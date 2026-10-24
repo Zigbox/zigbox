@@ -449,13 +449,26 @@ fn check_doctor_report(
     assert(code == if (any_fail) constants.exit_environment else constants.exit_ok);
 }
 
-/// True if two diagnostics render identically in the fullest text form.
+/// True if two diagnostics say the same: code, causes, `while` lines and fixes. The context
+/// pairs are left out on purpose: the kernel release is shown on every failure, and it is a
+/// fact of the kernel check, so a fault injected into that check legitimately changes it for
+/// the others.
 fn same_diagnostic(first: *const diag_fuzz.Diag, second: *const diag_fuzz.Diag) bool {
-    var buffer_first: [constants.output_bytes_max]u8 = undefined;
-    var buffer_second: [constants.output_bytes_max]u8 = undefined;
-    const text_first = render.render(first, .verbose, false, &buffer_first);
-    const text_second = render.render(second, .verbose, false, &buffer_second);
-    return std.mem.eql(u8, text_first, text_second);
+    if (first.code.? != second.code.?) return false;
+    if (first.causes.count != second.causes.count) return false;
+    if (first.whiles.count != second.whiles.count) return false;
+    if (first.fixes.count != second.fixes.count) return false;
+    for (first.causes.slice(), second.causes.slice()) |left, right| {
+        if (!std.mem.eql(u8, left.slice(), right.slice())) return false;
+    }
+    for (first.whiles.slice(), second.whiles.slice()) |left, right| {
+        if (!std.mem.eql(u8, left.slice(), right.slice())) return false;
+    }
+    for (first.fixes.slice(), second.fixes.slice()) |left, right| {
+        if (!std.mem.eql(u8, left.sentence.slice(), right.sentence.slice())) return false;
+        if (!std.mem.eql(u8, left.command.slice(), right.command.slice())) return false;
+    }
+    return true;
 }
 
 /// Runs `zbx doctor` end to end against the faulted host in a random output mode and checks
