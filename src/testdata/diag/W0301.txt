@@ -1,0 +1,5 @@
+warning[ZBX-W0301]: running without a cgroup scope
+  cause  the bus socket does not exist: this login has no systemd user session
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain W0301 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0301.html

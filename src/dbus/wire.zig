@@ -352,6 +352,7 @@ pub fn path_is_valid(text: []const u8) bool {
 /// recursion: every code is a known one, parentheses match and are not empty, an array is
 /// followed by an element, and nesting stays within `dbus_nesting_depth_max`.
 pub fn check_signature(text: []const u8) WireError!void {
+    assert(constants.dbus_nesting_depth_max > 0);
     if (text.len > constants.dbus_signature_bytes_max) return error.BadSignature;
     var depth: u32 = 0;
     var pending_arrays: u32 = 0; // Array markers waiting for their element.

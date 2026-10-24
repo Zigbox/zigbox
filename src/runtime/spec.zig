@@ -15,6 +15,23 @@ pub const Label = struct {
     value: []const u8,
 };
 
+/// What a container may use. A null limit is none. The values are checked against the bounds in
+/// `constants.zig` by `limits_problem`; `parse_memory`, `parse_pids` and `parse_cpus` read the
+/// text of the flags.
+pub const Limits = struct {
+    memory_bytes: ?u64 = null,
+    pids: ?u32 = null,
+    /// Thousandths of a CPU: 500 is half of one.
+    cpu_millis: ?u32 = null,
+
+    pub fn any(limits: Limits) bool {
+        const result = limits.memory_bytes != null or limits.pids != null or
+            limits.cpu_millis != null;
+        if (!result) assert(limits.memory_bytes == null);
+        return result;
+    }
+};
+
 pub const Spec = struct {
     /// The directory to use as the container's root, read and written in place.
     rootfs: []const u8,
@@ -24,6 +41,8 @@ pub const Spec = struct {
     command: []const []const u8,
     /// Kept in the run record. At most `labels_count_max`, with bounded keys and values.
     labels: []const Label = &.{},
+    /// Resource limits, applied through the container's cgroup scope.
+    limits: Limits = .{},
 };
 
 /// The index of the first label that does not fit, or null. Too many labels is reported at the
@@ -193,4 +212,192 @@ test "rootfs_problem and command_problem: the limits are exact" {
     try testing.expectEqual(CommandProblem.too_many_bytes, command_problem(&heavy).?);
     const fits: [8][]const u8 = @splat(word);
     try testing.expect(command_problem(&fits) == null);
+}
+
+// ---- Limits --------------------------------------------------------------------------------
+
+/// Which limit a value is for.
+pub const LimitKind = enum { memory, pids, cpus };
+
+/// Why a limit's value is not accepted. The bound is in `constants.zig`.
+pub const LimitProblem = error{
+    Empty,
+    /// Not a number (or a unit that is not k, m or g).
+    NotANumber,
+    Zero,
+    TooSmall,
+    TooLarge,
+    /// More than three decimals for a CPU count, which `CPUQuota` could not honour.
+    TooPrecise,
+};
+
+/// The bytes in a memory size: digits and an optional binary unit, `k`, `m` or `g` (any case).
+/// A bare number is bytes. 128m is 128 MiB.
+pub fn parse_memory(text: []const u8) LimitProblem!u64 {
+    assert(constants.limit_memory_bytes_min >= 1 << 20);
+    if (text.len == 0) return error.Empty;
+    if (text.len > constants.limit_text_bytes_max) return error.NotANumber;
+    var digits = text;
+    var multiplier: u64 = 1;
+    switch (std.ascii.toLower(text[text.len - 1])) {
+        'k' => multiplier = 1 << 10,
+        'm' => multiplier = 1 << 20,
+        'g' => multiplier = 1 << 30,
+        else => {},
+    }
+    if (multiplier != 1) digits = text[0 .. text.len - 1];
+    const count = parse_count(digits) catch |err| return err;
+    if (count == 0) return error.Zero;
+    const bytes = std.math.mul(u64, count, multiplier) catch return error.TooLarge;
+    if (bytes < constants.limit_memory_bytes_min) return error.TooSmall;
+    if (bytes > constants.limit_memory_bytes_max) return error.TooLarge;
+    assert(bytes >= constants.limit_memory_bytes_min);
+    return bytes;
+}
+
+pub fn parse_pids(text: []const u8) LimitProblem!u32 {
+    assert(constants.limit_pids_max <= std.math.maxInt(u32));
+    if (text.len == 0) return error.Empty;
+    if (text.len > constants.limit_text_bytes_max) return error.NotANumber;
+    const count = parse_count(text) catch |err| return err;
+    if (count == 0) return error.Zero;
+    if (count > constants.limit_pids_max) return error.TooLarge;
+    assert(count >= constants.limit_pids_min);
+    return @intCast(count);
+}
+
+/// CPUs as a decimal with at most three places ("0.5", "2", "1.25"), as thousandths.
+pub fn parse_cpus(text: []const u8) LimitProblem!u32 {
+    assert(constants.limit_cpu_millis_max <= std.math.maxInt(u32));
+    if (text.len == 0) return error.Empty;
+    if (text.len > constants.limit_text_bytes_max) return error.NotANumber;
+    const dot = std.mem.indexOfScalar(u8, text, '.');
+    const whole_text = if (dot) |at| text[0..at] else text;
+    const fraction_text = if (dot) |at| text[at + 1 ..] else "";
+    if (dot != null and fraction_text.len == 0) return error.NotANumber;
+    if (fraction_text.len > 3) return error.TooPrecise;
+    const whole = if (whole_text.len == 0) 0 else parse_count(whole_text) catch |err| return err;
+    var fraction: u64 = 0;
+    if (fraction_text.len > 0) fraction = try parse_count(fraction_text);
+    for (0..3 - fraction_text.len) |_| fraction *= 10;
+    if (whole_text.len == 0 and dot == null) return error.Empty;
+    const millis = std.math.mul(u64, whole, 1000) catch return error.TooLarge;
+    const total = millis + fraction;
+    if (total == 0) return error.Zero;
+    if (total < constants.limit_cpu_millis_min) return error.TooSmall;
+    if (total > constants.limit_cpu_millis_max) return error.TooLarge;
+    assert(total <= constants.limit_cpu_millis_max);
+    return @intCast(total);
+}
+
+/// A non-empty run of decimal digits, at most 18 of them (so that nothing overflows).
+fn parse_count(digits: []const u8) LimitProblem!u64 {
+    assert(digits.len <= constants.arg_bytes_max);
+    if (digits.len == 0) return error.NotANumber;
+    if (digits.len > 18) return error.TooLarge;
+    var value: u64 = 0;
+    for (digits) |digit| {
+        if (!std.ascii.isDigit(digit)) return error.NotANumber;
+        value = value * 10 + (digit - '0');
+    }
+    return value;
+}
+
+pub const LimitFound = struct { kind: LimitKind, problem: LimitProblem };
+
+fn found(kind: LimitKind, problem: LimitProblem) LimitFound {
+    assert(@intFromError(problem) != 0);
+    return .{ .kind = kind, .problem = problem };
+}
+
+/// The first limit of a typed `Limits` that is outside its bounds, for callers of the library
+/// that did not go through the flags.
+pub fn limits_problem(limits: Limits) ?LimitFound {
+    assert(constants.limit_memory_bytes_min > 0);
+    assert(constants.limit_pids_min > 0);
+    if (limits.memory_bytes) |value| {
+        if (value == 0) return .{ .kind = .memory, .problem = error.Zero };
+        if (value < constants.limit_memory_bytes_min) return found(.memory, error.TooSmall);
+        if (value > constants.limit_memory_bytes_max) return found(.memory, error.TooLarge);
+    }
+    if (limits.pids) |value| {
+        if (value == 0) return .{ .kind = .pids, .problem = error.Zero };
+        if (value > constants.limit_pids_max) return .{ .kind = .pids, .problem = error.TooLarge };
+    }
+    if (limits.cpu_millis) |value| {
+        if (value == 0) return .{ .kind = .cpus, .problem = error.Zero };
+        if (value < constants.limit_cpu_millis_min) return found(.cpus, error.TooSmall);
+        if (value > constants.limit_cpu_millis_max) return found(.cpus, error.TooLarge);
+    }
+    return null;
+}
+
+test "memory sizes: units, bare bytes, and both ends of the bound" {
+    // Goal: binary units in any case, the exact minimum and maximum, and one either side.
+    try testing.expectEqual(@as(u64, 128 << 20), try parse_memory("128m"));
+    try testing.expectEqual(@as(u64, 128 << 20), try parse_memory("128M"));
+    try testing.expectEqual(@as(u64, 1 << 30), try parse_memory("1g"));
+    try testing.expectEqual(@as(u64, 4096 << 10), try parse_memory("4096k"));
+    try testing.expectEqual(@as(u64, 4 << 20), try parse_memory("4194304"));
+    try testing.expectEqual(@as(u64, 4 << 20), try parse_memory("4m"));
+    try testing.expectError(error.TooSmall, parse_memory("4194303"));
+    try testing.expectError(error.TooSmall, parse_memory("3m"));
+    try testing.expectEqual(@as(u64, 1 << 40), try parse_memory("1024g"));
+    try testing.expectError(error.TooLarge, parse_memory("1025g"));
+    try testing.expectError(error.TooLarge, parse_memory("999999999999999999g"));
+    try testing.expectError(error.Zero, parse_memory("0"));
+    try testing.expectError(error.Zero, parse_memory("0m"));
+    try testing.expectError(error.Empty, parse_memory(""));
+    try testing.expectError(error.NotANumber, parse_memory("m"));
+    try testing.expectError(error.NotANumber, parse_memory("12x"));
+    try testing.expectError(error.NotANumber, parse_memory("-5m"));
+    try testing.expectError(error.NotANumber, parse_memory("1.5g"));
+    try testing.expectError(error.NotANumber, parse_memory("1 m"));
+    try testing.expectError(error.TooLarge, parse_memory("1234567890123456789012"));
+}
+
+test "pids: one to the kernel's maximum" {
+    try testing.expectEqual(@as(u32, 1), try parse_pids("1"));
+    try testing.expectEqual(@as(u32, 64), try parse_pids("64"));
+    try testing.expectEqual(@as(u32, 4_194_304), try parse_pids("4194304"));
+    try testing.expectError(error.TooLarge, parse_pids("4194305"));
+    try testing.expectError(error.Zero, parse_pids("0"));
+    try testing.expectError(error.Zero, parse_pids("000"));
+    try testing.expectError(error.Empty, parse_pids(""));
+    try testing.expectError(error.NotANumber, parse_pids("-1"));
+    try testing.expectError(error.NotANumber, parse_pids("6 4"));
+    try testing.expectError(error.NotANumber, parse_pids("0x40"));
+}
+
+test "cpus: decimals to thousandths, and the edges" {
+    try testing.expectEqual(@as(u32, 500), try parse_cpus("0.5"));
+    try testing.expectEqual(@as(u32, 500), try parse_cpus(".5"));
+    try testing.expectEqual(@as(u32, 2000), try parse_cpus("2"));
+    try testing.expectEqual(@as(u32, 1250), try parse_cpus("1.25"));
+    try testing.expectEqual(@as(u32, 10), try parse_cpus("0.01"));
+    try testing.expectEqual(@as(u32, 1_024_000), try parse_cpus("1024"));
+    try testing.expectError(error.TooSmall, parse_cpus("0.009"));
+    try testing.expectError(error.TooLarge, parse_cpus("1024.001"));
+    try testing.expectError(error.Zero, parse_cpus("0"));
+    try testing.expectError(error.Zero, parse_cpus("0.0"));
+    try testing.expectError(error.TooPrecise, parse_cpus("0.1234"));
+    try testing.expectError(error.NotANumber, parse_cpus("1."));
+    try testing.expectError(error.NotANumber, parse_cpus("."));
+    try testing.expectError(error.NotANumber, parse_cpus("a"));
+    try testing.expectError(error.NotANumber, parse_cpus("1,5"));
+    try testing.expectError(error.Empty, parse_cpus(""));
+    try testing.expectError(error.TooLarge, parse_cpus("99999999999999999999"));
+}
+
+test "typed limits are checked against the same bounds" {
+    // Goal: a library caller that skips the flags meets the same refusals.
+    try testing.expect(limits_problem(.{}) == null);
+    const fine: Limits = .{ .memory_bytes = 128 << 20, .pids = 64, .cpu_millis = 500 };
+    try testing.expect(limits_problem(fine) == null);
+    try testing.expect(limits_problem(.{ .memory_bytes = 0 }).?.problem == error.Zero);
+    try testing.expect(limits_problem(.{ .memory_bytes = 1 }).?.problem == error.TooSmall);
+    try testing.expect(limits_problem(.{ .pids = 0 }).?.kind == .pids);
+    try testing.expect(limits_problem(.{ .cpu_millis = 2_000_000 }).?.problem == error.TooLarge);
+    try testing.expect(!(Limits{}).any());
+    try testing.expect((Limits{ .pids = 3 }).any());
 }

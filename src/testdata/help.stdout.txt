@@ -14,6 +14,9 @@ run:
   zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
   --rootfs <dir>  the directory to use as the container's root (required)
   --name <name>   the container's name and hostname (default: zbx- and six hex digits)
+  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
+  --pids <n>      limit on processes and threads, as in 64
+  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
   --              ends the options; everything after it is the command, as typed
 
 bundle:

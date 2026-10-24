@@ -11,6 +11,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const child_mod = @import("child.zig");
 const diagnose = @import("diagnose.zig");
 const plan_mod = @import("plan.zig");
+const scope_mod = @import("scope.zig");
 const signals = @import("signals.zig");
 const sync = @import("sync.zig");
 
@@ -48,6 +49,8 @@ pub const Session = struct {
     open: Open,
     report: sync.Report,
     helper: ?HelperRecord,
+    /// Why the scope step failed, for its diagnostic.
+    scope_problem: ?scope_mod.Problem,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
 
@@ -66,6 +69,7 @@ pub const Session = struct {
         };
         session.report.reset();
         session.helper = null;
+        session.scope_problem = null;
         session.substituted = null;
         assert(!session.open.any());
         assert(session.pid == null);
@@ -92,7 +96,7 @@ pub const Session = struct {
                 };
                 host.begin_step(host_mod.step_none);
                 session.abandon();
-                diagnose.step_failed(host, diag, plan, info, failure, session.helper_end());
+                diagnose.step_failed(host, diag, plan, info, failure, session.details());
                 return error.StartFailed;
             };
         }
@@ -104,10 +108,20 @@ pub const Session = struct {
                 .err = host_mod.error_for_errno(record.errno),
                 .errno = record.errno,
             };
-            diagnose.step_failed(host, diag, plan, info, failure, null);
+            diagnose.step_failed(host, diag, plan, info, failure, .{});
             return error.StartFailed;
         }
         session.finish();
+    }
+
+    /// What the diagnostic of a failed step may need besides the step itself.
+    fn details(session: *const Session) diagnose.Details {
+        assert(session.plan.scoped == (session.plan.scope_name.len > 0));
+        const scope: ?*const scope_mod.Problem = if (session.scope_problem) |*problem|
+            problem
+        else
+            null;
+        return .{ .helper = session.helper_end(), .scope = scope };
     }
 
     fn helper_end(session: *const Session) ?diagnose.HelperEnd {
@@ -143,6 +157,7 @@ pub const Session = struct {
                 plan.text(step.target),
             ),
             .run_newuidmap, .run_newgidmap => try session.run_helper(step),
+            .start_scope => try session.start_scope(),
             .release_child => try session.release_child(),
             .await_report => try session.await_report(),
             .reap => unreachable, // `wait` does it.
@@ -239,6 +254,18 @@ pub const Session = struct {
         return error.IoFailed;
     }
 
+    /// Asks for the container's scope with the child's pid in it (scope.zig) and waits for the
+    /// job. The child is blocked waiting for `release_child`, so it runs nothing until the scope
+    /// and its limits exist. The bus connection lives for this step only.
+    fn start_scope(session: *Session) host_mod.Error!void {
+        assert(session.plan.scoped);
+        assert(session.scope_problem == null);
+        var problem: scope_mod.Problem = undefined;
+        if (scope_mod.start(session.host, session.plan, session.pid.?, &problem)) return;
+        session.scope_problem = problem;
+        return error.IoFailed;
+    }
+
     fn release_child(session: *Session) host_mod.Error!void {
         assert(session.open.ready_write);
         const byte = [1]u8{child_mod.go_ahead};
@@ -319,6 +346,8 @@ pub const Session = struct {
 
     /// Sends `number` to the container as the rule says (signals.zig), and notes a replacement.
     fn forward(session: *Session, number: u8, flooded: bool) void {
+        assert(number > 0);
+        assert(session.pid != null);
         session.send(number, flooded) catch {}; // The container may just have ended.
     }
 

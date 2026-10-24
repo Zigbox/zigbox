@@ -1,0 +1,11 @@
+error[ZBX-E0307]: a limit needs a cgroup scope, and none can be made
+  while  preparing the container's cgroup
+  cause  --memory, --pids and --cpus are enforced by a cgroup scope from the
+         user's systemd manager, and one cannot be made
+  cause  connecting to the user bus failed: no such file or directory (ENOENT)
+  cause  the bus socket does not exist: this login has no systemd user session
+  pids   64
+  fix    check this host (ZBX-E0103):   zbx doctor
+         or run without the limit flags, which needs no scope
+  more   zbx explain E0307
+  docs   https://zigbox.github.io/zigbox/errors/E0307.html

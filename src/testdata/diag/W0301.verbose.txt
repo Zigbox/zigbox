@@ -1,0 +1,7 @@
+warning[ZBX-W0301]: running without a cgroup scope
+  while  preparing the container's cgroup
+  cause  connecting to the user bus failed: no such file or directory (ENOENT)
+  cause  the bus socket does not exist: this login has no systemd user session
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain W0301
+  docs   https://zigbox.github.io/zigbox/errors/W0301.html

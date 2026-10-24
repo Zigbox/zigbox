@@ -86,6 +86,51 @@ fn prepare_records_unreadable(sim: *HostSim) void {
     }
 }
 
+/// The user's bus is perfect for the probe (the first connection) and meets `model` after it, so
+/// the run gets as far as the scope step before the fault.
+fn prepare_scope_fault(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.quiet_connections = 1;
+}
+
+fn prepare_no_bus(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.present = false;
+}
+
+fn prepare_bus_not_there(sim: *HostSim) void {
+    prepare_scope_fault(sim);
+    sim.world.bus.model.present = false;
+}
+
+fn prepare_bus_rejects(sim: *HostSim) void {
+    prepare_scope_fault(sim);
+    sim.world.bus.model.auth = .reject;
+}
+
+fn prepare_bus_garbage(sim: *HostSim) void {
+    prepare_scope_fault(sim);
+    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .garbage_reply };
+}
+
+fn prepare_systemd_refuses(sim: *HostSim) void {
+    prepare_scope_fault(sim);
+    sim.world.bus.model.start_error = "org.freedesktop.DBus.Error.AccessDenied";
+}
+
+fn prepare_name_taken(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.unit_taken = true;
+}
+
+/// An old systemd that cannot set the memory limit itself, and a cgroup that will not take it.
+fn prepare_cgroup_refuses(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.version = "230.1";
+    const base = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service";
+    sim.world.add_node(base ++ "/zbx-web-1.scope/memory.max", .dir);
+}
+
 fn prepare_proc_refused(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.faults.fail_step = step_of(.mount_proc);
@@ -166,6 +211,64 @@ const base_cases = [_]Case{
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },
         .prepare = prepare_container,
         .exit = 125,
+    },
+    .{
+        .code = .E0301,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_bus_not_there,
+        .exit = 125,
+    },
+    .{
+        .code = .E0302,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_bus_rejects,
+        .exit = 125,
+    },
+    .{
+        .code = .E0303,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_bus_garbage,
+        .exit = 125,
+    },
+    .{
+        .code = .E0304,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_systemd_refuses,
+        .exit = 125,
+    },
+    .{
+        .code = .E0305,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_name_taken,
+        .exit = 125,
+    },
+    .{
+        .code = .E0306,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--memory", "0m", "--", "/bin/sh" },
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .E0307,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--pids", "64", "--", "/bin/sh" },
+        .prepare = prepare_no_bus,
+        .exit = 125,
+    },
+    .{
+        .code = .E0308,
+        .args = &.{
+            "run",      "--rootfs", "/srv/alpine", "--name",  "web-1",
+            "--memory", "64m",      "--",          "/bin/sh",
+        },
+        .prepare = prepare_cgroup_refuses,
+        .exit = 125,
+    },
+    .{
+        .code = .W0301,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_no_bus,
+        .warning = true,
+        .exit = 0,
     },
     .{
         .code = .W0201,

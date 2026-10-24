@@ -74,6 +74,7 @@ test {
     _ = @import("runtime/run.zig");
     _ = @import("runtime/sim_run.zig");
     _ = @import("runtime/run_tests.zig");
+    _ = @import("runtime/scope.zig");
     _ = @import("dbus/wire.zig");
     _ = @import("dbus/message.zig");
     _ = @import("dbus/auth.zig");

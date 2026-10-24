@@ -42,6 +42,7 @@ pub fn minimum_version(feature: Feature) u32 {
 }
 
 pub fn supports(version: u32, feature: Feature) bool {
+    assert(version < 100_000);
     return version >= minimum_version(feature);
 }
 

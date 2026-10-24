@@ -3,7 +3,8 @@
 //! follow the `Runtime` contract of Zigcube's HANDOFF.md one to one:
 //!
 //!   - `Spec`: what to run. In M1 the root is a directory (`rootfs`) where the contract will hold
-//!     an image digest; the command, the name and the labels are the contract's.
+//!     an image digest; the command, the name and the labels are the contract's. `limits` (memory
+//!     bytes, pids, CPU thousandths) is enforced by the container's cgroup scope.
 //!   - `start(host, spec, options, handle, diag)`: starts it; on return the command is running.
 //!   - `wait(handle)`: how it ended, as an `ExitReason`.
 //!   - `signal(handle, number)`: sends it a signal, with the forwarding rule of PID 1.
@@ -22,6 +23,7 @@ const run = @import("runtime/run.zig");
 
 pub const Spec = run.Spec;
 pub const Label = run.Label;
+pub const Limits = run.Limits;
 pub const Handle = run.Handle;
 pub const Status = run.Status;
 pub const ExitReason = run.ExitReason;

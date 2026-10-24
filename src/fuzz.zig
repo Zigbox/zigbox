@@ -325,8 +325,12 @@ fn fuzz_cli(seed: u64) void {
 /// first word that is not an option, where `--output` takes the next word as its value.
 fn is_run_line(args: FuzzArgs) bool {
     var index: u32 = 1;
-    while (index < args.count) : (index += 1) {
+    // Collection stops at the first argument that is too long or past the count bound; what came
+    // before it is all the failure can see.
+    const seen_max = @min(args.count, constants.args_count_max + 1);
+    while (index < seen_max) : (index += 1) {
         const word = args.items[index];
+        if (word.len > constants.arg_bytes_max) return false;
         if (std.mem.eql(u8, word, "--output")) {
             index += 1; // Its value, whatever it is.
             continue;

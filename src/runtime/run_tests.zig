@@ -265,6 +265,7 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
     return switch (kind) {
         .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .E0203,
         .run_newuidmap, .run_newgidmap => .E0204,
+        .start_scope => .E0301, // The first call is the connect to the bus.
         .exec => .E0202,
         .mount_pts => null,
         else => .E0205,
@@ -773,7 +774,7 @@ test "a record that cannot be kept is a warning, never a failed run" {
     );
 
     sim_run.init(&sim, 19);
-    sim.environment_variables = &.{};
+    sim.environment_variables = &.{.{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" }};
     try testing.expectEqual(@as(u8, 0), run(&sim, &args));
     try expect_starts_with(sim.stderr(), "warning[ZBX-W0202]: can't save the run record\n");
     try testing.expect(
@@ -781,7 +782,10 @@ test "a record that cannot be kept is a warning, never a failed run" {
     );
 
     sim_run.init(&sim, 19);
-    sim.environment_variables = &.{.{ .name = "HOME", .value = "/home/nobody" }}; // Not there.
+    sim.environment_variables = &.{
+        .{ .name = "HOME", .value = "/home/nobody" }, // Not there.
+        .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
+    };
     try testing.expectEqual(@as(u8, 0), run(&sim, &args));
     try expect_starts_with(sim.stderr(), "warning[ZBX-W0202]: can't save the run record\n");
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "warning["));

@@ -1,0 +1,15 @@
+error[ZBX-E0302]: the user bus refused to authenticate this user
+  while  starting container web-1
+  while  starting the container's scope zbx-web-1.scope
+  cause  authenticating to the user bus failed at the auth step
+  cause  the bus answered 'REJECTED EXTERNAL' to EXTERNAL authentication as this
+         user: the socket may belong to another user (an inherited
+         DBUS_SESSION_BUS_ADDRESS after su or sudo)
+  scope  zbx-web-1.scope
+  name   web-1
+  rootfs /srv/alpine
+  step   start_scope (5 of 44)
+  fix    see which bus this process uses:   echo $DBUS_SESSION_BUS_ADDRESS
+         or log in again through a systemd session
+  more   zbx explain E0302
+  docs   https://zigbox.github.io/zigbox/errors/E0302.html

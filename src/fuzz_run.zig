@@ -14,6 +14,12 @@
 //! records and some that cannot be read. Every run must also leave the run record, and the
 //! warnings, that the scenario implies.
 //!
+//! M2 adds the cgroup scope: the user's bus may be fine, absent, without systemd or refusing the
+//! user (then a run with a limit is refused, E0307, and one without warns, W0301), may fail in
+//! the scope step in nine ways (each with its code), and the limits may be valid or not (E0306).
+//! The limits of a scope that started must be what the flags said, or in the cgroup files when
+//! the systemd is too old for the property.
+//!
 //! The oracle is independent of the code under test: it knows which code each kind of step
 //! should give, the order in which things fail (the parent's early steps, then the child's, then
 //! the wait), and reads the output by its text, not by the renderer's own functions.
@@ -37,6 +43,66 @@ const CommandShape = enum { shell_path, shell_bare, shell_args, missing_path, mi
 
 const NameShape = enum { none, valid, invalid };
 
+/// The user's bus when the run begins (what the probe finds).
+const BusShape = enum { fine, no_socket, no_systemd, auth_rejected, no_environment };
+
+/// A fault in the scope step, after a perfect probe.
+const StepFault = enum {
+    none,
+    no_socket,
+    auth_rejected,
+    hello_refused,
+    no_systemd,
+    start_refused,
+    name_taken,
+    job_failed,
+    job_never,
+    garbage,
+    oversized,
+    truncated,
+    hang_up,
+    silent,
+};
+
+/// The text of a limit flag and what it must read as, or null for text that must be refused.
+const LimitText = struct { text: [:0]const u8, value: ?u64 };
+
+const memory_texts = [_]LimitText{
+    .{ .text = "128m", .value = 128 << 20 },
+    .{ .text = "4m", .value = 4 << 20 },
+    .{ .text = "1G", .value = 1 << 30 },
+    .{ .text = "4194304", .value = 4 << 20 },
+    .{ .text = "4096k", .value = 4 << 20 },
+    .{ .text = "0", .value = null },
+    .{ .text = "", .value = null },
+    .{ .text = "abc", .value = null },
+    .{ .text = "3m", .value = null },
+    .{ .text = "1025g", .value = null },
+    .{ .text = "1.5m", .value = null },
+};
+const pids_texts = [_]LimitText{
+    .{ .text = "1", .value = 1 },
+    .{ .text = "64", .value = 64 },
+    .{ .text = "4194304", .value = 4194304 },
+    .{ .text = "0", .value = null },
+    .{ .text = "", .value = null },
+    .{ .text = "x", .value = null },
+    .{ .text = "4194305", .value = null },
+};
+const cpus_texts = [_]LimitText{
+    .{ .text = "0.5", .value = 500 },
+    .{ .text = "2", .value = 2000 },
+    .{ .text = "0.01", .value = 10 },
+    .{ .text = "1024", .value = 1024000 },
+    .{ .text = "1.25", .value = 1250 },
+    .{ .text = "0", .value = null },
+    .{ .text = "a", .value = null },
+    .{ .text = "0.001", .value = null },
+    .{ .text = "1024.5", .value = null },
+    .{ .text = "1.2345", .value = null },
+    .{ .text = ".", .value = null },
+};
+
 const RootfsShape = enum { good, missing, a_file, empty, too_long };
 
 /// What is already in the state directory.
@@ -59,6 +125,9 @@ const Verdict = union(enum) {
         lost: bool,
         /// For E0202: the command was not found (127), not merely unrunnable (126).
         command_missing: bool,
+        /// The request got as far as the ids, whose warning (W0201) was already written. True
+        /// for every refusal after the name, rootfs and limit checks.
+        reached_ids: bool,
     },
 };
 
@@ -89,6 +158,33 @@ const Scenario = struct {
     disk_full: bool,
     home: bool,
     preloaded: Preloaded,
+    bus: BusShape,
+    step_fault: StepFault,
+    /// systemd 230, which cannot set memory limits itself, instead of 255.
+    old_systemd: bool,
+    memory: ?LimitText,
+    pids: ?LimitText,
+    cpus: ?LimitText,
+
+    /// Whether the probe finds a bus: the run then has a scope and the plan a step for it.
+    fn scoped(scenario: *const Scenario) bool {
+        return scenario.bus == .fine;
+    }
+
+    /// Whether any limit flag is given (valid or not).
+    fn has_limit(scenario: *const Scenario) bool {
+        return scenario.memory != null or scenario.pids != null or scenario.cpus != null;
+    }
+
+    /// The first limit text that must be refused, if any.
+    fn limit_invalid(scenario: *const Scenario) bool {
+        inline for (.{ "memory", "pids", "cpus" }) |name| {
+            if (@field(scenario, name)) |item| {
+                if (item.value == null) return true;
+            }
+        }
+        return false;
+    }
 };
 
 /// Errnos a step can fail with: the ones mounts, pipes, forks and execs really return.
@@ -120,7 +216,7 @@ fn random_scenario(random: std.Random) Scenario {
     else
         .{ .signaled = random.intRangeAtMost(u8, 1, 31) };
     const faulted = random.uintLessThan(u8, 4) != 0;
-    scenario.fault_step = if (faulted) random.uintLessThan(u32, 44) else null;
+    scenario.fault_step = if (faulted) random.uintLessThan(u32, 46) else null;
     scenario.fault_errno = errnos[random.uintLessThan(usize, errnos.len)];
     scenario.devpts_refused = random.uintLessThan(u8, 4) == 0;
     scenario.interrupts_per_mille = if (random.boolean()) 0 else random.uintLessThan(u16, 200);
@@ -154,7 +250,21 @@ fn random_scenario(random: std.Random) Scenario {
         1 => .full_and_unreadable,
         else => .nothing,
     };
+    scenario.bus = if (random.uintLessThan(u8, 5) == 0) random.enumValue(BusShape) else .fine;
+    scenario.step_fault = .none;
+    if (scenario.bus == .fine and random.uintLessThan(u8, 3) == 0) {
+        scenario.step_fault = random.enumValue(StepFault);
+    }
+    scenario.old_systemd = random.uintLessThan(u8, 5) == 0;
+    scenario.memory = random_limit(random, &memory_texts);
+    scenario.pids = random_limit(random, &pids_texts);
+    scenario.cpus = random_limit(random, &cpus_texts);
     return scenario;
+}
+
+fn random_limit(random: std.Random, table: []const LimitText) ?LimitText {
+    if (random.uintLessThan(u8, 3) != 0) return null;
+    return table[random.uintLessThan(usize, table.len)];
 }
 
 /// The exit code the oracle expects for a failure of `zbx run`, written out on its own rather than
@@ -165,7 +275,7 @@ fn exit_for(code: codes.Code, command_missing: bool) u8 {
 }
 
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
-    sim_run.sample_plan(plan, scenario.full);
+    sim_run.sample_plan_with(plan, scenario.full, scenario.scoped());
 }
 
 /// The kind of step a plan has at `index`.
@@ -177,7 +287,12 @@ fn kind_at(scenario: *const Scenario, index: u32) plan_mod.Kind {
 }
 
 fn index_of(scenario: *const Scenario, kind: plan_mod.Kind) u32 {
-    return sim_run.step_index(kind, scenario.full);
+    var plan: plan_mod.Plan = undefined;
+    plan_for(&plan, scenario);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in the plan of its scenario.
 }
 
 /// Where in the run a step's failure shows up. The parent's steps up to the go-ahead fail at
@@ -193,12 +308,8 @@ fn phase_of(kind: plan_mod.Kind) Phase {
     };
 }
 
-/// What the run must do, decided from the scenario alone.
-fn verdict_of(scenario: *const Scenario) Verdict {
-    if (scenario.name == .invalid) return refusal(.E0206, null, false);
-    if (scenario.rootfs != .good) return refusal(.E0201, null, false);
-    const fault = fault_at(scenario);
-    // The parent's early steps: the first of a failed step and a failed helper wins.
+/// The parent's early steps: the first of a failed step, a failed helper and a failed scope wins.
+fn early_verdict(scenario: *const Scenario, fault: ?Fault) ?Verdict {
     var early: ?Verdict = null;
     if (fault) |found| {
         if (phase_of(found.kind) == .early) early = refusal(found.code, found.index, true);
@@ -208,7 +319,30 @@ fn verdict_of(scenario: *const Scenario) Verdict {
         const sooner = if (early) |event| helper < event.refused.step.? else true;
         if (sooner) early = refusal(.E0204, helper, true);
     }
-    if (early) |event| return event;
+    if (scenario.scoped()) {
+        if (scope_fault_code(scenario)) |code| {
+            const at = index_of(scenario, .start_scope);
+            const sooner = if (early) |event| at < event.refused.step.? else true;
+            if (sooner) early = refusal(code, at, true);
+        }
+    }
+    return early;
+}
+
+/// What the run must do, decided from the scenario alone.
+fn verdict_of(scenario: *const Scenario) Verdict {
+    // The command line reads the limits first, then the library checks name and rootfs.
+    if (scenario.limit_invalid()) return early_refusal(.E0306);
+    if (scenario.name == .invalid) return early_refusal(.E0206);
+    if (scenario.rootfs != .good) return early_refusal(.E0201);
+    // The ids come next (and their warning), then the scope: a limit with no bus is refused.
+    if (!scenario.scoped() and scenario.has_limit()) {
+        var verdict = refusal(.E0307, null, false);
+        verdict.refused.reached_ids = true;
+        return verdict;
+    }
+    const fault = fault_at(scenario);
+    if (early_verdict(scenario, fault)) |event| return event;
     if (fault) |found| {
         if (phase_of(found.kind) == .report) return refusal(found.code, found.index, true);
     }
@@ -243,6 +377,7 @@ fn verdict_of(scenario: *const Scenario) Verdict {
                     .begun = true,
                     .lost = true,
                     .command_missing = false,
+                    .reached_ids = true,
                 },
             };
         }
@@ -257,7 +392,27 @@ fn refusal(code: codes.Code, step: ?u32, begun: bool) Verdict {
         .begun = begun,
         .lost = false,
         .command_missing = false,
+        .reached_ids = true,
     } };
+}
+
+/// A refusal before the ids: nothing has been warned about yet.
+fn early_refusal(code: codes.Code) Verdict {
+    var verdict = refusal(code, null, false);
+    verdict.refused.reached_ids = false;
+    return verdict;
+}
+
+/// The code the scope step fails with, from the fault the model gives it.
+fn scope_fault_code(scenario: *const Scenario) ?codes.Code {
+    return switch (scenario.step_fault) {
+        .none => null,
+        .no_socket, .no_systemd => .E0301,
+        .auth_rejected, .hello_refused => .E0302,
+        .start_refused, .job_failed, .job_never => .E0304,
+        .name_taken => .E0305,
+        .garbage, .oversized, .truncated, .hang_up, .silent => .E0303,
+    };
 }
 
 /// Whether a failure injected into the exec step is a permission error, which a search through
@@ -292,6 +447,7 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
     switch (kind) {
         .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => return .E0203,
         .run_newuidmap, .run_newgidmap => return .E0204,
+        .start_scope => return .E0301, // Its first call is the connect to the bus.
         .mount_pts => return null, // The one step that may fail: skipped with a note.
         .exec => {
             // A shell looks on: a missing or unrunnable first candidate is not the end while
@@ -426,50 +582,117 @@ pub fn fuzz_run(seed: u64) void {
         sim.faults.fail_step = index;
         sim.faults.fail_step_errno = scenario.fault_errno;
     }
-    var variables: [2]host_sim.EnvironmentVariable = undefined;
-    var variables_count: usize = 0;
-    if (scenario.home) {
-        variables[variables_count] = sim_run.env_home[0];
-        variables_count += 1;
-    }
-    if (scenario.term) {
-        variables[variables_count] = .{ .name = "TERM", .value = "xterm" };
-        variables_count += 1;
-    }
-    sim.environment_variables = variables[0..variables_count];
+    var environment: Environment = undefined;
+    sim.environment_variables = environment.fill(&scenario);
+    set_bus(&sim, &scenario);
     preload(&sim, &scenario);
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
-    var words_storage: [3][:0]const u8 = undefined;
-    const words = command_words(&scenario, &words_storage);
-    var args: [16][:0]const u8 = undefined;
-    var count: usize = 0;
-    push(&args, &count, "zbx");
-    if (scenario.verbose) push(&args, &count, "-v");
-    if (scenario.json) {
-        push(&args, &count, "--output");
-        push(&args, &count, "json");
-    }
-    push(&args, &count, "run");
-    if (scenario.rootfs == .empty) {
-        push(&args, &count, "--rootfs=");
-    } else {
-        push(&args, &count, "--rootfs");
-        push(&args, &count, rootfs_text(&scenario));
-    }
-    if (scenario.name != .none) {
-        push(&args, &count, "--name");
-        push(&args, &count, scenario.name_text);
-    }
-    push(&args, &count, "--");
-    for (words) |word| push(&args, &count, word);
+    var args: [24][:0]const u8 = undefined;
+    const count = command_line(&scenario, &args);
     const code = sim_run.run_cli(&sim, args[0..count]);
 
     check(&sim, &scenario, &before, code);
 }
 
-fn push(args: *[16][:0]const u8, count: *usize, item: [:0]const u8) void {
+/// The simulated process's environment: what the scenario says it has.
+const Environment = struct {
+    variables: [3]host_sim.EnvironmentVariable,
+    count: u32,
+    runtime_dir: [32]u8,
+
+    fn fill(
+        environment: *Environment,
+        scenario: *const Scenario,
+    ) []const host_sim.EnvironmentVariable {
+        environment.count = 0;
+        if (scenario.home) environment.add(sim_run.env_home[0]);
+        if (scenario.bus != .no_environment) {
+            // The user's runtime directory is named by the user's own id.
+            const format = "/run/user/{d}";
+            const text = std.fmt.bufPrint(&environment.runtime_dir, format, .{scenario.uid}) catch
+                unreachable; // A u32 has ten digits.
+            environment.add(.{ .name = "XDG_RUNTIME_DIR", .value = text });
+        }
+        if (scenario.term) environment.add(.{ .name = "TERM", .value = "xterm" });
+        return environment.variables[0..environment.count];
+    }
+
+    fn add(environment: *Environment, variable: host_sim.EnvironmentVariable) void {
+        environment.variables[environment.count] = variable;
+        environment.count += 1;
+    }
+};
+
+/// The command line of the scenario, after the program name; returns how many words.
+fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
+    var words_storage: [3][:0]const u8 = undefined;
+    const words = command_words(scenario, &words_storage);
+    var count: usize = 0;
+    push(args, &count, "zbx");
+    if (scenario.verbose) push(args, &count, "-v");
+    if (scenario.json) {
+        push(args, &count, "--output");
+        push(args, &count, "json");
+    }
+    push(args, &count, "run");
+    push_limit(args, &count, "--memory", scenario.memory);
+    push_limit(args, &count, "--pids", scenario.pids);
+    push_limit(args, &count, "--cpus", scenario.cpus);
+    if (scenario.rootfs == .empty) {
+        push(args, &count, "--rootfs=");
+    } else {
+        push(args, &count, "--rootfs");
+        push(args, &count, rootfs_text(scenario));
+    }
+    if (scenario.name != .none) {
+        push(args, &count, "--name");
+        push(args, &count, scenario.name_text);
+    }
+    push(args, &count, "--");
+    for (words) |word| push(args, &count, word);
+    return count;
+}
+
+fn push_limit(args: *[24][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
+    const given = item orelse return;
+    push(args, count, flag);
+    push(args, count, given.text);
+}
+
+/// The bus the scenario describes: broken from the start (the probe finds it so), or perfect for
+/// the probe and broken for the scope step.
+fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
+    const model = &sim.world.bus.model;
+    if (scenario.old_systemd) model.version = "230.1";
+    switch (scenario.bus) {
+        .fine, .no_environment => {},
+        .no_socket => model.present = false,
+        .no_systemd => model.systemd_present = false,
+        .auth_rejected => model.auth = .reject,
+    }
+    if (scenario.step_fault == .none) return;
+    model.quiet_connections = 1;
+    switch (scenario.step_fault) {
+        .none => unreachable,
+        .no_socket => model.present = false,
+        .auth_rejected => model.auth = .reject,
+        .hello_refused => model.hello_error = "org.freedesktop.DBus.Error.AccessDenied",
+        .no_systemd => model.systemd_present = false,
+        .start_refused => model.start_error = "org.freedesktop.DBus.Error.AccessDenied",
+        .name_taken => model.unit_taken = true,
+        .job_failed => model.job_result = "failed",
+        .job_never => model.job_removed = false,
+        .garbage => model.misbehave = .{ .at_call = 2, .how = .garbage_reply },
+        .oversized => model.misbehave = .{ .at_call = 2, .how = .oversized_reply },
+        .truncated => model.misbehave = .{ .at_call = 2, .how = .truncated_reply },
+        .hang_up => model.misbehave = .{ .at_call = 2, .how = .hang_up },
+        .silent => model.misbehave = .{ .at_call = 2, .how = .silent },
+    }
+}
+
+fn push(args: *[24][:0]const u8, count: *usize, item: [:0]const u8) void {
     args[count.*] = item;
     count.* += 1;
 }
@@ -503,24 +726,32 @@ fn check(
 /// cannot be read warn when there are too many to keep. Nothing is warned about a run that was
 /// refused before it began.
 fn check_warnings(scenario: *const Scenario, verdict: *const Verdict, found: diag_fuzz.Found) void {
-    var expected: [4]codes.Code = undefined;
+    var expected: [6]codes.Code = undefined;
     var count: usize = 0;
     const began = switch (verdict.*) {
         .started => true,
         .refused => |refusal_found| refusal_found.begun,
     };
-    // Warnings are written once the request has passed its checks, which a refusal with no step
-    // (a name or rootfs problem) has not.
-    const reached_ids = began;
+    // The ids' warning is written once the request has passed the name, rootfs and limit checks;
+    // the scope's after it (a limit with no bus is refused instead of warned about); the record's
+    // when the run is recorded.
+    const reached_ids = switch (verdict.*) {
+        .started => true,
+        .refused => |refusal_found| refusal_found.reached_ids,
+    };
     if (reached_ids and !scenario.full) {
         expected[count] = .W0201;
         count += 1;
     }
-    if (reached_ids and (!scenario.home or scenario.disk_full)) {
+    if (reached_ids and !scenario.scoped() and !scenario.has_limit()) {
+        expected[count] = .W0301;
+        count += 1;
+    }
+    if (began and (!scenario.home or scenario.disk_full)) {
         expected[count] = .W0202;
         count += 1;
     }
-    if (reached_ids and scenario.home and scenario.preloaded == .full_and_unreadable) {
+    if (began and scenario.home and scenario.preloaded == .full_and_unreadable) {
         expected[count] = .W0203;
         count += 1;
     }
@@ -560,8 +791,59 @@ fn check_started(
     const received = expected_received(scenario, &received_storage);
     assert(std.mem.eql(u8, sim.world.received[0..sim.world.received_count], received));
     assert(sim.world.helper_runs == if (scenario.full) @as(u32, 2) else 0);
+    check_scope(sim, scenario, name);
     check_started_output(sim, scenario, status);
     check_record(sim, scenario, &.{ .started = status });
+}
+
+/// A run that started had its scope made before its command, with the container's pid in it and
+/// the limits the flags gave: as unit properties, or in the cgroup files for an old systemd.
+fn check_scope(sim: *const HostSim, scenario: *const Scenario, name: []const u8) void {
+    if (!scenario.scoped()) {
+        assert(sim.world.bus.scopes_started == 0);
+        return;
+    }
+    assert(sim.world.bus.scopes_started == 1);
+    const scope = &sim.world.bus.last_scope;
+    assert(scope.pid == sim.world.processes[1].pid);
+    assert(scope.delegate);
+    assert(scope.accounting == 4);
+    var unit: [96]u8 = undefined;
+    // Cannot fail: a 63-byte name and ten more bytes.
+    const unit_name = std.fmt.bufPrint(&unit, "zbx-{s}.scope", .{name}) catch unreachable;
+    assert(std.mem.eql(u8, scope.name.slice(), unit_name));
+    const memory: ?u64 = if (scenario.memory) |item| item.value else null;
+    const pids: ?u64 = if (scenario.pids) |item| item.value else null;
+    const cpus: ?u64 = if (scenario.cpus) |item| item.value else null;
+    assert(scope.tasks_max == pids); // systemd 227 has TasksMax, so both versions use it.
+    assert(scope.cpu_quota_usec == if (cpus) |millis| millis * 1000 else null);
+    if (!scenario.old_systemd) {
+        assert(std.mem.eql(u8, scope.slice.slice(), "app.slice"));
+        assert(scope.memory_max == memory);
+        assert(scope.memory_swap_max == if (memory != null) @as(?u64, 0) else null);
+        return;
+    }
+    assert(scope.slice.len == 0);
+    assert(scope.memory_max == null);
+    assert(scope.memory_swap_max == null);
+    var path: [192]u8 = undefined;
+    const uid = sim.uid_value;
+    const base = std.fmt.bufPrint(
+        &path,
+        "/sys/fs/cgroup/user.slice/user-{d}.slice/user@{d}.service/{s}",
+        .{ uid, uid, unit_name },
+    ) catch unreachable; // Short.
+    var file: [224]u8 = undefined;
+    const limit_path = std.fmt.bufPrint(&file, "{s}/memory.max", .{base}) catch
+        unreachable; // Same.
+    const written = sim.world.read_written(limit_path);
+    if (memory) |bytes| {
+        var digits: [24]u8 = undefined;
+        const text = std.fmt.bufPrint(&digits, "{d}", .{bytes}) catch unreachable; // A u64.
+        assert(std.mem.eql(u8, written.?, text));
+    } else {
+        assert(written == null);
+    }
 }
 
 fn check_started_output(

@@ -223,6 +223,7 @@ pub const Diag = struct {
 
     /// The process exit code for this failure in the standard scope: the code's blame decides.
     pub fn exit_code(diag: *const Diag) u8 {
+        assert(diag.code != null);
         return diag.exit_code_in(.standard);
     }
 

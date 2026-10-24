@@ -1,0 +1,13 @@
+error[ZBX-E0308]: can't write a limit to the container's cgroup
+  while  starting container web-1
+  while  starting the container's scope zbx-web-1.scope
+  cause  writing memory.max in the scope failed: the kernel returned ENOTDIR
+  cause  this systemd is too old to set the limit itself, and the cgroup
+         controller is not delegated to this user
+  scope  zbx-web-1.scope
+  name   web-1
+  rootfs /srv/alpine
+  step   start_scope (5 of 44)
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain E0308
+  docs   https://zigbox.github.io/zigbox/errors/E0308.html

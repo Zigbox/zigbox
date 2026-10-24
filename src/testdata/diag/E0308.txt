@@ -1,0 +1,6 @@
+error[ZBX-E0308]: can't write a limit to the container's cgroup
+  cause  this systemd is too old to set the limit itself, and the cgroup
+         controller is not delegated to this user
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain E0308 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0308.html

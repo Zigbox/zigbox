@@ -734,7 +734,9 @@ pub const World = struct {
         if (world.resolve(path, &real)) |errno| return errno;
         if (!world.parent_is_dir(&real)) return errno_noent;
         if (world.node_kind(real.slice()) != null) return errno_notdir;
-        if (world.disk_full) return errno_nospc;
+        // A full disk is the state directory's; cgroup and proc files are not on it.
+        const on_disk = !real.under("/sys") and !real.under("/proc");
+        if (world.disk_full and on_disk) return errno_nospc;
         if (bytes.len > constants.sim_written_bytes_max) return errno_nospc;
         const existing = world.find_written(real.slice());
         if (existing == null and world.written_count == constants.sim_written_files_max) {

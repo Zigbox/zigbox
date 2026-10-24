@@ -1,0 +1,13 @@
+error[ZBX-E0305]: a scope with this container's name already exists
+  while  starting container web-1
+  while  starting the container's scope zbx-web-1.scope
+  cause  systemd answered org.freedesktop.systemd1.UnitExists: Unit already
+         exists
+  scope  zbx-web-1.scope
+  name   web-1
+  rootfs /srv/alpine
+  step   start_scope (5 of 44)
+  fix    choose another name:      zbx run --name <other-name> ...
+         or stop the other unit:   systemctl --user stop zbx-web-1.scope
+  more   zbx explain E0305
+  docs   https://zigbox.github.io/zigbox/errors/E0305.html

@@ -1,0 +1,7 @@
+error[ZBX-E0306]: invalid resource limit
+  while  reading the --memory limit
+  cause  a limit of zero would stop the container before it starts
+  limit  --memory 0m
+  fix    a valid limit looks like this:   zbx run --rootfs ./alpine --memory 128m -- /bin/sh
+  more   zbx explain E0306
+  docs   https://zigbox.github.io/zigbox/errors/E0306.html

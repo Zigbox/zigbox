@@ -39,6 +39,9 @@ pub const Misbehaviour = enum {
 };
 
 pub const Model = struct {
+    /// The first this many connections get a perfect bus whatever else the model says, so that a
+    /// run's probe can succeed and its scope step meet the fault.
+    quiet_connections: u32 = 0,
     /// The socket exists. False models a user without a session bus.
     present: bool = true,
     /// The socket exists and nothing accepts on it.
@@ -87,6 +90,8 @@ const first_job: u32 = 1000;
 
 const Phase = enum { auth, begin, messages };
 
+const quiet_model: Model = .{};
+
 const error_service_unknown = "org.freedesktop.DBus.Error.ServiceUnknown";
 const error_invalid_args = "org.freedesktop.DBus.Error.InvalidArgs";
 const error_unit_exists = "org.freedesktop.systemd1.UnitExists";
@@ -95,6 +100,8 @@ const bus_interface = "org.freedesktop.DBus";
 
 const Conn = struct {
     used: bool,
+    /// Whether the model's faults are off for this connection (`Model.quiet_connections`).
+    quiet: bool,
     uid: u32,
     phase: Phase,
     inbox: [inbox_bytes]u8,
@@ -112,7 +119,13 @@ pub const Bus = struct {
     model: Model,
     conns: [conns_max]Conn,
     scopes: [scopes_max]Scope,
+    /// The last scope started, kept after it ends so a test can read what it was made with.
+    last_scope: Scope,
+    /// Scopes started so far.
+    scopes_started: u32,
     next_job: u32,
+    /// Connections made so far, counted by the model.
+    connections: u32,
     /// Set by a write that started a scope: its index, for the world to give it files.
     scope_started: ?u32,
 
@@ -121,9 +134,17 @@ pub const Bus = struct {
         for (&bus.conns) |*conn| conn.used = false;
         for (&bus.scopes) |*scope| scope.active = false;
         bus.next_job = first_job;
+        bus.connections = 0;
+        bus.scopes_started = 0;
+        bus.last_scope.active = false;
         bus.scope_started = null;
         assert(bus.open_count() == 0);
         assert(bus.scope_count() == 0);
+    }
+
+    /// The model a connection is served by: the perfect one while it is quiet.
+    fn active(bus: *const Bus, conn: *const Conn) *const Model {
+        return if (conn.quiet) &quiet_model else &bus.model;
     }
 
     pub fn open_count(bus: *const Bus) u32 {
@@ -162,12 +183,16 @@ pub const Bus = struct {
         const expected = bus.model.socket_path orelse
             // Cannot fail: "/run/user/4294967295/bus" is 24 bytes.
             std.fmt.bufPrint(&expected_buffer, "/run/user/{d}/bus", .{uid}) catch unreachable;
-        const there = bus.model.present and std.mem.eql(u8, path, expected);
+        const quiet = bus.connections < bus.model.quiet_connections;
+        const model = if (quiet) &quiet_model else &bus.model;
+        const there = model.present and std.mem.eql(u8, path, expected);
         if (!there) return .{ .errno = errno_noent };
-        if (bus.model.refuses) return .{ .errno = errno_refused };
+        if (model.refuses) return .{ .errno = errno_refused };
         for (&bus.conns, 0..) |*conn, index| {
             if (conn.used) continue;
             conn.used = true;
+            conn.quiet = quiet;
+            bus.connections += 1;
             conn.uid = uid;
             conn.phase = .auth;
             conn.inbox_len = 0;
@@ -268,7 +293,7 @@ pub const Bus = struct {
         const request = auth.request(&expected_buffer, conn.uid);
         const wanted = request[0 .. request.len - 2]; // The line without its CRLF.
         const matches = std.mem.eql(u8, line, wanted);
-        switch (bus.model.auth) {
+        switch (bus.active(conn).auth) {
             .accept => {
                 if (matches) {
                     send_text(conn, "OK 0123456789abcdef0123456789abcdef\r\n");
@@ -315,7 +340,7 @@ pub const Bus = struct {
     fn handle_call(bus: *Bus, conn: *Conn, call: *const message_mod.Message) void {
         const number = conn.calls;
         conn.calls += 1;
-        if (bus.model.misbehave) |fault| {
+        if (bus.active(conn).misbehave) |fault| {
             if (fault.at_call == number) return bus.misbehave(conn, call, fault.how);
         }
         const interface = call.interface orelse "";
@@ -325,7 +350,7 @@ pub const Bus = struct {
         if (on_bus and std.mem.eql(u8, member, "AddMatch")) return bus.add_match(conn, call);
         const destination = call.destination orelse "";
         const to_systemd = std.mem.eql(u8, destination, systemd_name);
-        if (!to_systemd or !bus.model.systemd_present) {
+        if (!to_systemd or !bus.active(conn).systemd_present) {
             return send_error(conn, call, error_service_unknown, "No owner for the name");
         }
         const properties = std.mem.eql(u8, interface, "org.freedesktop.DBus.Properties");
@@ -337,7 +362,9 @@ pub const Bus = struct {
     }
 
     fn hello(bus: *Bus, conn: *Conn, call: *const message_mod.Message) void {
-        if (bus.model.hello_error) |name| return send_error(conn, call, name, "Connection refused");
+        if (bus.active(conn).hello_error) |name| {
+            return send_error(conn, call, name, "Connection refused");
+        }
         var body_buffer: [64]u8 = undefined;
         var writer = wire.Writer.init(&body_buffer);
         writer.string(":1.42");
@@ -382,7 +409,7 @@ pub const Bus = struct {
         var out_buffer: [128]u8 = undefined;
         var writer = wire.Writer.init(&out_buffer);
         writer.variant_begin("s");
-        writer.string(bus.model.version);
+        writer.string(bus.active(conn).version);
         send_return(conn, call, "v", writer.finish() catch unreachable); // Short version text.
     }
 
@@ -393,19 +420,22 @@ pub const Bus = struct {
         }
         var scope: Scope = undefined;
         parse_scope(call, &scope) catch return send_error(conn, call, bad, "Malformed properties");
-        if (bus.model.start_error) |name| return send_error(conn, call, name, "Refused");
-        if (bus.model.unit_taken or bus.find_scope(scope.name.slice()) != null) {
+        const model = bus.active(conn);
+        if (model.start_error) |name| return send_error(conn, call, name, "Refused");
+        if (model.unit_taken or bus.find_scope(scope.name.slice()) != null) {
             return send_error(conn, call, error_unit_exists, "Unit already exists");
         }
         const job = bus.next_job;
         bus.next_job += 1;
-        const done = std.mem.eql(u8, bus.model.job_result, "done");
+        const done = std.mem.eql(u8, model.job_result, "done");
         if (done) {
             const slot = for (&bus.scopes, 0..) |*candidate, index| {
                 if (!candidate.active) break index;
             } else return send_error(conn, call, "org.freedesktop.systemd1.LimitsExceeded", "Full");
             bus.scopes[slot] = scope;
             bus.scopes[slot].uid = conn.uid;
+            bus.last_scope = bus.scopes[slot];
+            bus.scopes_started += 1;
             bus.scope_started = @intCast(slot);
         }
         var path_buffer: [64]u8 = undefined;
@@ -417,13 +447,13 @@ pub const Bus = struct {
         var writer = wire.Writer.init(&body_buffer);
         writer.object_path(path);
         send_return(conn, call, "o", writer.finish() catch unreachable); // Short path.
-        if (!bus.model.job_removed or !conn.matched) return;
+        if (!model.job_removed or !conn.matched) return;
         var signal_buffer: [256]u8 = undefined;
         writer = wire.Writer.init(&signal_buffer);
         writer.uint32(job);
         writer.object_path(path);
         writer.string(scope.name.slice());
-        writer.string(bus.model.job_result);
+        writer.string(model.job_result);
         const body = writer.finish() catch unreachable; // Bounded names in 256 bytes.
         send_signal(conn, .{
             .path = "/org/freedesktop/systemd1",

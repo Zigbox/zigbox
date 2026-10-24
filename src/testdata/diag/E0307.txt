@@ -1,0 +1,6 @@
+error[ZBX-E0307]: a limit needs a cgroup scope, and none can be made
+  cause  the bus socket does not exist: this login has no systemd user session
+  fix    check this host (ZBX-E0103):   zbx doctor
+         or run without the limit flags, which needs no scope
+  more   zbx explain E0307 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0307.html

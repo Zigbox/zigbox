@@ -1,0 +1,2 @@
+{"code":"ZBX-W0301","severity":"warning","blame":"environment","summary":"running without a cgroup scope","causes":["connecting to the user bus failed: no such file or directory (ENOENT)","the bus socket does not exist: this login has no systemd user session"],"while":["preparing the container's cgroup"],"context":{},"fixes":[{"sentence":"check this host (ZBX-E0103):","command":"zbx doctor"}],"docs":"https://zigbox.github.io/zigbox/errors/W0301.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}
+{"container_exit":{"code":0}}

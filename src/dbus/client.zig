@@ -182,8 +182,8 @@ pub const Connection = struct {
             return conn.fail_io(.no_bus, .connect, err);
         };
         conn.is_open = true;
-        // A write to a bus that has hung up must be an error here, not a signal that ends zbx.
-        conn.host.ignore_broken_pipe(true);
+        // A write to a bus that has hung up is a signal unless the caller has asked for an error
+        // (`Host.ignore_broken_pipe`): the run's session does, for its whole length.
     }
 
     /// SASL EXTERNAL as `uid`: the NUL byte and the AUTH line, the server's answer, then BEGIN.
