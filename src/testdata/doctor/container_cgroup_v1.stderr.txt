@@ -1,0 +1,14 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  /sys/fs/cgroup/cgroup.controllers exists only on the unified cgroup v2
+         hierarchy, so this host runs cgroup v1 or the hybrid layout
+  fix    check the mount (cgroup2fs is v2):   stat -fc %T /sys/fs/cgroup
+         boot with systemd.unified_cgroup_hierarchy=1, or use a cgroup v2 distro
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+
+error[ZBX-E0105]: uid and gid mapping is not set up
+  cause  root (uid 0); no subuid range of 65536 ids (largest: 0); no subgid
+         range of 65536 ids (largest: 0); newuidmap not found; newgidmap not
+         found
+  fix    give this user id ranges:                  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+         install uidmap (shadow-utils on Fedora):   sudo apt install uidmap
+  more   zbx explain E0105 · rerun with --verbose for the full cause chain

@@ -77,7 +77,6 @@ pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
 pub const doctor_checks_count: u32 = 6;
 pub const detail_bytes_max: u32 = 240;
-pub const fix_bytes_max: u32 = 200;
 pub const binary_candidates_count: u32 = 3;
 
 // Diagnostics (docs: DIAGNOSTICS.md). All of these are fixed-size: a `Diag` never allocates, and
@@ -107,6 +106,10 @@ pub const diag_wrap_columns: u32 = 80;
 pub const diag_label_columns: u32 = 9;
 /// Width of a code such as "ZBX-E0001".
 pub const diag_code_bytes: u32 = 9;
+
+// The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
+// this; the bound is what the tool's buffers and file reads use.
+pub const errors_page_bytes_max: u32 = 24 * 1024;
 
 // Host simulator.
 pub const sim_files_max: u32 = 128;
@@ -171,8 +174,9 @@ comptime {
     assert(controller_name_bytes_max * controllers_count_max <= 2 * cgroup_list_bytes_max);
     assert(kernel_number_digits_max < 10); // Nine digits always fit in u32.
     // The whole report is written in one call, so six check lines must fit one message.
-    // Per line: status word, name, separators, detail, fix, and colour escapes.
-    const line_bytes_max = 6 + 16 + 8 + detail_bytes_max + 14 + fix_bytes_max + 24;
+    // Per line: status word, name, separators, detail, the "  [ZBX-E0101]" code, and colour
+    // escapes.
+    const line_bytes_max = 6 + 16 + 8 + detail_bytes_max + 4 + diag_code_bytes + 24;
     assert(doctor_checks_count * line_bytes_max <= output_bytes_max);
 
     // Worst case for one rendered diagnostic: every list full, every field at its bound, and
@@ -196,6 +200,11 @@ comptime {
     assert(diag_context_count_max > 0);
     assert(diag_fixes_count_max > 0);
     assert(diag_command_bytes_max <= diag_field_bytes_max);
+
+    // A page holds the stylesheet (under 6 KiB), one explanation with every character escaped
+    // to at most six bytes, and room for the index's table row per code.
+    assert(6 * 1024 + 6 * diag_explanation_bytes_max + 2048 <= errors_page_bytes_max);
+    assert(diag_code_bytes < 16); // A page name ("E0101.html") fits the 16-byte buffers.
 
     assert(sim_files_max > 0);
     assert(sim_open_files_max > 0);

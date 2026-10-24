@@ -1,0 +1,6 @@
+error[ZBX-E0102]: kernel version is unsupported or unknown
+  cause  the release 'banana' does not start with a major.minor version, and zbx
+         does not guess
+  fix    see what this kernel reports:   uname -r
+         run Linux 5.15 or newer
+  more   zbx explain E0102 · rerun with --verbose for the full cause chain

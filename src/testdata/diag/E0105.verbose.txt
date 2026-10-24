@@ -1,0 +1,9 @@
+error[ZBX-E0105]: uid and gid mapping is not set up
+  while  running the subid check of zbx doctor
+  cause  a rootless container needs 65536 subordinate ids for its users, and the
+         user has no such range in /etc/subuid or /etc/subgid
+  cause  alice (uid 1000); no subuid range of 65536 ids (largest: 0)
+  kernel 6.8.0-45-generic
+  uid    1000
+  fix    give this user id ranges:   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+  more   zbx explain E0105

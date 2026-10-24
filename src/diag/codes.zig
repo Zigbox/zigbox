@@ -6,9 +6,10 @@
 //! or if blame and severity contradict each other. The long explanations are what
 //! `zbx explain` prints offline.
 //!
-//! Numbering: `00xx` CLI and general, `01xx` host and doctor (slice 5), `02xx` runtime and
-//! isolation, `03xx` limits, `04xx` store, `05xx` registry and pull, `06xx` network,
-//! `07xx` state, `08xx` build, `09xx` trust and policy. A code is never reused or renumbered.
+//! Numbering: `00xx` CLI and general, `01xx` host and doctor (one code per doctor check),
+//! `02xx` runtime and isolation, `03xx` limits, `04xx` store, `05xx` registry and pull,
+//! `06xx` network, `07xx` state, `08xx` build, `09xx` trust and policy. A code is never reused
+//! or renumbered.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,6 +33,12 @@ pub const Code = enum(u8) {
     E0007,
     E0008,
     E0009,
+    E0101,
+    E0102,
+    E0103,
+    E0104,
+    E0105,
+    E0106,
     B0001,
 };
 
@@ -162,6 +169,113 @@ pub const registry = [_]Entry{
         \\Free space or fix the redirect, then run the command again. If stderr is
         \\what failed, this message could not be shown, and only the exit code (2)
         \\tells you.
+        ,
+    },
+    .{
+        .code = .E0101,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't create a user namespace",
+        .explanation =
+        \\zbx runs containers without root, and that needs user namespaces. The kernel
+        \\refused to create one for this user, or a setting forbids it.
+        \\
+        \\Common causes: user.max_user_namespaces is 0;
+        \\kernel.unprivileged_userns_clone is 0 (Debian);
+        \\kernel.apparmor_restrict_unprivileged_userns is 1 (the Ubuntu 24.04
+        \\default), which blocks unconfined programs; or a security policy or a
+        \\seccomp filter denies the call although the settings allow it.
+        \\
+        \\The diagnostic names the cause that applies and prints the command that
+        \\fixes it. If the check could not run at all (an unreadable file, a probe
+        \\that timed out or was killed), the cause says so; fix that first. Then run
+        \\"zbx doctor".
+        ,
+    },
+    .{
+        .code = .E0102,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "kernel version is unsupported or unknown",
+        .explanation =
+        \\zbx needs Linux 5.15 or newer. Overlayfs mounts inside user namespaces
+        \\arrived in 5.11, and 5.15 is the oldest long-term kernel that has them.
+        \\
+        \\This is also reported when the kernel release cannot be read or is not a
+        \\version number zbx can parse, because zbx does not guess. The cause says
+        \\which of the three happened.
+        \\
+        \\Upgrade the kernel, or run zbx on a host with a supported one. Containers
+        \\share the host's kernel, so inside a container the host's version counts.
+        ,
+    },
+    .{
+        .code = .E0103,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "cgroup v2 is not set up for this user",
+        .explanation =
+        \\zbx limits a container's cpu, memory and process count through cgroup v2,
+        \\and asks systemd to create the container's cgroup under the user's own
+        \\manager, user@UID.service. That needs cgroup v2 mounted at /sys/fs/cgroup, a
+        \\systemd user manager for the user, and the cpu, memory and pids controllers
+        \\delegated to it.
+        \\
+        \\The diagnostic says which of these is missing. A cgroup v1 or hybrid host
+        \\needs systemd.unified_cgroup_hierarchy=1 on the kernel command line. Missing
+        \\controllers are fixed with a Delegate= drop-in for user@.service, a daemon-
+        \\reload and a fresh login. If the check could not run, the cause says why.
+        ,
+    },
+    .{
+        .code = .E0104,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't mount overlayfs in a user namespace",
+        .explanation =
+        \\zbx builds a container's root file system with overlayfs, mounted by an
+        \\unprivileged user inside a user and mount namespace. The doctor tried
+        \\exactly that in a scratch directory and it failed.
+        \\
+        \\Causes: the overlay module is not loaded or not built in, the kernel is
+        \\older than 5.11, a security policy forbids the mount, or the user namespace
+        \\itself could not be created (fix ZBX-E0101 first: the same permission is
+        \\needed).
+        \\
+        \\Try "sudo modprobe overlay", then run "zbx doctor" again. If the check could
+        \\not run, the cause says why.
+        ,
+    },
+    .{
+        .code = .E0105,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "uid and gid mapping is not set up",
+        .explanation =
+        \\A rootless container maps its users onto a range of ids that the host user
+        \\owns. That needs a range of at least 65536 subordinate ids for the user in
+        \\both /etc/subuid and /etc/subgid, and the setuid helpers newuidmap and
+        \\newgidmap (package uidmap, or shadow-utils on Fedora), which write the maps.
+        \\
+        \\The diagnostic lists what is missing. Ranges are matched by user name or by
+        \\numeric uid. The root user normally has no range, so run zbx as an ordinary
+        \\user. If a file could not be read, the cause says so.
+        ,
+    },
+    .{
+        .code = .E0106,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "seccomp is not available",
+        .explanation =
+        \\zbx confines container processes with a seccomp filter. The kernel must be
+        \\built with CONFIG_SECCOMP and CONFIG_SECCOMP_FILTER, and must report it the
+        \\same way in the Seccomp: line of /proc/self/status and through
+        \\prctl(PR_GET_SECCOMP).
+        \\
+        \\Use a kernel with seccomp enabled; every mainstream distribution kernel has
+        \\it. If the two answers disagree, run "zbx doctor" again, and report it if it
+        \\repeats. If a file could not be read, the cause says so.
         ,
     },
     .{

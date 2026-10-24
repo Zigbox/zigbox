@@ -1,0 +1,4 @@
+error[ZBX-E0101]: can't create a user namespace
+  cause  this kernel was built without user namespaces (CONFIG_USER_NS)
+  fix    use a kernel built with CONFIG_USER_NS=y
+  more   zbx explain E0101 · rerun with --verbose for the full cause chain

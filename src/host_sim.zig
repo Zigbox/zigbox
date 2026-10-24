@@ -211,6 +211,16 @@ pub const HostSim = struct {
         return err;
     }
 
+    /// A failure the model itself produces (a missing file, an unreadable one): it carries the
+    /// errno the real kernel would report, so diagnostics can name it, but it is not counted
+    /// as an injected fault.
+    fn natural(sim: *HostSim, err: host.Error) host.Error {
+        assert(err != error.Interrupted); // Interrupts are injected faults, never natural.
+        sim.errno_last = errno_of(err);
+        assert(sim.errno_last != 0);
+        return err;
+    }
+
     fn roll(sim: *HostSim, per_mille: u16) bool {
         assert(per_mille <= 1000);
         // Always draw, even when the probability is zero, so that enabling one fault kind does
@@ -237,15 +247,15 @@ pub const HostSim = struct {
 
         for (sim.files, 0..) |file, file_index| {
             if (!std.mem.eql(u8, file.path, path)) continue;
-            if (!file.readable) return error.AccessDenied;
+            if (!file.readable) return sim.natural(error.AccessDenied);
             for (&sim.open_files, 0..) |*slot, slot_index| {
                 if (slot.* != null) continue;
                 slot.* = .{ .file_index = @intCast(file_index), .offset = 0 };
                 return @intCast(slot_index);
             }
-            return error.OutOfMemory; // Out of simulated descriptors (EMFILE-like).
+            return sim.natural(error.OutOfMemory); // Out of simulated descriptors (EMFILE-like).
         }
-        return error.NotFound;
+        return sim.natural(error.NotFound);
     }
 
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
@@ -329,7 +339,7 @@ pub const HostSim = struct {
         assert(path.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
-        const file = sim.find(path) orelse return error.NotFound;
+        const file = sim.find(path) orelse return sim.natural(error.NotFound);
         return .{ .mode = file.mode, .uid = file.uid };
     }
 
@@ -343,8 +353,8 @@ pub const HostSim = struct {
         assert(buffer.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
-        const file = sim.find(path) orelse return error.NotFound;
-        const value = file.capability orelse return error.NoData;
+        const file = sim.find(path) orelse return sim.natural(error.NotFound);
+        const value = file.capability orelse return sim.natural(error.NoData);
         if (value.len > buffer.len) return error.FileTooLarge;
         @memcpy(buffer[0..value.len], value);
         return @intCast(value.len);
@@ -354,7 +364,7 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
-        return sim.seccomp_result;
+        return sim.seccomp_result catch |err| sim.natural(err);
     }
 
     fn is_terminal(context: *anyopaque, stream: host.Stream) bool {
@@ -383,11 +393,11 @@ pub const HostSim = struct {
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         switch (kind) {
             .userns => {
-                if (sim.probes.userns_error) |err| return err;
+                if (sim.probes.userns_error) |err| return sim.natural(err);
                 return sim.probes.userns;
             },
             .overlay => {
-                if (sim.probes.overlay_error) |err| return err;
+                if (sim.probes.overlay_error) |err| return sim.natural(err);
                 return sim.probes.overlay;
             },
         }

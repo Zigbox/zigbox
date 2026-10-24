@@ -265,6 +265,14 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
 };
 
+/// The fixture called `name`, or null.
+pub fn find(name: []const u8) ?*const Fixture {
+    for (&all) |*fixture| {
+        if (std.mem.eql(u8, fixture.name, name)) return fixture;
+    }
+    return null;
+}
+
 test "every fixture has a distinct name and fits the simulator" {
     // Goal: names key the snapshot files; file lists must fit sim limits.
     for (all, 0..) |fixture, index| {

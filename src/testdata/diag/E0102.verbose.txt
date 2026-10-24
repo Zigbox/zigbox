@@ -1,0 +1,8 @@
+error[ZBX-E0102]: kernel version is unsupported or unknown
+  while  running the kernel check of zbx doctor
+  cause  kernel 5.4.0-150-generic is older than 5.15
+  cause  zbx needs Linux 5.15 or newer: overlayfs mounts in user namespaces
+         arrived in 5.11, and 5.15 is the oldest long-term kernel that has them
+  kernel 5.4.0-150-generic
+  fix    upgrade to Linux 5.15 or newer
+  more   zbx explain E0102

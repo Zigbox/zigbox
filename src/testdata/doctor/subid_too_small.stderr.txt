@@ -1,0 +1,4 @@
+error[ZBX-E0105]: uid and gid mapping is not set up
+  cause  alice (uid 1000); no subgid range of 65536 ids (largest: 1000)
+  fix    give this user id ranges:   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+  more   zbx explain E0105 · rerun with --verbose for the full cause chain

@@ -1,0 +1,10 @@
+error[ZBX-E0104]: can't mount overlayfs in a user namespace
+  while  running the overlay check of zbx doctor
+  cause  an overlayfs mount inside a user namespace was refused
+  cause  the namespaces were created but mount(overlay) was refused: the overlay
+         module may be missing or not loaded, or a security policy forbids the
+         mount
+  kernel 6.8.0-45-generic
+  fix    load the overlay module:   sudo modprobe overlay
+         or use Linux 5.11 or newer built with CONFIG_OVERLAY_FS
+  more   zbx explain E0104

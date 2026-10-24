@@ -1,0 +1,5 @@
+error[ZBX-E0105]: uid and gid mapping is not set up
+  cause  the subid check could not run: read(/etc/subuid) failed: permission
+         denied (EACCES)
+  fix    check the file, then retry:   ls -l /etc/subuid
+  more   zbx explain E0105 · rerun with --verbose for the full cause chain

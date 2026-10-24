@@ -1,0 +1,13 @@
+error[ZBX-E0101]: can't create a user namespace
+  cause  the kernel created the namespace and then refused the write to its
+         uid_map, gid_map or setgroups file; an LSM policy can forbid that, and
+         only the user's own id may be mapped without newuidmap
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+  more   zbx explain E0101 · rerun with --verbose for the full cause chain
+
+error[ZBX-E0104]: can't mount overlayfs in a user namespace
+  cause  the kernel created the namespace and then refused the write to its
+         uid_map, gid_map or setgroups file; an LSM policy can forbid that, and
+         only the user's own id may be mapped without newuidmap
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+  more   zbx explain E0104 · rerun with --verbose for the full cause chain

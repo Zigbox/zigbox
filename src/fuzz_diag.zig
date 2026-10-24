@@ -9,25 +9,92 @@ const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const text_util = @import("text.zig");
-const Diag = @import("diag/diag.zig").Diag;
+pub const Diag = @import("diag/diag.zig").Diag;
 
-/// What a stderr holds, counted from its text: how many diagnostic headers and the last code.
+/// The most codes `Found` records. A doctor run has at most one block per check.
+pub const found_codes_max: u32 = 8;
+
+/// What a stderr holds, counted from its text: how many diagnostic headers, which registered
+/// codes they carried in order (up to `found_codes_max`), and how many carried a code that is
+/// not registered.
 pub const Found = struct {
     count: u32,
+    /// The last registered code seen.
     code: ?codes.Code,
+    codes: [found_codes_max]codes.Code,
+    codes_len: u32,
+    unregistered: u32,
+
+    pub fn in_order(found: *const Found) []const codes.Code {
+        assert(found.codes_len <= found_codes_max);
+        return found.codes[0..found.codes_len];
+    }
 };
 
 /// Counts diagnostics in text or JSON-lines output. An independent reading of the format, not
 /// the renderer's own code, so a renderer bug cannot hide itself.
 pub fn find_diagnostics(stderr: []const u8) Found {
-    var found: Found = .{ .count = 0, .code = null };
+    var found: Found = .{
+        .count = 0,
+        .code = null,
+        .codes = undefined,
+        .codes_len = 0,
+        .unregistered = 0,
+    };
     var lines = std.mem.splitScalar(u8, stderr, '\n');
     while (lines.next()) |line| {
         const tag: ?[]const u8 = header_code(line);
         if (tag == null) continue;
         found.count += 1;
         found.code = codes.parse(tag.?);
+        if (found.code) |code| {
+            if (found.codes_len < found_codes_max) {
+                found.codes[found.codes_len] = code;
+                found.codes_len += 1;
+            }
+        } else {
+            found.unregistered += 1;
+        }
     }
+    assert(found.codes_len <= found.count);
+    return found;
+}
+
+/// Reads the doctor's stdout: how many `FAIL` lines, and the code in the brackets that end each
+/// (`  [ZBX-E0101]`), in order. A line with no registered code in its brackets counts as
+/// unregistered. Independent of the doctor's own renderer.
+pub fn find_fail_lines(stdout: []const u8) Found {
+    var found: Found = .{
+        .count = 0,
+        .code = null,
+        .codes = undefined,
+        .codes_len = 0,
+        .unregistered = 0,
+    };
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "FAIL ")) continue;
+        found.count += 1;
+        const open = std.mem.lastIndexOf(u8, line, "  [") orelse {
+            found.unregistered += 1;
+            continue;
+        };
+        const tag = line[open + 3 ..];
+        const registered = if (tag.len > 0 and tag[tag.len - 1] == ']')
+            codes.parse(tag[0 .. tag.len - 1])
+        else
+            null;
+        if (registered) |code| {
+            found.code = code;
+            if (found.codes_len < found_codes_max) {
+                found.codes[found.codes_len] = code;
+                found.codes_len += 1;
+            }
+        } else {
+            found.unregistered += 1;
+        }
+    }
+    assert(found.codes_len <= found.count);
     return found;
 }
 

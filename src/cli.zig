@@ -29,7 +29,7 @@ const help_text =
     \\usage: zbx [options] <command>
     \\
     \\commands:
-    \\  doctor          check that this host can run zbx
+    \\  doctor          check that this host can run zbx (a diagnostic per failing check)
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
     \\  --version       print the version
@@ -37,6 +37,8 @@ const help_text =
     \\options (before or after the command):
     \\  -v, --verbose   show the full cause chain and context of a failure
     \\  --output json   write each failure to stderr as one JSON object per line
+    \\
+    \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
     \\
 ;
 
@@ -432,9 +434,36 @@ fn dispatch(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 
         .help => try print(host, help_text, diag),
         .version => try print(host, version_text, diag),
         .explain => try run_explain(host, invocation.operand.?, diag),
-        .doctor => return doctor.run(host, diag),
+        .doctor => return run_doctor(host, invocation.options, diag),
     }
     return constants.exit_ok;
+}
+
+/// Runs the doctor: its report goes to stdout, then the diagnostic of each FAIL goes to stderr,
+/// in check order, in the requested mode. Text blocks are separated by a blank line; JSON is
+/// one object per line. The exit code is the blame of the failures' diagnostics (the
+/// environment's) and, if stderr cannot be written, the same: there is nowhere to say so.
+fn run_doctor(host: Host, options: Options, diag: *Diag) RunError!u8 {
+    assert(diag.code == null);
+    var report: doctor.Report = undefined;
+    try doctor.run(host, &report, diag);
+    const mode = options.mode();
+    const color = mode != .json and host.color_enabled(.stderr);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var blocks: u32 = 0;
+    for (&report.checks) |*check| {
+        if (check.status != .fail) continue;
+        const separator = blocks > 0 and mode != .json;
+        if (separator) host.write_all(.stderr, "\n") catch return constants.exit_environment;
+        const block = render.render(&check.diag, mode, color, &buffer);
+        host.write_all(.stderr, block) catch return constants.exit_environment;
+        blocks += 1;
+    }
+    const code = report.exit_code();
+    // A failure has a block and an environment exit code; no failure has neither.
+    assert((blocks > 0) == (code == constants.exit_environment));
+    if (blocks == 0) assert(code == constants.exit_ok);
+    return code;
 }
 
 fn run_explain(host: Host, operand: []const u8, diag: *Diag) RunError!void {
@@ -721,14 +750,30 @@ test "colour only on a terminal with NO_COLOR unset, and the words do not change
     try testing.expect(std.mem.indexOfScalar(u8, coloured.stderr(), 0x1b) == null);
 }
 
-test "snapshot: doctor on a host with nothing readable fails every check, exit 2" {
+test "snapshot: doctor on a host with no readable files fails four checks, exit 2" {
     // Goal: faults and absences are FAIL with a reason, never ok. The simulator here has no
-    // files at all, so every check must fail; the whole report is checked in. The exit code is
-    // the environment's (2), not the user's.
+    // files at all, so every check that reads one must fail; the stdout report and the four
+    // stderr blocks (in check order) are checked in. The exit code is the environment's (2),
+    // not the user's.
     var sim: HostSim = undefined;
     try testing.expectEqual(@as(u8, 2), try run_case(&sim, &.{ "zbx", "doctor" }));
     try testing.expectEqualStrings(@embedFile("testdata/doctor/empty_host.txt"), sim.stdout());
-    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const blocks = @embedFile("testdata/doctor/empty_host.stderr.txt");
+    try testing.expectEqualStrings(blocks, sim.stderr());
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, sim.stderr(), "error[ZBX-E01"));
+
+    // The options apply to the blocks and not to the report on stdout.
+    const stdout = try testing.allocator.dupe(u8, sim.stdout());
+    defer testing.allocator.free(stdout);
+    const as_json = [_][:0]const u8{ "zbx", "doctor", "--output", "json" };
+    try testing.expectEqual(@as(u8, 2), try run_case(&sim, &as_json));
+    try testing.expectEqualStrings(stdout, sim.stdout());
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, sim.stderr(), "\n"));
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-E0101\""));
+    try testing.expectEqual(@as(u8, 2), try run_case(&sim, &.{ "zbx", "-v", "doctor" }));
+    try testing.expectEqualStrings(stdout, sim.stdout());
+    const while_line = "  while  running the userns check of zbx doctor\n";
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), while_line) != null);
 }
 
 test "a failing stdout is E0009 on stderr and exit 2; a failing stderr is exit 2 alone" {

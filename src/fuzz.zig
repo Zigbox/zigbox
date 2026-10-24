@@ -16,6 +16,7 @@ const parse_fuzz = @import("fuzz_parse.zig");
 const diag_fuzz = @import("fuzz_diag.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
+const test_util = @import("test_util.zig");
 const text_util = @import("text.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 const sim_file = @import("host_sim.zig").File;
@@ -200,9 +201,11 @@ fn random_args(
 }
 
 /// Property of every CLI run, given the arguments it was run with:
-///  - exit 0 means stderr is empty; any other exit has exactly one diagnostic on stderr, whose
-///    code's blame decides the exit code (the one exception: a doctor report with FAIL lines and
-///    an empty stderr, until the doctor raises its own diagnostics in slice 5);
+///  - exit 0 means stderr is empty; any other exit has a diagnostic on stderr, and exactly one
+///    unless it is a doctor run, which has one block per `FAIL` line of its stdout report, with
+///    the code the line shows. Every diagnostic's code is registered and its blame decides the
+///    exit code. A failure with an empty stderr is possible only when stderr could not be
+///    written (a fault was injected) and then the exit code is the environment's;
 ///  - stderr holds no escape byte (the simulated stream is not a terminal) and no raw Zig error
 ///    or trace, unless an argument itself contains the detector's marker and was echoed.
 fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) void {
@@ -213,20 +216,35 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
     assert(std.mem.indexOfScalar(u8, &known, code) != null);
     assert(std.mem.indexOfScalar(u8, sim.stderr(), 0x1b) == null);
     const found = diag_fuzz.find_diagnostics(sim.stderr());
+    // A faulted write can cut a header in half, which then names no registered code.
+    if (!faulted) assert(found.unregistered == 0);
     if (code == constants.exit_ok) {
         assert(sim.stderr().len == 0);
         return;
     }
     if (sim.stderr().len == 0) {
-        // Only a failed stderr write or a doctor report can leave a failure without a diagnostic.
+        // Only a failed stderr write leaves a failure with nothing to read. A doctor report with
+        // FAIL lines and an empty stderr does not pass here without a fault.
+        assert(faulted);
         assert(code == constants.exit_environment);
         return;
     }
+    const fails = diag_fuzz.find_fail_lines(sim.stdout());
     // A write fault can cut a diagnostic short, and then the exit code is the environment's
-    // whatever the blame was; without a fault the diagnostic is whole and blame decides.
-    if (faulted and code == constants.exit_environment) return assert(found.count <= 1);
-    assert(found.count == 1);
-    assert(codes.exit_code(codes.entry(found.code.?).blame) == code);
+    // whatever the blame was; without a fault the diagnostics are whole and blame decides.
+    if (faulted and code == constants.exit_environment) {
+        return assert(found.count <= @max(fails.count, 1));
+    }
+    assert(found.unregistered == 0); // Whole diagnostics only from here on.
+    if (fails.count > 0) {
+        assert(fails.unregistered == 0);
+        assert(code == constants.exit_environment);
+        assert(found.count == fails.count);
+        assert(std.mem.eql(codes.Code, found.in_order(), fails.in_order()));
+    } else {
+        assert(found.count == 1);
+    }
+    for (found.in_order()) |each| assert(codes.exit_code(codes.entry(each).blame) == code);
     for (args.items[0..args.count]) |argument| {
         if (render.contains_raw_error(argument)) return;
     }
@@ -327,12 +345,42 @@ fn random_doctor_error(random: std.Random) host.Error {
     return choices[random.uintLessThan(usize, choices.len)];
 }
 
+/// Everything that defines a faulted simulated host, so that the same host can be built twice:
+/// once to attribute faults to checks, once to run the whole CLI against.
+const FaultedHost = struct {
+    fixture: *const fixtures.Fixture,
+    sim_seed: u64,
+    faults: Faults,
+
+    fn init(spec: *const FaultedHost, sim: *HostSim) void {
+        sim.init(spec.sim_seed, spec.fixture.files);
+        spec.fixture.apply(sim);
+        sim.faults = spec.faults;
+        assert(sim.faults.write_error_per_mille == 0); // Only reads are faulted here.
+    }
+};
+
+/// The code each check must report, stated independently of `doctor.code_of`.
+fn expected_code(id: doctor.CheckId) codes.Code {
+    return switch (id) {
+        .userns => .E0101,
+        .kernel => .E0102,
+        .cgroup => .E0103,
+        .overlay => .E0104,
+        .subid => .E0105,
+        .seccomp => .E0106,
+    };
+}
+
 /// Property, per check, comparing a fault-free run with a faulted run of the same host:
 ///  - if a hard error (anything but an interrupt) was injected into the check's gather, the
 ///    check is FAIL; a fault is never answered ok or warn;
-///  - if nothing at all was injected into it, the check equals the fault-free result;
-///  - every report is well formed (fails have a fix, oks have none) and the exit code is 1
-///    exactly when some check is FAIL; no handle leaks.
+///  - if nothing at all was injected into it, the check equals the fault-free result, its
+///    diagnostic included;
+///  - every report is well formed, every FAIL has its registered E01xx code, causes and fixes,
+///    and the exit code is 2 exactly when some check is FAIL; no handle leaks;
+///  - the whole CLI against the same host prints that report on stdout, one diagnostic block
+///    per FAIL on stderr in check order with the code on the FAIL line, and exits 2.
 fn fuzz_doctor(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
@@ -347,13 +395,16 @@ fn fuzz_doctor(seed: u64) void {
     var expected: doctor.Report = undefined;
     doctor.evaluate(&facts, &expected);
 
+    var spec: FaultedHost = .{
+        .fixture = fixture,
+        .sim_seed = random.int(u64),
+        .faults = random_faults(random),
+    };
+    spec.faults.write_error_per_mille = 0;
+    if (random.boolean()) spec.faults.fail_call_index = random.uintLessThan(u32, 48);
+    spec.faults.fail_call_error = random_doctor_error(random);
     var faulted: HostSim = undefined;
-    faulted.init(random.int(u64), fixture.files);
-    fixture.apply(&faulted);
-    faulted.faults = random_faults(random);
-    faulted.faults.write_error_per_mille = 0;
-    if (random.boolean()) faulted.faults.fail_call_index = random.uintLessThan(u32, 48);
-    faulted.faults.fail_call_error = random_doctor_error(random);
+    spec.init(&faulted);
 
     var injected: [constants.doctor_checks_count]struct { hard: u32, any: u32 } = undefined;
     facts.reset();
@@ -369,6 +420,9 @@ fn fuzz_doctor(seed: u64) void {
     doctor.evaluate(&facts, &report);
     assert(faulted.open_count() == 0);
     check_doctor_report(&report, &expected, &injected);
+    var hard_total: u32 = 0;
+    for (injected) |counts| hard_total += counts.hard;
+    check_doctor_cli(&spec, &report, hard_total, random);
 }
 
 fn check_doctor_report(
@@ -378,17 +432,90 @@ fn check_doctor_report(
 ) void {
     report.validate();
     var any_fail = false;
-    for (report.checks, expected.checks, injected) |check, reference, counts| {
-        if (check.status == .fail) any_fail = true;
+    for (&report.checks, &expected.checks, injected) |*check, *reference, counts| {
+        if (check.status == .fail) {
+            any_fail = true;
+            assert(check.diag.code.? == expected_code(check.id));
+            assert(check.diag.entry().blame == .environment);
+        }
         if (counts.hard > 0) assert(check.status == .fail);
         if (counts.any == 0) {
             assert(check.status == reference.status);
             assert(std.mem.eql(u8, check.detail.slice(), reference.detail.slice()));
-            assert(std.mem.eql(u8, check.fix.slice(), reference.fix.slice()));
+            if (check.status == .fail) assert(same_diagnostic(&check.diag, &reference.diag));
         }
     }
     const code = report.exit_code();
     assert(code == if (any_fail) constants.exit_environment else constants.exit_ok);
+}
+
+/// True if two diagnostics render identically in the fullest text form.
+fn same_diagnostic(first: *const diag_fuzz.Diag, second: *const diag_fuzz.Diag) bool {
+    var buffer_first: [constants.output_bytes_max]u8 = undefined;
+    var buffer_second: [constants.output_bytes_max]u8 = undefined;
+    const text_first = render.render(first, .verbose, false, &buffer_first);
+    const text_second = render.render(second, .verbose, false, &buffer_second);
+    return std.mem.eql(u8, text_first, text_second);
+}
+
+/// Runs `zbx doctor` end to end against the faulted host in a random output mode and checks
+/// what a user and a script would see, against the report the per-check run produced.
+fn check_doctor_cli(
+    spec: *const FaultedHost,
+    report: *const doctor.Report,
+    gather_hard_errors: u32,
+    random: std.Random,
+) void {
+    var sim: HostSim = undefined;
+    spec.init(&sim);
+    const flavours = [_][]const []const u8{
+        &.{"doctor"},
+        &.{ "-v", "doctor" },
+        &.{ "doctor", "--output", "json" },
+        &.{ "--output=json", "-v", "doctor" },
+    };
+    const json = random.boolean();
+    const args = flavours[random.uintLessThan(usize, 2) + @as(usize, if (json) 2 else 0)];
+    const code = cli.run(sim.interface(), args);
+    assert(sim.open_count() == 0);
+
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    assert(!render.contains_raw_error(sim.stderr()));
+    assert(!render.contains_raw_error(sim.stdout()));
+    assert(std.mem.indexOfScalar(u8, sim.stderr(), 0x1b) == null);
+    if (sim.hard_errors_injected > gather_hard_errors) {
+        // The one-shot fault landed after the gather, on a write: stdout or one block did not
+        // reach its stream, and the exit code is the environment's whatever else happened.
+        assert(code == constants.exit_environment);
+        assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), sim.stdout()));
+        return;
+    }
+    assert(std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer)));
+    assert(code == report.exit_code());
+    const fails = diag_fuzz.find_fail_lines(sim.stdout());
+    const blocks = diag_fuzz.find_diagnostics(sim.stderr());
+    assert(fails.unregistered == 0);
+    assert(blocks.unregistered == 0);
+    assert(fails.count == blocks.count);
+    assert(std.mem.eql(codes.Code, fails.in_order(), blocks.in_order()));
+    var index: u32 = 0;
+    for (&report.checks) |*check| {
+        if (check.status != .fail) continue;
+        assert(blocks.codes[index] == expected_code(check.id));
+        index += 1;
+    }
+    assert(index == blocks.count);
+    if (blocks.count == 0) assert(sim.stderr().len == 0);
+    if (json) assert(every_line_is_json(sim.stderr()));
+}
+
+fn every_line_is_json(text: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (!(test_util.json_is_valid(line) catch false)) return false;
+    }
+    return true;
 }
 
 const Parsed = struct {
