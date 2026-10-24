@@ -19,7 +19,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 ## Environment facts (checked 2026-10-23 in the Claude Code cloud container)
 
-- The cloud container runs as root, has cgroup v1/hybrid (no `cgroup.controllers`), no `/dev/kvm`, no `newuidmap`, no `pasta`. It is not a valid test host: use it to build, unit-test and cross-compile only.
+- The cloud container runs as root, has cgroup v1/hybrid (no `cgroup.controllers`), no `/dev/kvm` and no `pasta`. A fresh container has no `newuidmap` either; a session may install `uidmap` and give a test user a subuid range to exercise the full id mapping, so check rather than assume. It is not a valid test host: use it to build, unit-test, cross-compile and smoke-test only; the VM demo is the real test.
 - Real validation happens in a QEMU guest (Ubuntu 24.04 cloud image) on GitHub Actions `ubuntu-24.04` runners, which expose KVM.
 - Zig downloads from https://ziglang.org/download/ work through the proxy.
 

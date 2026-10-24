@@ -38,7 +38,7 @@ Design goals, in order: **safety, performance, developer experience.**
 - Pass arguments over 16 bytes as `*const`. Initialise large structs in place through an out pointer.
 - Split compound conditions into nested `if`/`else`. State invariants positively (`if (index < count)`). Exception: test code, reference oracles in fuzzers, and build-host tooling (`tidy`, `size_check`) may use compound conditions in branches, because an oracle that mirrors the production code's structure stops being independent. Compound *assertions* are banned everywhere.
 - Make the rounding intent of every division explicit (`@divExact`, `@divFloor`, `std.math.divCeil`).
-- Handle every error. `catch unreachable` is allowed only with an assertion-grade comment explaining why the error cannot occur.
+- Handle every error. `catch unreachable` is allowed only with an assertion-grade comment explaining why the error cannot occur. `zig build tidy` requires that comment on the same line or the line directly above, and rejects `and`/`or` inside `assert(...)`.
 - Comments say **why** and are full sentences. Each test opens with a comment giving its goal and method.
 - Commit messages explain why. A PR description is not a commit message.
 
