@@ -13,7 +13,7 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 | Milestone | What it adds | Status |
 | --- | --- | --- |
 | **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **Demonstrated** in CI ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)); every failure is a coded diagnostic |
-| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md); slice 1 (isolation core) green in CI ([run 17](https://github.com/Zigbox/zigbox/actions/runs/40127252813)); slice 2 (full id map, signals, run records, `zigbox` library module) green in CI ([run 22](https://github.com/Zigbox/zigbox/actions/runs/40130034771)); slice 3 (redacted diagnostic bundles) built and reviewed, CI pending; slice 4 (VM demo) not started |
+| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md); slice 1 (isolation core) green in CI ([run 17](https://github.com/Zigbox/zigbox/actions/runs/40127252813)); slice 2 (full id map, signals, run records, `zigbox` library module) green in CI ([run 22](https://github.com/Zigbox/zigbox/actions/runs/40130034771)); slice 3 (redacted diagnostic bundles) green in CI ([run 23](https://github.com/Zigbox/zigbox/actions/runs/40133415168)); slice 4 (`demo-m1` VM demo) built and reviewed, passes locally under TCG, CI pending |
 | M2 · Limits | cgroup limits, capabilities, seccomp, read-only root | Not started |
 | M3 · Store | Content-addressed, deduplicated file trees | Not started |
 | M4 · Pull | Pull and run public OCI images | Not started |
