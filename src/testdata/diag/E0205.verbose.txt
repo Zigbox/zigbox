@@ -1,0 +1,12 @@
+error[ZBX-E0205]: a container setup step failed
+  while  starting container web-1
+  cause  mounting a fresh /proc failed: operation not permitted (EPERM)
+  cause  the host refuses a fresh /proc here; running inside another container,
+         which hides parts of /proc, or a security policy, is the usual reason
+  name   web-1
+  rootfs /srv/alpine
+  step   mount_proc (13 of 44)
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0205
+  docs   https://zigbox.github.io/zigbox/errors/E0205.html

@@ -19,6 +19,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const fixtures = @import("doctor_fixtures.zig");
+const plan_mod = @import("runtime/plan.zig");
+const sim_run = @import("runtime/sim_run.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 
 const testing = std.testing;
@@ -31,9 +33,54 @@ const Case = struct {
     stdout_full: bool = false,
     /// The name of a doctor fixture (doctor_fixtures.zig) to run against; null for no files.
     fixture: ?[]const u8 = null,
+    /// Sets the simulator up after it is initialised (a container host and a failure to inject).
+    prepare: ?*const fn (sim: *HostSim) void = null,
     /// The exit code the case must end with.
     exit: u8,
 };
+
+/// The index of the first step of `kind` in a plan, for injecting a failure into it.
+fn step_of(kind: plan_mod.Kind) u32 {
+    var plan: plan_mod.Plan = undefined;
+    plan.build(&.{
+        .rootfs = sim_run.rootfs_path,
+        .name = "web-1",
+        .command = &.{"/bin/sh"},
+        .term = null,
+        .uid = 1000,
+        .gid = 1000,
+    });
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for here is in every plan.
+}
+
+fn prepare_container(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+}
+
+fn prepare_proc_refused(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.faults.fail_step = step_of(.mount_proc);
+    sim.faults.fail_step_errno = 1; // EPERM
+}
+
+/// Ubuntu 24.04 as installed: AppArmor restricts user namespaces, so clone3 is refused.
+const run_restricted = fixtures.build(.{
+    .name = "run_restricted",
+    .apparmor_restrict = "1\n",
+    .probes = .{ .userns = .denied, .overlay = .setup_denied },
+    .extra_files = &sim_run.extra_files,
+});
+
+fn prepare_namespaces_refused(sim: *HostSim) void {
+    sim.init(1, run_restricted.files);
+    run_restricted.apply(sim);
+    sim.world.seed_container_host(sim_run.rootfs_path);
+    sim.faults.fail_step = step_of(.spawn);
+    sim.faults.fail_step_errno = 13; // EACCES
+}
 
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
@@ -54,6 +101,36 @@ const cases = [_]Case{
     .{ .code = .E0104, .args = &.{"doctor"}, .fixture = "overlay_denied", .exit = 2 },
     .{ .code = .E0105, .args = &.{"doctor"}, .fixture = "subid_missing_entry", .exit = 2 },
     .{ .code = .E0106, .args = &.{"doctor"}, .fixture = "seccomp_absent", .exit = 2 },
+    .{
+        .code = .E0201,
+        .args = &.{ "run", "--rootfs", "./alpine", "--", "/bin/sh" },
+        .prepare = prepare_container,
+        .exit = 1,
+    },
+    .{
+        .code = .E0202,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/nothere" },
+        .prepare = prepare_container,
+        .exit = 1,
+    },
+    .{
+        .code = .E0203,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_namespaces_refused,
+        .exit = 2,
+    },
+    .{
+        .code = .E0205,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_proc_refused,
+        .exit = 2,
+    },
+    .{
+        .code = .E0206,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },
+        .prepare = prepare_container,
+        .exit = 1,
+    },
 };
 
 const Style = enum { default, verbose, json };
@@ -83,6 +160,7 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
         sim.init(1, fixture.files);
         fixture.apply(sim);
     }
+    if (case.prepare) |prepare| prepare(sim);
     if (case.stdout_full) {
         sim.faults.write_error_per_mille = 1000;
         sim.faults.write_fault_stream = .stdout;

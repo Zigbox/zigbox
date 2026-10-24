@@ -1,0 +1,8 @@
+error[ZBX-E0206]: invalid container name
+  while  reading the container name
+  cause  'Web_1' has a character at position 1 that is not a lowercase letter, a
+         digit or '-'
+  name   Web_1
+  fix    a valid name looks like this:   zbx run --name web-1 --rootfs ./alpine -- /bin/sh
+  more   zbx explain E0206
+  docs   https://zigbox.github.io/zigbox/errors/E0206.html

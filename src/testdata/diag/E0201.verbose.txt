@@ -1,0 +1,8 @@
+error[ZBX-E0201]: the rootfs is missing or not a directory
+  while  checking the rootfs
+  cause  './alpine' does not exist
+  rootfs ./alpine
+  fix    unpack a root filesystem into a directory:   mkdir alpine && tar -xzf alpine-minirootfs-*.tar.gz -C alpine
+         then name that directory:                    zbx run --rootfs ./alpine -- /bin/sh
+  more   zbx explain E0201
+  docs   https://zigbox.github.io/zigbox/errors/E0201.html

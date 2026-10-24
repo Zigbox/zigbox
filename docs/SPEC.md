@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 43; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 46; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -34,6 +34,7 @@ Ground rules for the implementer:
 - Error messages are part of the demo. Every failure follows the diagnostics standard below, from M0 onward.
 - Never break an earlier demo. All prior `demo-mN` tests run in CI on every change.
 - When a milestone's scope is in doubt, cut scope and keep the demo.
+- Production-ready from the start. From M1 on, every milestone's acceptance criteria include the production-readiness checklist below: an upgrade test, stable diagnostics, documented failure modes.
 
 ## Milestone map
 
@@ -142,6 +143,26 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] Every image is identified internally by tree digest; tags are aliases only.
 - [ ] Interrupted pulls resume without re-downloading completed blobs.
 
+### M4b · Mac: the thirty seconds on macOS
+
+**Goal:** a Mac user goes from `brew install zigbox` to a running container with no setup step.
+
+**Scope:** a macOS `zbx` for Apple Silicon that drives a pinned, minimal Linux VM through Apple's Virtualization.framework. The VM is a small kernel plus an initramfs carrying the Linux `zbx`, booted lazily on the first command and stopped when idle; one VM per user, not per container (per-container microVMs stay stretch S1). Commands are forwarded over vsock; the user's home directory is shared with virtiofs, so `--rootfs` paths, state volumes and build contexts work unchanged; Rosetta runs `amd64` images. Inside the VM, Zigbox is unchanged and fully rootless. `zbx doctor` on macOS checks the VM, its version, file sharing and disk space. Distributed as a signed, notarized Homebrew formula; an Apple Developer ID and the virtualization entitlement are prerequisites. The macOS binary links libSystem, as macOS requires; the no-libc rule applies to the Linux binaries. Published ports arrive with M5, whose acceptance criteria then cover the Mac too. Deferred: Intel Macs, Windows, a GUI.
+
+**Demo script:**
+
+1. On a clean Mac: `brew install zigbox`.
+2. `zbx run alpine -- cat /etc/os-release` prints Alpine. The first run, VM boot included, takes under five seconds on Apple Silicon.
+3. `zbx run --rootfs ~/demo/alpine -- touch /hello`; on the Mac, `ls ~/demo/alpine/hello` shows the file.
+4. Leave it idle past the idle timeout: Activity Monitor shows no VM. The next `zbx run` brings it back.
+
+**Acceptance criteria:**
+
+- [ ] Nothing to set up between `brew install` and the first `zbx run`, and no administrator password prompt.
+- [ ] The macOS binary is signed and notarized; Gatekeeper shows no warning.
+- [ ] The M1 to M4 demos pass unchanged inside the VM, driven from macOS. If hosted macOS CI runners cannot nest virtualization, this runs on a self-hosted Apple Silicon runner.
+- [ ] Every failure in the VM layer is a coded diagnostic with a fix, in a new code group added to DIAGNOSTICS.md (both repos) when M4b starts.
+
 ### M5 · Network: access as an explicit grant
 
 **Goal:** a container has no network unless granted, and a granted service is reachable from the host.
@@ -243,11 +264,36 @@ Failures are a product surface, not an afterthought. The full standard is `DIAGN
 
 The M0 acceptance criteria therefore include the diagnostics machinery itself: the registry, `zbx explain` and the output modes. The bundle arrives with M1, the first milestone with containers and state worth bundling.
 
+## Production readiness
+
+Every milestone should leave Zigbox, and later Zigcube, something an operator would choose to run. From M1 and C0 on, each milestone's acceptance criteria therefore include this checklist:
+
+- [ ] **Upgrade test.** CI runs the new binary against state written by the previous tagged release (run records, store, state volumes, the control-plane database), and the previous milestone's demo still passes.
+- [ ] **Stable diagnostics.** Every new failure path has a registered code with a fix and golden tests; no existing code changes its meaning.
+- [ ] **Documented failure modes.** The milestone's demo document lists what can go wrong in production, how it shows up (code, exit reason or log line) and how to recover.
+
+Zigbox in production:
+
+- **Upgrades are a file swap.** One static binary and no daemon. From v1, the CLI and the runtime library API (the `zigbox` module Zigcube links) follow semantic versioning, with a published deprecation policy.
+- **systemd supervises.** `zbx systemd generate <name>` writes a user unit, so restarts, logs (journald), boot ordering and resource scopes come from systemd, not from Zigbox.
+- **Deploy by digest.** Production runs digests from a lockfile, never tags; switching versions and rolling back is one command (from M3 and M4).
+- **Observability without a daemon.** Each container has an event log and an exit reason in its run record; `zbx top` shows live cgroup usage; an optional OpenMetrics and OpenTelemetry exporter publishes the same data for a collector.
+- **Support.** Coded diagnostics whose pages read as runbook entries, and redacted bundles for bug reports.
+- **Trust in zbx itself.** Reproducible release builds, signed releases, an SBOM and a published security response policy: M8's machinery applied to Zigbox.
+
+Zigcube in production:
+
+- **Small to start, able to grow.** One binary on SQLite for a single node; Postgres for high availability. Backup and restore are tested in CI.
+- **Upgrades without downtime.** A version-skew policy (agents at most one minor version behind the server), tested on every release.
+- **Explainable by design.** `zcube why`, a request ID on every call, and one diagnostic model from node to CLI.
+- **Simulation-tested control plane.** Deterministic, seeded simulation of controllers, store and agents, with partitions, lost leases and a crashing store, each failure replayable from its seed.
+- **Configuration in git.** Service files are reviewed in pull requests; `zcube apply` shows a diff before it changes anything; every change lands in an audit log.
+
 ## Non-goals
 
 These are out of scope for M0 to M8. Raise a change to this doc before building any of them.
 
-- **Non-Linux hosts.** No macOS or Windows support; on those, run Zigbox inside a Linux VM.
+- **Native non-Linux runtimes.** Containers run only on a Linux kernel. On macOS, zbx runs a small Linux VM for the user, invisibly (milestone M4b); there is no native macOS runtime, and no Windows support.
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives.

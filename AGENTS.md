@@ -45,3 +45,4 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
 - Never report an unpushed commit as pushed.
+- CI runs only on pull requests and on `main`, never on a plain branch push. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited.

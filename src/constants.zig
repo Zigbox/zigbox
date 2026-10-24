@@ -125,6 +125,13 @@ pub const errors_page_bytes_max: u32 = 24 * 1024;
 pub const sim_files_max: u32 = 128;
 pub const sim_open_files_max: u32 = 8;
 pub const sim_output_bytes_max: u32 = 64 * 1024;
+/// The simulator's container model: paths, nodes (directories, files, links), mounts per
+/// namespace, processes, and pipe ends. Simulated paths are short; a longer one is refused.
+pub const sim_path_bytes_max: u32 = 256;
+pub const sim_nodes_max: u32 = 96;
+pub const sim_mounts_max: u32 = 32;
+pub const sim_processes_max: u32 = 3;
+pub const sim_pipe_ends_max: u32 = 8;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.
 /// Overlayfs mounts inside user namespaces need 5.11; 5.15 is the oldest LTS kernel that has it
@@ -134,6 +141,62 @@ pub const kernel_minor_min: u32 = 15;
 /// A full container uid/gid map needs 65536 ids.
 pub const subid_range_min: u32 = 65536;
 pub const probe_timeout_ms: u32 = 5000;
+
+// Containers (M1). A run is planned as a fixed list of steps, built from these bounds only.
+/// The longest rootfs path accepted. The plan derives a dozen paths from it (`/dev/pts`, ...),
+/// and every one must still fit `path_bytes_max`.
+pub const rootfs_bytes_max: u32 = 1024;
+/// A container name is a hostname label (RFC 1123): at most 63 characters.
+pub const container_name_bytes_max: u32 = 63;
+pub const container_name_prefix = "zbx-";
+/// Random hex digits after the prefix of a generated name.
+pub const container_name_hex_digits: u32 = 6;
+/// Words of the command after `--`. Fewer than `args_count_max`: `zbx run --rootfs R --` and a
+/// name take some.
+pub const command_words_count_max: u32 = 48;
+/// One command word. It becomes an exec path, which is tried under each directory of the
+/// container's PATH, so it leaves room for the longest of those plus a slash.
+pub const command_word_bytes_max: u32 = 4000;
+/// All bytes of the command's arguments and the container's environment, NUL included. The
+/// child execs from a copy of this made before `clone3`, so it never formats text.
+pub const exec_strings_bytes_max: u32 = 32 * 1024;
+/// The `TERM` value copied from the host. A longer one is not copied.
+pub const term_bytes_max: u32 = 64;
+/// Environment variables the container gets: PATH, HOME, HOSTNAME and (if set) TERM.
+pub const environment_count_max: u32 = 4;
+/// The container's PATH, in the order a shell searches it. Counted for the exec candidates.
+pub const container_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub const container_path_dirs_count: u32 = 6;
+/// The devices bind-mounted from the host into the container's `/dev`.
+pub const container_devices_count: u32 = 6;
+/// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
+pub const container_links_count: u32 = 5;
+/// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
+pub const plan_steps_max: u32 = 64;
+/// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
+pub const plan_paths_bytes_max: u32 = 64 * 1024;
+/// One id map line, "0 4294967295 1\n", with room to spare.
+pub const id_map_line_bytes_max: u32 = 32;
+/// A record the child writes to the failure pipe: kind, step, and a two-byte errno.
+pub const sync_record_bytes: u32 = 4;
+/// Records a child can write: one note per tolerant step, then at most one failure.
+pub const sync_records_max: u32 = 8;
+/// `read` calls the parent spends collecting records; each non-EOF call returns at least one
+/// byte, so this covers one-byte reads of a full buffer and the EOF read.
+pub const sync_read_calls_max: u32 = sync_record_bytes * sync_records_max + 1;
+/// Interrupted `wait` calls tolerated before a container's wait is reported as failed.
+pub const wait_interrupts_max: u32 = 1024;
+/// The exit code of a container child that failed before its command started. The parent never
+/// uses it: a failure is the record in the pipe. It only keeps a zombie's status meaningful.
+pub const child_exit_setup_failed: u8 = 125;
+/// EIO: the errno that stands for a failure with none (an error made inside host.zig).
+pub const errno_io: u16 = 5;
+/// SIGKILL, the same number on x86_64 and aarch64.
+pub const signal_kill: u8 = 9;
+/// A signal number is below this on every Linux architecture.
+pub const signal_number_max: u8 = 64;
+/// Added to a signal number to make the exit code of a container killed by it.
+pub const exit_signal_offset: u8 = 128;
 
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
@@ -224,6 +287,43 @@ comptime {
     assert(kernel_minor_min < 1000);
     assert(subid_range_min == 65536);
     assert(probe_timeout_ms > 0);
+
+    // Containers: every path the plan derives from the longest rootfs fits a path, and the
+    // plan's text arena holds the worst case of all of them at once.
+    const derived_suffix_bytes_max = "/dev/pts".len + 1;
+    assert(rootfs_bytes_max + derived_suffix_bytes_max <= path_bytes_max);
+    assert(container_name_bytes_max == 63);
+    assert(container_name_prefix.len + container_name_hex_digits <= container_name_bytes_max);
+    assert(command_words_count_max + 8 <= args_count_max);
+    assert(command_word_bytes_max < arg_bytes_max);
+    // A word tried under the longest PATH directory ("/usr/local/sbin/") still fits a path.
+    assert(command_word_bytes_max + "/usr/local/sbin/".len <= path_bytes_max);
+    assert(exec_strings_bytes_max >= command_word_bytes_max + container_path.len + 64);
+    assert(term_bytes_max < exec_strings_bytes_max);
+    assert(environment_count_max == 4);
+    assert(std.mem.count(u8, container_path, ":") + 1 == container_path_dirs_count);
+    assert(container_devices_count == 6);
+    assert(container_links_count == 5);
+    const derived_paths_max = 4 + container_devices_count + container_links_count;
+    const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
+    const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
+        2 * id_map_line_bytes_max + 512;
+    assert(paths_needed <= plan_paths_bytes_max);
+    assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
+    assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
+    assert(sync_record_bytes == 4);
+    assert(sync_records_max >= 2); // At least one note and the failure.
+    assert(sync_read_calls_max > sync_record_bytes * sync_records_max);
+    assert(wait_interrupts_max > eintr_retries_max);
+    assert(child_exit_setup_failed != exit_ok);
+    assert(signal_number_max <= 64);
+    assert(signal_kill < signal_number_max);
+    assert(@as(u32, exit_signal_offset) + signal_number_max <= std.math.maxInt(u8));
+    assert(sim_path_bytes_max >= 64);
+    assert(sim_nodes_max >= 64);
+    assert(sim_mounts_max >= container_devices_count + 8);
+    assert(sim_processes_max >= 2);
+    assert(sim_pipe_ends_max >= 4);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

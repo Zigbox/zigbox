@@ -64,6 +64,28 @@ pub const HostReal = struct {
         .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
+        .pipe = pipe,
+        .write_handle = write_handle,
+        .spawn = spawn,
+        .wait = wait,
+        .signal = signal,
+        .write_id_map = write_id_map,
+        .mount = mount,
+        .unmount_detach = unmount_detach,
+        .pivot_root = pivot_root,
+        .change_directory = change_directory,
+        .make_directory = make_directory,
+        .create_file = create_file,
+        .symlink = symlink,
+        .set_hostname = set_hostname,
+        .seal_descriptors = seal_descriptors,
+        .die_with_parent = die_with_parent,
+        .exec = exec,
+        .gid = gid,
+        .environment = environment,
+        .random_bytes = random_bytes,
+        .ignore_broken_pipe = ignore_broken_pipe,
+        .begin_step = begin_step,
     };
 
     fn from_context(context: *anyopaque) *HostReal {
@@ -202,6 +224,241 @@ pub const HostReal = struct {
         return probe_run(self, kind);
     }
 
+    // ---- Containers ----
+
+    fn pipe(context: *anyopaque) host.Error!host.Pipe {
+        const self = from_context(context);
+        var descriptors: [2]i32 = undefined;
+        try check(linux.pipe2(&descriptors, .{ .CLOEXEC = true }));
+        self.open_count += 2;
+        assert(descriptors[0] >= 0);
+        assert(descriptors[1] >= 0);
+        return .{ .read = @intCast(descriptors[0]), .write = @intCast(descriptors[1]) };
+    }
+
+    fn write_handle(context: *anyopaque, handle: host.Handle, bytes: []const u8) host.Error!u32 {
+        _ = from_context(context);
+        assert(bytes.len > 0);
+        assert(bytes.len <= constants.output_bytes_max);
+        const descriptor: i32 = @intCast(handle);
+        const result = linux.write(descriptor, bytes.ptr, bytes.len);
+        try check(result);
+        assert(result <= bytes.len);
+        return @intCast(result);
+    }
+
+    fn spawn(
+        context: *anyopaque,
+        flags: host.SpawnFlags,
+        entry: host.ChildEntry,
+        entry_context: *anyopaque,
+    ) host.Error!host.Pid {
+        _ = from_context(context);
+        var arguments: CloneArgs = std.mem.zeroes(CloneArgs);
+        arguments.flags = clone_flags(flags);
+        arguments.exit_signal = @backingInt(linux.SIG.CHLD);
+        const result = linux.syscall2(.clone3, @intFromPtr(&arguments), @sizeOf(CloneArgs));
+        // clone3 returns twice. In the child (result 0) nothing below this line runs: the entry
+        // function does the setup and the child ends here, never returning into the caller.
+        if (result == 0) linux.exit_group(entry(entry_context));
+        try check(result);
+        assert(result > 0);
+        assert(result <= std.math.maxInt(i32));
+        return @intCast(result);
+    }
+
+    fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
+        _ = from_context(context);
+        assert(pid > 0);
+        var status: i32 = 0;
+        const result = linux.wait4(@intCast(pid), &status, 0, null);
+        try check(result);
+        assert(result == pid);
+        const bits: u32 = @bitCast(status);
+        if (linux.W.IFEXITED(bits)) return .{ .exited = linux.W.EXITSTATUS(bits) };
+        if (linux.W.IFSIGNALED(bits)) {
+            const number: u32 = @backingInt(linux.W.TERMSIG(bits));
+            assert(number > 0);
+            assert(number < constants.signal_number_max);
+            return .{ .signaled = @intCast(number) };
+        }
+        return error.IoFailed; // Stopped or continued: wait4 was not asked for those.
+    }
+
+    fn signal(context: *anyopaque, pid: host.Pid, number: u8) host.Error!void {
+        _ = from_context(context);
+        assert(pid > 0);
+        assert(number > 0);
+        try check(linux.kill(@intCast(pid), @fromBackingInt(number)));
+    }
+
+    fn write_id_map(
+        context: *anyopaque,
+        pid: host.Pid,
+        kind: host.IdMapKind,
+        bytes: []const u8,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(pid > 0);
+        assert(bytes.len > 0);
+        var path: [64:0]u8 = undefined;
+        const format = "/proc/{d}/{s}";
+        // Cannot fail: a pid has at most ten digits and the names are at most eight bytes.
+        const text = std.fmt.bufPrintSentinel(&path, format, .{ pid, @tagName(kind) }, 0) catch
+            unreachable; // Same bound as above.
+        const opened = linux.open(text.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        const written = linux.write(descriptor, bytes.ptr, bytes.len);
+        const result = check(written);
+        _ = linux.close(descriptor); // Nothing buffered: the write above was the operation.
+        try result;
+        if (written != bytes.len) return error.IoFailed; // A map is written whole or not at all.
+    }
+
+    fn mount(context: *anyopaque, request: host.MountRequest) host.Error!void {
+        _ = from_context(context);
+        assert(request.target.len > 0);
+        const target = request.target.ptr;
+        const bind_source: ?[*:0]const u8 = if (request.source) |source| source.ptr else null;
+        const result = switch (request.kind) {
+            .make_private => linux.mount(null, target, null, linux.MS.REC | linux.MS.PRIVATE, 0),
+            .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
+            .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
+            .proc, .dev_tmpfs, .shm_tmpfs, .devpts => blk: {
+                const fresh = fresh_filesystem(request.kind);
+                const data = @intFromPtr(fresh.data.ptr);
+                break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
+            },
+        };
+        try check(result);
+    }
+
+    fn unmount_detach(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        try check(linux.umount2(path.ptr, linux.MNT.DETACH));
+    }
+
+    fn pivot_root(
+        context: *anyopaque,
+        new_root: [:0]const u8,
+        put_old: [:0]const u8,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(new_root.len > 0);
+        assert(put_old.len > 0);
+        try check(linux.pivot_root(new_root.ptr, put_old.ptr));
+    }
+
+    fn change_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        try check(linux.chdir(path.ptr));
+    }
+
+    fn make_directory(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        const result = linux.mkdir(path.ptr, 0o755);
+        if (exist_ok) {
+            if (linux.errno(result) == .EXIST) {
+                errno_last = 0;
+                return;
+            }
+        }
+        try check(result);
+    }
+
+    fn create_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        const flags: linux.O = .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .EXCL = true,
+            .CLOEXEC = true,
+        };
+        const opened = linux.open(path.ptr, flags, 0o644);
+        try check(opened);
+        _ = linux.close(@intCast(opened)); // An empty file: nothing was written to lose.
+    }
+
+    fn symlink(context: *anyopaque, target: [:0]const u8, link: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(target.len > 0);
+        assert(link.len > 0);
+        try check(linux.symlink(target.ptr, link.ptr));
+    }
+
+    fn set_hostname(context: *anyopaque, name: []const u8) host.Error!void {
+        _ = from_context(context);
+        assert(name.len > 0);
+        assert(name.len <= constants.container_name_bytes_max);
+        try check(linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len));
+    }
+
+    fn seal_descriptors(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        // Everything above stderr closes at exec; this keeps the failure pipe open until then,
+        // which a plain close would not.
+        const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = true };
+        try check(linux.close_range(3, -1, flags));
+    }
+
+    fn die_with_parent(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        const kill: usize = @backingInt(linux.SIG.KILL);
+        try check(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0));
+    }
+
+    fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {
+        _ = from_context(context);
+        assert(request.path.len > 0);
+        assert(request.argv[0] != null);
+        const result = linux.execve(request.path.ptr, request.argv, request.envp);
+        // execve returns only when it failed.
+        try check(result);
+        unreachable; // A success never returns, and check turns every failure into an error.
+    }
+
+    fn gid(context: *anyopaque) u32 {
+        _ = from_context(context);
+        return linux.getgid();
+    }
+
+    fn environment(context: *anyopaque, name: []const u8) ?[]const u8 {
+        const self = from_context(context);
+        assert(name.len > 0);
+        return self.environ.getPosix(name);
+    }
+
+    fn random_bytes(context: *anyopaque, buffer: []u8) host.Error!void {
+        _ = from_context(context);
+        assert(buffer.len > 0);
+        assert(buffer.len <= 256);
+        const result = linux.getrandom(buffer.ptr, buffer.len, 0);
+        try check(result);
+        if (result != buffer.len) return error.IoFailed; // Not short for 256 bytes or fewer.
+    }
+
+    fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {
+        _ = from_context(context);
+        const handler = if (ignore) linux.SIG.IGN else linux.SIG.DFL;
+        const action: linux.Sigaction = .{
+            .handler = .{ .handler = handler },
+            .mask = linux.sigemptyset(),
+            .flags = 0,
+        };
+        const result = linux.sigaction(.PIPE, &action, null);
+        assert(linux.errno(result) == .SUCCESS); // A valid signal and a valid handler.
+    }
+
+    fn begin_step(context: *anyopaque, index: u32) void {
+        _ = from_context(context);
+        _ = index; // The kernel needs no hint; see Host.begin_step.
+    }
+
     /// Converts a raw syscall return value into an error, or passes success through.
     fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
@@ -212,6 +469,81 @@ pub const HostReal = struct {
         return host.error_for_errno(@backingInt(code));
     }
 };
+
+// ---- Container constants ----------------------------------------------------------------
+
+/// The arguments of `clone3` up to and including `tls`: `CLONE_ARGS_SIZE_VER0`, 64 bytes. The
+/// later fields (`set_tid`, `cgroup`) are not used, and the kernel accepts the short size.
+const CloneArgs = extern struct {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+};
+
+comptime {
+    assert(@sizeOf(CloneArgs) == 64);
+}
+
+fn clone_flags(flags: host.SpawnFlags) u64 {
+    var bits: u64 = 0;
+    if (flags.user) bits |= linux.CLONE.NEWUSER;
+    if (flags.mount) bits |= linux.CLONE.NEWNS;
+    if (flags.pid) bits |= linux.CLONE.NEWPID;
+    if (flags.uts) bits |= linux.CLONE.NEWUTS;
+    if (flags.ipc) bits |= linux.CLONE.NEWIPC;
+    assert(bits & linux.CLONE.VM == 0); // The child gets its own memory, as after fork.
+    assert(bits & linux.CSIGNAL == 0); // The exit signal is its own field.
+    return bits;
+}
+
+/// The arguments of `mount` for a filesystem made new for the container. Fixed text, so the
+/// child formats nothing. `newinstance` gives the container its own devpts, so it cannot see the
+/// host's terminals.
+const Fresh = struct {
+    source: [:0]const u8,
+    type: [:0]const u8,
+    flags: u32,
+    data: [:0]const u8,
+};
+
+fn fresh_filesystem(kind: host.MountKind) Fresh {
+    const ms = linux.MS;
+    const fresh: Fresh = switch (kind) {
+        .proc => .{
+            .source = "proc",
+            .type = "proc",
+            .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
+            .data = "",
+        },
+        .dev_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.STRICTATIME,
+            .data = "mode=755,size=65536k",
+        },
+        .shm_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
+            .data = "mode=1777,size=65536k",
+        },
+        .devpts => .{
+            .source = "devpts",
+            .type = "devpts",
+            .flags = ms.NOSUID | ms.NOEXEC,
+            .data = "newinstance,ptmxmode=0666",
+        },
+        else => unreachable, // The other kinds mount nothing new.
+    };
+    assert(fresh.source.len > 0);
+    assert(fresh.flags & ms.BIND == 0);
+    return fresh;
+}
 
 test "real host reads a file, reports a missing one, and closes every handle" {
     // Goal: the production implementation honours the interface contract on the machine running

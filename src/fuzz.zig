@@ -14,6 +14,7 @@ const doctor = @import("doctor.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const parse_fuzz = @import("fuzz_parse.zig");
 const diag_fuzz = @import("fuzz_diag.zig");
+const run_fuzz = @import("fuzz_run.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -34,6 +35,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "text", .run_iteration = fuzz_text },
     .{ .name = "doctor", .run_iteration = fuzz_doctor },
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
+    .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },

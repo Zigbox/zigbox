@@ -42,6 +42,9 @@ pub const Spec = struct {
     status: ?[]const u8 = default_status,
     seccomp: host.Error!u32 = 0,
     probes: sim.Probes = .{},
+    /// More files for the same simulated host, for tests that run more than the doctor (a
+    /// container run needs its rootfs). Empty for every fixture the doctor's snapshots use.
+    extra_files: []const File = &.{},
 };
 
 pub const default_status =
@@ -121,6 +124,10 @@ pub fn build(comptime spec: Spec) Fixture {
         list.add_binary("/usr/bin/newuidmap", spec.newuidmap);
         list.add_binary("/usr/bin/newgidmap", spec.newgidmap);
         list.add("/proc/self/status", spec.status);
+        for (spec.extra_files) |file| {
+            list.items[list.len] = file;
+            list.len += 1;
+        }
         if (!spec.subuid_readable) {
             for (list.items[0..list.len]) |*file| {
                 if (std.mem.eql(u8, file.path, "/etc/subuid")) file.readable = false;

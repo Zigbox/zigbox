@@ -76,11 +76,15 @@ pub const Check = struct {
     detail: Detail,
     /// The diagnostic of a FAIL (stderr). Unclassified (`code == null`) for ok and warn.
     diag: Diag,
+    /// The FAIL is that the check could not look (a read or a probe failed), not that it looked
+    /// and found a setting that forbids what zbx needs.
+    could_not_run: bool,
 
     fn start(check: *Check, id: CheckId) void {
         check.id = id;
         check.status = .ok;
         check.detail = .{};
+        check.could_not_run = false;
         check.diag.reset();
         assert(check.detail.len == 0);
         assert(check.diag.code == null);
@@ -132,6 +136,7 @@ pub const Check = struct {
         assert(check.status == .fail);
         assert(what.len > 0);
         assert(what.len <= 160);
+        check.could_not_run = true;
         var buffer: [256]u8 = undefined;
         const format = "the {s} check could not run: {s}";
         // Cannot fail: the check name is at most 7 bytes and `what` at most 160.
@@ -1377,6 +1382,29 @@ pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
     assert(output.len <= buffer.len);
 }
 
+/// For a container run that could not create its namespaces: runs the user-namespace check on
+/// the same facts `zbx doctor` gathers and, if it FAILs, adds that check's real cause and its
+/// first two fixes to `diag`. Adds nothing when the check passes: the host then has no setting
+/// that explains the refusal, and the caller's own cause stands. The caller raised the code.
+pub fn explain_userns(host: Host, diag: *Diag) void {
+    assert(diag.code != null);
+    var facts: Facts = undefined;
+    facts.reset();
+    gather_one(host, &facts, .userns);
+    var check: Check = undefined;
+    check.start(.userns);
+    evaluate_userns(&facts, &check);
+    if (check.status != .fail) return;
+    // A check that could not look says nothing about the host that the caller does not know.
+    if (check.could_not_run) return;
+    if (check.diag.last_cause()) |cause| diag.cause("{s}", .{cause});
+    const fixes = check.diag.fixes.slice();
+    for (fixes[0..@min(fixes.len, 2)]) |fix| {
+        diag.fix(.{ .sentence = fix.sentence.slice(), .command = fix.command.slice() });
+    }
+    assert(diag.causes.count > 0);
+}
+
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -1605,4 +1633,33 @@ test "gather is exactly the per-check gather steps in order" {
         try testing.expectEqualStrings(a.detail.slice(), b.detail.slice());
     }
     try testing.expectEqual(target_a.call_count, target_b.call_count);
+}
+
+test "explain_userns adds the host's reason to a refused clone, or nothing" {
+    // Goal: the E0203 cause comes from the same facts as the doctor's userns check. Method: the
+    // AppArmor-restricted fixture gives the AppArmor cause and its two fixes; a healthy host gives
+    // nothing; a host where the check itself could not run gives nothing either, because "the
+    // check could not look" is no reason for the refusal.
+    const Case = struct { name: []const u8, causes: u32, fixes: u32 };
+    const cases = [_]Case{
+        .{ .name = "ubuntu_2404_restricted", .causes = 2, .fixes = 2 },
+        .{ .name = "userns_disabled", .causes = 2, .fixes = 1 },
+        .{ .name = "ubuntu_2404", .causes = 1, .fixes = 0 },
+        .{ .name = "probe_cannot_fork", .causes = 1, .fixes = 0 },
+        .{ .name = "restricted_but_working", .causes = 1, .fixes = 0 },
+    };
+    for (cases) |case| {
+        const fixture = fixtures.find(case.name).?;
+        var target: HostSim = undefined;
+        target.init(1, fixture.files);
+        fixture.apply(&target);
+        var diag: Diag = undefined;
+        diag.reset();
+        diag.raise(.E0203);
+        diag.cause("clone3 failed", .{});
+        explain_userns(target.interface(), &diag);
+        try testing.expectEqual(case.causes, diag.causes.count);
+        try testing.expectEqual(case.fixes, diag.fixes.count);
+        try testing.expectEqual(@as(u32, 0), target.open_count());
+    }
 }

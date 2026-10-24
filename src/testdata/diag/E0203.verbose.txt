@@ -1,0 +1,16 @@
+error[ZBX-E0203]: can't create the container's namespaces
+  while  starting container web-1
+  cause  clone3 with new user, mount, PID, UTS and IPC namespaces failed:
+         permission denied (EACCES)
+  cause  the kernel or a security policy refused to create the namespaces for
+         this process
+  cause  this host restricts unprivileged user namespaces through AppArmor
+         (kernel.apparmor_restrict_unprivileged_userns = 1)
+  name   web-1
+  rootfs /srv/alpine
+  step   spawn (2 of 44)
+  fix    allow them system-wide:        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+         keep it after a reboot:        echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee /etc/sysctl.d/60-zigbox-userns.conf
+         check this host (ZBX-E0101):   zbx doctor
+  more   zbx explain E0203
+  docs   https://zigbox.github.io/zigbox/errors/E0203.html
