@@ -1405,6 +1405,68 @@ pub fn explain_userns(host: Host, diag: *Diag) void {
     assert(diag.causes.count > 0);
 }
 
+/// What the doctor's subid check says about mapping a full range of ids: whether it can, and if
+/// so where the ranges start and which helpers to run. If it cannot, `diag` holds the check's
+/// diagnostic (unclassified when it can).
+pub const SubidAnswer = struct {
+    usable: bool,
+    uid_start: u32,
+    gid_start: u32,
+    newuidmap: []const u8,
+    newgidmap: []const u8,
+    diag: Diag,
+};
+
+const helper_paths = blk: {
+    var paths: [2][constants.binary_candidates_count][]const u8 = undefined;
+    for (program_names, 0..) |name, program| {
+        for (binary_directories, 0..) |directory, candidate| {
+            paths[program][candidate] = directory ++ name;
+        }
+    }
+    break :blk paths;
+};
+
+/// The path of the first candidate of `program` that is privileged, as `binary_state` judges.
+fn privileged_path(facts: *const Facts, program: Program) ?[]const u8 {
+    const row = &facts.binaries[@backingInt(program)];
+    for (row, 0..) |*binary, candidate| {
+        if (binary.stat_err != null) continue;
+        if (candidate_privilege(binary, program) != null) {
+            return helper_paths[@backingInt(program)][candidate];
+        }
+    }
+    return null;
+}
+
+/// Runs the subid check on the same facts `zbx doctor` gathers and answers for a container run.
+pub fn subid_answer(host: Host, answer: *SubidAnswer) void {
+    var facts: Facts = undefined;
+    facts.reset();
+    gather_one(host, &facts, .subid);
+    var check: Check = undefined;
+    check.start(.subid);
+    evaluate_subid(&facts, &check);
+    answer.diag.reset();
+    answer.usable = false;
+    if (check.status == .fail) {
+        answer.diag = check.diag;
+        assert(answer.diag.code != null);
+        return;
+    }
+    // The check passed: both ranges are at least the minimum and both helpers are privileged.
+    const user = lookup_user(&facts);
+    const uid_ranges = parse.parse_subid(facts.subuid.text(), user.name, facts.uid);
+    const gid_ranges = parse.parse_subid(facts.subgid.text(), user.name, facts.uid);
+    assert(uid_ranges.best_count >= constants.subid_range_min);
+    assert(gid_ranges.best_count >= constants.subid_range_min);
+    answer.newuidmap = privileged_path(&facts, .newuidmap).?;
+    answer.newgidmap = privileged_path(&facts, .newgidmap).?;
+    answer.uid_start = uid_ranges.best_start;
+    answer.gid_start = gid_ranges.best_start;
+    answer.usable = true;
+}
+
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;

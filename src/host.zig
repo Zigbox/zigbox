@@ -192,6 +192,75 @@ pub const ExecRequest = struct {
     envp: CStrings,
 };
 
+/// What a helper program (newuidmap, newgidmap) did: how it ended, and the first bytes it wrote.
+pub const HelperResult = struct {
+    status: ExitStatus,
+    output_len: u32,
+};
+
+/// What the parent waiting for its container learns next.
+pub const Event = union(enum) {
+    /// The child ended.
+    exited: ExitStatus,
+    /// A signal zbx forwards arrived (INT, TERM, HUP or QUIT).
+    signal: u8,
+};
+
+/// Which signals a process has handlers for or ignores, as bit masks (bit n-1 is signal n).
+pub const SignalState = struct {
+    caught: u64,
+    ignored: u64,
+
+    pub fn has(mask: u64, number: u8) bool {
+        assert(number > 0);
+        assert(number <= 64);
+        return mask >> @intCast(number - 1) & 1 == 1;
+    }
+};
+
+/// The names in one directory, NUL-terminated one after another. Fixed size: a directory with
+/// more entries, or a longer name, sets `truncated` and the rest is not listed.
+pub const DirListing = struct {
+    bytes: [constants.dir_listing_bytes_max]u8,
+    len: u32,
+    count: u32,
+    truncated: bool,
+
+    pub fn reset(listing: *DirListing) void {
+        listing.len = 0;
+        listing.count = 0;
+        listing.truncated = false;
+    }
+
+    /// Adds a name, or marks the listing truncated if it does not fit.
+    pub fn add(listing: *DirListing, entry: []const u8) void {
+        assert(entry.len > 0);
+        assert(std.mem.indexOfScalar(u8, entry, 0) == null);
+        const fits = entry.len <= constants.dir_name_bytes_max;
+        if (!fits or listing.count == constants.dir_entries_max) {
+            listing.truncated = true;
+            return;
+        }
+        @memcpy(listing.bytes[listing.len..][0..entry.len], entry);
+        listing.bytes[listing.len + entry.len] = 0;
+        listing.len += @intCast(entry.len + 1);
+        listing.count += 1;
+        assert(listing.len <= listing.bytes.len);
+    }
+
+    /// The name at `index` (in the order added).
+    pub fn name(listing: *const DirListing, index: u32) []const u8 {
+        assert(index < listing.count);
+        var at: u32 = 0;
+        var seen: u32 = 0;
+        while (seen < index) : (seen += 1) {
+            at += @intCast(std.mem.indexOfScalar(u8, listing.bytes[at..listing.len], 0).? + 1);
+        }
+        const rest = listing.bytes[at..listing.len];
+        return rest[0..std.mem.indexOfScalar(u8, rest, 0).?];
+    }
+};
+
 /// The step index to give `begin_step` when no plan step is running.
 pub const step_none: u32 = std.math.maxInt(u32);
 
@@ -263,6 +332,30 @@ pub const VTable = struct {
     /// The value of an environment variable of this process, or null if it is not set.
     environment: *const fn (context: *anyopaque, name: []const u8) ?[]const u8,
     random_bytes: *const fn (context: *anyopaque, buffer: []u8) Error!void,
+    /// Runs a helper program to its end and waits for it. Its output (stdout and stderr, joined)
+    /// is kept up to `output.len` bytes. The helper is run with the environment in the request.
+    run_helper: *const fn (
+        context: *anyopaque,
+        request: ExecRequest,
+        output: []u8,
+    ) Error!HelperResult,
+    /// Blocks (or unblocks) INT, TERM, HUP, QUIT and CHLD, so that they wait to be read by
+    /// `wait_event` instead of acting.
+    block_signals: *const fn (context: *anyopaque, block: bool) Error!void,
+    /// Waits for the child to end or for a forwarded signal; the signals must be blocked.
+    wait_event: *const fn (context: *anyopaque, pid: Pid) Error!Event,
+    signal_state: *const fn (context: *anyopaque, pid: Pid) Error!SignalState,
+    /// Seconds since the epoch.
+    time_now: *const fn (context: *anyopaque) u64,
+    /// Creates the file (mode 0600) or empties it, and writes all of `bytes`.
+    write_file: *const fn (context: *anyopaque, path: [:0]const u8, bytes: []const u8) Error!void,
+    rename: *const fn (context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void,
+    remove_file: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    list_directory: *const fn (
+        context: *anyopaque,
+        path: [:0]const u8,
+        listing: *DirListing,
+    ) Error!void,
     /// Makes a write to a pipe with no reader fail with `EPIPE` instead of killing the process.
     ignore_broken_pipe: *const fn (context: *anyopaque, ignore: bool) void,
     begin_step: *const fn (context: *anyopaque, index: u32) void,
@@ -591,6 +684,83 @@ pub const Host = struct {
         assert(buffer.len <= 256); // getrandom never returns short up to 256 bytes.
         try host.vtable.random_bytes(host.context, buffer);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn run_helper(host: Host, request: ExecRequest, output: []u8) Error!HelperResult {
+        assert(request.path.len > 0);
+        assert(request.argv[0] != null);
+        assert(output.len > 0);
+        assert(output.len <= constants.helper_output_bytes_max);
+        const result = try host.vtable.run_helper(host.context, request, output);
+        assert(result.output_len <= output.len);
+        return result;
+    }
+
+    pub fn block_signals(host: Host, block: bool) Error!void {
+        try host.vtable.block_signals(host.context, block);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// Waits for the child or a forwarded signal, retrying interrupted waits.
+    pub fn wait_event(host: Host, pid: Pid) Error!Event {
+        assert(pid > 0);
+        for (0..constants.wait_interrupts_max + 1) |_| {
+            const event = host.vtable.wait_event(host.context, pid) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            switch (event) {
+                .exited => {},
+                .signal => |number| assert(number > 0),
+            }
+            return event;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn signal_state(host: Host, pid: Pid) Error!SignalState {
+        assert(pid > 0);
+        const state = try host.vtable.signal_state(host.context, pid);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return state;
+    }
+
+    pub fn time_now(host: Host) u64 {
+        const seconds = host.vtable.time_now(host.context);
+        assert(seconds < 1 << 40); // Until the year 36812.
+        return seconds;
+    }
+
+    pub fn write_file(host: Host, path: [:0]const u8, bytes: []const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        assert(bytes.len <= constants.file_bytes_max);
+        try host.vtable.write_file(host.context, path, bytes);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn rename(host: Host, from: [:0]const u8, to: [:0]const u8) Error!void {
+        assert(from.len > 0);
+        assert(to.len > 0);
+        assert(!std.mem.eql(u8, from, to));
+        try host.vtable.rename(host.context, from, to);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn remove_file(host: Host, path: [:0]const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.remove_file(host.context, path);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn list_directory(host: Host, path: [:0]const u8, listing: *DirListing) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        listing.reset();
+        try host.vtable.list_directory(host.context, path, listing);
+        assert(listing.len <= listing.bytes.len);
+        assert(listing.count <= constants.dir_entries_max);
     }
 
     /// The parent writes one byte to a pipe whose reader may already be gone; that must be an

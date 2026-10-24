@@ -132,6 +132,10 @@ pub const sim_nodes_max: u32 = 96;
 pub const sim_mounts_max: u32 = 32;
 pub const sim_processes_max: u32 = 3;
 pub const sim_pipe_ends_max: u32 = 8;
+/// Files the simulated programs write (run records), and the most one can hold: a bigger write
+/// is "no space left on the device", which is also how a full disk is simulated.
+pub const sim_written_files_max: u32 = 40;
+pub const sim_written_bytes_max: u32 = 8192;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.
 /// Overlayfs mounts inside user namespaces need 5.11; 5.15 is the oldest LTS kernel that has it
@@ -197,6 +201,44 @@ pub const signal_kill: u8 = 9;
 pub const signal_number_max: u8 = 64;
 /// Added to a signal number to make the exit code of a container killed by it.
 pub const exit_signal_offset: u8 = 128;
+
+// Id mapping through the setuid helpers (M1, slice 2).
+/// Output of a helper kept for a diagnostic. The rest is read and dropped.
+pub const helper_output_bytes_max: u32 = 120;
+/// Words of a helper's command line: its name, the pid, and three triples of numbers.
+pub const helper_words_max: u32 = 10;
+/// One helper map argument list, "0 4294967295 1 1 4294967295 4294967295".
+pub const helper_map_bytes_max: u32 = 64;
+/// Reads spent draining a helper's output; each non-EOF read makes progress.
+pub const helper_read_calls_max: u32 = 64;
+
+// Signals (slice 2).
+/// Signals the parent forwards to the container, and the bound on how many it forwards in one
+/// wait. Past the bound the container is killed: a signal flood is not forwarded forever.
+pub const forwarded_signals_count: u32 = 4;
+pub const forwarded_signals_max: u32 = 1024;
+
+// Run records (slice 2).
+/// Records kept; the oldest is deleted when a run would make it more.
+pub const runs_max: u32 = 32;
+/// The version `zbx` writes. A record with a higher one is skipped, not misread.
+pub const record_version: u32 = 1;
+/// One record. The command is cut to `record_command_bytes_max` and says so.
+pub const record_bytes_max: u32 = 32 * 1024;
+pub const record_command_bytes_max: u32 = 2048;
+pub const labels_count_max: u32 = 8;
+pub const label_key_bytes_max: u32 = 32;
+pub const label_value_bytes_max: u32 = 128;
+/// A directory listing: entries kept and the bytes of their names. A name is at most
+/// `container_name_bytes_max` plus ".zon" for a record.
+pub const dir_entries_max: u32 = 96;
+pub const dir_name_bytes_max: u32 = 72;
+pub const dir_listing_bytes_max: u32 = dir_entries_max * (dir_name_bytes_max + 1);
+/// The state directory path: $XDG_STATE_HOME or $HOME/.local/state, then /zbx/runs/<name>.zon.
+pub const state_path_bytes_max: u32 = 512;
+pub const record_suffix = ".zon";
+/// Seconds since the epoch; a record's times are these.
+pub const record_time_unknown: u64 = 0;
 
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
@@ -324,6 +366,22 @@ comptime {
     assert(sim_mounts_max >= container_devices_count + 8);
     assert(sim_processes_max >= 2);
     assert(sim_pipe_ends_max >= 4);
+    assert(sim_written_files_max > runs_max + 4); // Every record, a temporary one, and slack.
+    assert(sim_written_bytes_max > 1024);
+
+    assert(helper_words_max >= 2 + 6 + 1); // name, pid, two triples' worth... and the null.
+    assert(helper_map_bytes_max >= "0 4294967295 1 1 4294967295 4294967295".len);
+    assert(helper_output_bytes_max < diag_field_bytes_max);
+    assert(forwarded_signals_count == 4);
+    assert(forwarded_signals_max > forwarded_signals_count);
+    assert(runs_max > 0);
+    assert(runs_max < dir_entries_max); // Room to see every record and the one being added.
+    assert(record_command_bytes_max < record_bytes_max / 2);
+    const label_bytes = label_key_bytes_max + label_value_bytes_max + 16;
+    assert(labels_count_max * label_bytes < record_bytes_max / 2);
+    assert(container_name_bytes_max + record_suffix.len <= dir_name_bytes_max);
+    assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
+    assert(record_version >= 1);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

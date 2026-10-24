@@ -84,6 +84,15 @@ pub const HostReal = struct {
         .gid = gid,
         .environment = environment,
         .random_bytes = random_bytes,
+        .run_helper = run_helper,
+        .block_signals = block_signals,
+        .wait_event = wait_event,
+        .signal_state = signal_state,
+        .time_now = time_now,
+        .write_file = write_file,
+        .rename = rename,
+        .remove_file = remove_file,
+        .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
         .begin_step = begin_step,
     };
@@ -442,6 +451,154 @@ pub const HostReal = struct {
         if (result != buffer.len) return error.IoFailed; // Not short for 256 bytes or fewer.
     }
 
+    // ---- Helpers, signals and files (slice 2) ----
+
+    fn run_helper(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        output: []u8,
+    ) host.Error!host.HelperResult {
+        _ = from_context(context);
+        assert(request.path.len > 0);
+        assert(output.len > 0);
+        var ends: [2]i32 = undefined;
+        try check(linux.pipe2(&ends, .{ .CLOEXEC = true }));
+        const forked = linux.fork();
+        check(forked) catch |err| {
+            _ = linux.close(ends[0]);
+            _ = linux.close(ends[1]);
+            return err;
+        };
+        if (forked == 0) helper_child(request, ends[1]);
+        _ = linux.close(ends[1]);
+        const length = drain_helper(ends[0], output);
+        _ = linux.close(ends[0]);
+        const status = try wait_child(@intCast(forked));
+        assert(length <= output.len);
+        return .{ .status = status, .output_len = length };
+    }
+
+    fn block_signals(context: *anyopaque, block: bool) host.Error!void {
+        _ = from_context(context);
+        const set = forwarded_set();
+        const how: u32 = if (block) linux.SIG.BLOCK else linux.SIG.UNBLOCK;
+        try check(linux.sigprocmask(how, &set, null));
+    }
+
+    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+        _ = from_context(context);
+        assert(pid > 0);
+        const set = forwarded_set();
+        var info: linux.siginfo_t = undefined;
+        // Each pass takes one signal off the queue, so the loop ends when the child does; a
+        // SIGCHLD for a child that is still running (a stop, say) is skipped.
+        for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
+            const size = linux.NSIG / 8;
+            const taken = linux.syscall4(
+                .rt_sigtimedwait,
+                @intFromPtr(&set),
+                @intFromPtr(&info),
+                0,
+                size,
+            );
+            try check(taken);
+            assert(taken > 0);
+            assert(taken < constants.signal_number_max);
+            if (taken != @backingInt(linux.SIG.CHLD)) return .{ .signal = @intCast(taken) };
+            var status: i32 = 0;
+            const result = linux.wait4(@intCast(pid), &status, linux.W.NOHANG, null);
+            try check(result);
+            if (result == 0) continue;
+            assert(result == pid);
+            return .{ .exited = try decode_status(status) };
+        }
+        return error.Stalled;
+    }
+
+    fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {
+        _ = from_context(context);
+        assert(pid > 0);
+        var path: [48:0]u8 = undefined;
+        // Cannot fail: "/proc/" and "/status" are 13 bytes and a pid at most ten digits.
+        const text = std.fmt.bufPrintSentinel(&path, "/proc/{d}/status", .{pid}, 0) catch
+            unreachable; // Same bound as above.
+        const opened = linux.open(text.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        var buffer: [constants.status_bytes_max]u8 = undefined;
+        const count = linux.read(descriptor, &buffer, buffer.len);
+        const result = check(count);
+        _ = linux.close(descriptor);
+        try result;
+        return parse_signal_masks(buffer[0..count]) orelse error.IoFailed;
+    }
+
+    fn time_now(context: *anyopaque) u64 {
+        _ = from_context(context);
+        var now: linux.timespec = undefined;
+        const result = linux.clock_gettime(.REALTIME, &now);
+        assert(linux.errno(result) == .SUCCESS); // A valid clock and a valid pointer.
+        assert(now.sec >= 0);
+        return @intCast(now.sec);
+    }
+
+    fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        assert(bytes.len <= constants.file_bytes_max);
+        const flags: linux.O = .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+            .CLOEXEC = true,
+        };
+        const opened = linux.open(path.ptr, flags, 0o600);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        var written: usize = 0;
+        var calls: u32 = 0;
+        const result: host.Error!void = while (written < bytes.len) {
+            calls += 1;
+            if (calls > constants.write_calls_max) break error.Stalled;
+            const count = linux.write(descriptor, bytes[written..].ptr, bytes.len - written);
+            check(count) catch |err| break err;
+            written += count;
+        } else {};
+        _ = linux.close(descriptor); // The data is in the page cache; rename publishes it.
+        try result;
+        assert(written == bytes.len);
+    }
+
+    fn rename(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(from.len > 0);
+        assert(to.len > 0);
+        try check(linux.rename(from.ptr, to.ptr));
+    }
+
+    fn remove_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        try check(linux.unlink(path.ptr));
+    }
+
+    fn list_directory(
+        context: *anyopaque,
+        path: [:0]const u8,
+        listing: *host.DirListing,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        assert(listing.count == 0);
+        const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+        const opened = linux.open(path.ptr, flags, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        const result = read_entries(descriptor, listing);
+        _ = linux.close(descriptor);
+        try result;
+    }
+
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {
         _ = from_context(context);
         const handler = if (ignore) linux.SIG.IGN else linux.SIG.DFL;
@@ -573,6 +730,162 @@ test "real host refuses a file larger than the buffer instead of truncating" {
         real.interface().read_file("/proc/self/stat", &small),
     );
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+// ---- Helper programs, signals and directories ---------------------------------------------
+
+/// The signals zbx forwards to a container, and SIGCHLD, which says the container ended.
+fn forwarded_set() linux.sigset_t {
+    var set = linux.sigemptyset();
+    for ([_]linux.SIG{ .INT, .TERM, .HUP, .QUIT, .CHLD }) |number| linux.sigaddset(&set, number);
+    return set;
+}
+
+fn decode_status(status: i32) host.Error!host.ExitStatus {
+    const bits: u32 = @bitCast(status);
+    if (linux.W.IFEXITED(bits)) return .{ .exited = linux.W.EXITSTATUS(bits) };
+    if (linux.W.IFSIGNALED(bits)) {
+        const number: u32 = @backingInt(linux.W.TERMSIG(bits));
+        assert(number > 0);
+        assert(number < constants.signal_number_max);
+        return .{ .signaled = @intCast(number) };
+    }
+    return error.IoFailed; // Stopped or continued: nothing here asks for those.
+}
+
+fn wait_child(pid: i32) host.Error!host.ExitStatus {
+    assert(pid > 0);
+    for (0..constants.wait_interrupts_max + 1) |_| {
+        var status: i32 = 0;
+        const result = linux.wait4(pid, &status, 0, null);
+        if (linux.errno(result) == .INTR) continue;
+        try HostReal.check(result);
+        assert(result == pid);
+        return decode_status(status);
+    }
+    return error.IoFailed;
+}
+
+/// The forked helper: its output goes to the pipe, then it becomes the program. It never
+/// returns; a failed exec ends it with the conventional "command not found" code.
+fn helper_child(request: host.ExecRequest, output: i32) noreturn {
+    _ = linux.dup2(output, linux.STDOUT_FILENO);
+    _ = linux.dup2(output, linux.STDERR_FILENO);
+    _ = linux.execve(request.path.ptr, request.argv, request.envp);
+    linux.exit_group(127);
+}
+
+/// Reads the helper's output to the end: the first bytes are kept, the rest dropped.
+fn drain_helper(descriptor: i32, output: []u8) u32 {
+    var kept: usize = 0;
+    var scratch: [64]u8 = undefined;
+    for (0..constants.helper_read_calls_max) |_| {
+        const room: []u8 = if (kept < output.len) output[kept..] else &scratch;
+        const count = linux.read(descriptor, room.ptr, room.len);
+        if (linux.errno(count) == .INTR) continue;
+        if (linux.errno(count) != .SUCCESS) break;
+        if (count == 0) break;
+        if (kept < output.len) kept += count;
+    }
+    return @intCast(kept);
+}
+
+/// The `SigIgn:` and `SigCgt:` lines of /proc/<pid>/status, as masks.
+fn parse_signal_masks(status: []const u8) ?host.SignalState {
+    var caught: ?u64 = null;
+    var ignored: ?u64 = null;
+    var lines = std.mem.splitScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        const key_end = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const key = line[0..key_end];
+        const value = std.mem.trim(u8, line[key_end + 1 ..], " \t");
+        const mask = std.fmt.parseInt(u64, value, 16) catch continue;
+        if (std.mem.eql(u8, key, "SigCgt")) caught = mask;
+        if (std.mem.eql(u8, key, "SigIgn")) ignored = mask;
+    }
+    return .{ .caught = caught orelse return null, .ignored = ignored orelse return null };
+}
+
+/// Appends every regular-file name of an open directory.
+fn read_entries(descriptor: i32, listing: *host.DirListing) host.Error!void {
+    var buffer: [4096]u8 align(8) = undefined;
+    for (0..constants.dir_entries_max + constants.eintr_retries_max + 8) |_| {
+        const count = linux.getdents64(descriptor, &buffer, buffer.len);
+        try HostReal.check(count);
+        if (count == 0) return;
+        var at: usize = 0;
+        while (at < count) {
+            // linux_dirent64: ino u64, off i64, reclen u16, type u8, then the NUL-terminated name.
+            const reclen = std.mem.readInt(u16, buffer[at + 16 ..][0..2], .little);
+            assert(reclen >= 19);
+            assert(at + reclen <= count);
+            const kind = buffer[at + 18];
+            const name = std.mem.sliceTo(buffer[at + 19 .. at + reclen], 0);
+            const wanted = kind == dirent_regular or kind == dirent_unknown;
+            if (wanted and name.len > 0) listing.add(name);
+            at += reclen;
+        }
+    }
+    listing.truncated = true; // More batches than a bounded listing can use.
+}
+
+const dirent_unknown: u8 = 0;
+const dirent_regular: u8 = 8;
+
+test "signal masks are read from the status lines, and only when both are there" {
+    // Goal: SigCgt and SigIgn parse as hex masks; a status without either is not guessed at.
+    const text = "Name:\tsh\nSigIgn:\t0000000000000004\nSigCgt:\t0000000000004002\n";
+    const state = parse_signal_masks(text).?;
+    try std.testing.expect(host.SignalState.has(state.caught, 2)); // SIGINT.
+    try std.testing.expect(host.SignalState.has(state.caught, 15)); // SIGTERM.
+    try std.testing.expect(!host.SignalState.has(state.caught, 1));
+    try std.testing.expect(host.SignalState.has(state.ignored, 3)); // SIGQUIT.
+    try std.testing.expect(parse_signal_masks("SigCgt:\t0\n") == null);
+    try std.testing.expect(parse_signal_masks("SigIgn:\t0\nSigCgt:\tzz\n") == null);
+    try std.testing.expect(parse_signal_masks("") == null);
+}
+
+test "a real helper's status and output are captured, and the rest dropped" {
+    // Goal: run_helper on this machine: /bin/sh -c prints more than the buffer and exits 3.
+    var real: HostReal = .{};
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", "echo hello; echo oops >&2; exit 3", null };
+    const envp = [_:null]?[*:0]const u8{null};
+    var output: [8]u8 = undefined;
+    const result = try real.interface().run_helper(
+        .{ .path = "/bin/sh", .argv = &argv, .envp = &envp },
+        &output,
+    );
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 3 }, result.status);
+    try std.testing.expectEqualStrings("hello\noo", output[0..result.output_len]);
+    const missing = try real.interface().run_helper(
+        .{ .path = "/zigbox/nope", .argv = &argv, .envp = &envp },
+        &output,
+    );
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 127 }, missing.status);
+}
+
+test "a directory listing keeps regular files and marks what does not fit" {
+    // Goal: the real listing of a scratch directory: files by name, subdirectories left out.
+    var name_buffer: [64]u8 = undefined;
+    const format = "/tmp/zbx-list-{d}";
+    const directory = try std.fmt.bufPrintSentinel(&name_buffer, format, .{linux.getpid()}, 0);
+    try HostReal.check(linux.mkdir(directory.ptr, 0o755));
+    defer _ = linux.rmdir(directory.ptr);
+    var real: HostReal = .{};
+    const subject = real.interface();
+    var one: [80:0]u8 = undefined;
+    const first = try std.fmt.bufPrintSentinel(&one, "{s}/a.zon", .{directory}, 0);
+    try subject.write_file(first, "x");
+    defer _ = linux.unlink(first.ptr);
+    var two: [80:0]u8 = undefined;
+    const sub = try std.fmt.bufPrintSentinel(&two, "{s}/subdir", .{directory}, 0);
+    try HostReal.check(linux.mkdir(sub.ptr, 0o755));
+    defer _ = linux.rmdir(sub.ptr);
+    var listing: host.DirListing = undefined;
+    try subject.list_directory(directory, &listing);
+    try std.testing.expectEqual(@as(u32, 1), listing.count);
+    try std.testing.expectEqualStrings("a.zon", listing.name(0));
+    try std.testing.expect(!listing.truncated);
 }
 
 // ---- Probes ----------------------------------------------------------------------------------
