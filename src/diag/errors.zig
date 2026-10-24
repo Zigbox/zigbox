@@ -11,75 +11,151 @@ const assert = std.debug.assert;
 const host_mod = @import("../host.zig");
 const Diag = @import("diag.zig").Diag;
 
-const Explained = struct {
-    /// The representative errno, or empty for failures that are not an errno (limits, stalls).
-    errno: []const u8,
-    reason: []const u8,
-};
+const linux = std.os.linux;
 
-fn explain(err: host_mod.Error) Explained {
-    const explained: Explained = switch (err) {
-        error.NotFound => .{ .errno = "ENOENT", .reason = "no such file or directory" },
-        error.AccessDenied => .{ .errno = "EACCES", .reason = "permission denied" },
-        error.Interrupted => .{ .errno = "EINTR", .reason = "interrupted by a signal" },
-        error.WouldBlock => .{ .errno = "EAGAIN", .reason = "the resource is busy, try again" },
-        error.NoSpace => .{ .errno = "ENOSPC", .reason = "no space left on the device" },
-        error.OutOfMemory => .{ .errno = "ENOMEM", .reason = "out of memory" },
-        error.PathTooLong => .{ .errno = "ENAMETOOLONG", .reason = "the path is too long" },
-        error.InvalidPath => .{ .errno = "EINVAL", .reason = "the path is not valid" },
-        error.FileTooLarge => .{ .errno = "", .reason = "larger than the size limit zbx reads" },
-        error.Stalled => .{ .errno = "", .reason = "the operation made no progress" },
-        error.Unsupported => .{ .errno = "ENOSYS", .reason = "this kernel does not support it" },
-        error.NoData => .{ .errno = "ENODATA", .reason = "the file has no such attribute" },
-        error.IoFailed => .{ .errno = "EIO", .reason = "input/output error (or another errno)" },
+/// A one-line human reason for the errnos a failing write or read most often reports. Any other
+/// errno gets the generic, true wording in `cause_host_error`, never a guess.
+fn errno_reason(code: linux.E) ?[]const u8 {
+    const reason: ?[]const u8 = switch (code) {
+        .PERM => "operation not permitted",
+        .NOENT => "no such file or directory",
+        .INTR => "interrupted by a signal",
+        .IO => "input/output error",
+        .BADF => "bad file descriptor",
+        .AGAIN => "the resource is busy, try again",
+        .NOMEM => "out of memory",
+        .ACCES => "permission denied",
+        .FAULT => "bad address",
+        .NODEV => "no such device",
+        .INVAL => "invalid argument",
+        .FBIG => "file too large",
+        .NOSPC => "no space left on the device",
+        .PIPE => "broken pipe",
+        .ROFS => "read-only file system",
+        .NAMETOOLONG => "the path is too long",
+        .NOSYS => "this kernel does not support it",
+        .NODATA => "the file has no such attribute",
+        .DQUOT => "disk quota exceeded",
+        else => null,
     };
-    assert(explained.reason.len > 0);
-    assert(explained.errno.len <= 12);
-    return explained;
+    if (reason) |text| assert(text.len > 0);
+    return reason;
 }
 
-/// Adds the cause "<operation> failed: <reason> (<errno>)". `operation` names the syscall or
-/// action in the caller's words, for example "write(stdout)".
-pub fn cause_host_error(diag: *Diag, operation: []const u8, err: host_mod.Error) void {
+/// Failures made inside host.zig itself, with no kernel errno behind them.
+fn reason_without_errno(err: host_mod.Error) ?[]const u8 {
+    const reason: ?[]const u8 = switch (err) {
+        error.FileTooLarge => "larger than the size limit zbx reads",
+        error.Stalled => "the operation made no progress",
+        error.PathTooLong, error.InvalidPath => "the path is not valid",
+        else => null,
+    };
+    if (reason) |text| assert(text.len > 0);
+    return reason;
+}
+
+/// Adds the cause "<operation> failed: <reason> (<ENAME>)", naming the errno the kernel really
+/// returned (`Host.last_errno`, read by the caller right after the failure). `operation` names the
+/// syscall or action in the caller's words, for example "write(stdout)". If the errno is missing
+/// or does not match the error (it is stale), the cause says the errno is unknown rather than
+/// naming a wrong one.
+pub fn cause_host_error(
+    diag: *Diag,
+    operation: []const u8,
+    err: host_mod.Error,
+    errno: u16,
+) void {
     assert(operation.len > 0);
-    const explained = explain(err);
-    if (explained.errno.len == 0) {
-        diag.cause("{s} failed: {s}", .{ operation, explained.reason });
+    assert(errno < 4096);
+    if (reason_without_errno(err)) |reason| {
+        diag.cause("{s} failed: {s}", .{ operation, reason });
+        return;
+    }
+    const matches = errno != 0 and host_mod.error_for_errno(errno) == err;
+    if (!matches) {
+        diag.cause("{s} failed (the errno is unknown)", .{operation});
+        return;
+    }
+    const code: linux.E = @fromBackingInt(errno);
+    const name = std.enums.tagName(linux.E, code);
+    if (name == null) {
+        diag.cause("{s} failed: the kernel returned errno {d}", .{ operation, errno });
+    } else if (errno_reason(code)) |reason| {
+        diag.cause("{s} failed: {s} (E{s})", .{ operation, reason, name.? });
     } else {
-        diag.cause("{s} failed: {s} ({s})", .{ operation, explained.reason, explained.errno });
+        diag.cause("{s} failed: the kernel returned E{s}", .{ operation, name.? });
     }
     assert(diag.causes.count > 0);
 }
 
-/// Classifies a failed write to stdout or stderr as `ZBX-E0009`, with the host's reason.
-pub fn output_failed(diag: *Diag, comptime stream: host_mod.Stream, err: host_mod.Error) void {
+/// Classifies a failed write to stdout or stderr as `ZBX-E0009`, with the real errno.
+pub fn output_failed(
+    diag: *Diag,
+    comptime stream: host_mod.Stream,
+    err: host_mod.Error,
+    errno: u16,
+) void {
     diag.raise(.E0009);
-    cause_host_error(diag, "write(" ++ @tagName(stream) ++ ")", err);
+    cause_host_error(diag, "write(" ++ @tagName(stream) ++ ")", err, errno);
     diag.fix(.{ .sentence = "free space or fix the redirect, then run the command again" });
     assert(diag.code.? == .E0009);
     assert(diag.fixes.count > 0);
 }
 
-test "every host error has a reason and a cause line" {
-    // Goal: the translation is total; no variant renders empty or without its operation.
-    inline for (@typeInfo(host_mod.Error).error_set.error_names.?) |name| {
-        const err = @field(host_mod.Error, name);
-        var diag: Diag = undefined;
-        diag.reset();
-        cause_host_error(&diag, "read(x)", err);
-        const text = diag.last_cause().?;
-        try std.testing.expect(std.mem.startsWith(u8, text, "read(x) failed: "));
-        try std.testing.expect(std.mem.indexOf(u8, text, "error.") == null);
-    }
-}
-
-test "an output failure is E0009 with the stream and errno named" {
+test "causes name the real errno, or say it is unknown, never a guess" {
+    // Goal: principle 4. Method: the errno decides the words; a mismatched or missing errno is
+    // reported as unknown; errors made inside host.zig carry no errno at all.
     var diag: Diag = undefined;
     diag.reset();
-    output_failed(&diag, .stdout, error.NoSpace);
-    try std.testing.expectEqual(@as(u8, 2), diag.exit_code());
+    cause_host_error(&diag, "write(stdout)", error.IoFailed, 9);
+    try std.testing.expectEqualStrings(
+        "write(stdout) failed: bad file descriptor (EBADF)",
+        diag.last_cause().?,
+    );
+    cause_host_error(&diag, "write(stdout)", error.NoSpace, 28);
     try std.testing.expectEqualStrings(
         "write(stdout) failed: no space left on the device (ENOSPC)",
         diag.last_cause().?,
     );
+    cause_host_error(&diag, "write(stdout)", error.IoFailed, 0);
+    try std.testing.expectEqualStrings(
+        "write(stdout) failed (the errno is unknown)",
+        diag.last_cause().?,
+    );
+    cause_host_error(&diag, "write(stdout)", error.NoSpace, 9); // Stale: EBADF is not NoSpace.
+    try std.testing.expectEqualStrings(
+        "write(stdout) failed (the errno is unknown)",
+        diag.last_cause().?,
+    );
+    cause_host_error(&diag, "write(stdout)", error.IoFailed, 61 + 1000); // No such name.
+    try std.testing.expectEqualStrings(
+        "write(stdout) failed: the kernel returned errno 1061",
+        diag.last_cause().?,
+    );
+    cause_host_error(&diag, "read(x)", error.IoFailed, 110); // Named, no table reason: ETIMEDOUT.
+    try std.testing.expectEqualStrings(
+        "read(x) failed: the kernel returned ETIMEDOUT",
+        diag.last_cause().?,
+    );
+    cause_host_error(&diag, "read(x)", error.Stalled, 9);
+    try std.testing.expectEqualStrings(
+        "read(x) failed: the operation made no progress",
+        diag.last_cause().?,
+    );
+}
+
+test "every host error renders a cause for every errno that maps to it" {
+    // Goal: the translation is total and never shows a raw Zig error name.
+    inline for (@typeInfo(host_mod.Error).error_set.error_names.?) |name| {
+        const err = @field(host_mod.Error, name);
+        var errno: u16 = 0;
+        while (errno < 200) : (errno += 1) {
+            var diag: Diag = undefined;
+            diag.reset();
+            cause_host_error(&diag, "read(x)", err, errno);
+            const text = diag.last_cause().?;
+            try std.testing.expect(std.mem.startsWith(u8, text, "read(x) failed"));
+            try std.testing.expect(std.mem.indexOf(u8, text, "error.") == null);
+        }
+    }
 }

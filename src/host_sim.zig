@@ -38,6 +38,9 @@ pub const Faults = struct {
     /// One-shot: the call whose zero-based index equals this fails with `fail_call_error`,
     /// whatever its kind. Lets a test walk a failure across every step of a sequence.
     fail_call_index: ?u32 = null,
+    /// The errno a `write_error_per_mille` fault reports (default ENOSPC). Mapped to a
+    /// `host.Error` by the same function the real host uses, so EBADF becomes `IoFailed`.
+    write_errno: u16 = 28,
     fail_call_error: host.Error = error.IoFailed,
 };
 
@@ -65,6 +68,8 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// The errno of the most recent call, 0 if it succeeded (`Host.last_errno`).
+    errno_last: u16,
     /// Whether NO_COLOR is set in the simulated environment.
     no_color_value: bool,
     /// Error results injected so far, split so tests can reason about what surfaced: `hard`
@@ -94,6 +99,7 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.errno_last = 0;
         sim.no_color_value = false;
         sim.hard_errors_injected = 0;
         sim.interrupts_injected = 0;
@@ -141,6 +147,7 @@ pub const HostSim = struct {
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
         .no_color = no_color,
+        .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
     };
@@ -157,13 +164,45 @@ pub const HostSim = struct {
         const index = sim.call_count;
         assert(index < std.math.maxInt(u32));
         sim.call_count += 1;
+        sim.errno_last = 0;
         if (sim.faults.fail_call_index) |fail_index| {
             if (fail_index == index) return sim.inject(sim.faults.fail_call_error);
         }
     }
 
+    /// The errno a real kernel would have reported for `err`, for errors the simulator injects.
+    fn errno_of(err: host.Error) u16 {
+        const errno: u16 = switch (err) {
+            error.NotFound => 2,
+            error.Interrupted => 4,
+            error.WouldBlock => 11,
+            error.OutOfMemory => 12,
+            error.AccessDenied => 13,
+            error.NoSpace => 28,
+            error.PathTooLong => 36,
+            error.Unsupported => 38,
+            error.NoData => 61,
+            error.FileTooLarge => 34,
+            error.IoFailed, error.InvalidPath, error.Stalled => 5,
+        };
+        // Pair assertion with the shared mapping: the errno means this error to the real host.
+        switch (err) {
+            error.InvalidPath, error.Stalled => {},
+            else => assert(host.error_for_errno(errno) == err),
+        }
+        return errno;
+    }
+
+    /// Injects a failure with a specific errno; the error is what the real host would derive.
+    fn inject_errno(sim: *HostSim, errno: u16) host.Error {
+        const err = sim.inject(host.error_for_errno(errno));
+        sim.errno_last = errno;
+        return err;
+    }
+
     /// Records an injected error result and returns it.
     fn inject(sim: *HostSim, err: host.Error) host.Error {
+        sim.errno_last = errno_of(err);
         if (err == error.Interrupted) {
             sim.interrupts_injected += 1;
         } else {
@@ -248,7 +287,9 @@ pub const HostSim = struct {
         const faulted = sim.faults.write_fault_stream == null or
             sim.faults.write_fault_stream.? == stream;
         if (faulted) {
-            if (sim.roll(sim.faults.write_error_per_mille)) return sim.inject(error.NoSpace);
+            if (sim.roll(sim.faults.write_error_per_mille)) {
+                return sim.inject_errno(sim.faults.write_errno);
+            }
         }
 
         var count: u32 = @intCast(bytes.len);
@@ -320,6 +361,12 @@ pub const HostSim = struct {
         const sim = from_context(context);
         _ = stream;
         return sim.terminal;
+    }
+
+    fn last_errno(context: *anyopaque) u16 {
+        const errno = from_context(context).errno_last;
+        assert(errno < 4096);
+        return errno;
     }
 
     fn no_color(context: *anyopaque) bool {

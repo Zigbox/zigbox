@@ -28,6 +28,11 @@ pub fn exit_now(code: u8) noreturn {
     linux.exit_group(code);
 }
 
+/// The errno of the most recent call checked by `check`, 0 after a success. Process-wide because
+/// `check` is a free function used by the probe code too; zbx is single-threaded where it
+/// matters (AGENTS.md), and a forked probe child has its own copy.
+var errno_last: u16 = 0;
+
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
     /// close without a matching open is a programmer error.
@@ -56,6 +61,7 @@ pub const HostReal = struct {
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
         .no_color = no_color,
+        .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
     };
@@ -174,6 +180,12 @@ pub const HostReal = struct {
         return linux.errno(linux.tcgetattr(descriptor, &attributes)) == .SUCCESS;
     }
 
+    fn last_errno(context: *anyopaque) u16 {
+        _ = from_context(context);
+        assert(errno_last < 4096);
+        return errno_last;
+    }
+
     fn no_color(context: *anyopaque) bool {
         return from_context(context).environ.containsUnemptyConstant("NO_COLOR");
     }
@@ -193,22 +205,11 @@ pub const HostReal = struct {
     /// Converts a raw syscall return value into an error, or passes success through.
     fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
+        errno_last = @backingInt(code);
         if (code == .SUCCESS) return;
-        assert(code != .SUCCESS);
         assert(@backingInt(code) != 0);
-        return switch (code) {
-            .INTR => error.Interrupted,
-            .AGAIN => error.WouldBlock,
-            .NOENT, .NOTDIR => error.NotFound,
-            .ACCES, .PERM => error.AccessDenied,
-            .NOSPC => error.NoSpace,
-            .NOMEM => error.OutOfMemory,
-            .NAMETOOLONG => error.PathTooLong,
-            .NOSYS => error.Unsupported,
-            .NODATA => error.NoData,
-            .RANGE => error.FileTooLarge,
-            else => error.IoFailed,
-        };
+        assert(errno_last < 4096);
+        return host.error_for_errno(@backingInt(code));
     }
 };
 

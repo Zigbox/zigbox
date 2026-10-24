@@ -1060,7 +1060,7 @@ pub fn run(host: Host, diag: *Diag) error{OutputFailed}!u8 {
     const output = render(&report, host.color_enabled(.stdout), &buffer);
     assert(output.len > 0);
     host.write_all(.stdout, output) catch |err| {
-        diag_errors.output_failed(diag, .stdout, err);
+        diag_errors.output_failed(diag, .stdout, err, host.last_errno());
         return error.OutputFailed;
     };
     assert(output.len <= buffer.len);

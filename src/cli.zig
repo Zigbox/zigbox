@@ -217,13 +217,18 @@ pub fn parse(
     }
     assert(count <= args.len);
     invocation.options = scan_options(args);
-    try resolve(operands[0..count], invocation, diag);
+    try resolve(args, operands[0..count], invocation, diag);
 }
 
 /// Turns the operands (everything that is not an option) into a command and its argument.
-fn resolve(operands: []const []const u8, invocation: *Invocation, diag: *Diag) ParseError!void {
+fn resolve(
+    args: []const []const u8,
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
     assert(operands.len <= constants.args_count_max);
-    if (operands.len == 0) return missing_command(diag);
+    if (operands.len == 0) return missing_command(diag, args.len);
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
     const wanted = operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
@@ -243,10 +248,11 @@ fn echo_of(storage: *[constants.arg_echo_bytes_max]u8, argument: []const u8) []c
     return echo;
 }
 
-fn missing_command(diag: *Diag) ParseError {
+fn missing_command(diag: *Diag, args_count: usize) ParseError {
     assert(diag.code == null);
     diag.raise(.E0002);
     diag.while_("reading the command line", .{});
+    _ = args_count;
     diag.cause("no command was given", .{});
     diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
     diag.fix(.{ .sentence = "check this host:", .command = "zbx doctor" });
@@ -450,7 +456,7 @@ fn print(host: Host, text: []const u8, diag: *Diag) RunError!void {
     assert(text.len <= constants.output_bytes_max);
     assert(diag.code == null);
     host.write_all(.stdout, text) catch |err| {
-        errors.output_failed(diag, .stdout, err);
+        errors.output_failed(diag, .stdout, err, host.last_errno());
         return error.OutputFailed;
     };
 }
@@ -742,6 +748,28 @@ test "a failing stdout is E0009 on stderr and exit 2; a failing stderr is exit 2
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     iterator = .{ .items = &.{ "zbx", "frobnicate" } };
     try testing.expectEqual(@as(u8, 2), run_from_iterator(sim.interface(), &iterator));
+}
+
+test "a failing write names the real errno: EBADF and ENOSPC from the simulator" {
+    // Goal: principle 4 for output failures. Method: inject each errno on stdout writes only;
+    // the E0009 cause must name exactly that errno (EBADF is how `zbx help >&-` fails; the host
+    // collapses it to IoFailed, so the errno has to travel separately), exit 2 both times.
+    const cases = [_]struct { errno: u16, cause: []const u8 }{
+        .{ .errno = 9, .cause = "write(stdout) failed: bad file descriptor (EBADF)" },
+        .{ .errno = 28, .cause = "write(stdout) failed: no space left on the device (ENOSPC)" },
+        .{ .errno = 32, .cause = "write(stdout) failed: broken pipe (EPIPE)" },
+    };
+    for (cases) |case| {
+        var sim: HostSim = undefined;
+        sim.init(1, &.{});
+        sim.faults.write_error_per_mille = 1000;
+        sim.faults.write_fault_stream = .stdout;
+        sim.faults.write_errno = case.errno;
+        var iterator: SliceIterator = .{ .items = &.{ "zbx", "help" } };
+        try testing.expectEqual(@as(u8, 2), run_from_iterator(sim.interface(), &iterator));
+        try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0009]"));
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), case.cause) != null);
+    }
 }
 
 test "output survives short writes" {

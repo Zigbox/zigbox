@@ -18,6 +18,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
+const linux = std.os.linux;
 
 /// Operating errors the kernel layer can report. Deliberately coarse: callers choose a message
 /// and a fix per error, never per errno.
@@ -39,6 +40,28 @@ pub const Error = error{
     NoData,
     IoFailed,
 };
+
+/// Maps a raw errno to the coarse operating error callers handle. The one mapping: the real
+/// host and the simulator both use it, so a simulated errno means what a real one would.
+pub fn error_for_errno(errno: u16) Error {
+    assert(errno != 0); // Zero is success, never an error.
+    const code: linux.E = @fromBackingInt(errno);
+    const mapped: Error = switch (code) {
+        .INTR => error.Interrupted,
+        .AGAIN => error.WouldBlock,
+        .NOENT, .NOTDIR => error.NotFound,
+        .ACCES, .PERM => error.AccessDenied,
+        .NOSPC => error.NoSpace,
+        .NOMEM => error.OutOfMemory,
+        .NAMETOOLONG => error.PathTooLong,
+        .NOSYS => error.Unsupported,
+        .NODATA => error.NoData,
+        .RANGE => error.FileTooLarge,
+        else => error.IoFailed,
+    };
+    assert(mapped != error.Stalled); // Only host.zig's own loops produce that.
+    return mapped;
+}
 
 /// An open, read-only file. Small integers so the simulator can hand out table indexes.
 pub const Handle = u32;
@@ -117,6 +140,9 @@ pub const VTable = struct {
     /// The real user id of this process.
     uid: *const fn (context: *anyopaque) u32,
     probe: *const fn (context: *anyopaque, kind: ProbeKind) Error!ProbeOutcome,
+    /// The raw errno of the most recent call through this vtable: 0 if it succeeded. Lets the
+    /// diagnostics name the real errno without widening `Error`.
+    last_errno: *const fn (context: *anyopaque) u16,
 };
 
 pub const Host = struct {
@@ -216,6 +242,15 @@ pub const Host = struct {
         const id = host.vtable.uid(host.context);
         assert(id != std.math.maxInt(u32)); // (uid_t)-1 means "no change", never a real id.
         return id;
+    }
+
+    /// The errno of the most recent failed host call, or 0 if the last call succeeded. Meaningful
+    /// right after a call that returned an error that came from the kernel; errors made inside
+    /// this file (`Stalled`, `InvalidPath`, ...) have no errno and callers must not ask.
+    pub fn last_errno(host: Host) u16 {
+        const errno = host.vtable.last_errno(host.context);
+        assert(errno < 4096); // The kernel's errno range.
+        return errno;
     }
 
     pub fn probe(host: Host, kind: ProbeKind) Error!ProbeOutcome {
