@@ -118,6 +118,83 @@ pub const ProbeOutcome = enum {
     timed_out,
 };
 
+// ---- Containers --------------------------------------------------------------------------
+//
+// The primitives a container run is built from. Each is one kernel operation (or one tiny
+// fixed sequence of them), so that a plan step maps to one fallible call and the simulator can
+// fail exactly that step. `run.zig` owns the order; this file owns what each call means.
+
+/// A process id in the caller's PID namespace.
+pub const Pid = u32;
+
+/// The two ends of a pipe. Both are close-on-exec, so a successful `exec` closes them: that EOF
+/// is how a parent learns that the child's command started.
+pub const Pipe = struct {
+    read: Handle,
+    write: Handle,
+};
+
+/// The namespaces a child is created in.
+pub const SpawnFlags = struct {
+    user: bool,
+    mount: bool,
+    pid: bool,
+    uts: bool,
+    ipc: bool,
+};
+
+/// The body of a spawned child. It runs in the child, on a copy of the parent's memory, and its
+/// result is the child's exit code unless it replaced itself with `exec`.
+pub const ChildEntry = *const fn (entry_context: *anyopaque) u8;
+
+pub const ExitStatus = union(enum) {
+    exited: u8,
+    /// Killed by this signal number.
+    signaled: u8,
+};
+
+/// The three files of a user namespace that define its ids, in the order they must be written:
+/// `setgroups` ("deny") first, because an unprivileged writer may not map groups otherwise.
+pub const IdMapKind = enum { setgroups, gid_map, uid_map };
+
+/// Every mount a container setup makes. The host knows each one's flags and options, so that a
+/// plan step is a name, not a pile of kernel constants, and the simulator models what each does.
+pub const MountKind = enum {
+    /// `target` ("/"): make the whole tree private so nothing propagates to the host.
+    make_private,
+    /// Bind `source` onto `target`, with everything mounted below it.
+    bind_tree,
+    /// Bind the single file or device `source` onto the file `target`.
+    bind_file,
+    /// A fresh procfs for the PID namespace of the caller: nosuid, nodev, noexec.
+    proc,
+    /// The container's `/dev`: tmpfs, mode 0755, nosuid.
+    dev_tmpfs,
+    /// `/dev/shm`: tmpfs, mode 1777, nosuid, nodev, noexec.
+    shm_tmpfs,
+    /// `/dev/pts`: a private devpts instance whose ptmx is mode 0666.
+    devpts,
+};
+
+pub const MountRequest = struct {
+    kind: MountKind,
+    target: [:0]const u8,
+    /// Set exactly for the bind kinds.
+    source: ?[:0]const u8,
+};
+
+/// A null-terminated array of C strings, as `execve` takes it.
+pub const CStrings = [*:null]const ?[*:0]const u8;
+
+pub const ExecRequest = struct {
+    path: [:0]const u8,
+    argv: CStrings,
+    envp: CStrings,
+};
+
+/// The step index to give `begin_step` when no plan step is running.
+pub const step_none: u32 = std.math.maxInt(u32);
+
 pub const VTable = struct {
     open_read: *const fn (context: *anyopaque, path: [:0]const u8) Error!Handle,
     read: *const fn (context: *anyopaque, handle: Handle, buffer: []u8) Error!u32,
@@ -143,6 +220,52 @@ pub const VTable = struct {
     /// The raw errno of the most recent call through this vtable: 0 if it succeeded. Lets the
     /// diagnostics name the real errno without widening `Error`.
     last_errno: *const fn (context: *anyopaque) u16,
+    // Containers. The step markers and the per-step fault injection are explained at
+    // `Host.begin_step`.
+    pipe: *const fn (context: *anyopaque) Error!Pipe,
+    write_handle: *const fn (context: *anyopaque, handle: Handle, bytes: []const u8) Error!u32,
+    /// `clone3` with the namespaces in `flags`. The child runs `entry` and exits with its result.
+    spawn: *const fn (
+        context: *anyopaque,
+        flags: SpawnFlags,
+        entry: ChildEntry,
+        entry_context: *anyopaque,
+    ) Error!Pid,
+    /// Blocks until the child ends and reaps it.
+    wait: *const fn (context: *anyopaque, pid: Pid) Error!ExitStatus,
+    signal: *const fn (context: *anyopaque, pid: Pid, signal: u8) Error!void,
+    write_id_map: *const fn (
+        context: *anyopaque,
+        pid: Pid,
+        kind: IdMapKind,
+        bytes: []const u8,
+    ) Error!void,
+    mount: *const fn (context: *anyopaque, request: MountRequest) Error!void,
+    unmount_detach: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    pivot_root: *const fn (
+        context: *anyopaque,
+        new_root: [:0]const u8,
+        put_old: [:0]const u8,
+    ) Error!void,
+    change_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    make_directory: *const fn (context: *anyopaque, path: [:0]const u8, exist_ok: bool) Error!void,
+    create_file: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    symlink: *const fn (context: *anyopaque, target: [:0]const u8, link: [:0]const u8) Error!void,
+    set_hostname: *const fn (context: *anyopaque, name: []const u8) Error!void,
+    /// Marks every descriptor above 2 close-on-exec (`close_range`), so none reaches the command.
+    seal_descriptors: *const fn (context: *anyopaque) Error!void,
+    /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
+    die_with_parent: *const fn (context: *anyopaque) Error!void,
+    /// Replaces the process. Returns only on failure in the real host; the simulator returns
+    /// success to model a command that started.
+    exec: *const fn (context: *anyopaque, request: ExecRequest) Error!void,
+    gid: *const fn (context: *anyopaque) u32,
+    /// The value of an environment variable of this process, or null if it is not set.
+    environment: *const fn (context: *anyopaque, name: []const u8) ?[]const u8,
+    random_bytes: *const fn (context: *anyopaque, buffer: []u8) Error!void,
+    /// Makes a write to a pipe with no reader fail with `EPIPE` instead of killing the process.
+    ignore_broken_pipe: *const fn (context: *anyopaque, ignore: bool) void,
+    begin_step: *const fn (context: *anyopaque, index: u32) void,
 };
 
 pub const Host = struct {
@@ -255,6 +378,238 @@ pub const Host = struct {
 
     pub fn probe(host: Host, kind: ProbeKind) Error!ProbeOutcome {
         return host.vtable.probe(host.context, kind);
+    }
+
+    // ---- Containers ----
+
+    /// Creates a pipe whose ends are both close-on-exec.
+    pub fn pipe(host: Host) Error!Pipe {
+        const result = try host.vtable.pipe(host.context);
+        assert(result.read != result.write);
+        assert(host.vtable.last_errno(host.context) == 0); // A success leaves no errno behind.
+        return result;
+    }
+
+    /// Reads at least one byte, or returns 0 at end of file, retrying interrupted calls.
+    pub fn read_some(host: Host, handle: Handle, buffer: []u8) Error!u32 {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.file_bytes_max);
+        for (0..constants.eintr_retries_max + 1) |_| {
+            const count = host.vtable.read(host.context, handle, buffer) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            assert(count <= buffer.len);
+            return count;
+        }
+        return error.IoFailed;
+    }
+
+    /// Writes every byte to a pipe, like `write_all` does for the standard streams.
+    pub fn write_handle_all(host: Host, handle: Handle, bytes: []const u8) Error!void {
+        assert(bytes.len > 0);
+        assert(bytes.len <= constants.output_bytes_max);
+        var written: u32 = 0;
+        var retries: u32 = 0;
+        var calls: u32 = 0;
+        // Bounded like `write_all`: interrupted calls by `retries`, the rest by `calls`.
+        while (calls < constants.write_calls_max) {
+            if (written == bytes.len) return;
+            const result = host.vtable.write_handle(host.context, handle, bytes[written..]);
+            const count = result catch |err| switch (err) {
+                error.Interrupted => {
+                    retries += 1;
+                    if (retries > constants.eintr_retries_max) return error.IoFailed;
+                    continue;
+                },
+                else => return err,
+            };
+            retries = 0;
+            calls += 1;
+            assert(count <= bytes.len - written);
+            written += count;
+        }
+        return error.Stalled;
+    }
+
+    pub fn close(host: Host, handle: Handle) void {
+        assert(handle < std.math.maxInt(i32));
+        assert(@intFromPtr(host.vtable) != 0);
+        host.vtable.close(host.context, handle);
+    }
+
+    pub fn spawn(
+        host: Host,
+        flags: SpawnFlags,
+        entry: ChildEntry,
+        entry_context: *anyopaque,
+    ) Error!Pid {
+        assert(flags.user); // Every other namespace is created owned by a new user namespace.
+        const pid = try host.vtable.spawn(host.context, flags, entry, entry_context);
+        assert(pid > 0);
+        return pid;
+    }
+
+    /// Waits for the child to end, retrying interrupted waits. Returns once, with its status.
+    pub fn wait_for(host: Host, pid: Pid) Error!ExitStatus {
+        assert(pid > 0);
+        for (0..constants.wait_interrupts_max + 1) |_| {
+            const status = host.vtable.wait(host.context, pid) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            switch (status) {
+                .exited => {},
+                .signaled => |number| assert(number > 0),
+            }
+            return status;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn signal(host: Host, pid: Pid, number: u8) Error!void {
+        assert(pid > 0);
+        assert(number > 0);
+        assert(number < constants.signal_number_max);
+        try host.vtable.signal(host.context, pid, number);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn write_id_map(host: Host, pid: Pid, kind: IdMapKind, bytes: []const u8) Error!void {
+        assert(pid > 0);
+        assert(bytes.len > 0);
+        assert(bytes.len <= constants.id_map_line_bytes_max);
+        if (kind == .setgroups) assert(std.mem.eql(u8, bytes, "deny")); // Never "allow".
+        try host.vtable.write_id_map(host.context, pid, kind, bytes);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn mount(host: Host, request: MountRequest) Error!void {
+        assert(request.target.len > 0);
+        assert(request.target[request.target.len] == 0);
+        switch (request.kind) {
+            .bind_tree, .bind_file => assert(request.source != null),
+            else => assert(request.source == null),
+        }
+        try host.vtable.mount(host.context, request);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn unmount_detach(host: Host, path: [:0]const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.unmount_detach(host.context, path);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn pivot_root(host: Host, new_root: [:0]const u8, put_old: [:0]const u8) Error!void {
+        assert(new_root.len > 0);
+        assert(put_old.len > 0);
+        assert(new_root[new_root.len] == 0);
+        assert(put_old[put_old.len] == 0);
+        try host.vtable.pivot_root(host.context, new_root, put_old);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn change_directory(host: Host, path: [:0]const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.change_directory(host.context, path);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// Makes a directory. With `exist_ok`, a directory (or anything) that is already there is
+    /// success, and a later use of it reports whatever is wrong with it.
+    pub fn make_directory(host: Host, path: [:0]const u8, exist_ok: bool) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.make_directory(host.context, path, exist_ok);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// Creates an empty file, failing if it exists: it is a mount point on a fresh tmpfs.
+    pub fn create_file(host: Host, path: [:0]const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.create_file(host.context, path);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn symlink(host: Host, target: [:0]const u8, link: [:0]const u8) Error!void {
+        assert(target.len > 0);
+        assert(link.len > 0);
+        assert(link[link.len] == 0);
+        try host.vtable.symlink(host.context, target, link);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn set_hostname(host: Host, name: []const u8) Error!void {
+        assert(name.len > 0);
+        assert(name.len <= constants.container_name_bytes_max);
+        try host.vtable.set_hostname(host.context, name);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn seal_descriptors(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        try host.vtable.seal_descriptors(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn die_with_parent(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        try host.vtable.die_with_parent(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn exec(host: Host, request: ExecRequest) Error!void {
+        assert(request.path.len > 0);
+        assert(request.path[request.path.len] == 0);
+        assert(request.argv[0] != null);
+        try host.vtable.exec(host.context, request);
+        // Only the simulator gets here: a real exec that succeeds does not return.
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn gid(host: Host) u32 {
+        const id = host.vtable.gid(host.context);
+        assert(id != std.math.maxInt(u32)); // (gid_t)-1 means "no change", never a real id.
+        return id;
+    }
+
+    /// The value of an environment variable, or null if unset or longer than `limit_bytes`.
+    pub fn environment(host: Host, name: []const u8, limit_bytes: u32) ?[]const u8 {
+        assert(name.len > 0);
+        assert(limit_bytes > 0);
+        const value = host.vtable.environment(host.context, name) orelse return null;
+        if (value.len > limit_bytes) return null;
+        return value;
+    }
+
+    pub fn random_bytes(host: Host, buffer: []u8) Error!void {
+        assert(buffer.len > 0);
+        assert(buffer.len <= 256); // getrandom never returns short up to 256 bytes.
+        try host.vtable.random_bytes(host.context, buffer);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// The parent writes one byte to a pipe whose reader may already be gone; that must be an
+    /// error it can report, not a signal that ends it. Set after `spawn`, so a child (which
+    /// inherits dispositions) never starts with the signal ignored.
+    pub fn ignore_broken_pipe(host: Host, ignore: bool) void {
+        assert(@intFromPtr(host.vtable) != 0);
+        host.vtable.ignore_broken_pipe(host.context, ignore);
+        assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    /// Tells the host which plan step the calls that follow belong to (`step_none` when none
+    /// does). The real host ignores it: the kernel needs no hint. The simulator uses it to fail
+    /// exactly the first call of a chosen step, which is how the run fuzzer walks one injected
+    /// failure across every step of a plan and checks that the diagnostic names that step.
+    pub fn begin_step(host: Host, index: u32) void {
+        if (index != step_none) assert(index < constants.plan_steps_max);
+        host.vtable.begin_step(host.context, index);
+        assert(host.vtable.last_errno(host.context) < 4096);
     }
 
     fn open_retrying(host: Host, path: [:0]const u8) Error!Handle {
