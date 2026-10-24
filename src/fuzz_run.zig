@@ -52,7 +52,14 @@ const Verdict = union(enum) {
     /// A diagnostic with this code, and (for a failed step) the index of the step it must name.
     /// `begun` is whether the run record was begun before it failed; `lost` that the failure was
     /// the wait (the command had started, and the run is recorded as lost).
-    refused: struct { code: codes.Code, step: ?u32, begun: bool, lost: bool },
+    refused: struct {
+        code: codes.Code,
+        step: ?u32,
+        begun: bool,
+        lost: bool,
+        /// For E0202: the command was not found (127), not merely unrunnable (126).
+        command_missing: bool,
+    },
 };
 
 const Scenario = struct {
@@ -150,9 +157,11 @@ fn random_scenario(random: std.Random) Scenario {
     return scenario;
 }
 
-/// The exit code the oracle expects for a diagnostic: the blame decides, nothing else.
-fn exit_for(code: codes.Code) u8 {
-    return codes.exit_code(codes.entry(code).blame);
+/// The exit code the oracle expects for a failure of `zbx run`, written out on its own rather than
+/// through `codes`: 126 or 127 for the command that could not start, 125 for everything else.
+fn exit_for(code: codes.Code, command_missing: bool) u8 {
+    if (code != .E0202) return 125;
+    return if (command_missing) 127 else 126;
 }
 
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
@@ -206,12 +215,23 @@ fn verdict_of(scenario: *const Scenario) Verdict {
     // The child's steps in order; its command missing is its last.
     var child: ?Verdict = null;
     if (fault) |found| {
-        if (phase_of(found.kind) == .child) child = refusal(found.code, found.index, true);
+        if (phase_of(found.kind) == .child) {
+            child = refusal(found.code, found.index, true);
+            if (found.kind == .exec) {
+                const err = host_mod.error_for_errno(scenario.fault_errno);
+                child.?.refused.command_missing = err == error.NotFound;
+            }
+        }
     }
     if (scenario.command == .missing_path or scenario.command == .missing_bare) {
         const exec = index_of(scenario, .exec);
         const sooner = if (child) |event| exec < event.refused.step.? else true;
-        if (sooner) child = refusal(.E0202, exec, true);
+        if (sooner) {
+            child = refusal(.E0202, exec, true);
+            // Looking on through PATH remembers a permission error from an earlier directory,
+            // as a shell does: the command is then reported as unrunnable, not missing.
+            child.?.refused.command_missing = !exec_denied_on_the_way(scenario);
+        }
     }
     if (child) |event| return event;
     if (fault) |found| {
@@ -222,6 +242,7 @@ fn verdict_of(scenario: *const Scenario) Verdict {
                     .step = found.index,
                     .begun = true,
                     .lost = true,
+                    .command_missing = false,
                 },
             };
         }
@@ -230,7 +251,24 @@ fn verdict_of(scenario: *const Scenario) Verdict {
 }
 
 fn refusal(code: codes.Code, step: ?u32, begun: bool) Verdict {
-    return .{ .refused = .{ .code = code, .step = step, .begun = begun, .lost = false } };
+    return .{ .refused = .{
+        .code = code,
+        .step = step,
+        .begun = begun,
+        .lost = false,
+        .command_missing = false,
+    } };
+}
+
+/// Whether a failure injected into the exec step is a permission error, which a search through
+/// PATH keeps and reports if no later directory has the program.
+fn exec_denied_on_the_way(scenario: *const Scenario) bool {
+    const index = scenario.fault_step orelse return false;
+    var plan: plan_mod.Plan = undefined;
+    plan_for(&plan, scenario);
+    if (index >= plan.count) return false;
+    if (plan.steps[index].kind != .exec) return false;
+    return host_mod.error_for_errno(scenario.fault_errno) == error.AccessDenied;
 }
 
 const Fault = struct { index: u32, kind: plan_mod.Kind, code: codes.Code };
@@ -454,7 +492,7 @@ fn check(
     switch (verdict) {
         .started => |status| check_started(sim, scenario, status, code),
         .refused => |refusal_found| {
-            check_refused(sim, scenario, refusal_found.code, refusal_found.step, found, code);
+            check_refused(sim, scenario, refusal_found, found, code);
             check_record(sim, scenario, &verdict);
         },
     }
@@ -547,17 +585,19 @@ fn check_started_output(
 fn check_refused(
     sim: *const HostSim,
     scenario: *const Scenario,
-    code: codes.Code,
-    step: ?u32,
+    refusal_found: @FieldType(Verdict, "refused"),
     found: diag_fuzz.Found,
     exit: u8,
 ) void {
+    const code = refusal_found.code;
+    const step = refusal_found.step;
     // Property 1: the failure's diagnostic is the last one written, with the step's code.
     assert(found.code.? == code);
-    // Property 3: the blame decides the exit code, and nothing else does.
-    assert(exit == exit_for(code));
-    assert(exit != constants.exit_ok);
-    assert(exit != constants.exit_internal);
+    // Property 3: a run's own failure never exits with a code a container could be mistaken for
+    // (1, 2, 3, 70): it is 125, or 126 and 127 for the command, and nothing else decides.
+    assert(exit == exit_for(code, refusal_found.command_missing));
+    assert(exit >= 125);
+    assert(exit <= 127);
     if (step == null) {
         // Refused before anything was created.
         assert(sim.world.processes[1].state == .unused);

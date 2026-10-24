@@ -359,6 +359,8 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
     diag.raise(.E0202);
     const program = std.mem.span(plan.argv[0].?);
     const by_path = plan.candidates_count == 1;
+    // A container run exits 127 for a command that is not there and 126 for one that cannot run.
+    if (failure.err == error.NotFound) diag.mark_command_missing();
     switch (failure.err) {
         error.NotFound => if (by_path) {
             // The note comes first, so default output (the newest cause) is the plain statement.

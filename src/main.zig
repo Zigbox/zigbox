@@ -27,7 +27,7 @@ fn panic_handler(message: []const u8, first_trace_addr: ?usize) noreturn {
     if (panic_report.respond(&panic_report.state, message, &buffer)) |bytes| {
         host_real.write_stderr_best_effort(bytes);
     }
-    host_real.exit_now(constants.exit_internal);
+    host_real.exit_now(panic_report.exit_code(&panic_report.state));
 }
 
 pub fn main(init: std.process.Init.Minimal) u8 {

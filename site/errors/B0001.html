@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-B0001</h1>
 <p class="summary">zbx hit an internal error</p>
-<dl class="facts"><div><dt>Kind</dt><dd>bug</dd></div><div><dt>Blame</dt><dd>internal</dd></div><div><dt>Exit code</dt><dd>70</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>bug</dd></div><div><dt>Blame</dt><dd>internal</dd></div><div><dt>Exit code</dt><dd>70 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx broke one of its own rules: a failed assertion, an unexpected error from its own code, or an arithmetic or bounds check. This is a bug in zbx, not something you did, and it always exits with code 70.</p>
 <p>Rerun with --verbose to see the internal message, and report it at https://github.com/Zigbox/zigbox/issues/new with the command you ran. A stack trace is not printed.</p>

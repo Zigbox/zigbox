@@ -628,6 +628,79 @@ pub fn exit_code(blame: Blame) u8 {
     return code;
 }
 
+/// Which family of exit codes a command uses. A command that runs a container passes the
+/// container's own exit code through, so it cannot also use the standard four.
+pub const ExitScope = enum { standard, container_run };
+
+/// The exit code for a failure of `code`, in `scope`. `command_missing` is true only for an
+/// E0202 whose cause is a command that was not found (as opposed to one that cannot be run).
+/// The only place that decides, for both scopes; call sites pass what they know and never pick.
+pub fn exit_code_in(scope: ExitScope, code: Code, command_missing: bool) u8 {
+    if (command_missing) assert(code == .E0202);
+    const result: u8 = switch (scope) {
+        .standard => exit_code(entry(code).blame),
+        .container_run => if (code == .E0202)
+            (if (command_missing) constants.exit_run_not_found else constants.exit_run_not_runnable)
+        else
+            constants.exit_run_failed,
+    };
+    assert(result != constants.exit_ok);
+    if (scope == .container_run) assert(result >= constants.exit_run_failed);
+    if (scope == .standard) assert(result <= constants.exit_internal);
+    return result;
+}
+
+/// What the process exits with when a diagnostic cannot even be written to stderr. In the
+/// standard scope that is the environment's code; a container run uses its own failure code.
+pub fn exit_code_unwritable(scope: ExitScope) u8 {
+    const result = switch (scope) {
+        .standard => constants.exit_environment,
+        .container_run => constants.exit_run_failed,
+    };
+    assert(result != constants.exit_ok);
+    assert(result != constants.exit_internal);
+    return result;
+}
+
+/// Whether a failure of this code can end a `zbx run`. The commands that report the others
+/// (the doctor's checks, `explain`, `bundle`, a missing command word) never run a container.
+pub fn can_end_run(code: Code) bool {
+    return switch (code) {
+        .E0001, .E0002, .E0007 => false,
+        .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
+        .E0701, .E0702, .E0703, .E0704 => false,
+        else => true,
+    };
+}
+
+/// The longest text `exit_text` writes.
+pub const exit_text_bytes_max = 40;
+
+/// How a code's exit code reads in `zbx explain` and on the error pages: the standard one and,
+/// for a failure that `zbx run` can report, the code `run` uses instead. A warning never ends a
+/// command, so it has only the standard one.
+pub fn exit_text(code: Code, buffer: *[exit_text_bytes_max]u8) []const u8 {
+    const found = entry(code);
+    const standard = exit_code_in(.standard, code, false);
+    const text = if (found.severity == .warning or !can_end_run(code))
+        std.fmt.bufPrint(buffer, "{d}", .{standard})
+    else if (code == .E0202)
+        std.fmt.bufPrint(buffer, "{d} ({d} or {d} in zbx run)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+            exit_code_in(.container_run, code, true),
+        })
+    else
+        std.fmt.bufPrint(buffer, "{d} ({d} in zbx run)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+        });
+    const written = text catch unreachable; // The longest form is 24 bytes; the buffer holds 40.
+    assert(written.len > 0);
+    assert(written.len <= exit_text_bytes_max);
+    return written;
+}
+
 const prefix = "ZBX-";
 
 const full_names = blk: {
@@ -702,6 +775,32 @@ test "parse accepts case-insensitive codes and refuses everything else" {
     try std.testing.expect(parse(" E0001") == null);
     try std.testing.expect(parse("E0001 ") == null);
     try std.testing.expect(parse("E0001\x00") == null);
+}
+
+test "a container run exits 125, 126 or 127 for zbx's own failures, whatever the blame" {
+    // Goal: no code of the registry can make a container run exit with a standard code, and E0202
+    // alone splits into 126 and 127. Method: every entry, in both scopes.
+    for (registry) |item| {
+        const standard = exit_code_in(.standard, item.code, false);
+        try std.testing.expectEqual(exit_code(item.blame), standard);
+        const run = exit_code_in(.container_run, item.code, false);
+        if (item.code == .E0202) {
+            try std.testing.expectEqual(@as(u8, 126), run);
+            try std.testing.expectEqual(@as(u8, 127), exit_code_in(.container_run, .E0202, true));
+            try std.testing.expectEqual(standard, exit_code_in(.standard, .E0202, true));
+        } else {
+            try std.testing.expectEqual(@as(u8, 125), run);
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 125), exit_code_in(.container_run, .E0201, false));
+    try std.testing.expectEqual(@as(u8, 125), exit_code_in(.container_run, .B0001, false));
+    var text: [exit_text_bytes_max]u8 = undefined;
+    try std.testing.expectEqualStrings("1 (125 in zbx run)", exit_text(.E0201, &text));
+    try std.testing.expectEqualStrings("1 (126 or 127 in zbx run)", exit_text(.E0202, &text));
+    try std.testing.expectEqualStrings("70 (125 in zbx run)", exit_text(.B0001, &text));
+    try std.testing.expectEqualStrings("2", exit_text(.E0101, &text)); // The doctor's, not a run's.
+    try std.testing.expectEqual(@as(u8, 2), exit_code_unwritable(.standard));
+    try std.testing.expectEqual(@as(u8, 125), exit_code_unwritable(.container_run));
 }
 
 test "blame decides the exit code, and every blame has a distinct one" {

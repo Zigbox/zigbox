@@ -3,8 +3,9 @@
 //! uses no `Host`, no allocation and no state but one small struct, and it never fails.
 //!
 //! The root panic function in `main.zig` calls `respond`, writes the bytes to stderr with a raw
-//! write, and exits 70. The stack trace is not printed: it goes nowhere a user sees it. No bundle
-//! is written from the handler either, and a panic has no `saved` line: bundle.zig says why.
+//! write, and exits 70 (125 for `zbx run`). The stack trace is not printed: it goes nowhere a user
+//! sees it. No bundle is written from the handler either, and a panic has no `saved` line:
+//! bundle.zig says why.
 //! The panic message is shown only in verbose and json output, because it is internal text.
 //!
 //! `respond` is pure so the whole output can be tested; the wiring around it is a few lines.
@@ -12,12 +13,15 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const codes = @import("codes.zig");
 const render = @import("render.zig");
 const Diag = @import("diag.zig").Diag;
 
 pub const State = struct {
     /// The output mode the command line asked for, once parsed. Before that, plain text.
     mode: render.Mode = .text,
+    /// Which family of exit codes the command line uses: a `run` exits 125 for a bug, not 70.
+    scope: codes.ExitScope = .standard,
     /// Set when a panic is being reported, so a panic while reporting exits at once.
     entered: bool = false,
 };
@@ -26,10 +30,21 @@ pub const State = struct {
 /// single-threaded child, thread pools only in the parent), and written once per run.
 pub var state: State = .{};
 
-pub fn configure(target: *State, mode: render.Mode) void {
+pub fn configure(target: *State, mode: render.Mode, scope: codes.ExitScope) void {
     assert(!target.entered);
     target.mode = mode;
+    target.scope = scope;
     assert(target.mode == mode);
+    assert(target.scope == scope);
+}
+
+/// The exit code of a panic: a bug's code in the command's scope (70, or 125 for `run`).
+pub fn exit_code(target: *const State) u8 {
+    const result = codes.exit_code_in(target.scope, .B0001, false);
+    assert(result != constants.exit_ok);
+    if (target.scope == .standard) assert(result == constants.exit_internal);
+    if (target.scope == .container_run) assert(result == constants.exit_run_failed);
+    return result;
 }
 
 /// The bytes to write to stderr for a panic with `message`, or null if a panic is already being

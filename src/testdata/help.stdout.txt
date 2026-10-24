@@ -26,5 +26,7 @@ options (before the "--" of run, or after any other command):
   -v, --verbose   show the full cause chain and context of a failure
   --output json   write each failure to stderr as one JSON object per line
 
-exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
-run exits with the command's own exit code, or 128 plus the signal that killed it
+exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
+run exits with the command's own exit code, or 128 plus the signal that killed it, and
+keeps its own failures out of that range: 125 zbx failed before the command started,
+126 the command could not be run, 127 the command was not found

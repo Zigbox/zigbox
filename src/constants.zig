@@ -18,6 +18,18 @@ pub const exit_external: u8 = 3;
 /// A bug in zbx: EX_SOFTWARE from sysexits.h.
 pub const exit_internal: u8 = 70;
 
+// Exit codes of a command that runs a container (`zbx run`): the container's own code is passed
+// through, so these four classes must not collide with it, and the shell's reserved codes are used
+// instead (DIAGNOSTICS.md, "Exit codes"). `codes.exit_code_in` decides which applies.
+/// zbx itself failed before the command started, whatever the blame.
+pub const exit_run_failed: u8 = 125;
+/// The command was found but could not be run: not executable, or not for this CPU.
+pub const exit_run_not_runnable: u8 = 126;
+/// The command was not found.
+pub const exit_run_not_found: u8 = 127;
+/// A command killed by signal n exits 128 + n.
+pub const exit_signal_base: u8 = 128;
+
 // Exit codes of the build-host tools (`size_check`, the fuzz runner). They are not `zbx`.
 pub const tool_exit_ok: u8 = 0;
 pub const tool_exit_failed: u8 = 1;
@@ -284,6 +296,17 @@ comptime {
     }
     assert(exit_ok == 0);
     assert(exit_internal == 70);
+    // The container-run codes are the shell's reserved ones: distinct from each other, from the
+    // standard four, and below the signal range.
+    const run_exits = [_]u8{ exit_run_failed, exit_run_not_runnable, exit_run_not_found };
+    for (run_exits, 0..) |first, index| {
+        for (exits) |standard| assert(first != standard);
+        for (run_exits[index + 1 ..]) |second| assert(first != second);
+        assert(first < exit_signal_base);
+    }
+    assert(exit_run_failed == 125);
+    assert(exit_run_not_runnable == 126);
+    assert(exit_run_not_found == 127);
     assert(tool_exit_ok == exit_ok);
     assert(tool_exit_failed != tool_exit_usage);
 

@@ -195,13 +195,14 @@ pub fn render_page(code: codes.Code, buffer: []u8) []const u8 {
     emit(&writer, "<p class=\"summary\">");
     write_escaped(&writer, entry.summary);
     emit(&writer, "</p>\n");
+    var exit_buffer: [codes.exit_text_bytes_max]u8 = undefined;
     emit_format(
         &writer,
         "<dl class=\"facts\">" ++
             "<div><dt>Kind</dt><dd>{s}</dd></div>" ++
             "<div><dt>Blame</dt><dd>{s}</dd></div>" ++
-            "<div><dt>Exit code</dt><dd>{d}</dd></div></dl>\n",
-        .{ @tagName(entry.severity), @tagName(entry.blame), codes.exit_code(entry.blame) },
+            "<div><dt>Exit code</dt><dd>{s}</dd></div></dl>\n",
+        .{ @tagName(entry.severity), @tagName(entry.blame), codes.exit_text(code, &exit_buffer) },
     );
     emit(&writer, "<h2>What it means</h2>\n");
     write_paragraphs(&writer, entry.explanation);

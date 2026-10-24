@@ -173,9 +173,10 @@ fn random_args(
     long: *[constants.arg_bytes_max + 8]u8,
 ) FuzzArgs {
     const words = [_][]const u8{
-        "doctor",  "help",  "--help",        "--version", "version", "",          "-",
-        "explain", "E0001", "zbx-b0001",     "E9999",     "-v",      "--verbose", "--output",
-        "json",    "text",  "--output=json", "--output=", "--bogus", "-x",
+        "doctor",  "help",     "--help",        "--version", "version", "",          "-",
+        "explain", "E0001",    "zbx-b0001",     "E9999",     "-v",      "--verbose", "--output",
+        "json",    "text",     "--output=json", "--output=", "--bogus", "-x",        "run",
+        "--",      "--rootfs", "--name",        "/srv/x",    "bundle",  "--last",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -215,11 +216,19 @@ fn random_args(
 ///  - stderr holds no escape byte (the simulated stream is not a terminal) and no raw Zig error
 ///    or trace, unless an argument itself contains the detector's marker and was echoed.
 fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) void {
+    // A `run` line (the simulator has no rootfs, so none of them gets as far as a container)
+    // never exits with a code a container could: every failure of it is 125.
+    const is_run = is_run_line(args);
     const known = [_]u8{
         constants.exit_ok,          constants.exit_user,
         constants.exit_environment, constants.exit_internal,
     };
-    assert(std.mem.indexOfScalar(u8, &known, code) != null);
+    if (is_run) {
+        assert(code == 125);
+    } else {
+        assert(std.mem.indexOfScalar(u8, &known, code) != null);
+    }
+    const environment_code: u8 = if (is_run) 125 else constants.exit_environment;
     assert(std.mem.indexOfScalar(u8, sim.stderr(), 0x1b) == null);
     const found = diag_fuzz.find_diagnostics(sim.stderr());
     // A faulted write can cut a header in half, which then names no registered code.
@@ -232,13 +241,13 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
         // Only a failed stderr write leaves a failure with nothing to read. A doctor report with
         // FAIL lines and an empty stderr does not pass here without a fault.
         assert(faulted);
-        assert(code == constants.exit_environment);
+        assert(code == environment_code);
         return;
     }
     const fails = diag_fuzz.find_fail_lines(sim.stdout());
     // A write fault can cut a diagnostic short, and then the exit code is the environment's
     // whatever the blame was; without a fault the diagnostics are whole and blame decides.
-    if (faulted and code == constants.exit_environment) {
+    if (faulted and code == environment_code) {
         return assert(found.count <= @max(fails.count, 1));
     }
     assert(found.unregistered == 0); // Whole diagnostics only from here on.
@@ -250,7 +259,13 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
     } else {
         assert(found.count == 1);
     }
-    for (found.in_order()) |each| assert(codes.exit_code(codes.entry(each).blame) == code);
+    for (found.in_order()) |each| {
+        if (is_run) {
+            assert(code == 125);
+        } else {
+            assert(codes.exit_code(codes.entry(each).blame) == code);
+        }
+    }
     for (args.items[0..args.count]) |argument| {
         if (render.contains_raw_error(argument)) return;
     }
@@ -294,13 +309,33 @@ fn fuzz_cli(seed: u64) void {
     assert(reference.open_count() == 0);
     assert(faulted.open_count() == 0);
     assert(std.mem.startsWith(u8, reference.stdout(), faulted.stdout()));
+    const environment_code: u8 = if (is_run_line(args)) 125 else constants.exit_environment;
     const complete = faulted.stdout().len == reference.stdout().len and
         faulted.stderr().len == reference.stderr().len;
     if (complete) {
         assert(faulted_code == reference_code);
     } else {
-        assert(faulted_code == constants.exit_environment);
+        assert(faulted_code == environment_code);
     }
+}
+
+/// Whether the command line is a `run` one, stated independently of `cli.scan_options`: the
+/// first word that is not an option, where `--output` takes the next word as its value.
+fn is_run_line(args: FuzzArgs) bool {
+    var index: u32 = 1;
+    while (index < args.count) : (index += 1) {
+        const word = args.items[index];
+        if (std.mem.eql(u8, word, "--output")) {
+            index += 1; // Its value, whatever it is.
+            continue;
+        }
+        const is_option = word.len > 1 and word[0] == '-';
+        const is_command_like = std.mem.eql(u8, word, "--help") or
+            std.mem.eql(u8, word, "--version");
+        if (is_option and !is_command_like) continue;
+        return std.mem.eql(u8, word, "run");
+    }
+    return false;
 }
 
 /// An independent statement of "printable" (space to tilde), so a wrong `is_printable` is caught.

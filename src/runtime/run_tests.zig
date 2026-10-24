@@ -159,7 +159,7 @@ test "a generated name is zbx- and six hex digits, and is the container's hostna
 
 test "bad input is refused before anything is created" {
     // Goal: a user error costs nothing: no process, no pipe, no mount. Each case has its code
-    // and exit 1, and the simulator's world is untouched.
+    // and exit 125 (zbx's own failure, never 1), and the simulator's world is untouched.
     const long_rootfs = "/" ++ repeat('r', constants.rootfs_bytes_max);
     const Case = struct { args: []const [:0]const u8, code: codes.Code };
     const cases = [_]Case{
@@ -185,7 +185,7 @@ test "bad input is refused before anything is created" {
         var sim: HostSim = undefined;
         sim_run.init(&sim, 4);
         const before = sim_run.baseline(&sim);
-        try testing.expectEqual(@as(u8, 1), run(&sim, case.args));
+        try testing.expectEqual(@as(u8, 125), run(&sim, case.args));
         var header: [32]u8 = undefined;
         const text = try std.fmt.bufPrint(&header, "error[{s}]: ", .{codes.full_name(case.code)});
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), text));
@@ -201,24 +201,31 @@ test "a command that cannot be run is E0202 and names what was looked up" {
     var sim: HostSim = undefined;
     sim_run.init(&sim, 5);
     sim.world.add_node(rootfs ++ "/bin/directory", .dir);
-    const Case = struct { command: [:0]const u8, words: []const []const u8 };
+    const Case = struct { command: [:0]const u8, words: []const []const u8, exit: u8 };
+    // A command that is not there exits 127, one that is there and cannot run exits 126.
     const cases = [_]Case{
         .{
             .command = "/bin/nothere",
+            .exit = 127,
             .words = &.{ "'/bin/nothere' is missing from the rootfs", "also needs its loader" },
         },
         .{
             .command = "nothere",
+            .exit = 127,
             .words = &.{ "no file named 'nothere' in the container's PATH", container_path },
         },
-        .{ .command = "/bin/directory", .words = &.{"is not a program this machine can run"} },
+        .{
+            .command = "/bin/directory",
+            .exit = 126,
+            .words = &.{"is not a program this machine can run"},
+        },
     };
     for (cases) |case| {
         sim_run.init(&sim, 5);
         sim.world.add_node(rootfs ++ "/bin/directory", .dir);
         const before = sim_run.baseline(&sim);
         const args = [_][:0]const u8{ "zbx", "-v", "run", "--rootfs", rootfs, "--", case.command };
-        try testing.expectEqual(@as(u8, 1), run(&sim, &args));
+        try testing.expectEqual(case.exit, run(&sim, &args));
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0202]: "));
         for (case.words) |word| try testing.expect(std.mem.indexOf(u8, sim.stderr(), word) != null);
         try no_leak(&sim, &before);
@@ -269,8 +276,8 @@ test "a failure injected into every step is a diagnostic naming that step, and c
     // each step in turn the first call of that step fails with EPERM. The result is the code
     // for the step (E0203 for the namespaces and their maps, E0202 for the command, E0205 for
     // the rest; the devpts mount alone is skipped), the verbose output names the step, the exit
-    // code is the blame's, and nothing leaked: the child is reaped, no descriptor is open and
-    // the host's mounts and hostname are as they were.
+    // code is 125 (126 for the command), and nothing leaked: the child is reaped, no descriptor
+    // is open and the host's mounts and hostname are as they were.
     var plan: plan_mod.Plan = undefined;
     sim_run.sample_plan(&plan, true);
     for (plan.steps[0..plan.count], 0..) |step, index| {
@@ -295,7 +302,8 @@ test "a failure injected into every step is a diagnostic naming that step, and c
                 @tagName(step.kind), index + 1, plan.count,
             });
             try testing.expect(std.mem.indexOf(u8, sim.stderr(), context) != null);
-            try testing.expectEqual(codes.exit_code(codes.entry(expected).blame), code);
+            // 125 for zbx's own failure; a command that cannot run (EPERM, not missing) is 126.
+            try testing.expectEqual(@as(u8, if (expected == .E0202) 126 else 125), code);
             try testing.expect(sim.world.processes[1].state != .running);
         } else {
             try testing.expectEqual(@as(u8, 0), code);
@@ -328,7 +336,7 @@ test "when the parent gives up before the go-ahead the child never runs a step" 
     const before = sim_run.baseline(&sim);
     sim.faults.fail_step = sim_run.step_index(.run_newgidmap, true);
     const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "x", "--", "sh" };
-    try testing.expectEqual(@as(u8, 2), run(&sim, &args));
+    try testing.expectEqual(@as(u8, 125), run(&sim, &args));
     const child = &sim.world.processes[1];
     try testing.expect(child.state == .reaped);
     try testing.expect(!child.execd);
@@ -450,7 +458,7 @@ test "a helper that refuses or cannot run is E0204, naming it and how it ended" 
         sim.world.helper_fails_with = case.exit;
         sim.world.subid_start = case.start;
         const args = [_][:0]const u8{ "zbx", "-v", "run", "--rootfs", rootfs, "--", "sh" };
-        try testing.expectEqual(@as(u8, 2), run(&sim, &args));
+        try testing.expectEqual(@as(u8, 125), run(&sim, &args));
         try expect_starts_with(sim.stderr(), "error[ZBX-E0204]: writing the id maps failed\n");
         if (std.mem.indexOf(u8, sim.stderr(), case.words) == null) {
             std.debug.print("missing {s} in:\n{s}\n", .{ case.words, sim.stderr() });
@@ -654,7 +662,7 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
         "--",
         "nothere",
     };
-    try testing.expectEqual(@as(u8, 1), run(&sim, &missing));
+    try testing.expectEqual(@as(u8, 127), run(&sim, &missing));
     try records.parse(record_text(&sim, "rec-2").?, &parsed);
     try testing.expectEqual(records.Exit{ .start_failed = .E0202 }, parsed.exit);
 
@@ -670,14 +678,14 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
         "--",
         "sh",
     };
-    try testing.expectEqual(@as(u8, 1), run(&sim, &refused));
+    try testing.expectEqual(@as(u8, 125), run(&sim, &refused));
     try testing.expect(record_text(&sim, "rec-3") == null);
 
     // A wait that fails is a lost run.
     sim_run.init(&sim, 17);
     sim.faults.fail_step = sim_run.step_index(.reap, true);
     const lost = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "rec-4", "--", "sh" };
-    try testing.expectEqual(@as(u8, 2), run(&sim, &lost));
+    try testing.expectEqual(@as(u8, 125), run(&sim, &lost));
     try records.parse(record_text(&sim, "rec-4").?, &parsed);
     try testing.expectEqual(records.Exit.lost, parsed.exit);
 }

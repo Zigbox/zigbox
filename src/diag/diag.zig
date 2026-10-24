@@ -105,6 +105,9 @@ pub const Diag = struct {
     fixes: List(Fix, constants.diag_fixes_count_max, .oldest),
     /// The path of the bundle written for this bug, empty for none. Only a bug has one.
     saved: text_util.Bounded(constants.state_path_bytes_max + 128),
+    /// Set only on ZBX-E0202, when the cause is a command that was not found: a container run
+    /// then exits 127 where a command that cannot be run exits 126.
+    command_missing: bool,
 
     /// Initialises in place: the struct is several kilobytes.
     pub fn reset(diag: *Diag) void {
@@ -114,9 +117,17 @@ pub const Diag = struct {
         diag.pairs.reset();
         diag.fixes.reset();
         diag.saved = .{};
+        diag.command_missing = false;
         assert(diag.saved.len == 0);
         assert(diag.causes.count == 0);
         assert(diag.code == null);
+    }
+
+    /// Says that the E0202 being built is a command that was not found.
+    pub fn mark_command_missing(diag: *Diag) void {
+        assert(diag.code != null);
+        assert(diag.code.? == .E0202);
+        diag.command_missing = true;
     }
 
     /// Records where the bundle for this bug was written.
@@ -210,12 +221,17 @@ pub const Diag = struct {
         return found;
     }
 
-    /// The process exit code for this failure, decided by the code's blame and nothing else.
+    /// The process exit code for this failure in the standard scope: the code's blame decides.
     pub fn exit_code(diag: *const Diag) u8 {
-        const blame = diag.entry().blame;
-        const exit = codes.exit_code(blame);
-        assert(exit != constants.exit_ok);
+        return diag.exit_code_in(.standard);
+    }
+
+    /// The process exit code for this failure in `scope`, from the code (and, for E0202, whether
+    /// the command was missing) and nothing else: `codes.exit_code_in` is the one mapping.
+    pub fn exit_code_in(diag: *const Diag, scope: codes.ExitScope) u8 {
         assert(diag.code != null);
+        const exit = codes.exit_code_in(scope, diag.code.?, diag.command_missing);
+        assert(exit != constants.exit_ok);
         return exit;
     }
 

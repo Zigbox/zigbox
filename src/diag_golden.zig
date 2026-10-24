@@ -135,37 +135,37 @@ const base_cases = [_]Case{
         .code = .E0201,
         .args = &.{ "run", "--rootfs", "./alpine", "--", "/bin/sh" },
         .prepare = prepare_container,
-        .exit = 1,
+        .exit = 125,
     },
     .{
         .code = .E0202,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/nothere" },
         .prepare = prepare_container,
-        .exit = 1,
+        .exit = 127,
     },
     .{
         .code = .E0203,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_namespaces_refused,
-        .exit = 2,
+        .exit = 125,
     },
     .{
         .code = .E0204,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_helper_refuses,
-        .exit = 2,
+        .exit = 125,
     },
     .{
         .code = .E0205,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_proc_refused,
-        .exit = 2,
+        .exit = 125,
     },
     .{
         .code = .E0206,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },
         .prepare = prepare_container,
-        .exit = 1,
+        .exit = 125,
     },
     .{
         .code = .W0201,
@@ -320,9 +320,11 @@ test "golden: every code in default, verbose and JSON output" {
             );
             try testing.expectEqualStrings(golden, shown);
             try testing.expectEqual(case.exit, code);
-            if (!case.warning) {
+            const is_run = case.args.len > 0 and std.mem.eql(u8, case.args[0], "run");
+            if (!case.warning and !is_run) {
                 try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
             }
+            if (!case.warning and is_run) try testing.expect(code >= 125);
             const full = codes.full_name(case.code);
             if (case.prints) {
                 try testing.expect(sim.stdout().len > 0);
@@ -356,10 +358,15 @@ test "golden: a panic, in default, verbose and JSON output" {
     };
     for ([_]render.Mode{ .text, .verbose, .json }, names) |mode, golden| {
         var state: panic.State = .{};
-        panic.configure(&state, mode);
+        panic.configure(&state, mode, .standard);
         const output = panic.respond(&state, message, &buffer).?;
         try testing.expectEqualStrings(golden, output);
         try testing.expect(!render.contains_raw_error(output));
+        try testing.expectEqual(@as(u8, 70), panic.exit_code(&state));
+        // A panic on a `zbx run` line is 125, so it cannot be mistaken for a container's 70.
+        var run_state: panic.State = .{};
+        panic.configure(&run_state, mode, .container_run);
+        try testing.expectEqual(@as(u8, 125), panic.exit_code(&run_state));
     }
 }
 

@@ -4,8 +4,8 @@
 //! Contract (docs/briefs/M0-diagnostics.md): commands `doctor`, `explain <code>`, `help`,
 //! `--version`; global options `-v`/`--verbose` and `--output text|json`, which may come before
 //! or after the command. Every refusal is a diagnostic (`E00xx`, blame user), rendered here, at
-//! the boundary, and nowhere below. The exit code comes from the diagnostic's blame, once, in
-//! `fail`.
+//! the boundary, and nowhere below. The exit code comes from the diagnostic and the command
+//! (`codes.exit_code_in`: blame for most commands, 125 to 127 for `run`), once, in `fail`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -55,8 +55,10 @@ const help_text =
     \\  -v, --verbose   show the full cause chain and context of a failure
     \\  --output json   write each failure to stderr as one JSON object per line
     \\
-    \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
-    \\run exits with the command's own exit code, or 128 plus the signal that killed it
+    \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
+    \\run exits with the command's own exit code, or 128 plus the signal that killed it, and
+    \\keeps its own failures out of that range: 125 zbx failed before the command started,
+    \\126 the command could not be run, 127 the command was not found
     \\
 ;
 
@@ -78,6 +80,14 @@ pub const OutputFormat = enum { text, json };
 pub const Options = struct {
     verbose: bool = false,
     output: OutputFormat = .text,
+    /// The command line is a `run`: its failures use the container-run exit codes.
+    runs_container: bool = false,
+
+    pub fn exit_scope(options: Options) codes.ExitScope {
+        const scope: codes.ExitScope = if (options.runs_container) .container_run else .standard;
+        assert((scope == .container_run) == options.runs_container);
+        return scope;
+    }
 
     /// json always carries everything; verbose only changes the text rendering.
     pub fn mode(options: Options) render.Mode {
@@ -264,6 +274,7 @@ pub fn scan_options(args: []const []const u8) Options {
         }
     }
     assert(index <= args.len + 1);
+    options.runs_container = first != null and first.? == .run;
     return options;
 }
 
@@ -628,7 +639,7 @@ pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
         assert(collected <= constants.args_count_max);
         // Whatever was collected before the limit was hit may hold --output or --verbose.
         const options = scan_options(storage[0..collected]);
-        panic.configure(&panic.state, options.mode());
+        panic.configure(&panic.state, options.mode(), options.exit_scope());
         return fail(host, &diag, options);
     };
     assert(args.len <= constants.args_count_max);
@@ -640,7 +651,7 @@ pub fn run(host: Host, args: []const []const u8) u8 {
     var diag: Diag = undefined;
     diag.reset();
     const options = scan_options(args);
-    panic.configure(&panic.state, options.mode());
+    panic.configure(&panic.state, options.mode(), options.exit_scope());
     var invocation: Invocation = undefined;
     parse(args, &invocation, &diag) catch return fail(host, &diag, options);
     assert(invocation.options.verbose == options.verbose);
@@ -893,9 +904,11 @@ pub fn fail(host: Host, diag: *Diag, options: Options) u8 {
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render.render(diag, mode, color, &buffer);
-    host.write_all(.stderr, output) catch return constants.exit_environment;
-    const code = diag.exit_code();
+    const scope = options.exit_scope();
+    host.write_all(.stderr, output) catch return codes.exit_code_unwritable(scope);
+    const code = diag.exit_code_in(scope);
     assert(code != constants.exit_ok);
+    if (options.runs_container) assert(code >= constants.exit_run_failed);
     return code;
 }
 
@@ -1051,6 +1064,36 @@ test "snapshot: the usage errors exit 1 with one diagnostic on stderr and nothin
     }
 }
 
+test "snapshot: a usage error on a run command line exits 125, any other command line 1" {
+    // Goal: `run` passes the container's exit code through, so its own refusals use 125 and the
+    // codes 1, 2, 3 and 70 belong to the container alone. Method: the ways a run line is wrong
+    // (unknown option, missing and repeated values, a bad --output, no command, no rootfs) each
+    // give one error on stderr and 125; the same mistakes on other commands still give 1.
+    var sim: HostSim = undefined;
+    const bad_run = [_][]const [:0]const u8{
+        &.{ "zbx", "run" },
+        &.{ "zbx", "run", "--nope" },
+        &.{ "zbx", "run", "--rootfs" },
+        &.{ "zbx", "run", "--rootfs", "a", "--rootfs", "b", "--", "sh" },
+        &.{ "zbx", "run", "--rootfs", "a" },
+        &.{ "zbx", "run", "--rootfs", "a", "--" },
+        &.{ "zbx", "--output", "xml", "run", "--rootfs", "a", "--", "sh" },
+        &.{ "zbx", "run", "--output", "xml", "--rootfs", "a", "--", "sh" },
+        &.{ "zbx", "--output=json", "run", "--last" },
+    };
+    for (bad_run) |args| {
+        try testing.expectEqual(@as(u8, 125), try run_case(&sim, args));
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-E00"));
+    }
+    const other = [_][]const [:0]const u8{
+        &.{ "zbx", "bundle", "--nope" },
+        &.{ "zbx", "doctor", "--rootfs", "a" },
+        &.{ "zbx", "--output", "xml", "doctor" },
+    };
+    for (other) |args| try testing.expectEqual(@as(u8, 1), try run_case(&sim, args));
+}
+
 test "an echoed argument cannot inject terminal escapes or overflow the line" {
     // Goal: negative space. Control bytes and non-ASCII become '?', long text is truncated.
     var sim: HostSim = undefined;
@@ -1182,6 +1225,9 @@ test "a failing stdout is E0009 on stderr and exit 2; a failing stderr is exit 2
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     iterator = .{ .items = &.{ "zbx", "frobnicate" } };
     try testing.expectEqual(@as(u8, 2), run_from_iterator(sim.interface(), &iterator));
+    // A run line with nowhere to say what went wrong still keeps out of the container's codes.
+    iterator = .{ .items = &.{ "zbx", "run", "--nope" } };
+    try testing.expectEqual(@as(u8, 125), run_from_iterator(sim.interface(), &iterator));
 }
 
 test "a failing write names the real errno: EBADF and ENOSPC from the simulator" {
