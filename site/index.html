@@ -167,8 +167,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 const SITE = {
   updated: "2026-10-24",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M0 shipped",
-  stageStatus: "done",
+  stage: "Pre-alpha · M1 in progress",
+  stageStatus: "wip",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
@@ -178,7 +178,7 @@ const MILESTONES = [
    slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40102173790", date:"2026-10-24"},
    demo:[["$","zbx doctor"],["","ok   kernel  6.8.0-147-generic x86_64 (minimum 5.15)"],["","ok   userns  user.max_user_namespaces=7718, unshare(CLONE_NEWUSER) works"],["","ok   cgroup  cgroup v2, user@1000.service delegated to uid 1000: cpu memory pids"],["","ok   overlay  overlayfs mounts inside a user and mount namespace"],["","ok   subid  demo (uid 1000): subuid 65536 ids, subgid 65536 ids; newuidmap: setuid root, newgidmap: setuid root"],["","ok   seccomp  seccomp is supported (current mode: disabled for this process)"],["#","sysctl -w user.max_user_namespaces=0"],["$","zbx doctor"],["","ok   kernel  6.8.0-147-generic x86_64 (minimum 5.15)"],["","FAIL userns  user.max_user_namespaces is 0, so no user namespace can be created  [ZBX-E0101]"],["","…    (four more lines; overlay fails for the same reason, ZBX-E0104)"],["","error[ZBX-E0101]: can't create a user namespace"],["","  cause  the sysctl user.max_user_namespaces = 0 caps the user namespaces this"],["","         system allows at none, for every user"],["","  fix    allow user namespaces:   sudo sysctl -w user.max_user_namespaces=15000"],["","  more   zbx explain E0101 · rerun with --verbose for the full cause chain"],["","…    (the ZBX-E0104 block follows; exit 2)"],["$","file zbx"],["","zbx: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, stripped"],["$","zbx frobnicate"],["","error[ZBX-E0001]: unknown command"],["","  cause  'frobnicate' is not a zbx command"],["","  fix    see the commands:   zbx help"],["","  more   zbx explain E0001 · rerun with --verbose for the full cause chain"]]},
-  {id:"M1", name:"Shell", status:"plan", goal:"Run a shell inside an unpacked rootfs, with no root privileges, isolated from the host.",
+  {id:"M1", name:"Shell", status:"wip", slices:{green:0, total:4, note:"slices green in CI; isolation core first"}, goal:"Run a shell inside an unpacked rootfs, with no root privileges, isolated from the host.",
    demo:[["$","zbx run --rootfs ./alpine -- /bin/sh"],["#","id"],["","uid=0(root) gid=0(root)"],["#","ps"],["","PID  USER  COMMAND"],["","  1  root  /bin/sh"],["","  2  root  ps"],["#","exit 42"],["$","echo $?"],["","42"]]},
   {id:"M2", name:"Limits", status:"plan", goal:"A misbehaving container cannot take down the host or regain privilege.",
    demo:[["$","zbx run --rootfs ./alpine --memory 128m -- stress-ng --vm 1 --vm-bytes 512m"],["","killed: out of memory (limit 128 MiB)"],["$","zbx run --rootfs ./alpine -- mount -t tmpfs none /mnt"],["","mount: operation not permitted (capability CAP_SYS_ADMIN not granted)"]]},

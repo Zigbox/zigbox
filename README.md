@@ -8,12 +8,12 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 
 ## Status
 
-*As of 2026-10-24. **M0 is demonstrated:** every slice is green in CI, and `demo-m0` passed in an Ubuntu 24.04 VM with KVM ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)). The owner tags `v0.0.0-m0` after watching the demo. M1 is next.*
+*As of 2026-10-24. **M0 is demonstrated:** every slice is green in CI, and `demo-m0` passed in an Ubuntu 24.04 VM with KVM ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)). M1 is in progress ([brief](docs/briefs/M1-shell.md)).*
 
 | Milestone | What it adds | Status |
 | --- | --- | --- |
 | **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **Demonstrated** in CI ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)); every failure is a coded diagnostic |
-| M1 · Shell | Run a shell in a rootless, isolated root filesystem | Not started |
+| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md) written; slice 1 of 4 started |
 | M2 · Limits | cgroup limits, capabilities, seccomp, read-only root | Not started |
 | M3 · Store | Content-addressed, deduplicated file trees | Not started |
 | M4 · Pull | Pull and run public OCI images | Not started |
