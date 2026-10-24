@@ -80,6 +80,7 @@ fn add_test_step(
     const test_step = b.step("test", "Run unit, snapshot and simulation tests");
     const roots = [_][]const u8{
         "src/testing/vm/main.zig",
+        "src/testing/vm/main_m1.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -179,49 +180,66 @@ fn add_release_step(b: *std.Build, options: *std.Build.Step.Options) void {
     if (strip) step.dependOn(&check.step);
 }
 
-/// `zig build demo-m0`: the milestone demo in a real Ubuntu VM. It always uses the stripped
-/// ReleaseSafe binaries, the ones that ship. -Daccel=kvm|tcg|auto chooses the accelerator:
+/// `zig build demo-m0` and `demo-m1`: the milestone demos in a real Ubuntu VM. They use the
+/// stripped ReleaseSafe binaries, the ones that ship. -Daccel=kvm|tcg|auto chooses the accelerator:
 /// auto means KVM and fails with a one-line message if /dev/kvm is unusable; tcg (software
 /// emulation, much slower) must be asked for explicitly.
 fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
     const Accel = enum { auto, kvm, tcg };
-    const accel_help = "VM accelerator for demo-m0: auto (default), kvm, tcg";
+    const accel_help = "VM accelerator for the demos: auto (default), kvm, tcg";
     const accel = b.option(Accel, "accel", accel_help) orelse .auto;
-    const dropin_help = "demo-m0: provision a Delegate= drop-in for user managers";
+    const dropin_help = "demo-m0 only: provision a Delegate= drop-in for user managers";
     const dropin = b.option(bool, "delegate-dropin", dropin_help) orelse false;
-    const keep_help = "demo-m0: keep the VM disk overlay (development)";
+    const keep_help = "demos: keep the VM disk overlay (development)";
     const keep = b.option(bool, "keep-overlay", keep_help) orelse false;
-    const reuse_help = "demo-m0: boot the kept, provisioned overlay (development)";
+    const reuse_help = "demos: boot the kept, provisioned overlay (development)";
     const reuse = b.option(bool, "reuse-overlay", reuse_help) orelse false;
 
-    const vm = b.addExecutable(.{
-        .name = "vm",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/vm/main.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    const run = b.addRunArtifact(vm);
-    run.setCwd(b.path("."));
-    run.addArgs(&.{ "--accel", @tagName(accel) });
-    if (dropin) run.addArg("--delegate-dropin");
-    if (keep) run.addArg("--keep-overlay");
-    if (reuse) run.addArg("--reuse-overlay");
-    const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
-    for (release_targets, flags) |query, flag| {
-        const exe = b.addExecutable(.{
-            .name = "zbx",
-            .root_module = zbx_module(b, options, b.resolveTargetQuery(query), .ReleaseSafe, true),
+    const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }{
+        .{
+            .step = "demo-m0",
+            .root = "src/testing/vm/main.zig",
+            .help = "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
+        },
+        .{
+            .step = "demo-m1",
+            .root = "src/testing/vm/main_m1.zig",
+            .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
+        },
+    };
+    for (demos) |demo| {
+        const vm = b.addExecutable(.{
+            .name = "vm",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(demo.root),
+                .target = b.graph.host,
+                .optimize = .ReleaseSafe,
+            }),
         });
-        run.addArg(flag);
-        run.addFileArg(exe.getEmittedBin());
+        const run = b.addRunArtifact(vm);
+        run.setCwd(b.path("."));
+        run.addArgs(&.{ "--accel", @tagName(accel) });
+        if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
+        if (keep) run.addArg("--keep-overlay");
+        if (reuse) run.addArg("--reuse-overlay");
+        const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
+        for (release_targets, flags) |query, flag| {
+            const exe = b.addExecutable(.{
+                .name = "zbx",
+                .root_module = zbx_module(
+                    b,
+                    options,
+                    b.resolveTargetQuery(query),
+                    .ReleaseSafe,
+                    true,
+                ),
+            });
+            run.addArg(flag);
+            run.addFileArg(exe.getEmittedBin());
+        }
+        const step = b.step(demo.step, demo.help);
+        step.dependOn(&run.step);
     }
-    const step = b.step(
-        "demo-m0",
-        "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
-    );
-    step.dependOn(&run.step);
 }
 
 /// `zig build errors-site` writes site/errors/<code>.html from the diagnostic registry;

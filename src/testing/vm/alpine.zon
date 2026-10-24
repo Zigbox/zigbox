@@ -1,0 +1,9 @@
+.{
+    // The Alpine minirootfs the M1 demo unpacks as the container root: a dated 3.20.x release,
+    // pinned by URL and SHA-256. The hash is the one Alpine publishes next to the file
+    // (`<url>.sha256`, and `latest-releases.yaml`), checked when it was pinned. Change both
+    // lines together, deliberately.
+    .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.10-x86_64.tar.gz",
+    .sha256 = "0d44a414245f043ae56872a23762e6c9bee585da2cbe4aa81cbd0331eaf53223",
+    .file_name = "alpine-minirootfs-3.20.10-x86_64.tar.gz",
+}
