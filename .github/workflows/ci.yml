@@ -41,6 +41,17 @@ jobs:
       - name: Unit, snapshot and simulation tests
         run: zig build test --summary all
 
+  errors-site:
+    name: errors site is up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      # site/errors/<code>.html is generated from the diagnostic registry. Fails, naming the
+      # first page, if a checked-in page is missing or differs: run `zig build errors-site`.
+      - name: Generated pages match the registry
+        run: zig build errors-site-check
+
   fuzz:
     name: fuzz (${{ matrix.fuzzer }})
     runs-on: ubuntu-24.04
