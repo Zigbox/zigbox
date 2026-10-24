@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 46; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 47; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -271,6 +271,7 @@ Every milestone should leave Zigbox, and later Zigcube, something an operator wo
 - [ ] **Upgrade test.** CI runs the new binary against state written by the previous tagged release (run records, store, state volumes, the control-plane database), and the previous milestone's demo still passes.
 - [ ] **Stable diagnostics.** Every new failure path has a registered code with a fix and golden tests; no existing code changes its meaning.
 - [ ] **Documented failure modes.** The milestone's demo document lists what can go wrong in production, how it shows up (code, exit reason or log line) and how to recover.
+- [ ] **Agent test (from M4).** CI runs a scripted agent through the milestone's demo using only `--output json`, the MCP tools and `zbx explain`. Anything the agent has to scrape from text or guess is a bug.
 
 Zigbox in production:
 
@@ -288,6 +289,29 @@ Zigcube in production:
 - **Explainable by design.** `zcube why`, a request ID on every call, and one diagnostic model from node to CLI.
 - **Simulation-tested control plane.** Deterministic, seeded simulation of controllers, store and agents, with partitions, lost leases and a crashing store, each failure replayable from its seed.
 - **Configuration in git.** Service files are reviewed in pull requests; `zcube apply` shows a diff before it changes anything; every change lands in an audit log.
+
+### Agent operability
+
+Agents (AI or scripts) will drive Zigbox and Zigcube more often than people will. Agents fail in three predictable ways: they guess output formats, they act without previewing, and they retry destructive things. Both projects are built so that none of these is necessary.
+
+Easy for agents to run:
+
+- **Stable, versioned machine output.** Every command's result, not only its failures, is available as `--output json`, with a versioned schema; `zbx schema <command>` prints it. A diagnostic's fix keeps its command separate from its sentence, so an agent can run `fixes[0].command` without parsing prose.
+- **Built-in MCP servers.** `zbx mcp` and `zcube mcp` expose typed tools (run, ps, logs, explain, why, apply), generated from the same schemas and the code registry, so agents call tools instead of composing shell lines. Arrives after M4, with the Mac work.
+- **Preview before acting.** Commands that change things can show what they would do first: `zbx run --plan` prints the container setup plan, `zcube apply` shows a diff, `zbx store gc` lists what it would delete.
+- **Never prompt, never hang.** Without a terminal nothing waits for input: anything that would prompt fails with a coded diagnostic naming the flag that proceeds, and every command takes `--timeout`.
+- **Machine-readable docs.** The registry also generates `errors.json` and an `llms.txt`, so an agent learns every code and its fix in one fetch.
+
+Hard to break by accident:
+
+- **Plan, then apply by plan hash.** Destructive commands (`store gc`, `state rm`, deleting applies, rollbacks) print a plan and its hash; only `--confirm <hash>` acts, and it refuses if anything changed since. This stops hallucinated targets, stale assumptions and blind retries. From M3 and M4, when deletion first exists.
+- **Undo.** `zbx state rm` and `zbx store gc` move data to a time-limited trash with `zbx restore`; content addressing makes rollback cheap; `zcube rollback` is the documented answer to a failed apply.
+- **Idempotent by default.** Repeating a command converges rather than duplicates: `zbx run --name x` when `x` exists is a coded refusal unless `--replace`; `zcube apply` is declarative; ids and digests are never matched by an ambiguous prefix.
+- **Limits an agent cannot flag its way past.** A policy file (a minimal form of M8's run policy, brought forward) can deny `--net host`, mounting `$HOME` or unsigned images regardless of flags. Zigcube API tokens are scoped (read-only, or apply to a set of services) and carry quotas, from C0.
+- **Attribution.** Every change records who made it (`--actor`, or an environment variable) and a request ID in an audit log, so `zcube why` can say which agent did it. From C0.
+- **A place to rehearse.** `zcube apply --simulate` runs the change against the deterministic simulator and reports what would restart, move or fail. From C1.
+
+From M2 on, every new command meets the two cheap rules now: its results have a JSON form with a schema, and it never prompts without a terminal.
 
 ## Non-goals
 
