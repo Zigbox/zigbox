@@ -35,29 +35,53 @@ const Case = struct {
     fixture: ?[]const u8 = null,
     /// Sets the simulator up after it is initialised (a container host and a failure to inject).
     prepare: ?*const fn (sim: *HostSim) void = null,
+    /// The code is a warning: the run goes on, so the exit code is the command's, not the blame's.
+    warning: bool = false,
     /// The exit code the case must end with.
     exit: u8,
 };
 
-/// The index of the first step of `kind` in a plan, for injecting a failure into it.
+/// The index of the first step of `kind` in a plan for a host that maps a full range of ids.
 fn step_of(kind: plan_mod.Kind) u32 {
-    var plan: plan_mod.Plan = undefined;
-    plan.build(&.{
-        .rootfs = sim_run.rootfs_path,
-        .name = "web-1",
-        .command = &.{"/bin/sh"},
-        .term = null,
-        .uid = 1000,
-        .gid = 1000,
-    });
-    for (plan.steps[0..plan.count], 0..) |step, index| {
-        if (step.kind == kind) return @intCast(index);
-    }
-    unreachable; // Every kind asked for here is in every plan.
+    return sim_run.step_index(kind, true);
 }
 
 fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
+}
+
+fn prepare_helper_refuses(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.helper_fails_with = 1;
+}
+
+fn prepare_single(sim: *HostSim) void {
+    sim_run.init_single(sim, 1);
+}
+
+fn prepare_disk_full(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.disk_full = true;
+}
+
+/// A runs directory over the limit, with a record that is damaged and one from a newer zbx.
+fn prepare_records_unreadable(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.add_node(sim_run.runs_path, .dir);
+    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    assert(sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage") == null);
+    assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
+    for (0..constants.runs_max - 1) |number| {
+        var path: [64]u8 = undefined;
+        const format = sim_run.runs_path ++ "/old-{d:0>2}.zon";
+        const where = std.fmt.bufPrint(&path, format, .{number}) catch unreachable; // Short.
+        var body: [96]u8 = undefined;
+        const text = ".{{\n    .name = \"old-{d:0>2}\",\n    .started = {d},\n}}\n";
+        const args = .{ number, 1000 + number };
+        // Cannot fail: the body is a few dozen bytes.
+        const record = std.fmt.bufPrint(&body, text, args) catch unreachable;
+        assert(sim.world.write_file(where, record) == null);
+    }
 }
 
 fn prepare_proc_refused(sim: *HostSim) void {
@@ -78,6 +102,8 @@ fn prepare_namespaces_refused(sim: *HostSim) void {
     sim.init(1, run_restricted.files);
     run_restricted.apply(sim);
     sim.world.seed_container_host(sim_run.rootfs_path);
+    sim.world.add_node(sim_run.home_path, .dir);
+    sim.environment_variables = &sim_run.env_home;
     sim.faults.fail_step = step_of(.spawn);
     sim.faults.fail_step_errno = 13; // EACCES
 }
@@ -120,6 +146,12 @@ const cases = [_]Case{
         .exit = 2,
     },
     .{
+        .code = .E0204,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_helper_refuses,
+        .exit = 2,
+    },
+    .{
         .code = .E0205,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_proc_refused,
@@ -130,6 +162,27 @@ const cases = [_]Case{
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },
         .prepare = prepare_container,
         .exit = 1,
+    },
+    .{
+        .code = .W0201,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_single,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0202,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_disk_full,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0203,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_records_unreadable,
+        .warning = true,
+        .exit = 0,
     },
 };
 
@@ -227,7 +280,9 @@ test "golden: every code in default, verbose and JSON output" {
             );
             try testing.expectEqualStrings(golden, shown);
             try testing.expectEqual(case.exit, code);
-            try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
+            if (!case.warning) {
+                try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
+            }
             const full = codes.full_name(case.code);
             if (case.fixture == null) {
                 try testing.expectEqual(@as(usize, 0), sim.stdout().len);
@@ -238,7 +293,9 @@ test "golden: every code in default, verbose and JSON output" {
             }
             try testing.expect(std.mem.indexOf(u8, sim.stderr(), full) != null);
             if (style == .json) {
-                try testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, golden, "\n")));
+                // One JSON object per line: a warning, then the run's end, are two lines.
+                var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, golden, "\n"), '\n');
+                while (lines.next()) |line| try testing.expect(try test_util.json_is_valid(line));
             }
         }
     }

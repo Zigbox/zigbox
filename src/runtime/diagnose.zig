@@ -15,6 +15,7 @@ const doctor = @import("../doctor.zig");
 const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const plan_mod = @import("plan.zig");
+const records = @import("records.zig");
 const spec = @import("spec.zig");
 
 const linux = std.os.linux;
@@ -130,14 +131,22 @@ pub fn command_too_big(diag: *Diag, problem: spec.CommandProblem) void {
 
 // ---- A failed step -------------------------------------------------------------------------
 
+/// How a helper program ended, when it ran at all.
+pub const HelperEnd = struct {
+    status: host_mod.ExitStatus,
+    output: []const u8,
+};
+
 /// Classifies a failed step and fills `diag`: ZBX-E0203 for the namespaces and their id maps,
-/// ZBX-E0202 for the command, ZBX-E0205 for every other step.
+/// ZBX-E0204 for the helpers that write them, ZBX-E0202 for the command, ZBX-E0205 for every
+/// other step. `helper` says how a helper ended, if the step ran one and it did run.
 pub fn step_failed(
     host: Host,
     diag: *Diag,
     plan: *const Plan,
     info: RunInfo,
     failure: Failure,
+    helper: ?HelperEnd,
 ) void {
     assert(diag.code == null);
     assert(failure.step < plan.count);
@@ -147,6 +156,14 @@ pub fn step_failed(
     switch (step.kind) {
         .spawn => namespaces_failed(host, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
+        .run_newuidmap, .run_newgidmap => helper_failed(
+            diag,
+            plan,
+            step,
+            operation,
+            failure,
+            helper,
+        ),
         .exec => command_failed(diag, plan, info, failure),
         else => setup_failed(diag, step, operation, failure, info),
     }
@@ -210,6 +227,59 @@ fn map_failed(diag: *Diag, operation: []const u8, failure: Failure) void {
     diag.fix(.{ .sentence = "look for the policy that denies it:", .command = dmesg_policy });
     diag.fix(.{ .sentence = "check this host (ZBX-E0101):", .command = "zbx doctor" });
     assert(diag.code.? == .E0203);
+}
+
+fn helper_failed(
+    diag: *Diag,
+    plan: *const Plan,
+    step: *const plan_mod.Step,
+    operation: []const u8,
+    failure: Failure,
+    helper: ?HelperEnd,
+) void {
+    assert(diag.code == null);
+    const path = plan.text(step.target);
+    const program = std.fs.path.basename(path);
+    diag.raise(.E0204);
+    // The general reason first; the helper's own words last, since they are the real cause and
+    // default output shows only the newest.
+    diag.cause("a full id map is written by the setuid helpers, which refuse unless " ++
+        "their ranges in /etc/subuid and /etc/subgid cover the ids zbx asks for " ++
+        "and they are setuid root", .{});
+    if (helper) |end| {
+        switch (end.status) {
+            .exited => |code| helper_exited(diag, program, path, code, end.output),
+            .signaled => |number| diag.cause("{s} was killed by signal {d}", .{ program, number }),
+        }
+    } else {
+        errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    }
+    diag.context("helper", "{s}", .{path});
+    diag.fix(.{ .sentence = "check the helpers and the ranges:", .command = "zbx doctor" });
+    diag.fix_with("look at the helper:", "ls -l {s}", .{path});
+    assert(diag.code.? == .E0204);
+    assert(diag.fixes.count == 2);
+}
+
+fn helper_exited(
+    diag: *Diag,
+    program: []const u8,
+    path: []const u8,
+    code: u8,
+    output: []const u8,
+) void {
+    assert(program.len > 0);
+    // The shell convention a failed exec in the helper's child ends with.
+    if (code == 127) {
+        diag.cause("{s} could not be run ({s})", .{ program, path });
+        return;
+    }
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (trimmed.len == 0) {
+        diag.cause("{s} exited with status {d}", .{ program, code });
+    } else {
+        diag.cause("{s} exited with status {d}: {s}", .{ program, code, trimmed });
+    }
 }
 
 fn setup_failed(
@@ -291,8 +361,10 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
     const by_path = plan.candidates_count == 1;
     switch (failure.err) {
         error.NotFound => if (by_path) {
-            diag.cause("'{s}' does not exist in the rootfs, or its program interpreter (the " ++
-                "dynamic loader of a dynamically linked program) does not", .{program});
+            // The note comes first, so default output (the newest cause) is the plain statement.
+            diag.cause("a dynamically linked program also needs its loader and libc inside the " ++
+                "rootfs; a missing loader is reported as a missing file", .{});
+            diag.cause("'{s}' is missing from the rootfs", .{program});
         } else {
             diag.cause("no file named '{s}' in the container's PATH ({s})", .{
                 program, constants.container_path,
@@ -320,6 +392,71 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
         info.rootfs,
     });
     assert(diag.code.? == .E0202);
+}
+
+// ---- Warnings ------------------------------------------------------------------------------
+
+/// ZBX-W0202: the run record could not be saved, or there is nowhere to save it.
+pub fn record_not_saved(diag: *Diag, directory: ?[]const u8, failure: ?Failure) void {
+    assert(diag.code == null);
+    diag.raise(.W0202);
+    diag.while_("saving the run record", .{});
+    if (failure) |failed| {
+        errors.cause_host_error(diag, "writing the run record", failed.err, failed.errno);
+        if (directory) |where| diag.context("path", "{s}", .{where});
+        diag.fix_with("free space, or choose another state directory:", "df -h \"{s}\"", .{
+            directory orelse "/",
+        });
+    } else {
+        diag.cause(
+            "neither XDG_STATE_HOME nor HOME names an absolute directory to keep it in",
+            .{},
+        );
+        diag.fix(
+            .{ .sentence = "name one:", .command = "export XDG_STATE_HOME=$HOME/.local/state" },
+        );
+    }
+    assert(diag.code.? == .W0202);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-W0203: records that could not be used were skipped.
+pub fn records_skipped(diag: *Diag, directory: []const u8, skipped: *const records.Skipped) void {
+    assert(diag.code == null);
+    assert(skipped.count > 0);
+    diag.raise(.W0203);
+    diag.while_("looking through the run records", .{});
+    const reason: []const u8 = switch (skipped.first_reason) {
+        .unreadable => "cannot be read",
+        .damaged => "is not a valid record",
+        .newer => "was written by a newer zbx",
+    };
+    if (skipped.count == 1) {
+        diag.cause("run record '{s}' {s}, so it was skipped", .{ skipped.first(), reason });
+    } else {
+        diag.cause("{d} run records were skipped; the first, '{s}', {s}", .{
+            skipped.count, skipped.first(), reason,
+        });
+    }
+    diag.context("path", "{s}", .{directory});
+    diag.fix_with("look at them:", "ls -l \"{s}\"", .{directory});
+    assert(diag.code.? == .W0203);
+    assert(diag.fixes.count == 1);
+}
+
+/// ZBX-E0008: a label does not fit.
+pub fn label_too_big(diag: *Diag, index: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0008);
+    diag.while_("reading the labels", .{});
+    diag.cause("label {d} is empty, too long, or there are more than {d} labels " ++
+        "(a key is at most " ++
+        "{d} bytes, a value {d})", .{
+        index + 1,                     constants.labels_count_max,
+        constants.label_key_bytes_max, constants.label_value_bytes_max,
+    });
+    diag.fix(.{ .sentence = "use fewer or shorter labels" });
+    assert(diag.code.? == .E0008);
 }
 
 /// The note for a step that was allowed to fail and did, for `--verbose` and the run record.

@@ -1,0 +1,15 @@
+error[ZBX-E0204]: writing the id maps failed
+  while  starting container web-1
+  cause  a full id map is written by the setuid helpers, which refuse unless
+         their ranges in /etc/subuid and /etc/subgid cover the ids zbx asks for
+         and they are setuid root
+  cause  newuidmap exited with status 1: newuidmap: write to uid_map failed:
+         Operation not permitted
+  helper /usr/bin/newuidmap
+  name   web-1
+  rootfs /srv/alpine
+  step   run_newuidmap (3 of 43)
+  fix    check the helpers and the ranges:   zbx doctor
+         look at the helper:                 ls -l /usr/bin/newuidmap
+  more   zbx explain E0204
+  docs   https://zigbox.github.io/zigbox/errors/E0204.html

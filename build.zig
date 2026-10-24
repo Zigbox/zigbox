@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .root_module = zbx_module(b, options, target, optimize, null),
     });
     b.installArtifact(exe);
+    add_library_module(b, options, target, optimize);
 
     add_test_step(b, options, target, optimize);
     add_tidy_step(b);
@@ -33,6 +34,24 @@ pub fn build(b: *std.Build) void {
     add_release_step(b, options);
     add_demo_step(b, options);
     add_errors_site_steps(b);
+}
+
+/// The runtime as a module named `zigbox`, for Zigcube's agent to link: another build adds this
+/// package as a dependency and imports `zigbox` from it. Its root is in `src/` so that the files
+/// it imports (`constants.zig`, `host.zig`, ...) are inside the module's path.
+fn add_library_module(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    _ = b.addModule("zigbox", .{
+        .root_source_file = b.path("src/zigbox.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
 }
 
 fn zbx_module(
@@ -62,6 +81,7 @@ fn add_test_step(
     const roots = [_][]const u8{
         "src/testing/vm/main.zig",
         "src/main.zig",
+        "src/zigbox.zig",
         "src/tidy.zig",
         "src/fuzz.zig",
         "src/size_check.zig",

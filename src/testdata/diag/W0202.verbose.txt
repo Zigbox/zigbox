@@ -1,0 +1,7 @@
+warning[ZBX-W0202]: can't save the run record
+  while  saving the run record
+  cause  writing the run record failed: no space left on the device (ENOSPC)
+  path   /home/alice/.local/state/zbx/runs
+  fix    free space, or choose another state directory:   df -h "/home/alice/.local/state/zbx/runs"
+  more   zbx explain W0202
+  docs   https://zigbox.github.io/zigbox/errors/W0202.html

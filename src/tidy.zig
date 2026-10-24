@@ -48,10 +48,15 @@ const shipped_files = [_][]const u8{
     "src/parse.zig",
     "src/runtime/child.zig",
     "src/runtime/diagnose.zig",
+    "src/runtime/ids.zig",
     "src/runtime/plan.zig",
+    "src/runtime/records.zig",
     "src/runtime/run.zig",
+    "src/runtime/session.zig",
+    "src/runtime/signals.zig",
     "src/runtime/spec.zig",
     "src/runtime/sync.zig",
+    "src/zigbox.zig",
     "src/text.zig",
 };
 const asserts_per_function_min: u32 = 2;

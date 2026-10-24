@@ -1,0 +1,9 @@
+warning[ZBX-W0201]: mapping only your own id into the container
+  cause  alice (uid 1000); no subuid range of 65536 ids (largest: 0); no subgid
+         range of 65536 ids (largest: 0); newuidmap not found; newgidmap not
+         found
+  fix    give this user id ranges:    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+         install on Debian, Ubuntu:   sudo apt install uidmap
+         install on Fedora:           sudo dnf install shadow-utils
+  more   zbx explain W0201 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0201.html

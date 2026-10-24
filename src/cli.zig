@@ -31,16 +31,24 @@ const help_text =
     \\usage: zbx [options] <command>
     \\
     \\commands:
+    \\  run             run a command in a container whose root is a directory (see below)
     \\  doctor          check that this host can run zbx (a diagnostic per failing check)
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
     \\  --version       print the version
     \\
-    \\options (before or after the command):
+    \\run:
+    \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
+    \\  --rootfs <dir>  the directory to use as the container's root (required)
+    \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
+    \\  --              ends the options; everything after it is the command, as typed
+    \\
+    \\options (before the "--" of run, or after any other command):
     \\  -v, --verbose   show the full cause chain and context of a failure
     \\  --output json   write each failure to stderr as one JSON object per line
     \\
     \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
+    \\run exits with the command's own exit code, or 128 plus the signal that killed it
     \\
 ;
 
@@ -592,8 +600,26 @@ fn dispatch(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 
     return constants.exit_ok;
 }
 
+/// Where a warning from the runtime is written: stderr, in the mode the user asked for.
+const Reporter = struct {
+    host: Host,
+    options: Options,
+};
+
+fn report_warning(context: *anyopaque, diag: *const Diag) void {
+    const reporter: *const Reporter = @ptrCast(@alignCast(context));
+    assert(diag.code != null);
+    const mode = reporter.options.mode();
+    const color = mode != .json and reporter.host.color_enabled(.stderr);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(diag, mode, color, &buffer);
+    // A warning that cannot be written is lost, and the run goes on: it is only a warning.
+    reporter.host.write_all(.stderr, text) catch return;
+}
+
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
-/// plus the signal that killed it. A container that could not be started is a diagnostic.
+/// plus the signal that killed it. A container that could not be started is a diagnostic; so is
+/// one whose end could not be waited for.
 fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     assert(invocation.command == .run);
@@ -603,38 +629,52 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
         .name = given.name,
         .command = given.command,
     };
-    var outcome: runtime.Outcome = undefined;
-    runtime.run(host, &container, &outcome, diag) catch return error.StartFailed;
-    report_outcome(host, invocation.options, &outcome);
-    return outcome.exit_code();
+    var reporter: Reporter = .{ .host = host, .options = invocation.options };
+    const options: runtime.StartOptions = .{
+        .warn = .{ .context = &reporter, .call = report_warning },
+    };
+    var handle: runtime.Handle = undefined;
+    runtime.start(host, &container, options, &handle, diag) catch return error.StartFailed;
+    const reason = runtime.wait(&handle);
+    const code = reason.code() orelse {
+        diag.* = handle.lost_diag; // The only reason a started run has no code.
+        return error.StartFailed;
+    };
+    report_outcome(host, invocation.options, &handle, &reason);
+    return code;
 }
 
 /// Says on stderr how the container ended. Text mode names a signal that killed it (and, with
 /// --verbose, the steps that were skipped); JSON mode ends with one `container_exit` line, so a
 /// script can tell the container's exit code from zbx's own. A failed write is ignored: the
 /// exit code is the container's and there is nowhere left to say more.
-fn report_outcome(host: Host, options: Options, outcome: *const runtime.Outcome) void {
+fn report_outcome(
+    host: Host,
+    options: Options,
+    handle: *const runtime.Handle,
+    reason: *const runtime.ExitReason,
+) void {
     var buffer: [constants.output_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     if (options.output == .json) {
-        write_container_exit(&writer, outcome);
+        write_container_exit(&writer, reason);
     } else {
         if (options.verbose) {
-            for (outcome.note_slice()) |*note| {
+            for (handle.note_slice()) |*note| {
                 // Cannot fail: a note is at most 160 bytes and the buffer holds a message.
                 writer.print("zbx: note: {s}\n", .{note.slice()}) catch unreachable;
             }
         }
-        write_signal_note(&writer, outcome);
+        write_signal_note(&writer, reason);
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
 }
 
-fn write_signal_note(writer: *std.Io.Writer, outcome: *const runtime.Outcome) void {
-    const number = switch (outcome.status) {
-        .exited => return,
+fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
+    const number = switch (reason.*) {
         .signaled => |signal| signal,
+        else => return,
     };
     const code: std.os.linux.SIG = @fromBackingInt(number);
     const name = std.enums.tagName(std.os.linux.SIG, code) orelse "?";
@@ -643,16 +683,16 @@ fn write_signal_note(writer: *std.Io.Writer, outcome: *const runtime.Outcome) vo
         unreachable; // Same bound as above.
 }
 
-fn write_container_exit(writer: *std.Io.Writer, outcome: *const runtime.Outcome) void {
-    const code = outcome.exit_code();
+fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
+    const code = reason.code().?; // Only called for a command that ran.
     // Cannot fail: a short line into a buffer that holds a message.
-    switch (outcome.status) {
-        .exited => writer.print("{{\"container_exit\":{{\"code\":{d}}}}}\n", .{code}) catch
-            unreachable, // Same bound as above.
+    switch (reason.*) {
         .signaled => |number| {
             const format = "{{\"container_exit\":{{\"signal\":{d},\"code\":{d}}}}}\n";
             writer.print(format, .{ number, code }) catch unreachable; // Same bound as above.
         },
+        else => writer.print("{{\"container_exit\":{{\"code\":{d}}}}}\n", .{code}) catch
+            unreachable, // Same bound as above.
     }
 }
 

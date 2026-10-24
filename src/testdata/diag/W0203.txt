@@ -1,0 +1,6 @@
+warning[ZBX-W0203]: skipped a run record that can't be read
+  cause  2 run records were skipped; the first, 'damaged.zon', is not a valid
+         record
+  fix    look at them:   ls -l "/home/alice/.local/state/zbx/runs"
+  more   zbx explain W0203 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0203.html

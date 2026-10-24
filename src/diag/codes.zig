@@ -42,8 +42,12 @@ pub const Code = enum(u8) {
     E0201,
     E0202,
     E0203,
+    E0204,
     E0205,
     E0206,
+    W0201,
+    W0202,
+    W0203,
     B0001,
 };
 
@@ -351,6 +355,26 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0204,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "writing the id maps failed",
+        .explanation =
+        \\A container with a full range of ids has its uid and gid maps written by
+        \\the setuid helpers newuidmap and newgidmap, because only they may map ids
+        \\the user does not own. A helper could not be run, or refused the map.
+        \\
+        \\The cause names the helper and how it ended, with what it printed. A
+        \\refusal usually means the range in /etc/subuid or /etc/subgid does not
+        \\cover the ids zbx asked for, or the helper is not setuid root. "zbx doctor"
+        \\checks both (ZBX-E0105).
+        \\
+        \\zbx does not fall back to a single-id map here: it falls back only when
+        \\the helpers or ranges are missing before the container starts, and says so
+        \\(ZBX-W0201).
+        ,
+    },
+    .{
         .code = .E0205,
         .severity = .@"error",
         .blame = .environment,
@@ -381,6 +405,53 @@ pub const registry = [_]Entry{
         \\starting or ending with '-'.
         \\
         \\Leave --name out and zbx picks one: zbx- and six hex digits.
+        ,
+    },
+    .{
+        .code = .W0201,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "mapping only your own id into the container",
+        .explanation =
+        \\A rootless container can map a full range of ids (root, and 65536 more
+        \\for its other users), which needs a range in /etc/subuid and /etc/subgid
+        \\and the setuid helpers newuidmap and newgidmap. This host lacks one of
+        \\them, so zbx mapped only the container's root, to your own id, and went on.
+        \\
+        \\Everything runs, but a program in the container that switches to another
+        \\user, or owns files as one, fails: only id 0 exists inside. The warning
+        \\names what is missing and the command that fixes it; "zbx doctor" shows
+        \\the same under ZBX-E0105.
+        ,
+    },
+    .{
+        .code = .W0202,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "can't save the run record",
+        .explanation =
+        \\zbx keeps a small record of each run in its state directory
+        \\($XDG_STATE_HOME/zbx/runs, or ~/.local/state/zbx/runs): the name, the
+        \\command, the times and how it ended. This one could not be written, for
+        \\example because the disk is full, so the run goes on without it.
+        \\
+        \\"zbx bundle" and tools that look up a run by name will not find this
+        \\one. Free space, or point XDG_STATE_HOME at a directory with room.
+        ,
+    },
+    .{
+        .code = .W0203,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "skipped a run record that can't be read",
+        .explanation =
+        \\Among the records in the state directory one could not be used: it is
+        \\damaged, it was written by a newer zbx than this one, or it cannot be
+        \\read. zbx skips it and goes on; a record it cannot read never stops a run.
+        \\
+        \\The oldest records are deleted when there are more than 32, so a record
+        \\that stays unreadable goes away on its own. To keep it, move it out of
+        \\the runs directory, or run the zbx that wrote it.
         ,
     },
     .{

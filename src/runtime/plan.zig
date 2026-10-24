@@ -27,6 +27,8 @@ pub const Kind = enum {
     deny_setgroups,
     write_gid_map,
     write_uid_map,
+    run_newuidmap,
+    run_newgidmap,
     release_child,
     await_report,
     reap,
@@ -58,6 +60,7 @@ pub const Kind = enum {
 pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
+        .run_newuidmap, .run_newgidmap => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -85,10 +88,34 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// Steps of every plan: the eight of the parent, nineteen of the child that happen once, and
-/// two per device and one per link.
-pub const steps_count: u32 = 8 + 19 + 2 * constants.container_devices_count +
+/// The child's steps: nineteen that happen once, and two per device and one per link.
+pub const child_steps_count: u32 = 19 + 2 * constants.container_devices_count +
     constants.container_links_count;
+
+/// Steps of a plan with the single-id map: the parent has eight (it denies setgroups and
+/// writes both maps itself), the child has `child_steps_count`.
+pub const steps_count_single: u32 = 8 + child_steps_count;
+
+/// Steps of a plan that uses the helpers: the parent has seven (one step per helper).
+pub const steps_count_full: u32 = 7 + child_steps_count;
+
+/// How the container's ids are mapped to the host's.
+pub const Mapping = union(enum) {
+    /// Only the container's root, to the user's own id. Written directly, with setgroups denied.
+    single,
+    /// Root to the user's own id, and ids 1 to 65536 to a range of subordinate ids, written by
+    /// the setuid helpers.
+    full: Helpers,
+};
+
+pub const Helpers = struct {
+    /// Paths of `newuidmap` and `newgidmap`.
+    newuidmap: []const u8,
+    newgidmap: []const u8,
+    /// The first subordinate id of the range for users and for groups.
+    uid_start: u32,
+    gid_start: u32,
+};
 
 /// A string stored in the plan's text area. NUL-terminated there, `len` without the NUL.
 pub const Text = struct {
@@ -116,6 +143,7 @@ pub const Input = struct {
     /// The user and group ids of zbx itself, the ones the container's root maps to.
     uid: u32,
     gid: u32,
+    mapping: Mapping,
 };
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
@@ -123,6 +151,8 @@ const empty_text: Text = .{ .offset = 0, .len = 0 };
 pub const Plan = struct {
     steps: [constants.plan_steps_max]Step,
     count: u32,
+    /// Whether the ids are mapped through the helpers (`Mapping.full`).
+    full: bool,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -141,6 +171,7 @@ pub const Plan = struct {
         assert(spec.name_problem(input.name) == null);
         assert(spec.command_problem(input.command) == null);
         plan.count = 0;
+        plan.full = input.mapping == .full;
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
@@ -149,23 +180,24 @@ pub const Plan = struct {
         plan.name = plan.add_text(&.{input.name});
         plan.build_exec_image(input);
         plan.push_parent_start(input);
+        assert(plan.count == @as(u32, if (plan.full) 5 else 6));
         plan.push_child_steps(input.rootfs);
         plan.push(.await_report, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
-        assert(plan.count == steps_count);
+        assert(plan.count == plan.steps_expected());
         plan.check();
     }
 
     /// Structural invariants of a built plan, also checked by the tests and the fuzzer.
     pub fn check(plan: *const Plan) void {
-        assert(plan.count == steps_count);
+        assert(plan.count == plan.steps_expected());
         assert(plan.count <= constants.plan_steps_max);
         assert(plan.steps[0].kind == .make_pipes);
         assert(plan.steps[1].kind == .spawn);
         assert(plan.steps[plan.count - 1].kind == .reap);
         assert(plan.steps[plan.count - 2].kind == .await_report);
         // The child's steps are one contiguous run, between `release_child` and `await_report`.
-        const first_child = 6;
+        const first_child: u32 = if (plan.full) 5 else 6;
         assert(plan.steps[first_child - 1].kind == .release_child);
         for (plan.steps[0..first_child]) |step| assert(side_of(step.kind) == .parent);
         for (plan.steps[first_child .. plan.count - 2]) |step| assert(side_of(step.kind) == .child);
@@ -175,6 +207,10 @@ pub const Plan = struct {
         assert(@intFromPtr(first_argument) >= @intFromPtr(&plan.strings[0]));
         assert(@intFromPtr(first_argument) < @intFromPtr(&plan.strings[0]) + plan.strings.len);
         assert(plan.candidates_count > 0);
+    }
+
+    pub fn steps_expected(plan: *const Plan) u32 {
+        return if (plan.full) steps_count_full else steps_count_single;
     }
 
     pub fn text(plan: *const Plan, ref: Text) [:0]const u8 {
@@ -229,9 +265,20 @@ pub const Plan = struct {
     }
 
     fn push_parent_start(plan: *Plan, input: *const Input) void {
-        var line: [constants.id_map_line_bytes_max]u8 = undefined;
         plan.push(.make_pipes, empty_text, empty_text, 0);
         plan.push(.spawn, empty_text, empty_text, 0);
+        switch (input.mapping) {
+            .single => plan.push_direct_maps(input),
+            .full => |helpers| plan.push_helper_maps(input, helpers),
+        }
+        plan.push(.release_child, empty_text, empty_text, 0);
+        assert(plan.steps[plan.count - 1].kind == .release_child);
+        assert(side_of(plan.steps[plan.count - 1].kind) == .parent);
+    }
+
+    /// The parent writes the maps itself: setgroups denied first, then the group and user map.
+    fn push_direct_maps(plan: *Plan, input: *const Input) void {
+        var line: [constants.id_map_line_bytes_max]u8 = undefined;
         plan.push(.deny_setgroups, plan.add_text(&.{"deny"}), empty_text, 0);
         // Cannot fail: "0 4294967295 1\n" is 15 bytes and the buffer is 32.
         const gid_line = std.fmt.bufPrint(&line, "0 {d} 1\n", .{input.gid}) catch unreachable;
@@ -239,13 +286,43 @@ pub const Plan = struct {
         // Cannot fail: same bound as above.
         const uid_line = std.fmt.bufPrint(&line, "0 {d} 1\n", .{input.uid}) catch unreachable;
         plan.push(.write_uid_map, plan.add_text(&.{uid_line}), empty_text, 0);
-        plan.push(.release_child, empty_text, empty_text, 0);
-        assert(plan.count == 6);
-        assert(side_of(plan.steps[plan.count - 1].kind) == .parent);
+    }
+
+    /// The helpers write them: each is told the child's pid when it runs, and these words.
+    fn push_helper_maps(plan: *Plan, input: *const Input, helpers: Helpers) void {
+        var words: [constants.helper_map_bytes_max]u8 = undefined;
+        const range = constants.subid_range_min;
+        const format = "0 {d} 1 1 {d} {d}";
+        // Cannot fail: six numbers of at most ten digits and the spaces fit 64 bytes.
+        const uid_words = std.fmt.bufPrint(
+            &words,
+            format,
+            .{ input.uid, helpers.uid_start, range },
+        ) catch
+            unreachable; // Same bound as above.
+        plan.push(
+            .run_newuidmap,
+            plan.add_text(&.{helpers.newuidmap}),
+            plan.add_text(&.{uid_words}),
+            0,
+        );
+        // Cannot fail: same bound as above.
+        const gid_words = std.fmt.bufPrint(
+            &words,
+            format,
+            .{ input.gid, helpers.gid_start, range },
+        ) catch
+            unreachable; // Same bound as above.
+        plan.push(
+            .run_newgidmap,
+            plan.add_text(&.{helpers.newgidmap}),
+            plan.add_text(&.{gid_words}),
+            0,
+        );
     }
 
     fn push_child_steps(plan: *Plan, rootfs_text: []const u8) void {
-        assert(plan.count == 6); // After the parent's start.
+        assert(plan.count == @as(u32, if (plan.full) 5 else 6)); // After the parent's start.
         assert(rootfs_text.len > 0);
         const rootfs = plan.add_text(&.{rootfs_text});
         const dev = plan.add_text(&.{ rootfs_text, "/dev" });
@@ -270,7 +347,7 @@ pub const Plan = struct {
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
-        assert(plan.count == steps_count - 2); // Only the parent's two last steps remain.
+        assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
     }
 
     fn push_devices(plan: *Plan, rootfs: []const u8) void {
@@ -380,6 +457,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .deny_setgroups => "denying setgroups in the container's user namespace",
         .write_gid_map => "writing the container's gid map",
         .write_uid_map => "writing the container's uid map",
+        .run_newuidmap => "running newuidmap to write the container's uid map",
+        .run_newgidmap => "running newgidmap to write the container's gid map",
         .release_child => "letting the container continue",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
@@ -410,11 +489,12 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
 }
 
 comptime {
-    assert(steps_count <= constants.plan_steps_max);
+    assert(steps_count_single <= constants.plan_steps_max);
+    assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
     assert(links.len == constants.container_links_count);
     // The failure record names a step in one byte, and a step's kind must be nameable too.
-    assert(steps_count <= std.math.maxInt(u8));
+    assert(steps_count_single <= std.math.maxInt(u8));
     assert(std.meta.fieldNames(Kind).len <= 64);
 }
 
@@ -428,7 +508,40 @@ fn test_input(command: []const []const u8) Input {
         .term = "xterm",
         .uid = 1000,
         .gid = 1001,
+        .mapping = .single,
     };
+}
+
+const test_helpers: Helpers = .{
+    .newuidmap = "/usr/bin/newuidmap",
+    .newgidmap = "/usr/bin/newgidmap",
+    .uid_start = 100000,
+    .gid_start = 200000,
+};
+
+test "with the helpers the parent has one step per map, and the words are the ranges" {
+    // Goal: the full mapping's plan. It has one step fewer than the single-id plan (no
+    // setgroups), the helper steps come first after spawn, and each carries the helper's path and
+    // "0 <own id> 1 1 <first subordinate id> 65536".
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    input.mapping = .{ .full = test_helpers };
+    plan.build(&input);
+    try testing.expectEqual(steps_count_full, plan.count);
+    try testing.expectEqual(@as(u32, 43), plan.count);
+    try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
+    try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
+    try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
+    try testing.expectEqualStrings("/usr/bin/newuidmap", plan.text(plan.steps[2].target));
+    try testing.expectEqualStrings("0 1000 1 1 100000 65536", plan.text(plan.steps[2].source));
+    try testing.expectEqualStrings("/usr/bin/newgidmap", plan.text(plan.steps[3].target));
+    try testing.expectEqualStrings("0 1001 1 1 200000 65536", plan.text(plan.steps[3].source));
+    for (plan.steps[0..plan.count]) |step| {
+        try testing.expect(
+            step.kind != .deny_setgroups,
+        ); // Never written: the helpers need no deny.
+        try testing.expect(step.kind != .write_uid_map);
+    }
 }
 
 test "the plan has the steps in order, parent and child interleaved, and all within bounds" {
@@ -438,7 +551,7 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     var plan: Plan = undefined;
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
-    try testing.expectEqual(steps_count, plan.count);
+    try testing.expectEqual(steps_count_single, plan.count);
     try testing.expectEqual(@as(u32, 44), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
@@ -548,6 +661,12 @@ test "the longest rootfs, name, command and ids still build a valid plan" {
         .term = repeat('t', constants.term_bytes_max),
         .uid = std.math.maxInt(u32) - 1,
         .gid = std.math.maxInt(u32) - 1,
+        .mapping = .{ .full = .{
+            .newuidmap = "/usr/local/bin/newuidmap",
+            .newgidmap = "/usr/local/bin/newgidmap",
+            .uid_start = std.math.maxInt(u32) - constants.subid_range_min,
+            .gid_start = std.math.maxInt(u32) - constants.subid_range_min,
+        } },
     };
     plan.build(&input);
     for (plan.steps[0..plan.count]) |step| {
