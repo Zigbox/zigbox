@@ -74,6 +74,7 @@ jobs:
           - doctor
           - diag
           - run
+          - record
           - parse_sysctl
           - parse_kernel
           - parse_controllers
