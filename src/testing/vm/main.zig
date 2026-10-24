@@ -5,7 +5,7 @@
 //!   3. `file zbx` reports a statically linked ELF; both release binaries (x86_64 and aarch64)
 //!      are checked here, in Zig, to be static ELF files under 2 MiB.
 //! Run it with `zig build demo-m0` (KVM) or `zig build demo-m0 -Daccel=tcg` (software
-//! emulation, slow). See docs/DEMO.md.
+//! emulation, slow). See docs/demos/m0.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !u8 {
     const out = &file_writer.interface;
     defer out.flush() catch {};
     const options = parse_options(init) catch |err| {
-        try out.print("demo-m0: bad arguments ({s}); see docs/DEMO.md\n", .{@errorName(err)});
+        try out.print("demo-m0: bad arguments ({s}); see docs/demos/m0.md\n", .{@errorName(err)});
         return 2;
     };
     const started = session_mod.now_ms();

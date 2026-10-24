@@ -8,7 +8,7 @@
 //!     whatever way commands reach the guest;
 //!   - a passwordless root shell on the serial console, which the harness drives. This VM is
 //!     throwaway and has no other way in.
-//! Nothing here sets Delegate=: the demo shows what stock Ubuntu delegates (see DEMO.md).
+//! Nothing here sets Delegate=: the demo shows what stock Ubuntu delegates (see docs/demos/m0.md).
 
 const std = @import("std");
 

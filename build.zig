@@ -195,6 +195,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.addArg(flag);
         run.addFileArg(exe.getEmittedBin());
     }
-    const step = b.step("demo-m0", "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/DEMO.md)");
+    const step = b.step(
+        "demo-m0",
+        "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
+    );
     step.dependOn(&run.step);
 }
