@@ -253,6 +253,11 @@ pub const registry = [_]Entry{
         \\needs systemd.unified_cgroup_hierarchy=1 on the kernel command line. Missing
         \\controllers are fixed with a Delegate= drop-in for user@.service, a daemon-
         \\reload and a fresh login. If the check could not run, the cause says why.
+        \\
+        \\The check also asks the user's D-Bus for the manager's version: zbx makes
+        \\each container's scope there, so a missing bus socket, a bus that refuses
+        \\the user, or a bus with no systemd on it fails the check too (ZBX-E0301
+        \\to ZBX-E0304 are what a run reports for the same causes).
         ,
     },
     .{

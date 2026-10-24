@@ -78,6 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>zbx limits a container's cpu, memory and process count through cgroup v2, and asks systemd to create the container's cgroup under the user's own manager, user@UID.service. That needs cgroup v2 mounted at /sys/fs/cgroup, a systemd user manager for the user, and the cpu, memory and pids controllers delegated to it.</p>
 <p>The diagnostic says which of these is missing. A cgroup v1 or hybrid host needs systemd.unified_cgroup_hierarchy=1 on the kernel command line. Missing controllers are fixed with a Delegate= drop-in for user@.service, a daemon- reload and a fresh login. If the check could not run, the cause says why.</p>
+<p>The check also asks the user's D-Bus for the manager's version: zbx makes each container's scope there, so a missing bus socket, a bus that refuses the user, or a bus with no systemd on it fails the check too (ZBX-E0301 to ZBX-E0304 are what a run reports for the same causes).</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0103</pre>

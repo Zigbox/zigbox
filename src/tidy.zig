@@ -60,6 +60,7 @@ const shipped_files = [_][]const u8{
     "src/runtime/records.zig",
     "src/runtime/run.zig",
     "src/runtime/scope.zig",
+    "src/runtime/scope_text.zig",
     "src/runtime/session.zig",
     "src/runtime/signals.zig",
     "src/runtime/spec.zig",

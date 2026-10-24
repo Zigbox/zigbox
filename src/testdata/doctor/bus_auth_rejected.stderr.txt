@@ -1,0 +1,8 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  the bus answered 'REJECTED EXTERNAL' to EXTERNAL authentication as this
+         user: the socket may belong to another user (an inherited
+         DBUS_SESSION_BUS_ADDRESS after su or sudo)
+  fix    unset an address inherited from another user:   unset DBUS_SESSION_BUS_ADDRESS
+         or log in again as this user, through a systemd (logind) session
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html

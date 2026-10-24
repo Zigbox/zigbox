@@ -16,8 +16,23 @@ pub const Binary = struct {
     capability: ?[]const u8 = null,
 };
 
+/// What the user's bus is like on the simulated host.
+pub const BusSpec = enum {
+    /// A session bus with a systemd user manager on it, at /run/user/<uid>/bus.
+    present,
+    /// No socket: the user manager's cgroup exists but nothing listens (a login that lost its bus).
+    no_socket,
+    /// A bus with no systemd on it.
+    no_systemd,
+    /// A bus that does not accept this user.
+    auth_rejected,
+    /// Neither DBUS_SESSION_BUS_ADDRESS nor XDG_RUNTIME_DIR is set.
+    no_environment,
+};
+
 pub const Spec = struct {
     name: []const u8,
+    bus: BusSpec = .present,
     kernel: []const u8 = "6.8.0-45-generic",
     machine: []const u8 = "x86_64",
     uid: u32 = 1000,
@@ -53,6 +68,8 @@ pub const default_status =
 
 pub const Fixture = struct {
     name: []const u8,
+    bus: BusSpec,
+    environment: []const sim.EnvironmentVariable,
     files: []const File,
     uid: u32,
     kernel: []const u8,
@@ -70,6 +87,14 @@ pub const Fixture = struct {
         };
         target.seccomp_result = fixture.seccomp;
         target.probes = fixture.probes;
+        target.environment_variables = fixture.environment;
+        const model = &target.world.bus.model;
+        switch (fixture.bus) {
+            .present, .no_environment => {},
+            .no_socket => model.present = false,
+            .no_systemd => model.systemd_present = false,
+            .auth_rejected => model.auth = .reject,
+        }
     }
 };
 
@@ -136,8 +161,15 @@ pub fn build(comptime spec: Spec) Fixture {
         const copy = list;
         break :blk copy;
     };
+    const environment = comptime blk: {
+        const runtime = std.fmt.comptimePrint("/run/user/{d}", .{spec.uid});
+        const set = [1]sim.EnvironmentVariable{.{ .name = "XDG_RUNTIME_DIR", .value = runtime }};
+        break :blk set;
+    };
     return .{
         .name = spec.name,
+        .bus = spec.bus,
+        .environment = if (spec.bus == .no_environment) &.{} else &environment,
         .files = final.items[0..final.len],
         .uid = spec.uid,
         .kernel = spec.kernel,
@@ -224,6 +256,11 @@ pub const all = [_]Fixture{
     // Only cpu is missing: systemd does not delegate cpu by default on some releases.
     build(.{ .name = "cgroup_cpu_missing", .cgroup_controllers = "cpuset io memory pids\n" }),
     build(.{ .name = "cgroup_user_manager_missing", .cgroup_user = false }),
+    // The user manager's cgroup is there but its bus is not: a login that lost its session bus.
+    build(.{ .name = "bus_socket_missing", .bus = .no_socket }),
+    build(.{ .name = "bus_no_environment", .bus = .no_environment }),
+    build(.{ .name = "bus_without_systemd", .bus = .no_systemd }),
+    build(.{ .name = "bus_auth_rejected", .bus = .auth_rejected }),
     build(.{ .name = "cgroup_dir_not_owned", .cgroup_user_owner = 0 }),
     build(.{ .name = "cgroup_not_a_directory", .cgroup_user_mode = 0o100644 }),
     // The directory exists but its controllers file cannot be found.
