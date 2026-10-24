@@ -13,7 +13,7 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 | Milestone | What it adds | Status |
 | --- | --- | --- |
 | **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **Demonstrated** in CI ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)); every failure is a coded diagnostic |
-| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md) written; slice 1 of 4 started |
+| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md); slice 1 of 4 (isolation core) built and reviewed, CI pending |
 | M2 · Limits | cgroup limits, capabilities, seccomp, read-only root | Not started |
 | M3 · Store | Content-addressed, deduplicated file trees | Not started |
 | M4 · Pull | Pull and run public OCI images | Not started |
