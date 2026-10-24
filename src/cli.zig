@@ -252,8 +252,12 @@ fn missing_command(diag: *Diag, args_count: usize) ParseError {
     assert(diag.code == null);
     diag.raise(.E0002);
     diag.while_("reading the command line", .{});
-    _ = args_count;
-    diag.cause("no command was given", .{});
+    // The summary already says "no command"; the cause says what zbx actually saw.
+    if (args_count == 0) {
+        diag.cause("zbx was run with no arguments at all", .{});
+    } else {
+        diag.cause("only options were given, and the first word after them must be a command", .{});
+    }
     diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
     diag.fix(.{ .sentence = "check this host:", .command = "zbx doctor" });
     assert(diag.fixes.count == 2);
