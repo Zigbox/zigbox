@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-23 (doc rev 8). The live doc is authoritative; update this file when it changes.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 42; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -21,7 +21,7 @@ Why Zig: namespace setup (`clone3`, `unshare`, `setns`, `pivot_root`) must happe
 
 A milestone is done when its demo script runs live, start to finish, on a clean test VM, in front of someone who did not write the code. Passing unit tests is necessary but not sufficient.
 
-Each milestone has four parts:
+Each milestone below has four parts:
 
 - **Goal**: the one capability it adds, in a sentence.
 - **Scope**: what to build, and what is deliberately deferred.
@@ -31,11 +31,13 @@ Each milestone has four parts:
 Ground rules for the implementer:
 
 - Each milestone ships as a tagged release with a `DEMO.md` that a stranger can follow.
-- Error messages are part of the demo. A refused action must say what was refused and why, in one line, not an `errno` dump.
+- Error messages are part of the demo. Every failure follows the diagnostics standard below, from M0 onward.
 - Never break an earlier demo. All prior `demo-mN` tests run in CI on every change.
 - When a milestone's scope is in doubt, cut scope and keep the demo.
 
 ## Milestone map
+
+*Figure: milestone map · 9 milestones, 3 tracks (diagram in the live doc, node 24eb2c38-a0d5; not reproduced here).*
 
 M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox.
 
@@ -227,9 +229,22 @@ Each keeps the same demo-first contract; none blocks M0 to M8.
 - **S4 · Dockerfile import:** translate a common Dockerfile into the M7 build format, flagging non-hermetic steps.
 - **S5 · WASM workloads:** run a WASI component through the same CLI, store and policy.
 
+## Diagnostics: designed from the first commit
+
+Failures are a product surface, not an afterthought. The full standard is `DIAGNOSTICS.md` in both repos; the essentials:
+
+- **Coded, short, causal.** Every user-facing failure has a stable code (`ZBX-E0101`, `ZC-E0203`), a one-line summary, the real cause (not the last symptom), and a runnable fix. Never a raw stack trace or a bare Zig error name.
+- **Layered.** Default output is a few lines; `--verbose` adds the cause chain and context; `--output json` gives scripts the same structure; a redacted **bundle** (the kitchen sink) is written automatically only for internal bugs, or on request with `zbx bundle` / `zcube bundle`.
+- **Correct blame.** Each diagnostic says whether the cause is the user, the host, an external service, or our bug. Only bugs ask for a report.
+- **One model everywhere.** The CLI, the Zigcube API and `zcube why` render the same structure, so a failure on a remote node reads exactly like a local one.
+- **In Zig:** functions take a `*Diag` collector alongside their plain error return; text is formatted only at the CLI or API boundary; codes live in one registry checked at build time and generate the docs pages at `site/errors/`.
+- **Tested.** Golden tests for every code, demo assertions on codes, and a CI check that no user-facing output contains a stack trace or an unredacted secret.
+
+The M0 acceptance criteria therefore include the diagnostics machinery itself: the registry, `zbx explain`, the output modes and the bundle.
+
 ## Non-goals
 
-These are out of scope for M0 to M8. Raise a change to the doc before building any of them.
+These are out of scope for M0 to M8. Raise a change to this doc before building any of them.
 
 - **Non-Linux hosts.** No macOS or Windows support; on those, run Zigbox inside a Linux VM.
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
@@ -265,3 +280,361 @@ These are out of scope for M0 to M8. Raise a change to the doc before building a
 - [ ] Chunking for M3: whole-file hashing first, or content-defined chunking from the start? Whole-file is simpler; chunking matters for large files that change slightly.
 - [ ] Should the store be shareable across users on one host, or strictly per-user?
 - [ ] Final project name and CLI name (`zigbox` / `zbx` are placeholders).
+
+## Part II · Zigcube: orchestrating Zigbox
+
+Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster.
+
+Principles it adds on top of Part I:
+
+1. **One thin node agent.** `zcube-agent` links Zigbox as a library and runs rootless. No CRI, no containerd, no shims.
+2. **Store-aware scheduling and distribution.** The scheduler knows which file chunks each node holds and prefers nodes where most of an image is already local. Nodes fetch missing chunks from peers before the registry.
+3. **Trust checked twice.** The control plane admits only digests that satisfy policy; every node re-verifies signature and policy before exec, so a compromised control plane cannot make a node run unsigned code.
+4. **Identity-based networking, default deny.** Workloads talk only along declared grants (`web → db:5432`), authenticated by workload identity, not by IP address.
+5. **Two layers.** An application primitive (`service`: image, replicas, ports, state, secrets) for most users, compiled down to lower-level placement objects that operators can still touch.
+6. **Explainable reconciliation.** Every controller decision is recorded with its cause, so `zcube why <thing>` answers "why is this not running" in one command.
+7. **Proven storage for the control plane.** Desired and observed state live behind a narrow, pluggable versioned key-value interface (get, list, compare-and-swap, gap-free watch, leases), backed by an existing database rather than a hand-written one: Postgres first (OrioleDB for the hot observed-state tables), SQLite for development, others such as etcd or FoundationDB if Postgres HA disappoints; the novelty budget goes to the agent, scheduler and distribution.
+
+### Architecture
+
+*Figure: ZigCube architecture · control plane, 3 nodes, registry (diagram in the live doc, node 6ca653d0-61c0; not reproduced here).*
+
+The control plane writes desired state and reads back what agents observe; each node runs one rootless agent over Zigbox and its own chunk store, fetching from peers before falling back to the registry.
+
+### When Zigcube starts
+
+The control plane needs no containers, so it starts on day one behind a `Runtime` interface, developed against a fake runtime that runs plain host processes. The real coupling point is Zigbox M1: from then on Zigbox must expose a stable runtime library API, which the agent links. Each C-milestone waits only on specific Zigbox milestones:
+
+| Zigcube | Needs from Zigbox | Why |
+| --- | --- | --- |
+| C0 Loop | M2 (for the real runtime) | Exit reasons and cgroup scopes, to tell OOM from crash and re-adopt cleanly |
+| C1 Fleet | M2 | Resource fit needs real CPU and memory limits |
+| C2 Swarm | M3, and M4 for the demo | Peer fetch and locality are built on the chunk store |
+| C3 Rollout | M4 | Health checks and rollouts against real images |
+| C4 Mesh | M5 | Builds on Zigbox's network namespaces and grants |
+| C5 Edge | C4 | Nothing new from Zigbox |
+| C6 Trust | M8 | Node-side signature checks |
+| C7 State | M6 | Named state volumes |
+| C8 Jobs | M7 | Cluster builds are M7 steps |
+
+The Zigbox M3 store is shared design work: it must expose chunk listings and verified fetch-by-hash from the start, or C2 forces a rework. The coding handoff for C0 and C1 lives in the zigcube repo as `HANDOFF.md`.
+
+### Zigcube milestones
+
+The demo environment is a set of three to five QEMU VMs on one host, created by a script checked into the repo, so any presenter can rebuild it from nothing.
+
+#### C0 · Loop: one node keeps a promise
+
+**Goal:** declare a service, and a controller keeps reality matching it on a single node.
+
+**Scope:** `zcube-server` (API plus controllers) backed by Postgres; `zcube-agent` on the same VM, linking Zigbox; a `service` object (image digest, replicas, command, env); `zcube apply`, `zcube get`, `zcube why`. Agent reports observed state; controller reconciles. Deferred: multiple nodes, networking.
+
+**Demo script:**
+
+1. `zcube apply hello.zon` with `replicas = 3`. `zcube get service hello` shows 3 running within seconds.
+2. On the VM, `kill -9` one of the processes. A replacement starts; `zcube get` shows 3 again.
+3. Edit the file to `replicas = 5`, apply: two more start. Back to 2: three stop.
+4. Apply a service whose digest does not exist. `zcube why service broken` prints the causal chain: `pending ← agent: image not found ← digest sha…`.
+
+**Acceptance criteria:**
+
+- [ ] Restarting `zcube-server` mid-demo changes nothing; restarting the agent re-adopts running containers instead of duplicating them.
+- [ ] Every controller action is recorded with its cause and visible to `zcube why`.
+
+#### C1 · Fleet: placement and failover
+
+**Goal:** workloads spread across nodes and survive the loss of one.
+
+**Scope:** node registration with leases; a scheduler with resource fit (CPU, memory) and spread; node failure detection; rescheduling. `zcube get nodes`.
+
+**Demo script:**
+
+1. Three VMs join. `zcube get nodes` shows them with capacity.
+2. Apply `hello` with `replicas = 6`. `zcube get ``replica``s -o wide` shows two per node.
+3. Power off one VM from the host. Within the lease timeout, its two replicas are marked lost and restarted on the survivors.
+4. Power it back on. It rejoins empty; `zcube why node vm3` explains why nothing moved back (no rebalancing by default).
+
+**Acceptance criteria:**
+
+- [ ] Lease timeout is configurable and printed at failover.
+- [ ] A partitioned node stops its workloads when its lease expires, so a replica never runs twice for long.
+
+#### C2 · Swarm: store-aware distribution
+
+**Goal:** images reach nodes fast because nodes share chunks and the scheduler prefers nodes that already have them.
+
+**Scope:** agent advertises a compact summary of its local store (for example a Bloom filter of chunk hashes per image tree); scheduler adds a locality score; agents fetch chunks from peers before the registry, verifying every chunk by hash. `zcube stats pull` reports bytes by source.
+
+**Demo script:**
+
+1. Deploy `python-app v1` to three nodes; `zcube stats pull` shows registry bytes once, then peer bytes for the other two nodes.
+2. Deploy `v2`, which changes one source file. Each node transfers only that file's chunks; the stats show kilobytes, not hundreds of megabytes.
+3. Block registry access from VM3 with a host firewall rule, add a replica there: it starts anyway, entirely from peers.
+4. Add a fourth empty node and a new replica: the scheduler picks a warm node and `zcube why` names locality as the reason.
+
+**Acceptance criteria:**
+
+- [ ] A peer serving a corrupted chunk is detected by hash, skipped and reported.
+- [ ] Locality never overrides resource fit or spread constraints.
+
+#### C3 · Rollout: safe updates and automatic rollback
+
+**Goal:** changing a service's image rolls out gradually, gated by health, and undoes itself on failure.
+
+**Scope:** readiness and liveness checks (HTTP, TCP, command); rolling update with surge and unavailable limits; automatic rollback when new replicas fail health; `zcube history service <name>` and `zcube rollback`.
+
+**Demo script:**
+
+1. A load generator hits `hello` continuously and prints error counts.
+2. Roll out `v2`: replicas replace one by one; zero errors on the load generator.
+3. Roll out `v3-broken`, whose health check fails. The rollout stops after the first replica, rolls back, and `zcube why` names the failing check.
+4. `zcube history service hello` lists v1, v2, v3 (rolled back), with digests and who applied each.
+
+**Acceptance criteria:**
+
+- [ ] No request errors during a healthy rollout at the demo load.
+- [ ] Rollback restores the previous digest exactly, never "latest".
+
+#### C4 · Mesh: grants between services
+
+**Goal:** services find each other by name, talk over authenticated encrypted links, and only along declared grants.
+
+**Scope:** WireGuard tunnels between nodes; cluster DNS for service names; per-workload identity issued by the control plane and bound to service name plus image digest; mutual TLS between workloads (or WireGuard-level identity, decided at C4 start); grants such as `web → db:5432` compiled into per-node rules. Default deny.
+
+**Demo script:**
+
+1. Deploy `web` and `db` on different nodes, with the grant `web → db:5432`. `web`'s page shows data from `db`.
+2. Exec into a third service `batch` and try `db:5432`: refused, and `zcube why` names the missing grant.
+3. Add the grant `batch → db:5432` live; the same call now succeeds without restarting anything. Remove it: cut off again.
+4. Capture traffic between nodes with `tcpdump` on the host: only encrypted packets.
+
+**Acceptance criteria:**
+
+- [ ] Grants change within seconds, cluster-wide, without restarts.
+- [ ] A workload's identity changes when its digest changes, so a grant can be scoped to signed versions.
+
+#### C5 · Edge: public HTTPS
+
+**Goal:** a service gets a public HTTPS address with one line of config.
+
+**Scope:** an edge proxy role on chosen nodes; `public = "app.example.dev"` on a service; automatic ACME certificates; routing to healthy replicas only; edge traffic enters the mesh through a grant like any other caller.
+
+**Demo script:**
+
+1. Add `public = "hello.<demo-domain>"` to the service, apply.
+2. From a laptop outside the cluster, open the URL: valid certificate, the hello page.
+3. Roll out a new version during a browser refresh loop: no errors, the new version appears.
+4. Remove the `public` line: the URL stops answering, certificate retained for reuse.
+
+**Acceptance criteria:**
+
+- [ ] Certificates renew automatically and are stored encrypted in the control plane.
+- [ ] The edge can only reach services that declare `public`.
+
+#### C6 · Trust: policy at admission and on every node
+
+**Goal:** the cluster runs only signed, policy-compliant images, even if the control plane is compromised.
+
+**Scope:** cluster policy (trusted keys, required provenance, allowed source repositories); admission check in `zcube-server`; independent re-check in `zcube-agent` before exec using a node-local copy of trusted keys; refusals reported back with cause.
+
+**Demo script:**
+
+1. `zcube apply` a service with an unsigned image: refused at admission, naming the policy rule.
+2. Simulate a compromised control plane: edit the database row directly to point the service at an unsigned digest.
+3. The agents refuse to run it; `zcube why` shows `refused by node policy` on every node; the old version keeps serving.
+4. Sign the image with a trusted key and apply: it rolls out.
+
+**Acceptance criteria:**
+
+- [ ] Node trust configuration cannot be changed through the control plane API.
+- [ ] Refusal never takes down the currently running, valid version.
+
+#### C7 · State: stateful services that survive a node
+
+**Goal:** a service with declared state recovers on another node after its node dies, with a known, bounded data loss.
+
+**Scope:** Zigbox named state volumes placed by the scheduler (a stateful replica is pinned to the node holding its state); periodic snapshots of state shipped to object storage; on node loss, restore the latest snapshot onto a new node and restart there. Recovery point equals the snapshot interval, stated in the spec. Deferred: synchronous replication.
+
+**Demo script:**
+
+1. Deploy Postgres with `state = pgdata`, `snapshot_every = "1m"`. Insert a row with a timestamp each second from a client.
+2. Power off its node.
+3. Within the lease timeout plus restore time, Postgres runs on another node. The client reconnects; the last row before failure is at most about one minute old.
+4. `zcube why service pg` shows the failover chain and the snapshot it restored.
+
+**Acceptance criteria:**
+
+- [ ] A stateful replica never runs on two nodes at once (fencing via leases, verified by test).
+- [ ] Snapshot restore is tested in CI from a cold cluster.
+
+#### C8 · Jobs: batch work and cluster builds
+
+**Goal:** the cluster runs finite jobs, including Zigbox M7 builds, sharing one build cache.
+
+**Scope:** a `job` object (run to completion, retries, deadlines); gang scheduling (all tasks start together or none do); M7 build steps dispatched as jobs across nodes, with outputs in the shared chunk store as a cluster-wide cache.
+
+**Demo script:**
+
+1. `zcube build` a project with independent steps: `zcube get jobs` shows steps running in parallel on different nodes.
+2. A second developer builds the same commit: every step is a cache hit; the result digest is identical.
+3. Submit a 4-task gang job on a cluster with room for only 3: it waits rather than starting 3; free a node and all 4 start together.
+
+**Acceptance criteria:**
+
+- [ ] Cluster-built digests match local `zbx build` digests for the same inputs.
+- [ ] A failed task retries within its budget, then fails the job with the cause recorded.
+
+#### Zigcube stretch milestones
+
+- **CS1 · Kubernetes API facade:** enough of the Kubernetes API that `kubectl get pods` and simple Deployments work, translated to Zigcube objects.
+- **CS2 · Cells:** many small clusters managed as one fleet, with services placed across cells.
+- **CS3 · Tenant isolation:** tenants pinned to microVM isolation (Zigbox S1), with separate keys and grants.
+- **CS4 · Accelerators:** GPU allocation and topology-aware gang scheduling for training jobs.
+
+### Zigcube non-goals, risks and open questions
+
+**Non-goals for C0 to C8:**
+
+- Kubernetes API compatibility (stretch CS1 only).
+- Clusters beyond a few hundred nodes; scale comes later through cells (CS2).
+- A custom consensus store. The control plane uses an existing database.
+- Multi-region active-active control planes.
+- Synchronous replication for stateful services; C7 is snapshot-based with a stated recovery point.
+
+**Risks:**
+
+| Risk | Where it bites | Mitigation |
+| --- | --- | --- |
+| Control-plane store choice limits scale or watch performance | C0 onward | Hide it behind a narrow storage interface; benchmark watch fan-out at C1 |
+| Split-brain runs a replica twice | C1, C7 | Lease-based fencing; agents stop work when their lease expires; partition tests in CI |
+| Peer chunk fetch adds latency or load on busy nodes | C2 | Bandwidth caps per node; registry fallback after a timeout |
+| Identity and mTLS design is easy to get subtly wrong | C4, C6 | Reuse proven libraries and an existing identity format such as SPIFFE IDs; external review before C6 |
+| Demo cluster on one host hides real network behaviour | C1 to C5 | Add a netem-based latency and packet-loss profile to the demo VMs |
+
+**Open questions:**
+
+- [ ] Control-plane store, decided: Postgres, with OrioleDB (`USING orioledb`) for the hot, update-heavy observed-state tables and plain heap for the rest. FoundationDB rejected as too hard to operate. Open: fall back to all-heap if OrioleDB is still alpha or lacks a needed feature when C0 starts.
+- [ ] Is the control plane also written in Zig, or in a language with a richer server ecosystem, keeping Zig for the agent and runtime?
+- [ ] Service config format: same as the M7 build file, so one language describes build and run?
+- [ ] Workload identity at C4: mTLS per connection, or identity carried at the WireGuard layer?
+
+## Part III · The ecosystem: how Zigbox wins people, not just benchmarks
+
+The goal is not to replace Docker. It is to become the secure, reproducible runtime that security-minded teams choose, while staying compatible enough that switching costs nothing. Ecosystems tip when a niche grows large enough that the default starts to look risky.
+
+Three precedents set the rules:
+
+| Project | Why it won or lost | Rule we take from it |
+| --- | --- | --- |
+| Docker | A five-minute demo (`docker run`) and Docker Hub's catalogue of ready-made images | Win the first five minutes; treat the catalogue as the product |
+| Kubernetes | Given to a neutral foundation, so rival vendors could invest; plugin interfaces (CNI, CSI, CRI) let others build businesses on it | Neutral ownership early; stable seams for others to profit from |
+| Nomad | Cleaner design, but single-vendor, and the owner's later licence change confirmed users' fears | Never be a project people fear depending on |
+
+Our wedge is **provenance by construction**: every image reproducibly built, signed and traceable, in one tool. Supply-chain regulation (the EU Cyber Resilience Act, US federal SBOM and attestation requirements) gives organizations a reason to care; the developer experience gives individuals a reason to try it. We ride existing gravity at the edges (OCI images from M4, a Kubernetes API facade at CS1) and differ inside.
+
+### Ecosystem roadmap
+
+*Figure: ecosystem roadmap · 4 phases, 4 gates (diagram in the live doc, node f290429c-f927; not reproduced here).*
+
+Each phase rides on a block of engineering milestones, and the next phase starts only when its gate, set out below, is met.
+
+### The four phases
+
+Gate numbers are first-guess targets to calibrate after Phase 1, not commitments. A phase ends when its gate is met, not on a date.
+
+#### Phase 1 · Prove (Zigbox M0 to M4)
+
+**Goal:** make people who see it want to try it.
+
+**Who we win:** the Zig community first; then engineers who already believe in hermetic builds (Nix users); then curious container people.
+
+**Actions:**
+
+- Build in public: every milestone demo becomes a short video and a written post ("A rootless container in 400 lines of Zig", "Pulling Python with most of it already on disk").
+- Apache 2.0 from the first commit, with a public no-relicensing pledge in the README.
+- Show up where the beachhead gathers: Zig meetups and online communities, FOSDEM's container devroom, Hacker News launch at M4.
+- Ask two or three respected container, Podman or Nix engineers for a public design critique of Part I.
+
+**Gate to Phase 2:** the M4 demo is published; a stranger can go from zero to `zbx run python` in under five minutes using only the README; roughly 1,000 GitHub stars and 20 people outside the project who have run it and reported back.
+
+#### Phase 2 · Recruit (Zigbox M5 to M8)
+
+**Goal:** turn watchers into contributors and first users.
+
+**Who we win:** contributors; platform and security teams willing to try it in staging.
+
+**Actions:**
+
+- Open an RFC process: design changes are proposed and decided in public.
+- Keep the codebase readable in a weekend; curate good-first-issues; review pull requests within one working day.
+- A contributor guide that explains the architecture with the same diagrams as this doc.
+- First conference talks built around the M7 and M8 demos ("the build that cannot lie", "the runtime that refuses unsigned code").
+- Publish a security-team brief mapping Zigbox features to supply-chain requirements.
+
+**Gate to Phase 3:** at least 10 outside contributors with merged changes; 3 teams running it in staging or CI and willing to say so publicly; one outside maintainer with commit rights.
+
+#### Phase 3 · Ecosystem (Zigcube C0 to C4, plus the catalogue)
+
+**Goal:** give other people and companies a reason to build on it.
+
+**Who we win:** tool builders and vendors; teams that want orchestration.
+
+**Actions:**
+
+- Freeze and document the extension seams (below) with a compatibility policy.
+- Launch the verified catalogue: common base images reproducibly built and signed, verifiable by anyone; explore a partnership with an existing signed-image provider rather than building it alone.
+- Run Zigcube's C2 demo (images that are mostly already on the cluster) as the flagship talk.
+- Pair with one or two early adopters to publish case studies.
+
+**Gate to Phase 4:** the first third-party plugin in real use; engineers from at least one other company contributing regularly; the catalogue covers the 20 most-used base images.
+
+#### Phase 4 · Neutralize (Zigcube C5 to C8 and CS1)
+
+**Goal:** make the project safe for anyone to bet a company on.
+
+**Who we win:** larger organizations and their procurement and security reviewers.
+
+**Actions:**
+
+- Apply to a neutral foundation (a CNCF Sandbox application is the obvious path) and move the trademark there.
+- Publish conformance tests so third parties can certify compatible implementations and distributions.
+- Ship the Kubernetes API facade (CS1) so existing tooling works on day one.
+- Founders' commercial offering (hosted fleets or support) launched, with the open-source boundary stated plainly.
+
+**Gate (steady state):** foundation acceptance; maintainers from at least two companies besides the founders'; one vendor shipping a commercial product built on Zigbox or Zigcube.
+
+### Standing commitments
+
+These hold in every phase and are stated publicly from day one, because trust is cheaper to keep than to rebuild.
+
+- **Licence:** Apache 2.0 for everything in Parts I and II, with a written pledge never to relicense. No contributor licence agreement that would make relicensing possible; use a Developer Certificate of Origin sign-off instead.
+- **Governance:** public RFCs for design changes; a maintainers file naming who decides what; the path to a neutral foundation published in Phase 1, even though the application waits for Phase 4.
+- **Extension seams:** stable, versioned interfaces where others can build products:
+
+| Seam | What plugs in | First needed at |
+| --- | --- | --- |
+| Isolation backend | Namespaces, microVMs, WASM | Zigbox S1, S5 |
+| Network | Rootless user-mode networking, mesh dataplanes | Zigbox M5, Zigcube C4 |
+| State | Volume drivers, snapshot targets | Zigbox M6, Zigcube C7 |
+| Policy | Admission and run-time policy engines | Zigbox M8, Zigcube C6 |
+| Registry and store | Registries, chunk caches, mirrors | Zigbox M4, Zigcube C2 |
+
+- **Catalogue:** verified base images are built from public build files on public infrastructure, so anyone can reproduce the digest. The catalogue is a commons, never a paywall.
+- **Business model:** the founders may sell hosted Zigcube fleets and support. The open-source runtime, orchestrator and catalogue stay complete and free; no feature that security or correctness depends on is ever paid-only.
+
+### Ecosystem risks and open questions
+
+| Risk | Mitigation |
+| --- | --- |
+| Seen as a hobby rewrite of Docker | Lead every message with the wedge (provenance by construction), never with "Docker in Zig" |
+| Zig's pre-1.0 status scares organizations | Ship static binaries so users never touch Zig; publish the version-pinning policy |
+| Founder bottleneck on reviews and decisions | Second maintainer by the Phase 2 gate; RFCs decided by maintainers, not one person |
+| Incumbents add the same features | Compete on coherence and defaults, not on any single feature; stay compatible so adopters lose nothing |
+| Commercial offering erodes community trust | Standing commitments published in Phase 1; boundary of the paid offering stated before it launches |
+
+**Open questions:**
+
+- [ ] Final names: is "Zigbox" too tied to Zig for organizations that do not care about the language? (Zigcube likewise.)
+- [ ] Which signed-image provider to approach for the catalogue partnership, and when?
+- [ ] Which foundation: CNCF, or a smaller neutral home first?
+- [ ] Should the security-team brief in Phase 2 map to specific frameworks (SLSA levels, CRA obligations) and get an outside review?
