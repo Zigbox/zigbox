@@ -40,13 +40,13 @@ pub fn main(init: std.process.Init) !u8 {
     assert(failed <= checked);
     try out.flush();
     if (checked == 0) return usage(out);
-    return if (failed == 0) constants.exit_ok else constants.exit_failed;
+    return if (failed == 0) constants.tool_exit_ok else constants.tool_exit_failed;
 }
 
 fn usage(out: *std.Io.Writer) u8 {
     out.writeAll("usage: size_check <limit_bytes> <file>...\n") catch {}; // Nowhere else to report.
     out.flush() catch {}; // Same.
-    return constants.exit_usage;
+    return constants.tool_exit_usage;
 }
 
 test "the limit is exclusive at the boundary" {

@@ -1,0 +1,14 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  systemd starts user@0.service when the user has a login session or
+         lingering enabled, and neither is active
+  fix    keep the manager running:   sudo loginctl enable-linger $(id -un)
+         or log in through a systemd (logind) session, such as ssh or a console
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html
+
+error[ZBX-E0105]: uid and gid mapping is not set up
+  cause  root (uid 0); no subuid range of 65536 ids (largest: 0); no subgid
+         range of 65536 ids (largest: 0)
+  fix    give this user id ranges:   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+  more   zbx explain E0105 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0105.html

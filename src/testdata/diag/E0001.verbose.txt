@@ -1,0 +1,7 @@
+error[ZBX-E0001]: unknown command
+  while  reading the command line
+  cause  'frobnicate' is not a zbx command
+  arg    frobnicate
+  fix    see the commands:   zbx help
+  more   zbx explain E0001
+  docs   https://zigbox.github.io/zigbox/errors/E0001.html

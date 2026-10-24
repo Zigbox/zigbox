@@ -1,0 +1,5 @@
+error[ZBX-E0005]: option has a missing or invalid value
+  cause  --output takes text or json, not 'xml'
+  fix    choose text or json:   zbx --output json doctor
+  more   zbx explain E0005 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0005.html

@@ -1,0 +1,8 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  a cgroup is a directory, so this path cannot be the cgroup systemd
+         delegates to the user
+  fix    create the drop-in directory:   sudo mkdir -p /etc/systemd/system/user@.service.d
+         delegate the controllers:       printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+         reload, then log in again:      sudo systemctl daemon-reload
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html

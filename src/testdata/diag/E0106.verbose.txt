@@ -1,0 +1,9 @@
+error[ZBX-E0106]: seccomp is not available
+  while  running the seccomp check of zbx doctor
+  cause  the seccomp check could not run: prctl(PR_GET_SECCOMP) failed: this
+         kernel does not support it (ENOSYS)
+  kernel 6.8.0-45-generic
+  fix    see how this kernel was built:   grep -E 'CONFIG_SECCOMP(_FILTER)?=' /boot/config-$(uname -r)
+         use a kernel built with CONFIG_SECCOMP=y
+  more   zbx explain E0106
+  docs   https://zigbox.github.io/zigbox/errors/E0106.html

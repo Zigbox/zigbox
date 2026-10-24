@@ -31,10 +31,16 @@ pub const Faults = struct {
     short_read_per_mille: u16 = 0,
     write_error_per_mille: u16 = 0,
     short_write_per_mille: u16 = 0,
+    /// Limits `write_error_per_mille` and `short_write_per_mille` to one stream; null means
+    /// both. Lets a test fail stdout while stderr still works, as `zbx help > /dev/full` does.
+    write_fault_stream: ?host.Stream = null,
     interrupt_per_mille: u16 = 0,
     /// One-shot: the call whose zero-based index equals this fails with `fail_call_error`,
     /// whatever its kind. Lets a test walk a failure across every step of a sequence.
     fail_call_index: ?u32 = null,
+    /// The errno a `write_error_per_mille` fault reports (default ENOSPC). Mapped to a
+    /// `host.Error` by the same function the real host uses, so EBADF becomes `IoFailed`.
+    write_errno: u16 = 28,
     fail_call_error: host.Error = error.IoFailed,
 };
 
@@ -62,6 +68,10 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// The errno of the most recent call, 0 if it succeeded (`Host.last_errno`).
+    errno_last: u16,
+    /// Whether NO_COLOR is set in the simulated environment.
+    no_color_value: bool,
     /// Error results injected so far, split so tests can reason about what surfaced: `hard`
     /// errors (anything but EINTR) always reach the caller; interrupts may be absorbed by the
     /// retry loop. Short reads and writes are not errors and are not counted.
@@ -89,6 +99,8 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.errno_last = 0;
+        sim.no_color_value = false;
         sim.hard_errors_injected = 0;
         sim.interrupts_injected = 0;
         sim.open_files = @splat(null);
@@ -134,6 +146,8 @@ pub const HostSim = struct {
         .read_capability = read_capability,
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
+        .no_color = no_color,
+        .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
     };
@@ -150,18 +164,60 @@ pub const HostSim = struct {
         const index = sim.call_count;
         assert(index < std.math.maxInt(u32));
         sim.call_count += 1;
+        sim.errno_last = 0;
         if (sim.faults.fail_call_index) |fail_index| {
             if (fail_index == index) return sim.inject(sim.faults.fail_call_error);
         }
     }
 
+    /// The errno a real kernel would have reported for `err`, for errors the simulator injects.
+    fn errno_of(err: host.Error) u16 {
+        const errno: u16 = switch (err) {
+            error.NotFound => 2,
+            error.Interrupted => 4,
+            error.WouldBlock => 11,
+            error.OutOfMemory => 12,
+            error.AccessDenied => 13,
+            error.NoSpace => 28,
+            error.PathTooLong => 36,
+            error.Unsupported => 38,
+            error.NoData => 61,
+            error.FileTooLarge => 34,
+            error.IoFailed, error.InvalidPath, error.Stalled => 5,
+        };
+        // Pair assertion with the shared mapping: the errno means this error to the real host.
+        switch (err) {
+            error.InvalidPath, error.Stalled => {},
+            else => assert(host.error_for_errno(errno) == err),
+        }
+        return errno;
+    }
+
+    /// Injects a failure with a specific errno; the error is what the real host would derive.
+    fn inject_errno(sim: *HostSim, errno: u16) host.Error {
+        const err = sim.inject(host.error_for_errno(errno));
+        sim.errno_last = errno;
+        return err;
+    }
+
     /// Records an injected error result and returns it.
     fn inject(sim: *HostSim, err: host.Error) host.Error {
+        sim.errno_last = errno_of(err);
         if (err == error.Interrupted) {
             sim.interrupts_injected += 1;
         } else {
             sim.hard_errors_injected += 1;
         }
+        return err;
+    }
+
+    /// A failure the model itself produces (a missing file, an unreadable one): it carries the
+    /// errno the real kernel would report, so diagnostics can name it, but it is not counted
+    /// as an injected fault.
+    fn natural(sim: *HostSim, err: host.Error) host.Error {
+        assert(err != error.Interrupted); // Interrupts are injected faults, never natural.
+        sim.errno_last = errno_of(err);
+        assert(sim.errno_last != 0);
         return err;
     }
 
@@ -191,15 +247,15 @@ pub const HostSim = struct {
 
         for (sim.files, 0..) |file, file_index| {
             if (!std.mem.eql(u8, file.path, path)) continue;
-            if (!file.readable) return error.AccessDenied;
+            if (!file.readable) return sim.natural(error.AccessDenied);
             for (&sim.open_files, 0..) |*slot, slot_index| {
                 if (slot.* != null) continue;
                 slot.* = .{ .file_index = @intCast(file_index), .offset = 0 };
                 return @intCast(slot_index);
             }
-            return error.OutOfMemory; // Out of simulated descriptors (EMFILE-like).
+            return sim.natural(error.OutOfMemory); // Out of simulated descriptors (EMFILE-like).
         }
-        return error.NotFound;
+        return sim.natural(error.NotFound);
     }
 
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
@@ -238,10 +294,16 @@ pub const HostSim = struct {
         assert(bytes.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
-        if (sim.roll(sim.faults.write_error_per_mille)) return sim.inject(error.NoSpace);
+        const faulted = sim.faults.write_fault_stream == null or
+            sim.faults.write_fault_stream.? == stream;
+        if (faulted) {
+            if (sim.roll(sim.faults.write_error_per_mille)) {
+                return sim.inject_errno(sim.faults.write_errno);
+            }
+        }
 
         var count: u32 = @intCast(bytes.len);
-        const short = sim.roll(sim.faults.short_write_per_mille);
+        const short = faulted and sim.roll(sim.faults.short_write_per_mille);
         if (short) {
             if (count > 1) count = sim.prng.random().intRangeAtMost(u32, 1, count - 1);
         }
@@ -277,7 +339,7 @@ pub const HostSim = struct {
         assert(path.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
-        const file = sim.find(path) orelse return error.NotFound;
+        const file = sim.find(path) orelse return sim.natural(error.NotFound);
         return .{ .mode = file.mode, .uid = file.uid };
     }
 
@@ -291,8 +353,8 @@ pub const HostSim = struct {
         assert(buffer.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
-        const file = sim.find(path) orelse return error.NotFound;
-        const value = file.capability orelse return error.NoData;
+        const file = sim.find(path) orelse return sim.natural(error.NotFound);
+        const value = file.capability orelse return sim.natural(error.NoData);
         if (value.len > buffer.len) return error.FileTooLarge;
         @memcpy(buffer[0..value.len], value);
         return @intCast(value.len);
@@ -302,13 +364,23 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
-        return sim.seccomp_result;
+        return sim.seccomp_result catch |err| sim.natural(err);
     }
 
     fn is_terminal(context: *anyopaque, stream: host.Stream) bool {
         const sim = from_context(context);
         _ = stream;
         return sim.terminal;
+    }
+
+    fn last_errno(context: *anyopaque) u16 {
+        const errno = from_context(context).errno_last;
+        assert(errno < 4096);
+        return errno;
+    }
+
+    fn no_color(context: *anyopaque) bool {
+        return from_context(context).no_color_value;
     }
 
     fn uid(context: *anyopaque) u32 {
@@ -321,11 +393,11 @@ pub const HostSim = struct {
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         switch (kind) {
             .userns => {
-                if (sim.probes.userns_error) |err| return err;
+                if (sim.probes.userns_error) |err| return sim.natural(err);
                 return sim.probes.userns;
             },
             .overlay => {
-                if (sim.probes.overlay_error) |err| return err;
+                if (sim.probes.overlay_error) |err| return sim.natural(err);
                 return sim.probes.overlay;
             },
         }

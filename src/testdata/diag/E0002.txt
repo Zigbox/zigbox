@@ -1,0 +1,6 @@
+error[ZBX-E0002]: no command given
+  cause  zbx was run with no arguments at all
+  fix    see the commands:   zbx help
+         check this host:    zbx doctor
+  more   zbx explain E0002 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0002.html

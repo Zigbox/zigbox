@@ -35,6 +35,12 @@ const shell_allowlist = [_][]const u8{};
 /// exempt from the number.
 const shipped_files = [_][]const u8{
     "src/cli.zig",
+    "src/diag/codes.zig",
+    "src/diag/diag.zig",
+    "src/diag/errors.zig",
+    "src/diag/explain.zig",
+    "src/diag/panic.zig",
+    "src/diag/render.zig",
     "src/doctor.zig",
     "src/host.zig",
     "src/host_real.zig",

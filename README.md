@@ -8,11 +8,11 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 
 ## Status
 
-*As of 2026-10-23. No milestone is demonstrated in CI yet. M0's demo has passed twice, independently, in a fresh Ubuntu 24.04 VM under software emulation (TCG); the CI run with KVM is the remaining step.*
+*As of 2026-10-24. **M0 is demonstrated:** every slice is green in CI, and `demo-m0` passed in an Ubuntu 24.04 VM with KVM ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)). The owner tags `v0.0.0-m0` after watching the demo. M1 is next.*
 
 | Milestone | What it adds | Status |
 | --- | --- | --- |
-| **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **In progress**: all three slices built and reviewed; demo passes under TCG; CI not yet run |
+| **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **Demonstrated** in CI ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)); every failure is a coded diagnostic |
 | M1 · Shell | Run a shell in a rootless, isolated root filesystem | Not started |
 | M2 · Limits | cgroup limits, capabilities, seccomp, read-only root | Not started |
 | M3 · Store | Content-addressed, deduplicated file trees | Not started |
@@ -25,15 +25,17 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 
 ### M0 in detail
 
-M0 is built in three slices. Each is reviewed adversarially before it is pushed.
+M0 was built in five slices. Each is reviewed adversarially before it is pushed.
 
 | Slice | Contents | Status |
 | --- | --- | --- |
 | 1 · Foundations | Zig 0.17.0 pinned; `build`, `test`, `tidy`, `fuzz` and `release` steps; limits in `src/constants.zig`; the host interface (`src/host.zig`) with real and simulated implementations; `zbx --version` and `zbx help`; the style checker; the seeded fuzz runner; release size gate (under 2 MiB) | **Built and reviewed.** Unit, snapshot and fuzz tests pass. Release binaries: x86_64 305 KB, aarch64 214 KB (stripped, static, ReleaseSafe). |
 | 2 · Doctor logic | The six `zbx doctor` checks (kernel, user namespaces, cgroup delegation to the systemd user manager, overlayfs, subuid/subgid with `newuidmap`/`newgidmap`, seccomp); real probes in a forked child; parsers; 42 snapshot fixtures of real and broken hosts; 12 seeded fuzzers | **Built and reviewed.** Runs for real on the build container (root and ordinary users); verdicts on a real Ubuntu host await slice 3. Release binaries: x86_64 366 KB, aarch64 269 KB. |
-| 3 · VM and CI | QEMU test VM harness in Zig, `zig build demo-m0`, GitHub Actions workflow, [demo document](docs/demos/m0.md) | **Built and reviewed.** `demo-m0` passed from a fresh VM under software emulation (TCG) in two independent runs (implementer and supervisor, about 8.5 minutes each): six `ok` lines, the right FAIL and fix for both sysctls, a static binary. Never run: the KVM path, the HTTPS image download, the CI workflow. |
+| 3 · VM and CI | QEMU test VM harness in Zig, `zig build demo-m0`, GitHub Actions workflow, [demo document](docs/demos/m0.md) | **Built and reviewed.** `demo-m0` passed from a fresh VM under software emulation (TCG) in two independent runs (implementer and supervisor, about 8.5 minutes each): six `ok` lines, the right FAIL and fix for both sysctls, a static binary. **Demonstrated in CI** with KVM (run 2, `demo-m0` about 2 minutes). |
+| 4 · Diagnostics core | `docs/SPEC.md` refreshed from the live doc; `src/diag/` (code registry, `Diag` collector, default, verbose and JSON output); exit codes from the standard; CLI errors as coded diagnostics; `zbx explain`; panic handler | **Built and reviewed.** CLI errors are coded diagnostics (`ZBX-E0001`–`E0009`, `B0001`) in text, verbose and JSON, with golden tests and a new `diag` fuzzer; exit codes 1 user, 2 environment, 70 bug; causes name the real errno. Green in CI, `demo-m0` with KVM included ([run 5](https://github.com/Zigbox/zigbox/actions/runs/40096452657)). Release binaries: x86_64 128 KB, aarch64 116 KB. |
+| 5 · Doctor diagnostics | Each doctor FAIL as a `ZBX-E01xx` diagnostic; golden tests; `demo-m0` asserts codes and exit codes | **Built, reviewed and demonstrated.** `FAIL <check> … [ZBX-E01xx]` on stdout, one diagnostic block per failure on stderr, exit 2; `demo-m0` asserts E0101 for both ways of disabling user namespaces, and E0001 with exit 1 for an unknown command; `site/errors/` pages generated from the registry and checked in CI. Release binaries: x86_64 173 KB, aarch64 156 KB. |
 
-**What works today on this branch:** `zbx --version`, `zbx help`, clear one-line errors for bad input, and `zbx doctor`, which checks this host and names the fix for every failure. It has run only on the cgroup v1 build container so far; the M0 demo on a clean Ubuntu 24.04 VM is slice 3.
+**What works today:** `zbx doctor` checks whether a host can run Zigbox and, for every problem, prints a coded diagnostic with the cause and a runnable fix (`zbx explain <code>` gives the long form, and `site/errors/` has the same pages for the web). `zbx --version`, `zbx help`, `-v` and `--output json` round it out. All of it has run in an Ubuntu 24.04 VM in CI.
 
 ## Building
 

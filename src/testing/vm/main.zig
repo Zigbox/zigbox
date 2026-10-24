@@ -1,11 +1,15 @@
 //! The M0 demo, run in a real Ubuntu 24.04 VM:
-//!   1. `zbx doctor` on the fresh VM: every check ok, exit 0, with what it detected.
-//!   2. With user namespaces disabled by sysctl, the userns check FAILs with a fix, exit 1;
-//!      the sysctls are restored and doctor is ok again.
+//!   1. `zbx doctor` on the fresh VM: every check ok, empty stderr, exit 0.
+//!   2. With user namespaces disabled by sysctl, the userns check FAILs with its code on the
+//!      stdout line (`[ZBX-E0101]`), stderr holds the `error[ZBX-E0101]` block with a fix that
+//!      names the sysctl, and the exit code is 2; the sysctls are restored and doctor is ok.
 //!   3. `file zbx` reports a statically linked ELF; both release binaries (x86_64 and aarch64)
 //!      are checked here, in Zig, to be static ELF files under 2 MiB.
+//!   4. `zbx frobnicate` prints `error[ZBX-E0001]` on stderr and exits 1.
+//! The guest console merges stdout and stderr, so every `zbx` command runs through
+//! `run_split`, which keeps stderr in a file in the guest and prints it after a marker.
 //! Run it with `zig build demo-m0` (KVM) or `zig build demo-m0 -Daccel=tcg` (software
-//! emulation, slow). See docs/DEMO.md.
+//! emulation, slow). See docs/demos/m0.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -36,7 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     const out = &file_writer.interface;
     defer out.flush() catch {};
     const options = parse_options(init) catch |err| {
-        try out.print("demo-m0: bad arguments ({s}); see docs/DEMO.md\n", .{@errorName(err)});
+        try out.print("demo-m0: bad arguments ({s}); see docs/demos/m0.md\n", .{@errorName(err)});
         return 2;
     };
     const started = session_mod.now_ms();
@@ -133,6 +137,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: Options) !u8 {
     try step_doctor_ok(&session, out, &timer);
     try step_userns_fails(&session, out, &timer);
     try step_static(&session, out, &timer);
+    try step_usage_error(&session, out, &timer);
     try session.shutdown();
     return 0;
 }
@@ -199,6 +204,31 @@ fn show(out: *Io.Writer, title: []const u8, result: Session.Result) !void {
     try out.print("\ndemo-m0: $ {s}   (exit {d})\n{s}\n", .{ title, result.status, result.output });
 }
 
+/// A `zbx` run with its two streams kept apart.
+const SplitResult = struct {
+    streams: checks.Streams,
+    status: u8,
+};
+
+/// Runs `command` in the guest with stderr redirected to a file and printed after a marker
+/// (checks.zig), and cuts the console text into the two streams. The slices live in the
+/// session's scratch buffer, which the next command overwrites.
+fn run_split(session: *Session, command: []const u8) !SplitResult {
+    var buffer: [limits.command_bytes_max]u8 = undefined;
+    const typed = try checks.split_command(&buffer, command);
+    const result = try session.run(typed, limits.command_timeout_kvm_s);
+    const streams = try checks.split_streams(result.output);
+    return .{ .streams = streams, .status = result.status };
+}
+
+fn show_split(out: *Io.Writer, title: []const u8, result: SplitResult) !void {
+    try out.print("\ndemo-m0: $ {s}   (exit {d})\n", .{ title, result.status });
+    try out.print("--- stdout\n{s}\n--- stderr\n{s}\n", .{
+        std.mem.trimEnd(u8, result.streams.stdout, "\n"),
+        std.mem.trimEnd(u8, result.streams.stderr, "\n"),
+    });
+}
+
 fn install_binary(session: *Session, out: *Io.Writer, timer: *Timer) !void {
     const command = try std.fmt.allocPrint(
         session.scratch_allocator(),
@@ -223,10 +253,11 @@ const doctor_as_demo = "runuser -u demo -- /home/demo/zbx doctor";
 
 fn step_doctor_ok(session: *Session, out: *Io.Writer, timer: *Timer) !void {
     try out.print("\ndemo-m0: STEP 1: zbx doctor on the fresh VM, as user demo\n", .{});
-    const result = try session.run(doctor_as_demo, limits.command_timeout_kvm_s);
-    try show(out, doctor_as_demo, result);
-    checks.check_all_ok(result.output, result.status) catch |err| {
-        try out.print("demo-m0: STEP 1 FAILED: expected six `ok` lines and exit 0 ({s})\n", .{
+    const result = try run_split(session, doctor_as_demo);
+    try show_split(out, doctor_as_demo, result);
+    checks.check_all_ok(result.streams, result.status) catch |err| {
+        try out.print("demo-m0: STEP 1 FAILED: expected six `ok` lines, empty stderr and " ++
+            "exit 0 ({s})\n", .{
             @errorName(err),
         });
         return err;
@@ -248,12 +279,13 @@ fn copy_value(storage: []u8, value: ?[]const u8) ![]const u8 {
 const Case = struct {
     title: []const u8,
     set: []const u8,
+    /// Text the block's fix must contain: the sysctl that was changed.
     fix_contains: []const u8,
 };
 
 fn step_userns_fails(session: *Session, out: *Io.Writer, timer: *Timer) !void {
     try out.print("\ndemo-m0: STEP 2: disable user namespaces by sysctl; the userns check " ++
-        "must FAIL with a fix\n", .{});
+        "must FAIL as ZBX-E0101, with its block and a fix on stderr, and exit 2\n", .{});
     const read_sysctls = "sysctl -n kernel.apparmor_restrict_unprivileged_userns; " ++
         "sysctl -n user.max_user_namespaces";
     const original = try session.run(read_sysctls, limits.command_timeout_kvm_s);
@@ -268,7 +300,7 @@ fn step_userns_fails(session: *Session, out: *Io.Writer, timer: *Timer) !void {
         .{
             .title = "AppArmor restriction on",
             .set = "kernel.apparmor_restrict_unprivileged_userns=1",
-            .fix_contains = "apparmor_restrict_unprivileged_userns=0",
+            .fix_contains = "kernel.apparmor_restrict_unprivileged_userns",
         },
         .{
             .title = "user.max_user_namespaces=0 (the restriction is still on)",
@@ -284,9 +316,9 @@ fn step_userns_fails(session: *Session, out: *Io.Writer, timer: *Timer) !void {
         "user.max_user_namespaces={s}";
     const restore = try std.fmt.bufPrint(&restore_buffer, restore_format, .{ apparmor, maximum });
     try show(out, restore, try session.run(restore, limits.command_timeout_kvm_s));
-    const again = try session.run(doctor_as_demo, limits.command_timeout_kvm_s);
-    try show(out, doctor_as_demo ++ "   (after restoring the sysctls)", again);
-    checks.check_all_ok(again.output, again.status) catch |err| {
+    const again = try run_split(session, doctor_as_demo);
+    try show_split(out, doctor_as_demo ++ "   (after restoring the sysctls)", again);
+    checks.check_all_ok(again.streams, again.status) catch |err| {
         try out.print("demo-m0: STEP 2 FAILED: doctor is not ok after restoring ({s})\n", .{
             @errorName(err),
         });
@@ -300,19 +332,18 @@ fn expect_userns_failure(session: *Session, out: *Io.Writer, case: Case) !void {
     const command = try std.fmt.bufPrint(&command_buffer, "sysctl -w {s}", .{case.set});
     try out.print("\ndemo-m0: case: {s}\n", .{case.title});
     try show(out, command, try session.run(command, limits.command_timeout_kvm_s));
-    const result = try session.run(doctor_as_demo, limits.command_timeout_kvm_s);
-    try show(out, doctor_as_demo, result);
-    const verdict = checks.check_fails_with_fix(
-        result.output,
-        result.status,
-        "userns",
-        case.fix_contains,
-    );
-    verdict catch |err| {
-        try out.print("demo-m0: STEP 2 FAILED: with `{s}` the userns check must be " ++
-            "`FAIL ... \u{2014} fix: ...{s}...` and the exit code 1 ({s})\n", .{
-            case.set, case.fix_contains, @errorName(err),
-        });
+    const result = try run_split(session, doctor_as_demo);
+    try show_split(out, doctor_as_demo, result);
+    const expected: checks.Failure = .{
+        .name = "userns",
+        .code = "ZBX-E0101",
+        .summary = "can't create a user namespace",
+        .fix_contains = case.fix_contains,
+    };
+    checks.check_fails_with_fix(result.streams, result.status, expected) catch |err| {
+        try out.print("demo-m0: STEP 2 FAILED: with `{s}` expected `FAIL userns ... " ++
+            "[ZBX-E0101]`, an `error[ZBX-E0101]: can't create a user namespace` block whose " ++
+            "fix names {s}, and exit 2 ({s})\n", .{ case.set, case.fix_contains, @errorName(err) });
         return err;
     };
 }
@@ -329,6 +360,20 @@ fn step_static(session: *Session, out: *Io.Writer, timer: *Timer) !void {
         return err;
     };
     try timer.lap(out, "step 3");
+}
+
+const mistyped = "runuser -u demo -- /home/demo/zbx frobnicate";
+
+fn step_usage_error(session: *Session, out: *Io.Writer, timer: *Timer) !void {
+    try out.print("\ndemo-m0: STEP 4: a mistyped command is a usage error, exit 1\n", .{});
+    const result = try run_split(session, mistyped);
+    try show_split(out, mistyped, result);
+    checks.check_unknown_command(result.streams, result.status) catch |err| {
+        try out.print("demo-m0: STEP 4 FAILED: expected `error[ZBX-E0001]: unknown command` " ++
+            "on stderr, nothing on stdout, and exit 1 ({s})\n", .{@errorName(err)});
+        return err;
+    };
+    try timer.lap(out, "step 4");
 }
 
 test "accelerator choice: KVM when usable, TCG only when asked, otherwise a clear error" {

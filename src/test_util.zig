@@ -22,3 +22,15 @@ test "repeat builds exact-length, NUL-terminated strings" {
     try std.testing.expectEqual(@as(usize, 4096), repeat('x', 4096).len);
     try std.testing.expectEqual(@as(u8, 0), repeat('x', 3)[3]);
 }
+
+/// Whether `text` is one well-formed JSON value. Uses a fixed-buffer allocator: test code.
+pub fn json_is_valid(text: []const u8) !bool {
+    var storage: [32 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), text);
+    defer scanner.deinit();
+    while (true) {
+        const token = scanner.next() catch return false;
+        if (token == .end_of_document) return true;
+    }
+}

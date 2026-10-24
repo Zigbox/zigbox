@@ -1,0 +1,1 @@
+{"code":"ZBX-E0001","severity":"error","blame":"user","summary":"unknown command","causes":["'frobnicate' is not a zbx command"],"while":["reading the command line"],"context":{"arg":"frobnicate"},"fixes":[{"sentence":"see the commands:","command":"zbx help"}],"docs":"https://zigbox.github.io/zigbox/errors/E0001.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}

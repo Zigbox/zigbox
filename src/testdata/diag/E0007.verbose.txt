@@ -1,0 +1,7 @@
+error[ZBX-E0007]: unknown diagnostic code
+  while  looking up a diagnostic code
+  cause  'E9999' is not a diagnostic code zbx has
+  arg    E9999
+  fix    codes look like this:   zbx explain E0001
+  more   zbx explain E0007
+  docs   https://zigbox.github.io/zigbox/errors/E0007.html

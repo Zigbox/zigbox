@@ -1,0 +1,10 @@
+error[ZBX-E0101]: can't create a user namespace
+  while  running the userns check of zbx doctor
+  cause  AppArmor restricts unprivileged user namespaces
+  cause  this host restricts unprivileged user namespaces through AppArmor
+         (kernel.apparmor_restrict_unprivileged_userns = 1)
+  kernel 6.8.0-45-generic
+  fix    allow them system-wide:   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+         keep it after a reboot:   echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee /etc/sysctl.d/60-zigbox-userns.conf
+  more   zbx explain E0101
+  docs   https://zigbox.github.io/zigbox/errors/E0101.html

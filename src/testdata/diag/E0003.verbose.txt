@@ -1,0 +1,8 @@
+error[ZBX-E0003]: unexpected arguments
+  while  reading the command line
+  cause  'help' takes no arguments, but 'me' was also given
+  cmd    help
+  arg    me
+  fix    run it on its own:   zbx help
+  more   zbx explain E0003
+  docs   https://zigbox.github.io/zigbox/errors/E0003.html

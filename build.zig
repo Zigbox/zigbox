@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
     add_fuzz_step(b, options, target);
     add_release_step(b, options);
     add_demo_step(b, options);
+    add_errors_site_steps(b);
 }
 
 fn zbx_module(
@@ -64,6 +65,7 @@ fn add_test_step(
         "src/tidy.zig",
         "src/fuzz.zig",
         "src/size_check.zig",
+        "src/errors_site.zig",
     };
     for (roots) |root| {
         const module = b.createModule(.{
@@ -195,6 +197,33 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.addArg(flag);
         run.addFileArg(exe.getEmittedBin());
     }
-    const step = b.step("demo-m0", "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/DEMO.md)");
+    const step = b.step(
+        "demo-m0",
+        "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
+    );
     step.dependOn(&run.step);
+}
+
+/// `zig build errors-site` writes site/errors/<code>.html from the diagnostic registry;
+/// `zig build errors-site-check` (run by CI) fails if a checked-in page is missing or stale.
+fn add_errors_site_steps(b: *std.Build) void {
+    const generator = b.addExecutable(.{
+        .name = "errors_site",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/errors_site.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const write = b.addRunArtifact(generator);
+    write.setCwd(b.path("."));
+    write.addArg("site/errors");
+    const write_step = b.step("errors-site", "Write site/errors/<code>.html from the registry");
+    write_step.dependOn(&write.step);
+
+    const check = b.addRunArtifact(generator);
+    check.setCwd(b.path("."));
+    check.addArgs(&.{ "site/errors", "--check" });
+    const check_step = b.step("errors-site-check", "Fail if site/errors is stale");
+    check_step.dependOn(&check.step);
 }

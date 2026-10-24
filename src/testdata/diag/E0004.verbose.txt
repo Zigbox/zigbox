@@ -1,0 +1,7 @@
+error[ZBX-E0004]: unknown option
+  while  reading the command line
+  cause  '--frobnicate' is not an option zbx knows
+  arg    --frobnicate
+  fix    see the options:   zbx help
+  more   zbx explain E0004
+  docs   https://zigbox.github.io/zigbox/errors/E0004.html

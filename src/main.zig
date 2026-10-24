@@ -6,13 +6,35 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const constants = @import("constants.zig");
-const HostReal = @import("host_real.zig").HostReal;
+const host_real = @import("host_real.zig");
+const panic_report = @import("diag/panic.zig");
+const HostReal = host_real.HostReal;
+
+/// A panic is a `bug[ZBX-B0001]` block and exit 70, never a stack trace (DIAGNOSTICS.md).
+pub const panic = std.debug.FullPanic(panic_handler);
+
+pub const std_options: std.Options = .{
+    // The std handler for SIGSEGV prints a stack trace. A segmentation fault in this program
+    // can only be a stack overflow or a kernel-level surprise; the process dies by the signal
+    // instead, which is at least not a trace shown to the user.
+    .enable_segfault_handler = false,
+};
+
+fn panic_handler(message: []const u8, first_trace_addr: ?usize) noreturn {
+    // The trace address is deliberately unused: nothing prints a trace.
+    _ = first_trace_addr;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    if (panic_report.respond(&panic_report.state, message, &buffer)) |bytes| {
+        host_real.write_stderr_best_effort(bytes);
+    }
+    host_real.exit_now(constants.exit_internal);
+}
 
 pub fn main(init: std.process.Init.Minimal) u8 {
-    var real: HostReal = .{};
+    var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
     const code = cli.run_from_iterator(real.interface(), &iterator);
-    assert(code <= constants.exit_usage);
+    assert(code <= constants.exit_internal);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
 }
@@ -29,4 +51,11 @@ test {
     _ = @import("doctor.zig");
     _ = @import("doctor_fixtures.zig");
     _ = @import("test_util.zig");
+    _ = @import("diag/codes.zig");
+    _ = @import("diag/diag.zig");
+    _ = @import("diag/render.zig");
+    _ = @import("diag/errors.zig");
+    _ = @import("diag/explain.zig");
+    _ = @import("diag/panic.zig");
+    _ = @import("diag_golden.zig");
 }

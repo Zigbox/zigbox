@@ -1,0 +1,5 @@
+error[ZBX-E0008]: command line exceeds the supported limits
+  cause  more than 64 arguments were given
+  fix    pass fewer arguments
+  more   zbx explain E0008 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0008.html

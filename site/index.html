@@ -59,6 +59,10 @@ nav a{color:var(--muted);text-decoration:none} nav a:hover{color:var(--fg)}
 .term .bar{display:flex;justify-content:space-between;gap:12px;padding:8px 14px;border-bottom:1px solid #ffffff14;color:var(--term-dim);font-size:.75rem}
 .term pre{margin:0;padding:14px 16px;white-space:pre;min-height:3em}
 .term .p{color:var(--term-accent)} .term .d{color:var(--term-dim)}
+.rec{font-size:.7rem;color:var(--ok);border:1px solid var(--ok);border-radius:4px;padding:0 6px;text-decoration:none;white-space:nowrap} .rec:hover,.rec:focus-visible{background:#ffffff14}
+.ms .meta .pill{align-self:flex-start}
+.ms .meta .slices{font-family:var(--mono);font-size:.75rem;color:var(--muted)}
+.ms .meta .slices b{color:var(--ok);font-weight:600}
 .planned{font-size:.7rem;color:var(--term-dim);border:1px dashed var(--term-dim);border-radius:4px;padding:0 6px}
 section{padding-block:48px;border-top:1px solid var(--line)}
 .sec-head{display:flex;justify-content:space-between;align-items:end;gap:16px;flex-wrap:wrap;margin-bottom:24px}
@@ -161,14 +165,19 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-10-23",
+  updated: "2026-10-24",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · planning",
+  stage: "Pre-alpha · M0 shipped",
+  stageStatus: "done",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
-  {id:"M0", name:"Doctor", status:"plan", goal:"A static binary that tells you truthfully whether this machine can run Zigbox.",
-   demo:[["$","zbx doctor"],["","user namespaces   ok   unprivileged, max 31k"],["","cgroup v2         ok   cpu memory pids delegated"],["","overlayfs (userns) ok"],["","subuid / subgid   ok   alex: 100000+65536"],["","seccomp           ok"],["$","file zbx"],["","zbx: ELF 64-bit, statically linked, 1.6 MB"]]},
+  // M0's demo below is output recorded by demo-m0 in CI (Ubuntu 24.04 VM, KVM), trimmed where marked.
+  // "#" lines ran as root in the VM; "$" lines ran as the unprivileged user demo.
+  {id:"M0", name:"Doctor", status:"done", goal:"A static binary that tells you truthfully whether this machine can run Zigbox.",
+   slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40102173790", date:"2026-10-24"},
+   demo:[["$","zbx doctor"],["","ok   kernel  6.8.0-147-generic x86_64 (minimum 5.15)"],["","ok   userns  user.max_user_namespaces=7718, unshare(CLONE_NEWUSER) works"],["","ok   cgroup  cgroup v2, user@1000.service delegated to uid 1000: cpu memory pids"],["","ok   overlay  overlayfs mounts inside a user and mount namespace"],["","ok   subid  demo (uid 1000): subuid 65536 ids, subgid 65536 ids; newuidmap: setuid root, newgidmap: setuid root"],["","ok   seccomp  seccomp is supported (current mode: disabled for this process)"],["#","sysctl -w user.max_user_namespaces=0"],["$","zbx doctor"],["","ok   kernel  6.8.0-147-generic x86_64 (minimum 5.15)"],["","FAIL userns  user.max_user_namespaces is 0, so no user namespace can be created  [ZBX-E0101]"],["","…    (four more lines; overlay fails for the same reason, ZBX-E0104)"],["","error[ZBX-E0101]: can't create a user namespace"],["","  cause  the sysctl user.max_user_namespaces = 0 caps the user namespaces this"],["","         system allows at none, for every user"],["","  fix    allow user namespaces:   sudo sysctl -w user.max_user_namespaces=15000"],["","  more   zbx explain E0101 · rerun with --verbose for the full cause chain"],["","…    (the ZBX-E0104 block follows; exit 2)"],["$","file zbx"],["","zbx: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, stripped"],["$","zbx frobnicate"],["","error[ZBX-E0001]: unknown command"],["","  cause  'frobnicate' is not a zbx command"],["","  fix    see the commands:   zbx help"],["","  more   zbx explain E0001 · rerun with --verbose for the full cause chain"]]},
   {id:"M1", name:"Shell", status:"plan", goal:"Run a shell inside an unpacked rootfs, with no root privileges, isolated from the host.",
    demo:[["$","zbx run --rootfs ./alpine -- /bin/sh"],["#","id"],["","uid=0(root) gid=0(root)"],["#","ps"],["","PID  USER  COMMAND"],["","  1  root  /bin/sh"],["","  2  root  ps"],["#","exit 42"],["$","echo $?"],["","42"]]},
   {id:"M2", name:"Limits", status:"plan", goal:"A misbehaving container cannot take down the host or regain privilege.",
@@ -187,7 +196,8 @@ const MILESTONES = [
    demo:[["$","zbx run alpine -- true"],["","refused: policy 'require signature' (no signature for b3:7f1c…a02e)"],["$","zbx verify b3:51aa…9c03"],["","signed by key alex@zigbox ✓  built from 3 inputs ✓  offline"]]},
 ];
 const DOCS = [
-  {t:"Install", m:"M0", d:"Download one static binary, run zbx doctor, fix whatever it names."},
+  {t:"Install", m:"M0", d:"Build one static binary, run zbx doctor, fix whatever it names.", href:"https://github.com/Zigbox/zigbox/blob/main/docs/demos/m0.md#by-hand-on-your-own-ubuntu-2404-machine"},
+  {t:"Diagnostic codes", m:"M0", d:"Every error zbx can print, what it means and how to fix it. Offline, run zbx explain with the code, for example zbx explain E0101.", href:"errors/"},
   {t:"Your first container", m:"M1", d:"Run a rootless shell from a plain directory and see what is isolated."},
   {t:"Limits and hardening", m:"M2", d:"Memory, CPU and PID limits; the default seccomp profile and capability set."},
   {t:"How the store works", m:"M3", d:"Chunks, trees and digests; import, commit, diff, verify and gc."},
@@ -203,17 +213,19 @@ function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"
 function termHTML(lines){return lines.map(([k,t])=>k? `<span class="p">${k}</span> ${esc(t)}` : `<span class="d">${esc(t)}</span>`).join("\n")}
 $("#hero-term").innerHTML = termHTML([["$","zbx pull alpine:3.20"],["","resolved sha256:1e42…  stored 3.4 MB"],["$","zbx run alpine:3.20 -- sh"],["#","id"],["","uid=0(root) gid=0(root)"],["#","exit"],["$","ps -o user,cmd -C zbx"],["","alex  zbx run alpine:3.20 -- sh"]]);
 const done = MILESTONES.filter(m=>m.status==="done").length;
-$("#ms-count").textContent = `${done} of ${MILESTONES.length} shipped`;
+const wip = MILESTONES.filter(m=>m.status==="wip").length;
+$("#ms-count").textContent = `${done} of ${MILESTONES.length} shipped` + (wip?` · ${wip} in progress`:"");
 $("#progress").innerHTML = MILESTONES.map(m=>`<span class="${m.status}"></span>`).join("");
 $("#milestones").innerHTML = MILESTONES.map(m=>`
   <article class="ms" id="${m.id.toLowerCase()}">
-    <div class="meta"><span class="code">${m.id}</span><h3>${m.name}</h3><p>${m.goal}</p><span class="pill s-${m.status}">${label[m.status]}</span></div>
-    <div class="term"><div class="bar"><span>demo · ${m.id.toLowerCase()}</span>${m.status==="done"?"<span>recorded output</span>":'<span class="planned">planned output</span>'}</div><pre>${termHTML(m.demo)}</pre></div>
+    <div class="meta"><span class="code">${m.id}</span><h3>${m.name}</h3><p>${m.goal}</p><span class="pill s-${m.status}">${label[m.status]}</span>${m.slices?`<span class="slices"><b>${m.slices.green} of ${m.slices.total}</b> ${m.slices.note}</span>`:""}</div>
+    <div class="term"><div class="bar"><span>demo · ${m.id.toLowerCase()}</span>${m.recorded?`<a class="rec" href="${m.recorded.url}">✓ recorded in CI · ${m.recorded.date}</a>`:(m.status==="done"?"<span>recorded output</span>":'<span class="planned">planned output</span>')}</div><pre>${termHTML(m.demo)}</pre></div>
   </article>`).join("");
 $("#docs-list").innerHTML = DOCS.map(d=>{const ms=MILESTONES.find(x=>x.id===d.m); const st=ms?ms.status:"plan";
-  return `<div class="doc"><h3>${d.t}</h3><p>${d.d}</p><span class="when">${st==="done"?"Available":"Arrives with "+d.m}</span></div>`}).join("");
+  return `<div class="doc"><h3>${d.t}</h3><p>${d.d}</p><span class="when">${st==="done"&&d.href?`<a href="${d.href}">Read it</a>`:(st==="done"?"Being written":"Arrives with "+d.m)}</span></div>`}).join("");
 $("#updated").textContent = SITE.updated;
 $("#hdr-status").textContent = SITE.stage;
+$("#hdr-status").className = "pill s-" + (SITE.stageStatus || "plan");
 $("#digest").textContent = "site tree b3:" + [...SITE.updated+MILESTONES.map(m=>m.status).join("")].reduce((h,c)=>((h<<5)-h+c.charCodeAt(0))>>>0,7).toString(16).padStart(8,"0");
 const sis = $("#sister"); if(SITE.sisterUrl){sis.href=SITE.sisterUrl}else{sis.removeAttribute("href");sis.style.opacity=.5;sis.title="Link coming"}
 if(location.hash){const t=document.getElementById(location.hash.slice(1)); if(t) t.scrollIntoView();}

@@ -11,14 +11,19 @@
 //!   ok    the requirement is met.
 //!   FAIL  the requirement is not met, or could not be checked. A failed read, a probe that
 //!         could not run and a malformed file are all FAIL with the reason: a fault is never
-//!         reported as ok, and never as warn. A FAIL always carries a one-line fix.
+//!         reported as ok, and never as warn. A FAIL carries a diagnostic (DIAGNOSTICS.md):
+//!         its check's own code (ZBX-E0101 to E0106, blame environment), its causes, and at
+//!         least one fix, with a runnable command where the fix is one. A check that could not
+//!         run uses its own code too, and its cause says that it could not run, and why.
 //!   warn  the requirement is demonstrably met by a direct test, yet a related setting says it
 //!         should not be. Today that is one situation: the user-namespace probe succeeded but
 //!         a sysctl (`kernel.unprivileged_userns_clone=0` or
 //!         `kernel.apparmor_restrict_unprivileged_userns=1`) says unconfined users are refused,
 //!         which happens when this process runs under an AppArmor profile that allows it. A warn
 //!         has no fix line, because nothing has to be fixed for this process.
-//!   The exit code is 0 if no check is FAIL, 1 otherwise. A warn does not change it.
+//!   The exit code is 0 if no check is FAIL, 2 (the environment's) otherwise. A warn does not
+//!   change it. This file renders only the stdout report; the diagnostic of each FAIL is
+//!   rendered by cli.zig, on stderr, in check order.
 //!
 //! Running as root proves nothing about ordinary users, so nothing here lets uid 0 pass:
 //! probes run in a child that drops to an unprivileged id first (host_real.zig), the subid
@@ -31,6 +36,9 @@ const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
 const parse = @import("parse.zig");
 const text_util = @import("text.zig");
+const diag_codes = @import("diag/codes.zig");
+const diag_errors = @import("diag/errors.zig");
+const Diag = @import("diag/diag.zig").Diag;
 
 const Host = host_mod.Host;
 
@@ -39,75 +47,161 @@ pub const Status = enum { ok, fail, warn };
 pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp };
 
 pub const Detail = text_util.Bounded(constants.detail_bytes_max);
-pub const Fix = text_util.Bounded(constants.fix_bytes_max);
+/// The diagnostic code of each check: one per check, so a FAIL line and its block name the same
+/// code. All are errors blamed on the environment (the host, not the command line).
+pub fn code_of(id: CheckId) diag_codes.Code {
+    const code: diag_codes.Code = switch (id) {
+        .kernel => .E0102,
+        .userns => .E0101,
+        .cgroup => .E0103,
+        .overlay => .E0104,
+        .subid => .E0105,
+        .seccomp => .E0106,
+    };
+    assert(diag_codes.entry(code).blame == .environment);
+    assert(diag_codes.entry(code).severity == .@"error");
+    return code;
+}
+
+/// A failed host call: the coarse error and the errno the kernel really returned (0 if none).
+const Failure = struct {
+    err: host_mod.Error,
+    errno: u16,
+};
 
 pub const Check = struct {
     id: CheckId,
     status: Status,
+    /// The text of the stdout line. For a FAIL it is the symptom in one line.
     detail: Detail,
-    fix: Fix,
+    /// The diagnostic of a FAIL (stderr). Unclassified (`code == null`) for ok and warn.
+    diag: Diag,
 
     fn start(check: *Check, id: CheckId) void {
         check.id = id;
         check.status = .ok;
         check.detail = .{};
-        check.fix = .{};
+        check.diag.reset();
         assert(check.detail.len == 0);
-        assert(check.fix.len == 0);
+        assert(check.diag.code == null);
     }
 
     fn pass(check: *Check, comptime format: []const u8, args: anytype) void {
-        assert(check.fix.len == 0); // A passing check never carries a fix.
+        assert(check.diag.code == null); // A passing check never carries a diagnostic.
         check.status = .ok;
         check.detail.print(format, args);
         assert(check.detail.len > 0);
     }
 
     fn warning(check: *Check, comptime format: []const u8, args: anytype) void {
-        assert(check.fix.len == 0); // A warning has nothing to fix.
+        assert(check.diag.code == null); // A warning has nothing to fix.
         check.status = .warn;
         check.detail.print(format, args);
         assert(check.detail.len > 0);
     }
 
-    /// Sets the detail only; follow with `fix_with`.
+    /// Records the failure: the stdout line, this check's code, and what was being done. Follow
+    /// with `cause`s (symptom first, real cause last: default output shows only the last) and
+    /// at least one `fix`.
     fn problem(check: *Check, comptime format: []const u8, args: anytype) void {
-        assert(check.fix.len == 0); // The fix is added after the problem is stated.
+        assert(check.diag.code == null); // One failure per check.
         check.status = .fail;
         check.detail.print(format, args);
         assert(check.detail.len > 0);
+        check.diag.raise(code_of(check.id));
+        check.diag.while_("running the {s} check of zbx doctor", .{@tagName(check.id)});
+        assert(check.diag.whiles.count == 1);
     }
 
-    fn fix_with(check: *Check, comptime format: []const u8, args: anytype) void {
+    fn cause(check: *Check, comptime format: []const u8, args: anytype) void {
         assert(check.status == .fail);
-        check.fix.print(format, args);
-        assert(check.fix.len > 0);
+        check.diag.cause(format, args);
+    }
+
+    /// The stdout symptom as the first cause, for failures whose real cause is added after it.
+    fn cause_symptom(check: *Check) void {
+        assert(check.status == .fail);
+        assert(check.diag.causes.count == 0); // Symptom first.
+        check.diag.cause("{s}", .{check.detail.slice()});
+    }
+
+    /// The cause of a check that could not run: "the <check> check could not run: <what>
+    /// failed: <reason> (<ENAME>)". The errno is the one the kernel returned, or the cause says
+    /// it is unknown (diag/errors.zig).
+    fn cause_could_not_run(check: *Check, what: []const u8, failure: Failure) void {
+        assert(check.status == .fail);
+        assert(what.len > 0);
+        assert(what.len <= 160);
+        var buffer: [256]u8 = undefined;
+        const format = "the {s} check could not run: {s}";
+        // Cannot fail: the check name is at most 7 bytes and `what` at most 160.
+        const operation = std.fmt.bufPrint(&buffer, format, .{ @tagName(check.id), what }) catch
+            unreachable; // Same bound as above.
+        const diag = &check.diag;
+        diag_errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    }
+
+    fn context_path(check: *Check, path: []const u8) void {
+        assert(check.status == .fail);
+        assert(path.len > 0);
+        check.diag.context("path", "{s}", .{path});
+    }
+
+    /// A fix. `command` is runnable as written, or empty when the fix is prose only.
+    fn fix(check: *Check, sentence: []const u8, command: []const u8) void {
+        assert(check.status == .fail);
+        assert(sentence.len > 0);
+        check.diag.fix(.{ .sentence = sentence, .command = command });
+        assert(check.diag.fixes.count > 0);
+    }
+
+    /// A fix whose command is formatted from run-time text.
+    fn fix_with(
+        check: *Check,
+        sentence: []const u8,
+        comptime command_format: []const u8,
+        command_args: anytype,
+    ) void {
+        assert(check.status == .fail);
+        check.diag.fix_with(sentence, command_format, command_args);
+        assert(check.diag.fixes.count > 0);
     }
 };
 
 pub const Report = struct {
     checks: [constants.doctor_checks_count]Check,
 
+    /// The exit code is the blame of the first failing check's diagnostic: the one place that
+    /// decides it (diag/codes.zig). Every failure here is the environment's.
     pub fn exit_code(report: *const Report) u8 {
         // The checks are always in the fixed order the renderer and the fuzzers rely on.
         assert(report.checks[0].id == .kernel);
         assert(report.checks[report.checks.len - 1].id == .seccomp);
         for (report.checks) |check| {
-            if (check.status == .fail) return constants.exit_failed;
+            if (check.status == .fail) return check.diag.exit_code();
         }
         return constants.exit_ok;
     }
 
     /// Structural invariants every report must satisfy, whatever the host looked like.
     pub fn validate(report: *const Report) void {
-        for (report.checks, 0..) |check, index| {
+        for (&report.checks, 0..) |*check, index| {
             assert(@backingInt(check.id) == index);
             assert(check.detail.len > 0);
             switch (check.status) {
-                .ok, .warn => assert(check.fix.len == 0),
-                .fail => assert(check.fix.len > 0),
+                .ok, .warn => assert(check.diag.code == null),
+                .fail => validate_failure(check),
             }
         }
+    }
+
+    fn validate_failure(check: *const Check) void {
+        assert(check.status == .fail);
+        assert(check.diag.code.? == code_of(check.id)); // The line and the block agree.
+        assert(check.diag.entry().blame == .environment);
+        assert(check.diag.causes.count > 0);
+        assert(check.diag.fixes.count > 0);
+        assert(check.diag.exit_code() == constants.exit_environment);
     }
 };
 
@@ -120,11 +214,15 @@ fn Slot(comptime capacity: u32) type {
         bytes: [capacity]u8 = undefined,
         len: u32 = 0,
         err: ?host_mod.Error = null,
+        /// The errno the kernel really returned for `err`, or 0 if there was none (see
+        /// `Host.last_errno`). Diagnostics name it; they never guess one.
+        errno: u16 = 0,
         attempted: bool = false,
 
         fn reset(slot: *Self) void {
             slot.len = 0;
             slot.err = null;
+            slot.errno = 0;
             slot.attempted = false;
         }
 
@@ -134,6 +232,7 @@ fn Slot(comptime capacity: u32) type {
             slot.attempted = true;
             const content = host.read_file(path, &slot.bytes) catch |err| {
                 slot.err = err;
+                slot.errno = host.last_errno();
                 return;
             };
             slot.len = @intCast(content.len);
@@ -152,6 +251,7 @@ fn Slot(comptime capacity: u32) type {
 const ProbeFact = struct {
     outcome: host_mod.ProbeOutcome = .ok,
     err: ?host_mod.Error = null,
+    errno: u16 = 0,
 
     /// True if the probe ran and gave exactly this outcome.
     fn is(fact: ProbeFact, outcome: host_mod.ProbeOutcome) bool {
@@ -161,8 +261,10 @@ const ProbeFact = struct {
 
     fn run(fact: *ProbeFact, host: Host, kind: host_mod.ProbeKind) void {
         fact.err = null;
+        fact.errno = 0;
         fact.outcome = host.probe(kind) catch |err| {
             fact.err = err;
+            fact.errno = host.last_errno();
             // A probe never reads a file, so it cannot report the size-limit error.
             assert(err != error.FileTooLarge);
             return;
@@ -175,6 +277,7 @@ const ProbeFact = struct {
 const StatFact = struct {
     stat: host_mod.Stat = .{ .mode = 0, .uid = 0 },
     err: ?host_mod.Error = null,
+    errno: u16 = 0,
     attempted: bool = false,
 };
 
@@ -182,18 +285,22 @@ const StatFact = struct {
 const Binary = struct {
     stat: host_mod.Stat = .{ .mode = 0, .uid = 0 },
     stat_err: ?host_mod.Error = null,
+    stat_errno: u16 = 0,
     capability: [constants.capability_bytes_max]u8 = undefined,
     capability_len: u32 = 0,
     capability_err: ?host_mod.Error = null,
+    capability_errno: u16 = 0,
 
     fn load(binary: *Binary, host: Host, path: []const u8) void {
         binary.* = .{};
         binary.stat = host.stat(path) catch |err| {
             binary.stat_err = err;
+            binary.stat_errno = host.last_errno();
             return;
         };
         const bytes = host.read_capability(path, &binary.capability) catch |err| {
             binary.capability_err = err;
+            binary.capability_errno = host.last_errno();
             return;
         };
         binary.capability_len = @intCast(bytes.len);
@@ -212,6 +319,7 @@ const program_names = [2][]const u8{ "newuidmap", "newgidmap" };
 pub const Facts = struct {
     uname: ?host_mod.Uname,
     uname_err: ?host_mod.Error,
+    uname_errno: u16,
 
     max_user_namespaces: Slot(constants.sysctl_bytes_max),
     unprivileged_userns_clone: Slot(constants.sysctl_bytes_max),
@@ -234,12 +342,14 @@ pub const Facts = struct {
     status: Slot(constants.status_bytes_max),
     seccomp: ?u32,
     seccomp_err: ?host_mod.Error,
+    seccomp_errno: u16,
 
     /// Clears every flag and result; the byte buffers are left as they are. Facts is large, so
     /// it is initialised in place rather than by assigning a struct value.
     pub fn reset(facts: *Facts) void {
         facts.uname = null;
         facts.uname_err = null;
+        facts.uname_errno = 0;
         facts.max_user_namespaces.reset();
         facts.unprivileged_userns_clone.reset();
         facts.apparmor_restrict.reset();
@@ -256,6 +366,7 @@ pub const Facts = struct {
         facts.status.reset();
         facts.seccomp = null;
         facts.seccomp_err = null;
+        facts.seccomp_errno = 0;
     }
 };
 
@@ -292,8 +403,10 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
 
 fn gather_kernel(host: Host, facts: *Facts) void {
     facts.uname_err = null;
+    facts.uname_errno = 0;
     facts.uname = host.uname() catch |err| {
         facts.uname_err = err;
+        facts.uname_errno = host.last_errno();
         return;
     };
     assert(facts.uname != null);
@@ -329,6 +442,7 @@ fn gather_cgroup(host: Host, facts: *Facts) void {
     const directory = user_manager_path(&buffer, facts.uid);
     facts.cgroup_user.stat = host.stat(directory) catch |err| {
         facts.cgroup_user.err = err;
+        facts.cgroup_user.errno = host.last_errno();
         return;
     };
     // The controllers file is only read where the directory exists; evaluate reports why not.
@@ -362,8 +476,10 @@ fn gather_subid(host: Host, facts: *Facts) void {
 fn gather_seccomp(host: Host, facts: *Facts) void {
     facts.status.load(host, "/proc/self/status");
     facts.seccomp_err = null;
+    facts.seccomp_errno = 0;
     facts.seccomp = host.seccomp_mode() catch |err| {
         facts.seccomp_err = err;
+        facts.seccomp_errno = host.last_errno();
         return;
     };
     assert(facts.status.attempted);
@@ -371,6 +487,10 @@ fn gather_seccomp(host: Host, facts: *Facts) void {
 }
 
 // ---- Evaluate ------------------------------------------------------------------------------
+//
+// All policy lives here: what counts as ok, and for each failure the code's cause and fixes.
+// Each failing site states the symptom (`problem`), the causes (the real one last), and the
+// fixes, with a runnable command wherever the fix is one.
 
 pub fn evaluate(facts: *const Facts, report: *Report) void {
     // The facts must have been gathered; a zero uid with no passwd attempt means they were not.
@@ -387,8 +507,24 @@ pub fn evaluate(facts: *const Facts, report: *Report) void {
             .subid => evaluate_subid(facts, check),
             .seccomp => evaluate_seccomp(facts, check),
         }
+        if (check.status == .fail) add_context(facts, check);
     }
     report.validate();
+}
+
+/// Facts that help read any failure in `--verbose`: the kernel, and who the check ran as for
+/// the checks that depend on the user. Only what was really gathered is shown.
+fn add_context(facts: *const Facts, check: *Check) void {
+    assert(check.status == .fail);
+    assert(check.diag.code != null);
+    if (facts.uname) |names| {
+        var storage: [constants.uname_field_bytes]u8 = undefined;
+        check.diag.context("kernel", "{s}", .{text_util.sanitise(&storage, names.release.slice())});
+    }
+    switch (check.id) {
+        .cgroup, .subid => check.diag.context("uid", "{d}", .{facts.uid}),
+        .kernel, .userns, .overlay, .seccomp => {},
+    }
 }
 
 fn error_reason(err: host_mod.Error) []const u8 {
@@ -411,14 +547,25 @@ fn error_reason(err: host_mod.Error) []const u8 {
     return reason;
 }
 
-/// A read that failed. `path` is shown to the user; the fix is the same for every file.
-fn read_failed(check: *Check, path: []const u8, err: host_mod.Error) void {
+const Access = enum { read, stat };
+
+/// A read or stat that failed. `path` is shown to the user; the fix is the same for every file.
+fn read_failed(check: *Check, access: Access, path: []const u8, failure: Failure) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
-    check.problem("cannot read {s}: {s}", .{ path, error_reason(err) });
-    check.fix_with("retry; if it persists, check the permissions and health of {s}", .{path});
+    assert(path.len > 0);
+    assert(path.len <= 120); // Every path is a constant or built from a uid.
+    check.problem("cannot read {s}: {s}", .{ path, error_reason(failure.err) });
+    var what: [160]u8 = undefined;
+    const verb = if (access == .read) "read" else "stat";
+    // Cannot fail: the path is at most 120 bytes, the verb at most 4, and the buffer 160.
+    const operation = std.fmt.bufPrint(&what, "{s}({s})", .{ verb, path }) catch unreachable;
+    check.cause_could_not_run(operation, failure);
+    check.context_path(path);
+    const sentence = "check the file, then retry:";
+    check.fix_with(sentence, "ls -l {s}", .{path});
     assert(check.status == .fail);
-    assert(check.fix.len > 0);
+    assert(check.diag.fixes.count == 1);
 }
 
 fn probe_problem(check: *Check, name: []const u8, fact: ProbeFact) void {
@@ -427,17 +574,38 @@ fn probe_problem(check: *Check, name: []const u8, fact: ProbeFact) void {
     if (fact.err == null) assert(fact.outcome != .ok);
     if (fact.err) |err| {
         check.problem("the {s} probe could not run: {s}", .{ name, error_reason(err) });
-        check.fix_with("retry; if it persists, check process limits (ulimit -u) and memory", .{});
+        var what: [64]u8 = undefined;
+        const format = "starting the {s} probe";
+        // Cannot fail: `name` is a short constant.
+        const operation = std.fmt.bufPrint(&what, format, .{name}) catch unreachable; // Same.
+        check.cause_could_not_run(operation, .{ .err = err, .errno = fact.errno });
+        const sentence = "check the process limits:";
+        check.fix(sentence, "ulimit -u");
         return;
     }
     switch (fact.outcome) {
-        .timed_out => check.problem("the {s} probe did not finish in {d} ms and was killed", .{
-            name, constants.probe_timeout_ms,
-        }),
-        .signaled => check.problem("the {s} probe child was killed by a signal", .{name}),
-        else => check.problem("the {s} probe child failed unexpectedly", .{name}),
+        .timed_out => {
+            check.problem("the {s} probe did not finish in {d} ms and was killed", .{
+                name, constants.probe_timeout_ms,
+            });
+            check.cause(
+                "the {s} probe child made no progress for {d} ms, so zbx killed it and could " ++
+                    "not tell whether this host allows the operation",
+                .{ name, constants.probe_timeout_ms },
+            );
+        },
+        .signaled => {
+            check.problem("the {s} probe child was killed by a signal", .{name});
+            check.cause("the {s} probe child was ended by a signal before it reported a result, " ++
+                "so zbx could not tell whether this host allows the operation", .{name});
+        },
+        else => {
+            check.problem("the {s} probe child failed unexpectedly", .{name});
+            check.cause("the {s} probe child ended with a result zbx does not recognise, so it " ++
+                "could not tell whether this host allows the operation", .{name});
+        },
     }
-    check.fix_with("retry; if it repeats, check dmesg and the audit log for the cause", .{});
+    check.fix("look in the kernel log:", "sudo dmesg | tail -n 50");
 }
 
 // kernel
@@ -451,7 +619,8 @@ fn evaluate_kernel(facts: *const Facts, check: *Check) void {
     if (facts.uname_err == null) assert(facts.uname != null); // gather_kernel ran.
     if (facts.uname_err) |err| {
         check.problem("cannot read the kernel release: {s}", .{error_reason(err)});
-        check.fix_with("retry; uname(2) failing means the process is heavily restricted", .{});
+        check.cause_could_not_run("uname()", .{ .err = err, .errno = facts.uname_errno });
+        check.fix("check that uname works:", "uname -r");
         return;
     }
     const names = facts.uname.?;
@@ -459,10 +628,10 @@ fn evaluate_kernel(facts: *const Facts, check: *Check) void {
     const release = text_util.sanitise(&storage, names.release.slice());
     const version = parse.parse_kernel_release(names.release.slice()) catch {
         check.problem("unrecognised kernel release '{s}'", .{release});
-        check.fix_with(
-            "run a Linux kernel 5.15 or newer; this release string is not parseable",
-            .{},
-        );
+        check.cause("the release '{s}' does not start with a major.minor version, and zbx " ++
+            "does not guess", .{release});
+        check.fix("see what this kernel reports:", "uname -r");
+        check.fix("run Linux 5.15 or newer", "");
         return;
     };
     const minimum = [2]u32{ constants.kernel_major_min, constants.kernel_minor_min };
@@ -473,9 +642,16 @@ fn evaluate_kernel(facts: *const Facts, check: *Check) void {
         return;
     }
     check.problem("kernel {s} is older than {d}.{d}", .{ release, minimum[0], minimum[1] });
-    check.fix_with("upgrade to Linux {d}.{d} or newer (overlayfs in user namespaces)", .{
-        minimum[0], minimum[1],
+    check.cause_symptom();
+    check.cause("zbx needs Linux {d}.{d} or newer: overlayfs mounts in user namespaces arrived " ++
+        "in 5.11, and {d}.{d} is the oldest long-term kernel that has them", .{
+        minimum[0], minimum[1], minimum[0], minimum[1],
     });
+    var sentence: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&sentence, "upgrade to Linux {d}.{d} or newer", .{
+        minimum[0], minimum[1],
+    }) catch unreachable; // Two small numbers fit 64 bytes.
+    check.fix(text, "");
 }
 
 fn kernel_at_least(version: parse.KernelVersion, minimum: [2]u32) bool {
@@ -495,22 +671,35 @@ const UsernsSysctls = struct {
     restrict: ?u32,
 };
 
+/// A sysctl file that holds something other than a number: damaged, or not a sysctl at all.
+fn not_a_number(check: *Check, path: []const u8) void {
+    assert(check.detail.len == 0);
+    assert(path.len > 0);
+    check.problem("{s} holds something other than a number", .{path});
+    check.cause("the kernel only ever writes a decimal number to this sysctl, so the file is " ++
+        "damaged or is not the sysctl", .{});
+    check.context_path(path);
+    check.fix_with("look at the file:", "cat {s}", .{path});
+}
+
 /// Reads a sysctl slot that must exist. Reports a failure on `check` and returns null.
-fn required_sysctl(check: *Check, slot: anytype, path: []const u8, missing_fix: []const u8) ?u32 {
+fn required_sysctl(check: *Check, slot: anytype, path: []const u8) ?u32 {
     assert(slot.attempted);
     assert(path.len > 0);
     if (slot.err) |err| {
         if (err == error.NotFound) {
             check.problem("{s} does not exist", .{path});
-            check.fix_with("{s}", .{missing_fix});
+            check.cause_symptom();
+            check.cause("this kernel was built without user namespaces (CONFIG_USER_NS)", .{});
+            check.context_path(path);
+            check.fix("use a kernel built with CONFIG_USER_NS=y", "");
         } else {
-            read_failed(check, path, err);
+            read_failed(check, .read, path, .{ .err = err, .errno = slot.errno });
         }
         return null;
     }
     return parse.parse_sysctl_uint(slot.text()) catch {
-        check.problem("{s} holds something other than a number", .{path});
-        check.fix_with("check the file; the kernel only ever writes a decimal number", .{});
+        not_a_number(check, path);
         return null;
     };
 }
@@ -522,12 +711,11 @@ fn optional_sysctl(check: *Check, slot: anytype, path: []const u8) error{Failed}
     assert(path.len > 0);
     if (slot.err) |err| {
         if (err == error.NotFound) return null;
-        read_failed(check, path, err);
+        read_failed(check, .read, path, .{ .err = err, .errno = slot.errno });
         return error.Failed;
     }
     return parse.parse_sysctl_uint(slot.text()) catch {
-        check.problem("{s} holds something other than a number", .{path});
-        check.fix_with("check the file; the kernel only ever writes a decimal number", .{});
+        not_a_number(check, path);
         return error.Failed;
     };
 }
@@ -538,11 +726,10 @@ fn evaluate_userns(facts: *const Facts, check: *Check) void {
     assert(facts.max_user_namespaces.attempted); // gather_userns ran.
     assert(facts.unprivileged_userns_clone.attempted);
     assert(facts.apparmor_restrict.attempted);
-    const missing = "use a kernel built with CONFIG_USER_NS=y";
     const max_path = "/proc/sys/user/max_user_namespaces";
     const clone_path = "/proc/sys/kernel/unprivileged_userns_clone";
     const restrict_path = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
-    const max = required_sysctl(check, facts.max_user_namespaces, max_path, missing) orelse return;
+    const max = required_sysctl(check, facts.max_user_namespaces, max_path) orelse return;
     const clone = optional_sysctl(check, facts.unprivileged_userns_clone, clone_path) catch return;
     const restrict = optional_sysctl(check, facts.apparmor_restrict, restrict_path) catch return;
     const sysctls: UsernsSysctls = .{
@@ -560,14 +747,20 @@ fn userns_verdict(check: *Check, sysctls: UsernsSysctls, probe: ProbeFact) void 
     const probe_ok = probe_ran and probe.outcome == .ok;
     if (sysctls.max_user_namespaces == 0) {
         check.problem("user.max_user_namespaces is 0, so no user namespace can be created", .{});
-        check.fix_with("sudo sysctl -w user.max_user_namespaces=15000", .{});
+        check.cause_symptom();
+        check.cause("the sysctl user.max_user_namespaces = 0 caps the user namespaces this " ++
+            "system allows at none, for every user", .{});
+        check.fix("allow user namespaces:", "sudo sysctl -w user.max_user_namespaces=15000");
         return;
     }
     assert(sysctls.max_user_namespaces != 0); // The zero case returned above.
     if (sysctls.clone == 0) {
         if (probe_ok) return restricted_but_working(check, "kernel.unprivileged_userns_clone=0");
         check.problem("kernel.unprivileged_userns_clone is 0 (unprivileged refused)", .{});
-        check.fix_with("sudo sysctl -w kernel.unprivileged_userns_clone=1", .{});
+        check.cause_symptom();
+        check.cause("this kernel refuses user namespaces to unprivileged users while " ++
+            "kernel.unprivileged_userns_clone = 0", .{});
+        check.fix("allow them:", "sudo sysctl -w kernel.unprivileged_userns_clone=1");
         return;
     }
     if (sysctls.restrict) |restrict| {
@@ -585,7 +778,14 @@ fn userns_restricted(check: *Check, probe_ok: bool) void {
     const setting = "kernel.apparmor_restrict_unprivileged_userns=1";
     if (probe_ok) return restricted_but_working(check, setting);
     check.problem("AppArmor restricts unprivileged user namespaces", .{});
-    check.fix_with("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0", .{});
+    check.cause_symptom();
+    check.cause("this host restricts unprivileged user namespaces through AppArmor " ++
+        "(kernel.apparmor_restrict_unprivileged_userns = 1)", .{});
+    const setting_off = "kernel.apparmor_restrict_unprivileged_userns=0";
+    check.fix("allow them system-wide:", "sudo sysctl -w " ++ setting_off);
+    const persist = "echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | " ++
+        "sudo tee /etc/sysctl.d/60-zigbox-userns.conf";
+    check.fix("keep it after a reboot:", persist);
 }
 
 fn restricted_but_working(check: *Check, setting: []const u8) void {
@@ -594,13 +794,18 @@ fn restricted_but_working(check: *Check, setting: []const u8) void {
     check.warning("unshare works for this process, but {s} refuses unconfined users", .{setting});
 }
 
+const dmesg_policy = "sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'";
+
 /// The sysctls say yes but the probe said otherwise: the interesting case.
 fn userns_probe_verdict(check: *Check, probe: ProbeFact) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
     if (probe.is(.denied)) {
         check.problem("sysctls allow it, but unshare(CLONE_NEWUSER) was refused", .{});
-        check.fix_with("check LSM policy (AppArmor/SELinux) and seccomp filters; see dmesg", .{});
+        check.cause_symptom();
+        check.cause("no sysctl forbids user namespaces here, so a security policy (AppArmor, " ++
+            "SELinux or a seccomp filter) is refusing the call", .{});
+        check.fix("look for the policy that denies it:", dmesg_policy);
         return;
     }
     if (probe.is(.map_denied)) return map_denied(check);
@@ -611,21 +816,47 @@ fn userns_probe_verdict(check: *Check, probe: ProbeFact) void {
 /// The namespace was created, but writing setgroups/gid_map/uid_map was refused.
 fn map_denied(check: *Check) void {
     assert(check.status == .ok);
-    assert(check.fix.len == 0);
+    assert(check.diag.code == null);
     check.problem("a user namespace can be created, but writing its id map was refused", .{});
-    check.fix_with(
-        "the mapped id must be one this user owns; check LSM policy (AppArmor/SELinux) and dmesg",
-        .{},
-    );
+    check.cause_symptom();
+    check.cause("the kernel created the namespace and then refused the write to its uid_map, " ++
+        "gid_map or setgroups file; an LSM policy can forbid that, and only the user's own id " ++
+        "may be mapped without newuidmap", .{});
+    check.fix("look for the policy that denies it:", dmesg_policy);
+    // Ubuntu's AppArmor restriction shows up like this in the overlay probe, next to a userns
+    // FAIL: the namespace exists but has no privilege to write its map.
+    if (check.id == .overlay) {
+        check.fix("if the userns check failed too, fix it first (ZBX-E0101)", "");
+    }
 }
 
 // cgroup
 
 const required_controllers = [_]parse.Controller{ .cpu, .memory, .pids };
 
-const delegate_fix = "create /etc/systemd/system/user@.service.d/delegate.conf containing " ++
-    "[Service] and Delegate=cpu cpuset io memory pids, then sudo systemctl daemon-reload " ++
-    "and log in again";
+/// Three runnable steps that delegate the controllers to user services: the drop-in directory,
+/// the drop-in, and the reload. A fresh login restarts the user manager with them.
+fn delegate_fixes(check: *Check) void {
+    assert(check.status == .fail);
+    assert(check.diag.fixes.count == 0); // The three steps are the whole fix.
+    const directory = "/etc/systemd/system/user@.service.d";
+    check.fix("create the drop-in directory:", "sudo mkdir -p " ++ directory);
+    const write = "printf '[Service]\\nDelegate=cpu cpuset io memory pids\\n' | " ++
+        "sudo tee " ++ directory ++ "/delegate.conf";
+    check.fix("delegate the controllers:", write);
+    check.fix("reload, then log in again:", "sudo systemctl daemon-reload");
+    assert(check.diag.fixes.count == 3);
+}
+
+/// The file below a user manager directory that lists the controllers it offers.
+fn controllers_path(buffer: []u8, directory: []const u8) []const u8 {
+    assert(buffer.len >= 192);
+    assert(directory.len < 160);
+    // Cannot fail: the directory path is under 160 bytes, so the file path fits 192.
+    const path = std.fmt.bufPrint(buffer, "{s}/cgroup.controllers", .{directory}) catch unreachable;
+    assert(std.mem.endsWith(u8, path, "/cgroup.controllers"));
+    return path;
+}
 
 /// What zbx will rely on (M2 creates its scope under the systemd user manager) is the cgroup
 /// systemd delegates to the user: `user@UID.service`. It must exist, belong to the user, and
@@ -638,39 +869,57 @@ fn evaluate_cgroup(facts: *const Facts, check: *Check) void {
     assert(facts.cgroup_user.attempted);
     if (facts.cgroup_root.err) |err| {
         const root_file = "/sys/fs/cgroup/cgroup.controllers";
-        if (err != error.NotFound) return read_failed(check, root_file, err);
-        check.problem("cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid host)", .{});
-        const fix = "boot with systemd.unified_cgroup_hierarchy=1 or use a cgroup v2 distro";
-        check.fix_with(fix, .{});
-        return;
+        const failure: Failure = .{ .err = err, .errno = facts.cgroup_root.errno };
+        if (err != error.NotFound) return read_failed(check, .read, root_file, failure);
+        return cgroup_v2_missing(check);
     }
     var buffer: [160]u8 = undefined;
     const directory = user_manager_path(&buffer, facts.uid);
     if (facts.cgroup_user.err) |err| {
-        if (err != error.NotFound) return read_failed(check, directory, err);
-        check.problem("no systemd user manager for uid {d}: {s} does not exist", .{
-            facts.uid, directory,
-        });
-        check.fix_with("log in through a systemd (logind) session, or run: {s}", .{
-            "sudo loginctl enable-linger $(id -un)",
-        });
-        return;
+        const failure: Failure = .{ .err = err, .errno = facts.cgroup_user.errno };
+        if (err != error.NotFound) return read_failed(check, .stat, directory, failure);
+        return user_manager_missing(check, facts.uid, directory);
     }
     if (!cgroup_owned_directory(check, facts, directory)) return;
+    var file_buffer: [192]u8 = undefined;
+    const file = controllers_path(&file_buffer, directory);
     if (facts.cgroup_controllers.err) |err| {
-        var file_buffer: [192]u8 = undefined;
-        // Cannot fail: the directory path is under 160 bytes, so the file path fits 192.
-        const format = "{s}/cgroup.controllers";
-        const formatted = std.fmt.bufPrint(&file_buffer, format, .{directory});
-        const file = formatted catch unreachable; // Same bound as above.
-        return read_failed(check, file, err);
+        const failure: Failure = .{ .err = err, .errno = facts.cgroup_controllers.errno };
+        return read_failed(check, .read, file, failure);
     }
     const offered = parse.parse_controller_list(facts.cgroup_controllers.text()) catch {
         check.problem("cgroup.controllers of the user manager is malformed", .{});
-        check.fix_with("check the file; the kernel writes space-separated lowercase names", .{});
+        check.cause("the kernel writes cgroup.controllers as space-separated lowercase names, " ++
+            "and this file does not look like that", .{});
+        check.context_path(file);
+        check.fix_with("look at the file:", "cat {s}", .{file});
         return;
     };
     cgroup_verdict(check, facts.uid, offered);
+}
+
+fn cgroup_v2_missing(check: *Check) void {
+    assert(check.detail.len == 0);
+    assert(check.status == .ok);
+    check.problem("cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid host)", .{});
+    check.cause_symptom();
+    check.cause("/sys/fs/cgroup/cgroup.controllers exists only on the unified cgroup v2 " ++
+        "hierarchy, so this host runs cgroup v1 or the hybrid layout", .{});
+    check.fix("check the mount (cgroup2fs is v2):", "stat -fc %T /sys/fs/cgroup");
+    check.fix("boot with systemd.unified_cgroup_hierarchy=1, or use a cgroup v2 distro", "");
+    assert(check.diag.fixes.count == 2);
+}
+
+fn user_manager_missing(check: *Check, uid: u32, directory: []const u8) void {
+    assert(check.detail.len == 0);
+    assert(check.status == .ok);
+    check.problem("no systemd user manager for uid {d}: {s} does not exist", .{ uid, directory });
+    check.cause_symptom();
+    check.cause("systemd starts user@{d}.service when the user has a login session or lingering " ++
+        "enabled, and neither is active", .{uid});
+    check.context_path(directory);
+    check.fix("keep the manager running:", "sudo loginctl enable-linger $(id -un)");
+    check.fix("or log in through a systemd (logind) session, such as ssh or a console", "");
 }
 
 /// True if the user manager's cgroup is a directory owned by the user; otherwise reports.
@@ -682,14 +931,21 @@ fn cgroup_owned_directory(check: *Check, facts: *const Facts, directory: []const
     const stat = facts.cgroup_user.stat;
     if (stat.mode & std.posix.S.IFMT != std.posix.S.IFDIR) {
         check.problem("{s} is not a directory", .{directory});
-        check.fix_with("{s}", .{delegate_fix});
+        check.cause("a cgroup is a directory, so this path cannot be the cgroup systemd " ++
+            "delegates to the user", .{});
+        check.context_path(directory);
+        delegate_fixes(check);
         return false;
     }
     if (stat.uid == facts.uid) return true;
     check.problem("{s} is owned by uid {d}, not by uid {d}: it is not delegated to this user", .{
         directory, stat.uid, facts.uid,
     });
-    check.fix_with("{s}", .{delegate_fix});
+    check.cause_symptom();
+    check.cause("only the owner of a cgroup can hand parts of it to unprivileged code, and " ++
+        "uid {d} does not own this one", .{facts.uid});
+    check.context_path(directory);
+    delegate_fixes(check);
     return false;
 }
 
@@ -704,7 +960,12 @@ fn cgroup_verdict(check: *Check, uid: u32, offered: parse.ControllerSet) void {
         check.problem("the cgroup delegated to uid {d} lacks controllers:{s}", .{
             uid, missing.slice(),
         });
-        check.fix_with("{s}", .{delegate_fix});
+        check.cause_symptom();
+        check.cause("systemd delegates only some controllers to user services by default, and " ++
+            "the cgroup.controllers of this user's manager does not list these:{s}", .{
+            missing.slice(),
+        });
+        delegate_fixes(check);
         return;
     }
     check.detail.print("cgroup v2, user@{d}.service delegated to uid {d}:", .{ uid, uid });
@@ -734,16 +995,21 @@ fn evaluate_overlay(facts: *const Facts, check: *Check) void {
     }
     if (probe.is(.denied)) {
         check.problem("an overlayfs mount inside a user namespace was refused", .{});
-        check.fix_with(
-            "use Linux 5.11 or newer with overlayfs (CONFIG_OVERLAY_FS, modprobe overlay)",
-            .{},
-        );
+        check.cause_symptom();
+        check.cause("the namespaces were created but mount(overlay) was refused: the overlay " ++
+            "module may be missing or not loaded, or a security policy forbids the mount", .{});
+        check.fix("load the overlay module:", "sudo modprobe overlay");
+        check.fix("or use Linux 5.11 or newer built with CONFIG_OVERLAY_FS", "");
         return;
     }
     if (probe.is(.map_denied)) return map_denied(check);
     if (probe.is(.setup_denied)) {
         check.problem("could not enter the user and mount namespaces the probe needs", .{});
-        check.fix_with("fix the userns check first; overlay needs the same permission", .{});
+        check.cause_symptom();
+        check.cause("the overlay probe needs a user namespace first and the kernel refused " ++
+            "to create one, so overlayfs itself was never tried (see the userns check)", .{});
+        check.fix("fix the userns check first (ZBX-E0101); overlay needs the same permission", "");
+        check.fix("then check again:", "zbx doctor");
         return;
     }
     assert(!probe.is(.ok)); // Every success and named refusal returned above.
@@ -761,7 +1027,7 @@ const BinaryState = union(enum) {
     /// Present but neither setuid root nor carrying the capability.
     unprivileged,
     missing,
-    fault: host_mod.Error,
+    fault: Failure,
 };
 
 fn binary_state(facts: *const Facts, program: Program) BinaryState {
@@ -770,9 +1036,13 @@ fn binary_state(facts: *const Facts, program: Program) BinaryState {
     // because another candidate turned out to be fine.
     for (row) |*binary| {
         if (binary.stat_err) |err| {
-            if (err != error.NotFound) return .{ .fault = err };
+            if (err != error.NotFound) {
+                return .{ .fault = .{ .err = err, .errno = binary.stat_errno } };
+            }
         } else if (binary.capability_err) |err| {
-            if (err != error.NoData) return .{ .fault = err };
+            if (err != error.NoData) {
+                return .{ .fault = .{ .err = err, .errno = binary.capability_errno } };
+            }
         }
     }
     var found_unprivileged = false;
@@ -815,7 +1085,8 @@ fn evaluate_subid(facts: *const Facts, check: *Check) void {
     assert(facts.subgid.attempted);
     // Failed reads come first: a fault must never be answered from partial information.
     if (facts.passwd.err) |err| {
-        if (err != error.NotFound) return read_failed(check, "/etc/passwd", err);
+        const failure: Failure = .{ .err = err, .errno = facts.passwd.errno };
+        if (err != error.NotFound) return read_failed(check, .read, "/etc/passwd", failure);
     }
     const files = [2]struct { path: []const u8, slot: *const Slot(constants.subid_bytes_max) }{
         .{ .path = "/etc/subuid", .slot = &facts.subuid },
@@ -823,7 +1094,8 @@ fn evaluate_subid(facts: *const Facts, check: *Check) void {
     };
     for (files) |file| {
         if (file.slot.err) |err| {
-            if (err != error.NotFound) return read_failed(check, file.path, err);
+            const failure: Failure = .{ .err = err, .errno = file.slot.errno };
+            if (err != error.NotFound) return read_failed(check, .read, file.path, failure);
         }
     }
     const user = lookup_user(facts);
@@ -886,10 +1158,7 @@ fn subid_verdict(
     for (programs, 0..) |program, index| {
         states[index] = binary_state(facts, program);
         if (states[index] == .fault) {
-            const name = program_names[index];
-            check.problem("cannot inspect {s}: {s}", .{ name, error_reason(states[index].fault) });
-            check.fix_with("retry; check the permissions of /usr/bin/{s}", .{name});
-            return;
+            return binary_fault(check, program_names[index], states[index].fault);
         }
     }
     var who: Detail = .{};
@@ -923,7 +1192,8 @@ fn subid_verdict(
     }
     if (problems.any()) {
         check.problem("{s}{s}", .{ who.slice(), found.slice() });
-        subid_fixes(check, user, problems);
+        subid_causes(check, problems);
+        subid_fixes(check, problems);
         return;
     }
     check.pass("{s}: subuid {d} ids, subgid {d} ids;", .{
@@ -936,48 +1206,88 @@ fn subid_verdict(
     }
 }
 
-fn subid_fixes(check: *Check, user: UserLookup, problems: SubidProblems) void {
+/// A look at newuidmap or newgidmap failed for a reason other than "not there".
+fn binary_fault(check: *Check, name: []const u8, failure: Failure) void {
+    assert(check.detail.len == 0);
+    assert(name.len > 0);
+    check.problem("cannot inspect {s}: {s}", .{ name, error_reason(failure.err) });
+    var what: [64]u8 = undefined;
+    // Cannot fail: the name is "newuidmap" or "newgidmap".
+    const operation = std.fmt.bufPrint(&what, "inspecting {s}", .{name}) catch unreachable;
+    check.cause_could_not_run(operation, failure);
+    check.fix_with("retry; check the permissions of the file:", "ls -l /usr/bin/{s}", .{name});
+}
+
+/// One explanation per kind of problem, then the whole list last: default output shows only
+/// the last cause, and with two problems it must name both.
+fn subid_causes(check: *Check, problems: SubidProblems) void {
     assert(problems.any());
-    var name_storage: [constants.user_name_bytes_max]u8 = undefined;
-    const owner = if (user.name) |name| text_util.sanitise(&name_storage, name) else "$(id -un)";
-    const command = "$(command -v newuidmap newgidmap)";
-    var first = true;
+    assert(check.status == .fail);
     if (problems.ranges) {
-        const usermod = "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535";
-        check.fix_with("{s} {s}", .{ usermod, owner });
-        first = false;
+        check.cause("a rootless container needs {d} subordinate ids for its users, and the " ++
+            "user has no such range in /etc/subuid or /etc/subgid", .{constants.subid_range_min});
     }
     if (problems.missing) {
-        const lead = if (first) "" else "; ";
-        const install = "install uidmap (apt install uidmap / dnf install shadow-utils)";
-        check.fix.print("{s}{s}", .{ lead, install });
-        first = false;
+        check.cause("newuidmap and newgidmap are the setuid helpers that write a rootless " ++
+            "container's id maps, and at least one is not installed", .{});
     }
     if (problems.unprivileged) {
-        const lead = if (first) "" else "; ";
-        check.fix.print("{s}sudo chown root: {s} && sudo chmod u+s {s}", .{
-            lead, command, command,
-        });
+        check.cause("a helper that is neither setuid root nor given the capability cannot " ++
+            "write the id maps of a rootless container", .{});
     }
-    assert(check.fix.len > 0);
+    check.cause("{s}", .{check.detail.slice()}); // The whole list, last: it is what default shows.
+}
+
+fn subid_fixes(check: *Check, problems: SubidProblems) void {
+    assert(problems.any());
+    assert(check.diag.fixes.count == 0);
+    if (problems.ranges) {
+        const usermod = "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 " ++
+            "$(id -un)";
+        check.fix("give this user id ranges:", usermod);
+    }
+    if (problems.missing) {
+        // No `os-release` is read: the two commands are the same package under its two names, and
+        // a fix for each family is true wherever the check runs, with no new host fact to fake.
+        check.fix("install on Debian, Ubuntu:", "sudo apt install uidmap");
+        check.fix("install on Fedora:", "sudo dnf install shadow-utils");
+    }
+    if (problems.unprivileged) {
+        const command = "$(command -v newuidmap newgidmap)";
+        check.fix("make the helpers setuid root:", "sudo chown root: " ++ command ++
+            " && sudo chmod u+s " ++ command);
+    }
+    assert(check.diag.fixes.count > 0);
 }
 
 // seccomp
+
+const seccomp_build = "grep -E 'CONFIG_SECCOMP(_FILTER)?=' /boot/config-$(uname -r)";
 
 fn evaluate_seccomp(facts: *const Facts, check: *Check) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
     assert(facts.status.attempted); // gather_seccomp ran.
     if (facts.seccomp_err == null) assert(facts.seccomp != null);
-    if (facts.status.err) |err| return read_failed(check, "/proc/self/status", err);
+    if (facts.status.err) |err| {
+        const failure: Failure = .{ .err = err, .errno = facts.status.errno };
+        return read_failed(check, .read, "/proc/self/status", failure);
+    }
     if (facts.seccomp_err) |err| {
         check.problem("prctl(PR_GET_SECCOMP) failed: {s}", .{error_reason(err)});
-        check.fix_with("use a kernel built with CONFIG_SECCOMP=y", .{});
+        const failure: Failure = .{ .err = err, .errno = facts.seccomp_errno };
+        check.cause_could_not_run("prctl(PR_GET_SECCOMP)", failure);
+        check.fix("see how this kernel was built:", seccomp_build);
+        check.fix("use a kernel built with CONFIG_SECCOMP=y", "");
         return;
     }
     const from_status = parse.parse_seccomp_status(facts.status.text()) catch {
         check.problem("no usable Seccomp: line in /proc/self/status", .{});
-        check.fix_with("use a kernel built with CONFIG_SECCOMP=y and CONFIG_SECCOMP_FILTER=y", .{});
+        check.cause_symptom();
+        check.cause("the kernel prints the Seccomp: line only when it is built with " ++
+            "CONFIG_SECCOMP, so this kernel was built without it", .{});
+        check.fix("see how this kernel was built:", seccomp_build);
+        check.fix("use a kernel built with CONFIG_SECCOMP=y and CONFIG_SECCOMP_FILTER=y", "");
         return;
     };
     const from_prctl = facts.seccomp.?;
@@ -985,7 +1295,9 @@ fn evaluate_seccomp(facts: *const Facts, check: *Check) void {
         check.problem("/proc/self/status says seccomp mode {d} but prctl says {d}", .{
             from_status, from_prctl,
         });
-        check.fix_with("retry; the two views of this process must agree", .{});
+        check.cause("the two ways of asking the kernel about this process's seccomp mode " ++
+            "disagree, so neither answer can be trusted", .{});
+        check.fix("run the check again:", "zbx doctor");
         return;
     }
     const mode = switch (from_status) {
@@ -1027,7 +1339,7 @@ pub fn render(report: *const Report, color: bool, buffer: []u8) []const u8 {
 
 fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
     assert(check.detail.len > 0);
-    if (check.status == .fail) assert(check.fix.len > 0);
+    if (check.status == .fail) assert(check.diag.code.? == code_of(check.id));
     const style = style_of(check.status);
     // Cannot fail: constants.zig asserts, at comptime, that six maximal lines fit the buffer.
     if (color) writer.writeAll(style.color) catch unreachable;
@@ -1036,57 +1348,87 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
     const line = .{ @tagName(check.id), check.detail.slice() };
     writer.print(" {s}  {s}", line) catch unreachable; // Same.
     if (check.status == .fail) {
-        writer.print(" \u{2014} fix: {s}", .{check.fix.slice()}) catch unreachable; // Same.
+        // The code ties the line to its diagnostic block on stderr.
+        const code = diag_codes.full_name(check.diag.code.?);
+        writer.print("  [{s}]", .{code}) catch unreachable; // Same.
     }
     writer.writeAll("\n") catch unreachable; // Same.
 }
 
 // ---- Entry point ---------------------------------------------------------------------------
 
-/// Runs the doctor against `host` and prints the report to stdout. Returns the exit code.
-pub fn run(host: Host) u8 {
+/// Runs the doctor against `host`, fills `report`, and prints the stdout report: one line per
+/// check. A stdout that cannot be written is `ZBX-E0009` in `diag`. The diagnostic of each FAIL
+/// stays in `report` for the caller (cli.zig) to render on stderr, and the exit code is
+/// `report.exit_code()`.
+pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
     var facts: Facts = undefined;
     facts.reset();
     gather(host, &facts);
-    var report: Report = undefined;
-    evaluate(&facts, &report);
+    evaluate(&facts, report);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
-    const output = render(&report, host.is_terminal(.stdout), &buffer);
+    const output = render(report, host.color_enabled(.stdout), &buffer);
     assert(output.len > 0);
-    host.write_all(.stdout, output) catch return constants.exit_failed;
+    host.write_all(.stdout, output) catch |err| {
+        diag_errors.output_failed(diag, .stdout, err, host.last_errno());
+        return error.OutputFailed;
+    };
     assert(output.len <= buffer.len);
-    return report.exit_code();
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;
+const cli = @import("cli.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 const fixtures = @import("doctor_fixtures.zig");
 
-/// Runs the whole doctor against a fixture and returns the exit code; output stays in `target`.
+/// Runs `zbx doctor` end to end (the CLI, so the stderr blocks too) against a fixture and
+/// returns the exit code; the output stays in `target`.
 fn run_fixture(target: *HostSim, fixture: *const fixtures.Fixture) u8 {
     target.init(7, fixture.files);
     fixture.apply(target);
-    const code = run(target.interface());
+    const code = run_exit_code(target);
     assert(target.open_count() == 0);
     return code;
 }
 
-test "snapshot: every fixture's full report and exit code" {
-    // Goal: the user-visible report for each simulated host is exactly the checked-in text
-    // (src/testdata/doctor/NAME.txt), and the exit code is 0 exactly when nothing is FAIL.
-    // Method: run the whole doctor (gather, evaluate, render, write) against the simulator.
+/// What the process would exit with.
+fn run_exit_code(target: *HostSim) u8 {
+    const code = cli.run(target.interface(), &.{"doctor"});
+    assert(code <= constants.exit_internal);
+    return code;
+}
+
+/// Counts the lines of `text` that start with `prefix`.
+fn count_lines(text: []const u8, prefix: []const u8) u32 {
+    var count: u32 = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, prefix)) count += 1;
+    }
+    return count;
+}
+
+test "snapshot: every fixture's report, its diagnostic blocks and its exit code" {
+    // Goal: the user-visible output for each simulated host is exactly the checked-in text:
+    // src/testdata/doctor/NAME.txt is stdout and NAME.stderr.txt is the stderr blocks (empty
+    // when nothing failed). The exit code is 0 exactly when nothing is FAIL, and every FAIL
+    // line has its block, in check order, with the same code.
     @setEvalBranchQuota(100_000);
     var target: HostSim = undefined;
     inline for (fixtures.all) |fixture| {
         const expected = @embedFile("testdata/doctor/" ++ fixture.name ++ ".txt");
+        const expected_stderr = @embedFile("testdata/doctor/" ++ fixture.name ++ ".stderr.txt");
         const code = run_fixture(&target, &fixture);
         try testing.expectEqualStrings(expected, target.stdout());
-        try testing.expectEqual(@as(usize, 0), target.stderr().len);
-        const has_fail = std.mem.indexOf(u8, expected, "FAIL ") != null;
-        try testing.expectEqual(@as(u8, @intFromBool(has_fail)), code);
+        try testing.expectEqualStrings(expected_stderr, target.stderr());
+        const fails = count_lines(expected, "FAIL ");
+        try testing.expectEqual(fails, count_lines(expected_stderr, "error[ZBX-E01"));
+        try testing.expectEqual(fails, std.mem.count(u8, expected, "  [ZBX-E01"));
+        const expected_code = if (fails > 0) constants.exit_environment else constants.exit_ok;
+        try testing.expectEqual(expected_code, code);
     }
 }
 
@@ -1105,6 +1447,7 @@ test "the healthy fixtures pass and warn does not change the exit code" {
         } else false;
         const code = run_fixture(&target, &fixture);
         try testing.expectEqual(expect_pass, code == constants.exit_ok);
+        if (expect_pass) try testing.expectEqual(@as(usize, 0), target.stderr().len);
     }
 }
 
@@ -1135,6 +1478,61 @@ test "uid 0 gets no free pass: root is judged like anyone else" {
     }
 }
 
+test "every check has its own code, and a FAIL's diagnostic is blamed on the environment" {
+    // Goal: the mapping from check to code is total and distinct (one code per check, E0101 to
+    // E0106), and a failing check carries a diagnostic with a cause, a fix and the exit code
+    // of its blame. Method: the empty host fails every check.
+    var seen: [constants.doctor_checks_count]diag_codes.Code = undefined;
+    for (std.enums.values(CheckId), 0..) |id, index| {
+        seen[index] = code_of(id);
+        for (seen[0..index]) |earlier| try testing.expect(earlier != seen[index]);
+        try testing.expect(std.mem.startsWith(u8, @tagName(seen[index]), "E01"));
+    }
+    var target: HostSim = undefined;
+    target.init(1, &.{});
+    var facts: Facts = undefined;
+    facts.reset();
+    gather(target.interface(), &facts);
+    var report: Report = undefined;
+    evaluate(&facts, &report);
+    var failures: u32 = 0;
+    for (report.checks) |check| {
+        // The simulator's defaults let the kernel and overlay checks pass; the rest read files.
+        const expected = check.id != .kernel and check.id != .overlay;
+        try testing.expectEqual(expected, check.status == .fail);
+        if (!expected) continue;
+        failures += 1;
+        try testing.expectEqual(code_of(check.id), check.diag.code.?);
+        try testing.expect(check.diag.causes.count > 0);
+        try testing.expect(check.diag.fixes.count > 0);
+        try testing.expectEqual(@as(u8, constants.exit_environment), check.diag.exit_code());
+    }
+    try testing.expectEqual(@as(u32, 4), failures);
+}
+
+test "a check that could not run says so, names the real errno, and keeps its own code" {
+    // Goal: the brief's rule for faults. An unreadable /etc/subuid is a FAIL of the subid check
+    // (E0105, environment); the last cause (the one default output shows) says the check could
+    // not run and names EACCES, the errno the simulator's model reports for it.
+    var target: HostSim = undefined;
+    for (fixtures.all) |fixture| {
+        if (!std.mem.eql(u8, fixture.name, "subuid_unreadable")) continue;
+        _ = run_fixture(&target, &fixture);
+        var facts: Facts = undefined;
+        facts.reset();
+        target.init(1, fixture.files);
+        fixture.apply(&target);
+        gather(target.interface(), &facts);
+        var report: Report = undefined;
+        evaluate(&facts, &report);
+        const check = report.checks[@backingInt(CheckId.subid)];
+        try testing.expectEqual(diag_codes.Code.E0105, check.diag.code.?);
+        const expected = "the subid check could not run: read(/etc/subuid) failed: " ++
+            "permission denied (EACCES)";
+        try testing.expectEqualStrings(expected, check.diag.last_cause().?);
+    }
+}
+
 test "colour is applied only when asked and does not change the text" {
     // Goal: with colour the report is the plain report plus escape sequences; without it there
     // is no escape byte at all.
@@ -1143,7 +1541,7 @@ test "colour is applied only when asked and does not change the text" {
     target.init(1, fixture.files);
     fixture.apply(&target);
     target.terminal = true;
-    _ = run(target.interface());
+    _ = run_exit_code(&target);
     const coloured = target.stdout();
     try testing.expect(std.mem.indexOf(u8, coloured, "\x1b[31mFAIL\x1b[0m") != null);
     try testing.expect(std.mem.indexOf(u8, coloured, "\x1b[32mok  \x1b[0m") != null);
@@ -1152,23 +1550,14 @@ test "colour is applied only when asked and does not change the text" {
     _ = run_fixture(&plain_sim, &fixture);
     try testing.expect(std.mem.indexOfScalar(u8, plain_sim.stdout(), 0x1b) == null);
     var stripped: [constants.output_bytes_max]u8 = undefined;
-    var length: usize = 0;
-    var index: usize = 0;
-    while (index < coloured.len) : (index += 1) {
-        if (coloured[index] == 0x1b) {
-            while (coloured[index] != 'm') index += 1;
-            continue;
-        }
-        stripped[length] = coloured[index];
-        length += 1;
-    }
-    try testing.expectEqualStrings(plain_sim.stdout(), stripped[0..length]);
+    const without = @import("diag/render.zig").strip_colour(&stripped, coloured);
+    try testing.expectEqualStrings(plain_sim.stdout(), without);
 }
 
 test "a failed read at every step of the healthy host is a FAIL, never ok" {
     // Goal: crash at any step. Method: fail host call 0, 1, 2, ... of the healthy Ubuntu run
     // with each error kind; whatever the failing call was (a read, a stat, a probe, the final
-    // write), the exit code is 1, the report is well formed, and no handle leaks.
+    // write), the exit code is 2, the report is well formed, and no handle leaks.
     const kinds = [_]host_mod.Error{ error.IoFailed, error.AccessDenied, error.OutOfMemory };
     const fixture = fixtures.all[0];
     var target: HostSim = undefined;
@@ -1179,14 +1568,14 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
             fixture.apply(&target);
             target.faults.fail_call_index = @intCast(index);
             target.faults.fail_call_error = kind;
-            const code = run(target.interface());
+            const code = run_exit_code(&target);
             try testing.expectEqual(@as(u32, 0), target.open_count());
             const injected = target.hard_errors_injected;
             if (injected == 0) {
                 calls_total = @max(calls_total, @as(u32, @intCast(index)));
                 try testing.expectEqual(constants.exit_ok, code);
             } else {
-                try testing.expectEqual(constants.exit_failed, code);
+                try testing.expectEqual(constants.exit_environment, code);
             }
         }
     }

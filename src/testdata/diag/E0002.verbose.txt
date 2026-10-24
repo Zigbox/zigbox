@@ -1,0 +1,8 @@
+error[ZBX-E0002]: no command given
+  while  reading the command line
+  cause  only options were given, and the first word after them must be a
+         command
+  fix    see the commands:   zbx help
+         check this host:    zbx doctor
+  more   zbx explain E0002
+  docs   https://zigbox.github.io/zigbox/errors/E0002.html

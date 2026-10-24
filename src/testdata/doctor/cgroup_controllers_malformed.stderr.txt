@@ -1,0 +1,6 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  the kernel writes cgroup.controllers as space-separated lowercase
+         names, and this file does not look like that
+  fix    look at the file:   cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html

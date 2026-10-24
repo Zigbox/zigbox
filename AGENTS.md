@@ -13,7 +13,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - Zig version is pinned in `build.zig.zon` (`minimum_zig_version`) and CI. Do not upgrade during a milestone.
 - No third-party dependencies; standard library only (see STYLE.md for the allowed external programs).
 - No libc: never set `link_libc`. Release targets are `x86_64-linux` and `aarch64-linux`, static, built `ReleaseSafe` so assertions stay on.
-- The pinned Zig is newer than most model training data, and std APIs (I/O, `std.Io`, readers/writers, build system) changed in 0.15–0.17. Read the pinned std source (`$(zig env | jq -r .lib_dir)/std`) before using an API; do not write from memory.
+- The pinned Zig is newer than most model training data, and std APIs (I/O, `std.Io`, readers/writers, build system) changed in 0.15–0.17. Read the pinned std source (`zig env` prints ZON; its `.lib_dir` field names the directory, and `std` is under it) before using an API; do not write from memory.
 - All namespace work happens in a single-threaded child before `execve`. Thread pools only in the parent.
 - Never run anything with `sudo` in tests on a developer's host. Privileged setup (sysctl toggles) happens only inside the test VM.
 
@@ -39,6 +39,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 ## README status
 
 - [README.md](README.md) holds the status of every milestone and slice: what is built and reviewed, what is in review, and what is not started. The supervisor updates it in the same push that changes the status. Never mark anything "demonstrated" until its `demo-mN` job is green in CI.
+- The project site (`site/index.html`, the `SITE` and `MILESTONES` data at the top of its script) shows the same status. Update it in the same push as the README: the milestone's `status`, its `slices` count, and, once a demo is green in CI, its `demo` lines taken from that run's recorded output with `recorded` linking to the run. Never show output that was not recorded as recorded. Pages deploys only from `main`.
 
 ## Git
 
