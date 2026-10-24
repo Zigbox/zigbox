@@ -64,6 +64,9 @@ test {
     _ = @import("runtime/child.zig");
     _ = @import("runtime/diagnose.zig");
     _ = @import("zigbox.zig");
+    _ = @import("redact.zig");
+    _ = @import("bundle.zig");
+    _ = @import("bundle_tests.zig");
     _ = @import("runtime/session.zig");
     _ = @import("runtime/ids.zig");
     _ = @import("runtime/records.zig");

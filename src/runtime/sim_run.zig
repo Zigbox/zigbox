@@ -13,6 +13,7 @@ const sim_world = @import("../sim_world.zig");
 const plan_mod = @import("plan.zig");
 
 const cli = @import("../cli.zig");
+const records = @import("records.zig");
 
 const HostSim = host_sim.HostSim;
 
@@ -21,6 +22,7 @@ pub const regular_file_path = "/srv/file";
 
 pub const home_path = "/home/alice";
 pub const runs_path = "/home/alice/.local/state/zbx/runs";
+pub const bundles_path = "/home/alice/.local/state/zbx/bundles";
 
 /// The environment of a user whose home is `home_path`, with and without a terminal.
 pub const env_home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = home_path }};
@@ -65,11 +67,37 @@ pub fn init_single(sim: *HostSim, seed: u64) void {
     start(sim, seed, &files_single);
 }
 
-fn start(sim: *HostSim, seed: u64, host_files: []const host_sim.File) void {
+pub fn start(sim: *HostSim, seed: u64, host_files: []const host_sim.File) void {
     sim.init(seed, host_files);
     sim.world.seed_container_host(rootfs_path);
     sim.world.add_node(home_path, .dir);
     sim.environment_variables = &env_home;
+}
+
+/// Puts the record `view` in the simulated runs directory, as a finished run would have.
+pub fn put_record(sim: *HostSim, view: *const records.View) void {
+    sim.world.add_node(runs_path, .dir);
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = records.render(view, &buffer);
+    var path: [128]u8 = undefined;
+    // Cannot fail: the runs path and a container name fit in 128 bytes.
+    const where = std.fmt.bufPrint(&path, runs_path ++ "/{s}.zon", .{view.name}) catch unreachable;
+    assert(sim.world.write_file(where, text) == null);
+}
+
+/// A finished run called `name`, started at `started`, for tests that need something to bundle.
+pub fn sample_view(name: []const u8, begun: u64) records.View {
+    return .{
+        .name = name,
+        .rootfs = rootfs_path,
+        .command = &.{ "/bin/sh", "-c", "echo hi" },
+        .labels = &.{.{ .key = "app", .value = "web" }},
+        .started = begun,
+        .ended = begun + 2,
+        .exit = .{ .exited = 3 },
+        .ids = .full,
+        .zbx_version = "0.0.0",
+    };
 }
 
 /// A plan for the oracle's own questions (which step is where). The steps are the same for every

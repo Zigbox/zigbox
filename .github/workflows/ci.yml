@@ -75,6 +75,7 @@ jobs:
           - diag
           - run
           - record
+          - redact
           - parse_sysctl
           - parse_kernel
           - parse_controllers

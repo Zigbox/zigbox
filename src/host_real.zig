@@ -83,6 +83,7 @@ pub const HostReal = struct {
         .exec = exec,
         .gid = gid,
         .environment = environment,
+        .environment_at = environment_at,
         .random_bytes = random_bytes,
         .run_helper = run_helper,
         .block_signals = block_signals,
@@ -442,6 +443,19 @@ pub const HostReal = struct {
         return self.environ.getPosix(name);
     }
 
+    fn environment_at(context: *anyopaque, index: u32) ?host.EnvironmentEntry {
+        const self = from_context(context);
+        const entries = self.environ.block.slice;
+        assert(index <= constants.environment_entries_max);
+        if (index >= entries.len) return null;
+        const text = std.mem.span(entries[index].?);
+        // An entry without "=" has no value; it is listed with an empty one.
+        const equals = std.mem.indexOfScalar(u8, text, '=') orelse text.len;
+        if (equals == 0) return .{ .name = "?", .value = text };
+        const value = if (equals < text.len) text[equals + 1 ..] else text[0..0];
+        return .{ .name = text[0..equals], .value = value };
+    }
+
     fn random_bytes(context: *anyopaque, buffer: []u8) host.Error!void {
         _ = from_context(context);
         assert(buffer.len > 0);
@@ -481,6 +495,7 @@ pub const HostReal = struct {
     fn block_signals(context: *anyopaque, block: bool) host.Error!void {
         _ = from_context(context);
         const set = forwarded_set();
+        assert(constants.forwarded_signals_count == 4);
         const how: u32 = if (block) linux.SIG.BLOCK else linux.SIG.UNBLOCK;
         try check(linux.sigprocmask(how, &set, null));
     }
@@ -545,7 +560,7 @@ pub const HostReal = struct {
     fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
         _ = from_context(context);
         assert(path.len > 0);
-        assert(bytes.len <= constants.file_bytes_max);
+        assert(bytes.len <= constants.write_bytes_max);
         const flags: linux.O = .{
             .ACCMODE = .WRONLY,
             .CREAT = true,

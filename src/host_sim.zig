@@ -194,6 +194,7 @@ pub const HostSim = struct {
         .exec = exec,
         .gid = gid,
         .environment = environment,
+        .environment_at = environment_at,
         .random_bytes = random_bytes,
         .run_helper = run_helper,
         .block_signals = block_signals,
@@ -621,6 +622,13 @@ pub const HostSim = struct {
             if (std.mem.eql(u8, variable.name, name)) return variable.value;
         }
         return null;
+    }
+
+    fn environment_at(context: *anyopaque, index: u32) ?host.EnvironmentEntry {
+        const sim = from_context(context);
+        if (index >= sim.environment_variables.len) return null;
+        const variable = sim.environment_variables[index];
+        return .{ .name = variable.name, .value = variable.value };
     }
 
     fn random_bytes(context: *anyopaque, buffer: []u8) host.Error!void {

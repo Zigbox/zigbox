@@ -1367,10 +1367,7 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
 /// stays in `report` for the caller (cli.zig) to render on stderr, and the exit code is
 /// `report.exit_code()`.
 pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
-    var facts: Facts = undefined;
-    facts.reset();
-    gather(host, &facts);
-    evaluate(&facts, report);
+    inspect(host, report);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render(report, host.color_enabled(.stdout), &buffer);
@@ -1380,6 +1377,15 @@ pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
         return error.OutputFailed;
     };
     assert(output.len <= buffer.len);
+}
+
+/// The doctor's checks without any output: for a bundle, which keeps the report as JSON.
+pub fn inspect(host: Host, report: *Report) void {
+    var facts: Facts = undefined;
+    facts.reset();
+    gather(host, &facts);
+    evaluate(&facts, report);
+    assert(report.checks[0].id == .kernel);
 }
 
 /// For a container run that could not create its namespaces: runs the user-namespace check on

@@ -49,6 +49,8 @@ pub const View = struct {
     exit: Exit,
     ids: IdsMode,
     zbx_version: []const u8,
+    /// The JSON line of the diagnostic that ended the run, for a bundle; empty for none.
+    diagnostic: []const u8 = "",
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -112,7 +114,14 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     write_format(&writer, "    .ids = .{s},\n", .{@tagName(view.ids)});
     write_bytes(&writer, "    .zbx = ");
     write_string(&writer, view.zbx_version);
-    write_bytes(&writer, ",\n}\n");
+    write_bytes(&writer, ",\n");
+    if (view.diagnostic.len > 0) {
+        assert(view.diagnostic.len <= constants.diag_json_bytes_max);
+        write_bytes(&writer, "    .diagnostic = ");
+        write_string(&writer, view.diagnostic);
+        write_bytes(&writer, ",\n");
+    }
+    write_bytes(&writer, "}\n");
     const text = writer.buffered();
     assert(text.len <= buffer.len);
     return text;
@@ -152,6 +161,8 @@ fn write_labels(writer: *std.Io.Writer, labels: []const Label) void {
 }
 
 fn write_exit(writer: *std.Io.Writer, exit: Exit) void {
+    assert(writer.buffer.len >= constants.record_bytes_max);
+    if (exit == .signaled) assert(exit.signaled > 0);
     switch (exit) {
         .running => write_bytes(writer, "    .exit = .running,\n"),
         .lost => write_bytes(writer, "    .exit = .lost,\n"),
@@ -174,7 +185,8 @@ comptime {
     const command = 4 * constants.record_command_bytes_max + 8 * constants.command_words_count_max;
     const label_bytes = 4 * (constants.label_key_bytes_max + constants.label_value_bytes_max);
     const labels = constants.labels_count_max * (label_bytes + 16);
-    assert(strings + command + labels + 512 <= constants.record_bytes_max);
+    const diagnostic = 4 * constants.diag_json_bytes_max + 32;
+    assert(strings + command + labels + diagnostic + 512 <= constants.record_bytes_max);
 }
 
 // ---- Reading -------------------------------------------------------------------------------
@@ -191,6 +203,13 @@ pub const Parsed = struct {
     ended: ?u64,
     exit: Exit,
     ids: ?IdsMode,
+    /// The diagnostic JSON line the run ended with; empty when the record has none.
+    diagnostic: [constants.diag_json_bytes_max]u8,
+    diagnostic_len: u16,
+
+    pub fn diagnostic_slice(parsed: *const Parsed) []const u8 {
+        return parsed.diagnostic[0..parsed.diagnostic_len];
+    }
 
     pub fn name_slice(parsed: *const Parsed) []const u8 {
         assert(parsed.name_len > 0);
@@ -284,6 +303,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.ended = null;
     out.exit = .running;
     out.ids = null;
+    out.diagnostic_len = 0;
     var have_start = false;
     var opened = false;
     var closed = false;
@@ -334,6 +354,9 @@ fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!voi
         out.ended = if (none) null else number;
     } else if (std.mem.eql(u8, key, "exit")) {
         out.exit = parse_exit(value) orelse return error.Malformed;
+    } else if (std.mem.eql(u8, key, "diagnostic")) {
+        const length = parse_string(value, &out.diagnostic) orelse return error.Malformed;
+        out.diagnostic_len = @intCast(length);
     } else if (std.mem.eql(u8, key, "ids")) {
         out.ids = std.meta.stringToEnum(IdsMode, std.mem.trimStart(u8, value, ".")) orelse
             return error.Malformed;
@@ -424,6 +447,46 @@ fn file_path(
     return text; // Both branches have the same bound.
 }
 
+/// `<runs>/<name>.zon`.
+pub fn record_path(
+    dir: *const Dir,
+    name: []const u8,
+    buffer: *[constants.state_path_bytes_max + 80]u8,
+) [:0]const u8 {
+    assert(dir.len > 0);
+    assert(name.len > 0);
+    return file_path(dir, name, false, buffer);
+}
+
+/// The name of the record with the latest start time (ties go to the larger name), or null when
+/// the directory holds none that can be read. Unreadable records are passed over.
+pub fn newest(host: Host, dir: *const Dir, name_out: *[constants.container_name_bytes_max]u8) ?u8 {
+    var listing: host_mod.DirListing = undefined;
+    host.list_directory(dir.text(), &listing) catch return null;
+    var best: ?u32 = null;
+    var best_started: u64 = 0;
+    var ignored: Skipped = undefined;
+    ignored.reset();
+    for (0..listing.count) |at| {
+        const name = listing.name(@intCast(at));
+        if (!is_record_name(name)) continue;
+        if (name.len - constants.record_suffix.len > constants.container_name_bytes_max) continue;
+        const started = started_of(host, dir, name, &ignored);
+        if (started == 0) continue; // Unreadable, or without a time: not a candidate.
+        const better = best == null or started > best_started or
+            (started == best_started and std.mem.lessThan(u8, listing.name(best.?), name));
+        if (!better) continue;
+        best = @intCast(at);
+        best_started = started;
+    }
+    const found = best orelse return null;
+    const stem = listing.name(found);
+    const length = stem.len - constants.record_suffix.len;
+    @memcpy(name_out[0..length], stem[0..length]);
+    assert(length > 0);
+    return @intCast(length);
+}
+
 /// Writes the record atomically: a temporary file, then a rename over the final name.
 pub fn save(host: Host, dir: *const Dir, view: *const View) host_mod.Error!void {
     var bytes: [constants.record_bytes_max]u8 = undefined;
@@ -480,6 +543,7 @@ const Entry = struct {
 };
 
 fn is_record_name(name: []const u8) bool {
+    assert(name.len <= constants.dir_name_bytes_max);
     if (name.len <= constants.record_suffix.len) return false;
     if (name[0] == '.') return false;
     return std.mem.endsWith(u8, name, constants.record_suffix);
@@ -546,6 +610,8 @@ fn oldest_of(listing: *const host_mod.DirListing, entries: []const Entry) ?usize
 }
 
 fn remove_record(host: Host, dir: *const Dir, file_name: []const u8) host_mod.Error!void {
+    assert(is_record_name(file_name));
+    assert(dir.len > 0);
     var storage: [constants.state_path_bytes_max + 80]u8 = undefined;
     const text = std.fmt.bufPrintSentinel(
         &storage,

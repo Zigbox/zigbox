@@ -33,6 +33,8 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const codes = @import("../diag/codes.zig");
+const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
 const ids = @import("ids.zig");
 const plan_mod = @import("plan.zig");
@@ -161,6 +163,7 @@ pub fn start(
     handle.warn = options.warn;
     handle.record_warned = false;
     handle.notes_count = 0;
+    handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.command = container.command;
     handle.labels = container.labels;
     try choose_name(host, container.name, handle, diag);
@@ -194,7 +197,7 @@ pub fn start(
     handle.session.execute(diag, info) catch |err| {
         assert(diag.code != null);
         handle.status = .stopped;
-        save_record(handle, .{ .start_failed = diag.code.? }, host.time_now());
+        save_record(handle, .{ .start_failed = diag.code.? }, host.time_now(), diag);
         return err;
     };
     collect_notes(handle);
@@ -223,7 +226,7 @@ pub fn wait(handle: *Handle) ExitReason {
             .rootfs = handle.rootfs_slice(),
         };
         diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, null);
-        save_record(handle, .lost, host.time_now());
+        save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         return .lost;
     };
     const reason: ExitReason = switch (status) {
@@ -233,7 +236,7 @@ pub fn wait(handle: *Handle) ExitReason {
     save_record(handle, switch (status) {
         .exited => |code| .{ .exited = code },
         .signaled => |number| .{ .signaled = number },
-    }, host.time_now());
+    }, host.time_now(), null);
     return reason;
 }
 
@@ -344,6 +347,8 @@ fn assert_single_threaded(host: Host) void {
 /// Writes the record that says the run began, and prunes the oldest. Nothing here can stop the
 /// run: a record that cannot be kept is a warning (ZBX-W0202, ZBX-W0203).
 fn begin_record(handle: *Handle) void {
+    assert(handle.status == .starting);
+    assert(handle.name_len > 0);
     var dir: records.Dir = undefined;
     if (!records.locate(handle.host, &dir)) {
         handle.record_dir = null;
@@ -360,7 +365,7 @@ fn begin_record(handle: *Handle) void {
         );
         return;
     };
-    save_record(handle, .running, null);
+    save_record(handle, .running, null, null);
     if (handle.record_dir == null) return;
     var skipped: records.Skipped = undefined;
     records.prune(handle.host, &dir, handle.name_slice(), &skipped) catch return;
@@ -371,8 +376,26 @@ fn begin_record(handle: *Handle) void {
     handle.report(&warning);
 }
 
-fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64) void {
+/// The diagnostic as the JSON line `--output json` prints, for the record. One too big to keep
+/// is replaced by an object that names its code and says it was cut.
+fn diagnostic_json(diag: *const Diag, buffer: *[constants.diag_json_bytes_max]u8) []const u8 {
+    assert(diag.code != null);
+    var big: [constants.output_bytes_max]u8 = undefined;
+    const line = std.mem.trimEnd(u8, render.render(diag, .json, false, &big), "\n");
+    if (line.len <= buffer.len) {
+        @memcpy(buffer[0..line.len], line);
+        return buffer[0..line.len];
+    }
+    const format = "{{\"code\":\"{s}\",\"truncated\":true}}";
+    // Cannot fail: a code name and a few words fit the buffer.
+    return std.fmt.bufPrint(buffer, format, .{codes.full_name(diag.code.?)}) catch unreachable;
+}
+
+fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Diag) void {
     const dir = handle.record_dir orelse return;
+    assert(handle.name_len > 0);
+    if (exit == .running) assert(ended == null);
+    var json: [constants.diag_json_bytes_max]u8 = undefined;
     const view: records.View = .{
         .name = handle.name_slice(),
         .rootfs = handle.rootfs_slice(),
@@ -383,6 +406,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64) void {
         .exit = exit,
         .ids = handle.mapping,
         .zbx_version = build_options.version,
+        .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {
         const failure: diagnose.Failure = .{

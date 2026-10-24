@@ -331,6 +331,9 @@ pub const VTable = struct {
     gid: *const fn (context: *anyopaque) u32,
     /// The value of an environment variable of this process, or null if it is not set.
     environment: *const fn (context: *anyopaque, name: []const u8) ?[]const u8,
+    /// The `index`th variable of the process environment, in the order the process has them, or
+    /// null past the last. Only a bundle lists the environment (with the values redacted).
+    environment_at: *const fn (context: *anyopaque, index: u32) ?EnvironmentEntry,
     random_bytes: *const fn (context: *anyopaque, buffer: []u8) Error!void,
     /// Runs a helper program to its end and waits for it. Its output (stdout and stderr, joined)
     /// is kept up to `output.len` bytes. The helper is run with the environment in the request.
@@ -361,6 +364,18 @@ pub const VTable = struct {
     begin_step: *const fn (context: *anyopaque, index: u32) void,
 };
 
+/// What `read_prefix` found.
+pub const Prefix = struct {
+    bytes: []u8,
+    truncated: bool,
+};
+
+/// A variable of the process environment.
+pub const EnvironmentEntry = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const Host = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -380,6 +395,27 @@ pub const Host = struct {
         const length = try host.read_all(handle, buffer);
         assert(length <= buffer.len);
         return buffer[0..length];
+    }
+
+    /// The first `buffer.len` bytes of the file, and whether there was more. For a bundle, which
+    /// keeps what fits and says it cut the rest; never for a check, which must see the whole file.
+    pub fn read_prefix(host: Host, path: []const u8, buffer: []u8) Error!Prefix {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.file_bytes_max);
+        var path_z: PathZ = undefined;
+        const path_sentinel = try path_z.init(path);
+        const handle = try host.open_retrying(path_sentinel);
+        defer host.vtable.close(host.context, handle);
+        var truncated = false;
+        const length = host.read_all(handle, buffer) catch |err| switch (err) {
+            error.FileTooLarge => blk: {
+                truncated = true;
+                break :blk buffer.len;
+            },
+            else => return err,
+        };
+        assert(length <= buffer.len);
+        return .{ .bytes = buffer[0..length], .truncated = truncated };
     }
 
     pub fn write_all(host: Host, stream: Stream, bytes: []const u8) Error!void {
@@ -679,6 +715,14 @@ pub const Host = struct {
         return value;
     }
 
+    /// The `index`th environment variable, or null past the end. Asserts a bounded walk.
+    pub fn environment_at(host: Host, index: u32) ?EnvironmentEntry {
+        assert(index <= constants.environment_entries_max);
+        const entry = host.vtable.environment_at(host.context, index) orelse return null;
+        assert(entry.name.len > 0);
+        return entry;
+    }
+
     pub fn random_bytes(host: Host, buffer: []u8) Error!void {
         assert(buffer.len > 0);
         assert(buffer.len <= 256); // getrandom never returns short up to 256 bytes.
@@ -734,7 +778,7 @@ pub const Host = struct {
     pub fn write_file(host: Host, path: [:0]const u8, bytes: []const u8) Error!void {
         assert(path.len > 0);
         assert(path[path.len] == 0);
-        assert(bytes.len <= constants.file_bytes_max);
+        assert(bytes.len <= constants.write_bytes_max);
         try host.vtable.write_file(host.context, path, bytes);
         assert(host.vtable.last_errno(host.context) == 0);
     }

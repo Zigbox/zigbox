@@ -103,6 +103,8 @@ pub const Diag = struct {
     whiles: List(Text, constants.diag_whiles_count_max, .newest),
     pairs: List(Pair, constants.diag_context_count_max, .oldest),
     fixes: List(Fix, constants.diag_fixes_count_max, .oldest),
+    /// The path of the bundle written for this bug, empty for none. Only a bug has one.
+    saved: text_util.Bounded(constants.state_path_bytes_max + 128),
 
     /// Initialises in place: the struct is several kilobytes.
     pub fn reset(diag: *Diag) void {
@@ -111,8 +113,19 @@ pub const Diag = struct {
         diag.whiles.reset();
         diag.pairs.reset();
         diag.fixes.reset();
+        diag.saved = .{};
+        assert(diag.saved.len == 0);
         assert(diag.causes.count == 0);
         assert(diag.code == null);
+    }
+
+    /// Records where the bundle for this bug was written.
+    pub fn save_bundle(diag: *Diag, path: []const u8) void {
+        assert(diag.code != null);
+        assert(path.len > 0);
+        diag.saved = .{};
+        diag.saved.print("{s}", .{path});
+        assert(diag.saved.len > 0);
     }
 
     /// Classifies the failure. Once per diagnostic: two classifications would mean two layers

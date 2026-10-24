@@ -35,6 +35,8 @@ const Case = struct {
     fixture: ?[]const u8 = null,
     /// Sets the simulator up after it is initialised (a container host and a failure to inject).
     prepare: ?*const fn (sim: *HostSim) void = null,
+    /// The command writes its result to stdout (a path), so stdout is not empty.
+    prints: bool = false,
     /// The code is a warning: the run goes on, so the exit code is the command's, not the blame's.
     warning: bool = false,
     /// The exit code the case must end with.
@@ -111,7 +113,9 @@ fn prepare_namespaces_refused(sim: *HostSim) void {
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = [_]Case{
+const cases = base_cases ++ bundle_cases;
+
+const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
     .{ .code = .E0002, .args = &.{}, .exit = 1 },
     .{ .code = .E0003, .args = &.{ "help", "me" }, .exit = 1 },
@@ -181,6 +185,42 @@ const cases = [_]Case{
         .code = .W0203,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_records_unreadable,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
+fn prepare_no_state(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.environment_variables = &.{};
+}
+
+fn prepare_with_record(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.now = 1_792_873_384;
+    sim_run.put_record(sim, &sim_run.sample_view("web-1", 1_792_873_000));
+}
+
+fn prepare_bundle_disk_full(sim: *HostSim) void {
+    prepare_with_record(sim);
+    sim.world.disk_full = true;
+}
+
+const bundle_cases = [_]Case{
+    .{ .code = .E0701, .args = &.{ "bundle", "--last" }, .prepare = prepare_no_state, .exit = 2 },
+    .{
+        .code = .E0702,
+        .args = &.{ "bundle", "--last" },
+        .prepare = prepare_bundle_disk_full,
+        .exit = 2,
+    },
+    .{ .code = .E0703, .args = &.{ "bundle", "nothere" }, .prepare = prepare_container, .exit = 1 },
+    .{ .code = .E0704, .args = &.{ "bundle", "--last" }, .prepare = prepare_container, .exit = 1 },
+    .{
+        .code = .W0701,
+        .args = &.{ "bundle", "--last", "--no-redact" },
+        .prepare = prepare_with_record,
+        .prints = true,
         .warning = true,
         .exit = 0,
     },
@@ -284,7 +324,9 @@ test "golden: every code in default, verbose and JSON output" {
                 try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
             }
             const full = codes.full_name(case.code);
-            if (case.fixture == null) {
+            if (case.prints) {
+                try testing.expect(sim.stdout().len > 0);
+            } else if (case.fixture == null) {
                 try testing.expectEqual(@as(usize, 0), sim.stdout().len);
             } else {
                 var tag: [16]u8 = undefined;

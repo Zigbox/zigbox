@@ -48,6 +48,11 @@ pub const Code = enum(u8) {
     W0201,
     W0202,
     W0203,
+    E0701,
+    E0702,
+    E0703,
+    E0704,
+    W0701,
     B0001,
 };
 
@@ -452,6 +457,76 @@ pub const registry = [_]Entry{
         \\The oldest records are deleted when there are more than 32, so a record
         \\that stays unreadable goes away on its own. To keep it, move it out of
         \\the runs directory, or run the zbx that wrote it.
+        ,
+    },
+    .{
+        .code = .E0701,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "no state directory to keep bundles and run records in",
+        .explanation =
+        \\zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx,
+        \\or ~/.local/state/zbx when that is not set. Neither variable names an
+        \\absolute directory here, so there is nowhere to read a run record from or
+        \\to write a bundle to.
+        \\
+        \\Set HOME, or point XDG_STATE_HOME at a directory you can write to.
+        ,
+    },
+    .{
+        .code = .E0702,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the bundle",
+        .explanation =
+        \\The bundle was put together but could not be saved in the bundles
+        \\directory under the state directory ($XDG_STATE_HOME/zbx/bundles, or
+        \\~/.local/state/zbx/bundles). The cause says why; a full disk is the usual
+        \\one. Nothing partial is left behind: the file is written under a
+        \\temporary name and renamed only when it is complete.
+        \\
+        \\Free space, or point XDG_STATE_HOME at a directory with room, and run the
+        \\same command again.
+        ,
+    },
+    .{
+        .code = .E0703,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no run record with that name",
+        .explanation =
+        \\"zbx bundle <name>" collects the record of one run, found by its name in
+        \\the runs directory under the state directory. There is none called that:
+        \\the name is misspelled, or the record was deleted. zbx keeps the newest 32.
+        \\
+        \\"zbx bundle --last" takes the most recent run whatever its name.
+        ,
+    },
+    .{
+        .code = .E0704,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no runs are recorded yet",
+        .explanation =
+        \\"zbx bundle --last" collects the most recent run, but the runs directory
+        \\holds no record that can be read: nothing has been run with this state
+        \\directory yet, or the records were deleted or are from a newer zbx.
+        \\
+        \\Run something first with "zbx run", then ask for the bundle.
+        ,
+    },
+    .{
+        .code = .W0701,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "writing a bundle without redaction",
+        .explanation =
+        \\--no-redact keeps the environment values, labels, and anything that looks
+        \\like a password, token or key in the bundle exactly as they were. Nobody
+        \\should send such a bundle anywhere without reading every file in it first.
+        \\
+        \\Leave --no-redact out and the values are replaced by [redacted:<kind>],
+        \\which is what you want for a bug report.
         ,
     },
     .{

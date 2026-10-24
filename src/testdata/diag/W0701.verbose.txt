@@ -1,0 +1,6 @@
+warning[ZBX-W0701]: writing a bundle without redaction
+  while  choosing what to keep in the bundle
+  cause  --no-redact keeps environment values and secrets in the bundle
+  fix    read every file in it before you share it, or leave --no-redact out
+  more   zbx explain W0701
+  docs   https://zigbox.github.io/zigbox/errors/W0701.html

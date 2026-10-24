@@ -152,6 +152,13 @@ fn write_bug_body(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, colo
     assert(diag.entry().severity == .bug);
     // Cannot fail: see `write_text`.
     emit(writer, "  this is a bug in zbx, not something you did\n");
+    if (diag.saved.len > 0) {
+        var line: [constants.state_path_bytes_max + 160]u8 = undefined;
+        // Cannot fail: the saved path is at most state_path_bytes_max + 128 and the label 20.
+        const text = std.fmt.bufPrint(&line, "diagnostic bundle: {s}", .{diag.saved.slice()}) catch
+            unreachable;
+        write_wrapped(writer, "saved", text, color);
+    }
     if (verbose) {
         for (diag.whiles.slice()) |text| write_wrapped(writer, "while", text.slice(), color);
         for (diag.causes.slice()) |text| write_wrapped(writer, "cause", text.slice(), color);
@@ -306,6 +313,11 @@ fn write_json(writer: *std.Io.Writer, diag: *const Diag) void {
     write_json_texts(writer, "while", &diag.whiles);
     write_json_context(writer, diag);
     write_json_fixes(writer, diag);
+    if (diag.saved.len > 0) {
+        write_json_key(writer, "saved");
+        write_json_string(writer, diag.saved.slice());
+        emit_byte(writer, ',');
+    }
     write_json_key(writer, "docs");
     var url: [constants.docs_url_bytes_max]u8 = undefined;
     write_json_string(writer, docs_url(&url, entry.code));

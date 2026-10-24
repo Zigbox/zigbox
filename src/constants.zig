@@ -135,7 +135,7 @@ pub const sim_pipe_ends_max: u32 = 8;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
 pub const sim_written_files_max: u32 = 40;
-pub const sim_written_bytes_max: u32 = 8192;
+pub const sim_written_bytes_max: u32 = 16 * 1024;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.
 /// Overlayfs mounts inside user namespaces need 5.11; 5.15 is the oldest LTS kernel that has it
@@ -239,6 +239,32 @@ pub const state_path_bytes_max: u32 = 512;
 pub const record_suffix = ".zon";
 /// Seconds since the epoch; a record's times are these.
 pub const record_time_unknown: u64 = 0;
+
+// Bundles (M1, slice 3).
+/// The directory under the state directory that holds bundles, next to "runs".
+pub const bundles_dir_name = "bundles";
+/// The most one bundle file keeps of any source; the manifest says when it cut something.
+pub const bundle_file_bytes_max: u32 = 32 * 1024;
+/// All files of a bundle together, before compression (tar headers included).
+pub const bundle_stage_bytes_max: u32 = 160 * 1024;
+/// The compressed bundle: the staged bytes plus the tar and gzip overhead always fit.
+pub const bundle_gz_bytes_max: u32 = 192 * 1024;
+/// The most one write_file call is given.
+pub const write_bytes_max: u32 = 256 * 1024;
+pub const bundle_files_max: u32 = 12;
+/// The environment variables listed in a bundle, and those whose values are scrubbed elsewhere.
+pub const environment_entries_max: u32 = 256;
+pub const bundle_secrets_max: u32 = 32;
+pub const secret_value_bytes_min: u32 = 4;
+pub const secret_value_bytes_max: u32 = 256;
+/// The diagnostic kept in a run record, as the JSON line zbx printed. Bigger is replaced by a
+/// short object that names the code.
+pub const diag_json_bytes_max: u32 = 3072;
+/// "[redacted:private-key]" and its siblings fit this.
+pub const redaction_bytes_max: u32 = 32;
+/// The words of a bundle name, "2026-10-23T22-41-07Z".
+pub const timestamp_bytes: u32 = 20;
+pub const bundle_name_bytes_max: u32 = timestamp_bytes + 1 + container_name_bytes_max + 7;
 
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
@@ -382,6 +408,14 @@ comptime {
     assert(container_name_bytes_max + record_suffix.len <= dir_name_bytes_max);
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
+    assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
+    assert(bundle_gz_bytes_max <= write_bytes_max);
+    assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);
+    assert(bundle_files_max * 1024 < bundle_stage_bytes_max); // The tar headers.
+    assert(diag_json_bytes_max * 4 < record_bytes_max / 2); // Fully escaped, in the record.
+    assert(secret_value_bytes_min < secret_value_bytes_max);
+    assert(bundle_secrets_max * secret_value_bytes_max < bundle_file_bytes_max);
+    assert(bundle_name_bytes_max < dir_name_bytes_max + 32);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);
