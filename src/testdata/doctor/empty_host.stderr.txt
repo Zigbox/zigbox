@@ -14,8 +14,9 @@ error[ZBX-E0105]: uid and gid mapping is not set up
   cause  uid 1000 (no passwd entry, matched by uid only); no subuid range of
          65536 ids (largest: 0); no subgid range of 65536 ids (largest: 0);
          newuidmap not found; newgidmap not found
-  fix    give this user id ranges:                  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
-         install uidmap (shadow-utils on Fedora):   sudo apt install uidmap
+  fix    give this user id ranges:    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
+         install on Debian, Ubuntu:   sudo apt install uidmap
+         install on Fedora:           sudo dnf install shadow-utils
   more   zbx explain E0105 · rerun with --verbose for the full cause chain
 
 error[ZBX-E0106]: seccomp is not available

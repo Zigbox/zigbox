@@ -1247,7 +1247,10 @@ fn subid_fixes(check: *Check, problems: SubidProblems) void {
         check.fix("give this user id ranges:", usermod);
     }
     if (problems.missing) {
-        check.fix("install uidmap (shadow-utils on Fedora):", "sudo apt install uidmap");
+        // No `os-release` is read: the two commands are the same package under its two names, and
+        // a fix for each family is true wherever the check runs, with no new host fact to fake.
+        check.fix("install on Debian, Ubuntu:", "sudo apt install uidmap");
+        check.fix("install on Fedora:", "sudo dnf install shadow-utils");
     }
     if (problems.unprivileged) {
         const command = "$(command -v newuidmap newgidmap)";

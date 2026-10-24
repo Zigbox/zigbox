@@ -1,4 +1,5 @@
 error[ZBX-E0105]: uid and gid mapping is not set up
   cause  alice (uid 1000); newuidmap not found
-  fix    install uidmap (shadow-utils on Fedora):   sudo apt install uidmap
+  fix    install on Debian, Ubuntu:   sudo apt install uidmap
+         install on Fedora:           sudo dnf install shadow-utils
   more   zbx explain E0105 · rerun with --verbose for the full cause chain
