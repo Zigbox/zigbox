@@ -49,7 +49,7 @@ Commit `Restore the CI workflow…` put back `.github/workflows/ci.yml` and `.gi
 
 ### Cuts (record each one in `docs/demos/m0.md`, under a "Cut from M0" heading)
 
-- Bundles and `zbx bundle`, including the CI redaction check. M0 has no state directory and no secrets to redact.
+- Bundles and `zbx bundle`, including the CI redaction check. M0 has no state directory and no secrets to redact. The live spec (rev 43) moves them to M1.
 - `zbx doctor --fix` (the standard's example uses it, but the fix shown is the `sysctl` command).
 - Optional, if slice 5 runs long: generating `site/errors/<code>.html`. If you build it, make it a `zig build errors-site` step in Zig that writes into `site/` and is checked in CI. If you cut it, the `docs` field and the `more` line point to `zbx explain` only.
 

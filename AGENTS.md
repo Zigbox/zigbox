@@ -13,7 +13,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - Zig version is pinned in `build.zig.zon` (`minimum_zig_version`) and CI. Do not upgrade during a milestone.
 - No third-party dependencies; standard library only (see STYLE.md for the allowed external programs).
 - No libc: never set `link_libc`. Release targets are `x86_64-linux` and `aarch64-linux`, static, built `ReleaseSafe` so assertions stay on.
-- The pinned Zig is newer than most model training data, and std APIs (I/O, `std.Io`, readers/writers, build system) changed in 0.15–0.17. Read the pinned std source (`$(zig env | jq -r .lib_dir)/std`) before using an API; do not write from memory.
+- The pinned Zig is newer than most model training data, and std APIs (I/O, `std.Io`, readers/writers, build system) changed in 0.15–0.17. Read the pinned std source (`zig env` prints ZON; its `.lib_dir` field names the directory, and `std` is under it) before using an API; do not write from memory.
 - All namespace work happens in a single-threaded child before `execve`. Thread pools only in the parent.
 - Never run anything with `sudo` in tests on a developer's host. Privileged setup (sysctl toggles) happens only inside the test VM.
 

@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 42; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 43; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -81,6 +81,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] No setuid bit on `zbx`; works with the setuid `newuidmap` only.
 - [ ] Host mounts and processes are invisible from inside.
 - [ ] Namespace setup happens before any thread is spawned (assert in debug builds).
+- [ ] Diagnostic bundles: `zbx bundle [--last | <container>]` and an automatic bundle on every bug diagnostic, redacted by default, with the CI redaction check from the diagnostics standard.
 
 ### M2 · Limits: contained and hardened
 
@@ -240,7 +241,7 @@ Failures are a product surface, not an afterthought. The full standard is `DIAGN
 - **In Zig:** functions take a `*Diag` collector alongside their plain error return; text is formatted only at the CLI or API boundary; codes live in one registry checked at build time and generate the docs pages at `site/errors/`.
 - **Tested.** Golden tests for every code, demo assertions on codes, and a CI check that no user-facing output contains a stack trace or an unredacted secret.
 
-The M0 acceptance criteria therefore include the diagnostics machinery itself: the registry, `zbx explain`, the output modes and the bundle.
+The M0 acceptance criteria therefore include the diagnostics machinery itself: the registry, `zbx explain` and the output modes. The bundle arrives with M1, the first milestone with containers and state worth bundling.
 
 ## Non-goals
 
