@@ -65,6 +65,7 @@ jobs:
           - text
           - doctor
           - diag
+          - run
           - parse_sysctl
           - parse_kernel
           - parse_controllers
