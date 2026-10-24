@@ -81,4 +81,5 @@ test {
     _ = @import("dbus/systemd.zig");
     _ = @import("dbus/client_tests.zig");
     _ = @import("sim_bus.zig");
+    _ = @import("fuzz_dbus.zig");
 }

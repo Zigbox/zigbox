@@ -76,6 +76,7 @@ jobs:
           - run
           - record
           - redact
+          - dbus
           - parse_sysctl
           - parse_kernel
           - parse_controllers
@@ -90,6 +91,22 @@ jobs:
       # `zig build fuzz -- <fuzzer> <seed>`. 10,000 iterations is the default.
       - name: Fuzz ${{ matrix.fuzzer }}
         run: zig build fuzz -- ${{ matrix.fuzzer }}
+
+  # The D-Bus client against a real dbus-daemon (a private session bus), which is what shows that
+  # the simulator's bus and the real one agree: Hello, calls, AddMatch, signals, and bytes the
+  # bus accepts or refuses. See src/dbus_live.zig.
+  dbus-live:
+    name: D-Bus client against a real dbus-daemon
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install dbus-daemon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus
+      - name: Run the client against a private session bus
+        run: dbus-run-session -- zig build dbus-live
 
   demo-m0:
     name: demo-m0 (Ubuntu 24.04 VM, KVM)

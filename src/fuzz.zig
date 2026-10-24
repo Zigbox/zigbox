@@ -17,6 +17,7 @@ const diag_fuzz = @import("fuzz_diag.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
+const dbus_fuzz = @import("fuzz_dbus.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -40,6 +41,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
+    .{ .name = "dbus", .run_iteration = dbus_fuzz.fuzz_dbus },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },

@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
     add_release_step(b, options);
     add_demo_step(b, options);
     add_errors_site_steps(b);
+    add_dbus_live_step(b, options);
 }
 
 /// The runtime as a module named `zigbox`, for Zigcube's agent to link: another build adds this
@@ -240,6 +241,24 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// `zig build dbus-live`: the D-Bus client against a real bus (see src/dbus_live.zig). It is not
+/// a test: it needs a bus, so run it as `dbus-run-session -- zig build dbus-live`.
+fn add_dbus_live_step(b: *std.Build, options: *std.Build.Step.Options) void {
+    const live = b.addExecutable(.{
+        .name = "dbus_live",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/dbus_live.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+            .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+        }),
+    });
+    const run = b.addRunArtifact(live);
+    const step = b.step("dbus-live", "Run the D-Bus client against a real bus (dbus-run-session)");
+    step.dependOn(&run.step);
 }
 
 /// `zig build errors-site` writes site/errors/<code>.html from the diagnostic registry;

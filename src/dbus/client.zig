@@ -65,11 +65,11 @@ pub const JobRemoved = struct {
 };
 
 /// How many polls and messages a wait may spend.
-const Budget = struct {
+pub const Budget = struct {
     timeouts_left: u32,
     messages_left: u32,
 
-    fn for_timeout(timeout_ms: u32) Budget {
+    pub fn for_timeout(timeout_ms: u32) Budget {
         assert(timeout_ms >= constants.dbus_poll_step_ms);
         assert(timeout_ms % constants.dbus_poll_step_ms == 0);
         return .{
