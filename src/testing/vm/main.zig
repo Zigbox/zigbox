@@ -1,6 +1,6 @@
 //! The M0 demo, run in a real Ubuntu 24.04 VM:
 //!   1. `zbx doctor` on the fresh VM: every check ok, exit 0, with what it detected.
-//!   2. With user namespaces disabled by sysctl, the userns check FAILs with a fix, exit 1;
+//!   2. With user namespaces disabled by sysctl, the userns check FAILs with a fix, exit 2;
 //!      the sysctls are restored and doctor is ok again.
 //!   3. `file zbx` reports a statically linked ELF; both release binaries (x86_64 and aarch64)
 //!      are checked here, in Zig, to be static ELF files under 2 MiB.
@@ -310,7 +310,7 @@ fn expect_userns_failure(session: *Session, out: *Io.Writer, case: Case) !void {
     );
     verdict catch |err| {
         try out.print("demo-m0: STEP 2 FAILED: with `{s}` the userns check must be " ++
-            "`FAIL ... \u{2014} fix: ...{s}...` and the exit code 1 ({s})\n", .{
+            "`FAIL ... \u{2014} fix: ...{s}...` and the exit code 2 ({s})\n", .{
             case.set, case.fix_contains, @errorName(err),
         });
         return err;

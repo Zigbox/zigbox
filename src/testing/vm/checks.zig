@@ -125,7 +125,8 @@ pub fn check_all_ok(output: []const u8, exit_code: u8) CheckError!void {
     if (exit_code != 0) return error.ExitCodeWrong;
 }
 
-/// Demo step 2: the named check is FAIL with a non-empty fix line, and the exit code is 1.
+/// Demo step 2: the named check is FAIL with a non-empty fix line, and the exit code is 2 (the
+/// environment's, DIAGNOSTICS.md).
 /// `fix_contains` (if given) must appear in the fix, to tie the fix to the cause.
 pub fn check_fails_with_fix(
     output: []const u8,
@@ -145,7 +146,7 @@ pub fn check_fails_with_fix(
         if (fix_contains) |needle| {
             if (std.mem.indexOf(u8, fix, needle) == null) return error.FixMissing;
         }
-        if (exit_code != 1) return error.ExitCodeWrong;
+        if (exit_code != 2) return error.ExitCodeWrong;
         return;
     }
     return error.ReportMalformed;
@@ -187,29 +188,34 @@ test "step 1: a report with every check ok and exit 0 passes" {
     try testing.expectError(error.ReportMalformed, check_all_ok(warned, 0));
 }
 
-test "step 2: the named check must FAIL with a fix, and the exit code must be 1" {
+test "step 2: the named check must FAIL with a fix, and the exit code must be 2" {
     // Goal: a report that says ok for the check (the bug the demo exists to catch) fails the
     // demo, as do a missing fix, a wrong fix, a wrong exit code and a different check failing.
-    try check_fails_with_fix(userns_failed_report, 1, "userns", "user.max_user_namespaces");
+    try check_fails_with_fix(userns_failed_report, 2, "userns", "user.max_user_namespaces");
     try testing.expectError(
         error.CheckNotFailed,
-        check_fails_with_fix(good_report, 1, "userns", null),
+        check_fails_with_fix(good_report, 2, "userns", null),
     );
     try testing.expectError(
         error.ExitCodeWrong,
         check_fails_with_fix(userns_failed_report, 0, "userns", null),
     );
+    // The old doctor exit code (1) is the user's now, and must not satisfy the demo.
+    try testing.expectError(
+        error.ExitCodeWrong,
+        check_fails_with_fix(userns_failed_report, 1, "userns", null),
+    );
     try testing.expectError(
         error.FixMissing,
-        check_fails_with_fix(userns_failed_report, 1, "userns", "apparmor"),
+        check_fails_with_fix(userns_failed_report, 2, "userns", "apparmor"),
     );
     try testing.expectError(
         error.CheckNotFailed,
-        check_fails_with_fix(userns_failed_report, 1, "cgroup", null),
+        check_fails_with_fix(userns_failed_report, 2, "cgroup", null),
     );
     const no_fix = "ok   kernel  k\nFAIL userns  broken\nok   cgroup  c\n" ++
         "ok   overlay  o\nok   subid  s\nok   seccomp  s\n";
-    try testing.expectError(error.FixMissing, check_fails_with_fix(no_fix, 1, "userns", null));
+    try testing.expectError(error.FixMissing, check_fails_with_fix(no_fix, 2, "userns", null));
 }
 
 /// A minimal 64-bit little-endian ELF with one program header of `kind`.
