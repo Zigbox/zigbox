@@ -33,38 +33,59 @@ pub fn sha256_file(io: Io, path: []const u8) ![32]u8 {
 
 /// Returns true if the file exists and matches the pinned hash. A mismatch is reported on
 /// `log` and the file is left alone (the caller decides).
-fn verified(io: Io, path: []const u8, log: *Io.Writer) !bool {
+fn verified(io: Io, path: []const u8, sha256: []const u8, log: *Io.Writer) !bool {
     _ = Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     const digest = try sha256_file(io, path);
     const actual = to_hex(digest);
-    if (std.mem.eql(u8, &actual, pinned.sha256)) return true;
-    try log.print("vm: {s} has sha256 {s}, expected {s}\n", .{ path, actual, pinned.sha256 });
+    if (std.mem.eql(u8, &actual, sha256)) return true;
+    try log.print("vm: {s} has sha256 {s}, expected {s}\n", .{ path, actual, sha256 });
     return false;
 }
 
-/// Makes sure `cache_dir/<file_name>` exists and matches the pinned SHA-256; downloads it
-/// otherwise. Returns the path (owned by `arena`).
+/// A file pinned by URL and SHA-256.
+pub const Pin = struct {
+    url: []const u8,
+    sha256: []const u8,
+    file_name: []const u8,
+};
+
+/// The base image of the VM.
 pub fn ensure(
     init: std.process.Init,
     cache_dir: []const u8,
     log: *Io.Writer,
 ) ![]const u8 {
+    return ensure_pin(init, cache_dir, log, .{
+        .url = pinned.url,
+        .sha256 = pinned.sha256,
+        .file_name = pinned.file_name,
+    });
+}
+
+/// Makes sure `cache_dir/<file_name>` exists and matches the pinned SHA-256; downloads it
+/// otherwise. Returns the path (owned by `arena`).
+pub fn ensure_pin(
+    init: std.process.Init,
+    cache_dir: []const u8,
+    log: *Io.Writer,
+    pin: Pin,
+) ![]const u8 {
     const io = init.io;
     const arena = init.arena.allocator();
     try Io.Dir.cwd().createDirPath(io, cache_dir);
-    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ cache_dir, pinned.file_name });
-    if (try verified(io, path, log)) {
-        try log.print("vm: base image {s} verified (sha256 {s})\n", .{ path, pinned.sha256 });
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ cache_dir, pin.file_name });
+    if (try verified(io, path, pin.sha256, log)) {
+        try log.print("vm: {s} verified (sha256 {s})\n", .{ path, pin.sha256 });
         return path;
     }
-    try log.print("vm: downloading {s}\n", .{pinned.url});
+    try log.print("vm: downloading {s}\n", .{pin.url});
     try log.flush();
     const partial = try std.fmt.allocPrint(arena, "{s}.part", .{path});
-    try download(io, init.gpa, arena, init.environ_map, pinned.url, partial);
-    if (!try verified(io, partial, log)) {
+    try download(io, init.gpa, arena, init.environ_map, pin.url, partial);
+    if (!try verified(io, partial, pin.sha256, log)) {
         Io.Dir.cwd().deleteFile(io, partial) catch {};
         return error.ImageHashMismatch;
     }
@@ -126,6 +147,20 @@ test "the pinned image identifies a dated release and a SHA-256" {
     try std.testing.expect(std.mem.endsWith(u8, pinned.url, pinned.file_name));
     try std.testing.expectEqual(@as(usize, hex_len), pinned.sha256.len);
     for (pinned.sha256) |byte| {
+        try std.testing.expect(std.ascii.isHex(byte));
+        try std.testing.expect(!std.ascii.isUpper(byte));
+    }
+}
+
+test "the pinned Alpine rootfs is a dated 3.20 release with a SHA-256" {
+    // Goal: the rootfs pin cannot become a moving target ("latest-stable") or a bad hash.
+    const alpine = @import("alpine.zon");
+    try std.testing.expect(std.mem.startsWith(u8, alpine.url, "https://"));
+    try std.testing.expect(std.mem.indexOf(u8, alpine.url, "/v3.20/releases/x86_64/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, alpine.file_name, "minirootfs-3.20.") != null);
+    try std.testing.expect(std.mem.endsWith(u8, alpine.url, alpine.file_name));
+    try std.testing.expectEqual(@as(usize, hex_len), alpine.sha256.len);
+    for (alpine.sha256) |byte| {
         try std.testing.expect(std.ascii.isHex(byte));
         try std.testing.expect(!std.ascii.isUpper(byte));
     }

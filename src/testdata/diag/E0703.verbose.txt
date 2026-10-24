@@ -1,0 +1,8 @@
+error[ZBX-E0703]: no run record with that name
+  while  looking for the run record
+  cause  there is no record of a run named 'nothere' in
+         /home/alice/.local/state/zbx/runs
+  name   nothere
+  fix    bundle the most recent run:   zbx bundle --last
+  more   zbx explain E0703
+  docs   https://zigbox.github.io/zigbox/errors/E0703.html

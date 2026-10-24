@@ -1,0 +1,7 @@
+error[ZBX-E0204]: writing the id maps failed
+  cause  newuidmap exited with status 1: newuidmap: write to uid_map failed:
+         Operation not permitted
+  fix    check the helpers and the ranges:   zbx doctor
+         look at the helper:                 ls -l /usr/bin/newuidmap
+  more   zbx explain E0204 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0204.html

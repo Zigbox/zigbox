@@ -1,0 +1,27 @@
+zbx diagnostic bundle 2026-10-24T20-23-04Z-web-1
+zbx <version>, run "web-1"
+
+redaction: on (values replaced: 1, shown as [redacted:<kind>])
+  a net, not a proof: a secret with an innocent name can pass
+review every file before you share this bundle; zbx never uploads it
+
+files:
+  MANIFEST.txt
+    this list
+  run-record.zon (324 bytes)
+    the run's record: name, rootfs, command, labels, times, how it ended
+    values redacted: 1
+  version.txt (36 bytes)
+    the zbx version and how it was built
+  mapping.txt (30 bytes)
+    how ids were mapped into the container, and who ran zbx
+  uname.txt (35 bytes)
+    the kernel release and machine (not the host name)
+  os-release.txt (47 bytes)
+    the distribution
+  cgroup.txt (49 bytes)
+    the cgroup layout of the zbx process
+  environment.txt (104 bytes)
+    the environment variables of zbx; values are redacted unless --no-redact
+  doctor.json (2070 bytes)
+    the host checks of `zbx doctor`, one JSON object per line

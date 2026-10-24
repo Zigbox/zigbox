@@ -26,6 +26,9 @@ pub fn now_ms() u64 {
 pub const Files = struct {
     user_data: []const u8,
     binary: []const u8,
+    /// A rootfs tarball for the guest to unpack (the M1 demo), served at /rootfs.tar.gz; empty
+    /// for none.
+    rootfs: []const u8 = "",
 };
 
 pub const Session = struct {
@@ -76,6 +79,7 @@ pub const Session = struct {
         session.server.add_route("/meta-data", cloud_init.meta_data);
         session.server.add_route("/vendor-data", "");
         session.server.add_route("/zbx", files.binary);
+        if (files.rootfs.len > 0) session.server.add_route("/rootfs.tar.gz", files.rootfs);
         const argv = try qemu_argv(arena, overlay, accel, session.server.port);
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{
             @tagName(accel), session.server.port,

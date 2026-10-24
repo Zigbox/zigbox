@@ -19,7 +19,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 ## Environment facts (checked 2026-10-23 in the Claude Code cloud container)
 
-- The cloud container runs as root, has cgroup v1/hybrid (no `cgroup.controllers`), no `/dev/kvm`, no `newuidmap`, no `pasta`. It is not a valid test host: use it to build, unit-test and cross-compile only.
+- The cloud container runs as root, has cgroup v1/hybrid (no `cgroup.controllers`), no `/dev/kvm` and no `pasta`. A fresh container has no `newuidmap` either; a session may install `uidmap` and give a test user a subuid range to exercise the full id mapping, so check rather than assume. It is not a valid test host: use it to build, unit-test, cross-compile and smoke-test only; the VM demo is the real test.
 - Real validation happens in a QEMU guest (Ubuntu 24.04 cloud image) on GitHub Actions `ubuntu-24.04` runners, which expose KVM.
 - Zig downloads from https://ziglang.org/download/ work through the proxy.
 
@@ -46,3 +46,4 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
 - Never report an unpushed commit as pushed.
 - CI runs only on pull requests and on `main`, never on a plain branch push. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited.
+- A commit that only records status (README.md and `site/index.html` updated after a CI result) carries `[skip ci]` in its message, so it does not start a run of its own. Never use `[skip ci]` on a commit that changes code, tests, the harness, CI or generated files.

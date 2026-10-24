@@ -63,6 +63,14 @@ test {
     _ = @import("runtime/sync.zig");
     _ = @import("runtime/child.zig");
     _ = @import("runtime/diagnose.zig");
+    _ = @import("zigbox.zig");
+    _ = @import("redact.zig");
+    _ = @import("bundle.zig");
+    _ = @import("bundle_tests.zig");
+    _ = @import("runtime/session.zig");
+    _ = @import("runtime/ids.zig");
+    _ = @import("runtime/records.zig");
+    _ = @import("runtime/signals.zig");
     _ = @import("runtime/run.zig");
     _ = @import("runtime/sim_run.zig");
     _ = @import("runtime/run_tests.zig");

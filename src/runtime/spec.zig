@@ -9,6 +9,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 
+/// A key and a value kept in the run record, for whoever started the container to find it by.
+pub const Label = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 pub const Spec = struct {
     /// The directory to use as the container's root, read and written in place.
     rootfs: []const u8,
@@ -16,7 +22,24 @@ pub const Spec = struct {
     name: ?[]const u8,
     /// The program and its arguments. Never empty; the first word is the program.
     command: []const []const u8,
+    /// Kept in the run record. At most `labels_count_max`, with bounded keys and values.
+    labels: []const Label = &.{},
 };
+
+/// The index of the first label that does not fit, or null. Too many labels is reported at the
+/// index of the first one past the bound. A key is non-empty printable ASCII without '='.
+pub fn labels_problem(labels: []const Label) ?u32 {
+    if (labels.len > constants.labels_count_max) return constants.labels_count_max;
+    for (labels, 0..) |label, index| {
+        const key_ok = label.key.len > 0 and label.key.len <= constants.label_key_bytes_max;
+        if (!key_ok) return @intCast(index);
+        if (label.value.len > constants.label_value_bytes_max) return @intCast(index);
+        for (label.key) |byte| {
+            if (byte <= 0x20 or byte >= 0x7f or byte == '=') return @intCast(index);
+        }
+    }
+    return null;
+}
 
 pub const NameProblem = union(enum) {
     empty,
@@ -94,6 +117,29 @@ pub fn command_problem(command: []const []const u8) ?CommandProblem {
     if (total > constants.exec_strings_bytes_max) return .too_many_bytes;
     assert(command.len > 0);
     return null;
+}
+
+test "labels: the bounds are exact and a key is a plain word" {
+    // Goal: the boundary where a label stops fitting.
+    const repeat_text = @import("../test_util.zig").repeat;
+    try testing.expect(labels_problem(&.{}) == null);
+    try testing.expect(labels_problem(&.{.{ .key = "app", .value = "" }}) == null);
+    const key = repeat_text('k', constants.label_key_bytes_max);
+    const value = repeat_text('v', constants.label_value_bytes_max);
+    try testing.expect(labels_problem(&.{.{ .key = key, .value = value }}) == null);
+    const long_key = repeat_text('k', constants.label_key_bytes_max + 1);
+    const long_value = repeat_text('v', constants.label_value_bytes_max + 1);
+    try testing.expectEqual(
+        @as(?u32, 1),
+        labels_problem(&.{ .{ .key = "a", .value = "" }, .{ .key = long_key, .value = "" } }),
+    );
+    try testing.expectEqual(@as(?u32, 0), labels_problem(&.{.{ .key = "a", .value = long_value }}));
+    try testing.expectEqual(@as(?u32, 0), labels_problem(&.{.{ .key = "", .value = "x" }}));
+    try testing.expectEqual(@as(?u32, 0), labels_problem(&.{.{ .key = "a=b", .value = "x" }}));
+    try testing.expectEqual(@as(?u32, 0), labels_problem(&.{.{ .key = "a b", .value = "x" }}));
+    const many: [constants.labels_count_max + 1]Label = @splat(.{ .key = "k", .value = "v" });
+    try testing.expect(labels_problem(many[0..constants.labels_count_max]) == null);
+    try testing.expectEqual(@as(?u32, constants.labels_count_max), labels_problem(&many));
 }
 
 comptime {

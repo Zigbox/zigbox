@@ -321,6 +321,25 @@ const binary_directories = [constants.binary_candidates_count][]const u8{
 };
 const program_names = [2][]const u8{ "newuidmap", "newgidmap" };
 
+comptime {
+    // Facts is 200 KiB: far more than a small `ulimit -s` or a thread's stack. The three
+    // production users borrow one static copy instead, one at a time.
+    assert(@sizeOf(Facts) <= constants.facts_bytes_max);
+    assert(constants.facts_bytes_max > 64 * 1024);
+}
+
+var facts_storage: Facts = undefined;
+var facts_busy = std.atomic.Value(bool).init(false);
+
+fn lend_facts() *Facts {
+    assert(!facts_busy.swap(true, .acquire));
+    return &facts_storage;
+}
+
+fn return_facts() void {
+    assert(facts_busy.swap(false, .release));
+}
+
 pub const Facts = struct {
     uname: ?host_mod.Uname,
     uname_err: ?host_mod.Error,
@@ -1367,10 +1386,7 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
 /// stays in `report` for the caller (cli.zig) to render on stderr, and the exit code is
 /// `report.exit_code()`.
 pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
-    var facts: Facts = undefined;
-    facts.reset();
-    gather(host, &facts);
-    evaluate(&facts, report);
+    inspect(host, report);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render(report, host.color_enabled(.stdout), &buffer);
@@ -1382,18 +1398,29 @@ pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
     assert(output.len <= buffer.len);
 }
 
+/// The doctor's checks without any output: for a bundle, which keeps the report as JSON.
+pub fn inspect(host: Host, report: *Report) void {
+    const facts = lend_facts();
+    defer return_facts();
+    facts.reset();
+    gather(host, facts);
+    evaluate(facts, report);
+    assert(report.checks[0].id == .kernel);
+}
+
 /// For a container run that could not create its namespaces: runs the user-namespace check on
 /// the same facts `zbx doctor` gathers and, if it FAILs, adds that check's real cause and its
 /// first two fixes to `diag`. Adds nothing when the check passes: the host then has no setting
 /// that explains the refusal, and the caller's own cause stands. The caller raised the code.
 pub fn explain_userns(host: Host, diag: *Diag) void {
     assert(diag.code != null);
-    var facts: Facts = undefined;
+    const facts = lend_facts();
+    defer return_facts();
     facts.reset();
-    gather_one(host, &facts, .userns);
+    gather_one(host, facts, .userns);
     var check: Check = undefined;
     check.start(.userns);
-    evaluate_userns(&facts, &check);
+    evaluate_userns(facts, &check);
     if (check.status != .fail) return;
     // A check that could not look says nothing about the host that the caller does not know.
     if (check.could_not_run) return;
@@ -1403,6 +1430,69 @@ pub fn explain_userns(host: Host, diag: *Diag) void {
         diag.fix(.{ .sentence = fix.sentence.slice(), .command = fix.command.slice() });
     }
     assert(diag.causes.count > 0);
+}
+
+/// What the doctor's subid check says about mapping a full range of ids: whether it can, and if
+/// so where the ranges start and which helpers to run. If it cannot, `diag` holds the check's
+/// diagnostic (unclassified when it can).
+pub const SubidAnswer = struct {
+    usable: bool,
+    uid_start: u32,
+    gid_start: u32,
+    newuidmap: []const u8,
+    newgidmap: []const u8,
+    diag: Diag,
+};
+
+const helper_paths = blk: {
+    var paths: [2][constants.binary_candidates_count][]const u8 = undefined;
+    for (program_names, 0..) |name, program| {
+        for (binary_directories, 0..) |directory, candidate| {
+            paths[program][candidate] = directory ++ name;
+        }
+    }
+    break :blk paths;
+};
+
+/// The path of the first candidate of `program` that is privileged, as `binary_state` judges.
+fn privileged_path(facts: *const Facts, program: Program) ?[]const u8 {
+    const row = &facts.binaries[@backingInt(program)];
+    for (row, 0..) |*binary, candidate| {
+        if (binary.stat_err != null) continue;
+        if (candidate_privilege(binary, program) != null) {
+            return helper_paths[@backingInt(program)][candidate];
+        }
+    }
+    return null;
+}
+
+/// Runs the subid check on the same facts `zbx doctor` gathers and answers for a container run.
+pub fn subid_answer(host: Host, answer: *SubidAnswer) void {
+    const facts = lend_facts();
+    defer return_facts();
+    facts.reset();
+    gather_one(host, facts, .subid);
+    var check: Check = undefined;
+    check.start(.subid);
+    evaluate_subid(facts, &check);
+    answer.diag.reset();
+    answer.usable = false;
+    if (check.status == .fail) {
+        answer.diag = check.diag;
+        assert(answer.diag.code != null);
+        return;
+    }
+    // The check passed: both ranges are at least the minimum and both helpers are privileged.
+    const user = lookup_user(facts);
+    const uid_ranges = parse.parse_subid(facts.subuid.text(), user.name, facts.uid);
+    const gid_ranges = parse.parse_subid(facts.subgid.text(), user.name, facts.uid);
+    assert(uid_ranges.best_count >= constants.subid_range_min);
+    assert(gid_ranges.best_count >= constants.subid_range_min);
+    answer.newuidmap = privileged_path(facts, .newuidmap).?;
+    answer.newgidmap = privileged_path(facts, .newgidmap).?;
+    answer.uid_start = uid_ranges.best_start;
+    answer.gid_start = gid_ranges.best_start;
+    answer.usable = true;
 }
 
 // ---- Tests ---------------------------------------------------------------------------------

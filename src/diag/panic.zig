@@ -3,9 +3,9 @@
 //! uses no `Host`, no allocation and no state but one small struct, and it never fails.
 //!
 //! The root panic function in `main.zig` calls `respond`, writes the bytes to stderr with a raw
-//! write, and exits 70. The stack trace is not printed: it goes nowhere a user sees it. (Bundles,
-//! which would keep it, are cut from M0; see docs/demos/m0.md.) The panic message is shown only
-//! in verbose and json output, because it is internal text.
+//! write, and exits 70. The stack trace is not printed: it goes nowhere a user sees it. No bundle
+//! is written from the handler either, and a panic has no `saved` line: bundle.zig says why.
+//! The panic message is shown only in verbose and json output, because it is internal text.
 //!
 //! `respond` is pure so the whole output can be tested; the wiring around it is a few lines.
 

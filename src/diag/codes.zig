@@ -42,8 +42,17 @@ pub const Code = enum(u8) {
     E0201,
     E0202,
     E0203,
+    E0204,
     E0205,
     E0206,
+    W0201,
+    W0202,
+    W0203,
+    E0701,
+    E0702,
+    E0703,
+    E0704,
+    W0701,
     B0001,
 };
 
@@ -351,6 +360,26 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0204,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "writing the id maps failed",
+        .explanation =
+        \\A container with a full range of ids has its uid and gid maps written by
+        \\the setuid helpers newuidmap and newgidmap, because only they may map ids
+        \\the user does not own. A helper could not be run, or refused the map.
+        \\
+        \\The cause names the helper and how it ended, with what it printed. A
+        \\refusal usually means the range in /etc/subuid or /etc/subgid does not
+        \\cover the ids zbx asked for, or the helper is not setuid root. "zbx doctor"
+        \\checks both (ZBX-E0105).
+        \\
+        \\zbx does not fall back to a single-id map here: it falls back only when
+        \\the helpers or ranges are missing before the container starts, and says so
+        \\(ZBX-W0201).
+        ,
+    },
+    .{
         .code = .E0205,
         .severity = .@"error",
         .blame = .environment,
@@ -381,6 +410,123 @@ pub const registry = [_]Entry{
         \\starting or ending with '-'.
         \\
         \\Leave --name out and zbx picks one: zbx- and six hex digits.
+        ,
+    },
+    .{
+        .code = .W0201,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "mapping only your own id into the container",
+        .explanation =
+        \\A rootless container can map a full range of ids (root, and 65536 more
+        \\for its other users), which needs a range in /etc/subuid and /etc/subgid
+        \\and the setuid helpers newuidmap and newgidmap. This host lacks one of
+        \\them, so zbx mapped only the container's root, to your own id, and went on.
+        \\
+        \\Everything runs, but a program in the container that switches to another
+        \\user, or owns files as one, fails: only id 0 exists inside. The warning
+        \\names what is missing and the command that fixes it; "zbx doctor" shows
+        \\the same under ZBX-E0105.
+        ,
+    },
+    .{
+        .code = .W0202,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "can't save the run record",
+        .explanation =
+        \\zbx keeps a small record of each run in its state directory
+        \\($XDG_STATE_HOME/zbx/runs, or ~/.local/state/zbx/runs): the name, the
+        \\command, the times and how it ended. This one could not be written, for
+        \\example because the disk is full, so the run goes on without it.
+        \\
+        \\"zbx bundle" and tools that look up a run by name will not find this
+        \\one. Free space, or point XDG_STATE_HOME at a directory with room.
+        ,
+    },
+    .{
+        .code = .W0203,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "skipped a run record that can't be read",
+        .explanation =
+        \\Among the records in the state directory one could not be used: it is
+        \\damaged, it was written by a newer zbx than this one, or it cannot be
+        \\read. zbx skips it and goes on; a record it cannot read never stops a run.
+        \\
+        \\The oldest records are deleted when there are more than 32, so a record
+        \\that stays unreadable goes away on its own. To keep it, move it out of
+        \\the runs directory, or run the zbx that wrote it.
+        ,
+    },
+    .{
+        .code = .E0701,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "no state directory to keep bundles and run records in",
+        .explanation =
+        \\zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx,
+        \\or ~/.local/state/zbx when that is not set. Neither variable names an
+        \\absolute directory here, so there is nowhere to read a run record from or
+        \\to write a bundle to.
+        \\
+        \\Set HOME, or point XDG_STATE_HOME at a directory you can write to.
+        ,
+    },
+    .{
+        .code = .E0702,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the bundle",
+        .explanation =
+        \\The bundle was put together but could not be saved in the bundles
+        \\directory under the state directory ($XDG_STATE_HOME/zbx/bundles, or
+        \\~/.local/state/zbx/bundles). The cause says why; a full disk is the usual
+        \\one. Nothing partial is left behind: the file is written under a
+        \\temporary name and renamed only when it is complete.
+        \\
+        \\Free space, or point XDG_STATE_HOME at a directory with room, and run the
+        \\same command again.
+        ,
+    },
+    .{
+        .code = .E0703,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no run record with that name",
+        .explanation =
+        \\"zbx bundle <name>" collects the record of one run, found by its name in
+        \\the runs directory under the state directory. There is none called that:
+        \\the name is misspelled, or the record was deleted. zbx keeps the newest 32.
+        \\
+        \\"zbx bundle --last" takes the most recent run whatever its name.
+        ,
+    },
+    .{
+        .code = .E0704,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no runs are recorded yet",
+        .explanation =
+        \\"zbx bundle --last" collects the most recent run, but the runs directory
+        \\holds no record that can be read: nothing has been run with this state
+        \\directory yet, or the records were deleted or are from a newer zbx.
+        \\
+        \\Run something first with "zbx run", then ask for the bundle.
+        ,
+    },
+    .{
+        .code = .W0701,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "writing a bundle without redaction",
+        .explanation =
+        \\--no-redact keeps the environment values, labels, and anything that looks
+        \\like a password, token or key in the bundle exactly as they were. Nobody
+        \\should send such a bundle anywhere without reading every file in it first.
+        \\
+        \\Leave --no-redact out and the values are replaced by [redacted:<kind>],
+        \\which is what you want for a bug report.
         ,
     },
     .{

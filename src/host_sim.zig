@@ -65,7 +65,10 @@ pub const Probes = struct {
 };
 
 const OpenFile = struct {
+    /// An index into the fixture files, or (when `written`) into the files written through the
+    /// host.
     file_index: u32,
+    written: bool,
     offset: u32,
 };
 
@@ -191,7 +194,17 @@ pub const HostSim = struct {
         .exec = exec,
         .gid = gid,
         .environment = environment,
+        .environment_at = environment_at,
         .random_bytes = random_bytes,
+        .run_helper = run_helper,
+        .block_signals = block_signals,
+        .wait_event = wait_event,
+        .signal_state = signal_state,
+        .time_now = time_now,
+        .write_file = write_file,
+        .rename = rename,
+        .remove_file = remove_file,
+        .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
         .begin_step = begin_step,
     };
@@ -302,17 +315,22 @@ pub const HostSim = struct {
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
 
+        if (sim.world.find_written(path)) |index| return sim.open_slot(index, true);
         for (sim.files, 0..) |file, file_index| {
             if (!std.mem.eql(u8, file.path, path)) continue;
             if (!file.readable) return sim.natural(error.AccessDenied);
-            for (&sim.open_files, 0..) |*slot, slot_index| {
-                if (slot.* != null) continue;
-                slot.* = .{ .file_index = @intCast(file_index), .offset = 0 };
-                return @intCast(slot_index);
-            }
-            return sim.natural(error.OutOfMemory); // Out of simulated descriptors (EMFILE-like).
+            return sim.open_slot(@intCast(file_index), false);
         }
         return sim.natural(error.NotFound);
+    }
+
+    fn open_slot(sim: *HostSim, index: u32, written: bool) host.Error!host.Handle {
+        for (&sim.open_files, 0..) |*slot, slot_index| {
+            if (slot.* != null) continue;
+            slot.* = .{ .file_index = index, .written = written, .offset = 0 };
+            return @intCast(slot_index);
+        }
+        return sim.natural(error.OutOfMemory); // Out of simulated descriptors (EMFILE-like).
     }
 
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
@@ -325,7 +343,10 @@ pub const HostSim = struct {
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
         if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
 
-        const content = sim.files[open_file.file_index].content;
+        const content = if (open_file.written) blk: {
+            const file = &sim.world.written[open_file.file_index];
+            break :blk file.content[0..file.len];
+        } else sim.files[open_file.file_index].content;
         assert(open_file.offset <= content.len);
         const remaining: u32 = @intCast(content.len - open_file.offset);
         var count: u32 = @min(remaining, @as(u32, @intCast(buffer.len)));
@@ -603,11 +624,90 @@ pub const HostSim = struct {
         return null;
     }
 
+    fn environment_at(context: *anyopaque, index: u32) ?host.EnvironmentEntry {
+        const sim = from_context(context);
+        if (index >= sim.environment_variables.len) return null;
+        const variable = sim.environment_variables[index];
+        return .{ .name = variable.name, .value = variable.value };
+    }
+
     fn random_bytes(context: *anyopaque, buffer: []u8) host.Error!void {
         const sim = from_context(context);
         assert(buffer.len > 0);
         try sim.begin_call();
         sim.prng.random().bytes(buffer);
+    }
+
+    fn run_helper(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        output: []u8,
+    ) host.Error!host.HelperResult {
+        const sim = from_context(context);
+        assert(output.len > 0);
+        try sim.begin_call();
+        // A helper that is not installed ends the way a failed exec does in the real child.
+        if (sim.find(request.path) == null) return .{
+            .status = .{ .exited = 127 },
+            .output_len = 0,
+        };
+        const ids: sim_world.Ids = .{ .uid = sim.uid_value, .gid = sim.gid_value };
+        const result = sim.world.run_helper(request, ids, output);
+        return .{ .status = result.status, .output_len = result.len };
+    }
+
+    fn block_signals(context: *anyopaque, block: bool) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        sim.world.signals_blocked = block;
+    }
+
+    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        switch (sim.world.wait_event(pid)) {
+            .event => |event| return event,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.world.signal_state(pid) orelse sim.model_error(sim_world.errno_srch);
+    }
+
+    fn time_now(context: *anyopaque) u64 {
+        return from_context(context).world.now;
+    }
+
+    fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.write_file(path, bytes)) |errno| return sim.model_error(errno);
+    }
+
+    fn rename(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.rename_file(from, to)) |errno| return sim.model_error(errno);
+    }
+
+    fn remove_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.remove_written(path)) |errno| return sim.model_error(errno);
+    }
+
+    fn list_directory(
+        context: *anyopaque,
+        path: [:0]const u8,
+        listing: *host.DirListing,
+    ) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.list_written(path, listing)) |errno| return sim.model_error(errno);
     }
 
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {

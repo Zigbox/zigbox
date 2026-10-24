@@ -1,11 +1,12 @@
 error[ZBX-E0202]: can't run the command in the rootfs
   while  starting container web-1
-  cause  '/bin/nothere' does not exist in the rootfs, or its program interpreter
-         (the dynamic loader of a dynamically linked program) does not
+  cause  a dynamically linked program also needs its loader and libc inside the
+         rootfs; a missing loader is reported as a missing file
+  cause  '/bin/nothere' is missing from the rootfs
   cmd    /bin/nothere
   name   web-1
   rootfs /srv/alpine
-  step   exec (42 of 44)
+  step   exec (41 of 43)
   fix    look in the rootfs:               ls -l "/srv/alpine/bin"
          or use the program's full path:   zbx run --rootfs /srv/alpine -- /bin/sh
   more   zbx explain E0202

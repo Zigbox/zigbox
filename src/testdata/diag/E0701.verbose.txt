@@ -1,0 +1,6 @@
+error[ZBX-E0701]: no state directory to keep bundles and run records in
+  while  looking for the state directory
+  cause  neither XDG_STATE_HOME nor HOME names an absolute directory
+  fix    name one:   export XDG_STATE_HOME=$HOME/.local/state
+  more   zbx explain E0701
+  docs   https://zigbox.github.io/zigbox/errors/E0701.html

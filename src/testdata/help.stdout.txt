@@ -3,13 +3,28 @@ zbx - rootless container runtime
 usage: zbx [options] <command>
 
 commands:
+  run             run a command in a container whose root is a directory (see below)
+  bundle          collect a redacted diagnostic bundle for a run (see below)
   doctor          check that this host can run zbx (a diagnostic per failing check)
   explain <code>  explain a diagnostic code offline, for example E0001
   help            show this text
   --version       print the version
 
-options (before or after the command):
+run:
+  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
+  --rootfs <dir>  the directory to use as the container's root (required)
+  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
+  --              ends the options; everything after it is the command, as typed
+
+bundle:
+  zbx bundle (--last | <name>) [--no-redact]
+  --last          the most recent run; <name> is the run called that
+  --no-redact     keep secrets in the bundle (prints a warning; review before sharing)
+  writes <state>/zbx/bundles/<UTC time>-<name>.tar.gz and prints its path
+
+options (before the "--" of run, or after any other command):
   -v, --verbose   show the full cause chain and context of a failure
   --output json   write each failure to stderr as one JSON object per line
 
 exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
+run exits with the command's own exit code, or 128 plus the signal that killed it

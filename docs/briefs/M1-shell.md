@@ -166,6 +166,10 @@ These are part of M1's acceptance criteria:
 
 The upgrade test and the record version field belong in slice 2 (run records); the failure-modes section belongs in slice 4.
 
+## Notes for M2 (found during M1)
+
+- Slice 3 moved large working memory to static storage, to keep zbx's stack small: the bundle workspace, `doctor.Facts` (which `zbx run` uses to pick the subuid range) and the CLI's run handle. Each is guarded against concurrent use by an assertion. That is right for the single-threaded CLI. It is not right for the `zigbox` library once Zigcube's agent calls it from several threads. M2, which builds the library's concurrent operations, must give each caller its own storage (caller-provided, or one per handle) instead of module statics.
+
 ## Done means
 
 - `zig build`, `test`, `tidy`, `release` and `errors-site-check` pass, and every fuzzer passes at 10,000 iterations, with commands and results in your report.

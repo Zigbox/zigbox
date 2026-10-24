@@ -35,6 +35,7 @@ pub const errno_inval: u16 = 22;
 pub const errno_pipe: u16 = 32;
 pub const errno_nametoolong: u16 = 36;
 pub const errno_noexec: u16 = 8;
+pub const errno_nospc: u16 = 28;
 
 /// A path of the simulated machine. Fixed-size, so the model never allocates.
 pub const SimPath = struct {
@@ -141,7 +142,15 @@ pub const MountTable = struct {
     }
 };
 
-pub const ProcessState = enum { unused, pending, running, zombie, reaped };
+pub const ProcessState = enum {
+    unused,
+    pending,
+    running,
+    /// The command started and has not ended: it ends when the scripted signals are all in.
+    command,
+    zombie,
+    reaped,
+};
 
 /// The id-map files of a user namespace, as the kernel's write-once rules see them.
 pub const IdMaps = struct {
@@ -206,6 +215,20 @@ pub const pipe_handle_base: u32 = 1000;
 
 pub const pipes_max: u32 = constants.sim_pipe_ends_max / 2;
 
+pub const Written = struct {
+    path: SimPath,
+    content: [constants.sim_written_bytes_max]u8,
+    len: u32,
+};
+
+pub const script_max: u32 = 8;
+
+/// What a simulated helper did: how it ended and how many bytes of output it wrote.
+pub const HelperRun = struct {
+    status: host.ExitStatus,
+    len: u32,
+};
+
 pub const World = struct {
     nodes: [constants.sim_nodes_max]Node,
     nodes_count: u32,
@@ -223,6 +246,29 @@ pub const World = struct {
     next_pid: u32,
     /// The plan step the calls that follow belong to (`Host.begin_step`).
     step: u32,
+    /// Files written through the host (run records), and whether the disk takes more.
+    written: [constants.sim_written_files_max]Written,
+    written_count: u32,
+    disk_full: bool,
+    now: u64,
+    /// Signals that reach the container's parent while the command runs, in order. When any
+    /// are scripted the command lives until they have all arrived.
+    script: [script_max]u8,
+    script_len: u32,
+    script_at: u32,
+    /// The signals the command's PID 1 has handlers for or ignores (`SignalState`).
+    command_caught: u64,
+    command_ignored: u64,
+    /// The signals the command received, in order.
+    received: [script_max * 2]u8,
+    received_count: u32,
+    signals_blocked: bool,
+    /// The ids the helpers may map: a range of subordinate ids.
+    subid_start: u32,
+    subid_count: u32,
+    helper_runs: u32,
+    /// Makes the helpers fail with this exit code (null: they behave).
+    helper_fails_with: ?u8,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -240,6 +286,19 @@ pub const World = struct {
         world.broken_pipe_ignored = false;
         world.next_pid = 500;
         world.step = host.step_none;
+        world.written_count = 0;
+        world.disk_full = false;
+        world.now = 1_760_000_000;
+        world.script_len = 0;
+        world.script_at = 0;
+        world.command_caught = 0;
+        world.command_ignored = 0;
+        world.received_count = 0;
+        world.signals_blocked = false;
+        world.subid_start = 100000;
+        world.subid_count = 65536;
+        world.helper_runs = 0;
+        world.helper_fails_with = null;
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -297,6 +356,7 @@ pub const World = struct {
             world.add_node(join(&buffer, rootfs, suffix), .dir);
         }
         world.add_node(join(&buffer, rootfs, "/bin/sh"), .file);
+        world.add_node(join(&buffer, rootfs, "/bin/sleep"), .file);
         const table = &world.tables[0];
         for ([_][]const u8{ "/", "/proc", "/dev" }) |target| {
             var existing: Mount = .{
@@ -381,7 +441,7 @@ pub const World = struct {
         var count: u32 = 0;
         for (world.processes[1..]) |*process| {
             switch (process.state) {
-                .pending, .running, .zombie => count += 1,
+                .pending, .running, .command, .zombie => count += 1,
                 .unused, .reaped => {},
             }
         }
@@ -539,15 +599,30 @@ pub const World = struct {
         world.current = previous;
         world.step = previous_step;
         assert(child.state == .running);
+        child.holds = @splat(false);
+        if (child.execd and world.script_len > 0) {
+            child.state = .command; // Still running: the scripted signals decide how it ends.
+            return;
+        }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
         child.state = .zombie;
-        child.holds = @splat(false);
     }
 
     /// Ends a child that has not run: it never gets to. Returns false if it is not pending.
     pub fn kill(world: *World, pid: u32, number: u8) ?u16 {
         const process = world.find_process(pid) orelse return errno_srch;
         switch (process.state) {
+            .command => {
+                assert(world.received_count < world.received.len);
+                world.received[world.received_count] = number;
+                world.received_count += 1;
+                // PID 1 of a namespace ignores a signal it has no handler for, from outside it;
+                // only SIGKILL (and SIGSTOP) cannot be ignored.
+                if (number == constants.signal_kill) {
+                    process.exit = .{ .signaled = number };
+                    process.state = .zombie;
+                }
+            },
             .pending => {
                 process.exit = .{ .signaled = number };
                 process.state = .zombie;
@@ -563,9 +638,179 @@ pub const World = struct {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
+        if (process.state == .command) world.finish_command(process);
         if (process.state != .zombie) return .{ .errno = errno_child };
         process.state = .reaped;
         return .{ .status = process.exit.? };
+    }
+
+    /// The command ends by itself, the way the model says it does.
+    fn finish_command(world: *World, process: *Process) void {
+        assert(process.state == .command);
+        process.exit = world.command_exit;
+        process.state = .zombie;
+    }
+
+    /// Waits for the child to end or for a scripted signal to arrive.
+    pub fn wait_event(world: *World, pid: u32) union(enum) { event: host.Event, errno: u16 } {
+        const index = world.find_index(pid) orelse return .{ .errno = errno_child };
+        if (world.processes[index].state == .pending) world.run_child(index);
+        const process = &world.processes[index];
+        assert(world.signals_blocked); // Otherwise a real signal would have acted instead.
+        if (process.state == .command) {
+            if (world.script_at < world.script_len) {
+                defer world.script_at += 1;
+                return .{ .event = .{ .signal = world.script[world.script_at] } };
+            }
+            world.finish_command(process);
+        }
+        if (process.state != .zombie) return .{ .errno = errno_child };
+        process.state = .reaped;
+        return .{ .event = .{ .exited = process.exit.? } };
+    }
+
+    pub fn signal_state(world: *World, pid: u32) ?host.SignalState {
+        const process = world.find_process(pid) orelse return null;
+        if (process.state != .command) return .{ .caught = 0, .ignored = 0 };
+        return .{ .caught = world.command_caught, .ignored = world.command_ignored };
+    }
+
+    // ---- Files written through the host ----
+
+    pub fn find_written(world: *const World, path: []const u8) ?u32 {
+        for (world.written[0..world.written_count], 0..) |*file, index| {
+            if (file.path.eql(path)) return @intCast(index);
+        }
+        return null;
+    }
+
+    pub fn read_written(world: *const World, path: []const u8) ?[]const u8 {
+        const index = world.find_written(path) orelse return null;
+        return world.written[index].content[0..world.written[index].len];
+    }
+
+    pub fn write_file(world: *World, path: []const u8, bytes: []const u8) ?u16 {
+        var real: SimPath = .{};
+        if (world.resolve(path, &real)) |errno| return errno;
+        if (!world.parent_is_dir(&real)) return errno_noent;
+        if (world.node_kind(real.slice()) != null) return errno_notdir;
+        if (world.disk_full) return errno_nospc;
+        if (bytes.len > constants.sim_written_bytes_max) return errno_nospc;
+        const existing = world.find_written(real.slice());
+        if (existing == null and world.written_count == constants.sim_written_files_max) {
+            return errno_nospc;
+        }
+        const index = existing orelse world.written_count;
+        if (existing == null) world.written_count += 1;
+        const file = &world.written[index];
+        file.path = real;
+        @memcpy(file.content[0..bytes.len], bytes);
+        file.len = @intCast(bytes.len);
+        return null;
+    }
+
+    pub fn rename_file(world: *World, from: []const u8, to: []const u8) ?u16 {
+        var source: SimPath = .{};
+        var target: SimPath = .{};
+        if (world.resolve(from, &source)) |errno| return errno;
+        if (world.resolve(to, &target)) |errno| return errno;
+        const index = world.find_written(source.slice()) orelse return errno_noent;
+        if (!world.parent_is_dir(&target)) return errno_noent;
+        if (world.find_written(target.slice())) |old| world.drop_written(old);
+        const moved = world.find_written(source.slice()).?;
+        world.written[moved].path = target;
+        assert(index < constants.sim_written_files_max);
+        return null;
+    }
+
+    pub fn remove_written(world: *World, path: []const u8) ?u16 {
+        var real: SimPath = .{};
+        if (world.resolve(path, &real)) |errno| return errno;
+        const index = world.find_written(real.slice()) orelse return errno_noent;
+        world.drop_written(index);
+        return null;
+    }
+
+    fn drop_written(world: *World, index: u32) void {
+        assert(index < world.written_count);
+        world.written[index] = world.written[world.written_count - 1];
+        world.written_count -= 1;
+    }
+
+    pub fn list_written(world: *const World, path: []const u8, listing: *host.DirListing) ?u16 {
+        var real: SimPath = .{};
+        if (world.resolve(path, &real)) |errno| return errno;
+        const kind = world.node_kind(real.slice()) orelse return errno_noent;
+        if (kind != .dir) return errno_notdir;
+        for (world.written[0..world.written_count]) |*file| {
+            const text = file.path.slice();
+            const slash = std.mem.lastIndexOfScalar(u8, text, '/') orelse continue;
+            const directory = if (slash == 0) "/" else text[0..slash];
+            if (std.mem.eql(u8, directory, real.slice())) listing.add(text[slash + 1 ..]);
+        }
+        return null;
+    }
+
+    // ---- Helper programs ----
+
+    /// What `newuidmap` and `newgidmap` do for a caller with these ids: map the caller's own id
+    /// to 0 and a range of its subordinate ids above it, once. `argv` is the program's name,
+    /// the pid and the triples, as numbers in text.
+    pub fn run_helper(
+        world: *World,
+        request: host.ExecRequest,
+        ids: Ids,
+        output: []u8,
+    ) HelperRun {
+        world.helper_runs += 1;
+        const program = std.fs.path.basename(request.path);
+        const is_uid = std.mem.eql(u8, program, "newuidmap");
+        if (!is_uid) assert(std.mem.eql(u8, program, "newgidmap"));
+        const refused = if (is_uid)
+            "newuidmap: write to uid_map failed: Operation not permitted\n"
+        else
+            "newgidmap: write to gid_map failed: Operation not permitted\n";
+        if (world.helper_fails_with) |code| return failed_helper(refused, code, output);
+        var words: [constants.helper_words_max][]const u8 = undefined;
+        var count: usize = 0;
+        while (request.argv[count]) |word| : (count += 1) {
+            if (count == words.len) return failed_helper(refused, 1, output);
+            words[count] = std.mem.span(word);
+        }
+        const pid = std.fmt.parseInt(u32, words[1], 10) catch return failed_helper(
+            refused,
+            1,
+            output,
+        );
+        const target = world.find_process(pid) orelse return failed_helper(refused, 1, output);
+        const done = if (is_uid) &target.maps.uid_map else &target.maps.gid_map;
+        const own = if (is_uid) ids.uid else ids.gid;
+        if (done.* or !target.new_user or !world.map_allowed(words[2..count], own)) {
+            return failed_helper(refused, 1, output);
+        }
+        done.* = true;
+        return .{ .status = .{ .exited = 0 }, .len = 0 };
+    }
+
+    /// The caller's own id to 0, then ranges inside what it was given, each of three numbers.
+    fn map_allowed(world: *const World, numbers: []const []const u8, own: u32) bool {
+        if (numbers.len == 0) return false;
+        if (numbers.len % 3 != 0) return false;
+        var at: usize = 0;
+        while (at < numbers.len) : (at += 3) {
+            const inside = std.fmt.parseInt(u32, numbers[at], 10) catch return false;
+            const outside = std.fmt.parseInt(u32, numbers[at + 1], 10) catch return false;
+            const length = std.fmt.parseInt(u32, numbers[at + 2], 10) catch return false;
+            if (length == 0) return false;
+            if (at == 0) {
+                if (inside != 0 or outside != own or length != 1) return false;
+                continue;
+            }
+            const end = @as(u64, outside) + length;
+            const allowed_end = @as(u64, world.subid_start) + world.subid_count;
+            if (outside < world.subid_start or end > allowed_end) return false;
+        }
+        return true;
     }
 
     // ---- Id maps and hostname ----
@@ -759,6 +1004,16 @@ pub const World = struct {
         return null;
     }
 };
+
+fn failed_helper(
+    message: []const u8,
+    code: u8,
+    output: []u8,
+) HelperRun {
+    const length = @min(message.len, output.len);
+    @memcpy(output[0..length], message[0..length]);
+    return .{ .status = .{ .exited = code }, .len = @intCast(length) };
+}
 
 fn unused_process() Process {
     return .{

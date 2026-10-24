@@ -8,12 +8,12 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 
 ## Status
 
-*As of 2026-10-24. **M0 is demonstrated:** every slice is green in CI, and `demo-m0` passed in an Ubuntu 24.04 VM with KVM ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)). M1 is in progress ([brief](docs/briefs/M1-shell.md)).*
+*As of 2026-10-24. **M0 and M1 are demonstrated.** `demo-m1` passed in an Ubuntu 24.04 VM with KVM ([run 24](https://github.com/Zigbox/zigbox/actions/runs/40137162669)): a rootless shell in an Alpine rootfs, the full subuid map, a real Ctrl-C, and a redacted bundle; `demo-m0` still passes. The owner tags `v0.0.0-m0` and `v0.0.0-m1`. M2 (limits) is next.*
 
 | Milestone | What it adds | Status |
 | --- | --- | --- |
 | **M0 · Doctor** | `zbx doctor`: is this host ready to run Zigbox? | **Demonstrated** in CI ([run 10](https://github.com/Zigbox/zigbox/actions/runs/40102173790)); every failure is a coded diagnostic |
-| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **In progress**: [brief](docs/briefs/M1-shell.md); slice 1 of 4 (isolation core) built, reviewed and green in CI ([run 17](https://github.com/Zigbox/zigbox/actions/runs/40127252813)) |
+| M1 · Shell | Run a shell in a rootless, isolated root filesystem | **Demonstrated** in CI ([run 24](https://github.com/Zigbox/zigbox/actions/runs/40137162669)): `demo-m1` in an Ubuntu 24.04 VM with KVM; all four slices green |
 | M2 · Limits | cgroup limits, capabilities, seccomp, read-only root | Not started |
 | M3 · Store | Content-addressed, deduplicated file trees | Not started |
 | M4 · Pull | Pull and run public OCI images | Not started |

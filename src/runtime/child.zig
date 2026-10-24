@@ -45,7 +45,7 @@ pub const go_ahead: u8 = 1;
 pub fn entry(context: *anyopaque) u8 {
     const child: *const Context = @ptrCast(@alignCast(context));
     const host = child.host;
-    assert(child.plan.count == plan_mod.steps_count);
+    assert(child.plan.count == child.plan.steps_expected());
     assert(child.ready.read != child.report.read); // Two distinct pipes.
     // The parent's ends of the pipes are closed here so that end of file reaches both sides.
     host.close(child.ready.write);
@@ -111,6 +111,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .seal_descriptors => try host.seal_descriptors(),
         .exec => try exec(child, state),
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
+        .run_newuidmap, .run_newgidmap => unreachable,
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
     }
 }

@@ -1,0 +1,7 @@
+error[ZBX-E0702]: can't write the bundle
+  while  saving the bundle
+  cause  writing the bundle failed: no space left on the device (ENOSPC)
+  path   /home/alice/.local/state/zbx/bundles/2026-10-24T20-23-04Z-web-1.tar.gz
+  fix    free space on that disk, or use another:   export XDG_STATE_HOME=/path/with/room
+  more   zbx explain E0702
+  docs   https://zigbox.github.io/zigbox/errors/E0702.html

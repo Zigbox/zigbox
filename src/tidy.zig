@@ -34,6 +34,7 @@ const shell_allowlist = [_][]const u8{};
 /// `asserts_per_function_min` runtime assertions (docs/STYLE.md). Test and tooling code is
 /// exempt from the number.
 const shipped_files = [_][]const u8{
+    "src/bundle.zig",
     "src/cli.zig",
     "src/diag/codes.zig",
     "src/diag/diag.zig",
@@ -46,12 +47,18 @@ const shipped_files = [_][]const u8{
     "src/host_real.zig",
     "src/main.zig",
     "src/parse.zig",
+    "src/redact.zig",
     "src/runtime/child.zig",
     "src/runtime/diagnose.zig",
+    "src/runtime/ids.zig",
     "src/runtime/plan.zig",
+    "src/runtime/records.zig",
     "src/runtime/run.zig",
+    "src/runtime/session.zig",
+    "src/runtime/signals.zig",
     "src/runtime/spec.zig",
     "src/runtime/sync.zig",
+    "src/zigbox.zig",
     "src/text.zig",
 };
 const asserts_per_function_min: u32 = 2;

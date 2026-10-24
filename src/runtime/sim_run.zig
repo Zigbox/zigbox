@@ -13,28 +13,121 @@ const sim_world = @import("../sim_world.zig");
 const plan_mod = @import("plan.zig");
 
 const cli = @import("../cli.zig");
+const records = @import("records.zig");
 
 const HostSim = host_sim.HostSim;
 
 pub const rootfs_path = "/srv/alpine";
 pub const regular_file_path = "/srv/file";
 
-/// What the simulated host has: its own status file (the single-thread check reads it), the
-/// rootfs directory, and a plain file where a directory is expected.
-pub const files = [_]host_sim.File{
+pub const home_path = "/home/alice";
+pub const runs_path = "/home/alice/.local/state/zbx/runs";
+pub const bundles_path = "/home/alice/.local/state/zbx/bundles";
+
+/// The environment of a user whose home is `home_path`, with and without a terminal.
+pub const env_home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = home_path }};
+pub const env_home_term = [_]host_sim.EnvironmentVariable{
+    .{ .name = "HOME", .value = home_path },
+    .{ .name = "TERM", .value = "xterm-256color" },
+};
+
+/// What every simulated host has: its own status file (the single-thread check reads it), the
+/// rootfs directory, a plain file where a directory is expected, the user's passwd entry, and
+/// the sysctl the user-namespace check reads.
+const common_files = [_]host_sim.File{
     .{ .path = "/proc/self/status", .content = "Name:\tzbx\nThreads:\t1\n" },
     .{ .path = rootfs_path, .content = "", .mode = 0o040755 },
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
+    .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
+    .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
 };
+
+/// A host that can map a full range of ids: ranges for the user and setuid-root helpers.
+pub const files = common_files ++ [_]host_sim.File{
+    .{ .path = "/etc/subuid", .content = "alice:100000:65536\n" },
+    .{ .path = "/etc/subgid", .content = "alice:100000:65536\n" },
+    .{ .path = "/usr/bin/newuidmap", .content = "", .mode = 0o104755 },
+    .{ .path = "/usr/bin/newgidmap", .content = "", .mode = 0o104755 },
+};
+
+/// A host with neither: the single-id map and a warning.
+pub const files_single = common_files;
 
 /// The same, for a host built from a doctor fixture (`doctor_fixtures.Spec.extra_files`).
 pub const extra_files = [_]host_sim.File{ files[1], files[2] };
 
 /// Starts the simulator with `files` and a container host: the devices, the rootfs tree with a
-/// shell in it, and the host's own three mounts.
+/// shell in it, the host's own three mounts, and the user's home.
 pub fn init(sim: *HostSim, seed: u64) void {
-    sim.init(seed, &files);
+    start(sim, seed, &files);
+}
+
+/// Like `init`, for a host that cannot map a full range of ids.
+pub fn init_single(sim: *HostSim, seed: u64) void {
+    start(sim, seed, &files_single);
+}
+
+pub fn start(sim: *HostSim, seed: u64, host_files: []const host_sim.File) void {
+    sim.init(seed, host_files);
     sim.world.seed_container_host(rootfs_path);
+    sim.world.add_node(home_path, .dir);
+    sim.environment_variables = &env_home;
+}
+
+/// Puts the record `view` in the simulated runs directory, as a finished run would have.
+pub fn put_record(sim: *HostSim, view: *const records.View) void {
+    sim.world.add_node(runs_path, .dir);
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = records.render(view, &buffer);
+    var path: [128]u8 = undefined;
+    // Cannot fail: the runs path and a container name fit in 128 bytes.
+    const where = std.fmt.bufPrint(&path, runs_path ++ "/{s}.zon", .{view.name}) catch unreachable;
+    assert(sim.world.write_file(where, text) == null);
+}
+
+/// A finished run called `name`, started at `started`, for tests that need something to bundle.
+pub fn sample_view(name: []const u8, begun: u64) records.View {
+    return .{
+        .name = name,
+        .rootfs = rootfs_path,
+        .command = &.{ "/bin/sh", "-c", "echo hi" },
+        .labels = &.{.{ .key = "app", .value = "web" }},
+        .started = begun,
+        .ended = begun + 2,
+        .exit = .{ .exited = 3 },
+        .ids = .full,
+        .zbx_version = "0.0.0",
+    };
+}
+
+/// A plan for the oracle's own questions (which step is where). The steps are the same for every
+/// command and name; only the id mapping changes them, by one step.
+pub fn sample_plan(plan: *plan_mod.Plan, full: bool) void {
+    const mapping: plan_mod.Mapping = if (full) .{ .full = .{
+        .newuidmap = "/usr/bin/newuidmap",
+        .newgidmap = "/usr/bin/newgidmap",
+        .uid_start = 100000,
+        .gid_start = 100000,
+    } } else .single;
+    plan.build(&.{
+        .rootfs = rootfs_path,
+        .name = "oracle",
+        .command = &.{"/bin/sh"},
+        .term = null,
+        .uid = 1000,
+        .gid = 1000,
+        .mapping = mapping,
+    });
+}
+
+/// The index of the first step of `kind` in the plan for `full` or single-id mapping.
+pub fn step_index(kind: plan_mod.Kind, full: bool) u32 {
+    var plan: plan_mod.Plan = undefined;
+    sample_plan(&plan, full);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in the plan of its mapping.
 }
 
 pub const SliceIterator = struct {
@@ -93,6 +186,8 @@ pub const Started = struct {
     name: []const u8,
     /// Whether the devpts mount worked (it can be refused, and is then skipped).
     devpts: bool,
+    /// Whether the ids were mapped through the helpers (else the single-id map was written).
+    full: bool = true,
 };
 
 /// Null if the child process the last run created reached its command in the state the plan
@@ -106,7 +201,9 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     if (child.old_root_attached) return "the old root was not detached";
     const root = child.root orelse return "the child never pivoted";
     if (!root.eql(rootfs_path)) return "the child pivoted into the wrong root";
-    if (!child.maps.setgroups_denied) return "setgroups was not denied";
+    // The helpers leave setgroups alone (programs in the container may need it); the direct
+    // write of the single-id map must deny it first.
+    if (child.maps.setgroups_denied == expected.full) return "setgroups is wrong for this map";
     if (!child.maps.gid_map) return "no gid map";
     if (!child.maps.uid_map) return "no uid map";
     if (child.table == 0) return "the child shares the host's mounts";

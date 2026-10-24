@@ -1,0 +1,5 @@
+error[ZBX-E0702]: can't write the bundle
+  cause  writing the bundle failed: no space left on the device (ENOSPC)
+  fix    free space on that disk, or use another:   export XDG_STATE_HOME=/path/with/room
+  more   zbx explain E0702 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0702.html

@@ -1,0 +1,7 @@
+error[ZBX-E0704]: no runs are recorded yet
+  while  looking for the most recent run
+  cause  there is no run record that can be read in
+         /home/alice/.local/state/zbx/runs
+  fix    run something first:   zbx run --rootfs ./alpine -- /bin/sh
+  more   zbx explain E0704
+  docs   https://zigbox.github.io/zigbox/errors/E0704.html
