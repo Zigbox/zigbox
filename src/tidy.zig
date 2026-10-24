@@ -36,6 +36,11 @@ const shell_allowlist = [_][]const u8{};
 const shipped_files = [_][]const u8{
     "src/bundle.zig",
     "src/cli.zig",
+    "src/dbus/auth.zig",
+    "src/dbus/client.zig",
+    "src/dbus/message.zig",
+    "src/dbus/systemd.zig",
+    "src/dbus/wire.zig",
     "src/diag/codes.zig",
     "src/diag/diag.zig",
     "src/diag/errors.zig",

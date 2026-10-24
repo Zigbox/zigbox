@@ -158,7 +158,7 @@ pub const HostSim = struct {
             if (slot != null) count += 1;
         }
         assert(count <= constants.sim_open_files_max);
-        return count + sim.world.open_pipe_ends();
+        return count + sim.world.open_pipe_ends() + sim.world.bus.open_count();
     }
 
     const vtable: host.VTable = .{
@@ -206,6 +206,8 @@ pub const HostSim = struct {
         .remove_file = remove_file,
         .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
+        .socket_connect = socket_connect,
+        .read_timeout = read_timeout,
         .begin_step = begin_step,
     };
 
@@ -252,6 +254,7 @@ pub const HostSim = struct {
             error.PathTooLong => 36,
             error.Unsupported => 38,
             error.NoData => 61,
+            error.TimedOut => 110,
             error.FileTooLarge => 34,
             error.IoFailed, error.InvalidPath, error.Stalled => 5,
         };
@@ -336,6 +339,7 @@ pub const HostSim = struct {
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
         const sim = from_context(context);
         assert(buffer.len > 0);
+        if (handle >= sim_world.bus_handle_base) return sim.read_bus(handle, buffer, false);
         if (handle >= sim_world.pipe_handle_base) return sim.read_pipe(handle, buffer);
         assert(handle < constants.sim_open_files_max);
         const open_file = &(sim.open_files[handle] orelse unreachable); // Pair with close().
@@ -362,6 +366,9 @@ pub const HostSim = struct {
 
     fn close(context: *anyopaque, handle: host.Handle) void {
         const sim = from_context(context);
+        if (handle >= sim_world.bus_handle_base) {
+            return sim.world.bus.close(handle - sim_world.bus_handle_base);
+        }
         if (handle >= sim_world.pipe_handle_base) return sim.world.close_end(handle);
         assert(handle < constants.sim_open_files_max);
         // Closing a handle twice, or one never opened, is a programmer error.
@@ -481,6 +488,61 @@ pub const HostSim = struct {
         }
     }
 
+    fn socket_connect(context: *anyopaque, path: [:0]const u8) host.Error!host.Handle {
+        const sim = from_context(context);
+        try sim.begin_call();
+        switch (sim.world.bus.connect(path, sim.uid_value)) {
+            .index => |index| return sim_world.bus_handle_base + index,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn read_timeout(
+        context: *anyopaque,
+        handle: host.Handle,
+        buffer: []u8,
+        timeout_ms: u32,
+    ) host.Error!u32 {
+        const sim = from_context(context);
+        assert(handle >= sim_world.bus_handle_base);
+        assert(timeout_ms > 0);
+        return sim.read_bus(handle, buffer, true);
+    }
+
+    /// The model has no time: a read that finds nothing queued is a timeout at once.
+    fn read_bus(sim: *HostSim, handle: host.Handle, buffer: []u8, timed: bool) host.Error!u32 {
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        if (sim.roll(sim.faults.read_error_per_mille)) return sim.inject(sim.random_error());
+        const index = handle - sim_world.bus_handle_base;
+        var limited = buffer;
+        if (sim.roll(sim.faults.short_read_per_mille)) {
+            const cut = sim.prng.random().intRangeAtMost(usize, 1, @max(buffer.len, 2) - 1);
+            if (buffer.len > 1) limited = buffer[0..cut];
+        }
+        switch (sim.world.bus.read(index, limited)) {
+            .count => |count| return count,
+            .end_of_file => return 0,
+            .timeout => {
+                assert(timed); // An untimed read of a quiet bus would block for ever.
+                return error.TimedOut;
+            },
+        }
+    }
+
+    fn write_bus(sim: *HostSim, handle: host.Handle, bytes: []const u8) host.Error!u32 {
+        const index = handle - sim_world.bus_handle_base;
+        if (sim.world.bus.write(index, bytes)) |errno| {
+            if (errno == sim_world.errno_pipe) assert(sim.world.broken_pipe_ignored);
+            return sim.model_error(errno);
+        }
+        if (sim.world.bus.scope_started) |slot| {
+            sim.world.bus.scope_started = null;
+            sim.world.start_scope_files(&sim.world.bus.scopes[slot]);
+        }
+        return @intCast(bytes.len);
+    }
+
     fn pipe(context: *anyopaque) host.Error!host.Pipe {
         const sim = from_context(context);
         try sim.begin_call();
@@ -492,6 +554,7 @@ pub const HostSim = struct {
         assert(bytes.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        if (handle >= sim_world.bus_handle_base) return sim.write_bus(handle, bytes);
         if (sim.world.write_pipe(handle, bytes)) |errno| {
             // A real parent that did not ignore SIGPIPE would be dead, not handling an error.
             if (errno == sim_world.errno_pipe and sim.world.current == 0) {

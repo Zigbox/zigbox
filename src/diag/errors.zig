@@ -132,9 +132,10 @@ test "causes name the real errno, or say it is unknown, never a guess" {
         "write(stdout) failed: the kernel returned errno 1061",
         diag.last_cause().?,
     );
-    cause_host_error(&diag, "read(x)", error.IoFailed, 110); // Named, no table reason: ETIMEDOUT.
+    // Named, no table reason: ECONNREFUSED.
+    cause_host_error(&diag, "read(x)", error.IoFailed, 111);
     try std.testing.expectEqualStrings(
-        "read(x) failed: the kernel returned ETIMEDOUT",
+        "read(x) failed: the kernel returned ECONNREFUSED",
         diag.last_cause().?,
     );
     cause_host_error(&diag, "read(x)", error.Stalled, 9);

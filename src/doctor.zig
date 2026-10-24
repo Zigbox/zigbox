@@ -564,6 +564,7 @@ fn error_reason(err: host_mod.Error) []const u8 {
         error.Stalled => "made no progress",
         error.Unsupported => "not supported by this kernel",
         error.NoData => "no such attribute",
+        error.TimedOut => "timed out",
         error.IoFailed => "input/output error",
     };
     assert(reason.len > 0);

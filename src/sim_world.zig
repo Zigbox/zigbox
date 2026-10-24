@@ -23,6 +23,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host = @import("host.zig");
+const sim_bus = @import("sim_bus.zig");
 
 pub const errno_perm: u16 = 1;
 pub const errno_noent: u16 = 2;
@@ -213,6 +214,9 @@ const SimPipe = struct {
 /// Pipe ends are numbered from here, so a pipe handle is never mistaken for a file handle.
 pub const pipe_handle_base: u32 = 1000;
 
+/// Bus connections are numbered from here.
+pub const bus_handle_base: u32 = 2000;
+
 pub const pipes_max: u32 = constants.sim_pipe_ends_max / 2;
 
 pub const Written = struct {
@@ -269,6 +273,8 @@ pub const World = struct {
     helper_runs: u32,
     /// Makes the helpers fail with this exit code (null: they behave).
     helper_fails_with: ?u8,
+    /// The user's D-Bus socket and the systemd manager behind it (sim_bus.zig).
+    bus: sim_bus.Bus,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -299,6 +305,7 @@ pub const World = struct {
         world.subid_count = 65536;
         world.helper_runs = 0;
         world.helper_fails_with = null;
+        world.bus.init();
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -640,8 +647,41 @@ pub const World = struct {
         const process = &world.processes[index];
         if (process.state == .command) world.finish_command(process);
         if (process.state != .zombie) return .{ .errno = errno_child };
-        process.state = .reaped;
+        world.reap(process);
         return .{ .status = process.exit.? };
+    }
+
+    /// The parent collects the child: it is gone, and so is a scope it was the last process of.
+    fn reap(world: *World, process: *Process) void {
+        assert(process.state == .zombie);
+        process.state = .reaped;
+        world.bus.process_ended(process.pid);
+    }
+
+    /// Gives a scope the manager just started its files: the cgroup directory, and the
+    /// `/proc/<pid>/cgroup` line that names it, which is how a client finds the directory.
+    pub fn start_scope_files(world: *World, scope: *const sim_bus.Scope) void {
+        var path_buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const relative = scope_cgroup_path(&path_buffer, scope);
+        var directory_buffer: [constants.cgroup_path_bytes_max + 16]u8 = undefined;
+        // Cannot fail: a bounded relative path and a short prefix fit the buffer.
+        const prefix = "/sys/fs/cgroup";
+        const directory = std.fmt.bufPrint(&directory_buffer, prefix ++ "{s}", .{relative}) catch
+            unreachable; // Same bound as above.
+        world.add_node(directory, .dir);
+        var pid_buffer: [32]u8 = undefined;
+        // Cannot fail: "/proc/4294967295" fits.
+        const proc_directory = std.fmt.bufPrint(&pid_buffer, "/proc/{d}", .{scope.pid}) catch
+            unreachable; // Same.
+        world.add_node(proc_directory, .dir);
+        var file_buffer: [48]u8 = undefined;
+        // Cannot fail: same.
+        const file = std.fmt.bufPrint(&file_buffer, "{s}/cgroup", .{proc_directory}) catch
+            unreachable; // Same.
+        var line_buffer: [constants.cgroup_path_bytes_max + 8]u8 = undefined;
+        // Cannot fail: the relative path is bounded.
+        const line = std.fmt.bufPrint(&line_buffer, "0::{s}\n", .{relative}) catch unreachable;
+        _ = world.write_file(file, line);
     }
 
     /// The command ends by itself, the way the model says it does.
@@ -665,7 +705,7 @@ pub const World = struct {
             world.finish_command(process);
         }
         if (process.state != .zombie) return .{ .errno = errno_child };
-        process.state = .reaped;
+        world.reap(process);
         return .{ .event = .{ .exited = process.exit.? } };
     }
 
@@ -1148,4 +1188,16 @@ test "id maps: setgroups first, own id only, once" {
     try testing.expectEqual(perm, world.write_id_map(pid, .gid_map, own, ids));
     try testing.expectEqual(@as(?u16, null), world.write_id_map(pid, .uid_map, own, ids));
     try testing.expectEqual(perm, world.write_id_map(pid, .uid_map, own, ids));
+}
+
+/// Where the manager puts a scope in the cgroup tree, relative to /sys/fs/cgroup.
+pub fn scope_cgroup_path(buffer: []u8, scope: *const sim_bus.Scope) []const u8 {
+    const slice_part = if (scope.slice.len > 0) scope.slice.slice() else "";
+    const separator = if (scope.slice.len > 0) "/" else "";
+    // Cannot fail: a uid, a slice name of 32 bytes and a scope name of 80 fit 256 bytes.
+    return std.fmt.bufPrint(
+        buffer,
+        "/user.slice/user-{d}.slice/user@{d}.service{s}{s}/{s}",
+        .{ scope.uid, scope.uid, separator, slice_part, scope.name.slice() },
+    ) catch unreachable; // Same bound as above.
 }
