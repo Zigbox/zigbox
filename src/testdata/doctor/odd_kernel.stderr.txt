@@ -4,3 +4,4 @@ error[ZBX-E0102]: kernel version is unsupported or unknown
   fix    see what this kernel reports:   uname -r
          run Linux 5.15 or newer
   more   zbx explain E0102 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0102.html

@@ -2,3 +2,4 @@ error[ZBX-E0003]: unexpected arguments
   cause  'help' takes no arguments, but 'me' was also given
   fix    run it on its own:   zbx help
   more   zbx explain E0003 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0003.html

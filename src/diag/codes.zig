@@ -394,6 +394,16 @@ pub fn full_name(code: Code) []const u8 {
     return name;
 }
 
+/// "E0101.html": the file name of a code's generated page, shared by the site generator and the
+/// docs URL of a diagnostic, so the two cannot drift apart.
+pub fn page_name(buffer: *[16]u8, code: Code) []const u8 {
+    // Cannot fail: a tag is five bytes.
+    const name = std.fmt.bufPrint(buffer, "{s}.html", .{@tagName(code)}) catch unreachable;
+    assert(name.len == 10);
+    assert(std.mem.endsWith(u8, name, ".html"));
+    return name;
+}
+
 /// Finds a code from what a user typed: "E0001", "ZBX-E0001", in any letter case. Anything else
 /// (another product's prefix, extra characters, an unregistered number) is null.
 pub fn parse(text: []const u8) ?Code {

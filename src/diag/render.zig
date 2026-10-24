@@ -81,6 +81,19 @@ fn explain_command(buffer: *[32]u8, code: codes.Code) []const u8 {
     return text;
 }
 
+/// "https://zigbox.github.io/zigbox/errors/E0101.html": the code's generated page, which is what
+/// the `docs` line and the JSON `docs` field point to.
+fn docs_url(buffer: *[constants.docs_url_bytes_max]u8, code: codes.Code) []const u8 {
+    var file_buffer: [16]u8 = undefined;
+    const file = codes.page_name(&file_buffer, code);
+    const parts = .{ constants.docs_url_base, file };
+    // Cannot fail: `constants.zig` proves the base plus a page name fits.
+    const text = std.fmt.bufPrint(buffer, "{s}{s}", parts) catch unreachable;
+    assert(std.mem.startsWith(u8, text, "https://"));
+    assert(std.mem.endsWith(u8, text, ".html"));
+    return text;
+}
+
 // ---- Text ----------------------------------------------------------------------------------
 
 fn header_color(severity: codes.Severity) []const u8 {
@@ -157,6 +170,9 @@ fn write_more(writer: *std.Io.Writer, entry: *const codes.Entry, verbose: bool, 
     const parts = .{ explain_command(&command, entry.code), if (verbose) "" else rerun };
     const text = std.fmt.bufPrint(&line, "{s}{s}", parts) catch unreachable; // Fits 128 bytes.
     write_wrapped(writer, "more", text, color);
+    // Its own line: the URL does not fit beside the `more` text within 80 columns.
+    var url: [constants.docs_url_bytes_max]u8 = undefined;
+    write_wrapped(writer, "docs", docs_url(&url, entry.code), color);
 }
 
 fn write_label(writer: *std.Io.Writer, label: []const u8, color: bool) void {
@@ -291,8 +307,8 @@ fn write_json(writer: *std.Io.Writer, diag: *const Diag) void {
     write_json_context(writer, diag);
     write_json_fixes(writer, diag);
     write_json_key(writer, "docs");
-    var command: [32]u8 = undefined;
-    write_json_string(writer, explain_command(&command, entry.code));
+    var url: [constants.docs_url_bytes_max]u8 = undefined;
+    write_json_string(writer, docs_url(&url, entry.code));
     const omitted = ",\"omitted\":{{\"causes\":{d},\"while\":{d}," ++
         "\"context\":{d},\"fixes\":{d}}}}}\n";
     emit_format(writer, omitted, .{
@@ -416,7 +432,8 @@ test "text rendering: the anatomy of the standard, default and verbose" {
             "  fix    allow zbx only:   sudo zbx doctor --fix apparmor\n" ++
             "         or system-wide:   sudo sysctl a.b=0\n" ++
             "         or read the docs\n" ++
-            "  more   zbx explain E0001 \u{b7} rerun with --verbose for the full cause chain\n",
+            "  more   zbx explain E0001 \u{b7} rerun with --verbose for the full cause chain\n" ++
+            "  docs   https://zigbox.github.io/zigbox/errors/E0001.html\n",
         render(&diag, .text, false, &buffer),
     );
     try testing.expectEqualStrings(
@@ -429,7 +446,8 @@ test "text rendering: the anatomy of the standard, default and verbose" {
             "  fix    allow zbx only:   sudo zbx doctor --fix apparmor\n" ++
             "         or system-wide:   sudo sysctl a.b=0\n" ++
             "         or read the docs\n" ++
-            "  more   zbx explain E0001\n",
+            "  more   zbx explain E0001\n" ++
+            "  docs   https://zigbox.github.io/zigbox/errors/E0001.html\n",
         render(&diag, .verbose, false, &buffer),
     );
 }
@@ -506,7 +524,7 @@ test "json rendering: one line, every field, escapes, null for a fix without a c
             "\"command\":\"sudo zbx doctor --fix apparmor\"}," ++
             "{\"sentence\":\"or system-wide:\",\"command\":\"sudo sysctl a.b=0\"}," ++
             "{\"sentence\":\"or read the docs\",\"command\":null}]," ++
-            "\"docs\":\"zbx explain E0001\"," ++
+            "\"docs\":\"https://zigbox.github.io/zigbox/errors/E0001.html\"," ++
             "\"omitted\":{\"causes\":0,\"while\":0,\"context\":0,\"fixes\":0}}\n",
         output,
     );

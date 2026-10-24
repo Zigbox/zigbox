@@ -302,11 +302,13 @@ const userns_failed_stderr =
     "         this system allows at none, for every user\n" ++
     "  fix    allow user namespaces:   sudo sysctl -w user.max_user_namespaces=15000\n" ++
     "  more   zbx explain E0101 \u{b7} rerun with --verbose for the full cause chain\n" ++
+    "  docs   https://zigbox.github.io/zigbox/errors/E0101.html\n" ++
     "\n" ++
     "error[ZBX-E0104]: can't mount overlayfs in a user namespace\n" ++
     "  cause  the overlay probe needs a user namespace first\n" ++
     "  fix    fix the userns check first (ZBX-E0101)\n" ++
-    "  more   zbx explain E0104\n";
+    "  more   zbx explain E0104\n" ++
+    "  docs   https://zigbox.github.io/zigbox/errors/E0104.html\n";
 
 const userns_failure: Failure = .{
     .name = "userns",

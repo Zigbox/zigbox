@@ -4,3 +4,4 @@ error[ZBX-E0006]: missing argument
   cmd    explain
   fix    pass the code from a diagnostic:   zbx explain E0001
   more   zbx explain E0006
+  docs   https://zigbox.github.io/zigbox/errors/E0006.html

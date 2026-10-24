@@ -3,3 +3,4 @@ error[ZBX-E0102]: kernel version is unsupported or unknown
          arrived in 5.11, and 5.15 is the oldest long-term kernel that has them
   fix    upgrade to Linux 5.15 or newer
   more   zbx explain E0102 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0102.html

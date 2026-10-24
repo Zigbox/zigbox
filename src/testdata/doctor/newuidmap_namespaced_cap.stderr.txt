@@ -3,3 +3,4 @@ error[ZBX-E0105]: uid and gid mapping is not set up
          file capability
   fix    make the helpers setuid root:   sudo chown root: $(command -v newuidmap newgidmap) && sudo chmod u+s $(command -v newuidmap newgidmap)
   more   zbx explain E0105 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0105.html

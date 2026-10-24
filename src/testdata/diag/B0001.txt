@@ -2,3 +2,4 @@ bug[ZBX-B0001]: zbx hit an internal error
   this is a bug in zbx, not something you did
   report https://github.com/Zigbox/zigbox/issues/new
   more   zbx explain B0001 · rerun with --verbose for the message
+  docs   https://zigbox.github.io/zigbox/errors/B0001.html

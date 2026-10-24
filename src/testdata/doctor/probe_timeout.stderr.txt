@@ -3,9 +3,11 @@ error[ZBX-E0101]: can't create a user namespace
          killed it and could not tell whether this host allows the operation
   fix    look in the kernel log:   sudo dmesg | tail -n 50
   more   zbx explain E0101 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0101.html
 
 error[ZBX-E0104]: can't mount overlayfs in a user namespace
   cause  the overlay probe child made no progress for 5000 ms, so zbx killed it
          and could not tell whether this host allows the operation
   fix    look in the kernel log:   sudo dmesg | tail -n 50
   more   zbx explain E0104 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0104.html

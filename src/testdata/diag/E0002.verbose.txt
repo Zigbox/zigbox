@@ -5,3 +5,4 @@ error[ZBX-E0002]: no command given
   fix    see the commands:   zbx help
          check this host:    zbx doctor
   more   zbx explain E0002
+  docs   https://zigbox.github.io/zigbox/errors/E0002.html

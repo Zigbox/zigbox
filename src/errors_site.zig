@@ -243,14 +243,7 @@ pub fn render_index(buffer: []u8) []const u8 {
     return page;
 }
 
-/// "E0101.html".
-fn page_name(buffer: *[16]u8, code: codes.Code) []const u8 {
-    // Cannot fail: a tag is five bytes.
-    const name = std.fmt.bufPrint(buffer, "{s}.html", .{@tagName(code)}) catch unreachable;
-    assert(name.len == 10);
-    assert(std.mem.endsWith(u8, name, ".html"));
-    return name;
-}
+const page_name = codes.page_name;
 
 const Mode = enum { write, check };
 

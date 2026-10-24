@@ -2,3 +2,4 @@ error[ZBX-E0004]: unknown option
   cause  '--frobnicate' is not an option zbx knows
   fix    see the options:   zbx help
   more   zbx explain E0004 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0004.html

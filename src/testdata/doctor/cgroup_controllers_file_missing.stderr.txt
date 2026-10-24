@@ -4,3 +4,4 @@ error[ZBX-E0103]: cgroup v2 is not set up for this user
          failed: no such file or directory (ENOENT)
   fix    check the file, then retry:   ls -l /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers
   more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html

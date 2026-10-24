@@ -3,3 +3,4 @@ error[ZBX-E0106]: seccomp is not available
          disagree, so neither answer can be trusted
   fix    run the check again:   zbx doctor
   more   zbx explain E0106 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0106.html

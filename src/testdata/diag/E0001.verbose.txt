@@ -4,3 +4,4 @@ error[ZBX-E0001]: unknown command
   arg    frobnicate
   fix    see the commands:   zbx help
   more   zbx explain E0001
+  docs   https://zigbox.github.io/zigbox/errors/E0001.html

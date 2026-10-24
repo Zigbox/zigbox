@@ -4,3 +4,4 @@ error[ZBX-E0005]: option has a missing or invalid value
   value  xml
   fix    choose text or json:   zbx --output json doctor
   more   zbx explain E0005
+  docs   https://zigbox.github.io/zigbox/errors/E0005.html

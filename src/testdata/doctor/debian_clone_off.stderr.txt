@@ -3,6 +3,7 @@ error[ZBX-E0101]: can't create a user namespace
          kernel.unprivileged_userns_clone = 0
   fix    allow them:   sudo sysctl -w kernel.unprivileged_userns_clone=1
   more   zbx explain E0101 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0101.html
 
 error[ZBX-E0104]: can't mount overlayfs in a user namespace
   cause  the overlay probe needs a user namespace first and the kernel refused
@@ -11,3 +12,4 @@ error[ZBX-E0104]: can't mount overlayfs in a user namespace
   fix    fix the userns check first (ZBX-E0101); overlay needs the same permission
          then check again:   zbx doctor
   more   zbx explain E0104 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0104.html

@@ -4,3 +4,4 @@ error[ZBX-E0007]: unknown diagnostic code
   arg    E9999
   fix    codes look like this:   zbx explain E0001
   more   zbx explain E0007
+  docs   https://zigbox.github.io/zigbox/errors/E0007.html

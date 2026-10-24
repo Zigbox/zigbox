@@ -104,6 +104,16 @@ pub const diag_explanation_line_bytes_max: u32 = 76;
 /// Width at which prose in a diagnostic is wrapped; the label column takes the first nine.
 pub const diag_wrap_columns: u32 = 80;
 pub const diag_label_columns: u32 = 9;
+/// Where the generated page of each code is served (GitHub Pages, deployed from `main`): the
+/// base ends in "/", and a code's page is the base plus "<code>.html" (src/errors_site.zig).
+pub const docs_url_base = "https://zigbox.github.io/zigbox/errors/";
+/// The base plus "E0001.html", with room to spare.
+pub const docs_url_bytes_max: u32 = 96;
+comptime {
+    assert(std.mem.startsWith(u8, docs_url_base, "https://"));
+    assert(std.mem.endsWith(u8, docs_url_base, "/"));
+    assert(docs_url_base.len + "E0001.html".len <= docs_url_bytes_max);
+}
 /// Width of a code such as "ZBX-E0001".
 pub const diag_code_bytes: u32 = 9;
 

@@ -4,6 +4,7 @@ error[ZBX-E0101]: can't create a user namespace
          only the user's own id may be mapped without newuidmap
   fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
   more   zbx explain E0101 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0101.html
 
 error[ZBX-E0104]: can't mount overlayfs in a user namespace
   cause  the kernel created the namespace and then refused the write to its
@@ -12,3 +13,4 @@ error[ZBX-E0104]: can't mount overlayfs in a user namespace
   fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
          if the userns check failed too, fix it first (ZBX-E0101)
   more   zbx explain E0104 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0104.html

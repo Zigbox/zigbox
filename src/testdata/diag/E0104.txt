@@ -5,3 +5,4 @@ error[ZBX-E0104]: can't mount overlayfs in a user namespace
   fix    load the overlay module:   sudo modprobe overlay
          or use Linux 5.11 or newer built with CONFIG_OVERLAY_FS
   more   zbx explain E0104 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0104.html

@@ -3,9 +3,11 @@ error[ZBX-E0101]: can't create a user namespace
          failed: out of memory (ENOMEM)
   fix    check the process limits:   ulimit -u
   more   zbx explain E0101 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0101.html
 
 error[ZBX-E0104]: can't mount overlayfs in a user namespace
   cause  the overlay check could not run: starting the overlay probe failed: out
          of memory (ENOMEM)
   fix    check the process limits:   ulimit -u
   more   zbx explain E0104 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0104.html

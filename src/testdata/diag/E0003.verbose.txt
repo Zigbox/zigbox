@@ -5,3 +5,4 @@ error[ZBX-E0003]: unexpected arguments
   arg    me
   fix    run it on its own:   zbx help
   more   zbx explain E0003
+  docs   https://zigbox.github.io/zigbox/errors/E0003.html

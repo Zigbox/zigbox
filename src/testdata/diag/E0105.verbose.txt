@@ -7,3 +7,4 @@ error[ZBX-E0105]: uid and gid mapping is not set up
   uid    1000
   fix    give this user id ranges:   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $(id -un)
   more   zbx explain E0105
+  docs   https://zigbox.github.io/zigbox/errors/E0105.html
