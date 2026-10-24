@@ -157,6 +157,15 @@ Every new failure is a registered code in `src/diag/codes.zig` with a golden tes
 - The Alpine pin, `demo-m1` and its CI job; `docs/demos/m1.md`, with the by-hand steps and the cuts.
 - Run `zig build demo-m1 -Daccel=tcg` locally from a fresh VM, and paste the tail. `demo-m0` must still pass.
 
+## Production readiness (live spec rev 46, from M1 on)
+
+These are part of M1's acceptance criteria:
+- **Upgrade test.** M0 wrote no state, so M1's upgrade test is a test that `zbx` handles a missing, empty or older-format run-record directory and older-format records without failing a run. A record it cannot read is skipped with a warning diagnostic, never a crash. Write the record format with a version field from the start.
+- **Stable diagnostics.** Every new failure path has a registered code with a fix and golden tests; no M0 code changes its meaning.
+- **Documented failure modes.** `docs/demos/m1.md` gets a "Failure modes" section. For each one it says what can go wrong in production, how it shows up (code, exit reason or log line) and how to recover. At least: no subuid range, AppArmor restriction, a rootfs owned by another user, a full disk for run records, and a command killed by a signal.
+
+The upgrade test and the record version field belong in slice 2 (run records); the failure-modes section belongs in slice 4.
+
 ## Done means
 
 - `zig build`, `test`, `tidy`, `release` and `errors-site-check` pass, and every fuzzer passes at 10,000 iterations, with commands and results in your report.
