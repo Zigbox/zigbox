@@ -684,6 +684,15 @@ fn report_warning(context: *anyopaque, diag: *const Diag) void {
     reporter.host.write_all(.stderr, text) catch return;
 }
 
+comptime {
+    // The run's handle is over 100 KiB (it holds a plan and a diagnostic), so it is static: one
+    // foreground run per process, and the assertion in `run_container` says so.
+    assert(@sizeOf(runtime.Handle) <= constants.handle_bytes_max);
+}
+
+var handle_storage: runtime.Handle = undefined;
+var handle_busy = std.atomic.Value(bool).init(false);
+
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
 /// plus the signal that killed it. A container that could not be started is a diagnostic; so is
 /// one whose end could not be waited for.
@@ -700,18 +709,20 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
     };
-    var handle: runtime.Handle = undefined;
-    runtime.start(host, &container, options, &handle, diag) catch {
-        keep_bundle_of_bug(host, &handle, diag);
+    assert(!handle_busy.swap(true, .acquire));
+    defer assert(handle_busy.swap(false, .release));
+    const handle = &handle_storage;
+    runtime.start(host, &container, options, handle, diag) catch {
+        keep_bundle_of_bug(host, handle, diag);
         return error.StartFailed;
     };
-    const reason = runtime.wait(&handle);
+    const reason = runtime.wait(handle);
     const code = reason.code() orelse {
         diag.* = handle.lost_diag; // The only reason a started run has no code.
-        keep_bundle_of_bug(host, &handle, diag);
+        keep_bundle_of_bug(host, handle, diag);
         return error.StartFailed;
     };
-    report_outcome(host, invocation.options, &handle, &reason);
+    report_outcome(host, invocation.options, handle, &reason);
     return code;
 }
 

@@ -87,6 +87,7 @@ const Workspace = struct {
     redactions: u32,
     gz: [constants.bundle_gz_bytes_max]u8,
     window: [flate.max_window_len]u8,
+    mask: redact.Mask,
 
     fn reset(ws: *Workspace, redacting: bool) void {
         ws.used = manifest_bytes_max;
@@ -112,7 +113,7 @@ const Workspace = struct {
             was_cut = true;
         } else if (ws.redact) {
             const secrets = ws.secrets[0..ws.secrets_count];
-            const result = redact.redact(source, target, secrets);
+            const result = redact.redact_with(&ws.mask, source, target, secrets);
             length = result.len;
             redactions = result.redactions;
             was_cut = was_cut or result.truncated;
@@ -167,6 +168,30 @@ const Workspace = struct {
         return ws.stage[file.start..][0..file.len];
     }
 };
+
+// ---- The workspace: static, one bundle at a time ------------------------------------------------
+
+comptime {
+    // The workspace is about 700 KiB with the compressor and the mask, far more than a thread's
+    // or a small `ulimit -s` stack holds, so it lives in static storage. This is the bound.
+    assert(@sizeOf(Workspace) <= constants.bundle_workspace_bytes_max);
+    assert(constants.bundle_workspace_bytes_max > 64 * 1024);
+}
+
+var workspace: Workspace = undefined;
+var workspace_busy = std.atomic.Value(bool).init(false);
+
+/// The workspace, for one bundle. A bundle command makes one bundle and the automatic bundle on a
+/// bug makes one, so two at once is a bug in zbx: the assertion says so. Tests make many, one
+/// after another, so `release` clears the flag instead of the flag being a once-per-process one.
+fn acquire() *Workspace {
+    assert(!workspace_busy.swap(true, .acquire));
+    return &workspace;
+}
+
+fn release() void {
+    assert(workspace_busy.swap(false, .release));
+}
 
 // ---- The UTC timestamp ---------------------------------------------------------------------
 
@@ -437,7 +462,7 @@ const CompressError = error{TooBig};
 /// The bundle as a gzip'd tar, in `ws.gz`. Every file is under a directory named `stem`.
 fn compress(ws: *Workspace, stem: []const u8, now: u64) CompressError![]const u8 {
     var out = std.Io.Writer.fixed(&ws.gz);
-    var gzip = flate.Compress.init(&out, &ws.window, .gzip, .default) catch return error.TooBig;
+    var gzip = flate.Compress.Huffman.init(&out, &ws.window, .gzip) catch return error.TooBig;
     var archive: std.tar.Writer = .{ .underlying_writer = &gzip.writer };
     const options: std.tar.Writer.Options = .{ .mode = 0o644, .mtime = now };
     archive.setRoot(stem) catch return error.TooBig;
@@ -625,13 +650,14 @@ pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!voi
         break :blk name_storage[0..length];
     };
     if (spec_mod.name_problem(name) != null) return no_record(diag, name, dir.text());
-    var ws: Workspace = undefined;
+    const ws = acquire();
+    defer release();
     ws.reset(request.redact);
-    if (ws.redact) collect_secrets(&ws, host);
-    const mapping = try stage_record(&ws, host, &dir, name, diag);
-    stage_system_files(&ws, host, mapping);
-    stage_environment(&ws, host);
-    stage_doctor(&ws, host);
+    if (ws.redact) collect_secrets(ws, host);
+    const mapping = try stage_record(ws, host, &dir, name, diag);
+    stage_system_files(ws, host, mapping);
+    stage_environment(ws, host);
+    stage_doctor(ws, host);
     const now = host.time_now();
     var stamp: [constants.timestamp_bytes]u8 = undefined;
     var stem_storage: [constants.bundle_name_bytes_max]u8 = undefined;
@@ -639,8 +665,8 @@ pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!voi
     // Cannot fail: a timestamp and a name of at most 63 bytes.
     const stem = std.fmt.bufPrint(&stem_storage, format, .{ timestamp(now, &stamp), name }) catch
         unreachable;
-    write_manifest(&ws, stem, name);
-    const bytes = compress(&ws, stem, now) catch return too_big(diag);
+    write_manifest(ws, stem, name);
+    const bytes = compress(ws, stem, now) catch return too_big(diag);
     try save(host, &dir, stem, bytes, saved, diag);
 }
 

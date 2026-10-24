@@ -83,7 +83,7 @@ const Out = struct {
 /// Which bytes of the input are secret, and of what kind (the `Kind` plus one; zero for none).
 /// Every rule marks bytes and none consumes the text, so a secret inside another rule's value is
 /// still found by its own rule.
-const Mask = struct {
+pub const Mask = struct {
     kinds: [constants.file_bytes_max]u8,
 
     fn mark(mask: *Mask, start: usize, end: usize, kind: Kind) void {
@@ -96,14 +96,30 @@ const Mask = struct {
     }
 };
 
-/// Redacts `input` into `output`. `secrets` are literal values to remove wherever they occur.
+/// The mask of `redact`, kept off the stack (it is 64 KiB). One use at a time.
+var shared_mask: Mask = undefined;
+var shared_busy = std.atomic.Value(bool).init(false);
+
+/// Redacts `input` into `output` with the module's own mask. `secrets` are literal values to
+/// remove wherever they occur. Not for two threads at once; the assertion says so.
 pub fn redact(input: []const u8, output: []u8, secrets: []const []const u8) Result {
+    assert(!shared_busy.swap(true, .acquire));
+    defer shared_busy.store(false, .release);
+    return redact_with(&shared_mask, input, output, secrets);
+}
+
+/// The same with a mask the caller owns (the bundle keeps one in its workspace).
+pub fn redact_with(
+    mask: *Mask,
+    input: []const u8,
+    output: []u8,
+    secrets: []const []const u8,
+) Result {
     assert(output.len > 0);
     assert(input.len <= constants.file_bytes_max);
     assert(secrets.len <= constants.bundle_secrets_max);
-    var mask: Mask = undefined;
     @memset(mask.kinds[0..input.len], 0);
-    find_secrets(input, secrets, &mask);
+    find_secrets(input, secrets, mask);
     var out: Out = .{ .buffer = output };
     var at: usize = 0;
     while (at < input.len and !out.truncated) {
