@@ -283,6 +283,10 @@ test "failures: no state directory, unknown name, no runs, a full disk" {
     sim.init(1, &.{});
     prepare_golden(&sim);
     try expect_failure(&sim, &.{ "zbx", "bundle", "../x" }, "E0703", 1); // Never a path.
+    // Found by the cli fuzzer: an empty name used to trip an assertion (a bug block, exit 70).
+    sim.init(1, &.{});
+    prepare_golden(&sim);
+    try expect_failure(&sim, &.{ "zbx", "bundle", "" }, "E0703", 1);
     sim.init(1, &.{});
     sim_run.init(&sim, 1);
     try expect_failure(&sim, &.{ "zbx", "bundle", "--last" }, "E0704", 1);
