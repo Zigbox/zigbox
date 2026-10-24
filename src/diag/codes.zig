@@ -39,6 +39,11 @@ pub const Code = enum(u8) {
     E0104,
     E0105,
     E0106,
+    E0201,
+    E0202,
+    E0203,
+    E0205,
+    E0206,
     B0001,
 };
 
@@ -85,7 +90,8 @@ pub const registry = [_]Entry{
         .summary = "unexpected arguments",
         .explanation =
         \\The command takes fewer arguments than it was given. "doctor", "help" and
-        \\"--version" take none; "explain" takes exactly one code.
+        \\"--version" take none; "explain" takes exactly one code; "run" takes its
+        \\command only after "--".
         \\
         \\Remove the extra arguments. The message names the first one zbx ignored.
         ,
@@ -98,7 +104,8 @@ pub const registry = [_]Entry{
         .explanation =
         \\An argument starting with a dash is not an option zbx knows. The options are
         \\-v and --verbose, and --output text or --output json (also written
-        \\--output=json). "--help" and "--version" are commands, not options.
+        \\--output=json); "run" also takes --rootfs and --name. "--help" and
+        \\"--version" are commands, not options.
         \\
         \\Run "zbx help" for the full list.
         ,
@@ -110,7 +117,8 @@ pub const registry = [_]Entry{
         .summary = "option has a missing or invalid value",
         .explanation =
         \\--output needs a value, and the only values are "text" and "json".
-        \\Either the value is missing (the option was last, or empty) or it is wrong.
+        \\--rootfs and --name need one too, a directory and a name. Either the
+        \\value is missing (the option was last, or empty) or it is wrong.
         \\
         \\Write --output json or --output=json. With json, every failure is written
         \\to stderr as one JSON object per line, for scripts and CI.
@@ -123,7 +131,8 @@ pub const registry = [_]Entry{
         .summary = "missing argument",
         .explanation =
         \\The command needs an argument and was given none. "zbx explain" needs the
-        \\code of a diagnostic, for example E0001 or ZBX-E0001.
+        \\code of a diagnostic, for example E0001 or ZBX-E0001; "zbx run" needs
+        \\--rootfs <dir> and, after "--", the command to run.
         \\
         \\The code is printed in the first line of every diagnostic, between
         \\"error[" and "]".
@@ -150,7 +159,8 @@ pub const registry = [_]Entry{
         .explanation =
         \\zbx accepts at most 64 arguments of at most 4096 bytes each, and refuses
         \\more instead of cutting them, so that a command is never silently
-        \\misread.
+        \\misread. The command after "run --" has its own limits: 48 words of at
+        \\most 4000 bytes, 32 KiB with the environment.
         \\
         \\Pass fewer or shorter arguments. For long lists, use a file when the
         \\command supports one.
@@ -276,6 +286,101 @@ pub const registry = [_]Entry{
         \\Use a kernel with seccomp enabled; every mainstream distribution kernel has
         \\it. If the two answers disagree, run "zbx doctor" again, and report it if it
         \\repeats. If a file could not be read, the cause says so.
+        ,
+    },
+    .{
+        .code = .E0201,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the rootfs is missing or not a directory",
+        .explanation =
+        \\"zbx run" needs a directory to use as the container's root file system,
+        \\and the path given to --rootfs is not one: it does not exist, it is a
+        \\file, or it cannot be read.
+        \\
+        \\In this version the root file system is a directory that you unpack
+        \\yourself. An Alpine minirootfs works:
+        \\
+        \\  mkdir alpine
+        \\  tar -xzf alpine-minirootfs-3.20.10-x86_64.tar.gz -C alpine
+        \\  zbx run --rootfs ./alpine -- /bin/sh
+        \\
+        \\The container reads and writes this directory in place, so what it
+        \\changes stays there. Unpack it as the user who runs zbx.
+        ,
+    },
+    .{
+        .code = .E0202,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't run the command in the rootfs",
+        .explanation =
+        \\The container was set up, but its command could not be run inside the
+        \\root file system. The cause says which: the file is not there, it is not
+        \\executable, or it is not a program for this machine's CPU.
+        \\
+        \\A command without a slash is looked up in the container's PATH, which is
+        \\/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin inside the
+        \\rootfs, not in the host's. The host's environment is not passed on.
+        \\A dynamically linked program also needs its libc and loader inside the
+        \\rootfs; a missing loader is reported as a missing file.
+        \\
+        \\Give the program's full path inside the rootfs after the "--", for
+        \\example /bin/sh.
+        ,
+    },
+    .{
+        .code = .E0203,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't create the container's namespaces",
+        .explanation =
+        \\zbx runs a container in new user, mount, PID, UTS and IPC namespaces and
+        \\writes the id maps of the user namespace. The kernel refused one of
+        \\these, or a setting forbids it, so the container was not started.
+        \\
+        \\The cause names what failed. The usual reason is a restriction on
+        \\unprivileged user namespaces: user.max_user_namespaces is 0,
+        \\kernel.unprivileged_userns_clone is 0 (Debian), AppArmor restricts them
+        \\(the Ubuntu 24.04 default), or a seccomp filter around zbx, as inside
+        \\another container, blocks clone3. "zbx doctor" runs the same check and
+        \\prints the command that fixes the setting (ZBX-E0101).
+        \\
+        \\A refused id map means the user namespace exists but could not be mapped.
+        \\Without the helper newuidmap only the user's own id can be mapped.
+        ,
+    },
+    .{
+        .code = .E0205,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a container setup step failed",
+        .explanation =
+        \\zbx sets a container up in steps: the mounts, the minimal /dev, moving
+        \\into the new root with pivot_root, the hostname. The kernel refused one
+        \\of them, so the container was not started and nothing it mounted is
+        \\left on the host.
+        \\
+        \\The cause names the step and the kernel's reason. Mounts inside a user
+        \\namespace are refused when the host forbids them: a security policy
+        \\(AppArmor, SELinux, seccomp), or running zbx inside another container,
+        \\which hides parts of /proc. "zbx doctor" checks what this host allows.
+        \\
+        \\Rerun with --verbose to see the step's place in the plan. If the reason
+        \\fits none of these, report it with the output.
+        ,
+    },
+    .{
+        .code = .E0206,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "invalid container name",
+        .explanation =
+        \\A container's name is also its hostname, so it must be a valid hostname
+        \\label: one to 63 characters, lowercase letters, digits and '-', and not
+        \\starting or ending with '-'.
+        \\
+        \\Leave --name out and zbx picks one: zbx- and six hex digits.
         ,
     },
     .{

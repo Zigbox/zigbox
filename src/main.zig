@@ -34,7 +34,6 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
     const code = cli.run_from_iterator(real.interface(), &iterator);
-    assert(code <= constants.exit_internal);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
 }
@@ -59,4 +58,12 @@ test {
     _ = @import("diag/panic.zig");
     _ = @import("diag_golden.zig");
     _ = @import("sim_world.zig");
+    _ = @import("runtime/spec.zig");
+    _ = @import("runtime/plan.zig");
+    _ = @import("runtime/sync.zig");
+    _ = @import("runtime/child.zig");
+    _ = @import("runtime/diagnose.zig");
+    _ = @import("runtime/run.zig");
+    _ = @import("runtime/sim_run.zig");
+    _ = @import("runtime/run_tests.zig");
 }

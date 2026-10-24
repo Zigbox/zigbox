@@ -1,0 +1,7 @@
+error[ZBX-E0205]: a container setup step failed
+  cause  the host refuses a fresh /proc here; running inside another container,
+         which hides parts of /proc, or a security policy, is the usual reason
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0205 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0205.html

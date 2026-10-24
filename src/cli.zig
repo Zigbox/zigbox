@@ -19,6 +19,8 @@ const errors = @import("diag/errors.zig");
 const explain = @import("diag/explain.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
+const runtime = @import("runtime/run.zig");
+const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
 const Host = host_mod.Host;
@@ -52,7 +54,7 @@ comptime {
     assert(version_text[version_text.len - 1] == '\n');
 }
 
-pub const Command = enum { doctor, explain, help, version };
+pub const Command = enum { doctor, explain, help, run, version };
 
 pub const OutputFormat = enum { text, json };
 
@@ -75,11 +77,20 @@ pub const Options = struct {
     }
 };
 
+/// What `run` was given: the options that came before `--`, and the command after it.
+pub const RunArgs = struct {
+    rootfs: ?[]const u8,
+    name: ?[]const u8,
+    command: []const []const u8,
+};
+
 pub const Invocation = struct {
     command: Command,
     /// The one operand of `explain`; null for commands that take none.
     operand: ?[]const u8,
     options: Options,
+    /// Set only when `command` is `run`.
+    run: RunArgs,
 };
 
 pub const ParseError = error{
@@ -99,6 +110,8 @@ pub const CollectError = error{
 pub const RunError = error{
     UnknownCode,
     OutputFailed,
+    /// The container could not be started; the reason is in the diagnostic.
+    StartFailed,
 };
 
 /// What one argument is, decided by its shape alone. Shared by `scan_options` and `parse` so
@@ -109,6 +122,14 @@ const Token = union(enum) {
     output_next,
     /// `--output=<value>`.
     output_inline: []const u8,
+    /// `--rootfs`, `--name`: options of `run`, whose value is the next argument.
+    rootfs_next,
+    name_next,
+    /// `--rootfs=<value>`, `--name=<value>`.
+    rootfs_inline: []const u8,
+    name_inline: []const u8,
+    /// `--`: after `run`, everything that follows is the command.
+    separator,
     unknown_option,
     operand,
 };
@@ -122,6 +143,17 @@ fn classify(argument: []const u8) Token {
     const inline_prefix = "--output=";
     if (std.mem.startsWith(u8, argument, inline_prefix)) {
         return .{ .output_inline = argument[inline_prefix.len..] };
+    }
+    if (std.mem.eql(u8, argument, "--rootfs")) return .rootfs_next;
+    if (std.mem.eql(u8, argument, "--name")) return .name_next;
+    if (std.mem.eql(u8, argument, "--")) return .separator;
+    const rootfs_prefix = "--rootfs=";
+    if (std.mem.startsWith(u8, argument, rootfs_prefix)) {
+        return .{ .rootfs_inline = argument[rootfs_prefix.len..] };
+    }
+    const name_prefix = "--name=";
+    if (std.mem.startsWith(u8, argument, name_prefix)) {
+        return .{ .name_inline = argument[name_prefix.len..] };
     }
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
     // string are operands, so they reach the "unknown command" error with their text.
@@ -147,6 +179,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "run")) found = .run;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -155,7 +188,7 @@ fn command_named(name: []const u8) ?Command {
 
 fn operands_count(command: Command) u32 {
     const count: u32 = switch (command) {
-        .doctor, .help, .version => 0,
+        .doctor, .help, .run, .version => 0,
         .explain => 1,
     };
     assert(count <= 1);
@@ -164,12 +197,16 @@ fn operands_count(command: Command) u32 {
 
 /// Reads the global options leniently, ignoring anything wrong with them. It runs before the
 /// strict `parse` so that a failure of any kind is already rendered in the requested mode: a
-/// script that asked for JSON gets JSON even when it also mistyped the command.
+/// script that asked for JSON gets JSON even when it also mistyped the command. After
+/// `run ... --` everything is the command's, so `-v` there is not ours.
 pub fn scan_options(args: []const []const u8) Options {
     assert(args.len <= constants.args_count_max);
     var options: Options = .{};
+    var first: ?Command = null;
+    var seen_operand = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
+        const is_run = first != null and first.? == .run;
         switch (classify(args[index])) {
             .verbose => options.verbose = true,
             .output_inline => |value| {
@@ -181,7 +218,17 @@ pub fn scan_options(args: []const []const u8) Options {
                     index += 1;
                 }
             },
-            .unknown_option, .operand => {},
+            .rootfs_next, .name_next => {
+                if (is_run and index + 1 < args.len) index += 1;
+            },
+            .separator => {
+                if (is_run) break;
+            },
+            .rootfs_inline, .name_inline, .unknown_option => {},
+            .operand => {
+                if (!seen_operand) first = command_named(args[index]);
+                seen_operand = true;
+            },
         }
     }
     assert(index <= args.len + 1);
@@ -199,9 +246,11 @@ pub fn parse(
     assert(diag.code == null);
     var operands: [constants.args_count_max][]const u8 = undefined;
     var count: u32 = 0;
+    var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
+        const is_run = count > 0 and command_named(operands[0]) == .run;
         switch (classify(argument)) {
             .verbose => {},
             .output_inline => |value| try check_output_value(diag, value),
@@ -209,6 +258,15 @@ pub fn parse(
                 if (index + 1 == args.len) return bad_output_value(diag, null);
                 index += 1;
                 try check_output_value(diag, args[index]);
+            },
+            .rootfs_next, .name_next, .rootfs_inline, .name_inline => {
+                if (!is_run) return unknown_option(diag, argument);
+                try take_run_option(diag, &run_args, args, &index);
+            },
+            .separator => {
+                if (!is_run) return unknown_option(diag, argument);
+                run_args.command = args[index + 1 ..];
+                break;
             },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -219,7 +277,52 @@ pub fn parse(
     }
     assert(count <= args.len);
     invocation.options = scan_options(args);
+    invocation.run = run_args;
     try resolve(args, operands[0..count], invocation, diag);
+    if (invocation.command == .run) try check_run_args(diag, &invocation.run);
+}
+
+/// Reads one `--rootfs` or `--name` and its value (inline, or the next argument). A value that
+/// is missing, or is the `--` that starts the command, is `ZBX-E0005`; giving the same option
+/// twice is `ZBX-E0003`, since one of them would be silently ignored.
+fn take_run_option(
+    diag: *Diag,
+    run_args: *RunArgs,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    const argument = args[index.*];
+    const is_rootfs = switch (classify(argument)) {
+        .rootfs_next, .rootfs_inline => true,
+        .name_next, .name_inline => false,
+        else => unreachable, // The caller matched one of the four.
+    };
+    const option = if (is_rootfs) "--rootfs" else "--name";
+    const value: []const u8 = switch (classify(argument)) {
+        .rootfs_inline => |inline_value| inline_value,
+        .name_inline => |inline_value| inline_value,
+        else => blk: {
+            const next = index.* + 1;
+            if (next == args.len) return missing_option_value(diag, option);
+            if (classify(args[next]) == .separator) return missing_option_value(diag, option);
+            index.* = next;
+            break :blk args[next];
+        },
+    };
+    const slot = if (is_rootfs) &run_args.rootfs else &run_args.name;
+    if (slot.* != null) return unexpected_argument(diag, .run, argument);
+    slot.* = value;
+}
+
+/// `run` needs a rootfs and a command: the two things a user is most likely to forget.
+fn check_run_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+    assert(diag.code == null);
+    if (run_args.rootfs == null) return missing_argument(diag, .run, .rootfs);
+    if (run_args.command.len == 0) return missing_argument(diag, .run, .command);
+    // `-- ""` names no program either.
+    if (run_args.command[0].len == 0) return missing_argument(diag, .run, .command);
+    assert(run_args.rootfs != null);
+    assert(run_args.command.len > 0);
 }
 
 /// Turns the operands (everything that is not an option) into a command and its argument.
@@ -235,7 +338,7 @@ fn resolve(
     const wanted = operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
-    if (given < wanted) return missing_argument(diag, command);
+    if (given < wanted) return missing_argument(diag, command, .code);
     invocation.command = command;
     invocation.operand = if (wanted == 1) operands[1] else null;
     if (invocation.operand == null) assert(wanted == 0);
@@ -286,14 +389,21 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     const name = @tagName(command);
     diag.raise(.E0003);
     diag.while_("reading the command line", .{});
-    if (operands_count(command) == 0) {
+    if (command == .run) {
+        diag.cause("'run' takes options, then '--' and the command, but '{s}' came first", .{echo});
+    } else if (operands_count(command) == 0) {
         diag.cause("'{s}' takes no arguments, but '{s}' was also given", .{ name, echo });
     } else {
         diag.cause("'{s}' takes one argument, but '{s}' was also given", .{ name, echo });
     }
     diag.context("cmd", "{s}", .{name});
     diag.context("arg", "{s}", .{echo});
-    if (operands_count(command) == 0) {
+    if (command == .run) {
+        diag.fix(.{
+            .sentence = "put the command after '--', and give each option once:",
+            .command = "zbx run --rootfs ./alpine -- /bin/sh",
+        });
+    } else if (operands_count(command) == 0) {
         diag.fix_with("run it on its own:", "zbx {s}", .{name});
     } else {
         diag.fix_with("pass one code:", "zbx {s} E0001", .{name});
@@ -302,15 +412,58 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-fn missing_argument(diag: *Diag, command: Command) ParseError {
-    assert(command == .explain); // The only command with an operand.
+const Missing = enum { code, rootfs, command };
+
+fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
+    // The commands with something to miss: `explain` its code, `run` its rootfs and command.
+    if (command == .run) assert(missing != .code);
+    if (command == .explain) assert(missing == .code);
+    assert(command != .doctor);
+    assert(command != .help);
+    assert(command != .version);
     diag.raise(.E0006);
     diag.while_("reading the command line", .{});
-    diag.cause("'{s}' needs a diagnostic code", .{@tagName(command)});
+    switch (missing) {
+        .code => {
+            diag.cause("'{s}' needs a diagnostic code", .{@tagName(command)});
+            diag.fix(.{
+                .sentence = "pass the code from a diagnostic:",
+                .command = "zbx explain E0001",
+            });
+        },
+        .rootfs => {
+            diag.cause("'run' needs --rootfs <dir>, the directory to use as the root", .{});
+            diag.fix(.{
+                .sentence = "name the root filesystem directory:",
+                .command = "zbx run --rootfs ./alpine -- /bin/sh",
+            });
+        },
+        .command => {
+            diag.cause("'run' needs the command to run, after '--'", .{});
+            diag.fix(.{
+                .sentence = "put the command after '--':",
+                .command = "zbx run --rootfs ./alpine -- /bin/sh",
+            });
+        },
+    }
     diag.context("cmd", "{s}", .{@tagName(command)});
-    diag.fix(.{ .sentence = "pass the code from a diagnostic:", .command = "zbx explain E0001" });
     assert(diag.code.? == .E0006);
     return error.MissingArgument;
+}
+
+/// `--rootfs` or `--name` with no value after it.
+fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(option.len > 2);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s} needs a value, and none follows it", .{option});
+    diag.fix(.{
+        .sentence = "give it a value:",
+        .command = "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
+    });
+    assert(diag.code.? == .E0005);
+    return error.BadOptionValue;
 }
 
 fn unknown_option(diag: *Diag, argument: []const u8) ParseError {
@@ -407,9 +560,7 @@ pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
         return fail(host, &diag, options);
     };
     assert(args.len <= constants.args_count_max);
-    const code = run(host, args);
-    assert(code <= constants.exit_internal);
-    return code;
+    return run(host, args);
 }
 
 pub fn run(host: Host, args: []const []const u8) u8 {
@@ -422,7 +573,8 @@ pub fn run(host: Host, args: []const []const u8) u8 {
     parse(args, &invocation, &diag) catch return fail(host, &diag, options);
     assert(invocation.options.verbose == options.verbose);
     const code = dispatch(host, &invocation, &diag) catch return fail(host, &diag, options);
-    assert(code <= constants.exit_internal);
+    // A container's own exit code is passed through whole; zbx's own codes stay below 71.
+    if (invocation.command != .run) assert(code <= constants.exit_internal);
     return code;
 }
 
@@ -435,8 +587,73 @@ fn dispatch(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 
         .version => try print(host, version_text, diag),
         .explain => try run_explain(host, invocation.operand.?, diag),
         .doctor => return run_doctor(host, invocation.options, diag),
+        .run => return run_container(host, invocation, diag),
     }
     return constants.exit_ok;
+}
+
+/// Runs a container in the foreground and returns its exit code: the command's own, or 128
+/// plus the signal that killed it. A container that could not be started is a diagnostic.
+fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+    assert(diag.code == null);
+    assert(invocation.command == .run);
+    const given = invocation.run;
+    const container: runtime_spec.Spec = .{
+        .rootfs = given.rootfs.?, // check_run_args refused a missing one.
+        .name = given.name,
+        .command = given.command,
+    };
+    var outcome: runtime.Outcome = undefined;
+    runtime.run(host, &container, &outcome, diag) catch return error.StartFailed;
+    report_outcome(host, invocation.options, &outcome);
+    return outcome.exit_code();
+}
+
+/// Says on stderr how the container ended. Text mode names a signal that killed it (and, with
+/// --verbose, the steps that were skipped); JSON mode ends with one `container_exit` line, so a
+/// script can tell the container's exit code from zbx's own. A failed write is ignored: the
+/// exit code is the container's and there is nowhere left to say more.
+fn report_outcome(host: Host, options: Options, outcome: *const runtime.Outcome) void {
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    if (options.output == .json) {
+        write_container_exit(&writer, outcome);
+    } else {
+        if (options.verbose) {
+            for (outcome.note_slice()) |*note| {
+                // Cannot fail: a note is at most 160 bytes and the buffer holds a message.
+                writer.print("zbx: note: {s}\n", .{note.slice()}) catch unreachable;
+            }
+        }
+        write_signal_note(&writer, outcome);
+    }
+    const text = writer.buffered();
+    if (text.len > 0) host.write_all(.stderr, text) catch return;
+}
+
+fn write_signal_note(writer: *std.Io.Writer, outcome: *const runtime.Outcome) void {
+    const number = switch (outcome.status) {
+        .exited => return,
+        .signaled => |signal| signal,
+    };
+    const code: std.os.linux.SIG = @fromBackingInt(number);
+    const name = std.enums.tagName(std.os.linux.SIG, code) orelse "?";
+    // Cannot fail: a short line into a buffer that holds a message.
+    writer.print("zbx: the container was killed by signal {d} (SIG{s})\n", .{ number, name }) catch
+        unreachable; // Same bound as above.
+}
+
+fn write_container_exit(writer: *std.Io.Writer, outcome: *const runtime.Outcome) void {
+    const code = outcome.exit_code();
+    // Cannot fail: a short line into a buffer that holds a message.
+    switch (outcome.status) {
+        .exited => writer.print("{{\"container_exit\":{{\"code\":{d}}}}}\n", .{code}) catch
+            unreachable, // Same bound as above.
+        .signaled => |number| {
+            const format = "{{\"container_exit\":{{\"signal\":{d},\"code\":{d}}}}}\n";
+            writer.print(format, .{ number, code }) catch unreachable; // Same bound as above.
+        },
+    }
 }
 
 /// Runs the doctor: its report goes to stdout, then the diagnostic of each FAIL goes to stderr,
@@ -840,4 +1057,73 @@ test "an unclassified failure is reported as a bug, never dropped" {
     diag.reset();
     try testing.expectEqual(@as(u8, 70), fail(sim.interface(), &diag, .{}));
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "bug[ZBX-B0001]: "));
+}
+
+test "parse: run takes its options, then the command after --, which is not ours to read" {
+    // Goal: the shape of a run command line. Method: options in both spellings and orders,
+    // global options before and among them, and a command whose words look like our options.
+    var invocation: Invocation = undefined;
+    const plain = [_][]const u8{ "run", "--rootfs", "alpine", "--", "/bin/sh" };
+    try testing.expect(try parse_case(&plain, &invocation) == null);
+    try testing.expectEqual(Command.run, invocation.command);
+    try testing.expectEqualStrings("alpine", invocation.run.rootfs.?);
+    try testing.expect(invocation.run.name == null);
+    try testing.expectEqual(@as(usize, 1), invocation.run.command.len);
+
+    const shaped = [_][]const u8{
+        "-v",     "run", "--name=web-1", "--rootfs=./a", "--output", "json", "--",
+        "ls",     "-v",  "--output",     "xml",          "--rootfs", "x",    "--",
+        "--help",
+    };
+    try testing.expect(try parse_case(&shaped, &invocation) == null);
+    try testing.expectEqualStrings("web-1", invocation.run.name.?);
+    try testing.expectEqualStrings("./a", invocation.run.rootfs.?);
+    try testing.expectEqual(@as(usize, 8), invocation.run.command.len);
+    try testing.expectEqualStrings("ls", invocation.run.command[0]);
+    try testing.expectEqualStrings("--", invocation.run.command[6]);
+    try testing.expect(invocation.options.verbose);
+    try testing.expectEqual(OutputFormat.json, invocation.options.output);
+
+    // An option after the "--" is the command's: zbx's own --output and -v do not see it.
+    const after = [_][]const u8{ "run", "--rootfs", "r", "--", "x", "--output", "json", "-v" };
+    const options = scan_options(&after);
+    try testing.expect(!options.verbose);
+    try testing.expectEqual(OutputFormat.text, options.output);
+    try testing.expectEqual(OutputFormat.json, scan_options(&.{ "--output=json", "run" }).output);
+}
+
+test "parse: every way a run command line is wrong has its code" {
+    // Goal: the usage errors of `run` reuse the general codes: E0006 for what is missing, E0005
+    // for an option without its value, E0003 for what should not be there, E0004 for an option
+    // that is not run's. Method: the exact boundary of each rule.
+    var invocation: Invocation = undefined;
+    const cases = [_]struct { args: []const []const u8, code: ?codes.Code }{
+        .{ .args = &.{ "run", "--rootfs", "r", "--", "x" }, .code = null },
+        .{ .args = &.{ "run", "--", "x" }, .code = .E0006 },
+        .{ .args = &.{"run"}, .code = .E0006 },
+        .{ .args = &.{ "run", "--rootfs", "r" }, .code = .E0006 },
+        .{ .args = &.{ "run", "--rootfs", "r", "--" }, .code = .E0006 },
+        .{ .args = &.{ "run", "--rootfs", "r", "--", "" }, .code = .E0006 },
+        .{ .args = &.{ "run", "--rootfs" }, .code = .E0005 },
+        .{ .args = &.{ "run", "--rootfs", "--", "x" }, .code = .E0005 },
+        .{ .args = &.{ "run", "--rootfs", "r", "--name" }, .code = .E0005 },
+        .{ .args = &.{ "run", "--rootfs", "r", "--name", "--", "x" }, .code = .E0005 },
+        .{ .args = &.{ "run", "extra", "--rootfs", "r", "--", "x" }, .code = .E0003 },
+        .{ .args = &.{ "run", "--rootfs", "a", "--rootfs", "b", "--", "x" }, .code = .E0003 },
+        .{ .args = &.{ "run", "--rootfs", "a", "--rootfs=b", "--", "x" }, .code = .E0003 },
+        .{
+            .args = &.{ "run", "--name", "a", "--name", "b", "--rootfs", "r", "--", "x" },
+            .code = .E0003,
+        },
+        .{ .args = &.{ "doctor", "--rootfs", "r" }, .code = .E0004 },
+        .{ .args = &.{ "--rootfs", "r", "run" }, .code = .E0004 },
+        .{ .args = &.{ "--", "run" }, .code = .E0004 },
+        .{ .args = &.{ "run", "--bogus", "--rootfs", "r", "--", "x" }, .code = .E0004 },
+        .{ .args = &.{ "explain", "--name", "x" }, .code = .E0004 },
+        .{ .args = &.{ "help", "--" }, .code = .E0004 },
+    };
+    for (cases) |case| {
+        const found = try parse_case(case.args, &invocation);
+        try testing.expectEqual(case.code, found);
+    }
 }

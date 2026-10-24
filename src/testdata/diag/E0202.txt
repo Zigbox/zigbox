@@ -1,0 +1,7 @@
+error[ZBX-E0202]: can't run the command in the rootfs
+  cause  '/bin/nothere' does not exist in the rootfs, or its program interpreter
+         (the dynamic loader of a dynamically linked program) does not
+  fix    look in the rootfs:               ls -l "/srv/alpine/bin"
+         or use the program's full path:   zbx run --rootfs /srv/alpine -- /bin/sh
+  more   zbx explain E0202 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0202.html
