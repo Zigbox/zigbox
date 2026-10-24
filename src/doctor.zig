@@ -823,6 +823,11 @@ fn map_denied(check: *Check) void {
         "gid_map or setgroups file; an LSM policy can forbid that, and only the user's own id " ++
         "may be mapped without newuidmap", .{});
     check.fix("look for the policy that denies it:", dmesg_policy);
+    // Ubuntu's AppArmor restriction shows up like this in the overlay probe, next to a userns
+    // FAIL: the namespace exists but has no privilege to write its map.
+    if (check.id == .overlay) {
+        check.fix("if the userns check failed too, fix it first (ZBX-E0101)", "");
+    }
 }
 
 // cgroup
