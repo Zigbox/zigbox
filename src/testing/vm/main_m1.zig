@@ -8,7 +8,7 @@
 //!   5. A real Ctrl-C (byte 0x03 on the serial console) stops a foreground `sleep 1000` in the
 //!      container within 2 s, with exit 130.
 //! And: the full id map inside, a host mount and process invisible, a missing rootfs is
-//! ZBX-E0201 with exit 1, and a bundle made after a run with secrets planted holds none.
+//! ZBX-E0201 with exit 125, and a bundle made after a run with secrets planted holds none.
 //! `zig build demo-m1` (KVM) or `zig build demo-m1 -Daccel=tcg`. See docs/demos/m1.md.
 
 const std = @import("std");
@@ -280,14 +280,14 @@ fn extra_host_invisible(session: *Session, out: *Io.Writer, timer: *H.Timer) !vo
 }
 
 fn extra_missing_rootfs(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    try out.print("\ndemo-m1: EXTRA: a missing rootfs is ZBX-E0201, exit 1\n", .{});
+    try out.print("\ndemo-m1: EXTRA: a missing rootfs is ZBX-E0201, exit 125\n", .{});
     const command = "runuser -u demo -- env HOME=/home/demo /home/demo/zbx run " ++
         "--rootfs /home/demo/nothere -- /bin/sh";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
     checks_m1.check_missing_rootfs(result.streams, result.status) catch |err| {
         return fail_step(out, "EXTRA missing rootfs", "expected error[ZBX-E0201] on stderr, " ++
-            "nothing on stdout, exit 1", err);
+            "nothing on stdout, exit 125", err);
     };
     try timer.lap(out, "missing rootfs");
 }
