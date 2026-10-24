@@ -8,10 +8,7 @@ The live design doc (rev 42) changed one M0 ground rule. It used to say "a refus
 
 ## Before slice 4: CI
 
-Commit `Restore the CI workflow…` put back `.github/workflows/ci.yml` and `.github/actions/setup-zig/action.yml`, which were dropped when the code was ported from `DailyWombat/zigboxxx`. That push is the first CI run with KVM. Check the run for this branch, with the GitHub MCP tools:
-
-- **All green:** report it. M0 slices 1 to 3 are demonstrated, but M0 stays open until slice 5's demo is green too.
-- **Any job red:** root-cause it, fix it in its own commit, and stop for review before you start slice 4. "Flaky" is not a root cause.
+Commit `Restore the CI workflow…` put back `.github/workflows/ci.yml` and `.github/actions/setup-zig/action.yml`, which were dropped when the code was ported from `DailyWombat/zigboxxx`. CI run 2 on this branch (https://github.com/Zigbox/zigbox/actions/runs/40048163873) is all green, `demo-m0` with KVM included. Keep it green: every push must leave every job green.
 
 ## Environment
 
