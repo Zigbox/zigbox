@@ -1,0 +1,4 @@
+error[ZBX-E0009]: can't write output
+  cause  write(stdout) failed: no space left on the device (ENOSPC)
+  fix    free space or fix the redirect, then run the command again
+  more   zbx explain E0009

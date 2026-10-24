@@ -7,6 +7,27 @@ const linux = std.os.linux;
 const constants = @import("constants.zig");
 const host = @import("host.zig");
 
+/// Writes to stderr with no state, no vtable and no error path, for the panic handler: when an
+/// invariant has broken, nothing else can be trusted. Short writes and errors are ignored
+/// because there is nowhere left to report them.
+pub fn write_stderr_best_effort(bytes: []const u8) void {
+    assert(bytes.len <= constants.output_bytes_max);
+    var written: usize = 0;
+    var calls: u32 = 0;
+    while (written < bytes.len and calls < constants.write_calls_max) : (calls += 1) {
+        const result = linux.write(linux.STDERR_FILENO, bytes[written..].ptr, bytes.len - written);
+        if (linux.errno(result) != .SUCCESS) return;
+        written += result;
+    }
+    assert(written <= bytes.len);
+}
+
+/// Ends the process at once, without unwinding, flushing or running anything else.
+pub fn exit_now(code: u8) noreturn {
+    assert(code != 0);
+    linux.exit_group(code);
+}
+
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
     /// close without a matching open is a programmer error.
@@ -17,6 +38,8 @@ pub const HostReal = struct {
     /// Test hook: replaces the body of the probe child, to exercise timeout, signal and
     /// exit-code handling without depending on what the host kernel allows.
     child_hook: ?*const fn () noreturn = null,
+    /// The process environment, for NO_COLOR. Empty unless `main` provides it.
+    environ: std.process.Environ = .empty,
 
     pub fn interface(self: *HostReal) host.Host {
         return .{ .context = self, .vtable = &vtable };
@@ -32,6 +55,7 @@ pub const HostReal = struct {
         .read_capability = read_capability,
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
+        .no_color = no_color,
         .uid = uid,
         .probe = probe,
     };
@@ -148,6 +172,10 @@ pub const HostReal = struct {
         };
         var attributes: linux.termios = undefined;
         return linux.errno(linux.tcgetattr(descriptor, &attributes)) == .SUCCESS;
+    }
+
+    fn no_color(context: *anyopaque) bool {
+        return from_context(context).environ.containsUnemptyConstant("NO_COLOR");
     }
 
     fn uid(context: *anyopaque) u32 {

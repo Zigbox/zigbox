@@ -1,0 +1,5 @@
+bug[ZBX-B0001]: zbx hit an internal error
+  this is a bug in zbx, not something you did
+  cause  index out of bounds: index 5, len 3
+  report https://github.com/Zigbox/zigbox/issues/new
+  more   zbx explain B0001

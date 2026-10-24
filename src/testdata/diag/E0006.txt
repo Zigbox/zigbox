@@ -1,0 +1,4 @@
+error[ZBX-E0006]: missing argument
+  cause  'explain' needs a diagnostic code
+  fix    pass the code from a diagnostic:   zbx explain E0001
+  more   zbx explain E0006 · rerun with --verbose for the full cause chain

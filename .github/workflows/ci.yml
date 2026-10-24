@@ -53,6 +53,7 @@ jobs:
           - cli
           - text
           - doctor
+          - diag
           - parse_sysctl
           - parse_kernel
           - parse_controllers

@@ -1,0 +1,1 @@
+{"code":"ZBX-B0001","severity":"bug","blame":"internal","summary":"zbx hit an internal error","causes":["index out of bounds: index 5, len 3"],"while":[],"context":{},"fixes":[],"docs":"zbx explain B0001","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}

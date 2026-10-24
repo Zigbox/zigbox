@@ -1,0 +1,5 @@
+error[ZBX-E0008]: command line exceeds the supported limits
+  while  reading the command line
+  cause  more than 64 arguments were given
+  fix    pass fewer arguments
+  more   zbx explain E0008

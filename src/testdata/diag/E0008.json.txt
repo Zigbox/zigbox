@@ -1,0 +1,1 @@
+{"code":"ZBX-E0008","severity":"error","blame":"user","summary":"command line exceeds the supported limits","causes":["more than 64 arguments were given"],"while":["reading the command line"],"context":{},"fixes":[{"sentence":"pass fewer arguments","command":null}],"docs":"zbx explain E0008","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}

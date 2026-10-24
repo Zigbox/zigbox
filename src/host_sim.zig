@@ -31,6 +31,9 @@ pub const Faults = struct {
     short_read_per_mille: u16 = 0,
     write_error_per_mille: u16 = 0,
     short_write_per_mille: u16 = 0,
+    /// Limits `write_error_per_mille` and `short_write_per_mille` to one stream; null means
+    /// both. Lets a test fail stdout while stderr still works, as `zbx help > /dev/full` does.
+    write_fault_stream: ?host.Stream = null,
     interrupt_per_mille: u16 = 0,
     /// One-shot: the call whose zero-based index equals this fails with `fail_call_error`,
     /// whatever its kind. Lets a test walk a failure across every step of a sequence.
@@ -62,6 +65,8 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// Whether NO_COLOR is set in the simulated environment.
+    no_color_value: bool,
     /// Error results injected so far, split so tests can reason about what surfaced: `hard`
     /// errors (anything but EINTR) always reach the caller; interrupts may be absorbed by the
     /// retry loop. Short reads and writes are not errors and are not counted.
@@ -89,6 +94,7 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.no_color_value = false;
         sim.hard_errors_injected = 0;
         sim.interrupts_injected = 0;
         sim.open_files = @splat(null);
@@ -134,6 +140,7 @@ pub const HostSim = struct {
         .read_capability = read_capability,
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
+        .no_color = no_color,
         .uid = uid,
         .probe = probe,
     };
@@ -238,10 +245,14 @@ pub const HostSim = struct {
         assert(bytes.len > 0);
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
-        if (sim.roll(sim.faults.write_error_per_mille)) return sim.inject(error.NoSpace);
+        const faulted = sim.faults.write_fault_stream == null or
+            sim.faults.write_fault_stream.? == stream;
+        if (faulted) {
+            if (sim.roll(sim.faults.write_error_per_mille)) return sim.inject(error.NoSpace);
+        }
 
         var count: u32 = @intCast(bytes.len);
-        const short = sim.roll(sim.faults.short_write_per_mille);
+        const short = faulted and sim.roll(sim.faults.short_write_per_mille);
         if (short) {
             if (count > 1) count = sim.prng.random().intRangeAtMost(u32, 1, count - 1);
         }
@@ -309,6 +320,10 @@ pub const HostSim = struct {
         const sim = from_context(context);
         _ = stream;
         return sim.terminal;
+    }
+
+    fn no_color(context: *anyopaque) bool {
+        return from_context(context).no_color_value;
     }
 
     fn uid(context: *anyopaque) u32 {

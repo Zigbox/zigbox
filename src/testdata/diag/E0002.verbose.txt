@@ -1,0 +1,6 @@
+error[ZBX-E0002]: no command given
+  while  reading the command line
+  cause  no command was given
+  fix    see the commands:   zbx help
+         check this host:    zbx doctor
+  more   zbx explain E0002

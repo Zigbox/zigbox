@@ -18,7 +18,8 @@
 //!         `kernel.apparmor_restrict_unprivileged_userns=1`) says unconfined users are refused,
 //!         which happens when this process runs under an AppArmor profile that allows it. A warn
 //!         has no fix line, because nothing has to be fixed for this process.
-//!   The exit code is 0 if no check is FAIL, 1 otherwise. A warn does not change it.
+//!   The exit code is 0 if no check is FAIL, 2 (the environment's) otherwise. A warn does not
+//!   change it.
 //!
 //! Running as root proves nothing about ordinary users, so nothing here lets uid 0 pass:
 //! probes run in a child that drops to an unprivileged id first (host_real.zig), the subid
@@ -31,6 +32,9 @@ const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
 const parse = @import("parse.zig");
 const text_util = @import("text.zig");
+const diag_codes = @import("diag/codes.zig");
+const diag_errors = @import("diag/errors.zig");
+const Diag = @import("diag/diag.zig").Diag;
 
 const Host = host_mod.Host;
 
@@ -93,7 +97,7 @@ pub const Report = struct {
         assert(report.checks[0].id == .kernel);
         assert(report.checks[report.checks.len - 1].id == .seccomp);
         for (report.checks) |check| {
-            if (check.status == .fail) return constants.exit_failed;
+            if (check.status == .fail) return diag_codes.exit_code(.environment);
         }
         return constants.exit_ok;
     }
@@ -1043,8 +1047,9 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
 
 // ---- Entry point ---------------------------------------------------------------------------
 
-/// Runs the doctor against `host` and prints the report to stdout. Returns the exit code.
-pub fn run(host: Host) u8 {
+/// Runs the doctor against `host` and prints the report to stdout. Returns the exit code. A
+/// stdout that cannot be written is `ZBX-E0009` in `diag`.
+pub fn run(host: Host, diag: *Diag) error{OutputFailed}!u8 {
     var facts: Facts = undefined;
     facts.reset();
     gather(host, &facts);
@@ -1052,9 +1057,12 @@ pub fn run(host: Host) u8 {
     evaluate(&facts, &report);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
-    const output = render(&report, host.is_terminal(.stdout), &buffer);
+    const output = render(&report, host.color_enabled(.stdout), &buffer);
     assert(output.len > 0);
-    host.write_all(.stdout, output) catch return constants.exit_failed;
+    host.write_all(.stdout, output) catch |err| {
+        diag_errors.output_failed(diag, .stdout, err);
+        return error.OutputFailed;
+    };
     assert(output.len <= buffer.len);
     return report.exit_code();
 }
@@ -1069,9 +1077,16 @@ const fixtures = @import("doctor_fixtures.zig");
 fn run_fixture(target: *HostSim, fixture: *const fixtures.Fixture) u8 {
     target.init(7, fixture.files);
     fixture.apply(target);
-    const code = run(target.interface());
+    const code = run_exit_code(target);
     assert(target.open_count() == 0);
     return code;
+}
+
+/// What the process would exit with: `run`'s code, or the code of the diagnostic it raised.
+fn run_exit_code(target: *HostSim) u8 {
+    var diag: Diag = undefined;
+    diag.reset();
+    return run(target.interface(), &diag) catch diag.exit_code();
 }
 
 test "snapshot: every fixture's full report and exit code" {
@@ -1086,7 +1101,8 @@ test "snapshot: every fixture's full report and exit code" {
         try testing.expectEqualStrings(expected, target.stdout());
         try testing.expectEqual(@as(usize, 0), target.stderr().len);
         const has_fail = std.mem.indexOf(u8, expected, "FAIL ") != null;
-        try testing.expectEqual(@as(u8, @intFromBool(has_fail)), code);
+        const expected_code = if (has_fail) constants.exit_environment else constants.exit_ok;
+        try testing.expectEqual(expected_code, code);
     }
 }
 
@@ -1143,7 +1159,7 @@ test "colour is applied only when asked and does not change the text" {
     target.init(1, fixture.files);
     fixture.apply(&target);
     target.terminal = true;
-    _ = run(target.interface());
+    _ = run_exit_code(&target);
     const coloured = target.stdout();
     try testing.expect(std.mem.indexOf(u8, coloured, "\x1b[31mFAIL\x1b[0m") != null);
     try testing.expect(std.mem.indexOf(u8, coloured, "\x1b[32mok  \x1b[0m") != null);
@@ -1168,7 +1184,7 @@ test "colour is applied only when asked and does not change the text" {
 test "a failed read at every step of the healthy host is a FAIL, never ok" {
     // Goal: crash at any step. Method: fail host call 0, 1, 2, ... of the healthy Ubuntu run
     // with each error kind; whatever the failing call was (a read, a stat, a probe, the final
-    // write), the exit code is 1, the report is well formed, and no handle leaks.
+    // write), the exit code is 2, the report is well formed, and no handle leaks.
     const kinds = [_]host_mod.Error{ error.IoFailed, error.AccessDenied, error.OutOfMemory };
     const fixture = fixtures.all[0];
     var target: HostSim = undefined;
@@ -1179,14 +1195,14 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
             fixture.apply(&target);
             target.faults.fail_call_index = @intCast(index);
             target.faults.fail_call_error = kind;
-            const code = run(target.interface());
+            const code = run_exit_code(&target);
             try testing.expectEqual(@as(u32, 0), target.open_count());
             const injected = target.hard_errors_injected;
             if (injected == 0) {
                 calls_total = @max(calls_total, @as(u32, @intCast(index)));
                 try testing.expectEqual(constants.exit_ok, code);
             } else {
-                try testing.expectEqual(constants.exit_failed, code);
+                try testing.expectEqual(constants.exit_environment, code);
             }
         }
     }

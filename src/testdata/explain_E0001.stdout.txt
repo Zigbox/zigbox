@@ -1,0 +1,8 @@
+ZBX-E0001: unknown command
+error, blame: user, exit code 1
+
+zbx was given a first word that is not one of its commands. Command names
+are matched exactly: "Help" and "version" are not "help" and "--version".
+
+Run "zbx help" for the list of commands. Options such as --verbose may come
+before or after the command.

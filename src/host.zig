@@ -112,6 +112,8 @@ pub const VTable = struct {
     /// The mode of the seccomp filter of this process, from `prctl(PR_GET_SECCOMP)`.
     seccomp_mode: *const fn (context: *anyopaque) Error!u32,
     is_terminal: *const fn (context: *anyopaque, stream: Stream) bool,
+    /// True if the environment variable NO_COLOR is set to a non-empty value (no-color.org).
+    no_color: *const fn (context: *anyopaque) bool,
     /// The real user id of this process.
     uid: *const fn (context: *anyopaque) u32,
     probe: *const fn (context: *anyopaque, kind: ProbeKind) Error!ProbeOutcome,
@@ -201,6 +203,13 @@ pub const Host = struct {
 
     pub fn is_terminal(host: Host, stream: Stream) bool {
         return host.vtable.is_terminal(host.context, stream);
+    }
+
+    /// Colour only when the stream is a terminal and NO_COLOR is unset. Output must read
+    /// correctly without colour, so this is never required for meaning.
+    pub fn color_enabled(host: Host, stream: Stream) bool {
+        if (!host.is_terminal(stream)) return false;
+        return !host.vtable.no_color(host.context);
     }
 
     pub fn uid(host: Host) u32 {
