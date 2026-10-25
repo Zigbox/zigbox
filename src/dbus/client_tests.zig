@@ -243,3 +243,74 @@ test "a failed write or read on the socket is an io failure" {
     try testing.expectEqual(host_mod.Error.AccessDenied, session.connection.failure.err);
     session.connection.close();
 }
+
+test "the job signal reaches only a connection that subscribed" {
+    // Goal: the client does not rely on systemd telling the creator of a job. Method: the model
+    // sends JobRemoved only to a subscriber; a start with the subscription skipped waits for a
+    // signal that never comes (a timeout at the job stage), and the real start works and ends
+    // unsubscribed.
+    var session: Session = undefined;
+    session.start();
+    try session.open();
+    const connection = &session.connection;
+    try connection.add_match("type='signal',member='JobRemoved'"); // The rule alone is not enough.
+    var body: [2048]u8 = undefined;
+    const request = scope_request("zbx-a.scope", 5);
+    const marshalled = try systemd.marshal_scope(&body, &request);
+    const reply = try connection.call(.{
+        .destination = "org.freedesktop.systemd1",
+        .path = "/org/freedesktop/systemd1",
+        .interface = "org.freedesktop.systemd1.Manager",
+        .member = "StartTransientUnit",
+        .signature = "ssa(sv)a(sa(sv))",
+        .body = marshalled,
+    }, .call);
+    var path_buffer: [96]u8 = undefined;
+    var reader = reply.body_reader();
+    const job = try reader.object_path();
+    @memcpy(path_buffer[0..job.len], job);
+    try testing.expectError(error.Failed, connection.wait_job(path_buffer[0..job.len]));
+    try expect_failure(&session, .timeout, .job);
+    session.connection.close();
+
+    session.start();
+    try session.open();
+    try start_a(&session);
+    try testing.expect(!session.sim.world.bus.conns[0].subscribed); // Unsubscribed after.
+}
+
+test "a refused Subscribe is a remote failure of the call, before any scope exists" {
+    var session: Session = undefined;
+    session.start();
+    session.sim.world.bus.model.subscribe_error = "org.freedesktop.DBus.Error.AccessDenied";
+    try session.open();
+    try testing.expectError(error.Failed, start_a(&session));
+    try expect_failure(&session, .remote, .call);
+    try testing.expectEqual(@as(u32, 0), session.sim.world.bus.scopes_started);
+}
+
+test "stopping a scope: gone, stopped by the job, refused, or its job failing" {
+    // Goal: StopUnit's four outcomes. A unit the manager does not know is the good one.
+    var session: Session = undefined;
+    session.start();
+    try session.open();
+    try systemd.watch_jobs(&session.connection);
+    const connection = &session.connection;
+    const unknown = try systemd.stop_scope(connection, "zbx-x.scope");
+    try testing.expectEqual(systemd.Stopped.gone, unknown);
+    try start_a(&session);
+    try systemd.watch_jobs(connection);
+    const stopped = try systemd.stop_scope(connection, "zbx-a.scope");
+    try testing.expectEqual(systemd.Stopped.stopped, stopped);
+    try testing.expect(session.sim.world.bus.find_scope("zbx-a.scope") == null);
+    try start_a(&session);
+    try systemd.watch_jobs(connection);
+    session.sim.world.bus.model.stop_error = "org.freedesktop.DBus.Error.AccessDenied";
+    try testing.expectError(error.Failed, systemd.stop_scope(connection, "zbx-a.scope"));
+    try expect_failure(&session, .remote, .call);
+    session.sim.world.bus.model.stop_error = null;
+    session.sim.world.bus.model.stop_result = "canceled";
+    try testing.expectError(error.Failed, systemd.stop_scope(connection, "zbx-a.scope"));
+    try expect_failure(&session, .remote, .job);
+    try testing.expect(session.sim.world.bus.find_scope("zbx-a.scope") != null);
+}
