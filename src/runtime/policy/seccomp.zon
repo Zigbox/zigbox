@@ -1,0 +1,172 @@
+// The container's seccomp profile: an allowlist of syscalls, compiled to classic BPF at build
+// time for x86_64 and aarch64 (src/runtime/seccomp.zig) and installed last, just before execve.
+// Any syscall not named here fails with EPERM, so programs fail politely instead of dying; a
+// foreign architecture (the 32-bit compatibility entry) fails the same way.
+//
+// It follows Docker's default profile (moby, profiles/seccomp/default.json) for a container
+// that does not hold CAP_SYS_ADMIN, CAP_NET_RAW, CAP_SYS_PTRACE and the other capabilities that
+// profile gates calls behind (policy/capabilities.zon keeps twelve). So what is missing is what
+// those capabilities would have opened: mount and umount, unshare and setns, pivot_root, reboot,
+// kexec, module loading, bpf, perf_event_open, keyctl, userfaultfd, process_vm_readv, the
+// clock setters, swapon and the NUMA calls. Differences from Docker, all deliberate:
+//   - 64-bit syscalls only: the 32-bit variants (socketcall, ipc, *64 and *32 names) have no
+//     entry because the filter refuses the 32-bit architecture altogether.
+//   - io_uring is absent, as in current Docker profiles.
+//   - mknod is listed, as in Docker, and the kernel refuses devices without CAP_MKNOD.
+//
+// A name that exists on neither architecture is a build error, so a typo cannot silently drop
+// a syscall; a name one architecture lacks (the legacy calls on aarch64) is skipped there.
+// Each group says why it is allowed. Reviewing this file is reviewing what a container can ask
+// the kernel for.
+.{
+    .groups = .{
+        .{
+            .name = "processes",
+            .why = "Starting, running, waiting for and ending processes and threads. clone has its own rule below: it may not create namespaces.",
+            .syscalls = .{
+                "exit",   "exit_group",      "fork",       "vfork",             "execve",           "execveat",        "wait4",           "waitid",
+                "kill",   "tkill",           "tgkill",     "getpid",            "getppid",          "gettid",          "getpgid",         "getpgrp",
+                "getsid", "setpgid",         "setsid",     "prctl",             "arch_prctl",       "set_tid_address", "set_robust_list", "get_robust_list",
+                "rseq",   "restart_syscall", "pidfd_open", "pidfd_send_signal", "process_mrelease", "ptrace",
+            },
+        },
+        .{
+            .name = "scheduling",
+            .why = "Scheduling and CPU placement of the container's own processes; the kernel checks the limits (RLIMIT_NICE, cpuset).",
+            .syscalls = .{
+                "sched_yield",            "sched_getaffinity",     "sched_setaffinity",  "sched_getparam",
+                "sched_setparam",         "sched_getscheduler",    "sched_setscheduler", "sched_get_priority_max",
+                "sched_get_priority_min", "sched_rr_get_interval", "sched_getattr",      "sched_setattr",
+                "getcpu",                 "ioprio_get",            "ioprio_set",         "getpriority",
+                "setpriority",
+            },
+        },
+        .{
+            .name = "memory",
+            .why = "Address space management: what every program, and every libc's allocator, does.",
+            .syscalls = .{
+                "brk",          "mmap",       "mprotect",  "munmap",        "mremap",    "madvise",          "mincore",    "mlock",
+                "mlock2",       "munlock",    "mlockall",  "munlockall",    "msync",     "remap_file_pages", "membarrier", "memfd_create",
+                "memfd_secret", "pkey_alloc", "pkey_free", "pkey_mprotect", "readahead", "modify_ldt",
+            },
+        },
+        .{
+            .name = "files_data",
+            .why = "Opening, reading, writing and syncing files and descriptors. ioctl is allowed whole, as in Docker's profile: terminals and many devices need it, and the kernel checks each request against the capabilities left.",
+            .syscalls = .{
+                "open",     "openat",          "openat2",   "creat",    "close",  "close_range",     "read",      "write",
+                "readv",    "writev",          "pread64",   "pwrite64", "preadv", "pwritev",         "preadv2",   "pwritev2",
+                "lseek",    "dup",             "dup2",      "dup3",     "pipe",   "pipe2",           "fcntl",     "flock",
+                "ioctl",    "fsync",           "fdatasync", "sync",     "syncfs", "sync_file_range", "fallocate", "ftruncate",
+                "truncate", "copy_file_range", "sendfile",  "splice",   "tee",    "vmsplice",        "fadvise64",
+            },
+        },
+        .{
+            .name = "files_metadata",
+            .why = "Looking at and changing the file tree: stat, directories, links, modes, owners, times, extended attributes and change notification. mknod is allowed because it makes fifos and files; without CAP_MKNOD the kernel refuses device nodes. chroot works because CAP_SYS_CHROOT is kept.",
+            .syscalls = .{
+                "stat",         "fstat",         "lstat",             "newfstatat",       "statx",         "statfs",      "fstatfs",      "access",
+                "faccessat",    "faccessat2",    "readlink",          "readlinkat",       "getdents",      "getdents64",  "getcwd",       "chdir",
+                "fchdir",       "chroot",        "chmod",             "fchmod",           "fchmodat",      "chown",       "fchown",       "lchown",
+                "fchownat",     "mkdir",         "mkdirat",           "rmdir",            "rename",        "renameat",    "renameat2",    "link",
+                "linkat",       "symlink",       "symlinkat",         "unlink",           "unlinkat",      "mknod",       "mknodat",      "utime",
+                "utimes",       "utimensat",     "futimesat",         "umask",            "getxattr",      "lgetxattr",   "fgetxattr",    "setxattr",
+                "lsetxattr",    "fsetxattr",     "listxattr",         "llistxattr",       "flistxattr",    "removexattr", "lremovexattr", "fremovexattr",
+                "inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch", "fanotify_mark",
+            },
+        },
+        .{
+            .name = "credentials",
+            .why = "The container's own user and group ids and capabilities: dropping rights is what daemons do first. The id maps decide what the ids mean; the capability sets only shrink.",
+            .syscalls = .{
+                "getuid",   "geteuid",   "getgid",   "getegid",  "getresuid", "getresgid", "getgroups",
+                "setuid",   "setgid",    "setreuid", "setregid", "setresuid", "setresgid", "setfsuid",
+                "setfsgid", "setgroups", "capget",   "capset",
+            },
+        },
+        .{
+            .name = "signals",
+            .why = "Signals and their masks.",
+            .syscalls = .{
+                "rt_sigaction",  "rt_sigprocmask",  "rt_sigreturn",    "rt_sigpending",
+                "rt_sigsuspend", "rt_sigtimedwait", "rt_sigqueueinfo", "rt_tgsigqueueinfo",
+                "sigaltstack",   "signalfd",        "signalfd4",       "pause",
+                "alarm",
+            },
+        },
+        .{
+            .name = "time",
+            .why = "Reading the clocks, sleeping and timers. Setting the clock (settimeofday, clock_settime) is not here: it needs CAP_SYS_TIME, which a container does not keep.",
+            .syscalls = .{
+                "clock_getres",  "clock_gettime", "clock_nanosleep", "gettimeofday",    "nanosleep",
+                "time",          "times",         "timer_create",    "timer_delete",    "timer_getoverrun",
+                "timer_gettime", "timer_settime", "timerfd_create",  "timerfd_gettime", "timerfd_settime",
+                "getitimer",     "setitimer",     "adjtimex",        "clock_adjtime",
+            },
+        },
+        .{
+            .name = "waiting",
+            .why = "Futexes, polling and asynchronous I/O: threads, event loops and databases.",
+            .syscalls = .{
+                "futex",         "futex_waitv", "poll",       "ppoll",       "select",       "pselect6",      "epoll_create",
+                "epoll_create1", "epoll_ctl",   "epoll_wait", "epoll_pwait", "epoll_pwait2", "eventfd",       "eventfd2",
+                "io_setup",      "io_destroy",  "io_submit",  "io_cancel",   "io_getevents", "io_pgetevents",
+            },
+        },
+        .{
+            .name = "sockets",
+            .why = "Network and local sockets. The container shares the host's network in M2, so this is the host's network, with the host's own limits on what an unprivileged user can bind. socket has a rule below.",
+            .syscalls = .{
+                "socketpair",  "bind",       "connect",    "listen", "accept",   "accept4", "getsockname",
+                "getpeername", "getsockopt", "setsockopt", "sendto", "recvfrom", "sendmsg", "recvmsg",
+                "sendmmsg",    "recvmmsg",   "shutdown",
+            },
+        },
+        .{
+            .name = "sysv_and_queues",
+            .why = "System V message queues, semaphores and shared memory, and POSIX message queues: private to the container's IPC namespace.",
+            .syscalls = .{
+                "msgget",       "msgsnd",          "msgrcv",    "msgctl",        "semget", "semop",   "semtimedop",
+                "semctl",       "shmget",          "shmat",     "shmdt",         "shmctl", "mq_open", "mq_unlink",
+                "mq_timedsend", "mq_timedreceive", "mq_notify", "mq_getsetattr",
+            },
+        },
+        .{
+            .name = "system_information",
+            .why = "Facts about the system and limits on the container's own resources; seccomp and landlock let a program restrict itself further, which only ever takes rights away.",
+            .syscalls = .{
+                "uname",     "sysinfo", "getrlimit",               "setrlimit",         "prlimit64",              "getrusage",
+                "getrandom", "seccomp", "landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self",
+            },
+        },
+    },
+    // Syscalls allowed only for some arguments (or answered with a chosen errno).
+    // kind: equals_any (argument 0 is one of values), mask_zero (argument 0 & value == 0),
+    // not_equal (argument 0 is not value), errno (always fail with errno value).
+    .rules = .{
+        .{
+            .syscall = "clone",
+            .kind = .mask_zero,
+            .values = .{0x7e020000},
+            .why = "Docker's rule: clone may not create a namespace (NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET). Threads and fork, which are clone without them, work.",
+        },
+        .{
+            .syscall = "clone3",
+            .kind = .errno,
+            .values = .{38},
+            .why = "clone3 takes its flags in a struct that a filter cannot read, so Docker answers ENOSYS and libc falls back to clone, where the rule above applies.",
+        },
+        .{
+            .syscall = "personality",
+            .kind = .equals_any,
+            .values = .{ 0, 8, 131072, 131080, 4294967295 },
+            .why = "Docker's rule: only the values programs use (PER_LINUX, PER_LINUX32, UNAME26 and their query form); the others switch off address space randomisation or emulate other systems.",
+        },
+        .{
+            .syscall = "socket",
+            .kind = .not_equal,
+            .values = .{40},
+            .why = "Docker's rule: no AF_VSOCK sockets, which reach the hypervisor.",
+        },
+    },
+}

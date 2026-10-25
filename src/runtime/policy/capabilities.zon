@@ -1,0 +1,61 @@
+// The capabilities a container's processes keep. Everything else is dropped from the bounding,
+// effective, permitted and inheritable sets, and the ambient set is cleared (docs/briefs/
+// M2-limits.md, "Hardening"). The list is Docker's default set without NET_RAW and MKNOD, and
+// it has no SYS_ADMIN: that one capability is what mount, unshare, setns and most of the
+// kernel's administrative interfaces ask for.
+//
+// A capability is in the user namespace the container lives in, so none of these reaches the
+// host: they are root-inside-the-container powers over the container's own files and ids.
+// Reviewing this file is reviewing the container's privilege; every entry says what needs it.
+.{
+    .keep = .{
+        .{
+            .name = "CHOWN",
+            .why = "chown on the container's files: package managers and installers need it.",
+        },
+        .{
+            .name = "DAC_OVERRIDE",
+            .why = "root inside reads and writes files whatever their mode, as a root shell expects.",
+        },
+        .{
+            .name = "FOWNER",
+            .why = "chmod and utimes on files the process does not own (tar, installers).",
+        },
+        .{
+            .name = "FSETID",
+            .why = "keeping the set-id bits when a file's owner changes (tar, cp -p).",
+        },
+        .{
+            .name = "KILL",
+            .why = "signalling processes of other ids inside the container (init scripts, pkill).",
+        },
+        .{
+            .name = "SETGID",
+            .why = "setgid and setgroups to the mapped group ids (su, sudo, daemons dropping rights).",
+        },
+        .{
+            .name = "SETUID",
+            .why = "setuid to the mapped user ids (su, sudo, daemons dropping rights).",
+        },
+        .{
+            .name = "SETPCAP",
+            .why = "daemons that drop their own capabilities need to change them.",
+        },
+        .{
+            .name = "NET_BIND_SERVICE",
+            .why = "binding ports below 1024, which a web server in a container expects to do.",
+        },
+        .{
+            .name = "SYS_CHROOT",
+            .why = "chroot inside the container (build tools, some daemons).",
+        },
+        .{
+            .name = "AUDIT_WRITE",
+            .why = "writing audit records (sshd, login programs); harmless without an audit daemon.",
+        },
+        .{
+            .name = "SETFCAP",
+            .why = "setting file capabilities when unpacking packages that carry them.",
+        },
+    },
+}
