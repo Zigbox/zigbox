@@ -1384,3 +1384,37 @@ test "real stat reports owner and type, capability read reports absence" {
     const mode = try subject.seccomp_mode();
     try std.testing.expect(mode <= 2);
 }
+
+const repeat = @import("test_util.zig").repeat;
+
+test "real read_timeout waits for bytes, times out when there are none, and sees the end" {
+    // Goal: the poll-then-read that the D-Bus client's waits are built on. Method: a real pipe
+    // with nothing in it times out (the call returns after about the time asked, not a hang);
+    // with a byte in it the read returns it; with the writer closed the read returns 0.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const pipe = try subject.pipe();
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectError(error.TimedOut, subject.read_timeout(pipe.read, &buffer, 10));
+    try std.testing.expectEqual(@as(u16, 0), subject.last_errno());
+    try subject.write_handle_all(pipe.write, "x");
+    try std.testing.expectEqual(@as(u32, 1), try subject.read_timeout(pipe.read, &buffer, 10));
+    try std.testing.expectEqual(@as(u8, 'x'), buffer[0]);
+    subject.close(pipe.write);
+    try std.testing.expectEqual(@as(u32, 0), try subject.read_timeout(pipe.read, &buffer, 10));
+    subject.close(pipe.read);
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+test "real socket_connect names why a bus cannot be reached" {
+    // Goal: a path that does not exist is NotFound (ENOENT), and one that is not a socket is
+    // refused with the errno the diagnostic names (ECONNREFUSED); neither leaves a descriptor.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    try std.testing.expectError(error.NotFound, subject.socket_connect("/zigbox-no-such-bus"));
+    try std.testing.expectEqual(@as(u16, 2), subject.last_errno());
+    try std.testing.expectError(error.IoFailed, subject.socket_connect("/dev/null"));
+    try std.testing.expectEqual(@as(u16, 111), subject.last_errno());
+    try std.testing.expectError(error.PathTooLong, subject.socket_connect(repeat('/', 108)));
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}

@@ -748,3 +748,36 @@ test "describe names every step and adds the device or link" {
         }
     }
 }
+
+test "a plan with a scope has the start_scope step before the go-ahead, with its names" {
+    // Goal: the scope's place in the plan: after the maps (single or helpers) and before
+    // release_child, so the child is in its cgroup before it may run anything; the unit and its
+    // description are made from the container's name; a plan without one is unchanged.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    input.scope = .{ .version = 255, .limits = .{ .pids = 64 } };
+    plan.build(&input);
+    try testing.expectEqual(steps_count_single + 1, plan.count);
+    try testing.expectEqual(Kind.start_scope, plan.steps[plan.first_child() - 2].kind);
+    try testing.expectEqual(Kind.release_child, plan.steps[plan.first_child() - 1].kind);
+    const step = plan.steps[plan.first_child() - 2];
+    try testing.expectEqualStrings("zbx-web-1.scope", plan.text(step.target));
+    try testing.expectEqualStrings("zbx: web-1", plan.text(step.source));
+    try testing.expectEqual(@as(u32, 255), plan.scope_version);
+    try testing.expectEqual(@as(?u32, 64), plan.scope_limits.pids);
+    var buffer: [160]u8 = undefined;
+    try testing.expectEqualStrings(
+        "starting the container's cgroup scope",
+        describe(&plan.steps[plan.first_child() - 2], &buffer),
+    );
+
+    input.mapping = .{ .full = test_helpers };
+    plan.build(&input);
+    try testing.expectEqual(steps_count_full + 1, plan.count);
+    try testing.expectEqual(Kind.start_scope, plan.steps[4].kind);
+
+    input.scope = null;
+    plan.build(&input);
+    try testing.expectEqual(steps_count_full, plan.count);
+    try testing.expect(!plan.scoped);
+}

@@ -273,6 +273,9 @@ pub const World = struct {
     helper_runs: u32,
     /// Makes the helpers fail with this exit code (null: they behave).
     helper_fails_with: ?u8,
+    /// When the manager started a scope, the container's process had not run yet: it was waiting
+    /// for the go-ahead, so nothing it does happens outside the scope.
+    scope_started_before_child_ran: bool,
     /// The user's D-Bus socket and the systemd manager behind it (sim_bus.zig).
     bus: sim_bus.Bus,
 
@@ -305,6 +308,7 @@ pub const World = struct {
         world.subid_count = 65536;
         world.helper_runs = 0;
         world.helper_fails_with = null;
+        world.scope_started_before_child_ran = false;
         world.bus.init();
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
@@ -674,6 +678,9 @@ pub const World = struct {
         const proc_directory = std.fmt.bufPrint(&pid_buffer, "/proc/{d}", .{scope.pid}) catch
             unreachable; // Same.
         world.add_node(proc_directory, .dir);
+        if (world.find_process(scope.pid)) |process| {
+            world.scope_started_before_child_ran = process.state == .pending;
+        }
         var file_buffer: [48]u8 = undefined;
         // Cannot fail: same.
         const file = std.fmt.bufPrint(&file_buffer, "{s}/cgroup", .{proc_directory}) catch

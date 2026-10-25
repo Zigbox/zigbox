@@ -185,7 +185,8 @@ fn no_bus_reason(errno: u16) []const u8 {
     return switch (errno) {
         2 => "the bus socket does not exist: this login has no systemd user session",
         111 => "nothing is listening on the bus socket: the systemd user manager is not running",
-        13, 1 => "the bus socket is not accessible to this user",
+        13, 1 => "the bus socket is not accessible to this user: an address inherited through " ++
+            "su or sudo may name another user's bus",
         else => "the user bus cannot be reached from this process",
     };
 }
