@@ -243,15 +243,15 @@ fn fault_job_never(sim: *HostSim) void {
 }
 
 fn fault_garbage(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .garbage_reply };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .garbage_reply };
 }
 
 fn fault_silent(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .silent };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .silent };
 }
 
 fn fault_hang_up(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .hang_up };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .hang_up };
 }
 
 test "a taken scope name is refused and the other container's scope is left alone" {

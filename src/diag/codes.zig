@@ -57,6 +57,7 @@ pub const Code = enum(u8) {
     E0307,
     E0308,
     W0301,
+    W0302,
     E0701,
     E0702,
     E0703,
@@ -614,6 +615,23 @@ pub const registry = [_]Entry{
         \\
         \\"zbx doctor" runs the same probe and prints the fix. A run that asks for
         \\a limit does not get this far: it is refused (ZBX-E0307).
+        ,
+    },
+    .{
+        .code = .W0302,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the container's cgroup scope was left behind",
+        .explanation =
+        \The container has ended, and zbx made sure its systemd scope went away:
+        \the scope goes by itself when its last process exits, and zbx asks the
+        \user's systemd manager to stop it if it does not. That did not work, so
+        \the scope, with its cgroup under /sys/fs/cgroup, may still be there. It
+        \holds no process of the container, but a new run with the same name will
+        \be refused until it is gone (ZBX-E0305).
+        \
+        \The cause says what went wrong. "systemctl --user stop zbx-<name>.scope"
+        \removes the scope by hand.
         ,
     },
     .{

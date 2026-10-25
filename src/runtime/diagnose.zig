@@ -565,6 +565,19 @@ pub fn running_without_scope(diag: *Diag, problem: *const scope_mod.Problem) voi
     assert(diag.causes.count >= 1);
 }
 
+/// ZBX-W0302: the container ended and its scope is still there, or could not be checked.
+pub fn scope_not_cleaned(diag: *Diag, unit: []const u8, problem: *const scope_mod.Problem) void {
+    assert(diag.code == null);
+    assert(std.mem.endsWith(u8, unit, constants.scope_suffix));
+    diag.raise(.W0302);
+    diag.while_("making sure the container's scope {s} is gone", .{unit});
+    scope_text.problem_causes(diag, problem);
+    diag.context("scope", "{s}", .{unit});
+    diag.fix_with("remove it by hand:", "systemctl --user stop {s}", .{unit});
+    assert(diag.code.? == .W0302);
+    assert(diag.causes.count >= 1);
+}
+
 // ---- Warnings ------------------------------------------------------------------------------
 
 /// ZBX-W0202: the run record could not be saved, or there is nowhere to save it.

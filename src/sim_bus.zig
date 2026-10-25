@@ -20,6 +20,7 @@ const wire = @import("dbus/wire.zig");
 pub const errno_noent: u16 = 2;
 pub const errno_pipe: u16 = 32;
 pub const errno_refused: u16 = 111;
+pub const errno_access: u16 = 13;
 
 /// What goes wrong with the bus after it has accepted the user, on the call numbered `at_call`
 /// (zero-based, counting method calls after authentication).
@@ -64,6 +65,22 @@ pub const Model = struct {
     /// Whether `JobRemoved` is sent at all (false: the client must time out).
     job_removed: bool = true,
     misbehave: ?struct { at_call: u32, how: Misbehaviour } = null,
+    /// When a scope whose last process has gone leaves the manager: at the next time anyone
+    /// connects to the bus (a real manager takes a moment, and the cgroup is readable until it
+    /// does), at once (the cgroup is gone before the parent can read it), or never (it lingers
+    /// until `StopUnit`).
+    scope_removal: enum { lazily, promptly, never } = .lazily,
+    /// A D-Bus error name `Subscribe` answers with.
+    subscribe_error: ?[]const u8 = null,
+    /// A D-Bus error name `StopUnit` answers with.
+    stop_error: ?[]const u8 = null,
+    /// How a stop job ends. Anything but "done" leaves the scope where it is.
+    stop_result: []const u8 = "done",
+    /// A socket that exists but is another user's: where the inherited address of a `su` or
+    /// `sudo` points. A connection to it is refused (`foreign_rejects` false: EACCES at connect)
+    /// or accepted and then refused at authentication.
+    foreign_socket: ?[]const u8 = null,
+    foreign_rejects: bool = false,
 };
 
 pub const scopes_max: u32 = 2;
@@ -81,6 +98,8 @@ pub const Scope = struct {
     tasks_max: ?u64,
     cpu_quota_usec: ?u64,
     accounting: u32,
+    /// Its last process has gone; the unit stays until the model removes it.
+    exited: bool,
 };
 
 const inbox_bytes: u32 = 8192;
@@ -95,6 +114,7 @@ const quiet_model: Model = .{};
 const error_service_unknown = "org.freedesktop.DBus.Error.ServiceUnknown";
 const error_invalid_args = "org.freedesktop.DBus.Error.InvalidArgs";
 const error_unit_exists = "org.freedesktop.systemd1.UnitExists";
+const error_no_such_unit = "org.freedesktop.systemd1.NoSuchUnit";
 const systemd_name = "org.freedesktop.systemd1";
 const bus_interface = "org.freedesktop.DBus";
 
@@ -110,6 +130,10 @@ const Conn = struct {
     out_start: u32,
     out_end: u32,
     matched: bool,
+    /// The connection called `Manager.Subscribe` and has not called `Unsubscribe`.
+    subscribed: bool,
+    /// The socket belongs to another user: authentication always fails.
+    foreign: bool,
     hung_up: bool,
     server_serial: u32,
     calls: u32,
@@ -128,6 +152,8 @@ pub const Bus = struct {
     connections: u32,
     /// Set by a write that started a scope: its index, for the world to give it files.
     scope_started: ?u32,
+    /// Set by a write that stopped a scope: its index, for the world to take its files away.
+    scope_stopped: ?u32,
 
     pub fn init(bus: *Bus) void {
         bus.model = .{};
@@ -138,6 +164,7 @@ pub const Bus = struct {
         bus.scopes_started = 0;
         bus.last_scope.active = false;
         bus.scope_started = null;
+        bus.scope_stopped = null;
         assert(bus.open_count() == 0);
         assert(bus.scope_count() == 0);
     }
@@ -170,11 +197,14 @@ pub const Bus = struct {
         return null;
     }
 
-    /// The process is gone: its scope ends with it.
-    pub fn process_ended(bus: *Bus, pid: u32) void {
-        for (&bus.scopes) |*scope| {
-            if (scope.active and scope.pid == pid) scope.active = false;
+    /// The process is gone: its scope has no process left. The index of that scope, if any.
+    pub fn process_ended(bus: *Bus, pid: u32) ?u32 {
+        for (&bus.scopes, 0..) |*scope, index| {
+            if (!scope.active or scope.pid != pid) continue;
+            scope.exited = true;
+            return @intCast(index);
         }
+        return null;
     }
 
     /// Connects: the errno of a refusal, or the connection's index.
@@ -185,7 +215,10 @@ pub const Bus = struct {
             std.fmt.bufPrint(&expected_buffer, "/run/user/{d}/bus", .{uid}) catch unreachable;
         const quiet = bus.connections < bus.model.quiet_connections;
         const model = if (quiet) &quiet_model else &bus.model;
-        const there = model.present and std.mem.eql(u8, path, expected);
+        const foreign = model.foreign_socket != null and
+            std.mem.eql(u8, path, model.foreign_socket.?);
+        if (foreign and !model.foreign_rejects) return .{ .errno = errno_access };
+        const there = foreign or (model.present and std.mem.eql(u8, path, expected));
         if (!there) return .{ .errno = errno_noent };
         if (model.refuses) return .{ .errno = errno_refused };
         for (&bus.conns, 0..) |*conn, index| {
@@ -199,6 +232,8 @@ pub const Bus = struct {
             conn.out_start = 0;
             conn.out_end = 0;
             conn.matched = false;
+            conn.subscribed = false;
+            conn.foreign = foreign;
             conn.hung_up = false;
             conn.server_serial = 1;
             conn.calls = 0;
@@ -293,6 +328,7 @@ pub const Bus = struct {
         const request = auth.request(&expected_buffer, conn.uid);
         const wanted = request[0 .. request.len - 2]; // The line without its CRLF.
         const matches = std.mem.eql(u8, line, wanted);
+        if (conn.foreign) return send_text(conn, "REJECTED EXTERNAL\r\n");
         switch (bus.active(conn).auth) {
             .accept => {
                 if (matches) {
@@ -357,6 +393,10 @@ pub const Bus = struct {
         if (properties and std.mem.eql(u8, member, "Get")) return bus.get_property(conn, call);
         if (std.mem.eql(u8, member, "StartTransientUnit")) {
             return bus.start_transient_unit(conn, call);
+        }
+        if (std.mem.eql(u8, member, "StopUnit")) return bus.stop_unit(conn, call);
+        if (std.mem.eql(u8, member, "Subscribe") or std.mem.eql(u8, member, "Unsubscribe")) {
+            return bus.subscription(conn, call, member[0] == 'S');
         }
         send_error(conn, call, "org.freedesktop.DBus.Error.UnknownMethod", "No such method");
     }
@@ -447,21 +487,50 @@ pub const Bus = struct {
         var writer = wire.Writer.init(&body_buffer);
         writer.object_path(path);
         send_return(conn, call, "o", writer.finish() catch unreachable); // Short path.
-        if (!model.job_removed or !conn.matched) return;
-        var signal_buffer: [256]u8 = undefined;
-        writer = wire.Writer.init(&signal_buffer);
-        writer.uint32(job);
+        if (!model.job_removed) return;
+        send_job_removed(conn, job, path, scope.name.slice(), model.job_result);
+    }
+
+    /// `Subscribe` and `Unsubscribe`: JobRemoved reaches only a connection that subscribed (and
+    /// has the match rule). The strictness is the point: a client that forgets to subscribe
+    /// waits for ever.
+    fn subscription(bus: *Bus, conn: *Conn, call: *const message_mod.Message, on: bool) void {
+        if (on) {
+            if (bus.active(conn).subscribe_error) |name| {
+                return send_error(conn, call, name, "Access denied");
+            }
+        }
+        conn.subscribed = on;
+        send_return(conn, call, "", "");
+    }
+
+    /// `StopUnit(name, mode)`: a unit that is not there is `NoSuchUnit`; otherwise a job that
+    /// ends the model's way, and with "done" the scope is gone.
+    fn stop_unit(bus: *Bus, conn: *Conn, call: *const message_mod.Message) void {
+        const bad = error_invalid_args;
+        if (!std.mem.eql(u8, call.signature, "ss")) return send_error(conn, call, bad, "ss");
+        var reader = call.body_reader();
+        const name = reader.string() catch return send_error(conn, call, bad, "Bad name");
+        const mode = reader.string() catch return send_error(conn, call, bad, "Bad mode");
+        if (!std.mem.eql(u8, mode, "fail")) return send_error(conn, call, bad, "Bad mode");
+        const model = bus.active(conn);
+        const slot = for (&bus.scopes, 0..) |*scope, index| {
+            if (scope.active and std.mem.eql(u8, scope.name.slice(), name)) break index;
+        } else return send_error(conn, call, error_no_such_unit, "Unit is not loaded");
+        if (model.stop_error) |error_name| return send_error(conn, call, error_name, "Refused");
+        const job = bus.next_job;
+        bus.next_job += 1;
+        var path_buffer: [64]u8 = undefined;
+        const job_format = "/org/freedesktop/systemd1/job/{d}";
+        // Cannot fail: the prefix and ten digits fit 64 bytes.
+        const path = std.fmt.bufPrint(&path_buffer, job_format, .{job}) catch unreachable;
+        var body_buffer: [128]u8 = undefined;
+        var writer = wire.Writer.init(&body_buffer);
         writer.object_path(path);
-        writer.string(scope.name.slice());
-        writer.string(model.job_result);
-        const body = writer.finish() catch unreachable; // Bounded names in 256 bytes.
-        send_signal(conn, .{
-            .path = "/org/freedesktop/systemd1",
-            .interface = "org.freedesktop.systemd1.Manager",
-            .member = "JobRemoved",
-            .signature = "uoss",
-            .body = body,
-        });
+        send_return(conn, call, "o", writer.finish() catch unreachable); // Short path.
+        if (std.mem.eql(u8, model.stop_result, "done")) bus.scope_stopped = @intCast(slot);
+        if (!model.job_removed) return;
+        send_job_removed(conn, job, path, name, model.stop_result);
     }
 
     fn misbehave(bus: *Bus, conn: *Conn, call: *const message_mod.Message, how: Misbehaviour) void {
@@ -493,6 +562,31 @@ pub const Bus = struct {
         }
     }
 };
+
+/// The `JobRemoved` signal, if this connection asked for it.
+fn send_job_removed(
+    conn: *Conn,
+    job: u32,
+    path: []const u8,
+    unit: []const u8,
+    result: []const u8,
+) void {
+    if (!conn.matched or !conn.subscribed) return;
+    var signal_buffer: [256]u8 = undefined;
+    var writer = wire.Writer.init(&signal_buffer);
+    writer.uint32(job);
+    writer.object_path(path);
+    writer.string(unit);
+    writer.string(result);
+    const body = writer.finish() catch unreachable; // Bounded names in 256 bytes.
+    send_signal(conn, .{
+        .path = "/org/freedesktop/systemd1",
+        .interface = "org.freedesktop.systemd1.Manager",
+        .member = "JobRemoved",
+        .signature = "uoss",
+        .body = body,
+    });
+}
 
 fn take_serial(conn: *Conn) u32 {
     const serial = conn.server_serial;
@@ -585,6 +679,7 @@ fn parse_scope(call: *const message_mod.Message, scope: *Scope) wire.WireError!v
         .tasks_max = null,
         .cpu_quota_usec = null,
         .accounting = 0,
+        .exited = false,
     };
     scope.name.append_sanitised(try reader.string(), constants.scope_name_bytes_max + 8);
     if (!std.mem.eql(u8, try reader.string(), "fail")) return error.BadValue;

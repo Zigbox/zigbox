@@ -146,7 +146,7 @@ pub const sim_processes_max: u32 = 3;
 pub const sim_pipe_ends_max: u32 = 8;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
-pub const sim_written_files_max: u32 = 56;
+pub const sim_written_files_max: u32 = 72;
 pub const sim_written_bytes_max: u32 = 16 * 1024;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.

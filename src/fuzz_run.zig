@@ -684,11 +684,11 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
         .name_taken => model.unit_taken = true,
         .job_failed => model.job_result = "failed",
         .job_never => model.job_removed = false,
-        .garbage => model.misbehave = .{ .at_call = 2, .how = .garbage_reply },
-        .oversized => model.misbehave = .{ .at_call = 2, .how = .oversized_reply },
-        .truncated => model.misbehave = .{ .at_call = 2, .how = .truncated_reply },
-        .hang_up => model.misbehave = .{ .at_call = 2, .how = .hang_up },
-        .silent => model.misbehave = .{ .at_call = 2, .how = .silent },
+        .garbage => model.misbehave = .{ .at_call = 3, .how = .garbage_reply },
+        .oversized => model.misbehave = .{ .at_call = 3, .how = .oversized_reply },
+        .truncated => model.misbehave = .{ .at_call = 3, .how = .truncated_reply },
+        .hang_up => model.misbehave = .{ .at_call = 3, .how = .hang_up },
+        .silent => model.misbehave = .{ .at_call = 3, .how = .silent },
     }
 }
 

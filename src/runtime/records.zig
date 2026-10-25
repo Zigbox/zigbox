@@ -5,7 +5,9 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Unknown fields are ignored, so a later zbx may add some. The file is
+//! skipped, never misread. Version 2 added the limits, the scope's name, why the run ended
+//! (`Reason`) and whether it was detached; a version 1 record reads with no limits, no scope,
+//! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may add some. The file is
 //! plain ZON, but the reader is a line reader for the shape the writer produces (one field per
 //! line), because the standard ZON parser allocates and this must not.
 //!
@@ -36,6 +38,20 @@ pub const Exit = union(enum) {
     lost,
 };
 
+/// Why a run ended, as the exit report says it (`ExitReason`): the same words as the JSON
+/// `container_exit.reason`. `none` is a run that has not ended, never started or was lost.
+pub const Reason = enum { none, exited, signal, oom, pid_limit };
+
+/// The reason an exit implies when nothing more is known (version 1 records, or a view that
+/// does not say).
+pub fn reason_of(exit: Exit) Reason {
+    return switch (exit) {
+        .exited => .exited,
+        .signaled => .signal,
+        .running, .start_failed, .lost => .none,
+    };
+}
+
 pub const Label = spec_mod.Label;
 
 /// What goes into a record.
@@ -51,6 +67,12 @@ pub const View = struct {
     zbx_version: []const u8,
     /// The JSON line of the diagnostic that ended the run, for a bundle; empty for none.
     diagnostic: []const u8 = "",
+    /// Why it ended; `none` means what `exit` implies (`reason_of`).
+    reason: Reason = .none,
+    limits: spec_mod.Limits = .{},
+    /// The cgroup scope's name, or empty if the run had none.
+    scope: []const u8 = "",
+    detached: bool = false,
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -112,6 +134,7 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     }
     write_exit(&writer, view.exit);
     write_format(&writer, "    .ids = .{s},\n", .{@tagName(view.ids)});
+    write_scope_fields(&writer, view);
     write_bytes(&writer, "    .zbx = ");
     write_string(&writer, view.zbx_version);
     write_bytes(&writer, ",\n");
@@ -125,6 +148,29 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     const text = writer.buffered();
     assert(text.len <= buffer.len);
     return text;
+}
+
+/// The fields version 2 added, one per line like the rest.
+fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
+    assert(view.scope.len <= constants.scope_name_bytes_max);
+    const reason = if (view.reason == .none) reason_of(view.exit) else view.reason;
+    write_format(writer, "    .reason = .{s},\n", .{@tagName(reason)});
+    write_format(writer, "    .detached = {s},\n", .{if (view.detached) "true" else "false"});
+    write_bytes(writer, "    .scope = ");
+    write_string(writer, view.scope);
+    write_bytes(writer, ",\n");
+    write_limit(writer, "limit_memory", view.limits.memory_bytes);
+    write_limit(writer, "limit_pids", view.limits.pids);
+    write_limit(writer, "limit_cpu_millis", view.limits.cpu_millis);
+}
+
+fn write_limit(writer: *std.Io.Writer, name: []const u8, value: anytype) void {
+    assert(name.len > 0);
+    if (value) |number| {
+        write_format(writer, "    .{s} = {d},\n", .{ name, number });
+    } else {
+        write_format(writer, "    .{s} = null,\n", .{name});
+    }
 }
 
 fn write_command(writer: *std.Io.Writer, command: []const []const u8) void {
@@ -186,7 +232,8 @@ comptime {
     const label_bytes = 4 * (constants.label_key_bytes_max + constants.label_value_bytes_max);
     const labels = constants.labels_count_max * (label_bytes + 16);
     const diagnostic = 4 * constants.diag_json_bytes_max + 32;
-    assert(strings + command + labels + diagnostic + 512 <= constants.record_bytes_max);
+    const scope = 4 * constants.scope_name_bytes_max + 160; // The name and the version 2 lines.
+    assert(strings + command + labels + diagnostic + scope + 512 <= constants.record_bytes_max);
 }
 
 // ---- Reading -------------------------------------------------------------------------------
@@ -206,6 +253,16 @@ pub const Parsed = struct {
     /// The diagnostic JSON line the run ended with; empty when the record has none.
     diagnostic: [constants.diag_json_bytes_max]u8,
     diagnostic_len: u16,
+    /// Version 2: why it ended (derived from `exit` for an older record).
+    reason: Reason,
+    detached: bool,
+    scope: [constants.scope_name_bytes_max]u8,
+    scope_len: u8,
+    limits: spec_mod.Limits,
+
+    pub fn scope_slice(parsed: *const Parsed) []const u8 {
+        return parsed.scope[0..parsed.scope_len];
+    }
 
     pub fn diagnostic_slice(parsed: *const Parsed) []const u8 {
         return parsed.diagnostic[0..parsed.diagnostic_len];
@@ -304,6 +361,11 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.exit = .running;
     out.ids = null;
     out.diagnostic_len = 0;
+    out.reason = .none;
+    out.detached = false;
+    out.scope_len = 0;
+    out.limits = .{};
+    var has_reason = false;
     var have_start = false;
     var opened = false;
     var closed = false;
@@ -322,11 +384,13 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
             continue;
         }
         try parse_field(line, out, &have_start);
+        if (std.mem.startsWith(u8, line, ".reason = ")) has_reason = true;
     }
     if (!opened or !closed) return error.Malformed;
     if (out.version > constants.record_version) return error.Newer;
     if (out.name_len == 0) return error.Malformed;
     if (!have_start) return error.Malformed;
+    if (!has_reason) out.reason = reason_of(out.exit);
     if (spec_mod.name_problem(out.name_slice()) != null) return error.Malformed;
 }
 
@@ -357,11 +421,52 @@ fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!voi
     } else if (std.mem.eql(u8, key, "diagnostic")) {
         const length = parse_string(value, &out.diagnostic) orelse return error.Malformed;
         out.diagnostic_len = @intCast(length);
+    } else if (parse_scope_field(key, value, out)) |accepted| {
+        if (!accepted) return error.Malformed;
     } else if (std.mem.eql(u8, key, "ids")) {
         out.ids = std.meta.stringToEnum(IdsMode, std.mem.trimStart(u8, value, ".")) orelse
             return error.Malformed;
     }
     // Any other field is ignored: a later zbx may add some.
+}
+
+/// A field version 2 added: null if `key` is not one, else whether the value was good.
+fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
+    if (std.mem.eql(u8, key, "reason")) {
+        const name = std.mem.trimStart(u8, value, ".");
+        out.reason = std.meta.stringToEnum(Reason, name) orelse return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "detached")) {
+        if (std.mem.eql(u8, value, "true")) out.detached = true else if (std.mem.eql(u8, value, "false")) out.detached = false else return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "scope")) {
+        const length = parse_string(value, &out.scope) orelse return false;
+        out.scope_len = @intCast(length);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "limit_memory")) {
+        out.limits.memory_bytes = parse_limit(u64, value) orelse return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "limit_pids")) {
+        out.limits.pids = parse_limit(u32, value) orelse return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "limit_cpu_millis")) {
+        out.limits.cpu_millis = parse_limit(u32, value) orelse return false;
+        return true;
+    }
+    return null;
+}
+
+/// `null` is no limit; a number is the limit. Anything else is not a limit at all, which the
+/// caller tells from "no limit" by the optional-of-optional.
+fn parse_limit(comptime Int: type, value: []const u8) ??Int {
+    if (std.mem.eql(u8, value, "null")) return @as(?Int, null);
+    const number = std.fmt.parseInt(Int, value, 10) catch return null;
+    return @as(?Int, number);
 }
 
 // ---- Where records live --------------------------------------------------------------------

@@ -278,6 +278,13 @@ pub const World = struct {
     scope_started_before_child_ran: bool,
     /// The user's D-Bus socket and the systemd manager behind it (sim_bus.zig).
     bus: sim_bus.Bus,
+    /// What the kernel counted in the container's cgroup by the time it ended: processes the
+    /// OOM killer killed (`memory.events`), and forks refused at the limit (`pids.events`).
+    oom_kills: u32,
+    pids_max_hits: u32,
+    /// A scope's cgroup directory stays after the manager is done with its unit (a cgroup that
+    /// something still holds).
+    cgroup_stays: bool,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -310,6 +317,9 @@ pub const World = struct {
         world.helper_fails_with = null;
         world.scope_started_before_child_ran = false;
         world.bus.init();
+        world.oom_kills = 0;
+        world.pids_max_hits = 0;
+        world.cgroup_stays = false;
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -659,7 +669,42 @@ pub const World = struct {
     fn reap(world: *World, process: *Process) void {
         assert(process.state == .zombie);
         process.state = .reaped;
-        world.bus.process_ended(process.pid);
+        const slot = world.bus.process_ended(process.pid) orelse return;
+        if (world.bus.model.scope_removal == .promptly) world.end_scope(slot);
+    }
+
+    /// A scope the manager has finished with leaves it, and its cgroup directory goes with it.
+    /// The manager gets to it when someone next connects to the bus, unless the model says
+    /// otherwise (`Model.scope_removal`).
+    pub fn settle_scopes(world: *World) void {
+        if (world.bus.model.scope_removal == .never) return;
+        for (&world.bus.scopes, 0..) |*scope, index| {
+            if (scope.active and scope.exited) world.end_scope(@intCast(index));
+        }
+    }
+
+    /// The scope is gone from the manager and from the cgroup tree.
+    pub fn end_scope(world: *World, slot: u32) void {
+        const scope = &world.bus.scopes[slot];
+        assert(scope.active);
+        scope.active = false;
+        if (world.cgroup_stays) return;
+        var path_buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const relative = scope_cgroup_path(&path_buffer, scope);
+        var directory_buffer: [constants.cgroup_path_bytes_max + 16]u8 = undefined;
+        // Cannot fail: a bounded relative path and a short prefix fit the buffer.
+        const directory = std.fmt.bufPrint(&directory_buffer, "/sys/fs/cgroup{s}", .{relative}) catch
+            unreachable; // Same bound as above.
+        var at: u32 = 0;
+        while (at < world.written_count) {
+            const under = world.written[at].path.under(directory);
+            if (under) world.drop_written(at) else at += 1;
+        }
+        if (world.find_node(directory)) |index| {
+            world.nodes[index] = world.nodes[world.nodes_count - 1];
+            world.nodes_count -= 1;
+        }
+        assert(world.find_node(directory) == null);
     }
 
     /// Gives a scope the manager just started its files: the cgroup directory, and the
@@ -681,6 +726,7 @@ pub const World = struct {
         if (world.find_process(scope.pid)) |process| {
             world.scope_started_before_child_ran = process.state == .pending;
         }
+        world.write_event_files(directory);
         var file_buffer: [48]u8 = undefined;
         // Cannot fail: same.
         const file = std.fmt.bufPrint(&file_buffer, "{s}/cgroup", .{proc_directory}) catch
@@ -689,6 +735,30 @@ pub const World = struct {
         // Cannot fail: the relative path is bounded.
         const line = std.fmt.bufPrint(&line_buffer, "0::{s}\n", .{relative}) catch unreachable;
         _ = world.write_file(file, line);
+    }
+
+    /// The files the kernel keeps in a cgroup that say what happened to it. They hold the final
+    /// counts from the start: the model has no time, and a command ends the way it is told to.
+    fn write_event_files(world: *World, directory: []const u8) void {
+        assert(directory.len > 0);
+        var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+        var text_buffer: [128]u8 = undefined;
+        const memory = "low 0\nhigh 0\nmax 0\noom {d}\noom_kill {d}\noom_group_kill 0\n";
+        // Cannot fail: a short format with two numbers in 128 bytes.
+        const events = std.fmt.bufPrint(&text_buffer, memory, .{ world.oom_kills, world.oom_kills }) catch
+            unreachable; // Same bound as above.
+        const memory_path = std.fmt.bufPrint(&path_buffer, "{s}/memory.events", .{directory}) catch
+            unreachable; // The directory is bounded and the name short.
+        _ = world.write_file(memory_path, events);
+        // Cannot fail: same.
+        const pids = std.fmt.bufPrint(&text_buffer, "max {d}\n", .{world.pids_max_hits}) catch
+            unreachable; // Same.
+        const pids_path = std.fmt.bufPrint(&path_buffer, "{s}/pids.events", .{directory}) catch
+            unreachable; // Same.
+        _ = world.write_file(pids_path, pids);
+        const populated = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.events", .{directory}) catch
+            unreachable; // Same.
+        _ = world.write_file(populated, "populated 1\nfrozen 0\n");
     }
 
     /// The command ends by itself, the way the model says it does.

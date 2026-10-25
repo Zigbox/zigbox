@@ -110,7 +110,7 @@ fn prepare_bus_rejects(sim: *HostSim) void {
 
 fn prepare_bus_garbage(sim: *HostSim) void {
     prepare_scope_fault(sim);
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .garbage_reply };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .garbage_reply };
 }
 
 fn prepare_systemd_refuses(sim: *HostSim) void {

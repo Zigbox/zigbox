@@ -36,6 +36,29 @@ pub const CgroupWrite = struct {
     io: Io,
 };
 
+pub const PathText = text_util.Bounded(constants.dbus_socket_path_bytes_max);
+
+/// A bus that was tried first and turned this user away.
+pub const Refused = struct {
+    path: PathText,
+    failure: client.Failure,
+};
+
+/// The bus at a second address, `/run/user/<own uid>/bus`, was tried after the inherited one
+/// refused this user; it failed too.
+pub const Retried = struct {
+    refused: Refused,
+    own_path: PathText,
+    failure: client.Failure,
+};
+
+/// How the bus was reached, for `--verbose`: `refused` is set when the inherited address did
+/// not work and the user's own bus did.
+pub const Via = struct {
+    refused: ?Refused,
+    own_path: PathText,
+};
+
 /// Why a scope could not be had.
 pub const Problem = union(enum) {
     /// Neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR` says where the bus is.
@@ -44,6 +67,10 @@ pub const Problem = union(enum) {
     bad_address: auth.AddressError,
     /// The conversation with the bus failed (client.zig has the details).
     bus: client.Failure,
+    /// The inherited bus turned this user away and the user's own bus failed as well.
+    bus_retried: Retried,
+    /// Stopping the scope did not make its cgroup go away.
+    scope_left,
     /// The scope is up but `/proc/<pid>/cgroup` does not say where its cgroup is.
     no_cgroup_path: Io,
     /// A limit systemd could not take was not written to the scope's cgroup file.
@@ -53,6 +80,7 @@ pub const Problem = union(enum) {
 pub const Probe = struct {
     version: u32,
     version_text: client.Text,
+    via: Via,
 };
 
 /// The path of the user's bus socket: the address in `DBUS_SESSION_BUS_ADDRESS`, or else
@@ -90,17 +118,67 @@ pub fn bus_path(
 
 /// Connects, authenticates as the user and says Hello. On failure `problem` says why and the
 /// connection is closed.
-fn open_bus(host: Host, conn: *client.Connection, problem: *Problem) bool {
+///
+/// An address inherited through `su` or `sudo` names someone else's bus. If connecting to it is
+/// refused for lack of permission, or authentication on it fails, and it is not this user's own
+/// socket (`/run/user/<uid>/bus`), that one is tried, once. `via` says which one worked.
+fn open_bus(host: Host, conn: *client.Connection, problem: *Problem, via: *Via) bool {
     assert(host.uid() != std.math.maxInt(u32));
     var path_buffer: [constants.dbus_socket_path_bytes_max]u8 = undefined;
     const path = bus_path(host, &path_buffer, problem) orelse return false;
     conn.init(host);
-    const done = open_steps(conn, path, host.uid());
-    if (done) return true;
-    problem.* = .{ .bus = conn.failure };
+    via.refused = null;
+    via.own_path = .{};
+    via.own_path.print("{s}", .{path});
+    if (open_steps(conn, path, host.uid())) return true;
+    const first = conn.failure;
+    conn.close();
+    var own_buffer: [constants.dbus_socket_path_bytes_max]u8 = undefined;
+    const own = own_path(host.uid(), &own_buffer);
+    if (!worth_retrying(&first) or std.mem.eql(u8, path, own)) {
+        problem.* = .{ .bus = first };
+        return false;
+    }
+    var refused: Refused = .{ .path = .{}, .failure = first };
+    refused.path.print("{s}", .{path});
+    conn.init(host);
+    if (open_steps(conn, own, host.uid())) {
+        via.refused = refused;
+        via.own_path = .{};
+        via.own_path.print("{s}", .{own});
+        return true;
+    }
+    problem.* = .{ .bus_retried = .{
+        .refused = refused,
+        .own_path = .{},
+        .failure = conn.failure,
+    } };
+    problem.bus_retried.own_path.print("{s}", .{own});
     conn.close();
     return false;
 }
+
+/// `/run/user/<uid>/bus`: where a login session puts the user's bus.
+fn own_path(uid: u32, buffer: *[constants.dbus_socket_path_bytes_max]u8) []const u8 {
+    assert(buffer.len == constants.dbus_socket_path_bytes_max);
+    // Cannot fail: "/run/user/4294967295/bus" is 24 bytes.
+    return std.fmt.bufPrint(buffer, "/run/user/{d}/bus", .{uid}) catch unreachable;
+}
+
+/// The bus was reachable but not by this user: permission was refused at connect, or the
+/// authentication was. Anything else (no socket, nobody listening) would not be different at
+/// another address of the same user.
+fn worth_retrying(failure: *const client.Failure) bool {
+    assert(failure.errno < 4096);
+    return switch (failure.kind) {
+        .no_bus => failure.errno == errno_access or failure.errno == errno_perm,
+        .auth_refused => true,
+        else => false,
+    };
+}
+
+const errno_perm: u16 = 1;
+const errno_access: u16 = 13;
 
 fn open_steps(conn: *client.Connection, path: []const u8, uid: u32) bool {
     assert(path.len > 0);
@@ -118,7 +196,7 @@ pub fn probe(host: Host, out: *Probe, problem: *Problem) bool {
     host.ignore_broken_pipe(true);
     defer host.ignore_broken_pipe(false);
     var conn: client.Connection = undefined;
-    if (!open_bus(host, &conn, problem)) return false;
+    if (!open_bus(host, &conn, problem, &out.via)) return false;
     defer conn.close();
     var version: systemd.Version = undefined;
     systemd.read_version(&conn, &version) catch {
@@ -214,31 +292,55 @@ pub fn fallback(
     return count;
 }
 
+/// The scope's cgroup directory under /sys/fs/cgroup; empty if it could not be found.
+pub const Directory = text_util.Bounded(constants.cgroup_path_bytes_max);
+
 /// Asks for the scope with `pid` in it, waits for the job, and writes the limits systemd could
-/// not take. Returns true with the pid inside the scope; otherwise `problem` says why.
-pub fn start(host: Host, plan: *const plan_mod.Plan, pid: u32, problem: *Problem) bool {
+/// not take. Returns true with the pid inside the scope and `directory` set to its cgroup (empty
+/// if `/proc` would not say, which matters only when a limit has to be written there);
+/// otherwise `problem` says why.
+pub fn start(
+    host: Host,
+    plan: *const plan_mod.Plan,
+    pid: u32,
+    directory: *Directory,
+    problem: *Problem,
+) bool {
     assert(pid > 1);
     assert(plan.scoped);
+    directory.* = .{};
     var conn: client.Connection = undefined;
-    if (!open_bus(host, &conn, problem)) return false;
+    var via: Via = undefined;
+    if (!open_bus(host, &conn, problem, &via)) return false;
     defer conn.close();
     const request = request_for(plan, pid);
     systemd.start_scope(&conn, &request) catch {
         problem.* = .{ .bus = conn.failure };
         return false;
     };
-    return write_fallback(host, plan, pid, problem);
-}
-
-fn write_fallback(host: Host, plan: *const plan_mod.Plan, pid: u32, problem: *Problem) bool {
-    assert(plan.scoped);
-    assert(pid > 1);
+    var buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
+    var lookup: Problem = undefined;
+    const found = cgroup_directory(host, pid, &buffer, &lookup);
+    if (found) |text| directory.print("{s}", .{text});
     var files: [fallback_files_max]FileWrite = undefined;
     const count = fallback(plan.scope_version, plan.scope_limits, &files);
     if (count == 0) return true;
-    var directory_buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
-    const directory = cgroup_directory(host, pid, &directory_buffer, problem) orelse return false;
-    for (files[0..count]) |*file| {
+    if (found == null) {
+        problem.* = lookup;
+        return false;
+    }
+    return write_fallback(host, directory.slice(), files[0..count], problem);
+}
+
+fn write_fallback(
+    host: Host,
+    directory: []const u8,
+    files: []const FileWrite,
+    problem: *Problem,
+) bool {
+    assert(directory.len > 0);
+    assert(files.len > 0);
+    for (files) |*file| {
         var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
         const text = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, file.name }) catch {
             problem.* = .{ .no_cgroup_path = .{ .err = error.PathTooLong, .errno = 0 } };
@@ -260,6 +362,99 @@ fn write_fallback(host: Host, plan: *const plan_mod.Plan, pid: u32, problem: *Pr
             return false;
         };
     }
+    return true;
+}
+
+// ---- After the container ends ---------------------------------------------------------------
+
+/// What the kernel counted in the scope's cgroup. A count is null if its file could not be read:
+/// the controller is not delegated, or the cgroup is already gone.
+pub const Events = struct {
+    /// `oom_kill` of `memory.events`: processes killed by the OOM killer.
+    oom_kill: ?u64,
+    /// `max` of `pids.events`: forks refused because the limit was reached.
+    pids_max: ?u64,
+};
+
+/// Reads the scope's `memory.events` and `pids.events`. Call it as soon as the container's
+/// PID 1 is reaped: the manager removes the cgroup once nothing is left in it, and a cgroup that
+/// is gone has no events to read (the result is then all null, and the run is reported as the
+/// plain exit it was).
+pub fn read_events(host: Host, directory: []const u8) Events {
+    assert(directory.len <= constants.cgroup_path_bytes_max);
+    if (directory.len == 0) return .{ .oom_kill = null, .pids_max = null };
+    return .{
+        .oom_kill = event_count(host, directory, "memory.events", "oom_kill"),
+        .pids_max = event_count(host, directory, "pids.events", "max"),
+    };
+}
+
+fn event_count(host: Host, directory: []const u8, file: []const u8, key: []const u8) ?u64 {
+    assert(directory.len > 0);
+    assert(key.len > 0);
+    var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, file }) catch return null;
+    var text_buffer: [512]u8 = undefined;
+    const text = host.read_file(path, &text_buffer) catch return null;
+    return event_value(text, key);
+}
+
+/// The number on the line `<key> <number>` of a cgroup events file.
+pub fn event_value(text: []const u8, key: []const u8) ?u64 {
+    assert(key.len > 0);
+    assert(text.len <= 4096);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, key)) continue;
+        if (line.len <= key.len or line[key.len] != ' ') continue;
+        return std.fmt.parseInt(u64, std.mem.trim(u8, line[key.len + 1 ..], " \t\r"), 10) catch
+            return null;
+    }
+    return null;
+}
+
+/// Whether the scope's cgroup is still there. Any answer but "no such file" counts as there: a
+/// directory that cannot be looked at has not been seen to go.
+pub fn cgroup_exists(host: Host, directory: []const u8) bool {
+    assert(directory.len > 0);
+    var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.events", .{directory}) catch
+        return true;
+    var text_buffer: [256]u8 = undefined;
+    _ = host.read_file(path, &text_buffer) catch |err| return err != error.NotFound;
+    return true;
+}
+
+/// Makes sure the scope is gone once its container has ended. The manager removes a scope by
+/// itself when its last process exits, so the common case costs one look at the cgroup. If it
+/// is still there the manager is asked to stop the unit (a scope that already went is
+/// `NoSuchUnit`, the good answer), and the cgroup is looked at again. Returns true if it is gone.
+pub fn cleanup(host: Host, name: []const u8, directory: []const u8, problem: *Problem) bool {
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    assert(directory.len <= constants.cgroup_path_bytes_max);
+    if (directory.len > 0 and !cgroup_exists(host, directory)) return true;
+    host.ignore_broken_pipe(true);
+    defer host.ignore_broken_pipe(false);
+    var conn: client.Connection = undefined;
+    var via: Via = undefined;
+    if (!open_bus(host, &conn, problem, &via)) return false;
+    defer conn.close();
+    const stopped = stop_steps(&conn, name);
+    if (!stopped) {
+        problem.* = .{ .bus = conn.failure };
+        return false;
+    }
+    if (directory.len > 0 and cgroup_exists(host, directory)) {
+        problem.* = .scope_left;
+        return false;
+    }
+    return true;
+}
+
+fn stop_steps(conn: *client.Connection, name: []const u8) bool {
+    assert(conn.is_open);
+    systemd.watch_jobs(conn) catch return false;
+    _ = systemd.stop_scope(conn, name) catch return false;
     return true;
 }
 

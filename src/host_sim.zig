@@ -491,6 +491,7 @@ pub const HostSim = struct {
     fn socket_connect(context: *anyopaque, path: [:0]const u8) host.Error!host.Handle {
         const sim = from_context(context);
         try sim.begin_call();
+        sim.world.settle_scopes(); // The manager has had its moment.
         switch (sim.world.bus.connect(path, sim.uid_value)) {
             .index => |index| return sim_world.bus_handle_base + index,
             .errno => |errno| return sim.model_error(errno),
@@ -539,6 +540,10 @@ pub const HostSim = struct {
         if (sim.world.bus.scope_started) |slot| {
             sim.world.bus.scope_started = null;
             sim.world.start_scope_files(&sim.world.bus.scopes[slot]);
+        }
+        if (sim.world.bus.scope_stopped) |slot| {
+            sim.world.bus.scope_stopped = null;
+            sim.world.end_scope(slot);
         }
         return @intCast(bytes.len);
     }
