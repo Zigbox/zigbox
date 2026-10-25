@@ -10,7 +10,8 @@
 //!   2. calls `GetId` and `ListNames` (a string and an array reply);
 //!   3. adds a match rule, takes a name with `RequestName` and reads the `NameAcquired` and
 //!      `NameOwnerChanged` signals the bus sends for it: a method call, AddMatch and signals;
-//!   4. sends `Subscribe`, `StartTransientUnit`, `StopUnit` and `Properties.Get(Version)` to `org.freedesktop.systemd1`,
+//!   4. sends `Subscribe`, `StartTransientUnit`, `StopUnit` and `Properties.Get(Version)` to
+//!      `org.freedesktop.systemd1`,
 //!      which a plain bus does not have: the daemon validates the marshalling of what it routes,
 //!      so `ServiceUnknown` (and not a dropped connection) means the bytes are well-formed;
 //!   5. waits for a `JobRemoved` signal that a second connection emits: the job wait.

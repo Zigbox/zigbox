@@ -106,6 +106,26 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
     }
 }
 
+/// What the cleanup of the scope found, for `--verbose`.
+pub fn cleanup_note(name: []const u8, how: scope_mod.Cleaned, buffer: []u8) []const u8 {
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    assert(buffer.len >= 160);
+    const result = switch (how) {
+        .already_gone => std.fmt.bufPrint(buffer, "scope {s} was gone when the run ended", .{name}),
+        .manager_done => std.fmt.bufPrint(
+            buffer,
+            "scope {s} went by itself just after the run ended",
+            .{name},
+        ),
+        .stopped => std.fmt.bufPrint(
+            buffer,
+            "scope {s} was still there at the end; stopped with StopUnit",
+            .{name},
+        ),
+    };
+    return result catch buffer[0..0];
+}
+
 /// How the first bus turned the user away, in a few words.
 fn refusal_words(failure: *const client.Failure) []const u8 {
     assert(failure.errno < 4096);

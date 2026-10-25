@@ -41,6 +41,14 @@ const HelperRecord = struct {
     output_len: u32,
 };
 
+/// What `Session.cleanup_scope` found.
+pub const Cleanup = union(enum) {
+    /// There was no scope to see to.
+    none,
+    done: scope_mod.Cleaned,
+    failed,
+};
+
 pub const Session = struct {
     host: Host,
     plan: *const Plan,
@@ -289,14 +297,17 @@ pub const Session = struct {
     }
 
     /// After the container has ended (or never ran): makes sure the scope is gone. A scope that
-    /// is not is a problem for the caller to warn about (ZBX-W0302). True if it is gone.
-    pub fn cleanup_scope(session: *Session, problem: *scope_mod.Problem) bool {
+    /// is not is a problem for the caller to warn about (ZBX-W0302).
+    pub fn cleanup_scope(session: *Session, problem: *scope_mod.Problem) Cleanup {
         assert(session.pid == null);
         assert(session.scope_up == (session.scope_up and session.plan.scoped));
-        if (!session.scope_up) return true;
+        if (!session.scope_up) return .none;
         session.scope_up = false;
         const name = session.plan.text(session.plan.scope_name);
-        return scope_mod.cleanup(session.host, name, session.scope_directory.slice(), problem);
+        const directory = session.scope_directory.slice();
+        const how = scope_mod.cleanup(session.host, name, directory, problem) orelse
+            return .failed;
+        return .{ .done = how };
     }
 
     fn release_child(session: *Session) host_mod.Error!void {

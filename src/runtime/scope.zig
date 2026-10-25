@@ -431,38 +431,53 @@ pub fn cgroup_exists(host: Host, directory: []const u8) bool {
     return true;
 }
 
+/// How the scope came to be gone.
+pub const Cleaned = enum {
+    /// Its cgroup was already removed when looked at.
+    already_gone,
+    /// The cgroup was there, but the manager no longer knew the unit (`NoSuchUnit`): it was on its
+    /// way out, and was gone by the next look.
+    manager_done,
+    /// The manager still had the unit; its stop job ended "done" and the cgroup went.
+    stopped,
+};
+
 /// Makes sure the scope is gone once its container has ended. The manager removes a scope by
 /// itself when its last process exits, so the common case costs one look at the cgroup. If it
 /// is still there the manager is asked to stop the unit (a scope that already went is
-/// `NoSuchUnit`, the good answer), and the cgroup is looked at again. Returns true if it is gone.
-pub fn cleanup(host: Host, name: []const u8, directory: []const u8, problem: *Problem) bool {
+/// `NoSuchUnit`, the good answer), and the cgroup is looked at again. Null if it is not gone,
+/// with `problem` saying why.
+pub fn cleanup(
+    host: Host,
+    name: []const u8,
+    directory: []const u8,
+    problem: *Problem,
+) ?Cleaned {
     assert(std.mem.endsWith(u8, name, constants.scope_suffix));
     assert(directory.len <= constants.cgroup_path_bytes_max);
-    if (directory.len > 0 and !cgroup_exists(host, directory)) return true;
+    if (directory.len > 0 and !cgroup_exists(host, directory)) return .already_gone;
     host.ignore_broken_pipe(true);
     defer host.ignore_broken_pipe(false);
     var conn: client.Connection = undefined;
     var via: Via = undefined;
-    if (!open_bus(host, &conn, problem, &via)) return false;
+    if (!open_bus(host, &conn, problem, &via)) return null;
     defer conn.close();
-    const stopped = stop_steps(&conn, name);
-    if (!stopped) {
+    const stopped = stop_steps(&conn, name) orelse {
         problem.* = .{ .bus = conn.failure };
-        return false;
-    }
+        return null;
+    };
     if (directory.len > 0 and cgroup_exists(host, directory)) {
         problem.* = .scope_left;
-        return false;
+        return null;
     }
-    return true;
+    return if (stopped == .gone) .manager_done else .stopped;
 }
 
-fn stop_steps(conn: *client.Connection, name: []const u8) bool {
+fn stop_steps(conn: *client.Connection, name: []const u8) ?systemd.Stopped {
     assert(conn.is_open);
     assert(name.len > constants.scope_suffix.len);
-    systemd.watch_jobs(conn) catch return false;
-    _ = systemd.stop_scope(conn, name) catch return false;
-    return true;
+    systemd.watch_jobs(conn) catch return null;
+    return systemd.stop_scope(conn, name) catch null;
 }
 
 /// Where the scope's cgroup is: the unified line (`0::<path>`) of `/proc/<pid>/cgroup`, under

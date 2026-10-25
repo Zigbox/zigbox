@@ -246,7 +246,9 @@ test "when /dev/pts is refused the run goes on, the step is skipped and noted" {
     const args = [_][:0]const u8{ "zbx", "-v", "run", "--rootfs", rootfs, "--", "/bin/sh" };
     try testing.expectEqual(@as(u8, 0), run(&sim, &args));
     const note = "zbx: note: skipped mounting devpts on /dev/pts: refused by the kernel (EPERM)\n";
-    try testing.expectEqualStrings(note, sim.stderr());
+    // The scope's cleanup note follows (the model's manager lets go of a scope a moment late).
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), note));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr()[note.len..], "went by itself") != null);
     try no_leak(&sim, &before);
     try testing.expect(sim_run.started(&sim, .{ .name = "x", .devpts = false }) != null); // Name.
     const child = &sim.world.processes[1];

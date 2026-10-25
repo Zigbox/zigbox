@@ -167,7 +167,7 @@ pub const Handle = struct {
     warn: ?Warn,
     record_warned: bool,
     /// Steps that were allowed to fail and did (the devpts mount), as sentences.
-    notes: [constants.sync_records_max + 1]Note,
+    notes: [constants.sync_records_max + 2]Note,
     notes_count: u32,
     /// The limits the run was started with, for the exit report and the record.
     limits: spec_mod.Limits,
@@ -343,12 +343,23 @@ fn finish_scope(handle: *Handle) void {
     assert(handle.status == .stopped);
     assert(handle.session.pid == null); // The container is gone: reaped or abandoned.
     var problem: scope_mod.Problem = undefined;
-    if (handle.session.cleanup_scope(&problem)) return;
-    var warning: Diag = undefined;
-    warning.reset();
-    const name = handle.plan.text(handle.plan.scope_name);
-    diagnose.scope_not_cleaned(&warning, name, &problem);
-    handle.report(&warning);
+    const name = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "";
+    switch (handle.session.cleanup_scope(&problem)) {
+        .none => return,
+        .done => |how| {
+            const note = &handle.notes[handle.notes_count];
+            note.* = .{};
+            var buffer: [160]u8 = undefined;
+            note.print("{s}", .{scope_text.cleanup_note(name, how, &buffer)});
+            handle.notes_count += 1;
+        },
+        .failed => {
+            var warning: Diag = undefined;
+            warning.reset();
+            diagnose.scope_not_cleaned(&warning, name, &problem);
+            handle.report(&warning);
+        },
+    }
 }
 
 /// Sends a signal to the container's PID 1 as the forwarding rule says: a signal it has no
@@ -590,6 +601,7 @@ fn warn_not_saved(handle: *Handle, directory: ?[]const u8, failure: ?diagnose.Fa
 
 fn collect_notes(handle: *Handle) void {
     assert(handle.notes_count <= 1); // The bus note, if the inherited bus was not the one used.
+    assert(handle.notes.len >= handle.notes_count + 1); // Room for the scope's.
     assert(handle.session.report.note_slice().len + handle.notes_count <= handle.notes.len);
     for (handle.session.report.note_slice()) |record| {
         const note = &handle.notes[handle.notes_count];

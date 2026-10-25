@@ -437,7 +437,10 @@ test "golden: every code in default, verbose and JSON output" {
                 case.code,
                 style,
             );
-            try testing.expectEqualStrings(golden, shown);
+            testing.expectEqualStrings(golden, shown) catch |err| {
+                std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+                return err;
+            };
             try testing.expectEqual(case.exit, code);
             const is_run = case.args.len > 0 and std.mem.eql(u8, case.args[0], "run");
             if (!case.warning and !is_run) {
