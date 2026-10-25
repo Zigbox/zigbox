@@ -39,6 +39,7 @@ const diagnose = @import("diagnose.zig");
 const ids = @import("ids.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const scope_mod = @import("scope.zig");
 const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 
@@ -48,6 +49,7 @@ const Session = session_mod.Session;
 
 pub const Spec = spec_mod.Spec;
 pub const Label = spec_mod.Label;
+pub const Limits = spec_mod.Limits;
 
 /// The run did not start the command; the reason is in the `Diag`.
 pub const Error = session_mod.Error;
@@ -169,11 +171,15 @@ pub fn start(
     try choose_name(host, container.name, handle, diag);
     try check_command(container.command, container.labels, diag);
     try check_rootfs(host, container.rootfs, handle, diag);
+    try check_limits(container.limits, diag);
 
     var choice: ids.Choice = undefined;
     ids.choose(host, &choice);
     if (choice.warned) handle.report(&choice.warning);
     handle.mapping = if (choice.warned) .single else .full;
+    // After the checks that need nothing from the host, and before anything is created: a run
+    // with a limit and no way to enforce it is refused here, with nothing to clean up.
+    const scope_input = try prepare_scope(handle, container.limits, diag);
     const input: plan_mod.Input = .{
         .rootfs = handle.rootfs_slice(),
         .name = handle.name_slice(),
@@ -182,6 +188,7 @@ pub fn start(
         .uid = host.uid(),
         .gid = host.gid(),
         .mapping = choice.mapping,
+        .scope = scope_input,
     };
     handle.plan.build(&input);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
@@ -225,7 +232,7 @@ pub fn wait(handle: *Handle) ExitReason {
             .name = handle.name_slice(),
             .rootfs = handle.rootfs_slice(),
         };
-        diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, null);
+        diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, .{});
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         return .lost;
     };
@@ -315,6 +322,44 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     }
     @memcpy(handle.rootfs[0..rootfs.len], rootfs);
     handle.rootfs_len = @intCast(rootfs.len);
+}
+
+/// The limits of a library caller, against the bounds the flags are held to.
+fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(diag.code == null);
+    const found = spec_mod.limits_problem(limits) orelse return;
+    var value: [constants.limit_text_bytes_max]u8 = undefined;
+    const number: u64 = switch (found.kind) {
+        .memory => limits.memory_bytes.?,
+        .pids => limits.pids.?,
+        .cpus => limits.cpu_millis.?,
+    };
+    // Cannot fail: a u64 has at most 20 digits and the buffer holds 24.
+    const text = std.fmt.bufPrint(&value, "{d}", .{number}) catch unreachable;
+    diagnose.limit_invalid(diag, found.kind, text, found.problem);
+    return error.StartFailed;
+}
+
+/// Decides whether this run has a scope. It has one if the user's systemd manager answers; if
+/// it does not, a run with a limit is refused (a limit nobody enforces is worse than none) and
+/// a run without goes on, warning once, as M1 did.
+fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?plan_mod.ScopeInput {
+    assert(diag.code == null);
+    var found: scope_mod.Probe = undefined;
+    var problem: scope_mod.Problem = undefined;
+    if (scope_mod.probe(handle.host, &found, &problem)) {
+        return .{ .version = found.version, .limits = limits };
+    }
+    if (limits.any()) {
+        diagnose.limit_without_cgroup(diag, &problem, limits);
+        return error.StartFailed;
+    }
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.running_without_scope(&warning, &problem);
+    handle.report(&warning);
+    return null;
 }
 
 // ---- The single-thread assertion ----------------------------------------------------------

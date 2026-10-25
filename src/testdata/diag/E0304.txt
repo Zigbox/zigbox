@@ -1,0 +1,5 @@
+error[ZBX-E0304]: systemd refused the container's scope, or its job failed
+  cause  systemd answered org.freedesktop.DBus.Error.AccessDenied: Refused
+  fix    see what the manager logged:   journalctl --user -n 20
+  more   zbx explain E0304 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0304.html

@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0205</h1>
 <p class="summary">a container setup step failed</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx sets a container up in steps: the mounts, the minimal /dev, moving into the new root with pivot_root, the hostname. The kernel refused one of them, so the container was not started and nothing it mounted is left on the host.</p>
 <p>The cause names the step and the kernel's reason. Mounts inside a user namespace are refused when the host forbids them: a security policy (AppArmor, SELinux, seccomp), or running zbx inside another container, which hides parts of /proc. &quot;zbx doctor&quot; checks what this host allows.</p>

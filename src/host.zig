@@ -38,6 +38,9 @@ pub const Error = error{
     Unsupported,
     /// The file exists but does not have the requested extended attribute.
     NoData,
+    /// A wait for a peer's bytes ended with none (`read_timeout`); a bound, not a failure of
+    /// the kernel.
+    TimedOut,
     IoFailed,
 };
 
@@ -56,6 +59,7 @@ pub fn error_for_errno(errno: u16) Error {
         .NAMETOOLONG => error.PathTooLong,
         .NOSYS => error.Unsupported,
         .NODATA => error.NoData,
+        .TIMEDOUT => error.TimedOut,
         .RANGE => error.FileTooLarge,
         else => error.IoFailed,
     };
@@ -361,6 +365,16 @@ pub const VTable = struct {
     ) Error!void,
     /// Makes a write to a pipe with no reader fail with `EPIPE` instead of killing the process.
     ignore_broken_pipe: *const fn (context: *anyopaque, ignore: bool) void,
+    /// Connects a stream socket to the unix socket at `path` (the user's D-Bus socket). The
+    /// handle is close-on-exec and is read and written like a pipe's.
+    socket_connect: *const fn (context: *anyopaque, path: [:0]const u8) Error!Handle,
+    /// Like `read`, but waits at most `timeout_ms` for the first byte: `TimedOut` if none came.
+    read_timeout: *const fn (
+        context: *anyopaque,
+        handle: Handle,
+        buffer: []u8,
+        timeout_ms: u32,
+    ) Error!u32,
     begin_step: *const fn (context: *anyopaque, index: u32) void,
 };
 
@@ -525,6 +539,43 @@ pub const Host = struct {
         assert(buffer.len <= constants.file_bytes_max);
         for (0..constants.eintr_retries_max + 1) |_| {
             const count = host.vtable.read(host.context, handle, buffer) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            assert(count <= buffer.len);
+            return count;
+        }
+        return error.IoFailed;
+    }
+
+    /// Connects to the unix socket at `path`. A path longer than a socket address holds is
+    /// `PathTooLong`.
+    pub fn socket_connect(host: Host, path: []const u8) Error!Handle {
+        if (path.len == 0) return error.InvalidPath;
+        if (path.len > constants.dbus_socket_path_bytes_max) return error.PathTooLong;
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
+        var storage: [constants.dbus_socket_path_bytes_max + 1]u8 = undefined;
+        @memcpy(storage[0..path.len], path);
+        storage[path.len] = 0;
+        const path_z: [:0]const u8 = storage[0..path.len :0];
+        const handle = try host.vtable.socket_connect(host.context, path_z);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return handle;
+    }
+
+    /// Waits up to `timeout_ms` for bytes, then reads at least one, or returns 0 at end of file.
+    /// Interrupted waits are retried, so the wait can be a little longer than asked.
+    pub fn read_timeout(host: Host, handle: Handle, buffer: []u8, timeout_ms: u32) Error!u32 {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.file_bytes_max);
+        assert(timeout_ms <= constants.dbus_job_timeout_ms);
+        for (0..constants.eintr_retries_max + 1) |_| {
+            const count = host.vtable.read_timeout(
+                host.context,
+                handle,
+                buffer,
+                timeout_ms,
+            ) catch |err| switch (err) {
                 error.Interrupted => continue,
                 else => return err,
             };

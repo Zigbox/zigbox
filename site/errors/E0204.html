@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0204</h1>
 <p class="summary">writing the id maps failed</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>A container with a full range of ids has its uid and gid maps written by the setuid helpers newuidmap and newgidmap, because only they may map ids the user does not own. A helper could not be run, or refused the map.</p>
 <p>The cause names the helper and how it ended, with what it printed. A refusal usually means the range in /etc/subuid or /etc/subgid does not cover the ids zbx asked for, or the helper is not setuid root. &quot;zbx doctor&quot; checks both (ZBX-E0105).</p>

@@ -18,6 +18,18 @@ pub const exit_external: u8 = 3;
 /// A bug in zbx: EX_SOFTWARE from sysexits.h.
 pub const exit_internal: u8 = 70;
 
+// Exit codes of a command that runs a container (`zbx run`): the container's own code is passed
+// through, so these four classes must not collide with it, and the shell's reserved codes are used
+// instead (DIAGNOSTICS.md, "Exit codes"). `codes.exit_code_in` decides which applies.
+/// zbx itself failed before the command started, whatever the blame.
+pub const exit_run_failed: u8 = 125;
+/// The command was found but could not be run: not executable, or not for this CPU.
+pub const exit_run_not_runnable: u8 = 126;
+/// The command was not found.
+pub const exit_run_not_found: u8 = 127;
+/// A command killed by signal n exits 128 + n.
+pub const exit_signal_base: u8 = 128;
+
 // Exit codes of the build-host tools (`size_check`, the fuzz runner). They are not `zbx`.
 pub const tool_exit_ok: u8 = 0;
 pub const tool_exit_failed: u8 = 1;
@@ -128,13 +140,13 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 /// The simulator's container model: paths, nodes (directories, files, links), mounts per
 /// namespace, processes, and pipe ends. Simulated paths are short; a longer one is refused.
 pub const sim_path_bytes_max: u32 = 256;
-pub const sim_nodes_max: u32 = 96;
+pub const sim_nodes_max: u32 = 160;
 pub const sim_mounts_max: u32 = 32;
 pub const sim_processes_max: u32 = 3;
 pub const sim_pipe_ends_max: u32 = 8;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
-pub const sim_written_files_max: u32 = 40;
+pub const sim_written_files_max: u32 = 56;
 pub const sim_written_bytes_max: u32 = 16 * 1024;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.
@@ -218,6 +230,60 @@ pub const helper_read_calls_max: u32 = 64;
 pub const forwarded_signals_count: u32 = 4;
 pub const forwarded_signals_max: u32 = 1024;
 
+// D-Bus and the scope (M2, slice 1). Every message, name and wait is bounded here.
+/// One D-Bus message, as sent or received. The spec allows 128 MiB; zbx's replies are under 1 KiB,
+/// and a bigger one from the bus is refused as a protocol error.
+pub const dbus_message_bytes_max: u32 = 16 * 1024;
+/// Header fields of one message. The spec defines nine; a message with more is malformed.
+pub const dbus_header_fields_max: u32 = 16;
+/// Elements of any array zbx reads or writes (header fields, scope properties, PIDs).
+pub const dbus_array_elements_max: u32 = 64;
+/// How deep a signature may nest (arrays and structs together). The spec's limit is 64.
+pub const dbus_nesting_depth_max: u32 = 8;
+/// A signature is at most 255 bytes in the spec.
+pub const dbus_signature_bytes_max: u32 = 255;
+/// A string, object path or name read from a message.
+pub const dbus_string_bytes_max: u32 = 1024;
+/// `DBUS_SESSION_BUS_ADDRESS`, the longest accepted.
+pub const dbus_address_bytes_max: u32 = 512;
+/// `sun_path` in the kernel ABI is 108 bytes including the NUL.
+pub const dbus_socket_path_bytes_max: u32 = 107;
+/// One SASL line, without its CRLF.
+pub const dbus_auth_line_bytes_max: u32 = 256;
+/// The wait for a reply to one method call, and for a unit's job to finish. The read step is
+/// one poll; a wait is a bounded number of steps.
+pub const dbus_call_timeout_ms: u32 = 10_000;
+pub const dbus_job_timeout_ms: u32 = 30_000;
+pub const dbus_poll_step_ms: u32 = 500;
+/// Messages processed while waiting for one reply or one job: past this the peer is flooding.
+pub const dbus_messages_per_wait_max: u32 = 64;
+/// `JobRemoved` signals kept while a reply is awaited.
+pub const dbus_job_results_max: u32 = 4;
+/// The pids, properties and text of the scope request.
+pub const scope_properties_max: u32 = 16;
+pub const scope_prefix = "zbx-";
+pub const scope_suffix = ".scope";
+pub const scope_name_bytes_max: u32 = 4 + container_name_bytes_max + 6;
+/// The text of a systemd `Version` property ("255.4-1ubuntu8.4"), kept for diagnostics.
+pub const systemd_version_text_bytes_max: u32 = 64;
+/// The most of a remote error's name and message kept for a diagnostic.
+pub const dbus_error_text_bytes_max: u32 = 160;
+/// A cgroup directory below /sys/fs/cgroup, and the files written in it by the fallback.
+pub const cgroup_path_bytes_max: u32 = 256;
+pub const cgroup_file_bytes_max: u32 = 24;
+
+// Limits (`--memory`, `--pids`, `--cpus`): what a user may ask for. Past either end is a
+// diagnostic naming the bound.
+pub const limit_memory_bytes_min: u64 = 4 * 1024 * 1024;
+pub const limit_memory_bytes_max: u64 = 1 << 40;
+pub const limit_pids_min: u32 = 1;
+pub const limit_pids_max: u32 = 4_194_304;
+/// One CPU is 1000 millis.
+pub const limit_cpu_millis_min: u32 = 10;
+pub const limit_cpu_millis_max: u32 = 1_024_000;
+/// The longest value of a limit flag.
+pub const limit_text_bytes_max: u32 = 24;
+
 // Run records (slice 2).
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
@@ -284,8 +350,34 @@ comptime {
     }
     assert(exit_ok == 0);
     assert(exit_internal == 70);
+    // The container-run codes are the shell's reserved ones: distinct from each other, from the
+    // standard four, and below the signal range.
+    const run_exits = [_]u8{ exit_run_failed, exit_run_not_runnable, exit_run_not_found };
+    for (run_exits, 0..) |first, index| {
+        for (exits) |standard| assert(first != standard);
+        for (run_exits[index + 1 ..]) |second| assert(first != second);
+        assert(first < exit_signal_base);
+    }
+    assert(exit_run_failed == 125);
+    assert(exit_run_not_runnable == 126);
+    assert(exit_run_not_found == 127);
     assert(tool_exit_ok == exit_ok);
     assert(tool_exit_failed != tool_exit_usage);
+
+    // D-Bus: a message holds its own header fields and one scope request, and the waits are whole
+    // numbers of poll steps.
+    assert(dbus_header_fields_max >= 9); // The spec defines nine.
+    assert(dbus_array_elements_max >= scope_properties_max);
+    assert(dbus_string_bytes_max <= dbus_message_bytes_max / 8);
+    assert(dbus_socket_path_bytes_max + "unix:path=".len < dbus_address_bytes_max);
+    assert(dbus_call_timeout_ms % dbus_poll_step_ms == 0);
+    assert(dbus_job_timeout_ms % dbus_poll_step_ms == 0);
+    assert(dbus_call_timeout_ms < dbus_job_timeout_ms);
+    assert(scope_prefix.len + container_name_bytes_max + scope_suffix.len == scope_name_bytes_max);
+    assert(limit_memory_bytes_min < limit_memory_bytes_max);
+    assert(limit_pids_min < limit_pids_max);
+    assert(limit_cpu_millis_min < limit_cpu_millis_max);
+    assert(dbus_signature_bytes_max == 255);
 
     assert(args_count_max > 0);
     assert(arg_echo_bytes_max >= 8); // Room for a truncation marker and some text.

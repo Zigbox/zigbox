@@ -1,0 +1,12 @@
+error[ZBX-E0303]: the user bus answered in a way zbx can't use
+  while  starting container web-1
+  while  starting the container's scope zbx-web-1.scope
+  cause  the user bus sent something zbx cannot use while asking systemd: the
+         reply is malformed
+  scope  zbx-web-1.scope
+  name   web-1
+  rootfs /srv/alpine
+  step   start_scope (5 of 44)
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain E0303
+  docs   https://zigbox.github.io/zigbox/errors/E0303.html

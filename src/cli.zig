@@ -4,8 +4,8 @@
 //! Contract (docs/briefs/M0-diagnostics.md): commands `doctor`, `explain <code>`, `help`,
 //! `--version`; global options `-v`/`--verbose` and `--output text|json`, which may come before
 //! or after the command. Every refusal is a diagnostic (`E00xx`, blame user), rendered here, at
-//! the boundary, and nowhere below. The exit code comes from the diagnostic's blame, once, in
-//! `fail`.
+//! the boundary, and nowhere below. The exit code comes from the diagnostic and the command
+//! (`codes.exit_code_in`: blame for most commands, 125 to 127 for `run`), once, in `fail`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -19,6 +19,7 @@ const errors = @import("diag/errors.zig");
 const explain = @import("diag/explain.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
+const diagnose = @import("runtime/diagnose.zig");
 const runtime = @import("runtime/run.zig");
 const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -43,6 +44,9 @@ const help_text =
     \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
     \\  --rootfs <dir>  the directory to use as the container's root (required)
     \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
+    \\  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
+    \\  --pids <n>      limit on processes and threads, as in 64
+    \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\bundle:
@@ -55,8 +59,10 @@ const help_text =
     \\  -v, --verbose   show the full cause chain and context of a failure
     \\  --output json   write each failure to stderr as one JSON object per line
     \\
-    \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 70 a bug in zbx
-    \\run exits with the command's own exit code, or 128 plus the signal that killed it
+    \\exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
+    \\run exits with the command's own exit code, or 128 plus the signal that killed it, and
+    \\keeps its own failures out of that range: 125 zbx failed before the command started,
+    \\126 the command could not be run, 127 the command was not found
     \\
 ;
 
@@ -78,6 +84,14 @@ pub const OutputFormat = enum { text, json };
 pub const Options = struct {
     verbose: bool = false,
     output: OutputFormat = .text,
+    /// The command line is a `run`: its failures use the container-run exit codes.
+    runs_container: bool = false,
+
+    pub fn exit_scope(options: Options) codes.ExitScope {
+        const scope: codes.ExitScope = if (options.runs_container) .container_run else .standard;
+        assert((scope == .container_run) == options.runs_container);
+        return scope;
+    }
 
     /// json always carries everything; verbose only changes the text rendering.
     pub fn mode(options: Options) render.Mode {
@@ -98,6 +112,30 @@ pub const RunArgs = struct {
     rootfs: ?[]const u8,
     name: ?[]const u8,
     command: []const []const u8,
+    /// The text of the limit flags, read by `limits_of` when the container starts.
+    memory: ?[]const u8 = null,
+    pids: ?[]const u8 = null,
+    cpus: ?[]const u8 = null,
+};
+
+/// The options of `run` that take a value, before the `--`.
+const RunOption = enum {
+    rootfs,
+    name,
+    memory,
+    pids,
+    cpus,
+
+    fn flag(option: RunOption) []const u8 {
+        assert(@backingInt(option) <= 4);
+        return switch (option) {
+            .rootfs => "--rootfs",
+            .name => "--name",
+            .memory => "--memory",
+            .pids => "--pids",
+            .cpus => "--cpus",
+        };
+    }
 };
 
 /// What `bundle` was given besides its optional operand, the run's name.
@@ -148,12 +186,11 @@ const Token = union(enum) {
     output_next,
     /// `--output=<value>`.
     output_inline: []const u8,
-    /// `--rootfs`, `--name`: options of `run`, whose value is the next argument.
-    rootfs_next,
-    name_next,
-    /// `--rootfs=<value>`, `--name=<value>`.
-    rootfs_inline: []const u8,
-    name_inline: []const u8,
+    /// `--rootfs`, `--name`, `--memory`, `--pids`, `--cpus`: options of `run`, whose value is the
+    /// next argument.
+    run_option_next: RunOption,
+    /// The same with the value after an `=`.
+    run_option_inline: struct { option: RunOption, value: []const u8 },
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -162,6 +199,20 @@ const Token = union(enum) {
     unknown_option,
     operand,
 };
+
+/// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
+fn run_option_of(argument: []const u8) ?Token {
+    assert(argument.len <= constants.arg_bytes_max);
+    inline for (comptime std.enums.values(RunOption)) |option| {
+        const flag = comptime option.flag();
+        if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
+        if (std.mem.startsWith(u8, argument, flag ++ "=")) {
+            const value = argument[flag.len + 1 ..];
+            return .{ .run_option_inline = .{ .option = option, .value = value } };
+        }
+    }
+    return null;
+}
 
 fn classify(argument: []const u8) Token {
     assert(argument.len <= constants.arg_bytes_max);
@@ -173,19 +224,10 @@ fn classify(argument: []const u8) Token {
     if (std.mem.startsWith(u8, argument, inline_prefix)) {
         return .{ .output_inline = argument[inline_prefix.len..] };
     }
-    if (std.mem.eql(u8, argument, "--rootfs")) return .rootfs_next;
-    if (std.mem.eql(u8, argument, "--name")) return .name_next;
+    if (run_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--")) return .separator;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
-    const rootfs_prefix = "--rootfs=";
-    if (std.mem.startsWith(u8, argument, rootfs_prefix)) {
-        return .{ .rootfs_inline = argument[rootfs_prefix.len..] };
-    }
-    const name_prefix = "--name=";
-    if (std.mem.startsWith(u8, argument, name_prefix)) {
-        return .{ .name_inline = argument[name_prefix.len..] };
-    }
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
     // string are operands, so they reach the "unknown command" error with their text.
     if (command_named(argument) != null) return .operand;
@@ -250,13 +292,13 @@ pub fn scan_options(args: []const []const u8) Options {
                     index += 1;
                 }
             },
-            .rootfs_next, .name_next => {
+            .run_option_next => {
                 if (is_run and index + 1 < args.len) index += 1;
             },
             .separator => {
                 if (is_run) break;
             },
-            .rootfs_inline, .name_inline, .unknown_option, .last, .no_redact => {},
+            .run_option_inline, .unknown_option, .last, .no_redact => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
                 seen_operand = true;
@@ -264,6 +306,7 @@ pub fn scan_options(args: []const []const u8) Options {
         }
     }
     assert(index <= args.len + 1);
+    options.runs_container = first != null and first.? == .run;
     return options;
 }
 
@@ -293,7 +336,7 @@ pub fn parse(
                 index += 1;
                 try check_output_value(diag, args[index]);
             },
-            .rootfs_next, .name_next, .rootfs_inline, .name_inline => {
+            .run_option_next, .run_option_inline => {
                 if (!is_run) return unknown_option(diag, argument);
                 try take_run_option(diag, &run_args, args, &index);
             },
@@ -326,7 +369,7 @@ pub fn parse(
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
-/// Reads one `--rootfs` or `--name` and its value (inline, or the next argument). A value that
+/// Reads one value option of `run` and its value (inline, or the next argument). A value that
 /// is missing, or is the `--` that starts the command, is `ZBX-E0005`; giving the same option
 /// twice is `ZBX-E0003`, since one of them would be silently ignored.
 fn take_run_option(
@@ -338,24 +381,29 @@ fn take_run_option(
     assert(index.* < args.len);
     assert(diag.code == null);
     const argument = args[index.*];
-    const is_rootfs = switch (classify(argument)) {
-        .rootfs_next, .rootfs_inline => true,
-        .name_next, .name_inline => false,
-        else => unreachable, // The caller matched one of the four.
+    const option: RunOption = switch (classify(argument)) {
+        .run_option_next => |chosen| chosen,
+        .run_option_inline => |chosen| chosen.option,
+        else => unreachable, // The caller matched one of the two.
     };
-    const option = if (is_rootfs) "--rootfs" else "--name";
     const value: []const u8 = switch (classify(argument)) {
-        .rootfs_inline => |inline_value| inline_value,
-        .name_inline => |inline_value| inline_value,
+        .run_option_inline => |chosen| chosen.value,
         else => blk: {
             const next = index.* + 1;
-            if (next == args.len) return missing_option_value(diag, option);
-            if (classify(args[next]) == .separator) return missing_option_value(diag, option);
+            if (next == args.len) return missing_option_value(diag, option.flag());
+            const flag = option.flag();
+            if (classify(args[next]) == .separator) return missing_option_value(diag, flag);
             index.* = next;
             break :blk args[next];
         },
     };
-    const slot = if (is_rootfs) &run_args.rootfs else &run_args.name;
+    const slot = switch (option) {
+        .rootfs => &run_args.rootfs,
+        .name => &run_args.name,
+        .memory => &run_args.memory,
+        .pids => &run_args.pids,
+        .cpus => &run_args.cpus,
+    };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
 }
@@ -628,7 +676,7 @@ pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
         assert(collected <= constants.args_count_max);
         // Whatever was collected before the limit was hit may hold --output or --verbose.
         const options = scan_options(storage[0..collected]);
-        panic.configure(&panic.state, options.mode());
+        panic.configure(&panic.state, options.mode(), options.exit_scope());
         return fail(host, &diag, options);
     };
     assert(args.len <= constants.args_count_max);
@@ -640,7 +688,7 @@ pub fn run(host: Host, args: []const []const u8) u8 {
     var diag: Diag = undefined;
     diag.reset();
     const options = scan_options(args);
-    panic.configure(&panic.state, options.mode());
+    panic.configure(&panic.state, options.mode(), options.exit_scope());
     var invocation: Invocation = undefined;
     parse(args, &invocation, &diag) catch return fail(host, &diag, options);
     assert(invocation.options.verbose == options.verbose);
@@ -704,6 +752,7 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
         .rootfs = given.rootfs.?, // check_run_args refused a missing one.
         .name = given.name,
         .command = given.command,
+        .limits = try limits_of(&given, diag),
     };
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{
@@ -724,6 +773,32 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
     };
     report_outcome(host, invocation.options, handle, &reason);
     return code;
+}
+
+/// The limits the flags asked for, or `ZBX-E0306` for the first that is not acceptable.
+fn limits_of(given: *const RunArgs, diag: *Diag) RunError!runtime_spec.Limits {
+    assert(diag.code == null);
+    var limits: runtime_spec.Limits = .{};
+    if (given.memory) |text| {
+        limits.memory_bytes = runtime_spec.parse_memory(text) catch |problem| {
+            diagnose.limit_invalid(diag, .memory, text, problem);
+            return error.StartFailed;
+        };
+    }
+    if (given.pids) |text| {
+        limits.pids = runtime_spec.parse_pids(text) catch |problem| {
+            diagnose.limit_invalid(diag, .pids, text, problem);
+            return error.StartFailed;
+        };
+    }
+    if (given.cpus) |text| {
+        limits.cpu_millis = runtime_spec.parse_cpus(text) catch |problem| {
+            diagnose.limit_invalid(diag, .cpus, text, problem);
+            return error.StartFailed;
+        };
+    }
+    assert(runtime_spec.limits_problem(limits) == null);
+    return limits;
 }
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
@@ -893,9 +968,11 @@ pub fn fail(host: Host, diag: *Diag, options: Options) u8 {
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render.render(diag, mode, color, &buffer);
-    host.write_all(.stderr, output) catch return constants.exit_environment;
-    const code = diag.exit_code();
+    const scope = options.exit_scope();
+    host.write_all(.stderr, output) catch return codes.exit_code_unwritable(scope);
+    const code = diag.exit_code_in(scope);
     assert(code != constants.exit_ok);
+    if (options.runs_container) assert(code >= constants.exit_run_failed);
     return code;
 }
 
@@ -1051,6 +1128,36 @@ test "snapshot: the usage errors exit 1 with one diagnostic on stderr and nothin
     }
 }
 
+test "snapshot: a usage error on a run command line exits 125, any other command line 1" {
+    // Goal: `run` passes the container's exit code through, so its own refusals use 125 and the
+    // codes 1, 2, 3 and 70 belong to the container alone. Method: the ways a run line is wrong
+    // (unknown option, missing and repeated values, a bad --output, no command, no rootfs) each
+    // give one error on stderr and 125; the same mistakes on other commands still give 1.
+    var sim: HostSim = undefined;
+    const bad_run = [_][]const [:0]const u8{
+        &.{ "zbx", "run" },
+        &.{ "zbx", "run", "--nope" },
+        &.{ "zbx", "run", "--rootfs" },
+        &.{ "zbx", "run", "--rootfs", "a", "--rootfs", "b", "--", "sh" },
+        &.{ "zbx", "run", "--rootfs", "a" },
+        &.{ "zbx", "run", "--rootfs", "a", "--" },
+        &.{ "zbx", "--output", "xml", "run", "--rootfs", "a", "--", "sh" },
+        &.{ "zbx", "run", "--output", "xml", "--rootfs", "a", "--", "sh" },
+        &.{ "zbx", "--output=json", "run", "--last" },
+    };
+    for (bad_run) |args| {
+        try testing.expectEqual(@as(u8, 125), try run_case(&sim, args));
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-E00"));
+    }
+    const other = [_][]const [:0]const u8{
+        &.{ "zbx", "bundle", "--nope" },
+        &.{ "zbx", "doctor", "--rootfs", "a" },
+        &.{ "zbx", "--output", "xml", "doctor" },
+    };
+    for (other) |args| try testing.expectEqual(@as(u8, 1), try run_case(&sim, args));
+}
+
 test "an echoed argument cannot inject terminal escapes or overflow the line" {
     // Goal: negative space. Control bytes and non-ASCII become '?', long text is truncated.
     var sim: HostSim = undefined;
@@ -1182,6 +1289,9 @@ test "a failing stdout is E0009 on stderr and exit 2; a failing stderr is exit 2
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     iterator = .{ .items = &.{ "zbx", "frobnicate" } };
     try testing.expectEqual(@as(u8, 2), run_from_iterator(sim.interface(), &iterator));
+    // A run line with nowhere to say what went wrong still keeps out of the container's codes.
+    iterator = .{ .items = &.{ "zbx", "run", "--nope" } };
+    try testing.expectEqual(@as(u8, 125), run_from_iterator(sim.interface(), &iterator));
 }
 
 test "a failing write names the real errno: EBADF and ENOSPC from the simulator" {

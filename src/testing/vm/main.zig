@@ -81,7 +81,11 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     return 0;
 }
 
-const doctor_as_demo = "runuser -u demo -- /home/demo/zbx doctor";
+// XDG_RUNTIME_DIR and the bus address are what a login session sets and `runuser` does not (it
+// keeps root's, whose address names root's bus): the doctor looks for the user's bus there.
+const doctor_as_demo =
+    "runuser -u demo -- env XDG_RUNTIME_DIR=/run/user/1000" ++
+    user_bus ++ " /home/demo/zbx doctor";
 
 fn step_doctor_ok(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m0: STEP 1: zbx doctor on the fresh VM, as user demo\n", .{});
@@ -217,3 +221,6 @@ test {
     _ = @import("image.zig");
     _ = @import("session.zig");
 }
+
+// The address of the demo user's own bus; `runuser` would leave root's in place.
+const user_bus = " DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus";

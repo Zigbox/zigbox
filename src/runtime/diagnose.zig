@@ -14,8 +14,12 @@ const host_mod = @import("../host.zig");
 const doctor = @import("../doctor.zig");
 const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const client = @import("../dbus/client.zig");
+const codes = @import("../diag/codes.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const scope_mod = @import("scope.zig");
+const scope_text = @import("scope_text.zig");
 const spec = @import("spec.zig");
 
 const linux = std.os.linux;
@@ -26,6 +30,13 @@ const Plan = plan_mod.Plan;
 pub const RunInfo = struct {
     name: []const u8,
     rootfs: []const u8,
+};
+
+/// What a failed step's diagnostic may need besides the step: how a helper ended, and why a
+/// scope could not be had.
+pub const Details = struct {
+    helper: ?HelperEnd = null,
+    scope: ?*const scope_mod.Problem = null,
 };
 
 /// A failed step: its index in the plan, the coarse error and the errno the kernel returned.
@@ -146,10 +157,11 @@ pub fn step_failed(
     plan: *const Plan,
     info: RunInfo,
     failure: Failure,
-    helper: ?HelperEnd,
+    details: Details,
 ) void {
     assert(diag.code == null);
     assert(failure.step < plan.count);
+    const helper = details.helper;
     const step = &plan.steps[failure.step];
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
@@ -164,6 +176,7 @@ pub fn step_failed(
             failure,
             helper,
         ),
+        .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
         .exec => command_failed(diag, plan, info, failure),
         else => setup_failed(diag, step, operation, failure, info),
     }
@@ -359,6 +372,8 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
     diag.raise(.E0202);
     const program = std.mem.span(plan.argv[0].?);
     const by_path = plan.candidates_count == 1;
+    // A container run exits 127 for a command that is not there and 126 for one that cannot run.
+    if (failure.err == error.NotFound) diag.mark_command_missing();
     switch (failure.err) {
         error.NotFound => if (by_path) {
             // The note comes first, so default output (the newest cause) is the plain statement.
@@ -392,6 +407,162 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
         info.rootfs,
     });
     assert(diag.code.? == .E0202);
+}
+
+// ---- The scope and the limits ---------------------------------------------------------------
+
+/// ZBX-E0306: a limit's value is not accepted. `value` is what the user wrote (or the number a
+/// library caller gave), `flag` the option it belongs to.
+pub fn limit_invalid(
+    diag: *Diag,
+    kind: spec.LimitKind,
+    value: []const u8,
+    problem: spec.LimitProblem,
+) void {
+    assert(value.len <= constants.arg_bytes_max);
+    assert(diag.code == null);
+    const flag = switch (kind) {
+        .memory => "--memory",
+        .pids => "--pids",
+        .cpus => "--cpus",
+    };
+    diag.raise(.E0306);
+    diag.while_("reading the {s} limit", .{flag});
+    diag.context("limit", "{s} {s}", .{ flag, value });
+    limit_cause(diag, kind, flag, value, problem);
+    const example = switch (kind) {
+        .memory => "zbx run --rootfs ./alpine --memory 128m -- /bin/sh",
+        .pids => "zbx run --rootfs ./alpine --pids 64 -- /bin/sh",
+        .cpus => "zbx run --rootfs ./alpine --cpus 0.5 -- /bin/sh",
+    };
+    diag.fix(.{ .sentence = "a valid limit looks like this:", .command = example });
+    assert(diag.code.? == .E0306);
+    assert(diag.causes.count == 1);
+}
+
+fn limit_cause(
+    diag: *Diag,
+    kind: spec.LimitKind,
+    flag: []const u8,
+    value: []const u8,
+    problem: spec.LimitProblem,
+) void {
+    assert(diag.code.? == .E0306);
+    assert(flag.len > 2);
+    switch (problem) {
+        error.Empty => diag.cause("{s} needs a value", .{flag}),
+        error.NotANumber => switch (kind) {
+            .memory => diag.cause(
+                "'{s}' is not a size: use digits and k, m or g, as in 128m",
+                .{value},
+            ),
+            .pids => diag.cause("'{s}' is not a count: use digits only, as in 64", .{value}),
+            .cpus => diag.cause("'{s}' is not a number of CPUs: use a decimal like 0.5", .{value}),
+        },
+        error.Zero => diag.cause("a limit of zero would stop the container before it starts", .{}),
+        error.TooPrecise => diag.cause("{s} takes at most three decimals", .{flag}),
+        error.TooSmall => switch (kind) {
+            .memory => diag.cause("{s} is below the smallest limit, {d} MiB", .{
+                value, constants.limit_memory_bytes_min >> 20,
+            }),
+            .pids => diag.cause("{s} is below the smallest limit, {d}", .{
+                value, constants.limit_pids_min,
+            }),
+            .cpus => diag.cause("{s} is below the smallest limit, 0.01 CPU", .{value}),
+        },
+        error.TooLarge => switch (kind) {
+            .memory => diag.cause("{s} is above the largest limit, {d} GiB", .{
+                value, constants.limit_memory_bytes_max >> 30,
+            }),
+            .pids => diag.cause("{s} is above the largest limit, {d}", .{
+                value, constants.limit_pids_max,
+            }),
+            .cpus => diag.cause("{s} is above the largest limit, {d} CPUs", .{
+                value, constants.limit_cpu_millis_max / 1000,
+            }),
+        },
+    }
+}
+
+fn problem_fixes(diag: *Diag, code: codes.Code, scope_name: []const u8) void {
+    assert(diag.code.? == code);
+    assert(diag.fixes.count == 0);
+    switch (code) {
+        .E0301 => {
+            diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
+            diag.fix(.{
+                .sentence = "keep the user manager running:",
+                .command = "loginctl enable-linger $USER",
+            });
+        },
+        .E0302 => {
+            diag.fix(.{
+                .sentence = "see which bus this process uses:",
+                .command = "echo $DBUS_SESSION_BUS_ADDRESS",
+            });
+            diag.fix(.{ .sentence = "or log in again through a systemd session" });
+        },
+        .E0305 => {
+            diag.fix(.{
+                .sentence = "choose another name:",
+                .command = "zbx run --name <other-name> ...",
+            });
+            diag.fix_with("or stop the other unit:", "systemctl --user stop {s}", .{scope_name});
+        },
+        .E0304 => diag.fix(.{
+            .sentence = "see what the manager logged:",
+            .command = "journalctl --user -n 20",
+        }),
+        else => diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" }),
+    }
+}
+
+/// A failed `start_scope` step: the problem the scope module recorded, or (when a fault stopped
+/// the step before any problem was recorded) the failed call itself.
+fn scope_step_failed(diag: *Diag, unit: []const u8, problem: ?*const scope_mod.Problem) void {
+    assert(unit.len > constants.scope_suffix.len);
+    assert(diag.code == null);
+    assert(std.mem.endsWith(u8, unit, constants.scope_suffix));
+    const found = problem.?; // The session records one whenever the step fails.
+    const code = scope_text.problem_code(found);
+    diag.raise(code);
+    diag.while_("starting the container's scope {s}", .{unit});
+    scope_text.problem_causes(diag, found);
+    diag.context("scope", "{s}", .{unit});
+    problem_fixes(diag, code, unit);
+    assert(diag.code.? == code);
+}
+
+/// ZBX-E0307: a limit was asked for and no scope can be made, found before anything was created.
+pub fn limit_without_cgroup(
+    diag: *Diag,
+    problem: *const scope_mod.Problem,
+    limits: spec.Limits,
+) void {
+    assert(diag.code == null);
+    assert(limits.any());
+    diag.raise(.E0307);
+    diag.while_("preparing the container's cgroup", .{});
+    if (limits.memory_bytes) |bytes| diag.context("memory", "{d} bytes", .{bytes});
+    if (limits.pids) |pids| diag.context("pids", "{d}", .{pids});
+    if (limits.cpu_millis) |millis| diag.context("cpus", "{d} thousandths", .{millis});
+    diag.cause("--memory, --pids and --cpus are enforced by a cgroup scope from the user's " ++
+        "systemd manager, and one cannot be made", .{});
+    scope_text.problem_causes(diag, problem);
+    diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
+    diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    assert(diag.code.? == .E0307);
+}
+
+/// ZBX-W0301: no limits were asked for and no scope can be made, so the run goes on without.
+pub fn running_without_scope(diag: *Diag, problem: *const scope_mod.Problem) void {
+    assert(diag.code == null);
+    diag.raise(.W0301);
+    diag.while_("preparing the container's cgroup", .{});
+    scope_text.problem_causes(diag, problem);
+    diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
+    assert(diag.code.? == .W0301);
+    assert(diag.causes.count >= 1);
 }
 
 // ---- Warnings ------------------------------------------------------------------------------

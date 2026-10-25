@@ -48,6 +48,15 @@ pub const Code = enum(u8) {
     W0201,
     W0202,
     W0203,
+    E0301,
+    E0302,
+    E0303,
+    E0304,
+    E0305,
+    E0306,
+    E0307,
+    E0308,
+    W0301,
     E0701,
     E0702,
     E0703,
@@ -244,6 +253,11 @@ pub const registry = [_]Entry{
         \\needs systemd.unified_cgroup_hierarchy=1 on the kernel command line. Missing
         \\controllers are fixed with a Delegate= drop-in for user@.service, a daemon-
         \\reload and a fresh login. If the check could not run, the cause says why.
+        \\
+        \\The check also asks the user's D-Bus for the manager's version: zbx makes
+        \\each container's scope there, so a missing bus socket, a bus that refuses
+        \\the user, or a bus with no systemd on it fails the check too (ZBX-E0301
+        \\to ZBX-E0304 are what a run reports for the same causes).
         ,
     },
     .{
@@ -460,6 +474,149 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0301,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't reach the systemd user manager over D-Bus",
+        .explanation =
+        \\zbx puts each container in its own cgroup, a transient systemd "scope" of
+        \\the user's systemd manager, and asks for it over the user's D-Bus socket
+        \\($DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus). It could not get
+        \\there: nothing set the address, the socket is missing or refuses
+        \\connections, the address is not a unix:path= one, or the bus has no
+        \\systemd on it.
+        \\
+        \\The cause says which. The usual one is a login with no systemd user
+        \\session: ssh without PAM's systemd module, su, or sudo -u. Log in through
+        \\a systemd session, or keep the manager running with
+        \\"loginctl enable-linger $USER". "zbx doctor" runs the same probe.
+        ,
+    },
+    .{
+        .code = .E0302,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the user bus refused to authenticate this user",
+        .explanation =
+        \\zbx proves who it is to the user's D-Bus socket with the SASL mechanism
+        \\EXTERNAL, which sends only the user id and relies on the socket's
+        \\credentials. The bus rejected that, or answered something else, or
+        \\refused the Hello that follows.
+        \\
+        \\This usually means the socket belongs to another user: an address
+        \\inherited through su or sudo points at the previous user's bus. Unset
+        \\DBUS_SESSION_BUS_ADDRESS, or run zbx from the user's own login session.
+        \\The cause shows what the bus answered.
+        ,
+    },
+    .{
+        .code = .E0303,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the user bus answered in a way zbx can't use",
+        .explanation =
+        \\The conversation with the user bus broke: a reply was malformed or too
+        \\big, the connection closed in the middle, a call got no answer in time,
+        \\or reading or writing the socket failed.
+        \\
+        \\The cause names the step and what went wrong. A bus that stops answering
+        \\is overloaded or stuck; "systemctl --user status" and
+        \\"journalctl --user -u dbus" show why. A malformed reply from a real bus is
+        \\a bug worth reporting with the output of "zbx bundle --last".
+        ,
+    },
+    .{
+        .code = .E0304,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "systemd refused the container's scope, or its job failed",
+        .explanation =
+        \\zbx asked the user's systemd manager to start the scope that holds the
+        \\container, and systemd either refused the request or started a job that
+        \\did not end well. The cause gives systemd's own error name and message,
+        \\or the job's result.
+        \\
+        \\Typical reasons: the user manager is shutting down, a property is not
+        \\accepted by this systemd version, or the user has no cgroup to delegate.
+        \\"journalctl --user" shows what the manager logged.
+        ,
+    },
+    .{
+        .code = .E0305,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a scope with this container's name already exists",
+        .explanation =
+        \\Each container runs in a systemd scope named zbx-<name>.scope, and a
+        \\unit of that name is already there: another container with the same name
+        \\is running, or one that ended has not been cleaned up yet. zbx never
+        \\reuses a scope, so the run was refused.
+        \\
+        \\Choose another name with --name, or stop the other container. The unit
+        \\can be listed with "systemctl --user list-units 'zbx-*'".
+        ,
+    },
+    .{
+        .code = .E0306,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "invalid resource limit",
+        .explanation =
+        \\A resource limit has to be a sensible number. --memory takes a size with
+        \\a binary unit (k, m or g; 128m is 128 MiB) between 4 MiB and 1 TiB.
+        \\--pids takes a count from 1 to 4194304. --cpus takes a number of CPUs
+        \\with up to three decimals (0.5 is half of one) from 0.01 to 1024.
+        \\
+        \\A zero, a number out of range, or text that is not a number is refused
+        \\before anything starts.
+        ,
+    },
+    .{
+        .code = .E0307,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a limit needs a cgroup scope, and none can be made",
+        .explanation =
+        \\--memory, --pids and --cpus are enforced by the container's cgroup, which
+        \\zbx gets from the user's systemd manager. That manager is not reachable,
+        \\so the limit cannot be enforced, and zbx refuses to run the container as
+        \\though it were: a limit that is silently ignored is worse than none.
+        \\
+        \\The cause says why the manager is not reachable (see ZBX-E0301 and the
+        \\codes after it). Fix that, or run without the limit flags: a run with no
+        \\limits still works without a scope, with a warning (ZBX-W0301).
+        ,
+    },
+    .{
+        .code = .E0308,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write a limit to the container's cgroup",
+        .explanation =
+        \\This systemd is too old to take one of the limits as a unit property, so
+        \\zbx writes it to the scope's own cgroup files (memory.max, pids.max,
+        \\cpu.max). Finding the scope's cgroup or writing the file failed.
+        \\
+        \\The cause names the file and the kernel's reason. The controller may not
+        \\be delegated to the user: "zbx doctor" shows which are (ZBX-E0103).
+        ,
+    },
+    .{
+        .code = .W0301,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "running without a cgroup scope",
+        .explanation =
+        \\The user's systemd manager could not be reached, so this container has
+        \\no cgroup scope of its own. It runs, as in M1, but nothing limits or
+        \\accounts for what it uses, and tools that look for the scope will not
+        \\find it. The warning names why the manager is out of reach.
+        \\
+        \\"zbx doctor" runs the same probe and prints the fix. A run that asks for
+        \\a limit does not get this far: it is refused (ZBX-E0307).
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -628,6 +785,81 @@ pub fn exit_code(blame: Blame) u8 {
     return code;
 }
 
+/// Which family of exit codes a command uses. A command that runs a container passes the
+/// container's own exit code through, so it cannot also use the standard four.
+pub const ExitScope = enum { standard, container_run };
+
+/// The exit code for a failure of `code`, in `scope`. `command_missing` is true only for an
+/// E0202 whose cause is a command that was not found (as opposed to one that cannot be run).
+/// The only place that decides, for both scopes; call sites pass what they know and never pick.
+pub fn exit_code_in(scope: ExitScope, code: Code, command_missing: bool) u8 {
+    if (command_missing) assert(code == .E0202);
+    const result: u8 = switch (scope) {
+        .standard => exit_code(entry(code).blame),
+        .container_run => if (code == .E0202)
+            (if (command_missing) constants.exit_run_not_found else constants.exit_run_not_runnable)
+        else
+            constants.exit_run_failed,
+    };
+    assert(result != constants.exit_ok);
+    if (scope == .container_run) assert(result >= constants.exit_run_failed);
+    if (scope == .standard) assert(result <= constants.exit_internal);
+    return result;
+}
+
+/// What the process exits with when a diagnostic cannot even be written to stderr. In the
+/// standard scope that is the environment's code; a container run uses its own failure code.
+pub fn exit_code_unwritable(scope: ExitScope) u8 {
+    const result = switch (scope) {
+        .standard => constants.exit_environment,
+        .container_run => constants.exit_run_failed,
+    };
+    assert(result != constants.exit_ok);
+    assert(result != constants.exit_internal);
+    return result;
+}
+
+/// Whether a failure of this code can end a `zbx run`. The commands that report the others
+/// (the doctor's checks, `explain`, `bundle`, a missing command word) never run a container.
+pub fn can_end_run(code: Code) bool {
+    assert(@backingInt(code) < registry.len);
+    assert(registry[@backingInt(code)].code == code);
+    return switch (code) {
+        .E0001, .E0002, .E0007 => false,
+        .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
+        .E0701, .E0702, .E0703, .E0704 => false,
+        else => true,
+    };
+}
+
+/// The longest text `exit_text` writes.
+pub const exit_text_bytes_max = 40;
+
+/// How a code's exit code reads in `zbx explain` and on the error pages: the standard one and,
+/// for a failure that `zbx run` can report, the code `run` uses instead. A warning never ends a
+/// command, so it has only the standard one.
+pub fn exit_text(code: Code, buffer: *[exit_text_bytes_max]u8) []const u8 {
+    const found = entry(code);
+    const standard = exit_code_in(.standard, code, false);
+    const text = if (found.severity == .warning or !can_end_run(code))
+        std.fmt.bufPrint(buffer, "{d}", .{standard})
+    else if (code == .E0202)
+        std.fmt.bufPrint(buffer, "{d} ({d} or {d} in zbx run)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+            exit_code_in(.container_run, code, true),
+        })
+    else
+        std.fmt.bufPrint(buffer, "{d} ({d} in zbx run)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+        });
+    const written = text catch unreachable; // The longest form is 24 bytes; the buffer holds 40.
+    assert(written.len > 0);
+    assert(written.len <= exit_text_bytes_max);
+    return written;
+}
+
 const prefix = "ZBX-";
 
 const full_names = blk: {
@@ -702,6 +934,32 @@ test "parse accepts case-insensitive codes and refuses everything else" {
     try std.testing.expect(parse(" E0001") == null);
     try std.testing.expect(parse("E0001 ") == null);
     try std.testing.expect(parse("E0001\x00") == null);
+}
+
+test "a container run exits 125, 126 or 127 for zbx's own failures, whatever the blame" {
+    // Goal: no code of the registry can make a container run exit with a standard code, and E0202
+    // alone splits into 126 and 127. Method: every entry, in both scopes.
+    for (registry) |item| {
+        const standard = exit_code_in(.standard, item.code, false);
+        try std.testing.expectEqual(exit_code(item.blame), standard);
+        const run = exit_code_in(.container_run, item.code, false);
+        if (item.code == .E0202) {
+            try std.testing.expectEqual(@as(u8, 126), run);
+            try std.testing.expectEqual(@as(u8, 127), exit_code_in(.container_run, .E0202, true));
+            try std.testing.expectEqual(standard, exit_code_in(.standard, .E0202, true));
+        } else {
+            try std.testing.expectEqual(@as(u8, 125), run);
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 125), exit_code_in(.container_run, .E0201, false));
+    try std.testing.expectEqual(@as(u8, 125), exit_code_in(.container_run, .B0001, false));
+    var text: [exit_text_bytes_max]u8 = undefined;
+    try std.testing.expectEqualStrings("1 (125 in zbx run)", exit_text(.E0201, &text));
+    try std.testing.expectEqualStrings("1 (126 or 127 in zbx run)", exit_text(.E0202, &text));
+    try std.testing.expectEqualStrings("70 (125 in zbx run)", exit_text(.B0001, &text));
+    try std.testing.expectEqualStrings("2", exit_text(.E0101, &text)); // The doctor's, not a run's.
+    try std.testing.expectEqual(@as(u8, 2), exit_code_unwritable(.standard));
+    try std.testing.expectEqual(@as(u8, 125), exit_code_unwritable(.container_run));
 }
 
 test "blame decides the exit code, and every blame has a distinct one" {

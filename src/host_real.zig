@@ -95,6 +95,8 @@ pub const HostReal = struct {
         .remove_file = remove_file,
         .list_directory = list_directory,
         .ignore_broken_pipe = ignore_broken_pipe,
+        .socket_connect = socket_connect,
+        .read_timeout = read_timeout,
         .begin_step = begin_step,
     };
 
@@ -244,6 +246,52 @@ pub const HostReal = struct {
         assert(descriptors[0] >= 0);
         assert(descriptors[1] >= 0);
         return .{ .read = @intCast(descriptors[0]), .write = @intCast(descriptors[1]) };
+    }
+
+    fn socket_connect(context: *anyopaque, path: [:0]const u8) host.Error!host.Handle {
+        const self = from_context(context);
+        assert(path.len > 0);
+        assert(path.len <= constants.dbus_socket_path_bytes_max);
+        const kind = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
+        const created = linux.socket(linux.AF.UNIX, kind, 0);
+        try check(created);
+        const descriptor: i32 = @intCast(created);
+        var address: linux.sockaddr.un = .{ .path = @splat(0) };
+        @memcpy(address.path[0..path.len], path);
+        const length: u32 = @intCast(@sizeOf(linux.sa_family_t) + path.len + 1);
+        check(linux.connect(descriptor, &address, length)) catch |err| {
+            const errno_connect = errno_last;
+            _ = linux.close(descriptor);
+            errno_last = errno_connect; // The close must not hide why the connect failed.
+            return err;
+        };
+        self.open_count += 1;
+        return @intCast(descriptor);
+    }
+
+    /// Waits for the first byte with poll(2), then reads. A hang-up with nothing to read is end
+    /// of file (the read returns 0), which the caller treats as the peer closing.
+    fn read_timeout(
+        context: *anyopaque,
+        handle: host.Handle,
+        buffer: []u8,
+        timeout_ms: u32,
+    ) host.Error!u32 {
+        const self = from_context(context);
+        assert(self.open_count > 0);
+        assert(buffer.len > 0);
+        const descriptor: i32 = @intCast(handle);
+        var poll_set = [1]linux.pollfd{.{ .fd = descriptor, .events = linux.POLL.IN }};
+        const waited = linux.poll(&poll_set, 1, @intCast(timeout_ms));
+        try check(waited);
+        if (waited == 0) {
+            errno_last = 0;
+            return error.TimedOut;
+        }
+        const result = linux.read(descriptor, buffer.ptr, buffer.len);
+        try check(result);
+        assert(result <= buffer.len);
+        return @intCast(result);
     }
 
     fn write_handle(context: *anyopaque, handle: host.Handle, bytes: []const u8) host.Error!u32 {
@@ -1335,4 +1383,38 @@ test "real stat reports owner and type, capability read reports absence" {
     try std.testing.expectEqual(linux.getuid(), subject.uid());
     const mode = try subject.seccomp_mode();
     try std.testing.expect(mode <= 2);
+}
+
+const repeat = @import("test_util.zig").repeat;
+
+test "real read_timeout waits for bytes, times out when there are none, and sees the end" {
+    // Goal: the poll-then-read that the D-Bus client's waits are built on. Method: a real pipe
+    // with nothing in it times out (the call returns after about the time asked, not a hang);
+    // with a byte in it the read returns it; with the writer closed the read returns 0.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const pipe = try subject.pipe();
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectError(error.TimedOut, subject.read_timeout(pipe.read, &buffer, 10));
+    try std.testing.expectEqual(@as(u16, 0), subject.last_errno());
+    try subject.write_handle_all(pipe.write, "x");
+    try std.testing.expectEqual(@as(u32, 1), try subject.read_timeout(pipe.read, &buffer, 10));
+    try std.testing.expectEqual(@as(u8, 'x'), buffer[0]);
+    subject.close(pipe.write);
+    try std.testing.expectEqual(@as(u32, 0), try subject.read_timeout(pipe.read, &buffer, 10));
+    subject.close(pipe.read);
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+test "real socket_connect names why a bus cannot be reached" {
+    // Goal: a path that does not exist is NotFound (ENOENT), and one that is not a socket is
+    // refused with the errno the diagnostic names (ECONNREFUSED); neither leaves a descriptor.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    try std.testing.expectError(error.NotFound, subject.socket_connect("/zigbox-no-such-bus"));
+    try std.testing.expectEqual(@as(u16, 2), subject.last_errno());
+    try std.testing.expectError(error.IoFailed, subject.socket_connect("/dev/null"));
+    try std.testing.expectEqual(@as(u16, 111), subject.last_errno());
+    try std.testing.expectError(error.PathTooLong, subject.socket_connect(repeat('/', 108)));
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
 }

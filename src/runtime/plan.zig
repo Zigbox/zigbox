@@ -29,6 +29,9 @@ pub const Kind = enum {
     write_uid_map,
     run_newuidmap,
     run_newgidmap,
+    /// Asks the user's systemd manager for the container's scope and waits for its job; only in
+    /// a plan built with a scope.
+    start_scope,
     release_child,
     await_report,
     reap,
@@ -60,7 +63,7 @@ pub const Kind = enum {
 pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
-        .run_newuidmap, .run_newgidmap => .parent,
+        .run_newuidmap, .run_newgidmap, .start_scope => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -96,7 +99,8 @@ pub const child_steps_count: u32 = 19 + 2 * constants.container_devices_count +
 /// writes both maps itself), the child has `child_steps_count`.
 pub const steps_count_single: u32 = 8 + child_steps_count;
 
-/// Steps of a plan that uses the helpers: the parent has seven (one step per helper).
+/// Steps of a plan that uses the helpers: the parent has seven (one step per helper). A plan with
+/// a scope has one more, whichever map it uses.
 pub const steps_count_full: u32 = 7 + child_steps_count;
 
 /// How the container's ids are mapped to the host's.
@@ -135,6 +139,13 @@ pub const Step = struct {
     tolerant: bool,
 };
 
+/// What a scoped run needs from the user's systemd manager: the version it reported (which
+/// decides unit property or cgroupfs file for each limit) and the limits.
+pub const ScopeInput = struct {
+    version: u32,
+    limits: spec.Limits,
+};
+
 pub const Input = struct {
     rootfs: []const u8,
     name: []const u8,
@@ -144,6 +155,8 @@ pub const Input = struct {
     uid: u32,
     gid: u32,
     mapping: Mapping,
+    /// Null: no scope, as in M1 (no `start_scope` step, and no limits).
+    scope: ?ScopeInput = null,
 };
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
@@ -153,6 +166,12 @@ pub const Plan = struct {
     count: u32,
     /// Whether the ids are mapped through the helpers (`Mapping.full`).
     full: bool,
+    /// Whether the plan has a `start_scope` step, and what it is made with.
+    scoped: bool,
+    scope_name: Text,
+    scope_description: Text,
+    scope_version: u32,
+    scope_limits: spec.Limits,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -172,15 +191,17 @@ pub const Plan = struct {
         assert(spec.command_problem(input.command) == null);
         plan.count = 0;
         plan.full = input.mapping == .full;
+        plan.scoped = input.scope != null;
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
         // Offset 0 is the empty text, so a step with nothing to say has a valid reference.
         assert(plan.add_text(&.{""}).offset == 0);
         plan.name = plan.add_text(&.{input.name});
+        plan.build_scope(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
-        assert(plan.count == @as(u32, if (plan.full) 5 else 6));
+        assert(plan.count == plan.first_child());
         plan.push_child_steps(input.rootfs);
         plan.push(.await_report, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
@@ -197,10 +218,13 @@ pub const Plan = struct {
         assert(plan.steps[plan.count - 1].kind == .reap);
         assert(plan.steps[plan.count - 2].kind == .await_report);
         // The child's steps are one contiguous run, between `release_child` and `await_report`.
-        const first_child: u32 = if (plan.full) 5 else 6;
-        assert(plan.steps[first_child - 1].kind == .release_child);
-        for (plan.steps[0..first_child]) |step| assert(side_of(step.kind) == .parent);
-        for (plan.steps[first_child .. plan.count - 2]) |step| assert(side_of(step.kind) == .child);
+        const child_start = plan.first_child();
+        assert(plan.steps[child_start - 1].kind == .release_child);
+        assert((plan.steps[child_start - 2].kind == .start_scope) == plan.scoped);
+        for (plan.steps[0..child_start]) |step| assert(side_of(step.kind) == .parent);
+        for (plan.steps[child_start .. plan.count - 2]) |step| {
+            assert(side_of(step.kind) == .child);
+        }
         assert(plan.steps[plan.count - 3].kind == .exec);
         // The exec image points into the plan itself: a copy of the plan would break it.
         const first_argument = plan.argv[0].?;
@@ -210,7 +234,34 @@ pub const Plan = struct {
     }
 
     pub fn steps_expected(plan: *const Plan) u32 {
-        return if (plan.full) steps_count_full else steps_count_single;
+        assert(plan.count <= constants.plan_steps_max);
+        const base = if (plan.full) steps_count_full else steps_count_single;
+        return base + @intFromBool(plan.scoped);
+    }
+
+    /// The index of the first of the child's steps: after the parent's start, which ends with
+    /// `release_child`.
+    pub fn first_child(plan: *const Plan) u32 {
+        assert(plan.count <= constants.plan_steps_max);
+        const parent: u32 = if (plan.full) 5 else 6;
+        return parent + @intFromBool(plan.scoped);
+    }
+
+    /// The unit name and description of a scoped plan: "zbx-<name>.scope" and "zbx: <name>".
+    fn build_scope(plan: *Plan, input: *const Input) void {
+        plan.scope_name = empty_text;
+        plan.scope_description = empty_text;
+        plan.scope_version = 0;
+        plan.scope_limits = .{};
+        const scope = input.scope orelse return;
+        assert(scope.version > 0);
+        assert(spec.limits_problem(scope.limits) == null);
+        const parts = [_][]const u8{ constants.scope_prefix, input.name, constants.scope_suffix };
+        plan.scope_name = plan.add_text(&parts);
+        plan.scope_description = plan.add_text(&.{ "zbx: ", input.name });
+        plan.scope_version = scope.version;
+        plan.scope_limits = scope.limits;
+        assert(plan.text(plan.scope_name).len <= constants.scope_name_bytes_max);
     }
 
     pub fn text(plan: *const Plan, ref: Text) [:0]const u8 {
@@ -271,6 +322,8 @@ pub const Plan = struct {
             .single => plan.push_direct_maps(input),
             .full => |helpers| plan.push_helper_maps(input, helpers),
         }
+        // The scope exists before the child may run its first step, and so before its command.
+        if (plan.scoped) plan.push(.start_scope, plan.scope_name, plan.scope_description, 0);
         plan.push(.release_child, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .release_child);
         assert(side_of(plan.steps[plan.count - 1].kind) == .parent);
@@ -322,7 +375,7 @@ pub const Plan = struct {
     }
 
     fn push_child_steps(plan: *Plan, rootfs_text: []const u8) void {
-        assert(plan.count == @as(u32, if (plan.full) 5 else 6)); // After the parent's start.
+        assert(plan.count == plan.first_child()); // After the parent's start.
         assert(rootfs_text.len > 0);
         const rootfs = plan.add_text(&.{rootfs_text});
         const dev = plan.add_text(&.{ rootfs_text, "/dev" });
@@ -459,6 +512,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map => "writing the container's uid map",
         .run_newuidmap => "running newuidmap to write the container's uid map",
         .run_newgidmap => "running newgidmap to write the container's gid map",
+        .start_scope => "starting the container's cgroup scope",
         .release_child => "letting the container continue",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
@@ -693,4 +747,37 @@ test "describe names every step and adds the device or link" {
             try testing.expectEqualStrings("creating the link /dev/stdin", phrase);
         }
     }
+}
+
+test "a plan with a scope has the start_scope step before the go-ahead, with its names" {
+    // Goal: the scope's place in the plan: after the maps (single or helpers) and before
+    // release_child, so the child is in its cgroup before it may run anything; the unit and its
+    // description are made from the container's name; a plan without one is unchanged.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    input.scope = .{ .version = 255, .limits = .{ .pids = 64 } };
+    plan.build(&input);
+    try testing.expectEqual(steps_count_single + 1, plan.count);
+    try testing.expectEqual(Kind.start_scope, plan.steps[plan.first_child() - 2].kind);
+    try testing.expectEqual(Kind.release_child, plan.steps[plan.first_child() - 1].kind);
+    const step = plan.steps[plan.first_child() - 2];
+    try testing.expectEqualStrings("zbx-web-1.scope", plan.text(step.target));
+    try testing.expectEqualStrings("zbx: web-1", plan.text(step.source));
+    try testing.expectEqual(@as(u32, 255), plan.scope_version);
+    try testing.expectEqual(@as(?u32, 64), plan.scope_limits.pids);
+    var buffer: [160]u8 = undefined;
+    try testing.expectEqualStrings(
+        "starting the container's cgroup scope",
+        describe(&plan.steps[plan.first_child() - 2], &buffer),
+    );
+
+    input.mapping = .{ .full = test_helpers };
+    plan.build(&input);
+    try testing.expectEqual(steps_count_full + 1, plan.count);
+    try testing.expectEqual(Kind.start_scope, plan.steps[4].kind);
+
+    input.scope = null;
+    plan.build(&input);
+    try testing.expectEqual(steps_count_full, plan.count);
+    try testing.expect(!plan.scoped);
 }

@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0203</h1>
 <p class="summary">can't create the container's namespaces</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx runs a container in new user, mount, PID, UTS and IPC namespaces and writes the id maps of the user namespace. The kernel refused one of these, or a setting forbids it, so the container was not started.</p>
 <p>The cause names what failed. The usual reason is a restriction on unprivileged user namespaces: user.max_user_namespaces is 0, kernel.unprivileged_userns_clone is 0 (Debian), AppArmor restricts them (the Ubuntu 24.04 default), or a seccomp filter around zbx, as inside another container, blocks clone3. &quot;zbx doctor&quot; runs the same check and prints the command that fixes the setting (ZBX-E0101).</p>

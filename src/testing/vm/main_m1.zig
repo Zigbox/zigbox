@@ -8,7 +8,7 @@
 //!   5. A real Ctrl-C (byte 0x03 on the serial console) stops a foreground `sleep 1000` in the
 //!      container within 2 s, with exit 130.
 //! And: the full id map inside, a host mount and process invisible, a missing rootfs is
-//! ZBX-E0201 with exit 1, and a bundle made after a run with secrets planted holds none.
+//! ZBX-E0201 with exit 125, and a bundle made after a run with secrets planted holds none.
 //! `zig build demo-m1` (KVM) or `zig build demo-m1 -Daccel=tcg`. See docs/demos/m1.md.
 
 const std = @import("std");
@@ -101,8 +101,13 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
 }
 
 // The commands, as the user `demo` runs them. HOME is set because `runuser -u` keeps root's, and
-// the run records and bundles go under the home of the user who runs zbx.
-const run_prefix = "runuser -u demo -- env HOME=/home/demo /home/demo/zbx run " ++
+// the run records and bundles go under the home of the user who runs zbx. XDG_RUNTIME_DIR is set
+// because `runuser` starts no login session: they are what a login sets, and where zbx finds the
+// user's bus, to ask the user's systemd manager for the container's scope. The bus address is set
+// as well as the directory because runuser keeps root's environment, whose address names root's
+// bus; zbx would use it (and meet "permission denied") as it would after a plain `su`.
+const run_prefix = "runuser -u demo -- env HOME=/home/demo XDG_RUNTIME_DIR=/run/user/1000" ++
+    user_bus ++ " /home/demo/zbx run " ++
     "--rootfs /home/demo/alpine";
 const rootfs_dir = "/home/demo/alpine";
 
@@ -144,7 +149,9 @@ fn step_shell(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 
 fn step_host_sees_process(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m1: STEP 2: sleep 1000 in the background, seen by the host's ps\n", .{});
-    const command = "runuser -u demo -- sh -c 'setsid env HOME=/home/demo /home/demo/zbx run " ++
+    const command = "runuser -u demo -- sh -c 'setsid env HOME=/home/demo" ++
+        " XDG_RUNTIME_DIR=/run/user/1000" ++
+        user_bus ++ " /home/demo/zbx run " ++
         "--rootfs " ++ rootfs_dir ++ " --name bg1 -- sleep 1000 </dev/null >/dev/null 2>&1 &'; " ++
         "for i in $(seq 60); do pgrep -u demo -fx 'sleep 1000' >/dev/null && break; " ++
         "sleep 0.5; done; " ++
@@ -202,7 +209,9 @@ fn step_exit_code(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 fn step_ctrl_c(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m1: STEP 5: a real Ctrl-C (byte 0x03) on a foreground run\n", .{});
     const write_script = "printf '%s\\n' 'trap : INT' " ++
-        "'setpriv --reuid=1000 --regid=1000 --init-groups env HOME=/home/demo " ++
+        "'setpriv --reuid=1000 --regid=1000 --init-groups env HOME=/home/demo" ++
+        " XDG_RUNTIME_DIR=/run/user/1000" ++
+        user_bus ++ " " ++
         "/home/demo/zbx run --rootfs " ++ rootfs_dir ++ " --name ctrlc1 -- " ++
         "sh -c \"echo CTRLC-READY; exec sleep 1000\" 2>/tmp/zbx-ctrlc-err' " ++
         "'echo CTRLC-EXIT:$?' 'cat /tmp/zbx-ctrlc-err' > /tmp/ctrlc.sh";
@@ -280,14 +289,15 @@ fn extra_host_invisible(session: *Session, out: *Io.Writer, timer: *H.Timer) !vo
 }
 
 fn extra_missing_rootfs(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    try out.print("\ndemo-m1: EXTRA: a missing rootfs is ZBX-E0201, exit 1\n", .{});
-    const command = "runuser -u demo -- env HOME=/home/demo /home/demo/zbx run " ++
+    try out.print("\ndemo-m1: EXTRA: a missing rootfs is ZBX-E0201, exit 125\n", .{});
+    const command = "runuser -u demo -- env HOME=/home/demo XDG_RUNTIME_DIR=/run/user/1000" ++
+        user_bus ++ " /home/demo/zbx run " ++
         "--rootfs /home/demo/nothere -- /bin/sh";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
     checks_m1.check_missing_rootfs(result.streams, result.status) catch |err| {
         return fail_step(out, "EXTRA missing rootfs", "expected error[ZBX-E0201] on stderr, " ++
-            "nothing on stdout, exit 1", err);
+            "nothing on stdout, exit 125", err);
     };
     try timer.lap(out, "missing rootfs");
 }
@@ -300,7 +310,8 @@ fn extra_bundle(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         "P=$($z bundle --last); echo BUNDLE:$P; tar -tzf $P; echo LISTED-END; " ++
         "echo LEAKS:$(tar -xzOf $P | grep -c -e hunter2 -e ghp_FAKEdemo); " ++
         "echo REDACTED:$(tar -xzOf $P | grep -c redacted:)";
-    const command = "runuser -u demo -- env HOME=/home/demo " ++
+    const command = "runuser -u demo -- env HOME=/home/demo XDG_RUNTIME_DIR=/run/user/1000" ++
+        user_bus ++ " " ++
         "GITHUB_TOKEN=ghp_FAKEdemo0123456789abcdefghij " ++
         "DB_PASSWORD=hunter2demo sh -c '" ++ script ++ "'";
     const result = try session.run(command, limits.command_timeout_kvm_s);
@@ -316,3 +327,6 @@ test {
     _ = @import("checks_m1.zig");
     _ = @import("harness.zig");
 }
+
+// The address of the demo user's own bus; `runuser` would leave root's in place.
+const user_bus = " DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus";

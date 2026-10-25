@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0202</h1>
 <p class="summary">can't run the command in the rootfs</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (126 or 127 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The container was set up, but its command could not be run inside the root file system. The cause says which: the file is not there, it is not executable, or it is not a program for this machine's CPU.</p>
 <p>A command without a slash is looked up in the container's PATH, which is /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin inside the rootfs, not in the host's. The host's environment is not passed on. A dynamically linked program also needs its libc and loader inside the rootfs; a missing loader is reported as a missing file.</p>

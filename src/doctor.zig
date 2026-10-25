@@ -34,6 +34,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
+const scope_mod = @import("runtime/scope.zig");
+const scope_text = @import("runtime/scope_text.zig");
 const parse = @import("parse.zig");
 const text_util = @import("text.zig");
 const diag_codes = @import("diag/codes.zig");
@@ -340,6 +342,18 @@ fn return_facts() void {
     assert(facts_busy.swap(false, .release));
 }
 
+/// What the probe of the user's bus found: the systemd version, or why there is none.
+pub const BusFact = struct {
+    /// The probe ran: the user manager's cgroup exists, so there may be a bus to ask.
+    attempted: bool = false,
+    ok: bool = false,
+    version: u32 = 0,
+    version_text: client_text = .{},
+    problem: scope_mod.Problem = .no_address,
+};
+
+const client_text = @import("dbus/client.zig").Text;
+
 pub const Facts = struct {
     uname: ?host_mod.Uname,
     uname_err: ?host_mod.Error,
@@ -354,6 +368,8 @@ pub const Facts = struct {
     /// `user@UID.service` below /sys/fs/cgroup: the cgroup systemd delegates to the user.
     cgroup_user: StatFact,
     cgroup_controllers: Slot(constants.cgroup_list_bytes_max),
+    /// The systemd user manager on the user's D-Bus, which zbx asks for each container's scope.
+    bus: BusFact,
 
     probe_overlay: ProbeFact,
 
@@ -381,6 +397,7 @@ pub const Facts = struct {
         facts.cgroup_root.reset();
         facts.cgroup_user = .{};
         facts.cgroup_controllers.reset();
+        facts.bus = .{};
         facts.probe_overlay = .{};
         facts.uid = 0;
         facts.passwd.reset();
@@ -462,6 +479,7 @@ fn gather_cgroup(host: Host, facts: *Facts) void {
     facts.cgroup_root.load(host, "/sys/fs/cgroup/cgroup.controllers");
     facts.cgroup_controllers.reset();
     facts.cgroup_user = .{ .attempted = true };
+    facts.bus = .{};
     var buffer: [160]u8 = undefined;
     const directory = user_manager_path(&buffer, facts.uid);
     facts.cgroup_user.stat = host.stat(directory) catch |err| {
@@ -476,6 +494,22 @@ fn gather_cgroup(host: Host, facts: *Facts) void {
     facts.cgroup_controllers.load(host, file catch unreachable);
     assert(facts.cgroup_root.attempted);
     assert(facts.cgroup_controllers.attempted);
+    gather_bus(host, facts);
+}
+
+/// Asks the user's bus for the systemd `Version` (read-only): zbx makes each container's scope
+/// there. Only where the user manager exists, since without it there is no bus to ask.
+fn gather_bus(host: Host, facts: *Facts) void {
+    assert(facts.cgroup_user.attempted);
+    assert(!facts.bus.attempted);
+    if (facts.cgroup_user.err != null) return;
+    var probe: scope_mod.Probe = undefined;
+    facts.bus.attempted = true;
+    facts.bus.ok = scope_mod.probe(host, &probe, &facts.bus.problem);
+    if (!facts.bus.ok) return;
+    facts.bus.version = probe.version;
+    facts.bus.version_text = probe.version_text;
+    assert(facts.bus.version > 0);
 }
 
 fn gather_subid(host: Host, facts: *Facts) void {
@@ -564,6 +598,7 @@ fn error_reason(err: host_mod.Error) []const u8 {
         error.Stalled => "made no progress",
         error.Unsupported => "not supported by this kernel",
         error.NoData => "no such attribute",
+        error.TimedOut => "timed out",
         error.IoFailed => "input/output error",
     };
     assert(reason.len > 0);
@@ -919,7 +954,7 @@ fn evaluate_cgroup(facts: *const Facts, check: *Check) void {
         check.fix_with("look at the file:", "cat {s}", .{file});
         return;
     };
-    cgroup_verdict(check, facts.uid, offered);
+    cgroup_verdict(check, facts.uid, offered, &facts.bus);
 }
 
 fn cgroup_v2_missing(check: *Check) void {
@@ -973,7 +1008,12 @@ fn cgroup_owned_directory(check: *Check, facts: *const Facts, directory: []const
     return false;
 }
 
-fn cgroup_verdict(check: *Check, uid: u32, offered: parse.ControllerSet) void {
+fn cgroup_verdict(
+    check: *Check,
+    uid: u32,
+    offered: parse.ControllerSet,
+    bus: *const BusFact,
+) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
     var missing: Detail = .{};
@@ -992,9 +1032,37 @@ fn cgroup_verdict(check: *Check, uid: u32, offered: parse.ControllerSet) void {
         delegate_fixes(check);
         return;
     }
+    if (!bus_usable(check, bus)) return;
     check.detail.print("cgroup v2, user@{d}.service delegated to uid {d}:", .{ uid, uid });
     append_controllers(&check.detail, offered);
+    check.detail.print("; systemd {s} on the user bus", .{bus.version_text.slice()});
     check.status = .ok;
+}
+
+/// True if the user's bus answered. Otherwise this is the check's failure: zbx cannot make a
+/// container's scope without it, whatever the cgroup offers.
+fn bus_usable(check: *Check, bus: *const BusFact) bool {
+    assert(check.status == .ok);
+    assert(bus.attempted); // The manager's cgroup exists, or we would not be here.
+    if (bus.ok) return true;
+    check.problem("{s}: containers cannot get a cgroup scope", .{
+        scope_text.problem_short(&bus.problem),
+    });
+    check.cause_symptom();
+    scope_text.problem_causes(&check.diag, &bus.problem);
+    switch (scope_text.problem_code(&bus.problem)) {
+        .E0302 => {
+            const inherited = "unset an address inherited from another user:";
+            check.fix(inherited, "unset DBUS_SESSION_BUS_ADDRESS");
+            check.fix("or log in again as this user, through a systemd (logind) session", "");
+        },
+        .E0301 => {
+            check.fix("keep the user manager running:", "sudo loginctl enable-linger $(id -un)");
+            check.fix("or log in through a systemd (logind) session, such as ssh or a console", "");
+        },
+        else => check.fix("look at the user manager:", "systemctl --user status"),
+    }
+    return false;
 }
 
 fn append_controllers(detail: *Detail, set: parse.ControllerSet) void {

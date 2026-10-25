@@ -1,0 +1,6 @@
+error[ZBX-E0103]: cgroup v2 is not set up for this user
+  cause  the bus socket does not exist: this login has no systemd user session
+  fix    keep the user manager running:   sudo loginctl enable-linger $(id -un)
+         or log in through a systemd (logind) session, such as ssh or a console
+  more   zbx explain E0103 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0103.html

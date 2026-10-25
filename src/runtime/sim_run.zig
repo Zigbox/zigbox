@@ -25,9 +25,13 @@ pub const runs_path = "/home/alice/.local/state/zbx/runs";
 pub const bundles_path = "/home/alice/.local/state/zbx/bundles";
 
 /// The environment of a user whose home is `home_path`, with and without a terminal.
-pub const env_home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = home_path }};
+pub const env_home = [_]host_sim.EnvironmentVariable{
+    .{ .name = "HOME", .value = home_path },
+    .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
+};
 pub const env_home_term = [_]host_sim.EnvironmentVariable{
     .{ .name = "HOME", .value = home_path },
+    .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
     .{ .name = "TERM", .value = "xterm-256color" },
 };
 
@@ -101,8 +105,14 @@ pub fn sample_view(name: []const u8, begun: u64) records.View {
 }
 
 /// A plan for the oracle's own questions (which step is where). The steps are the same for every
-/// command and name; only the id mapping changes them, by one step.
+/// command and name; the id mapping changes them by one step, and so does the scope that a host
+/// with a user bus gives (which is every simulated host unless its model says otherwise).
 pub fn sample_plan(plan: *plan_mod.Plan, full: bool) void {
+    sample_plan_with(plan, full, true);
+}
+
+/// Like `sample_plan`, for a run with (`scoped`) or without a scope.
+pub fn sample_plan_with(plan: *plan_mod.Plan, full: bool, scoped: bool) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -117,6 +127,7 @@ pub fn sample_plan(plan: *plan_mod.Plan, full: bool) void {
         .uid = 1000,
         .gid = 1000,
         .mapping = mapping,
+        .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
     });
 }
 
@@ -178,6 +189,7 @@ pub fn leak(sim: *const HostSim, before: *const Baseline) ?[]const u8 {
     if (sim.open_count() != 0) return "a descriptor was left open";
     if (sim.world.broken_pipe_ignored) return "SIGPIPE was left ignored";
     if (sim.world.current != 0) return "the run ended in a child";
+    if (sim.world.bus.scope_count() != 0) return "a cgroup scope was left behind";
     return null;
 }
 

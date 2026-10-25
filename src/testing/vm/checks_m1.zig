@@ -196,12 +196,13 @@ pub fn check_host_is_invisible(output: []const u8) Error!void {
     if (!has_line(output, "process-hidden")) return error.LineMissing;
 }
 
-/// A rootfs that does not exist: `error[ZBX-E0201]` on stderr, nothing on stdout, exit 1.
+/// A rootfs that does not exist: `error[ZBX-E0201]` on stderr, nothing on stdout, exit 125
+/// (zbx's own failure before the command started, which a container's exit code cannot be).
 pub fn check_missing_rootfs(streams: Streams, status: u8) Error!void {
     const header = "error[ZBX-E0201]: ";
     if (!std.mem.startsWith(u8, streams.stderr, header)) return error.NoteMissing;
     if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
-    if (status != 1) return error.ExitCodeWrong;
+    if (status != 125) return error.ExitCodeWrong;
 }
 
 /// The bundle step prints `BUNDLE:<path>`, the `tar -tzf` listing, `LISTED-END`, then
@@ -356,15 +357,18 @@ test "host invisibility, missing rootfs, bundle" {
     ); // Nothing to hide.
     try check_missing_rootfs(
         .{ .stdout = "", .stderr = "error[ZBX-E0201]: the rootfs is missing\n" },
-        1,
+        125,
     );
-    try testing.expectError(
-        error.ExitCodeWrong,
-        check_missing_rootfs(.{ .stdout = "", .stderr = "error[ZBX-E0201]: x\n" }, 2),
-    );
+    // The old standard codes are wrong now: a container could exit with them.
+    for ([_]u8{ 0, 1, 2, 70, 126, 127 }) |old| {
+        try testing.expectError(
+            error.ExitCodeWrong,
+            check_missing_rootfs(.{ .stdout = "", .stderr = "error[ZBX-E0201]: x\n" }, old),
+        );
+    }
     try testing.expectError(
         error.NoteMissing,
-        check_missing_rootfs(.{ .stdout = "", .stderr = "error[ZBX-E0001]: x\n" }, 1),
+        check_missing_rootfs(.{ .stdout = "", .stderr = "error[ZBX-E0001]: x\n" }, 125),
     );
     const bundle = "ran\nBUNDLE:/home/demo/.local/state/zbx/bundles/x.tar.gz\n" ++
         "x/MANIFEST.txt\nx/run-record.zon\nx/environment.txt\nx/doctor.json\n" ++

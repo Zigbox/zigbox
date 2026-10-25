@@ -1,0 +1,6 @@
+error[ZBX-E0303]: the user bus answered in a way zbx can't use
+  cause  the user bus sent something zbx cannot use while asking systemd: the
+         reply is malformed
+  fix    check this host (ZBX-E0103):   zbx doctor
+  more   zbx explain E0303 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0303.html

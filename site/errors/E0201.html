@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0201</h1>
 <p class="summary">the rootfs is missing or not a directory</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>&quot;zbx run&quot; needs a directory to use as the container's root file system, and the path given to --rootfs is not one: it does not exist, it is a file, or it cannot be read.</p>
 <p>In this version the root file system is a directory that you unpack yourself. An Alpine minirootfs works:</p>

@@ -639,7 +639,8 @@ pub fn unredacted_warning(diag: *Diag) void {
 
 /// Writes a bundle for `request` and says where it went. The reason for a failure is in `diag`.
 pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!void {
-    if (request.name) |name| assert(name.len > 0);
+    // An empty name is a user's mistake (`zbx bundle ""`), refused below as an unknown run.
+    if (request.name) |name| assert(name.len <= constants.arg_bytes_max);
     assert(diag.code == null);
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) return no_state(diag);
