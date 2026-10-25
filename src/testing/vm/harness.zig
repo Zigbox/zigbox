@@ -12,6 +12,31 @@ const session_mod = @import("session.zig");
 
 const Session = session_mod.Session;
 
+// ---- Running programs as the demo user ----
+//
+// `runuser` and `setpriv` start no login session: they keep root's environment, whose
+// `DBUS_SESSION_BUS_ADDRESS` names root's bus, and set no `XDG_RUNTIME_DIR`. zbx needs the
+// user's bus to give a container its cgroup scope, so every command that runs zbx as the demo
+// user goes through one of these prefixes. The test at the end of this file fails if a demo
+// source names `/home/demo/zbx` without one.
+
+/// The variables a login session of the demo user would set.
+pub const demo_env = "HOME=/home/demo XDG_RUNTIME_DIR=/run/user/1000 " ++
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus";
+
+/// The front of a command line that runs a program as the demo user: `as_demo ++ "/home/demo/zbx
+/// doctor"`.
+pub const as_demo = "runuser -u demo -- env " ++ demo_env ++ " ";
+
+/// The same for a command that must be started in its own session (`setsid`), inside `sh -c '`;
+/// the caller closes the quote.
+pub const as_demo_setsid = "runuser -u demo -- sh -c 'setsid env " ++ demo_env ++ " ";
+
+/// The same for a command on a terminal, by user and group id; `setpriv` execs, so nothing sits
+/// between the terminal and the program.
+pub const as_demo_setpriv = "setpriv --reuid=1000 --regid=1000 --init-groups env " ++
+    demo_env ++ " ";
+
 /// The demo's name, which prefixes every line the harness prints. Set once by the demo.
 pub var demo_name: []const u8 = "demo-m0";
 
@@ -208,4 +233,34 @@ test "accelerator choice: KVM when usable, TCG only when asked, otherwise a clea
     try std.testing.expectEqual(session_mod.Accel.kvm, try choose_accel("kvm", true));
     try std.testing.expectError(error.NoKvm, choose_accel("kvm", false));
     try std.testing.expectError(error.BadAccel, choose_accel("hvf", true));
+}
+
+test "every demo command that runs zbx as the demo user goes through the session prefix" {
+    // Goal: a later demo cannot forget the user's bus (it would run without a cgroup scope, or
+    // with root's bus). Method: scan the demo sources for a line that names the binary and
+    // check that the line, or one of the three before it, uses one of the prefixes, or says
+    // why not with `no-bus-env:`.
+    const sources = [_][]const u8{ @embedFile("main.zig"), @embedFile("main_m1.zig") };
+    const allowed = [_][]const u8{ "as_demo", "demo_env", "no-bus-env:", "z=/home/demo/zbx" };
+    for (sources) |source| {
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        var recent: [4][]const u8 = .{ "", "", "", "" };
+        while (lines.next()) |line| {
+            recent[0] = recent[1];
+            recent[1] = recent[2];
+            recent[2] = recent[3];
+            recent[3] = line;
+            const names_binary = std.mem.indexOf(u8, line, "\"") != null and
+                std.mem.indexOf(u8, line, "/home/demo/zbx ") != null;
+            if (!names_binary) continue;
+            if (std.mem.indexOf(u8, line, "file /home/demo/zbx") != null) continue; // Not a run.
+            var found = false;
+            for (recent) |earlier| {
+                for (allowed) |word| {
+                    if (std.mem.indexOf(u8, earlier, word) != null) found = true;
+                }
+            }
+            try std.testing.expect(found);
+        }
+    }
 }
