@@ -65,6 +65,7 @@ pub const Ended = union(enum) {
     signaled: u8,
 
     pub fn code(ended: Ended) u8 {
+        assert(@backingInt(ended) <= 1);
         switch (ended) {
             .exited => |value| return value,
             .signaled => |number| {
@@ -121,6 +122,7 @@ pub const ExitReason = union(enum) {
 
     /// The word the JSON `container_exit.reason` and the run record use.
     pub fn word(reason: *const ExitReason) []const u8 {
+        assert(@intFromPtr(reason) != 0);
         return switch (reason.*) {
             .oom => "oom",
             .pid_limit => "pid_limit",
@@ -322,6 +324,8 @@ pub fn wait(handle: *Handle) ExitReason {
 /// What the container's end was, given what the cgroup counted. An OOM kill outranks a process
 /// limit; either outranks how PID 1 ended, which stays in the reason.
 pub fn classify(ended: Ended, events: scope_mod.Events, limits: spec_mod.Limits) ExitReason {
+    if (ended == .signaled) assert(ended.signaled > 0);
+    if (limits.memory_bytes) |bytes| assert(bytes >= constants.limit_memory_bytes_min);
     if ((events.oom_kill orelse 0) > 0) {
         return .{ .oom = .{ .limit_bytes = limits.memory_bytes, .ended = ended } };
     }
@@ -337,6 +341,7 @@ pub fn classify(ended: Ended, events: scope_mod.Events, limits: spec_mod.Limits)
 /// Sees that the scope is gone now that the container has ended; if it is not, a warning.
 fn finish_scope(handle: *Handle) void {
     assert(handle.status == .stopped);
+    assert(handle.session.pid == null); // The container is gone: reaped or abandoned.
     var problem: scope_mod.Problem = undefined;
     if (handle.session.cleanup_scope(&problem)) return;
     var warning: Diag = undefined;

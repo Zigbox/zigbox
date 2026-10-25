@@ -202,6 +202,8 @@ pub const Bus = struct {
 
     /// The process is gone: its scope has no process left. The index of that scope, if any.
     pub fn process_ended(bus: *Bus, pid: u32) ?u32 {
+        assert(pid > 0);
+        assert(bus.scopes.len == scopes_max);
         for (&bus.scopes, 0..) |*scope, index| {
             if (!scope.active or scope.pid != pid) continue;
             scope.exited = true;
@@ -499,6 +501,8 @@ pub const Bus = struct {
     /// has the match rule). The strictness is the point: a client that forgets to subscribe
     /// waits for ever.
     fn subscription(bus: *Bus, conn: *Conn, call: *const message_mod.Message, on: bool) void {
+        assert(conn.used);
+        assert(call.member != null);
         if (on) {
             if (bus.active(conn).subscribe_error) |name| {
                 return send_error(conn, call, name, "Access denied");
@@ -511,6 +515,8 @@ pub const Bus = struct {
     /// `StopUnit(name, mode)`: a unit that is not there is `NoSuchUnit`; otherwise a job that
     /// ends the model's way, and with "done" the scope is gone.
     fn stop_unit(bus: *Bus, conn: *Conn, call: *const message_mod.Message) void {
+        assert(conn.used);
+        assert(bus.scope_stopped == null);
         const bad = error_invalid_args;
         if (!std.mem.eql(u8, call.signature, "ss")) return send_error(conn, call, bad, "ss");
         var reader = call.body_reader();
@@ -575,6 +581,8 @@ fn send_job_removed(
     unit: []const u8,
     result: []const u8,
 ) void {
+    assert(conn.used);
+    assert(path.len > 0);
     if (!conn.matched or !conn.subscribed) return;
     var signal_buffer: [256]u8 = undefined;
     var writer = wire.Writer.init(&signal_buffer);

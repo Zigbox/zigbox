@@ -7,7 +7,8 @@
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
 //! skipped, never misread. Version 2 added the limits, the scope's name, why the run ended
 //! (`EndReason`) and whether it was detached; a version 1 record reads with no limits, no scope,
-//! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may add some. The file is
+//! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may
+//! add some. The file is
 //! plain ZON, but the reader is a line reader for the shape the writer produces (one field per
 //! line), because the standard ZON parser allocates and this must not.
 //!
@@ -45,6 +46,7 @@ pub const EndReason = enum { none, exited, signal, oom, pid_limit };
 /// The reason an exit implies when nothing more is known (version 1 records, or a view that
 /// does not say).
 pub fn reason_of(exit: Exit) EndReason {
+    if (exit == .signaled) assert(exit.signaled > 0);
     return switch (exit) {
         .exited => .exited,
         .signaled => .signal,
@@ -166,6 +168,7 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
 
 fn write_limit(writer: *std.Io.Writer, name: []const u8, value: anytype) void {
     assert(name.len > 0);
+    assert(writer.buffer.len >= constants.record_bytes_max);
     if (value) |number| {
         write_format(writer, "    .{s} = {d},\n", .{ name, number });
     } else {
@@ -432,13 +435,17 @@ fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!voi
 
 /// A field version 2 added: null if `key` is not one, else whether the value was good.
 fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
+    assert(key.len > 0);
+    assert(value.len > 0);
     if (std.mem.eql(u8, key, "reason")) {
         const name = std.mem.trimStart(u8, value, ".");
         out.reason = std.meta.stringToEnum(EndReason, name) orelse return false;
         return true;
     }
     if (std.mem.eql(u8, key, "detached")) {
-        if (std.mem.eql(u8, value, "true")) out.detached = true else if (std.mem.eql(u8, value, "false")) out.detached = false else return false;
+        const yes = std.mem.eql(u8, value, "true");
+        if (!yes and !std.mem.eql(u8, value, "false")) return false;
+        out.detached = yes;
         return true;
     }
     if (std.mem.eql(u8, key, "scope")) {
@@ -464,6 +471,8 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
 /// `null` is no limit; a number is the limit. Anything else is not a limit at all, which the
 /// caller tells from "no limit" by the optional-of-optional.
 fn parse_limit(comptime Int: type, value: []const u8) ??Int {
+    assert(value.len > 0); // The line reader refused an empty value.
+    assert(@typeInfo(Int) == .int);
     if (std.mem.eql(u8, value, "null")) return @as(?Int, null);
     const number = std.fmt.parseInt(Int, value, 10) catch return null;
     return @as(?Int, number);

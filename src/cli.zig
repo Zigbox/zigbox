@@ -875,6 +875,7 @@ fn report_outcome(
 /// (the exit code is 137 for an OOM kill whatever it did), so nothing is hidden.
 fn write_ended_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
     assert(writer.end < writer.buffer.len);
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
     const ended = switch (reason.*) {
         .oom => |hit| hit.ended,
         .pid_limit => |hit| hit.ended,
@@ -896,6 +897,7 @@ fn write_ended_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) v
 /// A size as the largest binary unit that divides it, "128 MiB".
 fn bytes_words(buffer: []u8, bytes: u64) []const u8 {
     assert(buffer.len >= 32);
+    assert(bytes > 0);
     const units = [_]struct { size: u64, name: []const u8 }{
         .{ .size = 1 << 40, .name = "TiB" },
         .{ .size = 1 << 30, .name = "GiB" },
@@ -933,7 +935,7 @@ fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) 
                 writer.print("zbx: stopped: process limit reached (limit {d})\n", .{limit}) catch
                     unreachable; // Same bound as above.
             } else {
-                writer.print("zbx: stopped: process limit reached\n", .{}) catch unreachable;
+                writer.writeAll("zbx: stopped: process limit reached\n") catch unreachable; // Same.
             }
             return;
         },
@@ -952,6 +954,7 @@ fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) 
 
 fn write_optional(writer: *std.Io.Writer, value: anytype) void {
     assert(writer.end < writer.buffer.len);
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
     // Cannot fail: a number or null in a buffer that holds a message.
     if (value) |number| {
         writer.print("{d}", .{number}) catch unreachable; // Same bound as above.

@@ -138,12 +138,14 @@ pub fn watch_jobs(conn: *Connection) CallError!void {
 
 pub fn unsubscribe(conn: *Connection) CallError!void {
     assert(conn.is_open);
+    assert(conn.jobs_count <= conn.jobs.len);
     try manager_call(conn, "Unsubscribe");
 }
 
 /// A method of the manager that takes no arguments and returns nothing.
 fn manager_call(conn: *Connection, member: []const u8) CallError!void {
     assert(member.len > 0);
+    assert(conn.receive_start <= conn.receive_end);
     assert(conn.is_open);
     const reply = try conn.call(.{
         .destination = systemd_name,
@@ -175,6 +177,7 @@ pub fn start_scope(conn: *Connection, request: *const ScopeRequest) CallError!vo
 
 fn start_and_wait(conn: *Connection, request: *const ScopeRequest) CallError!void {
     assert(conn.is_open);
+    assert(request.pid > 1);
     var body_buffer: [2048]u8 = undefined;
     const body = marshal_scope(&body_buffer, request) catch |err| return protocol(conn, err);
     const reply = try conn.call(.{
@@ -191,6 +194,7 @@ fn start_and_wait(conn: *Connection, request: *const ScopeRequest) CallError!voi
 /// Reads the job path out of a reply and waits for the job to end with "done".
 fn finish_job(conn: *Connection, reply: *const message_mod.Message) CallError!void {
     assert(conn.is_open);
+    assert(reply.kind == .method_return);
     if (!std.mem.eql(u8, reply.signature, "o")) return protocol(conn, error.BadSignature);
     var reader = reply.body_reader();
     var job_path_buffer: [96]u8 = undefined;

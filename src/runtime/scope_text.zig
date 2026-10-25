@@ -109,6 +109,7 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
 /// How the first bus turned the user away, in a few words.
 fn refusal_words(failure: *const client.Failure) []const u8 {
     assert(failure.errno < 4096);
+    assert(failure.kind != .remote);
     return switch (failure.kind) {
         .auth_refused => "it did not accept this user's authentication",
         else => if (failure.errno == 1) "permission denied" else "access denied",

@@ -292,6 +292,7 @@ pub const Session = struct {
     /// is not is a problem for the caller to warn about (ZBX-W0302). True if it is gone.
     pub fn cleanup_scope(session: *Session, problem: *scope_mod.Problem) bool {
         assert(session.pid == null);
+        assert(session.scope_up == (session.scope_up and session.plan.scoped));
         if (!session.scope_up) return true;
         session.scope_up = false;
         const name = session.plan.text(session.plan.scope_name);

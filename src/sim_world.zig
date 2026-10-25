@@ -681,6 +681,8 @@ pub const World = struct {
     /// The manager gets to it when someone next connects to the bus, unless the model says
     /// otherwise (`Model.scope_removal`).
     pub fn settle_scopes(world: *World) void {
+        assert(world.nodes_count <= constants.sim_nodes_max);
+        assert(world.written_count <= constants.sim_written_files_max);
         if (world.bus.model.scope_removal == .never) return;
         for (&world.bus.scopes, 0..) |*scope, index| {
             if (scope.active and scope.exited) world.end_scope(@intCast(index));
@@ -689,15 +691,18 @@ pub const World = struct {
 
     /// The scope is gone from the manager and from the cgroup tree.
     pub fn end_scope(world: *World, slot: u32) void {
+        assert(slot < world.bus.scopes.len);
         const scope = &world.bus.scopes[slot];
         assert(scope.active);
+        assert(scope.name.len > 0);
         scope.active = false;
         if (world.cgroup_stays) return;
         var path_buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
         const relative = scope_cgroup_path(&path_buffer, scope);
         var directory_buffer: [constants.cgroup_path_bytes_max + 16]u8 = undefined;
         // Cannot fail: a bounded relative path and a short prefix fit the buffer.
-        const directory = std.fmt.bufPrint(&directory_buffer, "/sys/fs/cgroup{s}", .{relative}) catch
+        const prefix = "/sys/fs/cgroup{s}";
+        const directory = std.fmt.bufPrint(&directory_buffer, prefix, .{relative}) catch
             unreachable; // Same bound as above.
         var limit_path: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
         // Cannot fail: a bounded directory and a short name.
@@ -753,11 +758,13 @@ pub const World = struct {
     /// counts from the start: the model has no time, and a command ends the way it is told to.
     fn write_event_files(world: *World, directory: []const u8) void {
         assert(directory.len > 0);
+        assert(directory[0] == '/');
         var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
         var text_buffer: [128]u8 = undefined;
         const memory = "low 0\nhigh 0\nmax 0\noom {d}\noom_kill {d}\noom_group_kill 0\n";
         // Cannot fail: a short format with two numbers in 128 bytes.
-        const events = std.fmt.bufPrint(&text_buffer, memory, .{ world.oom_kills, world.oom_kills }) catch
+        const counts = .{ world.oom_kills, world.oom_kills };
+        const events = std.fmt.bufPrint(&text_buffer, memory, counts) catch
             unreachable; // Same bound as above.
         const memory_path = std.fmt.bufPrint(&path_buffer, "{s}/memory.events", .{directory}) catch
             unreachable; // The directory is bounded and the name short.

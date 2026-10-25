@@ -161,6 +161,7 @@ fn open_bus(host: Host, conn: *client.Connection, problem: *Problem, via: *Via) 
 /// `/run/user/<uid>/bus`: where a login session puts the user's bus.
 fn own_path(uid: u32, buffer: *[constants.dbus_socket_path_bytes_max]u8) []const u8 {
     assert(buffer.len == constants.dbus_socket_path_bytes_max);
+    assert(uid != std.math.maxInt(u32));
     // Cannot fail: "/run/user/4294967295/bus" is 24 bytes.
     return std.fmt.bufPrint(buffer, "/run/user/{d}/bus", .{uid}) catch unreachable;
 }
@@ -170,6 +171,7 @@ fn own_path(uid: u32, buffer: *[constants.dbus_socket_path_bytes_max]u8) []const
 /// another address of the same user.
 fn worth_retrying(failure: *const client.Failure) bool {
     assert(failure.errno < 4096);
+    assert(failure.name.len <= constants.dbus_error_text_bytes_max);
     return switch (failure.kind) {
         .no_bus => failure.errno == errno_access or failure.errno == errno_perm,
         .auth_refused => true,
@@ -382,6 +384,7 @@ pub const Events = struct {
 /// plain exit it was).
 pub fn read_events(host: Host, directory: []const u8) Events {
     assert(directory.len <= constants.cgroup_path_bytes_max);
+    if (directory.len > 0) assert(directory[0] == '/');
     if (directory.len == 0) return .{ .oom_kill = null, .pids_max = null };
     return .{
         .oom_kill = event_count(host, directory, "memory.events", "oom_kill"),
@@ -391,6 +394,7 @@ pub fn read_events(host: Host, directory: []const u8) Events {
 
 fn event_count(host: Host, directory: []const u8, file: []const u8, key: []const u8) ?u64 {
     assert(directory.len > 0);
+    assert(file.len > 0);
     assert(key.len > 0);
     var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, file }) catch return null;
@@ -402,6 +406,7 @@ fn event_count(host: Host, directory: []const u8, file: []const u8, key: []const
 /// The number on the line `<key> <number>` of a cgroup events file.
 pub fn event_value(text: []const u8, key: []const u8) ?u64 {
     assert(key.len > 0);
+    assert(std.mem.indexOfScalar(u8, key, ' ') == null);
     assert(text.len <= 4096);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -417,6 +422,7 @@ pub fn event_value(text: []const u8, key: []const u8) ?u64 {
 /// directory that cannot be looked at has not been seen to go.
 pub fn cgroup_exists(host: Host, directory: []const u8) bool {
     assert(directory.len > 0);
+    assert(directory[0] == '/');
     var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.events", .{directory}) catch
         return true;
@@ -453,6 +459,7 @@ pub fn cleanup(host: Host, name: []const u8, directory: []const u8, problem: *Pr
 
 fn stop_steps(conn: *client.Connection, name: []const u8) bool {
     assert(conn.is_open);
+    assert(name.len > constants.scope_suffix.len);
     systemd.watch_jobs(conn) catch return false;
     _ = systemd.stop_scope(conn, name) catch return false;
     return true;

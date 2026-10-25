@@ -568,6 +568,7 @@ pub fn running_without_scope(diag: *Diag, problem: *const scope_mod.Problem) voi
 /// ZBX-W0302: the container ended and its scope is still there, or could not be checked.
 pub fn scope_not_cleaned(diag: *Diag, unit: []const u8, problem: *const scope_mod.Problem) void {
     assert(diag.code == null);
+    assert(unit.len <= constants.scope_name_bytes_max);
     assert(std.mem.endsWith(u8, unit, constants.scope_suffix));
     diag.raise(.W0302);
     diag.while_("making sure the container's scope {s} is gone", .{unit});
