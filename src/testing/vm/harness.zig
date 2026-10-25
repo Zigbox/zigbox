@@ -241,7 +241,7 @@ test "every demo command that runs zbx as the demo user goes through the session
     // check that the line, or one of the three before it, uses one of the prefixes, or says
     // why not with `no-bus-env:`.
     const sources = [_][]const u8{ @embedFile("main.zig"), @embedFile("main_m1.zig") };
-    const allowed = [_][]const u8{ "as_demo", "demo_env", "no-bus-env:", "z=/home/demo/zbx" };
+    const allowed = [_][]const u8{ "H.as_demo", "H.demo_env", "no-bus-env:", "z=/home/demo/zbx" };
     for (sources) |source| {
         var lines = std.mem.splitScalar(u8, source, '\n');
         var recent: [4][]const u8 = .{ "", "", "", "" };
