@@ -82,6 +82,7 @@ fn add_test_step(
     const roots = [_][]const u8{
         "src/testing/vm/main.zig",
         "src/testing/vm/main_m1.zig",
+        "src/testing/vm/main_m2.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -206,6 +207,11 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             .step = "demo-m1",
             .root = "src/testing/vm/main_m1.zig",
             .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
+        },
+        .{
+            .step = "vm-m2-experiment",
+            .root = "src/testing/vm/main_m2.zig",
+            .help = "Look at M2's limits and exit reports in the VM (not the M2 demo)",
         },
     };
     for (demos) |demo| {
