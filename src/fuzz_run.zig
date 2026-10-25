@@ -64,6 +64,16 @@ const StepFault = enum {
     silent,
 };
 
+/// When the manager removes a scope whose last process has gone (`sim_bus.Model.scope_removal`).
+const Removal = enum { lazily, promptly, never };
+
+/// What goes wrong when the scope that stays is stopped.
+const StopFault = enum { none, refused, canceled, stays };
+
+/// The address the environment carries for the user's bus: none, another user's socket that
+/// refuses at connect or at authentication, or a socket that does not exist.
+const Inherited = enum { none, denied, auth, stale };
+
 /// The text of a limit flag and what it must read as, or null for text that must be refused.
 const LimitText = struct { text: [:0]const u8, value: ?u64 };
 
@@ -102,6 +112,9 @@ const cpus_texts = [_]LimitText{
     .{ .text = "1.2345", .value = null },
     .{ .text = ".", .value = null },
 };
+
+/// Another user's bus, which the inherited address names. No scenario user has this id.
+const foreign_socket = "/run/user/4242/bus";
 
 const RootfsShape = enum { good, missing, a_file, empty, too_long };
 
@@ -165,10 +178,41 @@ const Scenario = struct {
     memory: ?LimitText,
     pids: ?LimitText,
     cpus: ?LimitText,
+    /// The kernel counted an OOM kill, or a refused fork, in the container's cgroup.
+    oom: bool,
+    pids_hit: bool,
+    removal: Removal,
+    stop_fault: StopFault,
+    inherited: Inherited,
 
-    /// Whether the probe finds a bus: the run then has a scope and the plan a step for it.
+    /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
+    /// stale inherited address is not permission trouble, so nothing falls back from it.
     fn scoped(scenario: *const Scenario) bool {
-        return scenario.bus == .fine;
+        return scenario.bus == .fine and scenario.inherited != .stale;
+    }
+
+    /// The stop fault that can matter: only a scope that stays is ever stopped.
+    fn stop_effective(scenario: *const Scenario) StopFault {
+        return if (scenario.removal == .never) scenario.stop_fault else .none;
+    }
+
+    /// Whether the counters of the cgroup can be read after the container ends.
+    fn events_readable(scenario: *const Scenario) bool {
+        return scenario.scoped() and scenario.removal != .promptly;
+    }
+
+    /// Whether the cleanup after the run ends in the warning that the scope was left behind.
+    fn lingers(scenario: *const Scenario) bool {
+        return scenario.scoped() and scenario.stop_effective() != .none;
+    }
+
+    /// The scope's name for a container called `name`, in the record and on the bus.
+    fn counts_as_oom(scenario: *const Scenario) bool {
+        return scenario.events_readable() and scenario.oom;
+    }
+
+    fn counts_as_pid_limit(scenario: *const Scenario) bool {
+        return scenario.events_readable() and scenario.pids_hit and !scenario.oom;
     }
 
     /// Whether any limit flag is given (valid or not).
@@ -259,7 +303,28 @@ fn random_scenario(random: std.Random) Scenario {
     scenario.memory = random_limit(random, &memory_texts);
     scenario.pids = random_limit(random, &pids_texts);
     scenario.cpus = random_limit(random, &cpus_texts);
+    random_cgroup(random, &scenario);
     return scenario;
+}
+
+/// What the cgroup counted and how the manager treats the scope after the run.
+fn random_cgroup(random: std.Random, scenario: *Scenario) void {
+    scenario.oom = random.uintLessThan(u8, 6) == 0;
+    scenario.pids_hit = random.uintLessThan(u8, 6) == 0;
+    // Scope cleanup and inherited-address faults are drawn only where nothing else is failing,
+    // so that every warning and every connection of the run can be accounted for.
+    const calm = scenario.fault_step == null and scenario.step_fault == .none and
+        scenario.helper_fails == null;
+    scenario.removal = .lazily;
+    scenario.stop_fault = .none;
+    scenario.inherited = .none;
+    if (calm and random.uintLessThan(u8, 3) == 0) {
+        scenario.removal = random.enumValue(Removal);
+        scenario.stop_fault = random.enumValue(StopFault);
+    }
+    if (calm and scenario.bus != .no_environment and random.uintLessThan(u8, 4) == 0) {
+        scenario.inherited = random.enumValue(Inherited);
+    }
 }
 
 fn random_limit(random: std.Random, table: []const LimitText) ?LimitText {
@@ -598,7 +663,7 @@ pub fn fuzz_run(seed: u64) void {
 
 /// The simulated process's environment: what the scenario says it has.
 const Environment = struct {
-    variables: [3]host_sim.EnvironmentVariable,
+    variables: [4]host_sim.EnvironmentVariable,
     count: u32,
     runtime_dir: [32]u8,
 
@@ -616,6 +681,17 @@ const Environment = struct {
             environment.add(.{ .name = "XDG_RUNTIME_DIR", .value = text });
         }
         if (scenario.term) environment.add(.{ .name = "TERM", .value = "xterm" });
+        switch (scenario.inherited) {
+            .none => {},
+            .denied, .auth => environment.add(.{
+                .name = "DBUS_SESSION_BUS_ADDRESS",
+                .value = "unix:path=" ++ foreign_socket,
+            }),
+            .stale => environment.add(.{
+                .name = "DBUS_SESSION_BUS_ADDRESS",
+                .value = "unix:path=/run/user/4243/bus",
+            }),
+        }
         return environment.variables[0..environment.count];
     }
 
@@ -672,6 +748,27 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
         .no_systemd => model.systemd_present = false,
         .auth_rejected => model.auth = .reject,
     }
+    model.scope_removal = switch (scenario.removal) {
+        .lazily => .lazily,
+        .promptly => .promptly,
+        .never => .never,
+    };
+    switch (scenario.stop_effective()) {
+        .none, .stays => {},
+        .refused => model.stop_error = "org.freedesktop.DBus.Error.AccessDenied",
+        .canceled => model.stop_result = "canceled",
+    }
+    sim.world.cgroup_stays = scenario.stop_effective() == .stays;
+    sim.world.oom_kills = @intFromBool(scenario.oom);
+    sim.world.pids_max_hits = @intFromBool(scenario.pids_hit);
+    switch (scenario.inherited) {
+        .none, .stale => {},
+        .denied => model.foreign_socket = foreign_socket,
+        .auth => {
+            model.foreign_socket = foreign_socket;
+            model.foreign_rejects = true;
+        },
+    }
     if (scenario.step_fault == .none) return;
     model.quiet_connections = 1;
     model.perfect_from = 2; // The cleanup after the scope step has a bus that works.
@@ -704,8 +801,14 @@ fn check(
     before: *const sim_run.Baseline,
     code: u8,
 ) void {
-    // Property 2, for every run: nothing leaked, however it ended.
-    assert(sim_run.leak(sim, before) == null);
+    // Property 2, for every run: nothing leaked, however it ended. A scope the manager refuses
+    // to stop is the one thing left behind, and the run said so (ZBX-W0302, checked below).
+    var allowed = before.*;
+    const made = scenario.scoped() and sim.world.bus.scopes_started > 0;
+    const refused_stop = scenario.stop_effective() == .refused or
+        scenario.stop_effective() == .canceled;
+    allowed.scopes_allowed = @intFromBool(made and refused_stop);
+    assert(sim_run.leak(sim, &allowed) == null);
     assert(std.mem.indexOfScalar(u8, sim.stderr(), 0x1b) == null);
     assert(!render.contains_raw_error(sim.stderr()));
     assert(sim.stdout().len == 0); // zbx's own output; the container's goes to the real stdout.
@@ -727,7 +830,7 @@ fn check(
 /// cannot be read warn when there are too many to keep. Nothing is warned about a run that was
 /// refused before it began.
 fn check_warnings(scenario: *const Scenario, verdict: *const Verdict, found: diag_fuzz.Found) void {
-    var expected: [6]codes.Code = undefined;
+    var expected: [7]codes.Code = undefined;
     var count: usize = 0;
     const began = switch (verdict.*) {
         .started => true,
@@ -756,6 +859,15 @@ fn check_warnings(scenario: *const Scenario, verdict: *const Verdict, found: dia
         expected[count] = .W0203;
         count += 1;
     }
+    // The cleanup after the container: only a run whose scope was made gets there.
+    const scope_made = switch (verdict.*) {
+        .started => true,
+        .refused => |refusal_found| refusal_found.code == .E0202,
+    };
+    if (scope_made and scenario.lingers()) {
+        expected[count] = .W0302;
+        count += 1;
+    }
     switch (verdict.*) {
         .refused => |refusal_found| {
             expected[count] = refusal_found.code;
@@ -774,10 +886,12 @@ fn check_started(
     code: u8,
 ) void {
     // Property 3 when the command ran: its code, 128 plus the signal, never a zbx code mix-up.
-    const expected: u8 = switch (status) {
+    // An OOM kill in the cgroup is exit 137 whatever the command did; a refused fork keeps it.
+    const own: u8 = switch (status) {
         .exited => |n| n,
         .signaled => |n| constants.exit_signal_offset + n,
     };
+    const expected: u8 = if (scenario.counts_as_oom()) 137 else own;
     assert(code == expected);
     const name = sim.world.hostnames[sim.world.processes[1].uts].slice();
     if (scenario.name == .valid) assert(std.mem.eql(u8, name, scenario.name_text));
@@ -831,9 +945,9 @@ fn check_scope(sim: *const HostSim, scenario: *const Scenario, name: []const u8)
     if (memory) |bytes| {
         var digits: [24]u8 = undefined;
         const text = std.fmt.bufPrint(&digits, "{d}", .{bytes}) catch unreachable; // A u64.
-        assert(std.mem.eql(u8, sim.world.ended_memory_max.?.slice(), text));
+        assert(std.mem.eql(u8, sim.world.last_memory_max().?, text));
     } else {
-        assert(sim.world.ended_memory_max == null);
+        assert(sim.world.last_memory_max() == null);
     }
 }
 
@@ -847,12 +961,32 @@ fn check_started_output(
         // Warnings are JSON lines of their own; the run ends with the container_exit line.
         assert(std.mem.indexOf(u8, stderr, "{\"container_exit\":{") != null);
         assert(std.mem.endsWith(u8, stderr, "}}\n"));
+        const reason = if (scenario.counts_as_oom())
+            "oom"
+        else if (scenario.counts_as_pid_limit())
+            "pid_limit"
+        else if (status == .signaled)
+            "signal"
+        else
+            "exited";
+        var needle: [48]u8 = undefined;
+        // Cannot fail: a reason word in 48 bytes.
+        const text = std.fmt.bufPrint(&needle, "\"reason\":\"{s}\"", .{reason}) catch unreachable;
+        assert(std.mem.indexOf(u8, stderr, text) != null);
         return;
     }
     const skipped = std.mem.count(u8, stderr, "zbx: note: skipped");
     assert(skipped == @intFromBool(scenario.verbose and devpts_skipped(scenario)));
+    const oom = scenario.counts_as_oom();
+    const limited = scenario.counts_as_pid_limit();
     const killed = std.mem.count(u8, stderr, "the container was killed by signal");
-    assert(killed == @intFromBool(status == .signaled));
+    assert(killed == @intFromBool(status == .signaled and !oom and !limited));
+    assert(std.mem.count(u8, stderr, "zbx: killed: out of memory") == @intFromBool(oom));
+    assert(std.mem.count(u8, stderr, "zbx: stopped: process limit reached") ==
+        @intFromBool(limited));
+    const turned_away = std.mem.count(u8, stderr, "); connected to ");
+    const fell_back = scenario.scoped() and scenario.verbose and scenario.inherited != .none;
+    assert(turned_away == @intFromBool(fell_back));
 }
 
 fn check_refused(
@@ -893,6 +1027,44 @@ fn check_refused(
     assert(std.mem.indexOf(u8, sim.stderr(), found_text) != null);
 }
 
+/// The version 2 fields of a record: why the run ended, the limits, the scope, not detached.
+fn check_record_v2(
+    scenario: *const Scenario,
+    verdict: *const Verdict,
+    parsed: *const records.Parsed,
+) void {
+    assert(parsed.version == constants.record_version);
+    const reason: records.EndReason = switch (verdict.*) {
+        .refused => .none,
+        .started => |status| if (scenario.counts_as_oom())
+            .oom
+        else if (scenario.counts_as_pid_limit())
+            .pid_limit
+        else if (status == .signaled)
+            .signal
+        else
+            .exited,
+    };
+    assert(parsed.reason == reason);
+    assert(!parsed.detached);
+    const memory: ?u64 = if (scenario.memory) |item| item.value else null;
+    assert(parsed.limits.memory_bytes == memory);
+    const pids: ?u32 = if (scenario.pids) |item| @intCast(item.value.?) else null;
+    const cpus: ?u32 = if (scenario.cpus) |item| @intCast(item.value.?) else null;
+    assert(parsed.limits.pids == pids);
+    assert(parsed.limits.cpu_millis == cpus);
+    if (scenario.scoped()) {
+        var unit: [96]u8 = undefined;
+        // Cannot fail: a 63-byte name and ten more bytes.
+        const format = "zbx-{s}.scope";
+        const name = std.fmt.bufPrint(&unit, format, .{parsed.name_slice()}) catch
+            unreachable; // Same bound as above.
+        assert(std.mem.eql(u8, parsed.scope_slice(), name));
+    } else {
+        assert(parsed.scope_slice().len == 0);
+    }
+}
+
 /// The run record, when one can have been kept: exactly one record of this run exists (the
 /// others in the directory are older), it says how the run ended, and none exists when the
 /// state could not be kept.
@@ -926,6 +1098,7 @@ fn check_record(sim: *const HostSim, scenario: *const Scenario, verdict: *const 
             .{ .start_failed = refusal_found.code },
     };
     assert(std.meta.eql(parsed.exit, expected));
+    check_record_v2(scenario, verdict, &parsed);
     assert(parsed.ids.? == if (scenario.full) records.IdsMode.full else records.IdsMode.single);
     assert(parsed.ended != null);
 }

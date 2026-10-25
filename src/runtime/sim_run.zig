@@ -162,6 +162,8 @@ pub fn run_cli(sim: *HostSim, args: []const [:0]const u8) u8 {
 pub const Baseline = struct {
     table: sim_world.MountTable,
     hostname: host_mod.Text,
+    /// Scopes the run may leave: a manager that will not stop one is a warning, not a leak.
+    scopes_allowed: u32 = 0,
 };
 
 pub fn baseline(sim: *const HostSim) Baseline {
@@ -189,7 +191,9 @@ pub fn leak(sim: *const HostSim, before: *const Baseline) ?[]const u8 {
     if (sim.open_count() != 0) return "a descriptor was left open";
     if (sim.world.broken_pipe_ignored) return "SIGPIPE was left ignored";
     if (sim.world.current != 0) return "the run ended in a child";
-    if (sim.world.bus.scope_count() != 0) return "a cgroup scope was left behind";
+    if (sim.world.bus.scope_count() > before.scopes_allowed) {
+        return "a cgroup scope was left behind";
+    }
     return null;
 }
 

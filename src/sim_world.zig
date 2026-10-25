@@ -689,6 +689,18 @@ pub const World = struct {
         }
     }
 
+    /// What `memory.max` holds in the last scope's cgroup, or held when the cgroup went.
+    pub fn last_memory_max(world: *const World) ?[]const u8 {
+        if (world.ended_memory_max) |*text| return text.slice();
+        var relative: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const path = scope_cgroup_path(&relative, &world.bus.last_scope);
+        var file: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
+        // Cannot fail: a bounded path and a short name.
+        const where = std.fmt.bufPrint(&file, "/sys/fs/cgroup{s}/memory.max", .{path}) catch
+            unreachable; // Same bound as above.
+        return world.read_written(where);
+    }
+
     /// The scope is gone from the manager and from the cgroup tree.
     pub fn end_scope(world: *World, slot: u32) void {
         assert(slot < world.bus.scopes.len);
