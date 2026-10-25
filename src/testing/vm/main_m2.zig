@@ -72,6 +72,7 @@ fn experiment(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try unpack_and_scripts(&session, out);
     try show(&session, out, "the guest", "uname -r; systemctl --version | head -1; " ++
         "stat -fc %T /sys/fs/cgroup; ls -ld /run/user/0 /run/user/0/bus /run/user/1000/bus");
+    try hardening(&session, out);
     try pids_limit(&session, out);
     try memory_limit(&session, out);
     try limits_visible(&session, out);
@@ -111,6 +112,48 @@ fn split(session: *Session, out: *Io.Writer, command: []const u8) !void {
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
     try show(session, out, "what is left", after);
+}
+
+/// The scripts the hardening checks run inside the container, written into the rootfs as root.
+const hardening_scripts = [_][]const u8{
+    "printf '%s\\n' 'echo == status' " ++
+        "'grep -E \"NoNewPrivs|Seccomp:|CapInh|CapPrm|CapEff|CapBnd|CapAmb\" /proc/self/status' " ++
+        "'echo == mount' 'mount -t tmpfs none /mnt; echo status:$?' " ++
+        "'echo == hostname' 'hostname changed; echo status:$?' " ++
+        "'echo == unshare' 'unshare -U true; echo status:$?' " ++
+        "> /home/demo/alpine/hard1.sh",
+    "printf '%s\\n' 'echo == chown' 'touch /tmp/c; chown 5:5 /tmp/c; echo status:$?' " ++
+        "'echo == applets' " ++
+        "'busybox --list | grep -E \"^(unshare|nsenter|mount|chroot)$\" | tr \"\\n\" \" \"' " ++
+        "'echo' 'echo == fork and pipes' 'sh -c \"echo child\" | cat; ps | wc -l' " ++
+        "> /home/demo/alpine/hard2.sh",
+    "printf '%s\\n' 'echo == write /x' 'touch /x; echo status:$?' " ++
+        "'echo == write /tmp/x' 'touch /tmp/x; echo status:$?' " ++
+        "'echo == write /run/y' 'touch /run/y; echo status:$?' " ++
+        "'echo == write /etc/f' 'echo hi > /etc/f; echo status:$?' " ++
+        "'echo == mounts' " ++
+        "'grep -E \" (/|/tmp|/run) \" /proc/self/mountinfo | cut -d\" \" -f5-7' " ++
+        "> /home/demo/alpine/ro.sh",
+};
+
+fn hardening(session: *Session, out: *Io.Writer) !void {
+    for (hardening_scripts) |script| try show(session, out, "write a test script", script);
+    try out.print("\nvm-m2: hardening, a normal run\n", .{});
+    try split(session, out, run_prefix ++ " --name hard1 -- sh /hard1.sh");
+    try split(session, out, run_prefix ++ " --name hard2 -- sh /hard2.sh");
+    try out.print("\nvm-m2: --read-only\n", .{});
+    try split(session, out, run_prefix ++ " --read-only --name ro1 -- sh /ro.sh");
+    // The container's root can write any directory its user owns, so "not writable" means owned
+    // by an id the container does not map.
+    try out.print("\nvm-m2: --read-only, no /tmp, rootfs directory owned by root\n", .{});
+    const bare = "rm -rf /home/demo/bare && mkdir /home/demo/bare && " ++
+        "cp -a /home/demo/alpine/bin /home/demo/alpine/lib /home/demo/bare/ && " ++
+        "mkdir /home/demo/bare/proc /home/demo/bare/dev && " ++
+        "chown -R demo:demo /home/demo/bare && chown root:root /home/demo/bare && " ++
+        "ls /home/demo/bare";
+    try show(session, out, "a rootfs without /tmp, owned by root", bare);
+    try split(session, out, H.as_demo ++ "/home/demo/zbx -v run --rootfs /home/demo/bare " ++
+        "--read-only --name ro2 -- /bin/sh -c true");
 }
 
 fn pids_limit(session: *Session, out: *Io.Writer) !void {
