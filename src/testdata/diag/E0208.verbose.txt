@@ -1,0 +1,10 @@
+error[ZBX-E0208]: can't install the container's seccomp filter
+  while  starting container web-1
+  cause  installing the seccomp filter failed: invalid argument (EINVAL)
+  cause  the kernel may lack seccomp filters, or a policy forbids installing one
+  name   web-1
+  rootfs /srv/alpine
+  step   install_seccomp (45 of 48)
+  fix    check what this host allows:   zbx doctor
+  more   zbx explain E0208
+  docs   https://zigbox.github.io/zigbox/errors/E0208.html

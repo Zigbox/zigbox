@@ -17,6 +17,7 @@ run:
   --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
   --pids <n>      limit on processes and threads, as in 64
   --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
+  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
   --              ends the options; everything after it is the command, as typed
 
 bundle:

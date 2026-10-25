@@ -5,7 +5,7 @@ error[ZBX-E0304]: systemd refused the container's scope, or its job failed
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (5 of 44)
+  step   start_scope (5 of 48)
   fix    see what the manager logged:   journalctl --user -n 20
   more   zbx explain E0304
   docs   https://zigbox.github.io/zigbox/errors/E0304.html

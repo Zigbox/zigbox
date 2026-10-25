@@ -1,0 +1,8 @@
+error[ZBX-E0207]: can't restrict the container's capabilities
+  cause  the container's root should hold these capabilities in its own user
+         namespace; a security module or an old kernel is the usual reason they
+         cannot be changed
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0207 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0207.html

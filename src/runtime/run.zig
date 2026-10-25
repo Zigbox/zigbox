@@ -246,6 +246,7 @@ pub fn start(
         .gid = host.gid(),
         .mapping = choice.mapping,
         .scope = scope_input,
+        .read_only = container.read_only,
     };
     handle.plan.build(&input);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).

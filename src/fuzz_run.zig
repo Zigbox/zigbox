@@ -184,6 +184,8 @@ const Scenario = struct {
     removal: Removal,
     stop_fault: StopFault,
     inherited: Inherited,
+    /// `--read-only`: the rootfs is read-only with tmpfs at /tmp and /run.
+    read_only: bool,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -260,7 +262,7 @@ fn random_scenario(random: std.Random) Scenario {
     else
         .{ .signaled = random.intRangeAtMost(u8, 1, 31) };
     const faulted = random.uintLessThan(u8, 4) != 0;
-    scenario.fault_step = if (faulted) random.uintLessThan(u32, 46) else null;
+    scenario.fault_step = if (faulted) random.uintLessThan(u32, 56) else null;
     scenario.fault_errno = errnos[random.uintLessThan(usize, errnos.len)];
     scenario.devpts_refused = random.uintLessThan(u8, 4) == 0;
     scenario.interrupts_per_mille = if (random.boolean()) 0 else random.uintLessThan(u16, 200);
@@ -315,6 +317,7 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     // so that every warning and every connection of the run can be accounted for.
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
         scenario.helper_fails == null;
+    scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.removal = .lazily;
     scenario.stop_fault = .none;
     scenario.inherited = .none;
@@ -340,7 +343,7 @@ fn exit_for(code: codes.Code, command_missing: bool) u8 {
 }
 
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
-    sim_run.sample_plan_with(plan, scenario.full, scenario.scoped());
+    sim_run.sample_plan_ro(plan, scenario.full, scenario.scoped(), scenario.read_only);
 }
 
 /// The kind of step a plan has at `index`.
@@ -513,6 +516,9 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => return .E0203,
         .run_newuidmap, .run_newgidmap => return .E0204,
         .start_scope => return .E0301, // Its first call is the connect to the bus.
+        .restrict_capabilities, .clear_ambient => return .E0207,
+        .set_no_new_privs, .install_seccomp => return .E0208,
+        .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
         .mount_pts => return null, // The one step that may fail: skipped with a note.
         .exec => {
             // A shell looks on: a missing or unrunnable first candidate is not the end while
@@ -713,6 +719,7 @@ fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
         push(args, &count, "json");
     }
     push(args, &count, "run");
+    if (scenario.read_only) push(args, &count, "--read-only");
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
@@ -899,9 +906,13 @@ fn check_started(
         assert(std.mem.startsWith(u8, name, constants.container_name_prefix));
     }
     const devpts = !devpts_skipped(scenario);
-    assert(
-        sim_run.started(sim, .{ .name = name, .devpts = devpts, .full = scenario.full }) == null,
-    );
+    const container: sim_run.Started = .{
+        .name = name,
+        .devpts = devpts,
+        .full = scenario.full,
+        .read_only = scenario.read_only,
+    };
+    assert(sim_run.started(sim, container) == null);
     var received_storage: [8]u8 = undefined;
     const received = expected_received(scenario, &received_storage);
     assert(std.mem.eql(u8, sim.world.received[0..sim.world.received_count], received));

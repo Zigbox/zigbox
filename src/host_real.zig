@@ -4,6 +4,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const linux = std.os.linux;
+const bpf = @import("runtime/bpf.zig");
+const capabilities = @import("runtime/capabilities.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
 
@@ -80,6 +82,10 @@ pub const HostReal = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .restrict_capabilities = restrict_capabilities,
+        .clear_ambient = clear_ambient,
+        .no_new_privs = no_new_privs,
+        .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -383,7 +389,8 @@ pub const HostReal = struct {
             .make_private => linux.mount(null, target, null, linux.MS.REC | linux.MS.PRIVATE, 0),
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
-            .proc, .dev_tmpfs, .shm_tmpfs, .devpts => blk: {
+            .remount_readonly => return remount_readonly(request.target),
+            .proc, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -468,6 +475,53 @@ pub const HostReal = struct {
         _ = from_context(context);
         const kill: usize = @backingInt(linux.SIG.KILL);
         try check(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0));
+    }
+
+    /// Capabilities are dropped from the bounding set one by one (`PR_CAPBSET_DROP`, which needs
+    /// CAP_SETPCAP, still held at this point), then the three sets are set to `keep` in one
+    /// `capset` (version 3 data: two words each).
+    fn restrict_capabilities(context: *anyopaque, keep: u64) host.Error!void {
+        _ = from_context(context);
+        assert(keep != 0);
+        assert(keep >> (capabilities.last_known + 1) == 0);
+        var capability: u32 = 0;
+        while (capability <= capabilities.last_known) : (capability += 1) {
+            if (keep & (@as(u64, 1) << @intCast(capability)) != 0) continue;
+            const result = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), capability, 0, 0, 0);
+            // A kernel older than this build knows has fewer capabilities: EINVAL, nothing to drop.
+            if (linux.errno(result) == .INVAL) continue;
+            try check(result);
+        }
+        const header: CapHeader = .{ .version = cap_version_3, .pid = 0 };
+        const low: u32 = @truncate(keep);
+        const high: u32 = @truncate(keep >> 32);
+        const data = [2]CapData{
+            .{ .effective = low, .permitted = low, .inheritable = low },
+            .{ .effective = high, .permitted = high, .inheritable = high },
+        };
+        try check(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
+    }
+
+    fn clear_ambient(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(linux.PR.CAP_AMBIENT_CLEAR_ALL == 4);
+        const operation = linux.PR.CAP_AMBIENT_CLEAR_ALL;
+        try check(linux.prctl(@backingInt(linux.PR.CAP_AMBIENT), operation, 0, 0, 0));
+    }
+
+    fn no_new_privs(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(@backingInt(linux.PR.SET_NO_NEW_PRIVS) == 38);
+        try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
+    }
+
+    fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
+        _ = from_context(context);
+        assert(program.len > 0);
+        assert(program.len <= bpf.insns_max);
+        const filter: SockFprog = .{ .len = @intCast(program.len), .filter = program.ptr };
+        const operation = linux.SECCOMP.SET_MODE_FILTER;
+        try check(linux.seccomp(operation, 0, &filter));
     }
 
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {
@@ -724,12 +778,50 @@ fn clone_flags(flags: host.SpawnFlags) u64 {
 /// The arguments of `mount` for a filesystem made new for the container. Fixed text, so the
 /// child formats nothing. `newinstance` gives the container its own devpts, so it cannot see the
 /// host's terminals.
+/// `struct __user_cap_header_struct` and `__user_cap_data_struct` of capset(2), version 3.
+const CapHeader = extern struct { version: u32, pid: i32 };
+const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const cap_version_3: u32 = 0x20080522;
+
+/// `struct sock_fprog`.
+const SockFprog = extern struct { len: u16, filter: [*]const bpf.Insn };
+
+/// `struct statfs` of the 64-bit architectures; only `f_flags` is read.
+const StatFs = extern struct {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [2]i32,
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [4]i64,
+};
+
 const Fresh = struct {
     source: [:0]const u8,
     type: [:0]const u8,
     flags: u32,
     data: [:0]const u8,
 };
+
+/// Makes a bind mount read-only. A bind remount that does not repeat the mount's own flags
+/// (nosuid, nodev, noexec, noatime, nodiratime, relatime) is refused in a user namespace, where
+/// those flags are locked: they are read from the mount first.
+fn remount_readonly(target: [:0]const u8) host.Error!void {
+    assert(target.len > 0);
+    var found: StatFs = undefined;
+    try HostReal.check(linux.syscall2(.statfs, @intFromPtr(target.ptr), @intFromPtr(&found)));
+    const ms = linux.MS;
+    const locked = ms.NOSUID | ms.NODEV | ms.NOEXEC | ms.NOATIME | ms.NODIRATIME | ms.RELATIME;
+    const current: u32 = @intCast(found.f_flags);
+    const flags = ms.REMOUNT | ms.BIND | ms.RDONLY | (current & locked);
+    try HostReal.check(linux.mount(null, target.ptr, null, flags, 0));
+}
 
 fn fresh_filesystem(kind: host.MountKind) Fresh {
     const ms = linux.MS;
@@ -751,6 +843,18 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .type = "tmpfs",
             .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
             .data = "mode=1777,size=65536k",
+        },
+        .tmp_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.NODEV,
+            .data = std.fmt.comptimePrint("mode=1777,size={d}", .{constants.tmpfs_bytes_max}),
+        },
+        .run_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.NODEV,
+            .data = std.fmt.comptimePrint("mode=755,size={d}", .{constants.tmpfs_bytes_max}),
         },
         .devpts => .{
             .source = "devpts",

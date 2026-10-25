@@ -6,7 +6,7 @@ error[ZBX-E0303]: the user bus answered in a way zbx can't use
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (5 of 44)
+  step   start_scope (5 of 48)
   fix    check this host (ZBX-E0103):   zbx doctor
   more   zbx explain E0303
   docs   https://zigbox.github.io/zigbox/errors/E0303.html

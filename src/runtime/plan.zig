@@ -52,11 +52,24 @@ pub const Kind = enum {
     make_pts_dir,
     mount_pts,
     link_dev,
+    /// Only in a read-only plan: scratch space on tmpfs, then the rootfs itself read-only.
+    make_tmp_dir,
+    mount_tmp,
+    make_run_dir,
+    mount_run,
+    remount_readonly,
     enter_rootfs,
     pivot_root,
     detach_old_root,
     enter_new_root,
     seal_descriptors,
+    /// The hardening, in the order the kernel needs it: capabilities first (dropping the bounding
+    /// set needs CAP_SETPCAP), then `no_new_privs` (a filter needs it once CAP_SYS_ADMIN is
+    /// gone), and the filter last, so that it is the last thing the child does but `execve`.
+    restrict_capabilities,
+    clear_ambient,
+    set_no_new_privs,
+    install_seccomp,
     exec,
 };
 
@@ -91,9 +104,13 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// The child's steps: nineteen that happen once, and two per device and one per link.
-pub const child_steps_count: u32 = 19 + 2 * constants.container_devices_count +
+/// The child's steps: twenty-three that happen once (four of them the hardening), and two per
+/// device and one per link. A read-only plan has `read_only_steps_count` more.
+pub const child_steps_count: u32 = 23 + 2 * constants.container_devices_count +
     constants.container_links_count;
+
+/// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
+pub const read_only_steps_count: u32 = 5;
 
 /// Steps of a plan with the single-id map: the parent has eight (it denies setgroups and
 /// writes both maps itself), the child has `child_steps_count`.
@@ -157,6 +174,8 @@ pub const Input = struct {
     mapping: Mapping,
     /// Null: no scope, as in M1 (no `start_scope` step, and no limits).
     scope: ?ScopeInput = null,
+    /// The rootfs is remounted read-only, with tmpfs at `/tmp` and `/run`.
+    read_only: bool = false,
 };
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
@@ -166,6 +185,8 @@ pub const Plan = struct {
     count: u32,
     /// Whether the ids are mapped through the helpers (`Mapping.full`).
     full: bool,
+    /// Whether the rootfs is remounted read-only.
+    read_only: bool,
     /// Whether the plan has a `start_scope` step, and what it is made with.
     scoped: bool,
     scope_name: Text,
@@ -192,6 +213,7 @@ pub const Plan = struct {
         plan.count = 0;
         plan.full = input.mapping == .full;
         plan.scoped = input.scope != null;
+        plan.read_only = input.read_only;
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
@@ -236,7 +258,8 @@ pub const Plan = struct {
     pub fn steps_expected(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
-        return base + @intFromBool(plan.scoped);
+        const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
+        return base + @intFromBool(plan.scoped) + read_only;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -392,15 +415,36 @@ pub const Plan = struct {
         plan.push_devices(rootfs_text);
         plan.push_dev_mounts(rootfs_text);
         plan.push_links(rootfs_text);
+        if (plan.read_only) plan.push_read_only(rootfs, rootfs_text);
         const here = plan.add_text(&.{"."});
         plan.push(.enter_rootfs, rootfs, empty_text, 0);
         plan.push(.pivot_root, here, here, 0);
         plan.push(.detach_old_root, here, empty_text, 0);
         plan.push(.enter_new_root, plan.add_text(&.{"/"}), empty_text, 0);
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
+        plan.push(.restrict_capabilities, empty_text, empty_text, 0);
+        plan.push(.clear_ambient, empty_text, empty_text, 0);
+        plan.push(.set_no_new_privs, empty_text, empty_text, 0);
+        plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
         assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+    }
+
+    /// `/tmp` and `/run` as tmpfs (their mount points are made first, while the rootfs is still
+    /// writable), then the rootfs bind mount read-only.
+    fn push_read_only(plan: *Plan, rootfs: Text, rootfs_text: []const u8) void {
+        assert(plan.read_only);
+        assert(rootfs_text.len > 0);
+        const start = plan.count;
+        defer assert(plan.count == start + read_only_steps_count);
+        const tmp = plan.add_text(&.{ rootfs_text, "/tmp" });
+        const run = plan.add_text(&.{ rootfs_text, "/run" });
+        plan.push(.make_tmp_dir, tmp, empty_text, 0);
+        plan.push(.mount_tmp, tmp, empty_text, 0);
+        plan.push(.make_run_dir, run, empty_text, 0);
+        plan.push(.mount_run, run, empty_text, 0);
+        plan.push(.remount_readonly, rootfs, empty_text, 0);
     }
 
     fn push_devices(plan: *Plan, rootfs: []const u8) void {
@@ -538,6 +582,15 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .create_device_file => "creating the mount point /dev/",
         .bind_device => "bind-mounting /dev/",
         .link_dev => "creating the link /dev/",
+        .make_tmp_dir => "creating /tmp in the rootfs",
+        .mount_tmp => "mounting a tmpfs on /tmp",
+        .make_run_dir => "creating /run in the rootfs",
+        .mount_run => "mounting a tmpfs on /run",
+        .remount_readonly => "making the rootfs read-only",
+        .restrict_capabilities => "dropping the capabilities the container does not keep",
+        .clear_ambient => "clearing the ambient capabilities",
+        .set_no_new_privs => "setting no_new_privs",
+        .install_seccomp => "installing the seccomp filter",
     };
     return std.fmt.bufPrint(buffer, "{s}{s}", .{ phrase, name }) catch phrase;
 }
@@ -582,7 +635,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
-    try testing.expectEqual(@as(u32, 43), plan.count);
+    try testing.expectEqual(@as(u32, 47), plan.count);
     try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
     try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
@@ -606,7 +659,7 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
     try testing.expectEqual(steps_count_single, plan.count);
-    try testing.expectEqual(@as(u32, 44), plan.count);
+    try testing.expectEqual(@as(u32, 48), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
     var links_seen: u32 = 0;

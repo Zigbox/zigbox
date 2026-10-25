@@ -47,6 +47,7 @@ const help_text =
     \\  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
+    \\  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\bundle:
@@ -116,6 +117,8 @@ pub const RunArgs = struct {
     memory: ?[]const u8 = null,
     pids: ?[]const u8 = null,
     cpus: ?[]const u8 = null,
+    /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
+    read_only: bool = false,
 };
 
 /// The options of `run` that take a value, before the `--`.
@@ -191,6 +194,8 @@ const Token = union(enum) {
     run_option_next: RunOption,
     /// The same with the value after an `=`.
     run_option_inline: struct { option: RunOption, value: []const u8 },
+    /// `--read-only`: an option of `run` without a value.
+    read_only,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -226,6 +231,7 @@ fn classify(argument: []const u8) Token {
     }
     if (run_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--")) return .separator;
+    if (std.mem.eql(u8, argument, "--read-only")) return .read_only;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -298,7 +304,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .run_option_inline, .unknown_option, .last, .no_redact => {},
+            .run_option_inline, .unknown_option, .last, .no_redact, .read_only => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
                 seen_operand = true;
@@ -344,6 +350,10 @@ pub fn parse(
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
                 break;
+            },
+            .read_only => {
+                if (!is_run) return unknown_option(diag, argument);
+                run_args.read_only = true;
             },
             .last, .no_redact => {
                 if (!is_bundle) return unknown_option(diag, argument);
@@ -753,6 +763,7 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
         .name = given.name,
         .command = given.command,
         .limits = try limits_of(&given, diag),
+        .read_only = given.read_only,
     };
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{

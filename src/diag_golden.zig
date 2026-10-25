@@ -48,6 +48,25 @@ fn step_of(kind: plan_mod.Kind) u32 {
     return sim_run.step_index(kind, true);
 }
 
+/// A host where one step of the hardening, or of the read-only setup, is refused.
+fn prepare_step_refused(sim: *HostSim, index: u32, errno: u16) void {
+    sim_run.init(sim, 1);
+    sim.faults.fail_step = index;
+    sim.faults.fail_step_errno = errno;
+}
+
+fn prepare_capabilities_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, step_of(.restrict_capabilities), 1);
+}
+
+fn prepare_seccomp_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, step_of(.install_seccomp), 22);
+}
+
+fn prepare_no_tmp(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_read_only(.make_tmp_dir), 13);
+}
+
 fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
@@ -213,6 +232,26 @@ const base_cases = [_]Case{
         .code = .E0205,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_proc_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0207,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_capabilities_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0208,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_seccomp_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0209,
+        .args = &.{
+            "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--read-only", "--", "/bin/sh",
+        },
+        .prepare = prepare_no_tmp,
         .exit = 125,
     },
     .{

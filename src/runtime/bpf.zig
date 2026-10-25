@@ -49,19 +49,32 @@ pub fn ld(offset: u32) Insn {
 }
 
 pub fn jeq(value: u32, jt: u8, jf: u8) Insn {
-    return .{ .code = jmp_jeq_k, .jt = jt, .jf = jf, .k = value };
+    const insn: Insn = .{ .code = jmp_jeq_k, .jt = jt, .jf = jf, .k = value };
+    assert(insn.code == jmp_jeq_k);
+    assert(insn.k == value);
+    return insn;
 }
 
 pub fn ret(value: u32) Insn {
-    return .{ .code = ret_k, .jt = 0, .jf = 0, .k = value };
+    const insn: Insn = .{ .code = ret_k, .jt = 0, .jf = 0, .k = value };
+    assert(insn.code == ret_k);
+    assert(insn.jt == 0);
+    assert(insn.jf == 0);
+    return insn;
 }
 
 pub fn and_k(mask: u32) Insn {
-    return .{ .code = alu_and_k, .jt = 0, .jf = 0, .k = mask };
+    const insn: Insn = .{ .code = alu_and_k, .jt = 0, .jf = 0, .k = mask };
+    assert(insn.code == alu_and_k);
+    assert(insn.k == mask);
+    return insn;
 }
 
 pub fn ja(distance: u32) Insn {
-    return .{ .code = jmp_ja, .jt = 0, .jf = 0, .k = distance };
+    assert(distance < insns_max); // Forward, and within what a program can hold.
+    const insn: Insn = .{ .code = jmp_ja, .jt = 0, .jf = 0, .k = distance };
+    assert(insn.code == jmp_ja);
+    return insn;
 }
 
 /// What the kernel gives a filter to look at, in the fields the filters here read.
@@ -71,6 +84,7 @@ pub const Data = struct {
     args: [6]u64 = @splat(0),
 
     fn word(data: *const Data, offset: u32) u32 {
+        assert(data.args.len == 6);
         assert(offset % 4 == 0);
         assert(offset + 4 <= data_bytes);
         if (offset == offset_nr) return data.nr;
@@ -93,6 +107,7 @@ pub const Problem = enum {
 
 /// Null if the kernel would accept the program and `run` can run it; else why not.
 pub fn verify(program: []const Insn) ?Problem {
+    assert(insns_max == 4096); // The kernel's BPF_MAXINSNS; a longer filter is refused outright.
     if (program.len == 0) return .empty;
     if (program.len > insns_max) return .too_long;
     if (program[program.len - 1].code != ret_k) return .falls_off_the_end;
@@ -105,7 +120,7 @@ pub fn verify(program: []const Insn) ?Problem {
             alu_and_k, ret_k => {},
             jmp_ja => if (insn.k >= remaining) return .jump_out_of_range,
             jmp_jeq_k, jmp_jgt_k, jmp_jge_k, jmp_jset_k => {
-                if (insn.jt > remaining or insn.jf > remaining) return .jump_out_of_range;
+                if (insn.jt >= remaining or insn.jf >= remaining) return .jump_out_of_range;
             },
             else => return .unknown_opcode,
         }
@@ -190,6 +205,9 @@ test "the verifier refuses what the kernel would, and what the interpreter canno
     try testing.expectEqual(@as(?Problem, .falls_off_the_end), verify(&.{ld(0)}));
     try testing.expectEqual(@as(?Problem, .jump_out_of_range), verify(&.{ jeq(0, 5, 0), ret(0) }));
     try testing.expectEqual(@as(?Problem, .jump_out_of_range), verify(&.{ ja(2), ret(0) }));
+    // A jump to the instruction after the last is out; to the last is in.
+    try testing.expectEqual(@as(?Problem, .jump_out_of_range), verify(&.{ jeq(0, 1, 0), ret(0) }));
+    try testing.expectEqual(@as(?Problem, null), verify(&.{ jeq(0, 1, 0), ret(1), ret(0) }));
     const odd: Insn = .{ .code = 0x61, .jt = 0, .jf = 0, .k = 0 };
     try testing.expectEqual(@as(?Problem, .unknown_opcode), verify(&.{ odd, ret(0) }));
     const unaligned: Insn = .{ .code = ld_w_abs, .jt = 0, .jf = 0, .k = 2 };

@@ -23,9 +23,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host = @import("host.zig");
+const bpf = @import("runtime/bpf.zig");
+const seccomp = @import("runtime/seccomp.zig");
 const sim_bus = @import("sim_bus.zig");
 
 pub const errno_perm: u16 = 1;
+pub const errno_acces: u16 = 13;
 pub const errno_noent: u16 = 2;
 pub const errno_srch: u16 = 3;
 pub const errno_child: u16 = 10;
@@ -90,6 +93,8 @@ pub const Mount = struct {
     /// Set for a procfs: whether it was mounted by a process in its own new PID namespace. A
     /// procfs of the host's namespace would show the host's processes.
     own_pid_namespace: bool,
+    /// Remounted read-only (`MountKind.remount_readonly`).
+    read_only: bool = false,
 };
 
 pub const MountTable = struct {
@@ -183,6 +188,13 @@ pub const Process = struct {
     /// After `pivot_root` the old root is still mounted on the new one until it is detached.
     old_root_attached: bool,
     die_with_parent: bool,
+    /// The capability mask the process was restricted to (`restrict_capabilities`), if it was.
+    capabilities: ?u64,
+    ambient_cleared: bool,
+    no_new_privs: bool,
+    /// A seccomp filter is installed (`install_seccomp`), and it answered ALLOW for the calls the
+    /// process still has to make: write, close and exit_group (to report a failure), and execve.
+    seccomp: bool,
     sealed: bool,
     execd: bool,
     exec_path: SimPath,
@@ -1054,6 +1066,12 @@ pub const World = struct {
             table.private = true;
             return null;
         }
+        if (request.kind == .remount_readonly) {
+            // Only a mount point can be remounted; the rootfs bind is one.
+            const index = table.find(target.slice()) orelse return errno_inval;
+            table.mounts[index].read_only = true;
+            return null;
+        }
         if (world.mount_target_error(request.kind, &target)) |errno| return errno;
         if (request.kind == .devpts) {
             if (world.devpts_refused) return errno_perm;
@@ -1134,6 +1152,43 @@ pub const World = struct {
         world.processes[world.current].sealed = true;
     }
 
+    /// The capability calls of a container's setup, in the order the child makes them.
+    pub fn restrict_capabilities(world: *World, keep: u64) ?u16 {
+        assert(keep != 0);
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        if (process.no_new_privs or process.seccomp) return errno_inval; // Out of order.
+        process.capabilities = keep;
+        return null;
+    }
+
+    pub fn clear_ambient(world: *World) void {
+        assert(world.current < world.processes.len);
+        world.processes[world.current].ambient_cleared = true;
+    }
+
+    pub fn no_new_privs(world: *World) void {
+        assert(world.current < world.processes.len);
+        world.processes[world.current].no_new_privs = true;
+    }
+
+    /// The filter is run on the calls the child makes after it: execve, write, close and
+    /// exit_group must be allowed on this machine's architecture, or the container could not
+    /// start (or report why not).
+    pub fn install_seccomp(world: *World, program: []const bpf.Insn) ?u16 {
+        assert(program.len > 0);
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        if (!process.no_new_privs) return errno_acces; // The kernel needs it, or CAP_SYS_ADMIN.
+        if (bpf.verify(program) != null) return errno_inval;
+        if (!seccomp.allows_native(program, "execve")) return errno_perm;
+        if (!seccomp.allows_native(program, "write")) return errno_perm;
+        if (!seccomp.allows_native(program, "close")) return errno_perm;
+        if (!seccomp.allows_native(program, "exit_group")) return errno_perm;
+        process.seccomp = true;
+        return null;
+    }
+
     pub fn die_with_parent(world: *World) void {
         world.processes[world.current].die_with_parent = true;
     }
@@ -1182,6 +1237,10 @@ fn unused_process() Process {
         .root = null,
         .old_root_attached = false,
         .die_with_parent = false,
+        .capabilities = null,
+        .ambient_cleared = false,
+        .no_new_privs = false,
+        .seccomp = false,
         .sealed = false,
         .execd = false,
         .exec_path = .{},

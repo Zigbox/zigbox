@@ -16,6 +16,7 @@
 //! the same code that runs in production.
 
 const std = @import("std");
+const bpf = @import("runtime/bpf.zig");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const linux = std.os.linux;
@@ -178,6 +179,15 @@ pub const MountKind = enum {
     shm_tmpfs,
     /// `/dev/pts`: a private devpts instance whose ptmx is mode 0666.
     devpts,
+    /// A read-only rootfs gets `/tmp`: tmpfs, mode 1777, nosuid, nodev, sized by
+    /// `constants.tmpfs_bytes_max`.
+    tmp_tmpfs,
+    /// ... and `/run`: tmpfs, mode 0755, nosuid, nodev.
+    run_tmpfs,
+    /// `target` (a bind mount) becomes read-only. In a user namespace the kernel requires the
+    /// flags the mount already has (nosuid, nodev, noexec, atime) to be kept, so the host reads
+    /// them first.
+    remount_readonly,
 };
 
 pub const MountRequest = struct {
@@ -329,6 +339,15 @@ pub const VTable = struct {
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
     die_with_parent: *const fn (context: *anyopaque) Error!void,
+    /// Drops every capability not in `keep` (a mask by capability number) from the bounding set,
+    /// then makes it the effective, permitted and inheritable sets (`PR_CAPBSET_DROP`, `capset`).
+    restrict_capabilities: *const fn (context: *anyopaque, keep: u64) Error!void,
+    /// Empties the ambient capability set (`PR_CAP_AMBIENT_CLEAR_ALL`).
+    clear_ambient: *const fn (context: *anyopaque) Error!void,
+    /// Sets `no_new_privs` (`PR_SET_NO_NEW_PRIVS`), which stays for the process and its children.
+    no_new_privs: *const fn (context: *anyopaque) Error!void,
+    /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
+    install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
     /// success to model a command that started.
     exec: *const fn (context: *anyopaque, request: ExecRequest) Error!void,
@@ -739,6 +758,33 @@ pub const Host = struct {
     pub fn die_with_parent(host: Host) Error!void {
         assert(@intFromPtr(host.vtable) != 0);
         try host.vtable.die_with_parent(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn restrict_capabilities(host: Host, keep: u64) Error!void {
+        assert(keep != 0); // A container keeps something, and the mask is never empty by policy.
+        try host.vtable.restrict_capabilities(host.context, keep);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn clear_ambient(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        try host.vtable.clear_ambient(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn no_new_privs(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        try host.vtable.no_new_privs(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn install_seccomp(host: Host, program: []const bpf.Insn) Error!void {
+        assert(program.len > 0);
+        assert(program.len <= bpf.insns_max);
+        try host.vtable.install_seccomp(host.context, program);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

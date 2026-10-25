@@ -45,6 +45,9 @@ pub const Code = enum(u8) {
     E0204,
     E0205,
     E0206,
+    E0207,
+    E0208,
+    E0209,
     W0201,
     W0202,
     W0203,
@@ -425,6 +428,60 @@ pub const registry = [_]Entry{
         \\starting or ending with '-'.
         \\
         \\Leave --name out and zbx picks one: zbx- and six hex digits.
+        ,
+    },
+    .{
+        .code = .E0207,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't restrict the container's capabilities",
+        .explanation =
+        \\Just before the command starts, zbx drops every capability the container
+        \\does not keep: from the bounding set, then from the effective, permitted
+        \\and inheritable sets, and it empties the ambient set. The list that is
+        \\kept is Docker's default without NET_RAW and MKNOD, and has no SYS_ADMIN
+        \\(src/runtime/policy/capabilities.zon). The kernel refused one of those
+        \\calls, so the container was not started: a container with more rights
+        \\than intended is never run.
+        \\
+        \\The cause names the step and the kernel's reason. This is unusual: the
+        \\child is root of its own user namespace and holds these capabilities
+        \\there. A security module that restricts capability changes, or a very
+        \\old kernel, is the likely reason.
+        ,
+    },
+    .{
+        .code = .E0208,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't install the container's seccomp filter",
+        .explanation =
+        \\The last thing zbx does before the command starts is set no_new_privs and
+        \\install a seccomp filter (src/runtime/policy/seccomp.zon): a list of the
+        \\system calls the container may make, which fails every other with EPERM.
+        \\The kernel refused one of the two calls, so the container was not
+        \\started: a container without its filter is never run.
+        \\
+        \\The cause names the step and the kernel's reason. The kernel may lack
+        \\seccomp filters (CONFIG_SECCOMP_FILTER), or a policy may forbid
+        \\installing one. "zbx doctor" checks that this host has seccomp (ZBX-E0106).
+        ,
+    },
+    .{
+        .code = .E0209,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up the read-only rootfs",
+        .explanation =
+        \\--read-only mounts a tmpfs on the rootfs's /tmp and /run, then remounts
+        \\the rootfs read-only. One of those steps failed, so the container was not
+        \\started.
+        \\
+        \\When the cause says /tmp or /run could not be made, the rootfs does not
+        \\have the directory and is not writable by this user, so zbx cannot make
+        \\the mount point: make both directories as the rootfs's owner (mkdir -p
+        \\<rootfs>/tmp <rootfs>/run) and run again. Otherwise the kernel refused the
+        \\mount or the remount; the cause says why.
         ,
     },
     .{

@@ -188,7 +188,11 @@ pub const container_devices_count: u32 = 6;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 64;
+pub const plan_steps_max: u32 = 80;
+
+/// The size of the tmpfs mounts of a read-only rootfs (`/tmp` and `/run`): memory the container
+/// may use for scratch files, in addition to any memory limit it has.
+pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
 pub const plan_paths_bytes_max: u32 = 64 * 1024;
 /// One id map line, "0 4294967295 1\n", with room to spare.

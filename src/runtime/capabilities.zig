@@ -32,6 +32,7 @@ pub const kept_count: usize = policy_file.keep.len;
 /// Whether the capability is kept.
 pub fn is_kept(capability: u32) bool {
     assert(capability < 64);
+    if (capability > last_known) assert(keep_mask >> @intCast(capability) == 0);
     return keep_mask & (@as(u64, 1) << @intCast(capability)) != 0;
 }
 

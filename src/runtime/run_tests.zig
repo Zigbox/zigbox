@@ -270,6 +270,9 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
         .start_scope => .E0301, // The first call is the connect to the bus.
         .exec => .E0202,
         .mount_pts => null,
+        .restrict_capabilities, .clear_ambient => .E0207,
+        .set_no_new_privs, .install_seccomp => .E0208,
+        .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => .E0209,
         else => .E0205,
     };
 }
@@ -281,18 +284,28 @@ test "a failure injected into every step is a diagnostic naming that step, and c
     // the rest; the devpts mount alone is skipped), the verbose output names the step, the exit
     // code is 125 (126 for the command), and nothing leaked: the child is reaped, no descriptor
     // is open and the host's mounts and hostname are as they were.
+    try walk_steps(false);
+    try walk_steps(true);
+}
+
+/// The walk over the steps of a plan, with and without `--read-only`.
+fn walk_steps(read_only: bool) !void {
     var plan: plan_mod.Plan = undefined;
-    sim_run.sample_plan(&plan, true);
+    sim_run.sample_plan_ro(&plan, true, true, read_only);
     for (plan.steps[0..plan.count], 0..) |step, index| {
         var sim: HostSim = undefined;
         sim_run.init(&sim, 7);
         const before = sim_run.baseline(&sim);
         sim.faults.fail_step = @intCast(index);
         sim.faults.fail_step_errno = 1;
-        const args = [_][:0]const u8{
+        const plain = [_][:0]const u8{
             "zbx", "-v", "run", "--rootfs", rootfs, "--name", "walk", "--", "/bin/sh",
         };
-        const code = run(&sim, &args);
+        const limited = [_][:0]const u8{
+            "zbx",  "-v",          "run", "--rootfs", rootfs, "--name",
+            "walk", "--read-only", "--",  "/bin/sh",
+        };
+        const code = run(&sim, if (read_only) &limited else &plain);
         try testing.expect(sim.step_fault_fired); // The step really made a fallible call.
         try no_leak(&sim, &before);
         if (expected_code(step.kind)) |expected| {

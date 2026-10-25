@@ -10,6 +10,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
+const bpf = @import("runtime/bpf.zig");
 const host = @import("host.zig");
 const sim_world = @import("sim_world.zig");
 
@@ -191,6 +192,10 @@ pub const HostSim = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .restrict_capabilities = restrict_capabilities,
+        .clear_ambient = clear_ambient,
+        .no_new_privs = no_new_privs,
+        .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -672,6 +677,32 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         sim.world.die_with_parent();
+    }
+
+    fn restrict_capabilities(context: *anyopaque, keep: u64) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.restrict_capabilities(keep)) |errno| return sim.model_error(errno);
+    }
+
+    fn clear_ambient(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        assert(sim.world.current < sim.world.processes.len);
+        try sim.begin_call();
+        sim.world.clear_ambient();
+    }
+
+    fn no_new_privs(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        assert(sim.world.current < sim.world.processes.len);
+        try sim.begin_call();
+        sim.world.no_new_privs();
+    }
+
+    fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.install_seccomp(program)) |errno| return sim.model_error(errno);
     }
 
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {

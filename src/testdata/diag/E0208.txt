@@ -1,0 +1,5 @@
+error[ZBX-E0208]: can't install the container's seccomp filter
+  cause  the kernel may lack seccomp filters, or a policy forbids installing one
+  fix    check what this host allows:   zbx doctor
+  more   zbx explain E0208 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0208.html

@@ -9,7 +9,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
+const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
+const seccomp = @import("seccomp.zig");
 const sync = @import("sync.zig");
 
 const Host = host_mod.Host;
@@ -102,6 +104,15 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_pts => try mount(host, .devpts, target, null),
         .bind_device => try mount(host, .bind_file, target, plan.text(step.source)),
         .make_proc_dir, .make_dev_dir => try host.make_directory(target, true),
+        // The rootfs may already have them (Alpine has both): only a missing one is made.
+        .make_tmp_dir, .make_run_dir => try host.make_directory(target, true),
+        .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
+        .mount_run => try mount(host, .run_tmpfs, target, null),
+        .remount_readonly => try mount(host, .remount_readonly, target, null),
+        .restrict_capabilities => try host.restrict_capabilities(capabilities.keep_mask),
+        .clear_ambient => try host.clear_ambient(),
+        .set_no_new_privs => try host.no_new_privs(),
+        .install_seccomp => try host.install_seccomp(&seccomp.program),
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
         .create_device_file => try host.create_file(target),
         .link_dev => try host.symlink(plan.text(step.source), target),
@@ -123,6 +134,7 @@ fn mount(
     source: ?[:0]const u8,
 ) host_mod.Error!void {
     assert(target.len > 0);
+    assert(target[0] != 0);
     assert((source != null) == (kind == .bind_tree or kind == .bind_file));
     try host.mount(.{ .kind = kind, .target = target, .source = source });
 }

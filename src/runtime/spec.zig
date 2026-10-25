@@ -43,6 +43,8 @@ pub const Spec = struct {
     labels: []const Label = &.{},
     /// Resource limits, applied through the container's cgroup scope.
     limits: Limits = .{},
+    /// The rootfs is remounted read-only, with a tmpfs at /tmp and /run.
+    read_only: bool = false,
 };
 
 /// The index of the first label that does not fit, or null. Too many labels is reported at the

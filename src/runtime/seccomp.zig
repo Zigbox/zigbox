@@ -66,10 +66,15 @@ pub const CompileError = error{TooManyInstructions};
 pub const chunk_max: u32 = 100;
 
 fn eperm() u32 {
-    return linux.SECCOMP.RET.ERRNO | errno_perm;
+    const value = linux.SECCOMP.RET.ERRNO | errno_perm;
+    assert(value & linux.SECCOMP.RET.ACTION == linux.SECCOMP.RET.ERRNO);
+    assert(value & linux.SECCOMP.RET.DATA == errno_perm);
+    return value;
 }
 
 fn errno_return(errno: u32) u32 {
+    assert(errno > 0);
+    assert(errno <= linux.SECCOMP.RET.DATA);
     return linux.SECCOMP.RET.ERRNO | errno;
 }
 
@@ -78,6 +83,8 @@ const Emitter = struct {
     len: u32,
 
     fn push(emitter: *Emitter, insn: Insn) CompileError!void {
+        assert(emitter.len <= emitter.out.len);
+        assert(insn.code != 0);
         const room = @min(emitter.out.len, bpf.insns_max);
         if (emitter.len >= room) return error.TooManyInstructions;
         emitter.out[emitter.len] = insn;
@@ -87,6 +94,7 @@ const Emitter = struct {
 
 /// The number of instructions of a rule's block, after its `jeq`.
 fn block_len(rule: *const Rule) u32 {
+    assert(rule.nr < 1 << 20);
     assert(rule.count <= rule_values_max);
     return switch (rule.kind) {
         .equals_any => 1 + rule.count + 2, // ld, one jeq per value, ret EPERM, ret ALLOW.
@@ -98,6 +106,8 @@ fn block_len(rule: *const Rule) u32 {
 
 /// The number of instructions of one architecture's section.
 pub fn section_len(policy: *const Policy) u32 {
+    assert(policy.rules.len <= 1024);
+    assert(policy.plain.len <= 1 << 20);
     var length: u32 = 1; // ld nr.
     for (policy.rules) |*rule| length += 1 + block_len(rule);
     const plain: u32 = @intCast(policy.plain.len);
@@ -139,6 +149,8 @@ fn emit_rule(emitter: *Emitter, rule: *const Rule) CompileError!void {
 }
 
 fn emit_section(emitter: *Emitter, policy: *const Policy) CompileError!void {
+    assert(emitter.len > 0); // The header comes first.
+    assert(chunk_max + 1 <= std.math.maxInt(u8)); // A match reaches its ret ALLOW in a byte.
     const start = emitter.len;
     try emitter.push(bpf.ld(bpf.offset_nr));
     for (policy.rules) |*rule| try emit_rule(emitter, rule);
@@ -162,6 +174,7 @@ fn emit_section(emitter: *Emitter, policy: *const Policy) CompileError!void {
 /// A syscall made under an architecture not listed gets EPERM.
 pub fn compile(out: []Insn, arches: []const ArchPolicy) CompileError![]const Insn {
     assert(arches.len > 0);
+    assert(arches.len <= 4);
     var emitter: Emitter = .{ .out = out, .len = 0 };
     const header: u32 = @intCast(1 + 2 * arches.len + 1);
     try emitter.push(bpf.ld(bpf.offset_arch));
@@ -180,16 +193,38 @@ pub fn compile(out: []Insn, arches: []const ArchPolicy) CompileError![]const Ins
     return out[0..emitter.len];
 }
 
+/// Whether the program lets syscall `name` through on the machine this runs on. The simulator
+/// asks it of the calls a container's child still makes after the filter is installed.
+pub fn allows_native(filter: []const Insn, comptime name: []const u8) bool {
+    assert(bpf.verify(filter) == null);
+    const native = @import("builtin").cpu.arch;
+    var data: bpf.Data = .{ .nr = 0, .arch = 0 };
+    switch (native) {
+        .x86_64 => {
+            data.arch = audit_x86_64;
+            data.nr = @backingInt(@field(SysX64, name));
+        },
+        .aarch64 => {
+            data.arch = audit_aarch64;
+            data.nr = @backingInt(@field(SysArm64, name));
+        },
+        else => return true, // No release runs there; nothing to ask.
+    }
+    return bpf.run(filter, &data) == ret_allow;
+}
+
 // ---- The policy file, resolved for each architecture, at build time --------------------------
 
 const SysX64 = linux.syscalls.X64;
 const SysArm64 = linux.syscalls.Arm64;
 
 fn exists(comptime name: []const u8) bool {
+    comptime assert(name.len > 0);
     return @hasField(SysX64, name) or @hasField(SysArm64, name);
 }
 
 fn number_on(comptime Sys: type, comptime name: []const u8) ?u32 {
+    comptime assert(name.len > 0);
     if (!@hasField(Sys, name)) return null;
     return @backingInt(@field(Sys, name));
 }

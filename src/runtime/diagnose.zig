@@ -178,6 +178,18 @@ pub fn step_failed(
         ),
         .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
         .exec => command_failed(diag, plan, info, failure),
+        .restrict_capabilities,
+        .clear_ambient,
+        => hardening_failed(diag, .E0207, operation, failure),
+        .set_no_new_privs,
+        .install_seccomp,
+        => hardening_failed(diag, .E0208, operation, failure),
+        .make_tmp_dir,
+        .mount_tmp,
+        .make_run_dir,
+        .mount_run,
+        .remount_readonly,
+        => read_only_failed(diag, step, operation, failure, info),
         else => setup_failed(diag, step, operation, failure, info),
     }
     starting(diag, info);
@@ -324,6 +336,57 @@ fn setup_failed(
         },
     }
     assert(diag.code.? == .E0205);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-E0207 and ZBX-E0208: the capabilities, `no_new_privs` or the seccomp filter could not be
+/// applied. The container is never started without them.
+fn hardening_failed(diag: *Diag, code: codes.Code, operation: []const u8, failure: Failure) void {
+    assert(diag.code == null);
+    assert(@backingInt(code) >= @backingInt(codes.Code.E0207));
+    assert(@backingInt(code) <= @backingInt(codes.Code.E0208));
+    diag.raise(code);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    if (code == .E0207) {
+        diag.cause("the container's root should hold these capabilities in its own user " ++
+            "namespace; a security module or an old kernel is the usual reason they cannot " ++
+            "be changed", .{});
+    } else {
+        diag.cause("the kernel may lack seccomp filters, or a policy forbids installing one", .{});
+    }
+    if (failure.err == error.AccessDenied) {
+        diag.fix(.{ .sentence = "look for the policy that denies it:", .command = dmesg_policy });
+    }
+    diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
+    assert(diag.code.? == code);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-E0209: `--read-only` could not make its mount points, mount its tmpfs or remount.
+fn read_only_failed(
+    diag: *Diag,
+    step: *const plan_mod.Step,
+    operation: []const u8,
+    failure: Failure,
+    info: RunInfo,
+) void {
+    assert(diag.code == null);
+    assert(operation.len > 0);
+    diag.raise(.E0209);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    const makes = step.kind == .make_tmp_dir or step.kind == .make_run_dir;
+    if (makes) {
+        diag.cause("the rootfs has no such directory and is not writable by this user, so it " ++
+            "cannot be made; a read-only rootfs needs /tmp and /run before it is made " ++
+            "read-only", .{});
+        diag.fix_with("make them as the rootfs's owner:", "mkdir -p \"{s}/tmp\" \"{s}/run\"", .{
+            info.rootfs, info.rootfs,
+        });
+        diag.fix(.{ .sentence = "or unpack the rootfs as the user who runs zbx" });
+    } else {
+        diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
+    }
+    assert(diag.code.? == .E0209);
     assert(diag.fixes.count > 0);
 }
 
