@@ -6,7 +6,7 @@
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
 //! skipped, never misread. Version 2 added the limits, the scope's name, why the run ended
-//! (`Reason`) and whether it was detached; a version 1 record reads with no limits, no scope,
+//! (`EndReason`) and whether it was detached; a version 1 record reads with no limits, no scope,
 //! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may add some. The file is
 //! plain ZON, but the reader is a line reader for the shape the writer produces (one field per
 //! line), because the standard ZON parser allocates and this must not.
@@ -40,11 +40,11 @@ pub const Exit = union(enum) {
 
 /// Why a run ended, as the exit report says it (`ExitReason`): the same words as the JSON
 /// `container_exit.reason`. `none` is a run that has not ended, never started or was lost.
-pub const Reason = enum { none, exited, signal, oom, pid_limit };
+pub const EndReason = enum { none, exited, signal, oom, pid_limit };
 
 /// The reason an exit implies when nothing more is known (version 1 records, or a view that
 /// does not say).
-pub fn reason_of(exit: Exit) Reason {
+pub fn reason_of(exit: Exit) EndReason {
     return switch (exit) {
         .exited => .exited,
         .signaled => .signal,
@@ -68,7 +68,7 @@ pub const View = struct {
     /// The JSON line of the diagnostic that ended the run, for a bundle; empty for none.
     diagnostic: []const u8 = "",
     /// Why it ended; `none` means what `exit` implies (`reason_of`).
-    reason: Reason = .none,
+    reason: EndReason = .none,
     limits: spec_mod.Limits = .{},
     /// The cgroup scope's name, or empty if the run had none.
     scope: []const u8 = "",
@@ -254,7 +254,7 @@ pub const Parsed = struct {
     diagnostic: [constants.diag_json_bytes_max]u8,
     diagnostic_len: u16,
     /// Version 2: why it ended (derived from `exit` for an older record).
-    reason: Reason,
+    reason: EndReason,
     detached: bool,
     scope: [constants.scope_name_bytes_max]u8,
     scope_len: u8,
@@ -434,7 +434,7 @@ fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!voi
 fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "reason")) {
         const name = std.mem.trimStart(u8, value, ".");
-        out.reason = std.meta.stringToEnum(Reason, name) orelse return false;
+        out.reason = std.meta.stringToEnum(EndReason, name) orelse return false;
         return true;
     }
     if (std.mem.eql(u8, key, "detached")) {
@@ -781,11 +781,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 1,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 2,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(@as(u32, 1), parsed.version);
+        try testing.expectEqual(@as(u32, 2), parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -809,7 +809,7 @@ test "the command is cut at its bound and says so" {
 
 test "older, newer and damaged records: the reader accepts, skips or refuses exactly" {
     // Goal: the format rules. A record with no version field is version 0 and readable; a field
-    // this reader does not know is ignored; version 2 is Newer; anything that is not a record, a
+    // this reader does not know is ignored; version 3 is Newer; anything that is not a record, a
     // missing name or start, a bad name, and text after the closing brace are Malformed.
     var parsed: Parsed = undefined;
     const old = ".{\n    .name = \"old\",\n    .started = 5,\n}\n";
@@ -818,7 +818,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try testing.expect(parsed.ids == null);
     const head = ".{\n    .version = 1,\n    .name = \"x\",\n    .started = 5,\n";
     try parse(head ++ "    .future = .{ 1, 2 },\n}\n", &parsed);
-    const newer = ".{\n    .version = 2,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 3,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",

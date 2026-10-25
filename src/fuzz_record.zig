@@ -44,6 +44,11 @@ fn random_exit(random: std.Random) records.Exit {
     };
 }
 
+fn random_reason(random: std.Random) records.EndReason {
+    const all = std.enums.values(records.EndReason);
+    return all[random.uintLessThan(usize, all.len)];
+}
+
 fn same_exit(a: records.Exit, b: records.Exit) bool {
     return std.meta.eql(a, b);
 }
@@ -94,6 +99,14 @@ fn check_round_trip(random: std.Random) void {
         .exit = random_exit(random),
         .ids = if (random.boolean()) .single else .full,
         .zbx_version = "0.0.0",
+        .reason = random_reason(random),
+        .limits = .{
+            .memory_bytes = if (random.boolean()) random.int(u64) else null,
+            .pids = if (random.boolean()) random.int(u32) else null,
+            .cpu_millis = if (random.boolean()) random.int(u32) else null,
+        },
+        .scope = if (random.boolean()) "zbx-web-1.scope" else "",
+        .detached = random.boolean(),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -106,6 +119,11 @@ fn check_round_trip(random: std.Random) void {
     assert(parsed.ended == view.ended);
     assert(same_exit(parsed.exit, view.exit));
     assert(parsed.ids.? == view.ids);
+    const reason = if (view.reason == .none) records.reason_of(view.exit) else view.reason;
+    assert(parsed.reason == reason);
+    assert(std.meta.eql(parsed.limits, view.limits));
+    assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
+    assert(parsed.detached == view.detached);
     check_damaged(random, text);
 }
 
@@ -128,7 +146,7 @@ fn check_damaged(random: std.Random, text: []const u8) void {
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = "    .version = 1,\n";
+    const marker = "    .version = 2,\n";
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);
@@ -142,6 +160,7 @@ fn check_versions(random: std.Random, text: []const u8) void {
     @memcpy(buffer[at .. text.len - marker.len], text[at + marker.len ..]);
     records.parse(buffer[0 .. text.len - marker.len], &parsed) catch unreachable; // Older reads.
     assert(parsed.version == 0);
+    assert(parsed.reason == records.reason_of(parsed.exit)); // The version 2 fields default.
 }
 
 pub fn fuzz_record(seed: u64) void {

@@ -674,6 +674,7 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
     if (scenario.step_fault == .none) return;
     model.quiet_connections = 1;
+    model.perfect_from = 2; // The cleanup after the scope step has a bus that works.
     switch (scenario.step_fault) {
         .none => unreachable,
         .no_socket => model.present = false,
@@ -826,23 +827,13 @@ fn check_scope(sim: *const HostSim, scenario: *const Scenario, name: []const u8)
     assert(scope.slice.len == 0);
     assert(scope.memory_max == null);
     assert(scope.memory_swap_max == null);
-    var path: [192]u8 = undefined;
-    const uid = sim.uid_value;
-    const base = std.fmt.bufPrint(
-        &path,
-        "/sys/fs/cgroup/user.slice/user-{d}.slice/user@{d}.service/{s}",
-        .{ uid, uid, unit_name },
-    ) catch unreachable; // Short.
-    var file: [224]u8 = undefined;
-    const limit_path = std.fmt.bufPrint(&file, "{s}/memory.max", .{base}) catch
-        unreachable; // Same.
-    const written = sim.world.read_written(limit_path);
+    // The scope and its files are gone by now; the world kept what memory.max held.
     if (memory) |bytes| {
         var digits: [24]u8 = undefined;
         const text = std.fmt.bufPrint(&digits, "{d}", .{bytes}) catch unreachable; // A u64.
-        assert(std.mem.eql(u8, written.?, text));
+        assert(std.mem.eql(u8, sim.world.ended_memory_max.?.slice(), text));
     } else {
-        assert(written == null);
+        assert(sim.world.ended_memory_max == null);
     }
 }
 

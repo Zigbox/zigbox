@@ -43,6 +43,9 @@ pub const Model = struct {
     /// The first this many connections get a perfect bus whatever else the model says, so that a
     /// run's probe can succeed and its scope step meet the fault.
     quiet_connections: u32 = 0,
+    /// From this connection on (zero-based) the bus is perfect again, so that a fault meets
+    /// one connection of a run: the scope step's, and not the cleanup after it.
+    perfect_from: ?u32 = null,
     /// The socket exists. False models a user without a session bus.
     present: bool = true,
     /// The socket exists and nothing accepts on it.
@@ -213,7 +216,8 @@ pub const Bus = struct {
         const expected = bus.model.socket_path orelse
             // Cannot fail: "/run/user/4294967295/bus" is 24 bytes.
             std.fmt.bufPrint(&expected_buffer, "/run/user/{d}/bus", .{uid}) catch unreachable;
-        const quiet = bus.connections < bus.model.quiet_connections;
+        const later = if (bus.model.perfect_from) |from| bus.connections >= from else false;
+        const quiet = bus.connections < bus.model.quiet_connections or later;
         const model = if (quiet) &quiet_model else &bus.model;
         const foreign = model.foreign_socket != null and
             std.mem.eql(u8, path, model.foreign_socket.?);

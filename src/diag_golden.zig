@@ -91,6 +91,7 @@ fn prepare_records_unreadable(sim: *HostSim) void {
 fn prepare_scope_fault(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.bus.model.quiet_connections = 1;
+    sim.world.bus.model.perfect_from = 2;
 }
 
 fn prepare_no_bus(sim: *HostSim) void {
@@ -116,6 +117,14 @@ fn prepare_bus_garbage(sim: *HostSim) void {
 fn prepare_systemd_refuses(sim: *HostSim) void {
     prepare_scope_fault(sim);
     sim.world.bus.model.start_error = "org.freedesktop.DBus.Error.AccessDenied";
+}
+
+/// The container ends and its scope stays: the manager refuses to stop it.
+fn prepare_scope_lingers(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.quiet_connections = 2; // The probe and the scope step; not the cleanup.
+    sim.world.bus.model.scope_removal = .never;
+    sim.world.bus.model.stop_error = "org.freedesktop.DBus.Error.AccessDenied";
 }
 
 fn prepare_name_taken(sim: *HostSim) void {
@@ -267,6 +276,13 @@ const base_cases = [_]Case{
         .code = .W0301,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_no_bus,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0302,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_scope_lingers,
         .warning = true,
         .exit = 0,
     },

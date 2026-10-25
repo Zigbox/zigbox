@@ -1,2 +1,2 @@
 {"code":"ZBX-W0203","severity":"warning","blame":"environment","summary":"skipped a run record that can't be read","causes":["2 run records were skipped; the first, 'damaged.zon', is not a valid record"],"while":["looking through the run records"],"context":{"path":"/home/alice/.local/state/zbx/runs"},"fixes":[{"sentence":"look at them:","command":"ls -l \"/home/alice/.local/state/zbx/runs\""}],"docs":"https://zigbox.github.io/zigbox/errors/W0203.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}
-{"container_exit":{"code":0}}
+{"container_exit":{"reason":"exited","code":0}}

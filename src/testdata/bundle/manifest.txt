@@ -8,7 +8,7 @@ review every file before you share this bundle; zbx never uploads it
 files:
   MANIFEST.txt
     this list
-  run-record.zon (324 bytes)
+  run-record.zon (467 bytes)
     the run's record: name, rootfs, command, labels, times, how it ended
     values redacted: 1
   version.txt (36 bytes)

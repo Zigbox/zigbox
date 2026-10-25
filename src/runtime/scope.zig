@@ -628,7 +628,8 @@ test "an old systemd's limits are written to the scope's own cgroup files" {
     var plan: plan_mod.Plan = undefined;
     scoped_plan(&plan, 230, .{ .memory_bytes = 64 << 20, .pids = 8 });
     var problem: Problem = undefined;
-    try testing.expect(start(sim.interface(), &plan, 600, &problem));
+    var directory: Directory = undefined;
+    try testing.expect(start(sim.interface(), &plan, 600, &directory, &problem));
     const scope = sim.world.bus.find_scope("zbx-web-1.scope").?;
     try testing.expect(scope.memory_max == null);
     try testing.expectEqual(@as(?u64, 8), scope.tasks_max);
@@ -652,7 +653,8 @@ test "a limit that cannot be written is a cgroup_write problem naming the file" 
     var plan: plan_mod.Plan = undefined;
     scoped_plan(&plan, 230, .{ .memory_bytes = 64 << 20 });
     var problem: Problem = undefined;
-    try testing.expect(!start(sim.interface(), &plan, 600, &problem));
+    var directory: Directory = undefined;
+    try testing.expect(!start(sim.interface(), &plan, 600, &directory, &problem));
     try testing.expectEqualStrings("memory.max", problem.cgroup_write.file.slice());
     try testing.expectEqual(host_mod.Error.NotFound, problem.cgroup_write.io.err);
 }

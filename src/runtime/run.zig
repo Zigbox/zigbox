@@ -23,7 +23,8 @@
 //!   - The event stream is the `report` pipe kept open for the container's life, with more record
 //!     kinds (`sync.zig`) for started, stopped and limit events.
 //!   - A detached run is `start` without `wait` in a supervisor process that is not the caller.
-//!   - `oom` and `pid_limit` join `ExitReason` when the cgroup is there.
+//!   - `oom` and `pid_limit` are in `ExitReason` since slice 2 of M2: `wait` reads the scope's
+//!     `memory.events` and `pids.events` the moment PID 1 is reaped.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -40,6 +41,7 @@ const ids = @import("ids.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
+const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 
@@ -57,8 +59,41 @@ pub const Error = session_mod.Error;
 /// Where a run is. `starting` is only seen from inside `start`.
 pub const Status = enum { starting, running, stopped };
 
-/// Why a run ended. `oom` and `pid_limit` arrive with M2.
+/// How the container's PID 1 ended, before the cgroup's counters are looked at.
+pub const Ended = union(enum) {
+    exited: u8,
+    signaled: u8,
+
+    pub fn code(ended: Ended) u8 {
+        switch (ended) {
+            .exited => |value| return value,
+            .signaled => |number| {
+                assert(number > 0);
+                assert(number < constants.signal_number_max);
+                return constants.exit_signal_offset + number;
+            },
+        }
+    }
+};
+
+/// The kernel's OOM killer killed something in the container's cgroup. The exit code is 137
+/// whatever PID 1 did, so a script can tell; `ended` keeps what PID 1 did, for `--verbose`.
+pub const Oom = struct {
+    /// The `--memory` limit; null if there was none (an ancestor's limit, or the machine's).
+    limit_bytes: ?u64,
+    ended: Ended,
+};
+
+/// The container hit its process limit (a fork was refused). The exit code is PID 1's own.
+pub const PidLimit = struct {
+    limit: ?u32,
+    ended: Ended,
+};
+
+/// Why a run ended.
 pub const ExitReason = union(enum) {
+    oom: Oom,
+    pid_limit: PidLimit,
     exited: u8,
     /// Killed by this signal. A container that died of the SIGKILL zbx sent in place of a signal
     /// PID 1 had no handler for is reported with that signal.
@@ -78,8 +113,22 @@ pub const ExitReason = union(enum) {
                 assert(number < constants.signal_number_max);
                 return constants.exit_signal_offset + number;
             },
+            .oom => return constants.exit_signal_offset + constants.signal_kill,
+            .pid_limit => |hit| return hit.ended.code(),
             .start_failed, .lost => return null,
         }
+    }
+
+    /// The word the JSON `container_exit.reason` and the run record use.
+    pub fn word(reason: *const ExitReason) []const u8 {
+        return switch (reason.*) {
+            .oom => "oom",
+            .pid_limit => "pid_limit",
+            .exited => "exited",
+            .signaled => "signal",
+            .start_failed => "start_failed",
+            .lost => "lost",
+        };
     }
 };
 
@@ -116,8 +165,12 @@ pub const Handle = struct {
     warn: ?Warn,
     record_warned: bool,
     /// Steps that were allowed to fail and did (the devpts mount), as sentences.
-    notes: [constants.sync_records_max]Note,
+    notes: [constants.sync_records_max + 1]Note,
     notes_count: u32,
+    /// The limits the run was started with, for the exit report and the record.
+    limits: spec_mod.Limits,
+    /// Why the run ended, as the record says it; `none` until it has.
+    end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
     lost_diag: Diag,
 
@@ -133,7 +186,7 @@ pub const Handle = struct {
     }
 
     pub fn note_slice(handle: *const Handle) []const Note {
-        assert(handle.notes_count <= constants.sync_records_max);
+        assert(handle.notes_count <= handle.notes.len);
         if (handle.notes_count > 0) assert(handle.notes[0].len > 0);
         return handle.notes[0..handle.notes_count];
     }
@@ -165,6 +218,8 @@ pub fn start(
     handle.warn = options.warn;
     handle.record_warned = false;
     handle.notes_count = 0;
+    handle.limits = container.limits;
+    handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.command = container.command;
     handle.labels = container.labels;
@@ -205,6 +260,7 @@ pub fn start(
         assert(diag.code != null);
         handle.status = .stopped;
         save_record(handle, .{ .start_failed = diag.code.? }, host.time_now(), diag);
+        finish_scope(handle);
         return err;
     };
     collect_notes(handle);
@@ -234,17 +290,60 @@ pub fn wait(handle: *Handle) ExitReason {
         };
         diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, .{});
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
+        finish_scope(handle); // `abandon` ended the container.
         return .lost;
     };
-    const reason: ExitReason = switch (status) {
+    // First thing after the reap: the manager removes the cgroup once it is empty.
+    const events = if (handle.plan.scoped)
+        scope_mod.read_events(host, handle.session.scope_directory.slice())
+    else
+        scope_mod.Events{ .oom_kill = null, .pids_max = null };
+    const ended: Ended = switch (status) {
         .exited => |code| .{ .exited = code },
         .signaled => |number| .{ .signaled = number },
     };
-    save_record(handle, switch (status) {
+    const reason = classify(ended, events, handle.limits);
+    handle.end_reason = switch (reason) {
+        .oom => .oom,
+        .pid_limit => .pid_limit,
+        .exited => .exited,
+        .signaled => .signal,
+        .start_failed, .lost => unreachable, // `classify` makes only the four above.
+    };
+    const exit: records.Exit = switch (ended) {
         .exited => |code| .{ .exited = code },
         .signaled => |number| .{ .signaled = number },
-    }, host.time_now(), null);
+    };
+    save_record(handle, exit, host.time_now(), null);
+    finish_scope(handle);
     return reason;
+}
+
+/// What the container's end was, given what the cgroup counted. An OOM kill outranks a process
+/// limit; either outranks how PID 1 ended, which stays in the reason.
+pub fn classify(ended: Ended, events: scope_mod.Events, limits: spec_mod.Limits) ExitReason {
+    if ((events.oom_kill orelse 0) > 0) {
+        return .{ .oom = .{ .limit_bytes = limits.memory_bytes, .ended = ended } };
+    }
+    if ((events.pids_max orelse 0) > 0) {
+        return .{ .pid_limit = .{ .limit = limits.pids, .ended = ended } };
+    }
+    return switch (ended) {
+        .exited => |code| .{ .exited = code },
+        .signaled => |number| .{ .signaled = number },
+    };
+}
+
+/// Sees that the scope is gone now that the container has ended; if it is not, a warning.
+fn finish_scope(handle: *Handle) void {
+    assert(handle.status == .stopped);
+    var problem: scope_mod.Problem = undefined;
+    if (handle.session.cleanup_scope(&problem)) return;
+    var warning: Diag = undefined;
+    warning.reset();
+    const name = handle.plan.text(handle.plan.scope_name);
+    diagnose.scope_not_cleaned(&warning, name, &problem);
+    handle.report(&warning);
 }
 
 /// Sends a signal to the container's PID 1 as the forwarding rule says: a signal it has no
@@ -349,6 +448,13 @@ fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?p
     var found: scope_mod.Probe = undefined;
     var problem: scope_mod.Problem = undefined;
     if (scope_mod.probe(handle.host, &found, &problem)) {
+        if (found.via.refused != null) {
+            const note = &handle.notes[handle.notes_count];
+            var buffer: [160]u8 = undefined;
+            note.* = .{};
+            note.print("{s}", .{scope_text.fallback_note(&found.via, &buffer)});
+            handle.notes_count += 1;
+        }
         return .{ .version = found.version, .limits = limits };
     }
     if (limits.any()) {
@@ -450,6 +556,9 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .ended = if (exit == .running) null else ended,
         .exit = exit,
         .ids = handle.mapping,
+        .reason = handle.end_reason,
+        .limits = handle.limits,
+        .scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "",
         .zbx_version = build_options.version,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
@@ -475,8 +584,8 @@ fn warn_not_saved(handle: *Handle, directory: ?[]const u8, failure: ?diagnose.Fa
 }
 
 fn collect_notes(handle: *Handle) void {
-    handle.notes_count = 0;
-    assert(handle.session.report.note_slice().len <= handle.notes.len);
+    assert(handle.notes_count <= 1); // The bus note, if the inherited bus was not the one used.
+    assert(handle.session.report.note_slice().len + handle.notes_count <= handle.notes.len);
     for (handle.session.report.note_slice()) |record| {
         const note = &handle.notes[handle.notes_count];
         note.* = .{};

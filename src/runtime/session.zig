@@ -51,6 +51,10 @@ pub const Session = struct {
     helper: ?HelperRecord,
     /// Why the scope step failed, for its diagnostic.
     scope_problem: ?scope_mod.Problem,
+    /// The scope's cgroup directory (empty if unknown), and whether a scope may exist that
+    /// `cleanup_scope` has to see to.
+    scope_directory: scope_mod.Directory,
+    scope_up: bool,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
 
@@ -70,6 +74,8 @@ pub const Session = struct {
         session.report.reset();
         session.helper = null;
         session.scope_problem = null;
+        session.scope_directory = .{};
+        session.scope_up = false;
         session.substituted = null;
         assert(!session.open.any());
         assert(session.pid == null);
@@ -261,9 +267,35 @@ pub const Session = struct {
         assert(session.plan.scoped);
         assert(session.scope_problem == null);
         var problem: scope_mod.Problem = undefined;
-        if (scope_mod.start(session.host, session.plan, session.pid.?, &problem)) return;
+        const pid = session.pid.?;
+        if (scope_mod.start(session.host, session.plan, pid, &session.scope_directory, &problem)) {
+            session.scope_up = true;
+            return;
+        }
+        // The scope exists, or may: the request went out and the answer was lost, or the job
+        // ended badly. A refusal (a taken name above all: that scope is someone else's) means
+        // there is nothing of ours to clean up.
+        session.scope_up = switch (problem) {
+            .bus => |failure| switch (failure.kind) {
+                .remote => failure.stage == .job,
+                .timeout, .io, .protocol => failure.stage == .call or failure.stage == .job,
+                .no_bus, .auth_refused => false,
+            },
+            .bus_retried, .no_address, .bad_address, .scope_left => false,
+            .no_cgroup_path, .cgroup_write => true,
+        };
         session.scope_problem = problem;
         return error.IoFailed;
+    }
+
+    /// After the container has ended (or never ran): makes sure the scope is gone. A scope that
+    /// is not is a problem for the caller to warn about (ZBX-W0302). True if it is gone.
+    pub fn cleanup_scope(session: *Session, problem: *scope_mod.Problem) bool {
+        assert(session.pid == null);
+        if (!session.scope_up) return true;
+        session.scope_up = false;
+        const name = session.plan.text(session.plan.scope_name);
+        return scope_mod.cleanup(session.host, name, session.scope_directory.slice(), problem);
     }
 
     fn release_child(session: *Session) host_mod.Error!void {

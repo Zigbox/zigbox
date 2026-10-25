@@ -285,6 +285,9 @@ pub const World = struct {
     /// A scope's cgroup directory stays after the manager is done with its unit (a cgroup that
     /// something still holds).
     cgroup_stays: bool,
+    /// What `memory.max` held in the last scope's cgroup when the cgroup went (the fallback
+    /// write for an old systemd), since the file goes with it.
+    ended_memory_max: ?host.Text,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -320,6 +323,7 @@ pub const World = struct {
         world.oom_kills = 0;
         world.pids_max_hits = 0;
         world.cgroup_stays = false;
+        world.ended_memory_max = null;
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -695,6 +699,14 @@ pub const World = struct {
         // Cannot fail: a bounded relative path and a short prefix fit the buffer.
         const directory = std.fmt.bufPrint(&directory_buffer, "/sys/fs/cgroup{s}", .{relative}) catch
             unreachable; // Same bound as above.
+        var limit_path: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+        // Cannot fail: a bounded directory and a short name.
+        const memory_path = std.fmt.bufPrint(&limit_path, "{s}/memory.max", .{directory}) catch
+            unreachable; // Same bound as above.
+        world.ended_memory_max = if (world.read_written(memory_path)) |text|
+            host.Text.from_slice(text)
+        else
+            null;
         var at: u32 = 0;
         while (at < world.written_count) {
             const under = world.written[at].path.under(directory);

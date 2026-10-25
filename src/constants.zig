@@ -288,7 +288,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 1;
+pub const record_version: u32 = 2;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 32 * 1024;
 pub const record_command_bytes_max: u32 = 2048;

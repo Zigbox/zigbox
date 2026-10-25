@@ -864,15 +864,81 @@ fn report_outcome(
                 writer.print("zbx: note: {s}\n", .{note.slice()}) catch unreachable;
             }
         }
+        if (options.verbose) write_ended_note(&writer, reason);
         write_signal_note(&writer, reason);
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
 }
 
+/// With --verbose, what the container's first process did when the report says something else
+/// (the exit code is 137 for an OOM kill whatever it did), so nothing is hidden.
+fn write_ended_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
+    assert(writer.end < writer.buffer.len);
+    const ended = switch (reason.*) {
+        .oom => |hit| hit.ended,
+        .pid_limit => |hit| hit.ended,
+        else => return,
+    };
+    // Cannot fail: a short line into a buffer that holds a message.
+    switch (ended) {
+        .exited => |code| writer.print(
+            "zbx: note: the container's first process exited with code {d}\n",
+            .{code},
+        ) catch unreachable, // Same bound as above.
+        .signaled => |number| writer.print(
+            "zbx: note: the container's first process was killed by signal {d}\n",
+            .{number},
+        ) catch unreachable, // Same bound as above.
+    }
+}
+
+/// A size as the largest binary unit that divides it, "128 MiB".
+fn bytes_words(buffer: []u8, bytes: u64) []const u8 {
+    assert(buffer.len >= 32);
+    const units = [_]struct { size: u64, name: []const u8 }{
+        .{ .size = 1 << 40, .name = "TiB" },
+        .{ .size = 1 << 30, .name = "GiB" },
+        .{ .size = 1 << 20, .name = "MiB" },
+        .{ .size = 1 << 10, .name = "KiB" },
+    };
+    for (units) |unit| {
+        if (bytes >= unit.size and bytes % unit.size == 0) {
+            // Cannot fail: twenty digits and a unit fit 32 bytes.
+            return std.fmt.bufPrint(buffer, "{d} {s}", .{ bytes / unit.size, unit.name }) catch
+                unreachable; // Same bound as above.
+        }
+    }
+    return std.fmt.bufPrint(buffer, "{d} bytes", .{bytes}) catch unreachable; // Same.
+}
+
 fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
     assert(writer.end < writer.buffer.len);
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    var words: [32]u8 = undefined;
+    // Cannot fail: short lines into a buffer that holds a message.
+    switch (reason.*) {
+        .oom => |hit| {
+            if (hit.limit_bytes) |limit| {
+                writer.print("zbx: killed: out of memory (limit {s})\n", .{
+                    bytes_words(&words, limit),
+                }) catch unreachable; // Same bound as above.
+            } else {
+                writer.print("zbx: killed: out of memory\n", .{}) catch unreachable; // Same.
+            }
+            return;
+        },
+        .pid_limit => |hit| {
+            if (hit.limit) |limit| {
+                writer.print("zbx: stopped: process limit reached (limit {d})\n", .{limit}) catch
+                    unreachable; // Same bound as above.
+            } else {
+                writer.print("zbx: stopped: process limit reached\n", .{}) catch unreachable;
+            }
+            return;
+        },
+        else => {},
+    }
     const number = switch (reason.*) {
         .signaled => |signal| signal,
         else => return,
@@ -884,6 +950,16 @@ fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) 
         unreachable; // Same bound as above.
 }
 
+fn write_optional(writer: *std.Io.Writer, value: anytype) void {
+    assert(writer.end < writer.buffer.len);
+    // Cannot fail: a number or null in a buffer that holds a message.
+    if (value) |number| {
+        writer.print("{d}", .{number}) catch unreachable; // Same bound as above.
+    } else {
+        writer.writeAll("null") catch unreachable; // Same.
+    }
+}
+
 fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
     const code = reason.code().?; // Only called for a command that ran.
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
@@ -891,11 +967,26 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
     // Cannot fail: a short line into a buffer that holds a message.
     switch (reason.*) {
         .signaled => |number| {
-            const format = "{{\"container_exit\":{{\"signal\":{d},\"code\":{d}}}}}\n";
+            const format = "{{\"container_exit\":{{\"reason\":\"signal\",\"signal\":{d}," ++
+                "\"code\":{d}}}}}\n";
             writer.print(format, .{ number, code }) catch unreachable; // Same bound as above.
         },
-        else => writer.print("{{\"container_exit\":{{\"code\":{d}}}}}\n", .{code}) catch
-            unreachable, // Same bound as above.
+        .oom => |hit| {
+            writer.writeAll("{\"container_exit\":{\"reason\":\"oom\",\"limit_bytes\":") catch
+                unreachable; // Same bound as above.
+            write_optional(writer, hit.limit_bytes);
+            writer.print(",\"code\":{d}}}}}\n", .{code}) catch unreachable; // Same.
+        },
+        .pid_limit => |hit| {
+            writer.writeAll("{\"container_exit\":{\"reason\":\"pid_limit\",\"limit\":") catch
+                unreachable; // Same bound as above.
+            write_optional(writer, hit.limit);
+            writer.print(",\"code\":{d}}}}}\n", .{code}) catch unreachable; // Same.
+        },
+        else => {
+            const format = "{{\"container_exit\":{{\"reason\":\"exited\",\"code\":{d}}}}}\n";
+            writer.print(format, .{code}) catch unreachable; // Same bound as above.
+        },
     }
 }
 

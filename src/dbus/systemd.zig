@@ -225,10 +225,7 @@ pub fn stop_scope(conn: *Connection, name: []const u8) CallError!Stopped {
     var writer = wire.Writer.init(&body_buffer);
     writer.string(name);
     writer.string("fail");
-    const body = writer.finish() catch |err| {
-        _ = protocol(conn, err);
-        return error.Failed;
-    };
+    const body = writer.finish() catch |err| return protocol(conn, err);
     const reply = conn.call(.{
         .destination = systemd_name,
         .path = manager_path,
