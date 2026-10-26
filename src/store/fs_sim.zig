@@ -353,16 +353,25 @@ pub const SimFs = struct {
     }
 
     fn store_xattr(sim: *SimFs, index: u32, name: []const u8, value: []const u8) Error!void {
+        try sim.rewrite_xattrs(index, name, .{ .name = name, .value = value });
+    }
+
+    /// Replaces the node's attribute section with its attributes but `drop`, and `add`.
+    fn rewrite_xattrs(sim: *SimFs, index: u32, drop: []const u8, add: ?xattrs.Xattr) Error!void {
         const node = &sim.nodes[index];
         sim.builder.reset();
         if (node.xattr_len > 0) {
             var iterator = xattrs.Iterator.init(sim.pool[node.xattr_at..][0..node.xattr_len]);
             while (iterator.next()) |item| {
-                if (std.mem.eql(u8, item.name, name)) continue;
+                if (std.mem.eql(u8, item.name, drop)) continue;
                 sim.builder.add(item.name, item.value) catch return error.NoSpace;
             }
         }
-        sim.builder.add(name, value) catch return error.NoSpace;
+        if (add) |item| sim.builder.add(item.name, item.value) catch return error.NoSpace;
+        if (sim.builder.count == 0) {
+            node.xattr_len = 0;
+            return;
+        }
         const section = sim.builder.finish(&sim.blob);
         if (sim.pool_len + section.len > sim.pool.len) return error.NoSpace;
         @memcpy(sim.pool[sim.pool_len..][0..section.len], section);
@@ -644,9 +653,10 @@ pub const SimFs = struct {
         const node = &sim.nodes[sim.slot_of(fd).node];
         node.uid = uid;
         node.gid = gid;
-        // A change of owner clears the capability and the setuid bits, as the kernel does.
-        node.xattr_len = 0;
+        // A change of owner clears the file capability and the setuid and setgid bits, as the
+        // kernel does; the other attributes stay.
         node.mode &= 0o1777;
+        try sim.rewrite_xattrs(sim.slot_of(fd).node, "security.capability", null);
     }
 
     fn set_mode(context: *anyopaque, fd: Fd, mode: u16) Error!void {
@@ -869,7 +879,10 @@ test "attributes: listed, read, and cleared by a change of owner as the kernel d
     const fd = try fs.create("/d/g", 0o4755);
     defer fs.close(fd);
     try fs.set_xattr(fd, "security.capability", "\x01");
+    try fs.set_xattr(fd, "user.keep", "k");
     try fs.set_owner(fd, 5, 6);
-    try testing.expect(sim.xattrs_of("/d/g") == null);
+    var kept = xattrs.Iterator.init(sim.xattrs_of("/d/g").?);
+    try testing.expectEqualStrings("user.keep", kept.next().?.name);
+    try testing.expect(kept.next() == null);
     try testing.expectEqual(@as(u16, 0o755), sim.stat_of("/d/g").?.mode);
 }
