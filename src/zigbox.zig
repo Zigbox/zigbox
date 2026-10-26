@@ -46,6 +46,13 @@ pub const host_sim = @import("host_sim.zig");
 pub const diag = @import("diag/diag.zig");
 pub const codes = @import("diag/codes.zig");
 pub const render = @import("diag/render.zig");
+/// A second product's diagnostics: a finished diagnostic as plain data with JSON in and out, the
+/// strings that belong to one product, and the explanation of a code given as data. Zigcube's
+/// agent renders its own `ZC-` codes and Zigbox's `ZBX-` ones with the same renderer through
+/// these (`render.render_diagnostic`, `explain.render_entry`).
+pub const diagnostic = @import("diag/diagnostic.zig");
+pub const product = @import("diag/product.zig");
+pub const explain = @import("diag/explain.zig");
 
 /// Run records: the state a run leaves in the state directory.
 pub const records = @import("runtime/records.zig");
@@ -61,4 +68,37 @@ test "the module's surface is what the contract names" {
     _ = signal;
     _ = inspect;
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
+}
+
+test "the module's surface for a second product's diagnostics" {
+    // Goal: what Zigcube's agent calls (docs/DECISIONS.md, "Zigcube's diagnostic codes plug into
+    // Zigbox's diagnostics") fails here, loudly, if it is renamed or removed. Method: a
+    // `ZBX-` diagnostic goes through the whole path a node-to-agent hop takes.
+    var collector: diag.Diag = undefined;
+    collector.reset();
+    collector.raise(.E0001);
+    collector.cause("a cause", .{});
+    var finished: diagnostic.Diagnostic = undefined;
+    diagnostic.from_diag(&finished, &collector);
+    var json: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&json);
+    try diagnostic.write_json(&writer, &finished);
+    var parsed: diagnostic.Diagnostic = undefined;
+    try diagnostic.parse_json(&parsed, writer.buffered());
+    try std.testing.expect(parsed.equal(&finished));
+
+    var out: [16 * 1024]u8 = undefined;
+    const products = [_]product.Product{product.Product.zbx};
+    const text = render.render_diagnostic(&parsed, &products, .text, false, &out);
+    try std.testing.expect(std.mem.indexOf(u8, text, "zbx explain E0001") != null);
+    try std.testing.expect(product.Product.find(&products, "ZC-E0201") == null);
+    const entry: explain.ExplainEntry = .{
+        .full_name = "ZBX-E0001",
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "s",
+        .explanation = "e",
+        .exit_text = "1",
+    };
+    try std.testing.expect(explain.render_entry(entry, &out).len > 0);
 }
