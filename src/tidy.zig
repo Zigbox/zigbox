@@ -653,6 +653,37 @@ fn is_shipped(path: []const u8) bool {
     return false;
 }
 
+const fuzzer_entry = ".{ .name = \"";
+const workflow_path = ".github/workflows/ci.yml";
+
+/// The first fuzzer registered in `fuzz_source` (a `.{ .name = "x", ...}` entry) that the CI
+/// matrix in `workflow` does not list (a line `- x`), or null if every one is listed. STYLE.md:
+/// CI runs every fuzzer.
+pub fn fuzzer_missing_from(fuzz_source: []const u8, workflow: []const u8) ?[]const u8 {
+    assert(fuzz_source.len > 0);
+    var lines = std.mem.splitScalar(u8, fuzz_source, '\n');
+    while (lines.next()) |line| {
+        const entry = std.mem.trim(u8, line, " ");
+        if (!std.mem.startsWith(u8, entry, fuzzer_entry)) continue;
+        const rest = entry[fuzzer_entry.len..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+        if (!workflow_lists(workflow, rest[0..end])) return rest[0..end];
+    }
+    return null;
+}
+
+fn workflow_lists(workflow: []const u8, name: []const u8) bool {
+    assert(name.len > 0);
+    var lines = std.mem.splitScalar(u8, workflow, '\n');
+    while (lines.next()) |line| {
+        const item = std.mem.trim(u8, line, " ");
+        if (std.mem.startsWith(u8, item, "- ")) {
+            if (std.mem.eql(u8, item[2..], name)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
@@ -692,6 +723,13 @@ pub fn main(init: std.process.Init) !u8 {
             shipped_asserts += report.asserts;
         }
     }
+    const limit: std.Io.Limit = .limited(source_bytes_max);
+    const fuzz_source = try root.readFileAlloc(io, "src/fuzz.zig", arena, limit);
+    const workflow = try root.readFileAlloc(io, workflow_path, arena, limit);
+    if (fuzzer_missing_from(fuzz_source, workflow)) |name| {
+        try out.print("fuzzer {s} is not in the CI matrix of {s}\n", .{ name, workflow_path });
+        violations += 1;
+    }
     if (!density_ok(shipped_asserts, shipped_functions)) {
         try out.print(
             "shipped code: {d} assertions in {d} functions, below {d} per function\n",
@@ -719,6 +757,17 @@ const repeat = @import("test_util.zig").repeat;
 fn check_text(report: *Report, source: []const u8) void {
     report.* = .{};
     check_source(report, "src/example.zig", source);
+}
+
+test "a fuzzer missing from the CI matrix is found" {
+    // Goal: the check is not vacuous. Every registered name must be a matrix item; a name that
+    // is only a prefix of an item, or appears in a comment, does not count.
+    const source = "    .{ .name = \"cli\", .run_iteration = a },\n" ++
+        "    .{ .name = \"diag\", .run_iteration = b },\n";
+    const listed = "        fuzzer:\n          - cli\n          - diag\n";
+    try testing.expect(fuzzer_missing_from(source, listed) == null);
+    try testing.expectEqualStrings("diag", fuzzer_missing_from(source, "- cli\n- diagnostic\n").?);
+    try testing.expectEqualStrings("cli", fuzzer_missing_from(source, "# - cli\n- diag\n").?);
 }
 
 test "line length: 100 columns pass, 101 fail, multibyte counts as one column" {
