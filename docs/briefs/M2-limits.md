@@ -126,6 +126,11 @@ Hardening failures (`capset`, `prctl`, `seccomp`, the remount) are `E02xx`, each
    - Write `docs/demos/m2.md`: the by-hand steps, the cuts, the departures from runc, and the failure modes (no user bus, no lingering, a delegation missing a controller, an OOM that hits zbx's own memory, a seccomp denial that looks like a bug, a read-only rootfs without `/tmp`).
    - Run `demo-m2` locally under TCG, and `demo-m0` and `demo-m1` still pass.
 
+## Notes for later milestones (found during M2)
+
+- **Seccomp allowlist.** It follows Docker's default profile but has only been exercised with Alpine's busybox. Before M4 runs real images (Debian-based `python`, `postgres`), test a glibc rootfs, and grow the allowlist from what fails. A missing syscall shows up as `EPERM`, not a crash, so it can look like an application bug; the failure-modes section of `docs/demos/m2.md` should say so.
+- **The `mount` refusal message.** Busybox prints "permission denied (are you root?)" for the kernel's `EPERM`, and glibc's `mount` prints "Operation not permitted". Demo assertions match the exit status and either text.
+
 ## Done means
 
 - All gates pass, and every fuzzer runs at 10,000 iterations (`dbus` and the seccomp-compiler fuzzer are new).
