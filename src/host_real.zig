@@ -47,7 +47,12 @@ fn monotonic_now_ms() u64 {
 /// because `check` is a free function used by the probe code too and the library is called from
 /// several threads (each caller's host reads the errno of its own last call); a forked child has
 /// its own copy.
-threadlocal var errno_last: u16 = 0;
+//
+// The alignment is not decoration. A static binary without libc sets up its own thread-local
+// area at startup (`std.os.linux.tls`), and with a TLS segment aligned to 2 bytes it lays out the
+// thread control block at a misaligned offset and panics (`incorrectAlignment`) before `main`,
+// in ReleaseSafe only. 16 makes the segment's alignment that of the block it holds.
+threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a

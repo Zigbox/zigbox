@@ -6,7 +6,9 @@
 //!   - `--memory 32m` with a memory hog that is PID 1, and with one that is a child of PID 1;
 //!   - the limit files of a running container, read from the host, and gone after it ends;
 //!   - whether the scope is gone from the cgroup tree and from the manager after each run;
-//!   - an inherited root bus address, which the fallback to the user's own bus has to survive.
+//!   - an inherited root bus address, which the fallback to the user's own bus has to survive;
+//!   - slice 4: `run -d`, `ps` (text and JSON), `stop` (graceful, killed, unknown), `--timeout`,
+//!     the scope gone afterwards, and re-adoption by a new zbx process.
 
 const std = @import("std");
 const Io = std.Io;
@@ -77,7 +79,9 @@ fn experiment(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try memory_limit(&session, out);
     try limits_visible(&session, out);
     try inherited_bus(&session, out);
-    try show(&session, out, "records", "for f in pid1 bomb1 oom1 oom2 oom3 oomchild; do " ++
+    try lifecycle(&session, out);
+    const names = "pid1 bomb1 oom1 oom2 oom3 oomchild det1 det3";
+    try show(&session, out, "records", "for f in " ++ names ++ "; do " ++
         "echo == $f; cat /home/demo/.local/state/zbx/runs/$f.zon 2>&1 | " ++
         "grep -E 'version|exit|reason|detached|scope|limit'; done");
     try session.shutdown();
@@ -205,4 +209,47 @@ fn inherited_bus(session: *Session, out: *Io.Writer) !void {
         " --name fb1 -- sh -c 'echo fallback-ran'";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
+}
+
+const zbx = H.as_demo ++ "/home/demo/zbx";
+const detached = zbx ++ " run -d --rootfs " ++ rootfs_dir;
+
+/// The scope of `name` in the cgroup tree and the manager, and who is still running as demo.
+fn scope_of(comptime name: []const u8) []const u8 {
+    return "echo SCOPE-" ++ name ++ ":$(ls " ++ app_slice ++ " | grep -c zbx-" ++ name ++
+        ".scope); echo PROCS:$(pgrep -u demo -fa 'sleep 1000|zbx run' | grep -vc pgrep)";
+}
+
+fn lifecycle(session: *Session, out: *Io.Writer) !void {
+    try out.print("\nvm-m2: slice 4, a detached run: start, list, stop\n", .{});
+    try split(session, out, detached ++ " --name det1 -- sleep 1000");
+    try show(session, out, "det1 is running", "sleep 2; " ++ comptime scope_of("det1"));
+    const record = "/home/demo/.local/state/zbx/runs/det1.zon";
+    const fields = "grep -E 'pid|supervisor|detached|scope' ";
+    try show(session, out, "the record names the pids", fields ++
+        record ++ "; ps -o pid,ppid,sid,tty,args -p $(grep -o 'supervisor = [0-9]*' " ++ record ++
+        " | cut -d' ' -f3)");
+    // Each zbx below is a new process: none of them started det1.
+    try split(session, out, zbx ++ " ps");
+    try split(session, out, zbx ++ " ps --output json");
+    try split(session, out, zbx ++ " stop det1 --output json");
+    try show(session, out, "det1 after stop", "sleep 2; " ++ comptime scope_of("det1") ++ after);
+    try split(session, out, zbx ++ " ps --all");
+    try split(session, out, zbx ++ " stop det1");
+
+    try out.print("\nvm-m2: slice 4, stop gives a handler of SIGTERM its grace period\n", .{});
+    try split(session, out, detached ++ " --name det3 -- sh -c 'trap \"exit 7\" TERM; " ++
+        "sleep 1000 & wait'");
+    try show(session, out, "det3 is running", "sleep 2; " ++ comptime scope_of("det3"));
+    try split(session, out, zbx ++ " stop det3 --grace 3000 --output json");
+    try show(session, out, "det3 after stop", "sleep 2; " ++ comptime scope_of("det3") ++ after);
+
+    try out.print("\nvm-m2: slice 4, --timeout on a detached and a foreground run\n", .{});
+    try split(session, out, detached ++ " --timeout 3000 --name det4 -- sleep 1000");
+    try show(session, out, "det4, 8 s later", "sleep 8; " ++ comptime scope_of("det4") ++ after);
+    try split(session, out, zbx ++ " ps --all --output json");
+    try split(session, out, run_prefix ++ " --timeout 3000 --name fg1 -- sleep 1000");
+    try split(session, out, zbx ++ " stop nobody");
+    try split(session, out, zbx ++ " stop det4 --grace soon");
+    try show(session, out, "schema ps", zbx ++ " schema ps | head -c 300");
 }

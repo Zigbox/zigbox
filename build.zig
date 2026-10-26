@@ -178,6 +178,14 @@ fn add_release_step(b: *std.Build, options: *std.Build.Step.Options) void {
         });
         step.dependOn(&install.step);
         check.addFileArg(exe.getEmittedBin());
+        // The binary that can run here is run once. A release binary has its own startup (no
+        // libc: `std.os.linux.tls`), and a thread-local variable once made it panic before
+        // `main`, which no test binary showed.
+        if (query.cpu_arch == b.graph.host.result.cpu.arch) {
+            const smoke = b.addRunArtifact(exe);
+            smoke.addArg("--version");
+            step.dependOn(&smoke.step);
+        }
     }
     if (strip) step.dependOn(&check.step);
 }
