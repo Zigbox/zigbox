@@ -174,3 +174,41 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M1 demo
         run: zig build demo-m1 -Daccel=kvm
+
+  # Sibling of demo-m1: the same VM and rootfs, then the four steps of the M2 spec (a fork bomb
+  # under --pids 64, stress-ng under --memory 128m, a refused mount, a read-only root), the
+  # acceptance criteria (limits visible under the user's slice and gone after; oom, process
+  # limit, signal and exit told apart) and the lifecycle (run -d, ps, stop, --timeout). stress-ng
+  # is installed with apk inside a zbx run, over the VM's network. See docs/demos/m2.md.
+  demo-m2:
+    name: demo-m2 (Ubuntu 24.04 VM, KVM, Alpine rootfs, limits)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # The same cache entry as demo-m0 (same path, same key), so the base image is downloaded
+      # once for both jobs.
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm
+          key: vm-image-${{ hashFiles('src/testing/vm/image.zon') }}
+      # The Alpine minirootfs (3.5 MB), keyed by src/testing/vm/alpine.zon, which holds its
+      # SHA-256. The harness re-verifies the hash on every run, cached or downloaded.
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      - name: Run the M2 demo
+        run: zig build demo-m2 -Daccel=kvm

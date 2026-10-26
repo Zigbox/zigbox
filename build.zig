@@ -217,9 +217,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
         },
         .{
-            .step = "vm-m2-experiment",
+            .step = "demo-m2",
             .root = "src/testing/vm/main_m2.zig",
-            .help = "Look at M2's limits and exit reports in the VM (not the M2 demo)",
+            .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
         },
     };
     for (demos) |demo| {
