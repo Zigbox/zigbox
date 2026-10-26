@@ -173,18 +173,28 @@ pub const Session = struct {
         assert(command.len < limits.command_bytes_max);
         session.nonce += 1;
         var line: [limits.command_bytes_max + 256]u8 = undefined;
-        const format = "ZBX_OUT=$( {s} 2>&1 ); ZBX_ST=$?; printf '%s\\n' \"$ZBX_OUT\"; " ++
-            "echo \"ZBXDONE\"\"{d}:$ZBX_ST\"\n";
-        const text = try std.fmt.bufPrint(&line, format, .{ command, session.nonce });
+        // The output is taken from the line after a begin marker of its own, never from where
+        // the command was typed: bash's line editor redraws a long typed line even with echo
+        // off, and its padding can land in front of the first output line (CI runs 40378288342
+        // and 40417118406).
+        const format = "ZBX_OUT=$( {s} 2>&1 ); ZBX_ST=$?; echo \"ZBXBEGIN\"\"{d}:\"; " ++
+            "printf '%s\\n' \"$ZBX_OUT\"; echo \"ZBXDONE\"\"{d}:$ZBX_ST\"\n";
+        const nonce = session.nonce;
+        const text = try std.fmt.bufPrint(&line, format, .{ command, nonce, nonce });
         const mark = session.console_len;
         try session.send(text);
+        var begin_buffer: [32]u8 = undefined;
+        const begin = try std.fmt.bufPrint(&begin_buffer, "ZBXBEGIN{d}:", .{session.nonce});
+        const begun = try session.wait_for(begin, mark, timeout_s);
+        const output_start = try session.wait_for("\n", begun, timeout_s);
         var sentinel_buffer: [32]u8 = undefined;
         const sentinel = try std.fmt.bufPrint(&sentinel_buffer, "ZBXDONE{d}:", .{session.nonce});
-        const after = try session.wait_for(sentinel, mark, timeout_s);
+        const after = try session.wait_for(sentinel, output_start, timeout_s);
         const end = try session.wait_for("\n", after, timeout_s);
         const status_text = std.mem.trim(u8, session.console[after..end], " \r\n");
         const status = std.fmt.parseInt(u8, status_text, 10) catch return error.BadStatus;
-        const raw = session.console[mark .. after - sentinel.len];
+        assert(output_start <= after - sentinel.len);
+        const raw = session.console[output_start .. after - sentinel.len];
         const length = try clean_output(raw, session.scratch);
         return .{ .output = std.mem.trim(u8, session.scratch[0..length], "\n"), .status = status };
     }
