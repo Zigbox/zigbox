@@ -129,6 +129,24 @@ comptime {
 /// Width of a code such as "ZBX-E0001".
 pub const diag_code_bytes: u32 = 9;
 
+// A second product's diagnostics (src/diag/product.zig): the strings a `Product` supplies, which
+// the renderer places in fixed buffers. The proofs below keep the longest of each within them.
+/// "ZBX-", "ZC-": capital letters and a dash. The tag after it ("E0501") is always five bytes.
+pub const product_prefix_bytes_max: u32 = 4;
+/// The command that explains and bundles: "zbx", "zcube".
+pub const product_command_bytes_max: u32 = 16;
+/// The hint that names the command that collects a bundle: "zbx bundle --last".
+pub const product_bundle_hint_bytes_max: u32 = 48;
+pub const product_report_url_bytes_max: u32 = 128;
+/// Ends in "/"; a code's page is the base plus "<tag>.html".
+pub const product_docs_base_bytes_max: u32 = 64;
+/// How many products one rendering looks through for the owner of a code.
+pub const products_count_max: u32 = 8;
+/// "zbx explain E0501": the `more` line's command, and the buffer it is built in.
+pub const product_explain_bytes_max: u32 = 32;
+/// A diagnostic as JSON on the wire (`Diagnostic.parse_json`). Larger input is refused unread.
+pub const diag_wire_bytes_max: u32 = output_bytes_max;
+
 // The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
 // this; the bound is what the tool's buffers and file reads use.
 pub const errors_page_bytes_max: u32 = 24 * 1024;
@@ -438,6 +456,28 @@ comptime {
     assert(diag_context_count_max > 0);
     assert(diag_fixes_count_max > 0);
     assert(diag_command_bytes_max <= diag_field_bytes_max);
+
+    assert(diag_code_bytes == product_prefix_bytes_max + 5);
+    assert(product_command_bytes_max + " explain ".len + 5 <= product_explain_bytes_max);
+    assert(product_docs_base_bytes_max + diag_code_bytes + ".html".len <= docs_url_bytes_max);
+    assert(product_bundle_hint_bytes_max <= diag_field_bytes_max);
+    // What a product's strings add to one rendering (the `more`, `docs` and `report` lines and
+    // the bug sentence, each with its label) is far inside the 1024 bytes that the proof of
+    // `rendered_bytes_max` above keeps for everything but the lists.
+    const product_lines_bytes_max = 2 * (docs_url_bytes_max + product_report_url_bytes_max +
+        2 * product_command_bytes_max + 4 * (diag_label_columns + 16));
+    assert(product_lines_bytes_max + 2 * diag_summary_bytes_max + 128 <= 1024);
+    // The longest diagnostic as JSON, every byte of free text escaped to two: the lists as in
+    // `rendered_bytes_max`, the summary, the saved path, the docs URL and the framing. It must
+    // fit what a renderer buffers and what the parser accepts.
+    const json_free_text = diag_causes_count_max * diag_field_bytes_max +
+        diag_whiles_count_max * diag_field_bytes_max +
+        diag_context_count_max * (diag_key_bytes_max + diag_field_bytes_max) +
+        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max) +
+        diag_summary_bytes_max + state_path_bytes_max + 128;
+    const json_bytes_max = 2 * json_free_text + docs_url_bytes_max + 1024;
+    assert(json_bytes_max <= diag_wire_bytes_max);
+    assert(diag_wire_bytes_max == output_bytes_max);
 
     // A page holds the stylesheet (under 6 KiB), one explanation with every character escaped
     // to at most six bytes, and room for the index's table row per code.
