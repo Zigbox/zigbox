@@ -188,7 +188,7 @@ fn populated(host: Host, cgroup: []const u8) bool {
 /// elsewhere shows none.
 fn add_orphan_scopes(host: Host, out: []Entry, count_in: u32) u32 {
     assert(count_in <= out.len);
-    assert(out.len <= constants.scopes_listed_max);
+    assert(out.len <= constants.runs_max + constants.scopes_listed_max);
     var path: [128]u8 = undefined;
     const format = "/sys/fs/cgroup/user.slice/user-{d}.slice/user@{d}.service/app.slice";
     const uid = host.uid();
@@ -216,7 +216,7 @@ fn add_orphan_scopes(host: Host, out: []Entry, count_in: u32) u32 {
 
 fn has_scope(entries: []const Entry, scope: []const u8) bool {
     assert(scope.len > 0);
-    assert(entries.len <= constants.scopes_listed_max);
+    assert(entries.len <= constants.runs_max + constants.scopes_listed_max);
     for (entries) |*entry| {
         if (std.mem.eql(u8, entry.record.scope_slice(), scope)) return true;
     }

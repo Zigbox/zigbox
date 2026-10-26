@@ -117,7 +117,7 @@ pub fn run_ps(
     diag: *Diag,
 ) Error!void {
     assert(entries.len > 0);
-    assert(entries.len <= constants.scopes_listed_max);
+    assert(entries.len <= constants.runs_max + constants.scopes_listed_max);
     const count = lifecycle.list(host, entries) catch |err| {
         const why: diagnose.NoContainer = switch (err) {
             error.NoState => .no_state,
@@ -166,7 +166,7 @@ fn ps_row(entry: *const lifecycle.Entry, line: *[constants.output_bytes_max]u8) 
 const json_string = @import("bundle.zig").write_json_string;
 
 fn ps_json(host: Host, entries: []const lifecycle.Entry, all: bool, diag: *Diag) Error!void {
-    assert(entries.len <= constants.scopes_listed_max);
+    assert(entries.len <= constants.runs_max + constants.scopes_listed_max);
     assert(diag.code == null);
     try write(host, "{\"schema\":\"zbx.ps/1\",\"containers\":[", diag);
     var buffer: [constants.output_bytes_max]u8 = undefined;

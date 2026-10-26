@@ -250,7 +250,7 @@ pub fn start(
     handle.command = container.command;
     handle.labels = container.labels;
     try choose_name(host, container.name, handle, diag);
-    try check_command(container.command, container.labels, diag);
+    try check_command(container, diag);
     try check_rootfs(host, container.rootfs, handle, diag);
     try check_limits(container.limits, diag);
 
@@ -271,6 +271,7 @@ pub fn start(
         .mapping = choice.mapping,
         .scope = scope_input,
         .read_only = container.read_only,
+        .env = container.env,
     };
     handle.plan.build(&input);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
@@ -435,7 +436,9 @@ fn choose_name(host: Host, given: ?[]const u8, handle: *Handle, diag: *Diag) Err
     assert(spec_mod.name_problem(handle.name_slice()) == null);
 }
 
-fn check_command(command: []const []const u8, labels: []const Label, diag: *Diag) Error!void {
+fn check_command(container: *const Spec, diag: *Diag) Error!void {
+    const command = container.command;
+    const labels = container.labels;
     // The command line parser refuses a missing program; a caller of the library must too.
     assert(command.len > 0);
     assert(command[0].len > 0);
@@ -445,6 +448,10 @@ fn check_command(command: []const []const u8, labels: []const Label, diag: *Diag
     }
     if (spec_mod.labels_problem(labels)) |index| {
         diagnose.label_too_big(diag, index);
+        return error.StartFailed;
+    }
+    if (spec_mod.env_problem(container.env, command)) |index| {
+        diagnose.env_too_big(diag, index);
         return error.StartFailed;
     }
 }

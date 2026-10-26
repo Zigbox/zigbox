@@ -851,6 +851,22 @@ pub fn label_too_big(diag: *Diag, index: u32) void {
     assert(diag.code.? == .E0008);
 }
 
+/// ZBX-E0008: a variable of `Spec.env` does not fit.
+pub fn env_too_big(diag: *Diag, index: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0008);
+    diag.while_("reading the environment", .{});
+    diag.cause("variable {d} has an empty or unusable name, is too long, or there are more than " ++
+        "{d} variables (a name is at most {d} bytes, a value {d}, and with the command they " ++
+        "must fit {d} bytes)", .{
+        index + 1,                        constants.env_vars_count_max,
+        constants.env_name_bytes_max,     constants.env_value_bytes_max,
+        constants.exec_strings_bytes_max,
+    });
+    diag.fix(.{ .sentence = "pass fewer or shorter variables" });
+    assert(diag.code.? == .E0008);
+}
+
 /// The note for a step that was allowed to fail and did, for `--verbose` and the run record.
 pub fn skipped_note(plan: *const Plan, step_index: u8, errno: u16, buffer: []u8) []const u8 {
     assert(step_index < plan.count);

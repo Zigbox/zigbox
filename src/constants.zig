@@ -180,6 +180,11 @@ pub const exec_strings_bytes_max: u32 = 32 * 1024;
 pub const term_bytes_max: u32 = 64;
 /// Environment variables the container gets: PATH, HOME, HOSTNAME and (if set) TERM.
 pub const environment_count_max: u32 = 4;
+/// Variables a caller may add (`Spec.env`), each with a bounded name and value. They count
+/// against `exec_strings_bytes_max` with the command.
+pub const env_vars_count_max: u32 = 32;
+pub const env_name_bytes_max: u32 = 64;
+pub const env_value_bytes_max: u32 = 4096;
 /// The container's PATH, in the order a shell searches it. Counted for the exec candidates.
 pub const container_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub const container_path_dirs_count: u32 = 6;

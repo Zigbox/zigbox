@@ -216,7 +216,9 @@ pub const Process = struct {
     }
 };
 
-const pipe_bytes_max: u32 = constants.sync_record_bytes * constants.sync_records_max + 4;
+/// Room for the sync records of a start and for the frames a detached run's supervisor sends.
+const pipe_bytes_max: u32 =
+    @max(constants.sync_record_bytes * constants.sync_records_max + 4, 2048);
 
 const SimPipe = struct {
     used: bool,

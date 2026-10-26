@@ -176,6 +176,8 @@ pub const Input = struct {
     scope: ?ScopeInput = null,
     /// The rootfs is remounted read-only, with tmpfs at `/tmp` and `/run`.
     read_only: bool = false,
+    /// Added to the container's environment, replacing a default of the same name.
+    env: []const spec.Label = &.{},
 };
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
@@ -203,13 +205,14 @@ pub const Plan = struct {
     strings: [constants.exec_strings_bytes_max]u8,
     strings_len: u32,
     argv: [constants.command_words_count_max + 1]?[*:0]const u8,
-    envp: [constants.environment_count_max + 1]?[*:0]const u8,
+    envp: [constants.environment_count_max + constants.env_vars_count_max + 1]?[*:0]const u8,
 
     /// Builds the plan in place. The input must have passed the checks in `spec.zig`.
     pub fn build(plan: *Plan, input: *const Input) void {
         assert(spec.rootfs_problem(input.rootfs) == null);
         assert(spec.name_problem(input.name) == null);
         assert(spec.command_problem(input.command) == null);
+        assert(spec.env_problem(input.env, input.command) == null);
         plan.count = 0;
         plan.full = input.mapping == .full;
         plan.scoped = input.scope != null;
@@ -503,20 +506,41 @@ pub const Plan = struct {
         plan.argv[input.command.len] = null;
         var count: usize = 0;
         const path_variable = "PATH=" ++ constants.container_path;
-        plan.envp[count] = plan.add_string(&.{path_variable});
-        count += 1;
-        plan.envp[count] = plan.add_string(&.{"HOME=/root"});
-        count += 1;
-        plan.envp[count] = plan.add_string(&.{ "HOSTNAME=", input.name });
-        count += 1;
+        if (!overridden(input.env, "PATH")) {
+            plan.envp[count] = plan.add_string(&.{path_variable});
+            count += 1;
+        }
+        if (!overridden(input.env, "HOME")) {
+            plan.envp[count] = plan.add_string(&.{"HOME=/root"});
+            count += 1;
+        }
+        if (!overridden(input.env, "HOSTNAME")) {
+            plan.envp[count] = plan.add_string(&.{ "HOSTNAME=", input.name });
+            count += 1;
+        }
         if (input.term) |term| {
             assert(term.len <= constants.term_bytes_max);
-            plan.envp[count] = plan.add_string(&.{ "TERM=", term });
+            if (!overridden(input.env, "TERM")) {
+                plan.envp[count] = plan.add_string(&.{ "TERM=", term });
+                count += 1;
+            }
+        }
+        assert(count <= constants.environment_count_max);
+        for (input.env) |variable| {
+            plan.envp[count] = plan.add_string(&.{ variable.key, "=", variable.value });
             count += 1;
         }
         plan.envp[count] = null;
-        assert(count <= constants.environment_count_max);
+        assert(count <= constants.environment_count_max + constants.env_vars_count_max);
         plan.build_candidates(input.command[0]);
+    }
+
+    fn overridden(env: []const spec.Label, name: []const u8) bool {
+        assert(name.len > 0);
+        for (env) |variable| {
+            if (std.mem.eql(u8, variable.key, name)) return true;
+        }
+        return false;
     }
 
     /// A program with a slash in its name is run as named; any other is looked up in the
@@ -752,6 +776,25 @@ test "the exec image is a clean environment, and a bare program is looked up in 
     try testing.expect(plan.envp[3] == null);
     try testing.expectEqual(@as(u32, 1), plan.candidates_count);
     try testing.expectEqualStrings("./tool", plan.text(plan.candidates[0]));
+}
+
+test "Spec.env adds variables after the defaults and replaces a default of the same name" {
+    // Goal: the caller's environment reaches the exec image, in order, and PATH can be replaced
+    // without a second PATH. Method: one added variable, then one that replaces TERM and PATH.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"ls"});
+    input.env = &.{.{ .key = "APP", .value = "a=b c" }};
+    plan.build(&input);
+    try testing.expectEqualStrings("TERM=xterm", std.mem.span(plan.envp[3].?));
+    try testing.expectEqualStrings("APP=a=b c", std.mem.span(plan.envp[4].?));
+    try testing.expect(plan.envp[5] == null);
+    input.env = &.{ .{ .key = "TERM", .value = "dumb" }, .{ .key = "PATH", .value = "/x" } };
+    plan.build(&input);
+    try testing.expectEqualStrings("HOME=/root", std.mem.span(plan.envp[0].?));
+    try testing.expectEqualStrings("HOSTNAME=web-1", std.mem.span(plan.envp[1].?));
+    try testing.expectEqualStrings("TERM=dumb", std.mem.span(plan.envp[2].?));
+    try testing.expectEqualStrings("PATH=/x", std.mem.span(plan.envp[3].?));
+    try testing.expect(plan.envp[4] == null);
 }
 
 test "the longest rootfs, name, command and ids still build a valid plan" {

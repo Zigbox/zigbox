@@ -1002,6 +1002,8 @@ fn write_frame(
     assert(body.len < constants.output_bytes_max);
     assert(tag >= frame_warning);
     assert(tag <= frame_failed);
+    // Starting a scope puts SIGPIPE back; a caller that has gone must not kill the supervisor.
+    host.ignore_broken_pipe(true);
     const length: u16 = @intCast(body.len + @intFromBool(head != null));
     const header = [3]u8{ tag, @truncate(length), @truncate(length >> 8) };
     try host.write_handle_all(fd, &header);
@@ -1142,7 +1144,7 @@ fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunErro
         if (!got_header) break;
         const length = @as(usize, header[1]) | (@as(usize, header[2]) << 8);
         if (length > body.len) break;
-        const got_body = read_exact(host, fd, body[0..length]) catch false;
+        const got_body = length == 0 or (read_exact(host, fd, body[0..length]) catch false);
         if (!got_body) break;
         switch (header[0]) {
             frame_warning => host.write_all(.stderr, body[0..length]) catch {},
@@ -1905,4 +1907,262 @@ test "parse: every way a run command line is wrong has its code" {
         const found = try parse_case(case.args, &invocation);
         try testing.expectEqual(case.code, found);
     }
+}
+
+// ---- Tests of ps, stop, schema, run -d and the times ----------------------------------------
+
+const sim_run = @import("runtime/sim_run.zig");
+
+var test_storage: Storage = undefined;
+
+fn command_line(sim: *HostSim, args: []const []const u8) u8 {
+    return run_slice(sim.interface(), args, &test_storage);
+}
+
+fn parse_json(bytes: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+}
+
+fn running_container(sim: *HostSim, name: []const u8) !void {
+    sim_run.init(sim, 4);
+    sim.world.command_runs_ms = 3_600_000;
+    var diag: Diag = undefined;
+    diag.reset();
+    const container: runtime_spec.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = name,
+        .command = &.{ "/bin/sh", "-c", "sleep 1000" },
+    };
+    const options: runtime.StartOptions = .{ .detached = true };
+    try runtime.start(sim.interface(), &container, options, &test_storage.handle, &diag);
+}
+
+test "parse: ps, stop, schema, -d and the times take what the brief says" {
+    // Goal: the new commands and flags parse into the fields the dispatcher reads. Method: one
+    // command line each, checking the field, and the lines that must be refused.
+    var invocation: Invocation = undefined;
+    try testing.expect(try parse_case(&.{ "ps", "--all" }, &invocation) == null);
+    try testing.expect(invocation.run.all);
+    try testing.expect(try parse_case(&.{"ps"}, &invocation) == null);
+    try testing.expect(!invocation.run.all);
+    const stop_line = [_][]const u8{ "stop", "web-1", "--grace", "250", "--timeout=900" };
+    try testing.expect(try parse_case(&stop_line, &invocation) == null);
+    try testing.expectEqualStrings("web-1", invocation.operand.?);
+    try testing.expectEqualStrings("250", invocation.run.grace.?);
+    try testing.expectEqualStrings("900", invocation.run.timeout.?);
+    try testing.expect(try parse_case(&.{ "schema", "ps" }, &invocation) == null);
+    const detached_line = [_][]const u8{ "run", "-d", "--rootfs", "r", "--", "x" };
+    try testing.expect(try parse_case(&detached_line, &invocation) == null);
+    try testing.expect(invocation.run.detach);
+    const refused = [_]struct { args: []const []const u8, code: codes.Code }{
+        .{ .args = &.{"stop"}, .code = .E0006 },
+        .{ .args = &.{"schema"}, .code = .E0006 },
+        .{ .args = &.{ "stop", "a", "b" }, .code = .E0003 },
+        .{ .args = &.{ "ps", "extra" }, .code = .E0003 },
+        .{ .args = &.{ "ps", "--grace", "5" }, .code = .E0004 },
+        .{ .args = &.{ "stop", "web-1", "-d" }, .code = .E0004 },
+        .{ .args = &.{ "stop", "web-1", "--grace" }, .code = .E0005 },
+        .{ .args = &.{ "stop", "a", "--grace", "1", "--grace", "2" }, .code = .E0003 },
+    };
+    for (refused) |case| {
+        const found = try parse_case(case.args, &invocation);
+        try testing.expectEqual(@as(?codes.Code, case.code), found);
+    }
+}
+
+test "schema prints the versioned schema of each command, and refuses the others" {
+    // Goal: `zbx schema <command>` for run, bundle, ps, stop and doctor, and E0402 otherwise.
+    var sim: HostSim = undefined;
+    sim.init(1, &.{});
+    for ([_][]const u8{ "run", "bundle", "ps", "stop", "doctor" }) |name| {
+        sim.init(1, &.{});
+        try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "schema", name }));
+        try testing.expect(std.mem.indexOf(u8, sim.stdout(), "/schema/") != null);
+        try testing.expect(std.mem.endsWith(u8, sim.stdout(), "}\n"));
+        try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    }
+    sim.init(1, &.{});
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "logs" }));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
+}
+
+test "ps lists a running container in text and in JSON that matches the schema's fields" {
+    // Goal: the same view in both forms, from the record and the kernel's view of the pid.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{"ps"}));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "web-1") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "running") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "sleep 1000") != null);
+    // JSON: one object, the containers inside it, every field of the schema's `required`.
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("zbx.ps/1", parsed.value.object.get("schema").?.string);
+    const list = parsed.value.object.get("containers").?.array;
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    const one = list.items[0].object;
+    for ([_][]const u8{ "name", "state", "pid", "started", "command", "labels", "limits" }) |key| {
+        try testing.expect(one.get(key) != null);
+    }
+    try testing.expectEqualStrings("running", one.get("state").?.string);
+    try testing.expectEqual(@as(usize, 3), one.get("command").?.array.items.len);
+    _ = runtime.wait(&test_storage.handle);
+}
+
+test "stop ends a running container, says so in text and JSON, and is a no-op the second time" {
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const grace = [_][]const u8{ "stop", "web-1", "--grace", "100", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &grace));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("zbx.stop/1", parsed.value.object.get("schema").?.string);
+    try testing.expectEqualStrings("web-1", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("killed", parsed.value.object.get("result").?.string);
+    _ = runtime.wait(&test_storage.handle);
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "stop", "web-1" }));
+    try testing.expectEqualStrings("web-1 was not running, exit code 137\n", sim.stdout());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+}
+
+test "stop and ps refuse what they cannot do with one line and a code" {
+    // Goal: a bad time is E0401 before anything is looked at; an unknown name is E0402.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const soon = [_][]const u8{ "stop", "web-1", "--grace", "soon" };
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &soon));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0401") != null);
+    sim.stderr_len = 0;
+    const zero = [_][]const u8{ "stop", "web-1", "--timeout", "0" };
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &zero));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0401") != null);
+    sim.stderr_len = 0;
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "stop", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    _ = runtime.wait(&test_storage.handle);
+}
+
+test "run --timeout stops the container when its time is up and says so" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    sim.world.command_runs_ms = 3_600_000;
+    const sleeping = [_][]const u8{ "/bin/sh", "-c", "sleep 1000" };
+    const head = [_][]const u8{ "run", "--rootfs", sim_run.rootfs_path, "--timeout", "2000", "--" };
+    const args = head ++ sleeping;
+    const code = command_line(&sim, &args);
+    try testing.expectEqual(@as(u8, 143), code);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "timed out after 2000 ms") != null);
+    sim_run.init(&sim, 6);
+    sim.world.command_runs_ms = 3_600_000;
+    sim.stderr_len = 0;
+    const json = [_][]const u8{ "run", "--output", "json", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--timeout", "2000", "--" } ++ sleeping;
+    try testing.expectEqual(@as(u8, 143), command_line(&sim, &json));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
+}
+
+const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
+
+fn framed(sim: *HostSim, frames: []const Frame) !host_mod.Handle {
+    const host = sim.interface();
+    const pipe = try host.pipe();
+    for (frames) |frame| try write_frame(host, pipe.write, frame.tag, frame.head, frame.body);
+    host.close(pipe.write);
+    return pipe.read;
+}
+
+test "run -d: the caller passes warnings on and prints the name once the start is reported" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 7);
+    const read = try framed(&sim, &.{
+        .{ .tag = frame_warning, .head = null, .body = "zbx: warning: something\n" },
+        .{ .tag = frame_started, .head = null, .body = "web-1 502 zbx-web-1.scope" },
+    });
+    var diag: Diag = undefined;
+    diag.reset();
+    const options: Options = .{ .runs_container = true };
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), read, options, &diag));
+    sim.interface().close(read);
+    try testing.expectEqualStrings("web-1\n", sim.stdout());
+    try testing.expectEqualStrings("zbx: warning: something\n", sim.stderr());
+
+    sim_run.init(&sim, 7);
+    const bare: Frame = .{ .tag = frame_started, .head = null, .body = "web-1 502 -" };
+    const again = try framed(&sim, &.{bare});
+    const json: Options = .{ .runs_container = true, .output = .json };
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &diag));
+    sim.interface().close(again);
+    const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
+        "\"pid\":502,\"scope\":null,\"detached\":true}}\n";
+    try testing.expectEqualStrings(expected, sim.stdout());
+}
+
+test "run -d: a failed start passes the supervisor's diagnostic and code through" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 8);
+    const refused: Frame = .{ .tag = frame_failed, .head = 126, .body = "zbx: refused\n" };
+    const read = try framed(&sim, &.{refused});
+    var diag: Diag = undefined;
+    diag.reset();
+    const options: Options = .{ .runs_container = true };
+    try testing.expectEqual(@as(u8, 126), try relay(sim.interface(), read, options, &diag));
+    sim.interface().close(read);
+    try testing.expectEqualStrings("zbx: refused\n", sim.stderr());
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+}
+
+test "run -d: a supervisor that ends without a report, or sends nonsense, is E0405" {
+    // Goal: the caller never hangs and never prints a success it did not see.
+    const cases = [_][]const u8{ "", "\x09\x00\x00", "\x02\xff\xff", "\x03\x00\x00" };
+    for (cases) |bytes| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 9);
+        const host = sim.interface();
+        const pipe = try host.pipe();
+        if (bytes.len > 0) try host.write_handle_all(pipe.write, bytes);
+        host.close(pipe.write);
+        var diag: Diag = undefined;
+        diag.reset();
+        const options: Options = .{ .runs_container = true };
+        try testing.expectError(error.CommandFailed, relay(host, pipe.read, options, &diag));
+        host.close(pipe.read);
+        try testing.expectEqual(codes.Code.E0405, diag.code.?);
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    }
+}
+
+test "run -d as the supervisor starts the container, reports it and records it as detached" {
+    // Goal: the supervisor's half end to end in the simulator: it forks into the supervisor
+    // role, starts, waits for the container's end and leaves a finished record.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 10);
+    sim.world.fork_role = .supervisor;
+    sim.world.command_runs_ms = 5000;
+    const args = [_][]const u8{ "run", "-d", "--name", "web-1", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--", "/bin/sh", "-c", "sleep 5" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    try testing.expectEqual(@as(?u8, 0), sim.world.exited_with);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    var state: lifecycle.State = undefined;
+    var ref: lifecycle.Ref = undefined;
+    try lifecycle.adopt(sim.interface(), "web-1", &ref, &state);
+    try testing.expectEqual(lifecycle.State.stopped, state);
+}
+
+test "run -d as the caller, when the fork fails or the supervisor never reports, is E0405" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 11);
+    sim.world.fork_errno = 11;
+    const args = [_][]const u8{ "run", "-d", "--rootfs", sim_run.rootfs_path, "--", "/bin/true" };
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0405") != null);
+    sim_run.init(&sim, 11);
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0405") != null);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
 }

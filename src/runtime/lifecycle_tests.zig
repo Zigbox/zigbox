@@ -300,3 +300,21 @@ test "two callers start and wait on containers at the same time and share nothin
     try testing.expectEqual(@as(u8, 3), callers[0].exit_code);
     try testing.expectEqual(@as(u8, 7), callers[1].exit_code);
 }
+
+test "an environment that does not fit is refused before anything is created" {
+    // Goal: Spec.env is checked like the command and the labels: E0008, nothing left behind.
+    var sim = running_sim(12);
+    var diag: Diag = undefined;
+    diag.reset();
+    var container = spec("web-1");
+    const bad: [constants.env_vars_count_max + 1]run.Label = @splat(.{ .key = "K", .value = "v" });
+    container.env = &bad;
+    const result = run.start(sim.interface(), &container, .{}, &handle, &diag);
+    try testing.expectError(error.StartFailed, result);
+    try testing.expectEqual(@as(?@import("../diag/codes.zig").Code, .E0008), diag.code);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+    container.env = &.{.{ .key = "APP", .value = "1" }};
+    diag.reset();
+    try run.start(sim.interface(), &container, .{ .detached = true }, &handle, &diag);
+    try testing.expectEqual(run.Status.running, run.inspect(&handle));
+}
