@@ -567,6 +567,11 @@ pub const World = struct {
         const held = &world.processes[world.current].holds[index];
         assert(held.*); // Closing an end the process does not hold is a programmer error.
         held.* = false;
+        // A pipe nobody holds either end of is gone, as in the kernel; its slot can be reused.
+        const pipe_index = index / 2;
+        if (!world.reader_exists(pipe_index)) {
+            if (!world.writer_exists(pipe_index)) world.pipes[pipe_index].used = false;
+        }
     }
 
     /// Reads from a pipe end the current process holds. 0 means end of file. A read that waits

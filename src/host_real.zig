@@ -1,5 +1,6 @@
-//! The production `Host`: raw Linux syscalls through `std.os.linux`, no libc. This file and
-//! `host.zig` are the only places that may name syscalls, or paths under /proc and /sys.
+//! The production `Host`: raw Linux syscalls through `std.os.linux`, no libc. This file,
+//! `host_real_fs.zig` (the store's file system) and `host.zig` are the only places that may name
+//! syscalls, or paths under /proc and /sys.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -8,6 +9,8 @@ const bpf = @import("runtime/bpf.zig");
 const capabilities = @import("runtime/capabilities.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
+const host_real_fs = @import("host_real_fs.zig");
+const store_fs = @import("store/fs.zig");
 
 /// Writes to stderr with no state, no vtable and no error path, for the panic handler: when an
 /// invariant has broken, nothing else can be trusted. Short writes and errors are ignored
@@ -58,7 +61,7 @@ fn monotonic_now_ms() u64 {
 // it, so it depends on the layout of the whole segment. `align(16)` made the layout work here.
 // The guard is the `zig build release` smoke run, which starts the binary: a later change to
 // the thread-locals, or a new Zig, can break this again and only that run would show it.
-threadlocal var errno_last: u16 align(16) = 0;
+pub threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
@@ -134,6 +137,7 @@ pub const HostReal = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .filesystem = filesystem,
     };
 
     fn from_context(context: *anyopaque) *HostReal {
@@ -811,13 +815,17 @@ pub const HostReal = struct {
         assert(linux.errno(result) == .SUCCESS); // A valid signal and a valid handler.
     }
 
+    fn filesystem(context: *anyopaque) store_fs.Fs {
+        return host_real_fs.interface(from_context(context));
+    }
+
     fn begin_step(context: *anyopaque, index: u32) void {
         _ = from_context(context);
         _ = index; // The kernel needs no hint; see Host.begin_step.
     }
 
     /// Converts a raw syscall return value into an error, or passes success through.
-    fn check(result: usize) host.Error!void {
+    pub fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
         errno_last = @backingInt(code);
         if (code == .SUCCESS) return;

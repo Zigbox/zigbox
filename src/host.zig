@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const bpf = @import("runtime/bpf.zig");
+const store_fs = @import("store/fs.zig");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const linux = std.os.linux;
@@ -419,6 +420,9 @@ pub const VTable = struct {
         timeout_ms: u32,
     ) Error!u32,
     begin_step: *const fn (context: *anyopaque, index: u32) void,
+    /// The file-system half of the host, which the store is written against (`store/fs.zig`).
+    /// The simulator's, when a test gives it none, is a machine that is down: every call fails.
+    filesystem: *const fn (context: *anyopaque) store_fs.Fs,
 };
 
 /// What `read_prefix` found.
@@ -976,6 +980,14 @@ pub const Host = struct {
         if (index != step_none) assert(index < constants.plan_steps_max);
         host.vtable.begin_step(host.context, index);
         assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    /// The file system the store works on. Calls on it are made by the single-threaded child
+    /// that runs inside the user namespace, so the ids it sees are the container's.
+    pub fn filesystem(host: Host) store_fs.Fs {
+        const fs = host.vtable.filesystem(host.context);
+        assert(@intFromPtr(fs.vtable) != 0);
+        return fs;
     }
 
     fn open_retrying(host: Host, path: [:0]const u8) Error!Handle {
