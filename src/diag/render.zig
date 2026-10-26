@@ -1,6 +1,7 @@
-//! Renders a `Diag` for people and for scripts (DIAGNOSTICS.md, "Anatomy" and "Output modes").
-//! Pure: a diagnostic goes in, bytes come out, into a caller's buffer. This is the only place
-//! that decides how a diagnostic looks, and it is called only from the CLI boundary.
+//! Renders a `Diagnostic` (or a `Diag`, through it) for people and for scripts (DIAGNOSTICS.md,
+//! "Anatomy" and "Output modes"). Pure: a diagnostic goes in, bytes come out, into a caller's
+//! buffer. This is the only place that decides how a diagnostic looks, and it is called only
+//! from the CLI boundary.
 //!
 //!   text     summary, the newest cause, the fixes, and a `more` line
 //!   verbose  plus the `while` lines, the whole cause chain and the context pairs
@@ -17,26 +18,53 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const codes = @import("codes.zig");
 const diag_mod = @import("diag.zig");
+const diagnostic_mod = @import("diagnostic.zig");
+const product_mod = @import("product.zig");
 
 const Diag = diag_mod.Diag;
+const Diagnostic = diagnostic_mod.Diagnostic;
+const Product = product_mod.Product;
 
 pub const Mode = enum { text, verbose, json };
 
-pub const report_url = "https://github.com/Zigbox/zigbox/issues/new";
+pub const report_url = Product.zbx.report_url;
 
 const color_bold = "\x1b[1m";
 const color_reset = "\x1b[0m";
 
 /// Renders `diag` into `buffer` and returns the used prefix. `buffer` must be
 /// `constants.output_bytes_max` bytes: the comptime check in constants.zig proves a maximal
-/// diagnostic fits it, so a write cannot fail.
+/// diagnostic fits it, so a write cannot fail. A `Diag` is Zigbox's, so it renders as a
+/// `Diagnostic` of the one product `Product.zbx`.
 pub fn render(diag: *const Diag, mode: Mode, color: bool, buffer: []u8) []const u8 {
     assert(buffer.len >= constants.output_bytes_max);
     assert(diag.code != null);
+    var diagnostic: Diagnostic = undefined;
+    diagnostic_mod.from_diag(&diagnostic, diag);
+    return render_diagnostic(&diagnostic, &.{Product.zbx}, mode, color, buffer);
+}
+
+/// Renders `diagnostic` into `buffer` and returns the used prefix; same buffer rule as `render`.
+/// The product whose strings it uses (the command in `more`, the report address of a bug, the
+/// docs page) is the one `Product.find` picks from `products` by the code's own prefix, not the
+/// program's: `zcube why` showing a "ZBX-" diagnostic says `zbx explain`. A code that no product
+/// owns gets neither a `more` nor a `docs` line (nor a report address), and nothing else changes.
+/// JSON mode writes the diagnostic as it is, docs included.
+pub fn render_diagnostic(
+    diagnostic: *const Diagnostic,
+    products: []const Product,
+    mode: Mode,
+    color: bool,
+    buffer: []u8,
+) []const u8 {
+    assert(buffer.len >= constants.output_bytes_max);
+    assert(diagnostic.code.len > 0);
     var writer = std.Io.Writer.fixed(buffer);
+    const product = Product.find(products, diagnostic.code.slice());
     switch (mode) {
-        .json => write_json(&writer, diag),
-        .text, .verbose => write_text(&writer, diag, mode == .verbose, color),
+        // Cannot fail: the buffer holds a maximal diagnostic (the proof in constants.zig).
+        .json => diagnostic_mod.write_json(&writer, diagnostic) catch unreachable,
+        .text, .verbose => write_text(&writer, diagnostic, product, mode == .verbose, color),
     }
     const output = writer.buffered();
     assert(output.len > 0);
@@ -45,7 +73,7 @@ pub fn render(diag: *const Diag, mode: Mode, color: bool, buffer: []u8) []const 
 }
 
 // The writer is a fixed buffer that `render` proves holds a maximal diagnostic (the bound is a
-// comptime assertion in constants.zig), so a write to it cannot fail. These four helpers are the
+// comptime assertion in constants.zig), so a write to it cannot fail. These three helpers are the
 // only places that say so.
 
 fn emit(writer: *std.Io.Writer, bytes: []const u8) void {
@@ -60,38 +88,10 @@ fn emit_format(writer: *std.Io.Writer, comptime format: []const u8, args: anytyp
     writer.print(format, args) catch unreachable; // Cannot fail: same bound as `emit`.
 }
 
-fn emit_byte(writer: *std.Io.Writer, byte: u8) void {
-    assert(writer.buffer.len >= constants.output_bytes_max);
-    assert(byte < 0x80); // Output is ASCII, plus the one two-byte middle dot written as text.
-    writer.writeByte(byte) catch unreachable; // Cannot fail: same bound as `emit`.
-}
-
 fn emit_spaces(writer: *std.Io.Writer, count: usize) void {
     assert(count <= constants.diag_field_bytes_max + 3); // Fix padding is the widest.
     assert(writer.buffer.len >= constants.output_bytes_max);
     writer.splatByteAll(' ', count) catch unreachable; // Cannot fail: same bound as `emit`.
-}
-
-/// "zbx explain E0001": what the `more` line and the JSON `docs` field point to.
-fn explain_command(buffer: *[32]u8, code: codes.Code) []const u8 {
-    const name = codes.full_name(code)[4..]; // Without "ZBX-", as typed to `zbx explain`.
-    const text = std.fmt.bufPrint(buffer, "zbx explain {s}", .{name}) catch unreachable; // Fits 32.
-    assert(text.len == 17);
-    assert(std.mem.startsWith(u8, text, "zbx explain "));
-    return text;
-}
-
-/// "https://zigbox.github.io/zigbox/errors/E0101.html": the code's generated page, which is what
-/// the `docs` line and the JSON `docs` field point to.
-fn docs_url(buffer: *[constants.docs_url_bytes_max]u8, code: codes.Code) []const u8 {
-    var file_buffer: [16]u8 = undefined;
-    const file = codes.page_name(&file_buffer, code);
-    const parts = .{ constants.docs_url_base, file };
-    // Cannot fail: `constants.zig` proves the base plus a page name fits.
-    const text = std.fmt.bufPrint(buffer, "{s}{s}", parts) catch unreachable;
-    assert(std.mem.startsWith(u8, text, "https://"));
-    assert(std.mem.endsWith(u8, text, ".html"));
-    return text;
 }
 
 // ---- Text ----------------------------------------------------------------------------------
@@ -107,79 +107,109 @@ fn header_color(severity: codes.Severity) []const u8 {
     return color;
 }
 
-fn write_text(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, color: bool) void {
-    const entry = diag.entry();
-    assert(diag.code.? == entry.code);
-    assert(entry.summary.len > 0);
-    if (color) emit(writer, header_color(entry.severity));
-    const head = .{ @tagName(entry.severity), codes.full_name(entry.code), entry.summary };
+fn write_text(
+    writer: *std.Io.Writer,
+    diagnostic: *const Diagnostic,
+    product: ?*const Product,
+    verbose: bool,
+    color: bool,
+) void {
+    assert(diagnostic.summary.len > 0);
+    if (color) emit(writer, header_color(diagnostic.severity));
+    const head = .{
+        @tagName(diagnostic.severity), diagnostic.code.slice(), diagnostic.summary.slice(),
+    };
     emit_format(writer, "{s}[{s}]: {s}", head);
     if (color) emit(writer, color_reset);
     emit(writer, "\n");
 
-    if (entry.severity == .bug) {
-        write_bug_body(writer, diag, verbose, color);
+    if (diagnostic.severity == .bug) {
+        write_bug_body(writer, diagnostic, product, verbose, color);
     } else {
-        write_error_body(writer, diag, verbose, color);
+        write_error_body(writer, diagnostic, verbose, color);
     }
-    write_more(writer, entry, verbose, color);
+    if (product) |owner| write_more(writer, diagnostic, owner, verbose, color);
 }
 
-fn write_error_body(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, color: bool) void {
-    assert(diag.code != null);
-    assert(diag.entry().severity != .bug); // A bug has its own body.
+fn write_error_body(
+    writer: *std.Io.Writer,
+    diagnostic: *const Diagnostic,
+    verbose: bool,
+    color: bool,
+) void {
+    assert(diagnostic.code.len > 0);
+    assert(diagnostic.severity != .bug); // A bug has its own body.
     if (verbose) {
         // Outermost first: the list holds them innermost first.
-        write_omitted(writer, "while", diag.whiles.omitted, color);
-        var index = diag.whiles.count;
+        write_omitted(writer, "while", diagnostic.whiles.omitted, color);
+        var index = diagnostic.whiles.count;
         while (index > 0) : (index -= 1) {
-            write_wrapped(writer, "while", diag.whiles.items[index - 1].slice(), color);
+            write_wrapped(writer, "while", diagnostic.whiles.items[index - 1].slice(), color);
         }
-        write_omitted(writer, "cause", diag.causes.omitted, color);
-        for (diag.causes.slice()) |text| write_wrapped(writer, "cause", text.slice(), color);
-        for (diag.pairs.slice()) |*pair| {
+        write_omitted(writer, "cause", diagnostic.causes.omitted, color);
+        for (diagnostic.causes.slice()) |text| write_wrapped(writer, "cause", text.slice(), color);
+        for (diagnostic.pairs.slice()) |*pair| {
             write_wrapped(writer, pair.key_slice(), pair.value.slice(), color);
         }
-        write_omitted(writer, "extra", diag.pairs.omitted, color);
-    } else if (diag.last_cause()) |text| {
+        write_omitted(writer, "extra", diagnostic.pairs.omitted, color);
+    } else if (diagnostic.last_cause()) |text| {
         write_wrapped(writer, "cause", text, color);
     }
-    write_fixes(writer, diag, verbose, color);
+    write_fixes(writer, diagnostic, verbose, color);
 }
 
-fn write_bug_body(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, color: bool) void {
-    assert(diag.code != null);
-    assert(diag.entry().severity == .bug);
-    // Cannot fail: see `write_text`.
-    emit(writer, "  this is a bug in zbx, not something you did\n");
-    if (diag.saved.len > 0) {
+/// A bug says whose fault it is and where to report it. Without a product (a code nobody here
+/// owns) it cannot name the program or the address, and says only that the fault is not the
+/// user's.
+fn write_bug_body(
+    writer: *std.Io.Writer,
+    diagnostic: *const Diagnostic,
+    product: ?*const Product,
+    verbose: bool,
+    color: bool,
+) void {
+    assert(diagnostic.code.len > 0);
+    assert(diagnostic.severity == .bug);
+    if (product) |owner| {
+        emit_format(writer, "  this is a bug in {s}, not something you did\n", .{owner.command});
+    } else {
+        emit(writer, "  this is a bug, not something you did\n");
+    }
+    if (diagnostic.saved.len > 0) {
         var line: [constants.state_path_bytes_max + 160]u8 = undefined;
+        const parts = .{diagnostic.saved.slice()};
         // Cannot fail: the saved path is at most state_path_bytes_max + 128 and the label 20.
-        const text = std.fmt.bufPrint(&line, "diagnostic bundle: {s}", .{diag.saved.slice()}) catch
-            unreachable;
+        const text = std.fmt.bufPrint(&line, "diagnostic bundle: {s}", parts) catch unreachable;
         write_wrapped(writer, "saved", text, color);
     }
     if (verbose) {
-        for (diag.whiles.slice()) |text| write_wrapped(writer, "while", text.slice(), color);
-        for (diag.causes.slice()) |text| write_wrapped(writer, "cause", text.slice(), color);
+        for (diagnostic.whiles.slice()) |text| write_wrapped(writer, "while", text.slice(), color);
+        for (diagnostic.causes.slice()) |text| write_wrapped(writer, "cause", text.slice(), color);
     }
-    write_wrapped(writer, "report", report_url, color);
+    if (product) |owner| write_wrapped(writer, "report", owner.report_url, color);
 }
 
-fn write_more(writer: *std.Io.Writer, entry: *const codes.Entry, verbose: bool, color: bool) void {
-    assert(entry.summary.len > 0);
-    const rerun = if (entry.severity == .bug)
+fn write_more(
+    writer: *std.Io.Writer,
+    diagnostic: *const Diagnostic,
+    product: *const Product,
+    verbose: bool,
+    color: bool,
+) void {
+    assert(diagnostic.summary.len > 0);
+    const rerun = if (diagnostic.severity == .bug)
         " \u{b7} rerun with --verbose for the message"
     else
         " \u{b7} rerun with --verbose for the full cause chain";
-    var command: [32]u8 = undefined;
+    var command: [constants.product_explain_bytes_max]u8 = undefined;
     var line: [128]u8 = undefined;
-    const parts = .{ explain_command(&command, entry.code), if (verbose) "" else rerun };
-    const text = std.fmt.bufPrint(&line, "{s}{s}", parts) catch unreachable; // Fits 128 bytes.
+    const explain = product.explain_command(&command, diagnostic.code.slice());
+    const text = std.fmt.bufPrint(&line, "{s}{s}", .{ explain, if (verbose) "" else rerun }) catch
+        unreachable; // Fits 128 bytes.
     write_wrapped(writer, "more", text, color);
     // Its own line: the URL does not fit beside the `more` text within 80 columns.
     var url: [constants.docs_url_bytes_max]u8 = undefined;
-    write_wrapped(writer, "docs", docs_url(&url, entry.code), color);
+    write_wrapped(writer, "docs", product.docs_url(&url, diagnostic.code.slice()), color);
 }
 
 fn write_label(writer: *std.Io.Writer, label: []const u8, color: bool) void {
@@ -236,8 +266,13 @@ fn write_omitted(writer: *std.Io.Writer, label: []const u8, omitted: u32, color:
     write_wrapped(writer, label, text, color);
 }
 
-fn write_fixes(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, color: bool) void {
-    const fixes = diag.fixes.slice();
+fn write_fixes(
+    writer: *std.Io.Writer,
+    diagnostic: *const Diagnostic,
+    verbose: bool,
+    color: bool,
+) void {
+    const fixes = diagnostic.fixes.slice();
     assert(fixes.len <= constants.diag_fixes_count_max);
     if (fixes.len == 0) return;
     // Commands line up in one column, after the longest sentence that has a command.
@@ -254,113 +289,7 @@ fn write_fixes(writer: *std.Io.Writer, diag: *const Diag, verbose: bool, color: 
         }
         emit(writer, "\n");
     }
-    if (verbose) write_omitted(writer, "fix", diag.fixes.omitted, color);
-}
-
-// ---- JSON ----------------------------------------------------------------------------------
-
-fn write_json_string(writer: *std.Io.Writer, text: []const u8) void {
-    // Cannot fail, here and below: the buffer holds a maximal diagnostic (see `render`).
-    emit_byte(writer, '"');
-    for (text) |byte| {
-        assert(byte >= 0x20); // Diag stores printable ASCII only.
-        assert(byte <= 0x7e);
-        if (byte == '"' or byte == '\\') emit_byte(writer, '\\');
-        emit_byte(writer, byte);
-    }
-    emit_byte(writer, '"');
-}
-
-fn write_json_key(writer: *std.Io.Writer, key: []const u8) void {
-    assert(key.len > 0);
-    assert(std.mem.indexOfAny(u8, key, "\"\\") == null); // Keys are ours and need no escape.
-    write_json_string(writer, key);
-    emit_byte(writer, ':');
-}
-
-fn write_json_texts(writer: *std.Io.Writer, key: []const u8, list: anytype) void {
-    assert(list.count <= constants.diag_causes_count_max + constants.diag_whiles_count_max);
-    assert(key.len > 0);
-    write_json_key(writer, key);
-    emit_byte(writer, '[');
-    for (list.slice(), 0..) |*text, index| {
-        if (index > 0) emit_byte(writer, ',');
-        write_json_string(writer, text.slice());
-    }
-    emit(writer, "],");
-}
-
-/// The standard's field table, plus `while` (the standard's verbose rendering shows those lines
-/// but its table has no field for them) and `omitted`, the counts past the bounds.
-fn write_json(writer: *std.Io.Writer, diag: *const Diag) void {
-    const entry = diag.entry();
-    assert(diag.code.? == entry.code);
-    assert(writer.end == 0); // One object, one line: nothing was written before it.
-    emit_byte(writer, '{');
-    write_json_key(writer, "code");
-    write_json_string(writer, codes.full_name(entry.code));
-    emit_byte(writer, ',');
-    write_json_key(writer, "severity");
-    write_json_string(writer, @tagName(entry.severity));
-    emit_byte(writer, ',');
-    write_json_key(writer, "blame");
-    write_json_string(writer, @tagName(entry.blame));
-    emit_byte(writer, ',');
-    write_json_key(writer, "summary");
-    write_json_string(writer, entry.summary);
-    emit_byte(writer, ',');
-    write_json_texts(writer, "causes", &diag.causes);
-    write_json_texts(writer, "while", &diag.whiles);
-    write_json_context(writer, diag);
-    write_json_fixes(writer, diag);
-    if (diag.saved.len > 0) {
-        write_json_key(writer, "saved");
-        write_json_string(writer, diag.saved.slice());
-        emit_byte(writer, ',');
-    }
-    write_json_key(writer, "docs");
-    var url: [constants.docs_url_bytes_max]u8 = undefined;
-    write_json_string(writer, docs_url(&url, entry.code));
-    const omitted = ",\"omitted\":{{\"causes\":{d},\"while\":{d}," ++
-        "\"context\":{d},\"fixes\":{d}}}}}\n";
-    emit_format(writer, omitted, .{
-        diag.causes.omitted, diag.whiles.omitted, diag.pairs.omitted, diag.fixes.omitted,
-    });
-}
-
-fn write_json_context(writer: *std.Io.Writer, diag: *const Diag) void {
-    assert(diag.pairs.count <= constants.diag_context_count_max);
-    assert(writer.end > 0);
-    write_json_key(writer, "context");
-    emit_byte(writer, '{');
-    for (diag.pairs.slice(), 0..) |*pair, index| {
-        if (index > 0) emit_byte(writer, ',');
-        write_json_key(writer, pair.key_slice());
-        write_json_string(writer, pair.value.slice());
-    }
-    emit(writer, "},");
-}
-
-fn write_json_fixes(writer: *std.Io.Writer, diag: *const Diag) void {
-    assert(diag.fixes.count <= constants.diag_fixes_count_max);
-    assert(writer.end > 0);
-    write_json_key(writer, "fixes");
-    emit_byte(writer, '[');
-    for (diag.fixes.slice(), 0..) |*item, index| {
-        if (index > 0) emit_byte(writer, ',');
-        emit_byte(writer, '{');
-        write_json_key(writer, "sentence");
-        write_json_string(writer, item.sentence.slice());
-        emit_byte(writer, ',');
-        write_json_key(writer, "command");
-        if (item.command.len > 0) {
-            write_json_string(writer, item.command.slice());
-        } else {
-            emit(writer, "null");
-        }
-        emit_byte(writer, '}');
-    }
-    emit(writer, "],");
+    if (verbose) write_omitted(writer, "fix", diagnostic.fixes.omitted, color);
 }
 
 /// Removes ANSI colour sequences (`ESC [ ... m`), for tests that compare coloured and plain.
