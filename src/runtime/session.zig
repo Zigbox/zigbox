@@ -10,6 +10,7 @@ const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const child_mod = @import("child.zig");
 const diagnose = @import("diagnose.zig");
+const doctor = @import("../doctor.zig");
 const plan_mod = @import("plan.zig");
 const scope_mod = @import("scope.zig");
 const signals = @import("signals.zig");
@@ -57,6 +58,8 @@ pub const Session = struct {
     open: Open,
     report: sync.Report,
     helper: ?HelperRecord,
+    /// The caller's room for the doctor's facts, for the diagnostic of a refused namespace.
+    facts: *doctor.Facts,
     /// Why the scope step failed, for its diagnostic.
     scope_problem: ?scope_mod.Problem,
     /// The scope's cgroup directory (empty if unknown), and whether a scope may exist that
@@ -66,11 +69,12 @@ pub const Session = struct {
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
 
-    pub fn start(session: *Session, host: Host, plan: *const Plan) void {
+    pub fn start(session: *Session, host: Host, plan: *const Plan, facts: *doctor.Facts) void {
         assert(plan.count == plan.steps_expected());
         assert(plan.candidates_count > 0);
         session.host = host;
         session.plan = plan;
+        session.facts = facts;
         session.child = .{ .host = host, .plan = plan, .ready = undefined, .report = undefined };
         session.pid = null;
         session.open = .{
@@ -122,7 +126,7 @@ pub const Session = struct {
                 .err = host_mod.error_for_errno(record.errno),
                 .errno = record.errno,
             };
-            diagnose.step_failed(host, diag, plan, info, failure, .{});
+            diagnose.step_failed(host, diag, plan, info, failure, .{ .facts = session.facts });
             return error.StartFailed;
         }
         session.finish();
@@ -135,7 +139,7 @@ pub const Session = struct {
             problem
         else
             null;
-        return .{ .helper = session.helper_end(), .scope = scope };
+        return .{ .helper = session.helper_end(), .scope = scope, .facts = session.facts };
     }
 
     fn helper_end(session: *const Session) ?diagnose.HelperEnd {

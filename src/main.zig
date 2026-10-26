@@ -30,10 +30,15 @@ fn panic_handler(message: []const u8, first_trace_addr: ?usize) noreturn {
     host_real.exit_now(panic_report.exit_code(&panic_report.state));
 }
 
+/// The command line's big working memory (a run's handle, the bundle workspace), the program's
+/// own: static, because it is over a megabyte and the stack is not the place; one command line
+/// runs per process.
+var storage: cli.Storage = undefined;
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
-    const code = cli.run_from_iterator(real.interface(), &iterator);
+    const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
 }

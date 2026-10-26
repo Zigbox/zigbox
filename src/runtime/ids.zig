@@ -21,9 +21,9 @@ pub const Choice = struct {
 };
 
 /// Fills `choice`. Never fails: a host that cannot give a full map gets the single-id map.
-pub fn choose(host: host_mod.Host, choice: *Choice) void {
+pub fn choose(host: host_mod.Host, facts: *doctor.Facts, choice: *Choice) void {
     var answer: doctor.SubidAnswer = undefined;
-    doctor.subid_answer(host, &answer);
+    doctor.subid_answer(host, facts, &answer);
     choice.warning.reset();
     if (answer.usable) {
         choice.warned = false;
@@ -64,6 +64,9 @@ fn describe_fallback(warning: *Diag, reason: *const Diag) void {
     assert(warning.causes.count >= 1);
 }
 
+/// The tests run one at a time, so one set of facts serves them all.
+var test_facts: doctor.Facts = undefined;
+
 const testing = std.testing;
 const HostSim = @import("../host_sim.zig").HostSim;
 const fixtures = @import("../doctor_fixtures.zig");
@@ -76,7 +79,7 @@ test "a host with ranges and privileged helpers gets the full map, from the firs
     sim.init(1, fixture.files);
     fixture.apply(&sim);
     var choice: Choice = undefined;
-    choose(sim.interface(), &choice);
+    choose(sim.interface(), &test_facts, &choice);
     try testing.expect(!choice.warned);
     const full = choice.mapping.full;
     try testing.expectEqual(@as(u32, 100000), full.uid_start);
@@ -100,7 +103,7 @@ test "a host without a range or a helper gets the single-id map and one warning 
         sim.init(1, fixture.files);
         fixture.apply(&sim);
         var choice: Choice = undefined;
-        choose(sim.interface(), &choice);
+        choose(sim.interface(), &test_facts, &choice);
         try testing.expect(choice.warned);
         try testing.expect(choice.mapping == .single);
         try testing.expectEqual(

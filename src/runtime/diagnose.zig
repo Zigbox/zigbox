@@ -37,6 +37,8 @@ pub const RunInfo = struct {
 pub const Details = struct {
     helper: ?HelperEnd = null,
     scope: ?*const scope_mod.Problem = null,
+    /// The caller's room for the doctor's facts, which a refused namespace is explained with.
+    facts: *doctor.Facts,
 };
 
 /// A failed step: its index in the plan, the coarse error and the errno the kernel returned.
@@ -166,7 +168,7 @@ pub fn step_failed(
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
     switch (step.kind) {
-        .spawn => namespaces_failed(host, diag, failure),
+        .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
         .run_newuidmap, .run_newgidmap => helper_failed(
             diag,
@@ -205,7 +207,7 @@ fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {
     diag.context("step", "{s} ({d} of {d})", .{ @tagName(step.kind), index + 1, plan.count });
 }
 
-fn namespaces_failed(host: Host, diag: *Diag, failure: Failure) void {
+fn namespaces_failed(host: Host, facts: *doctor.Facts, diag: *Diag, failure: Failure) void {
     assert(diag.code == null);
     assert(failure.errno < 4096);
     diag.raise(.E0203);
@@ -217,7 +219,7 @@ fn namespaces_failed(host: Host, diag: *Diag, failure: Failure) void {
     }
     // The doctor's user-namespace check knows the host's real reason when there is one: it is
     // the newest cause, which is the one the default output shows.
-    doctor.explain_userns(host, diag);
+    doctor.explain_userns(host, facts, diag);
     diag.fix(.{ .sentence = "check this host (ZBX-E0101):", .command = "zbx doctor" });
     assert(diag.code.? == .E0203);
 }

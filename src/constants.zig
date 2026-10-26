@@ -324,9 +324,9 @@ pub const write_bytes_max: u32 = 256 * 1024;
 pub const bundle_files_max: u32 = 12;
 /// The bundle's static workspace: staged files, the compressor's window and tables, its mask.
 pub const facts_bytes_max: u32 = 256 * 1024;
-pub const bundle_workspace_bytes_max: u32 = 768 * 1024;
+pub const bundle_workspace_bytes_max: u32 = 1024 * 1024;
 /// The run `Handle` of a foreground run, kept off the stack too.
-pub const handle_bytes_max: u32 = 160 * 1024;
+pub const handle_bytes_max: u32 = 480 * 1024;
 /// The environment variables listed in a bundle, and those whose values are scrubbed elsewhere.
 pub const environment_entries_max: u32 = 256;
 pub const bundle_secrets_max: u32 = 32;

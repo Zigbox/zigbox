@@ -37,6 +37,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const codes = @import("../diag/codes.zig");
 const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
+const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
@@ -175,6 +176,9 @@ pub const Handle = struct {
     end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
     lost_diag: Diag,
+    /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
+    /// nothing. It is why a `Handle` is large: keep it off the stack.
+    facts: doctor.Facts,
 
     pub fn name_slice(handle: *const Handle) []const u8 {
         assert(handle.name_len > 0);
@@ -231,7 +235,7 @@ pub fn start(
     try check_limits(container.limits, diag);
 
     var choice: ids.Choice = undefined;
-    ids.choose(host, &choice);
+    ids.choose(host, &handle.facts, &choice);
     if (choice.warned) handle.report(&choice.warning);
     handle.mapping = if (choice.warned) .single else .full;
     // After the checks that need nothing from the host, and before anything is created: a run
@@ -254,7 +258,7 @@ pub fn start(
 
     handle.started = host.time_now();
     begin_record(handle);
-    handle.session.start(host, &handle.plan);
+    handle.session.start(host, &handle.plan, &handle.facts);
     const info: diagnose.RunInfo = .{
         .name = handle.name_slice(),
         .rootfs = handle.rootfs_slice(),
@@ -291,7 +295,9 @@ pub fn wait(handle: *Handle) ExitReason {
             .name = handle.name_slice(),
             .rootfs = handle.rootfs_slice(),
         };
-        diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, .{});
+        diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, .{
+            .facts = &handle.facts,
+        });
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         finish_scope(handle); // `abandon` ended the container.
         return .lost;

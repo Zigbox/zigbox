@@ -676,24 +676,51 @@ pub fn collect(
 // ---- Running -------------------------------------------------------------------------------
 
 /// Entry point: skips the program name, collects, parses, runs. Returns the exit code.
+/// Everything one command line needs that is too big for the stack: a run's handle (which holds
+/// the plan and the doctor's facts) and the bundle's workspace. The caller owns it, so two
+/// command lines in one process (a library user, a test) share nothing. `zbx` itself owns one in
+/// `main.zig`.
+pub const Storage = struct {
+    handle: runtime.Handle,
+    workspace: bundle.Workspace,
+};
+
+/// One shared `Storage` for callers that run one command line at a time (the tests, the
+/// fuzzers). Two at once is a bug in the caller, and the assertion says so; a caller that wants
+/// concurrency owns a `Storage` and uses `run_with`.
+var shared_storage: Storage = undefined;
+var shared_busy = std.atomic.Value(bool).init(false);
+
 pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
+    assert(!shared_busy.swap(true, .acquire));
+    defer assert(shared_busy.swap(false, .release));
+    return run_with(host, iterator, &shared_storage);
+}
+
+pub fn run(host: Host, args: []const []const u8) u8 {
+    assert(!shared_busy.swap(true, .acquire));
+    defer assert(shared_busy.swap(false, .release));
+    return run_slice(host, args, &shared_storage);
+}
+
+pub fn run_with(host: Host, iterator: anytype, storage: *Storage) u8 {
     _ = iterator.next(); // Program name; absent only in a malformed exec, which is harmless.
     var diag: Diag = undefined;
     diag.reset();
-    var storage: [constants.args_count_max][]const u8 = undefined;
+    var words: [constants.args_count_max][]const u8 = undefined;
     var collected: u32 = 0;
-    const args = collect(&storage, &collected, iterator, &diag) catch {
+    const args = collect(&words, &collected, iterator, &diag) catch {
         assert(collected <= constants.args_count_max);
         // Whatever was collected before the limit was hit may hold --output or --verbose.
-        const options = scan_options(storage[0..collected]);
+        const options = scan_options(words[0..collected]);
         panic.configure(&panic.state, options.mode(), options.exit_scope());
         return fail(host, &diag, options);
     };
     assert(args.len <= constants.args_count_max);
-    return run(host, args);
+    return run_slice(host, args, storage);
 }
 
-pub fn run(host: Host, args: []const []const u8) u8 {
+pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
     assert(args.len <= constants.args_count_max);
     var diag: Diag = undefined;
     diag.reset();
@@ -702,25 +729,27 @@ pub fn run(host: Host, args: []const []const u8) u8 {
     var invocation: Invocation = undefined;
     parse(args, &invocation, &diag) catch return fail(host, &diag, options);
     assert(invocation.options.verbose == options.verbose);
-    const code = dispatch(host, &invocation, &diag) catch return fail(host, &diag, options);
+    const code = dispatch(host, &invocation, storage, &diag) catch {
+        return fail(host, &diag, options);
+    };
     // A container's own exit code is passed through whole; zbx's own codes stay below 71.
     if (invocation.command != .run) assert(code <= constants.exit_internal);
     return code;
 }
 
-fn dispatch(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     if (invocation.command == .explain) assert(invocation.operand != null);
     if (invocation.command != .explain and invocation.command != .bundle) {
         assert(invocation.operand == null);
     }
     switch (invocation.command) {
-        .bundle => return run_bundle(host, invocation, diag),
+        .bundle => return run_bundle(host, invocation, &storage.workspace, diag),
         .help => try print(host, help_text, diag),
         .version => try print(host, version_text, diag),
         .explain => try run_explain(host, invocation.operand.?, diag),
-        .doctor => return run_doctor(host, invocation.options, diag),
-        .run => return run_container(host, invocation, diag),
+        .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
+        .run => return run_container(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -743,18 +772,20 @@ fn report_warning(context: *anyopaque, diag: *const Diag) void {
 }
 
 comptime {
-    // The run's handle is over 100 KiB (it holds a plan and a diagnostic), so it is static: one
-    // foreground run per process, and the assertion in `run_container` says so.
+    // The run's handle is over 300 KiB (it holds a plan, a diagnostic and the doctor's facts), so
+    // the caller provides it: `Storage`.
     assert(@sizeOf(runtime.Handle) <= constants.handle_bytes_max);
 }
-
-var handle_storage: runtime.Handle = undefined;
-var handle_busy = std.atomic.Value(bool).init(false);
 
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
 /// plus the signal that killed it. A container that could not be started is a diagnostic; so is
 /// one whose end could not be waited for.
-fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn run_container(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(invocation.command == .run);
     const given = invocation.run;
@@ -769,17 +800,15 @@ fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunErro
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
     };
-    assert(!handle_busy.swap(true, .acquire));
-    defer assert(handle_busy.swap(false, .release));
-    const handle = &handle_storage;
+    const handle = &storage.handle;
     runtime.start(host, &container, options, handle, diag) catch {
-        keep_bundle_of_bug(host, handle, diag);
+        keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
     const reason = runtime.wait(handle);
     const code = reason.code() orelse {
         diag.* = handle.lost_diag; // The only reason a started run has no code.
-        keep_bundle_of_bug(host, handle, diag);
+        keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
     report_outcome(host, invocation.options, handle, &reason);
@@ -814,16 +843,26 @@ fn limits_of(given: *const RunArgs, diag: *Diag) RunError!runtime_spec.Limits {
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
 /// block says where it is. Any other diagnostic is left alone: a bundle is for bugs.
-pub fn keep_bundle_of_bug(host: Host, handle: *const runtime.Handle, diag: *Diag) void {
+pub fn keep_bundle_of_bug(
+    host: Host,
+    workspace: *bundle.Workspace,
+    handle: *const runtime.Handle,
+    diag: *Diag,
+) void {
     assert(diag.code != null);
     if (diag.entry().severity != .bug) return;
     if (handle.name_len == 0) return; // It failed before the run had a name or a record.
-    bundle.attach_to_bug(host, handle.name_slice(), diag);
+    bundle.attach_to_bug(host, workspace, handle.name_slice(), diag);
 }
 
 /// `zbx bundle`: writes the bundle and prints its path on stdout (a JSON object with --output
 /// json). `--no-redact` first warns on stderr.
-fn run_bundle(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn run_bundle(
+    host: Host,
+    invocation: *const Invocation,
+    workspace: *bundle.Workspace,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(invocation.command == .bundle);
     const no_redact = invocation.bundle.no_redact;
@@ -836,7 +875,7 @@ fn run_bundle(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u
     }
     var saved: bundle.Saved = undefined;
     const request: bundle.Request = .{ .name = invocation.operand, .redact = !no_redact };
-    bundle.write(host, request, &saved, diag) catch return error.BundleFailed;
+    bundle.write(host, workspace, request, &saved, diag) catch return error.BundleFailed;
     var line: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&line);
     // Cannot fail: a path of at most 640 bytes escapes to at most six times that, plus a frame.
@@ -1008,10 +1047,10 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
 /// in check order, in the requested mode. Text blocks are separated by a blank line; JSON is
 /// one object per line. The exit code is the blame of the failures' diagnostics (the
 /// environment's) and, if stderr cannot be written, the same: there is nowhere to say so.
-fn run_doctor(host: Host, options: Options, diag: *Diag) RunError!u8 {
+fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     var report: doctor.Report = undefined;
-    try doctor.run(host, &report, diag);
+    try doctor.run(host, facts, &report, diag);
     const mode = options.mode();
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;

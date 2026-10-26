@@ -30,10 +30,11 @@ pub fn exit_now(code: u8) noreturn {
     linux.exit_group(code);
 }
 
-/// The errno of the most recent call checked by `check`, 0 after a success. Process-wide because
-/// `check` is a free function used by the probe code too; zbx is single-threaded where it
-/// matters (AGENTS.md), and a forked probe child has its own copy.
-var errno_last: u16 = 0;
+/// The errno of the most recent call checked by `check`, 0 after a success. One per thread,
+/// because `check` is a free function used by the probe code too and the library is called from
+/// several threads (each caller's host reads the errno of its own last call); a forked child has
+/// its own copy.
+threadlocal var errno_last: u16 = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a

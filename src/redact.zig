@@ -96,19 +96,9 @@ pub const Mask = struct {
     }
 };
 
-/// The mask of `redact`, kept off the stack (it is 64 KiB). One use at a time.
-var shared_mask: Mask = undefined;
-var shared_busy = std.atomic.Value(bool).init(false);
-
-/// Redacts `input` into `output` with the module's own mask. `secrets` are literal values to
-/// remove wherever they occur. Not for two threads at once; the assertion says so.
-pub fn redact(input: []const u8, output: []u8, secrets: []const []const u8) Result {
-    assert(!shared_busy.swap(true, .acquire));
-    defer shared_busy.store(false, .release);
-    return redact_with(&shared_mask, input, output, secrets);
-}
-
-/// The same with a mask the caller owns (the bundle keeps one in its workspace).
+/// Redacts `input` into `output` with a mask the caller owns (it is 64 KiB: keep it off the
+/// stack; the bundle keeps one in its workspace). `secrets` are literal values to remove wherever
+/// they occur.
 pub fn redact_with(
     mask: *Mask,
     input: []const u8,
@@ -413,6 +403,13 @@ fn mask_labels(input: []const u8, at: usize, mask: *Mask) void {
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;
+
+/// The tests run one at a time, so one mask of their own serves them all.
+var test_mask: Mask = undefined;
+
+fn redact(input: []const u8, output: []u8, secrets: []const []const u8) Result {
+    return redact_with(&test_mask, input, output, secrets);
+}
 
 fn run_redact(input: []const u8, secrets: []const []const u8, storage: []u8) []const u8 {
     const result = redact(input, storage, secrets);

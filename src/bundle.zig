@@ -74,7 +74,10 @@ const File = struct {
 };
 
 /// All the memory a bundle needs. One of these lives on the stack of `write`.
-const Workspace = struct {
+/// Everything a bundle needs (about a megabyte: staged files, the compressor's tables, the
+/// redaction mask, the doctor's facts). The caller owns it, so bundles on two threads share
+/// nothing; keep it off the stack.
+pub const Workspace = struct {
     stage: [constants.bundle_stage_bytes_max]u8,
     used: u32,
     raw: [constants.bundle_file_bytes_max]u8,
@@ -88,6 +91,8 @@ const Workspace = struct {
     gz: [constants.bundle_gz_bytes_max]u8,
     window: [flate.max_window_len]u8,
     mask: redact.Mask,
+    /// Room for the doctor check the bundle includes.
+    facts: doctor.Facts,
 
     fn reset(ws: *Workspace, redacting: bool) void {
         ws.used = manifest_bytes_max;
@@ -169,28 +174,13 @@ const Workspace = struct {
     }
 };
 
-// ---- The workspace: static, one bundle at a time ------------------------------------------------
+// ---- The workspace: the caller's, one bundle at a time per workspace ----------------------
 
 comptime {
     // The workspace is about 700 KiB with the compressor and the mask, far more than a thread's
-    // or a small `ulimit -s` stack holds, so it lives in static storage. This is the bound.
+    // or a small `ulimit -s` stack holds, so the caller provides it. This is the bound.
     assert(@sizeOf(Workspace) <= constants.bundle_workspace_bytes_max);
     assert(constants.bundle_workspace_bytes_max > 64 * 1024);
-}
-
-var workspace: Workspace = undefined;
-var workspace_busy = std.atomic.Value(bool).init(false);
-
-/// The workspace, for one bundle. A bundle command makes one bundle and the automatic bundle on a
-/// bug makes one, so two at once is a bug in zbx: the assertion says so. Tests make many, one
-/// after another, so `release` clears the flag instead of the flag being a once-per-process one.
-fn acquire() *Workspace {
-    assert(!workspace_busy.swap(true, .acquire));
-    return &workspace;
-}
-
-fn release() void {
-    assert(workspace_busy.swap(false, .release));
 }
 
 // ---- The UTC timestamp ---------------------------------------------------------------------
@@ -319,7 +309,7 @@ fn stage_doctor(ws: *Workspace, host: Host) void {
     assert(ws.count < constants.bundle_files_max - 1);
     assert(ws.used >= manifest_bytes_max);
     var report: doctor.Report = undefined;
-    doctor.inspect(host, &report);
+    doctor.inspect(host, &ws.facts, &report);
     var writer = std.Io.Writer.fixed(&ws.raw);
     var cut = false;
     for (&report.checks) |*check| {
@@ -638,7 +628,13 @@ pub fn unredacted_warning(diag: *Diag) void {
 // ---- The entry points ----------------------------------------------------------------------
 
 /// Writes a bundle for `request` and says where it went. The reason for a failure is in `diag`.
-pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!void {
+pub fn write(
+    host: Host,
+    ws: *Workspace,
+    request: Request,
+    saved: *Saved,
+    diag: *Diag,
+) Error!void {
     // An empty name is a user's mistake (`zbx bundle ""`), refused below as an unknown run.
     if (request.name) |name| assert(name.len <= constants.arg_bytes_max);
     assert(diag.code == null);
@@ -651,8 +647,6 @@ pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!voi
         break :blk name_storage[0..length];
     };
     if (spec_mod.name_problem(name) != null) return no_record(diag, name, dir.text());
-    const ws = acquire();
-    defer release();
     ws.reset(request.redact);
     if (ws.redact) collect_secrets(ws, host);
     const mapping = try stage_record(ws, host, &dir, name, diag);
@@ -674,13 +668,13 @@ pub fn write(host: Host, request: Request, saved: *Saved, diag: *Diag) Error!voi
 /// For a `bug` diagnostic from the run called `name`: writes a redacted bundle and puts its path
 /// in the bug's `saved` line. A bundle that cannot be written leaves the bug as it was; the
 /// bug is the news, not the bundle.
-pub fn attach_to_bug(host: Host, name: []const u8, bug: *Diag) void {
+pub fn attach_to_bug(host: Host, ws: *Workspace, name: []const u8, bug: *Diag) void {
     assert(bug.code != null);
     assert(bug.entry().severity == .bug);
     var saved: Saved = undefined;
     var ignored: Diag = undefined;
     ignored.reset();
-    write(host, .{ .name = name, .redact = true }, &saved, &ignored) catch return;
+    write(host, ws, .{ .name = name, .redact = true }, &saved, &ignored) catch return;
     bug.save_bundle(saved.slice());
 }
 
