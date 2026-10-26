@@ -6,7 +6,7 @@ Read `AGENTS.md`, `docs/STYLE.md`, `DIAGNOSTICS.md`, the M2 section and the "Pro
 
 A misbehaving container cannot take down the host or regain privilege.
 
-1. `zbx run --rootfs ./alpine --pids 64 -- sh -c ':(){ :|:& };:'`: the fork bomb stalls, the host stays responsive, and `zbx` exits reporting the PID limit.
+1. `zbx run --rootfs ./alpine --pids 64 -- sh -c 'b(){ b|b& }; b; wait'`: the fork bomb stalls, the host stays responsive, and `zbx` exits reporting the PID limit. (Spec rev 48 changed this from `:(){ :|:& };:`, which Alpine's `sh` rejects and which lets PID 1 exit before the limit is hit.)
 2. `zbx run --rootfs ./alpine --memory 128m -- stress-ng --vm 1 --vm-bytes 512m`: output ends with `killed: out of memory (limit 128 MiB)`.
 3. `zbx run --rootfs ./alpine -- mount -t tmpfs none /mnt` fails with `operation not permitted`.
 4. `zbx run --rootfs ./alpine --read-only -- touch /x` fails; `touch /tmp/x` succeeds (tmpfs).
@@ -125,6 +125,13 @@ Hardening failures (`capset`, `prctl`, `seccomp`, the remount) are `E02xx`, each
    - Add the `demo-m2` CI job.
    - Write `docs/demos/m2.md`: the by-hand steps, the cuts, the departures from runc, and the failure modes (no user bus, no lingering, a delegation missing a controller, an OOM that hits zbx's own memory, a seccomp denial that looks like a bug, a read-only rootfs without `/tmp`).
    - Run `demo-m2` locally under TCG, and `demo-m0` and `demo-m1` still pass.
+
+## Notes for later milestones (found during M2)
+
+- **Seccomp allowlist.** It follows Docker's default profile but has only been exercised with Alpine's busybox. Before M4 runs real images (Debian-based `python`, `postgres`), test a glibc rootfs, and grow the allowlist from what fails. A missing syscall shows up as `EPERM`, not a crash, so it can look like an application bug; the failure-modes section of `docs/demos/m2.md` should say so.
+- **The `mount` refusal message.** Busybox prints "permission denied (are you root?)" for the kernel's `EPERM`, and glibc's `mount` prints "Operation not permitted". Demo assertions match the exit status and either text.
+- **No `/sys` in the container.** M1 and M2 mount `/proc` and `/dev` but not `/sys`; stress-ng in the M2 demo prints `no CPUs found in /sys/devices/system/cpu`. Real images (M4) expect at least a read-only `/sys`. A rootless sysfs mount needs the container to own a network namespace, so decide this with networking.
+- **Thread-local storage costs 256 KiB per thread.** std's default `signal_stack_size` gives every thread a `threadlocal` alternate signal stack, on top of its own stack (see `docs/demos/m2.md`). Zigcube's agent thread pool pays it per thread.
 
 ## Done means
 

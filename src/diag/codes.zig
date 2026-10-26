@@ -45,6 +45,9 @@ pub const Code = enum(u8) {
     E0204,
     E0205,
     E0206,
+    E0207,
+    E0208,
+    E0209,
     W0201,
     W0202,
     W0203,
@@ -57,6 +60,13 @@ pub const Code = enum(u8) {
     E0307,
     E0308,
     W0301,
+    W0302,
+    E0401,
+    E0402,
+    E0403,
+    E0404,
+    E0405,
+    E0406,
     E0701,
     E0702,
     E0703,
@@ -427,6 +437,60 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0207,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't restrict the container's capabilities",
+        .explanation =
+        \\Just before the command starts, zbx drops every capability the container
+        \\does not keep: from the bounding set, then from the effective, permitted
+        \\and inheritable sets, and it empties the ambient set. The list that is
+        \\kept is Docker's default without NET_RAW and MKNOD, and has no SYS_ADMIN
+        \\(src/runtime/policy/capabilities.zon). The kernel refused one of those
+        \\calls, so the container was not started: a container with more rights
+        \\than intended is never run.
+        \\
+        \\The cause names the step and the kernel's reason. This is unusual: the
+        \\child is root of its own user namespace and holds these capabilities
+        \\there. A security module that restricts capability changes, or a very
+        \\old kernel, is the likely reason.
+        ,
+    },
+    .{
+        .code = .E0208,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't install the container's seccomp filter",
+        .explanation =
+        \\The last thing zbx does before the command starts is set no_new_privs and
+        \\install a seccomp filter (src/runtime/policy/seccomp.zon): a list of the
+        \\system calls the container may make, which fails every other with EPERM.
+        \\The kernel refused one of the two calls, so the container was not
+        \\started: a container without its filter is never run.
+        \\
+        \\The cause names the step and the kernel's reason. The kernel may lack
+        \\seccomp filters (CONFIG_SECCOMP_FILTER), or a policy may forbid
+        \\installing one. "zbx doctor" checks that this host has seccomp (ZBX-E0106).
+        ,
+    },
+    .{
+        .code = .E0209,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up the read-only rootfs",
+        .explanation =
+        \\--read-only mounts a tmpfs on the rootfs's /tmp and /run, then remounts
+        \\the rootfs read-only. One of those steps failed, so the container was not
+        \\started.
+        \\
+        \\When the cause says /tmp or /run could not be made, the rootfs does not
+        \\have the directory and is not writable by this user, so zbx cannot make
+        \\the mount point: make both directories as the rootfs's owner (mkdir -p
+        \\<rootfs>/tmp <rootfs>/run) and run again. Otherwise the kernel refused the
+        \\mount or the remount; the cause says why.
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -614,6 +678,100 @@ pub const registry = [_]Entry{
         \\
         \\"zbx doctor" runs the same probe and prints the fix. A run that asks for
         \\a limit does not get this far: it is refused (ZBX-E0307).
+        ,
+    },
+    .{
+        .code = .W0302,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the container's cgroup scope was left behind",
+        .explanation =
+        \\The container has ended, and zbx made sure its systemd scope went away:
+        \\the scope goes by itself when its last process exits, and zbx asks the
+        \\user's systemd manager to stop it if it does not. That did not work, so
+        \\the scope, with its cgroup under /sys/fs/cgroup, may still be there. It
+        \\holds no process of the container, but a new run with the same name will
+        \\be refused until it is gone (ZBX-E0305).
+        \\
+        \\The cause says what went wrong. "systemctl --user stop zbx-<name>.scope"
+        \\removes the scope by hand.
+        ,
+    },
+    .{
+        .code = .E0401,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a time is not a number of milliseconds",
+        .explanation =
+        \\--timeout and --grace take a number of milliseconds: a whole number
+        \\from 1 to 86400000 (a day) for --timeout, and from 0 for --grace, which is
+        \\how long a container gets between SIGTERM and SIGKILL. Anything else is
+        \\refused before anything starts.
+        ,
+    },
+    .{
+        .code = .E0402,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no container with that name",
+        .explanation =
+        \\No run record has that name, so there is no container to stop. "zbx ps
+        \\--all" lists the containers zbx knows, running or not; the newest 32 are
+        \\kept. A container that ended is found, and "zbx stop" on it says it was
+        \\already stopped.
+        ,
+    },
+    .{
+        .code = .E0403,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't signal the container",
+        .explanation =
+        \\zbx found the container's PID 1 but the kernel refused to signal it.
+        \\That is unusual: the container belongs to the user who runs zbx. The
+        \\record may be another user's, or the pid was reused by a process that is
+        \\not ours. The cause names the kernel's reason.
+        ,
+    },
+    .{
+        .code = .E0404,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the container did not stop in time",
+        .explanation =
+        \\zbx sent the container SIGTERM, and SIGKILL after the grace period, and
+        \\it was still there when --timeout ran out (or a few seconds after SIGKILL).
+        \\A process in uninterruptible sleep (a stuck mount, a hung disk) cannot be
+        \\killed until the kernel lets it go.
+        \\
+        \\Look at what it is doing with "ps -o pid,stat,wchan -p <pid>" and try
+        \\again; the pid is in "zbx ps".
+        ,
+    },
+    .{
+        .code = .E0405,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't start the supervisor of a detached run",
+        .explanation =
+        \\A detached run ("zbx run -d") hands the container to a supervisor
+        \\process that stays to wait for it and to finish its record. The kernel
+        \\refused to create that process (a process limit, or no memory), so
+        \\nothing was started.
+        \\
+        \\The cause names the kernel's reason. Check the process limits with
+        \\"ulimit -u".
+        ,
+    },
+    .{
+        .code = .E0406,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no schema for that command",
+        .explanation =
+        \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
+        \\doctor ("zbx schema ps"). Other commands have no machine-readable output
+        \\that needs one: explain and help print text, version prints a line.
         ,
     },
     .{
@@ -828,6 +986,7 @@ pub fn can_end_run(code: Code) bool {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0701, .E0702, .E0703, .E0704 => false,
+        .E0402, .E0403, .E0404, .E0406 => false,
         else => true,
     };
 }

@@ -198,7 +198,7 @@ fn check_output(random: std.Random, input: []const u8, planted: *const Planted) 
     var storage: [input_bytes_max * 4]u8 = undefined;
     const room = random.intRangeAtMost(usize, 1, storage.len);
     const literals = planted.literals[0..planted.literals_count];
-    const result = redact.redact(input, storage[0..room], literals);
+    const result = redact_shared(input, storage[0..room], literals);
     assert(result.len <= room);
     const output = storage[0..result.len];
     for (0..planted.count) |index| {
@@ -226,10 +226,17 @@ fn check_damaged(random: std.Random) void {
     }
     var first: [input_bytes_max * 4]u8 = undefined;
     var second: [input_bytes_max * 4]u8 = undefined;
-    const a = redact.redact(bytes[0..length], &first, &.{});
-    const b = redact.redact(bytes[0..length], &second, &.{});
+    const a = redact_shared(bytes[0..length], &first, &.{});
+    const b = redact_shared(bytes[0..length], &second, &.{});
     assert(a.len == b.len); // Deterministic.
     assert(std.mem.eql(u8, first[0..a.len], second[0..b.len]));
+}
+
+/// The fuzzer runs one iteration at a time, so one mask of its own serves them all.
+var shared_mask: redact.Mask = undefined;
+
+fn redact_shared(input: []const u8, output: []u8, secrets: []const []const u8) redact.Result {
+    return redact.redact_with(&shared_mask, input, output, secrets);
 }
 
 pub fn fuzz_redact(seed: u64) void {

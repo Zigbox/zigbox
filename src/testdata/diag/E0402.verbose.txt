@@ -1,0 +1,7 @@
+error[ZBX-E0402]: no container with that name
+  while  looking for the container web-1
+  cause  no run record is called 'web-1'; zbx keeps the newest 32
+  name   web-1
+  fix    see the containers:   zbx ps --all
+  more   zbx explain E0402
+  docs   https://zigbox.github.io/zigbox/errors/E0402.html

@@ -37,6 +37,8 @@ pub const RunInfo = struct {
 pub const Details = struct {
     helper: ?HelperEnd = null,
     scope: ?*const scope_mod.Problem = null,
+    /// The caller's room for the doctor's facts, which a refused namespace is explained with.
+    facts: *doctor.Facts,
 };
 
 /// A failed step: its index in the plan, the coarse error and the errno the kernel returned.
@@ -166,7 +168,7 @@ pub fn step_failed(
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
     switch (step.kind) {
-        .spawn => namespaces_failed(host, diag, failure),
+        .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
         .run_newuidmap, .run_newgidmap => helper_failed(
             diag,
@@ -178,6 +180,18 @@ pub fn step_failed(
         ),
         .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
         .exec => command_failed(diag, plan, info, failure),
+        .restrict_capabilities,
+        .clear_ambient,
+        => hardening_failed(diag, .E0207, operation, failure),
+        .set_no_new_privs,
+        .install_seccomp,
+        => hardening_failed(diag, .E0208, operation, failure),
+        .make_tmp_dir,
+        .mount_tmp,
+        .make_run_dir,
+        .mount_run,
+        .remount_readonly,
+        => read_only_failed(diag, step, operation, failure, info),
         else => setup_failed(diag, step, operation, failure, info),
     }
     starting(diag, info);
@@ -193,7 +207,7 @@ fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {
     diag.context("step", "{s} ({d} of {d})", .{ @tagName(step.kind), index + 1, plan.count });
 }
 
-fn namespaces_failed(host: Host, diag: *Diag, failure: Failure) void {
+fn namespaces_failed(host: Host, facts: *doctor.Facts, diag: *Diag, failure: Failure) void {
     assert(diag.code == null);
     assert(failure.errno < 4096);
     diag.raise(.E0203);
@@ -205,7 +219,7 @@ fn namespaces_failed(host: Host, diag: *Diag, failure: Failure) void {
     }
     // The doctor's user-namespace check knows the host's real reason when there is one: it is
     // the newest cause, which is the one the default output shows.
-    doctor.explain_userns(host, diag);
+    doctor.explain_userns(host, facts, diag);
     diag.fix(.{ .sentence = "check this host (ZBX-E0101):", .command = "zbx doctor" });
     assert(diag.code.? == .E0203);
 }
@@ -324,6 +338,57 @@ fn setup_failed(
         },
     }
     assert(diag.code.? == .E0205);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-E0207 and ZBX-E0208: the capabilities, `no_new_privs` or the seccomp filter could not be
+/// applied. The container is never started without them.
+fn hardening_failed(diag: *Diag, code: codes.Code, operation: []const u8, failure: Failure) void {
+    assert(diag.code == null);
+    assert(@backingInt(code) >= @backingInt(codes.Code.E0207));
+    assert(@backingInt(code) <= @backingInt(codes.Code.E0208));
+    diag.raise(code);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    if (code == .E0207) {
+        diag.cause("the container's root should hold these capabilities in its own user " ++
+            "namespace; a security module or an old kernel is the usual reason they cannot " ++
+            "be changed", .{});
+    } else {
+        diag.cause("the kernel may lack seccomp filters, or a policy forbids installing one", .{});
+    }
+    if (failure.err == error.AccessDenied) {
+        diag.fix(.{ .sentence = "look for the policy that denies it:", .command = dmesg_policy });
+    }
+    diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
+    assert(diag.code.? == code);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-E0209: `--read-only` could not make its mount points, mount its tmpfs or remount.
+fn read_only_failed(
+    diag: *Diag,
+    step: *const plan_mod.Step,
+    operation: []const u8,
+    failure: Failure,
+    info: RunInfo,
+) void {
+    assert(diag.code == null);
+    assert(operation.len > 0);
+    diag.raise(.E0209);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    const makes = step.kind == .make_tmp_dir or step.kind == .make_run_dir;
+    if (makes) {
+        diag.cause("the rootfs has no such directory and is not writable by this user, so it " ++
+            "cannot be made; a read-only rootfs needs /tmp and /run before it is made " ++
+            "read-only", .{});
+        diag.fix_with("make them as the rootfs's owner:", "mkdir -p \"{s}/tmp\" \"{s}/run\"", .{
+            info.rootfs, info.rootfs,
+        });
+        diag.fix(.{ .sentence = "or unpack the rootfs as the user who runs zbx" });
+    } else {
+        diag.fix(.{ .sentence = "check what this host allows:", .command = "zbx doctor" });
+    }
+    assert(diag.code.? == .E0209);
     assert(diag.fixes.count > 0);
 }
 
@@ -565,6 +630,165 @@ pub fn running_without_scope(diag: *Diag, problem: *const scope_mod.Problem) voi
     assert(diag.causes.count >= 1);
 }
 
+/// ZBX-W0302: the container ended and its scope is still there, or could not be checked.
+pub fn scope_not_cleaned(diag: *Diag, unit: []const u8, problem: *const scope_mod.Problem) void {
+    assert(diag.code == null);
+    assert(unit.len <= constants.scope_name_bytes_max);
+    assert(std.mem.endsWith(u8, unit, constants.scope_suffix));
+    diag.raise(.W0302);
+    diag.while_("making sure the container's scope {s} is gone", .{unit});
+    scope_text.problem_causes(diag, problem);
+    diag.context("scope", "{s}", .{unit});
+    diag.fix_with("remove it by hand:", "systemctl --user stop {s}", .{unit});
+    assert(diag.code.? == .W0302);
+    assert(diag.causes.count >= 1);
+}
+
+// ---- The lifecycle commands ---------------------------------------------------------------
+
+/// ZBX-E0401: `--timeout` or `--grace` is not a number of milliseconds in range.
+pub fn time_invalid(diag: *Diag, flag: []const u8, text: []const u8) void {
+    assert(diag.code == null);
+    assert(flag.len > 2);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, text);
+    diag.raise(.E0401);
+    diag.while_("reading {s}", .{flag});
+    diag.cause("'{s}' is not a whole number of milliseconds from 0 to {d}", .{
+        echo, constants.wait_timeout_ms_max,
+    });
+    diag.context("value", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give a time in milliseconds:",
+        .command = "zbx stop web-1 --grace 5000",
+    });
+    assert(diag.code.? == .E0401);
+}
+
+pub const NoContainer = enum { no_record, unreadable_record, no_state, unreadable_state };
+
+/// ZBX-E0402: no container of that name (or no state directory to look in: ZBX-E0701).
+pub fn no_such_container(diag: *Diag, name: []const u8, why: NoContainer) void {
+    assert(diag.code == null);
+    if (why == .no_state) {
+        diag.raise(.E0701);
+        diag.while_("looking for the state directory", .{});
+        diag.cause("neither XDG_STATE_HOME nor HOME names an absolute directory", .{});
+        diag.fix(.{
+            .sentence = "name one:",
+            .command = "export XDG_STATE_HOME=$HOME/.local/state",
+        });
+        return;
+    }
+    if (why == .unreadable_state) {
+        diag.raise(.E0701);
+        diag.while_("looking for the containers", .{});
+        diag.cause("the runs directory under the state directory cannot be read", .{});
+        diag.fix(.{
+            .sentence = "look at it:",
+            .command = "ls -ld \"${XDG_STATE_HOME:-$HOME/.local/state}/zbx/runs\"",
+        });
+        return;
+    }
+    // The name is what the user typed: no escape reaches the terminal, no line is too long.
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, name);
+    diag.raise(.E0402);
+    diag.while_("looking for the container {s}", .{echo});
+    switch (why) {
+        .no_record => diag.cause("no run record is called '{s}'; zbx keeps the newest {d}", .{
+            echo, constants.runs_max,
+        }),
+        .unreadable_record => diag.cause("the run record of '{s}' cannot be read or is from a " ++
+            "newer zbx", .{echo}),
+        .no_state, .unreadable_state => unreachable, // Handled above.
+    }
+    diag.context("name", "{s}", .{echo});
+    diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps --all" });
+    assert(diag.code.? == .E0402);
+}
+
+/// ZBX-E0403: the container's PID 1 cannot be signalled.
+pub fn cannot_signal(diag: *Diag, name: []const u8, pid: u32, failure: Failure) void {
+    assert(diag.code == null);
+    diag.raise(.E0403);
+    diag.while_("stopping the container {s}", .{name});
+    errors.cause_host_error(diag, "signalling the container's PID 1", failure.err, failure.errno);
+    diag.cause(
+        "the record names pid {d}; it belongs to another user, or the number was reused",
+        .{pid},
+    );
+    diag.context("name", "{s}", .{name});
+    diag.context("pid", "{d}", .{pid});
+    diag.fix(.{
+        .sentence = "look at the process:",
+        .command = "ps -o pid,user,stat,args -p <pid>",
+    });
+    assert(diag.code.? == .E0403);
+}
+
+/// ZBX-E0404: the container was still there when the time was up.
+pub fn did_not_stop(diag: *Diag, name: []const u8, pid: u32, waited_ms: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0404);
+    diag.while_("stopping the container {s}", .{name});
+    diag.cause("pid {d} was still there {d} ms after SIGKILL was sent; a process in " ++
+        "uninterruptible sleep cannot be killed until the kernel lets it go", .{ pid, waited_ms });
+    diag.context("name", "{s}", .{name});
+    diag.context("pid", "{d}", .{pid});
+    diag.fix(.{
+        .sentence = "see what it is waiting for:",
+        .command = "ps -o pid,stat,wchan -p <pid>",
+    });
+    assert(diag.code.? == .E0404);
+}
+
+pub const SupervisorFault = union(enum) {
+    /// The kernel refused to create the process.
+    fork: Failure,
+    /// The supervisor ended without saying whether the container started.
+    ended_early,
+};
+
+/// ZBX-E0405: the supervisor of a detached run could not be had.
+pub fn supervisor_failed(diag: *Diag, fault: SupervisorFault) void {
+    assert(diag.code == null);
+    diag.raise(.E0405);
+    diag.while_("starting the supervisor of a detached run", .{});
+    switch (fault) {
+        .fork => |failure| errors.cause_host_error(
+            diag,
+            "creating the supervisor process",
+            failure.err,
+            failure.errno,
+        ),
+        .ended_early => diag.cause("the supervisor ended before it said whether the container " ++
+            "started; its output is on /dev/null", .{}),
+    }
+    diag.fix(.{ .sentence = "check the process limit:", .command = "ulimit -u" });
+    diag.fix(.{
+        .sentence = "run it in the foreground to see the failure:",
+        .command = "zbx run ...",
+    });
+    assert(diag.code.? == .E0405);
+}
+
+/// ZBX-E0406: no schema for that command.
+pub fn no_schema(diag: *Diag, topic: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, topic);
+    diag.raise(.E0406);
+    diag.while_("looking up a schema", .{});
+    diag.cause(
+        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop and doctor",
+        .{echo},
+    );
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "print one:", .command = "zbx schema ps" });
+    assert(diag.code.? == .E0406);
+}
+
 // ---- Warnings ------------------------------------------------------------------------------
 
 /// ZBX-W0202: the run record could not be saved, or there is nowhere to save it.
@@ -627,6 +851,22 @@ pub fn label_too_big(diag: *Diag, index: u32) void {
         constants.label_key_bytes_max, constants.label_value_bytes_max,
     });
     diag.fix(.{ .sentence = "use fewer or shorter labels" });
+    assert(diag.code.? == .E0008);
+}
+
+/// ZBX-E0008: a variable of `Spec.env` does not fit.
+pub fn env_too_big(diag: *Diag, index: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0008);
+    diag.while_("reading the environment", .{});
+    diag.cause("variable {d} has an empty or unusable name, is too long, or there are more than " ++
+        "{d} variables (a name is at most {d} bytes, a value {d}, and with the command they " ++
+        "must fit {d} bytes)", .{
+        index + 1,                        constants.env_vars_count_max,
+        constants.env_name_bytes_max,     constants.env_value_bytes_max,
+        constants.exec_strings_bytes_max,
+    });
+    diag.fix(.{ .sentence = "pass fewer or shorter variables" });
     assert(diag.code.? == .E0008);
 }
 

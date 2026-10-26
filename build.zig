@@ -82,6 +82,7 @@ fn add_test_step(
     const roots = [_][]const u8{
         "src/testing/vm/main.zig",
         "src/testing/vm/main_m1.zig",
+        "src/testing/vm/main_m2.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -177,6 +178,14 @@ fn add_release_step(b: *std.Build, options: *std.Build.Step.Options) void {
         });
         step.dependOn(&install.step);
         check.addFileArg(exe.getEmittedBin());
+        // The binary that can run here is run once. A release binary has its own startup (no
+        // libc: `std.os.linux.tls`), and a thread-local variable once made it panic before
+        // `main`, which no test binary showed.
+        if (query.cpu_arch == b.graph.host.result.cpu.arch) {
+            const smoke = b.addRunArtifact(exe);
+            smoke.addArg("--version");
+            step.dependOn(&smoke.step);
+        }
     }
     if (strip) step.dependOn(&check.step);
 }
@@ -206,6 +215,11 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             .step = "demo-m1",
             .root = "src/testing/vm/main_m1.zig",
             .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
+        },
+        .{
+            .step = "demo-m2",
+            .root = "src/testing/vm/main_m2.zig",
+            .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
         },
     };
     for (demos) |demo| {

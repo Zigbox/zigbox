@@ -198,6 +198,7 @@ test "each way the scope step can fail is its own code, exit 125, and cleans up"
         var sim: HostSim = undefined;
         sim_run.init(&sim, 8);
         sim.world.bus.model.quiet_connections = 1;
+        sim.world.bus.model.perfect_from = 2;
         case.set_up(&sim);
         const before = sim_run.baseline(&sim);
         const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "x", "--", "sh" };
@@ -243,15 +244,15 @@ fn fault_job_never(sim: *HostSim) void {
 }
 
 fn fault_garbage(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .garbage_reply };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .garbage_reply };
 }
 
 fn fault_silent(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .silent };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .silent };
 }
 
 fn fault_hang_up(sim: *HostSim) void {
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .hang_up };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .hang_up };
 }
 
 test "a taken scope name is refused and the other container's scope is left alone" {
@@ -271,6 +272,7 @@ test "a taken scope name is refused and the other container's scope is left alon
         .tasks_max = null,
         .cpu_quota_usec = null,
         .accounting = 4,
+        .exited = false,
     };
     sim.world.bus.scopes[0].name.print("zbx-web-1.scope", .{});
     const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "sh" };
@@ -296,10 +298,9 @@ test "a systemd too old for a property gets the limit in the scope's cgroup file
     try testing.expect(scope.memory_max == null);
     try testing.expectEqual(@as(?u64, 8), scope.tasks_max);
     try testing.expectEqual(@as(usize, 0), scope.slice.len); // app.slice needs 247.
-    const base = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/zbx-web-1.scope";
-    try testing.expectEqualStrings("67108864", sim.world.read_written(base ++ "/memory.max").?);
-    try testing.expectEqualStrings("0", sim.world.read_written(base ++ "/memory.swap.max").?);
-    try testing.expect(sim.world.read_written(base ++ "/pids.max") == null);
+    // The scope and its files are gone after the run; the world kept what memory.max held.
+    try testing.expectEqualStrings("67108864", sim.world.ended_memory_max.?.slice());
+    try testing.expectEqual(@as(u32, 0), sim.world.bus.scope_count());
 }
 
 test "a failure of the cgroup write names the file and cleans up" {

@@ -10,6 +10,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const host_sim = @import("../host_sim.zig");
 const sim_world = @import("../sim_world.zig");
+const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
 
 const cli = @import("../cli.zig");
@@ -113,6 +114,11 @@ pub fn sample_plan(plan: *plan_mod.Plan, full: bool) void {
 
 /// Like `sample_plan`, for a run with (`scoped`) or without a scope.
 pub fn sample_plan_with(plan: *plan_mod.Plan, full: bool, scoped: bool) void {
+    sample_plan_ro(plan, full, scoped, false);
+}
+
+/// Like `sample_plan_with`, for a run with (`read_only`) or without a read-only rootfs.
+pub fn sample_plan_ro(plan: *plan_mod.Plan, full: bool, scoped: bool, read_only: bool) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -128,7 +134,18 @@ pub fn sample_plan_with(plan: *plan_mod.Plan, full: bool, scoped: bool) void {
         .gid = 1000,
         .mapping = mapping,
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
+        .read_only = read_only,
     });
+}
+
+/// The index of the first step of `kind` in a read-only plan for a full id mapping.
+pub fn step_index_read_only(kind: plan_mod.Kind) u32 {
+    var plan: plan_mod.Plan = undefined;
+    sample_plan_ro(&plan, true, true, true);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in a read-only plan.
 }
 
 /// The index of the first step of `kind` in the plan for `full` or single-id mapping.
@@ -162,6 +179,8 @@ pub fn run_cli(sim: *HostSim, args: []const [:0]const u8) u8 {
 pub const Baseline = struct {
     table: sim_world.MountTable,
     hostname: host_mod.Text,
+    /// Scopes the run may leave: a manager that will not stop one is a warning, not a leak.
+    scopes_allowed: u32 = 0,
 };
 
 pub fn baseline(sim: *const HostSim) Baseline {
@@ -189,7 +208,9 @@ pub fn leak(sim: *const HostSim, before: *const Baseline) ?[]const u8 {
     if (sim.open_count() != 0) return "a descriptor was left open";
     if (sim.world.broken_pipe_ignored) return "SIGPIPE was left ignored";
     if (sim.world.current != 0) return "the run ended in a child";
-    if (sim.world.bus.scope_count() != 0) return "a cgroup scope was left behind";
+    if (sim.world.bus.scope_count() > before.scopes_allowed) {
+        return "a cgroup scope was left behind";
+    }
     return null;
 }
 
@@ -200,6 +221,8 @@ pub const Started = struct {
     devpts: bool,
     /// Whether the ids were mapped through the helpers (else the single-id map was written).
     full: bool = true,
+    /// The run was `--read-only`.
+    read_only: bool = false,
 };
 
 /// Null if the child process the last run created reached its command in the state the plan
@@ -222,10 +245,27 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     if (child.uts == 0) return "the child shares the host's hostname";
     const hostname = sim.world.hostnames[child.uts].slice();
     if (!std.mem.eql(u8, hostname, expected.name)) return "the child's hostname is wrong";
-    return container_mounts(&sim.world.tables[child.table], expected.devpts);
+    if (hardening(child)) |problem| return problem;
+    return container_mounts(&sim.world.tables[child.table], expected.devpts, expected.read_only);
 }
 
-fn container_mounts(table: *const sim_world.MountTable, devpts: bool) ?[]const u8 {
+/// The capabilities, no_new_privs and the filter are all in place when the command starts.
+fn hardening(child: *const sim_world.Process) ?[]const u8 {
+    assert(child.execd);
+    assert(child.sealed);
+    const kept = child.capabilities orelse return "the capabilities were not restricted";
+    if (kept != capabilities.keep_mask) return "the wrong capabilities were kept";
+    if (!child.ambient_cleared) return "the ambient capabilities were not cleared";
+    if (!child.no_new_privs) return "no_new_privs was not set";
+    if (!child.seccomp) return "no seccomp filter was installed";
+    return null;
+}
+
+fn container_mounts(
+    table: *const sim_world.MountTable,
+    devpts: bool,
+    read_only: bool,
+) ?[]const u8 {
     if (!table.private) return "the mounts were not made private";
     if (!table.has(.bind_tree, rootfs_path)) return "the rootfs was not bind-mounted";
     if (!table.has(.proc, rootfs_path ++ "/proc")) return "no /proc";
@@ -238,6 +278,10 @@ fn container_mounts(table: *const sim_world.MountTable, devpts: bool) ?[]const u
             unreachable; // The rootfs path and a device name are short.
         if (!table.has(.bind_file, path)) return "a device is not bound";
     }
+    if (table.has(.tmp_tmpfs, rootfs_path ++ "/tmp") != read_only) return "/tmp is wrong";
+    if (table.has(.run_tmpfs, rootfs_path ++ "/run") != read_only) return "/run is wrong";
+    const root = table.find(rootfs_path) orelse return "the rootfs is not a mount";
+    if (table.mounts[root].read_only != read_only) return "the rootfs is not as read-only as asked";
     for (table.slice()) |*mount| {
         if (!mount.target.under(rootfs_path)) return "a host mount is still visible";
         if (mount.kind == .proc and !mount.own_pid_namespace) return "/proc shows the host";

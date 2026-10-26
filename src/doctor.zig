@@ -324,22 +324,11 @@ const binary_directories = [constants.binary_candidates_count][]const u8{
 const program_names = [2][]const u8{ "newuidmap", "newgidmap" };
 
 comptime {
-    // Facts is 200 KiB: far more than a small `ulimit -s` or a thread's stack. The three
-    // production users borrow one static copy instead, one at a time.
+    // Facts is 200 KiB: far more than a small `ulimit -s` or a thread's stack. Every user is
+    // handed one by its caller (a run's `Handle` holds one, so does the bundle workspace), so
+    // two threads never share it.
     assert(@sizeOf(Facts) <= constants.facts_bytes_max);
     assert(constants.facts_bytes_max > 64 * 1024);
-}
-
-var facts_storage: Facts = undefined;
-var facts_busy = std.atomic.Value(bool).init(false);
-
-fn lend_facts() *Facts {
-    assert(!facts_busy.swap(true, .acquire));
-    return &facts_storage;
-}
-
-fn return_facts() void {
-    assert(facts_busy.swap(false, .release));
 }
 
 /// What the probe of the user's bus found: the systemd version, or why there is none.
@@ -1453,8 +1442,8 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
 /// check. A stdout that cannot be written is `ZBX-E0009` in `diag`. The diagnostic of each FAIL
 /// stays in `report` for the caller (cli.zig) to render on stderr, and the exit code is
 /// `report.exit_code()`.
-pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
-    inspect(host, report);
+pub fn run(host: Host, facts: *Facts, report: *Report, diag: *Diag) error{OutputFailed}!void {
+    inspect(host, facts, report);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render(report, host.color_enabled(.stdout), &buffer);
@@ -1467,9 +1456,7 @@ pub fn run(host: Host, report: *Report, diag: *Diag) error{OutputFailed}!void {
 }
 
 /// The doctor's checks without any output: for a bundle, which keeps the report as JSON.
-pub fn inspect(host: Host, report: *Report) void {
-    const facts = lend_facts();
-    defer return_facts();
+pub fn inspect(host: Host, facts: *Facts, report: *Report) void {
     facts.reset();
     gather(host, facts);
     evaluate(facts, report);
@@ -1480,10 +1467,8 @@ pub fn inspect(host: Host, report: *Report) void {
 /// the same facts `zbx doctor` gathers and, if it FAILs, adds that check's real cause and its
 /// first two fixes to `diag`. Adds nothing when the check passes: the host then has no setting
 /// that explains the refusal, and the caller's own cause stands. The caller raised the code.
-pub fn explain_userns(host: Host, diag: *Diag) void {
+pub fn explain_userns(host: Host, facts: *Facts, diag: *Diag) void {
     assert(diag.code != null);
-    const facts = lend_facts();
-    defer return_facts();
     facts.reset();
     gather_one(host, facts, .userns);
     var check: Check = undefined;
@@ -1535,9 +1520,7 @@ fn privileged_path(facts: *const Facts, program: Program) ?[]const u8 {
 }
 
 /// Runs the subid check on the same facts `zbx doctor` gathers and answers for a container run.
-pub fn subid_answer(host: Host, answer: *SubidAnswer) void {
-    const facts = lend_facts();
-    defer return_facts();
+pub fn subid_answer(host: Host, facts: *Facts, answer: *SubidAnswer) void {
     facts.reset();
     gather_one(host, facts, .subid);
     var check: Check = undefined;
@@ -1564,6 +1547,9 @@ pub fn subid_answer(host: Host, answer: *SubidAnswer) void {
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
+
+/// The tests run one at a time, so one set of facts serves them all.
+var test_facts: Facts = undefined;
 
 const testing = std.testing;
 const cli = @import("cli.zig");
@@ -1815,7 +1801,7 @@ test "explain_userns adds the host's reason to a refused clone, or nothing" {
         diag.reset();
         diag.raise(.E0203);
         diag.cause("clone3 failed", .{});
-        explain_userns(target.interface(), &diag);
+        explain_userns(target.interface(), &test_facts, &diag);
         try testing.expectEqual(case.causes, diag.causes.count);
         try testing.expectEqual(case.fixes, diag.fixes.count);
         try testing.expectEqual(@as(u32, 0), target.open_count());

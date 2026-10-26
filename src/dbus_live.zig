@@ -10,7 +10,8 @@
 //!   2. calls `GetId` and `ListNames` (a string and an array reply);
 //!   3. adds a match rule, takes a name with `RequestName` and reads the `NameAcquired` and
 //!      `NameOwnerChanged` signals the bus sends for it: a method call, AddMatch and signals;
-//!   4. sends `StartTransientUnit` and `Properties.Get(Version)` to `org.freedesktop.systemd1`,
+//!   4. sends `Subscribe`, `StartTransientUnit`, `StopUnit` and `Properties.Get(Version)` to
+//!      `org.freedesktop.systemd1`,
 //!      which a plain bus does not have: the daemon validates the marshalling of what it routes,
 //!      so `ServiceUnknown` (and not a dropped connection) means the bytes are well-formed;
 //!   5. waits for a `JobRemoved` signal that a second connection emits: the job wait.
@@ -168,8 +169,22 @@ fn step_systemd_missing(conn: *client.Connection) !void {
         .tasks_max = 64,
         .cpu_quota_usec = 500_000,
     };
+    // start_scope subscribes first, which the plain bus routes (and cannot serve) like the rest.
     if (systemd.start_scope(conn, &request)) |_| return error.LiveFailed else |_| {}
+    try expect_remote(conn, "Subscribe");
+    var body_buffer: [2048]u8 = undefined;
+    const body = try systemd.marshal_scope(&body_buffer, &request);
+    if (conn.call(.{
+        .destination = "org.freedesktop.systemd1",
+        .path = "/org/freedesktop/systemd1",
+        .interface = "org.freedesktop.systemd1.Manager",
+        .member = "StartTransientUnit",
+        .signature = "ssa(sv)a(sa(sv))",
+        .body = body,
+    }, .call)) |_| return error.LiveFailed else |_| {}
     try expect_remote(conn, "StartTransientUnit");
+    if (systemd.stop_scope(conn, "zbx-live.scope")) |_| return error.LiveFailed else |_| {}
+    try expect_remote(conn, "StopUnit");
 }
 
 /// The bus answered with an error of its own (ServiceUnknown, or a failed activation where a

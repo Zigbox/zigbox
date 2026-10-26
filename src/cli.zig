@@ -24,6 +24,8 @@ const runtime = @import("runtime/run.zig");
 const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
+const commands = @import("commands.zig");
+const lifecycle = @import("runtime/lifecycle.zig");
 
 const Host = host_mod.Host;
 
@@ -36,6 +38,9 @@ const help_text =
     \\  run             run a command in a container whose root is a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
     \\  doctor          check that this host can run zbx (a diagnostic per failing check)
+    \\  ps              list the containers (--all: the ones that ended too)
+    \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+    \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
     \\  --version       print the version
@@ -47,7 +52,15 @@ const help_text =
     \\  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
+    \\  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
+    \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
+    \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
+    \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
     \\  --              ends the options; everything after it is the command, as typed
+    \\
+    \\stop:
+    \\  zbx stop <name> [--grace <ms>] [--timeout <ms>]
+    \\  --timeout <ms>  give up (exit 2) if the container is still there after this long
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -76,7 +89,7 @@ comptime {
     assert(version_text[version_text.len - 1] == '\n');
 }
 
-pub const Command = enum { bundle, doctor, explain, help, run, version };
+pub const Command = enum { bundle, doctor, explain, help, ps, run, schema, stop, version };
 
 pub const OutputFormat = enum { text, json };
 
@@ -116,6 +129,14 @@ pub const RunArgs = struct {
     memory: ?[]const u8 = null,
     pids: ?[]const u8 = null,
     cpus: ?[]const u8 = null,
+    /// `--timeout` and `--grace` of `run` and `stop`, in milliseconds as typed.
+    timeout: ?[]const u8 = null,
+    grace: ?[]const u8 = null,
+    /// `-d`: the run is detached; `--all` (of `ps`): stopped containers too.
+    detach: bool = false,
+    all: bool = false,
+    /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
+    read_only: bool = false,
 };
 
 /// The options of `run` that take a value, before the `--`.
@@ -125,15 +146,20 @@ const RunOption = enum {
     memory,
     pids,
     cpus,
+    timeout,
+    grace,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 4);
+        assert(@backingInt(option) <= 6);
+        assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
             .name => "--name",
             .memory => "--memory",
             .pids => "--pids",
             .cpus => "--cpus",
+            .timeout => "--timeout",
+            .grace => "--grace",
         };
     }
 };
@@ -176,6 +202,8 @@ pub const RunError = error{
     StartFailed,
     /// The bundle could not be written; the reason is in the diagnostic.
     BundleFailed,
+    /// `ps`, `stop` or `schema` failed; the reason is in the diagnostic.
+    CommandFailed,
 };
 
 /// What one argument is, decided by its shape alone. Shared by `scan_options` and `parse` so
@@ -191,6 +219,10 @@ const Token = union(enum) {
     run_option_next: RunOption,
     /// The same with the value after an `=`.
     run_option_inline: struct { option: RunOption, value: []const u8 },
+    /// `--read-only` and `-d`: options of `run` without a value; `--all` is `ps`'s.
+    read_only,
+    detach,
+    all,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -203,6 +235,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
+    assert(std.enums.values(RunOption).len == 7);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -226,6 +259,10 @@ fn classify(argument: []const u8) Token {
     }
     if (run_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--")) return .separator;
+    if (std.mem.eql(u8, argument, "--read-only")) return .read_only;
+    if (std.mem.eql(u8, argument, "-d")) return .detach;
+    if (std.mem.eql(u8, argument, "--detach")) return .detach;
+    if (std.mem.eql(u8, argument, "--all")) return .all;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -253,7 +290,10 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "run")) found = .run;
+    if (std.mem.eql(u8, name, "schema")) found = .schema;
+    if (std.mem.eql(u8, name, "stop")) found = .stop;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -261,9 +301,10 @@ fn command_named(name: []const u8) ?Command {
 }
 
 fn operands_count(command: Command) u32 {
+    assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
-        .bundle, .doctor, .help, .run, .version => 0,
-        .explain => 1,
+        .bundle, .doctor, .help, .ps, .run, .version => 0,
+        .explain, .schema, .stop => 1,
     };
     assert(count <= 1);
     return count;
@@ -299,6 +340,7 @@ pub fn scan_options(args: []const []const u8) Options {
                 if (is_run) break;
             },
             .run_option_inline, .unknown_option, .last, .no_redact => {},
+            .read_only, .detach, .all => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
                 seen_operand = true;
@@ -328,6 +370,8 @@ pub fn parse(
         const argument = args[index];
         const is_run = count > 0 and command_named(operands[0]) == .run;
         const is_bundle = count > 0 and command_named(operands[0]) == .bundle;
+        const is_stop = count > 0 and command_named(operands[0]) == .stop;
+        const is_ps = count > 0 and command_named(operands[0]) == .ps;
         switch (classify(argument)) {
             .verbose => {},
             .output_inline => |value| try check_output_value(diag, value),
@@ -337,13 +381,25 @@ pub fn parse(
                 try check_output_value(diag, args[index]);
             },
             .run_option_next, .run_option_inline => {
+                if (!is_run and !is_stop) return unknown_option(diag, argument);
+                try take_run_option(diag, &run_args, args, &index, is_run);
+            },
+            .detach => {
                 if (!is_run) return unknown_option(diag, argument);
-                try take_run_option(diag, &run_args, args, &index);
+                run_args.detach = true;
+            },
+            .all => {
+                if (!is_ps) return unknown_option(diag, argument);
+                run_args.all = true;
             },
             .separator => {
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
                 break;
+            },
+            .read_only => {
+                if (!is_run) return unknown_option(diag, argument);
+                run_args.read_only = true;
             },
             .last, .no_redact => {
                 if (!is_bundle) return unknown_option(diag, argument);
@@ -377,6 +433,7 @@ fn take_run_option(
     run_args: *RunArgs,
     args: []const []const u8,
     index: *usize,
+    is_run: bool,
 ) ParseError!void {
     assert(index.* < args.len);
     assert(diag.code == null);
@@ -386,6 +443,8 @@ fn take_run_option(
         .run_option_inline => |chosen| chosen.option,
         else => unreachable, // The caller matched one of the two.
     };
+    // `stop` takes the two times and nothing else of the options of `run`.
+    if (!is_run and option != .timeout and option != .grace) return unknown_option(diag, argument);
     const value: []const u8 = switch (classify(argument)) {
         .run_option_inline => |chosen| chosen.value,
         else => blk: {
@@ -403,6 +462,8 @@ fn take_run_option(
         .memory => &run_args.memory,
         .pids => &run_args.pids,
         .cpus => &run_args.cpus,
+        .timeout => &run_args.timeout,
+        .grace => &run_args.grace,
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -445,7 +506,14 @@ fn resolve(
     const wanted = if (command == .bundle) 1 else operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
-    if (given < wanted and command != .bundle) return missing_argument(diag, command, .code);
+    if (given < wanted and command != .bundle) {
+        const what: Missing = switch (command) {
+            .stop => .container,
+            .schema => .topic,
+            else => .code,
+        };
+        return missing_argument(diag, command, what);
+    }
     invocation.command = command;
     invocation.operand = if (given == 1) operands[1] else null;
     if (invocation.operand == null) assert(given == 0);
@@ -518,6 +586,10 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         );
     } else if (operands_count(command) == 0) {
         diag.fix_with("run it on its own:", "zbx {s}", .{name});
+    } else if (command == .stop) {
+        diag.fix(.{ .sentence = "stop one container at a time:", .command = "zbx stop web-1" });
+    } else if (command == .schema) {
+        diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
     } else {
         diag.fix_with("pass one code:", "zbx {s} E0001", .{name});
     }
@@ -525,14 +597,17 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target };
+const Missing = enum { code, rootfs, command, target, container, topic };
 
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
     if (command == .run) assert(missing != .code);
     if (command == .explain) assert(missing == .code);
     if (command == .bundle) assert(missing == .target);
+    if (command == .stop) assert(missing == .container);
+    if (command == .schema) assert(missing == .topic);
     assert(command != .doctor);
+    assert(command != .ps);
     assert(command != .help);
     assert(command != .version);
     diag.raise(.E0006);
@@ -557,6 +632,14 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(
                 .{ .sentence = "bundle the most recent run:", .command = "zbx bundle --last" },
             );
+        },
+        .container => {
+            diag.cause("'stop' needs the name of the container to stop", .{});
+            diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps" });
+        },
+        .topic => {
+            diag.cause("'schema' needs the command whose output schema to print", .{});
+            diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
@@ -666,24 +749,53 @@ pub fn collect(
 // ---- Running -------------------------------------------------------------------------------
 
 /// Entry point: skips the program name, collects, parses, runs. Returns the exit code.
+/// Everything one command line needs that is too big for the stack: a run's handle (which holds
+/// the plan and the doctor's facts) and the bundle's workspace. The caller owns it, so two
+/// command lines in one process (a library user, a test) share nothing. `zbx` itself owns one in
+/// `main.zig`.
+pub const Storage = struct {
+    handle: runtime.Handle,
+    workspace: bundle.Workspace,
+    /// Room for `zbx ps`.
+    entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
+};
+
+/// One shared `Storage` for callers that run one command line at a time (the tests, the
+/// fuzzers). Two at once is a bug in the caller, and the assertion says so; a caller that wants
+/// concurrency owns a `Storage` and uses `run_with`.
+var shared_storage: Storage = undefined;
+var shared_busy = std.atomic.Value(bool).init(false);
+
 pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
+    assert(!shared_busy.swap(true, .acquire));
+    defer assert(shared_busy.swap(false, .release));
+    return run_with(host, iterator, &shared_storage);
+}
+
+pub fn run(host: Host, args: []const []const u8) u8 {
+    assert(!shared_busy.swap(true, .acquire));
+    defer assert(shared_busy.swap(false, .release));
+    return run_slice(host, args, &shared_storage);
+}
+
+pub fn run_with(host: Host, iterator: anytype, storage: *Storage) u8 {
     _ = iterator.next(); // Program name; absent only in a malformed exec, which is harmless.
     var diag: Diag = undefined;
     diag.reset();
-    var storage: [constants.args_count_max][]const u8 = undefined;
+    var words: [constants.args_count_max][]const u8 = undefined;
     var collected: u32 = 0;
-    const args = collect(&storage, &collected, iterator, &diag) catch {
+    const args = collect(&words, &collected, iterator, &diag) catch {
         assert(collected <= constants.args_count_max);
         // Whatever was collected before the limit was hit may hold --output or --verbose.
-        const options = scan_options(storage[0..collected]);
+        const options = scan_options(words[0..collected]);
         panic.configure(&panic.state, options.mode(), options.exit_scope());
         return fail(host, &diag, options);
     };
     assert(args.len <= constants.args_count_max);
-    return run(host, args);
+    return run_slice(host, args, storage);
 }
 
-pub fn run(host: Host, args: []const []const u8) u8 {
+pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
     assert(args.len <= constants.args_count_max);
     var diag: Diag = undefined;
     diag.reset();
@@ -692,27 +804,89 @@ pub fn run(host: Host, args: []const []const u8) u8 {
     var invocation: Invocation = undefined;
     parse(args, &invocation, &diag) catch return fail(host, &diag, options);
     assert(invocation.options.verbose == options.verbose);
-    const code = dispatch(host, &invocation, &diag) catch return fail(host, &diag, options);
+    const code = dispatch(host, &invocation, storage, &diag) catch {
+        return fail(host, &diag, options);
+    };
     // A container's own exit code is passed through whole; zbx's own codes stay below 71.
     if (invocation.command != .run) assert(code <= constants.exit_internal);
     return code;
 }
 
-fn dispatch(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
+    const takes_operand = switch (invocation.command) {
+        .explain, .bundle, .schema, .stop => true,
+        else => false,
+    };
     if (invocation.command == .explain) assert(invocation.operand != null);
-    if (invocation.command != .explain and invocation.command != .bundle) {
-        assert(invocation.operand == null);
-    }
+    if (!takes_operand) assert(invocation.operand == null);
     switch (invocation.command) {
-        .bundle => return run_bundle(host, invocation, diag),
+        .bundle => return run_bundle(host, invocation, &storage.workspace, diag),
         .help => try print(host, help_text, diag),
         .version => try print(host, version_text, diag),
         .explain => try run_explain(host, invocation.operand.?, diag),
-        .doctor => return run_doctor(host, invocation.options, diag),
-        .run => return run_container(host, invocation, diag),
+        .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
+        .run => return run_container(host, invocation, storage, diag),
+        .ps => commands.run_ps(
+            host,
+            &storage.entries,
+            invocation.options.output == .json,
+            invocation.run.all,
+            diag,
+        ) catch |err| return command_error(err),
+        .schema => commands.run_schema(host, invocation.operand.?, diag) catch |err| {
+            return command_error(err);
+        },
+        .stop => return run_stop(host, invocation, diag),
     }
     return constants.exit_ok;
+}
+
+fn command_error(err: commands.Error) RunError {
+    assert(@errorName(err).len > 0);
+    assert(@intFromError(err) != 0);
+    return switch (err) {
+        error.Failed => error.CommandFailed,
+        error.OutputFailed => error.OutputFailed,
+    };
+}
+
+/// `zbx stop <name>`: the times are checked first (`ZBX-E0401`), then the container is stopped.
+fn run_stop(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+    assert(invocation.command == .stop);
+    assert(diag.code == null);
+    const times = try times_of(&invocation.run, diag);
+    var options: commands.StopOptions = .{
+        .name = invocation.operand.?,
+        .json = invocation.options.output == .json,
+    };
+    if (invocation.run.grace != null) options.grace_ms = times.grace_ms;
+    if (invocation.run.timeout != null) options.timeout_ms = times.timeout_ms;
+    commands.run_stop(host, options, diag) catch |err| return command_error(err);
+    return constants.exit_ok;
+}
+
+const Times = struct { timeout_ms: u32, grace_ms: u32 };
+
+/// `--timeout` (0: none) and `--grace` as milliseconds, or `ZBX-E0401` for the first bad one.
+fn times_of(given: *const RunArgs, diag: *Diag) RunError!Times {
+    assert(diag.code == null);
+    var times: Times = .{ .timeout_ms = 0, .grace_ms = constants.stop_grace_ms_default };
+    if (given.timeout) |text| {
+        times.timeout_ms = commands.parse_millis(text, 1) orelse {
+            diagnose.time_invalid(diag, "--timeout", text);
+            return error.CommandFailed;
+        };
+    }
+    if (given.grace) |text| {
+        times.grace_ms = commands.parse_millis(text, 0) orelse {
+            diagnose.time_invalid(diag, "--grace", text);
+            return error.CommandFailed;
+        };
+    }
+    assert(times.grace_ms <= constants.wait_timeout_ms_max);
+    assert(times.timeout_ms <= constants.wait_timeout_ms_max);
+    return times;
 }
 
 /// Where a warning from the runtime is written: stderr, in the mode the user asked for.
@@ -733,42 +907,47 @@ fn report_warning(context: *anyopaque, diag: *const Diag) void {
 }
 
 comptime {
-    // The run's handle is over 100 KiB (it holds a plan and a diagnostic), so it is static: one
-    // foreground run per process, and the assertion in `run_container` says so.
+    // The run's handle is over 300 KiB (it holds a plan, a diagnostic and the doctor's facts), so
+    // the caller provides it: `Storage`.
     assert(@sizeOf(runtime.Handle) <= constants.handle_bytes_max);
 }
-
-var handle_storage: runtime.Handle = undefined;
-var handle_busy = std.atomic.Value(bool).init(false);
 
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
 /// plus the signal that killed it. A container that could not be started is a diagnostic; so is
 /// one whose end could not be waited for.
-fn run_container(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn run_container(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(invocation.command == .run);
     const given = invocation.run;
+    const times = try times_of(&given, diag);
     const container: runtime_spec.Spec = .{
         .rootfs = given.rootfs.?, // check_run_args refused a missing one.
         .name = given.name,
         .command = given.command,
         .limits = try limits_of(&given, diag),
+        .read_only = given.read_only,
     };
+    if (given.detach) return run_detached(host, invocation, &container, times, storage, diag);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
+        .timeout_ms = times.timeout_ms,
+        .grace_ms = times.grace_ms,
     };
-    assert(!handle_busy.swap(true, .acquire));
-    defer assert(handle_busy.swap(false, .release));
-    const handle = &handle_storage;
+    const handle = &storage.handle;
     runtime.start(host, &container, options, handle, diag) catch {
-        keep_bundle_of_bug(host, handle, diag);
+        keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
     const reason = runtime.wait(handle);
     const code = reason.code() orelse {
         diag.* = handle.lost_diag; // The only reason a started run has no code.
-        keep_bundle_of_bug(host, handle, diag);
+        keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
     report_outcome(host, invocation.options, handle, &reason);
@@ -801,18 +980,240 @@ fn limits_of(given: *const RunArgs, diag: *Diag) RunError!runtime_spec.Limits {
     return limits;
 }
 
+// ---- A detached run -----------------------------------------------------------------------
+
+// A detached run is two processes. The supervisor is a fork of the caller: it starts the
+// container, tells the caller over a pipe how that went, and stays to wait for it and finish its
+// record. The caller reads the pipe, prints what the supervisor said as if it had started the
+// container itself, and exits. The pipe carries frames: a tag byte, a two-byte length and that
+// many bytes.
+
+const frame_warning: u8 = 1;
+const frame_started: u8 = 2;
+const frame_failed: u8 = 3;
+
+fn write_frame(
+    host: Host,
+    fd: host_mod.Handle,
+    tag: u8,
+    head: ?u8,
+    body: []const u8,
+) host_mod.Error!void {
+    assert(body.len < constants.output_bytes_max);
+    assert(tag >= frame_warning);
+    assert(tag <= frame_failed);
+    // Starting a scope puts SIGPIPE back; a caller that has gone must not kill the supervisor.
+    host.ignore_broken_pipe(true);
+    const length: u16 = @intCast(body.len + @intFromBool(head != null));
+    const header = [3]u8{ tag, @truncate(length), @truncate(length >> 8) };
+    try host.write_handle_all(fd, &header);
+    if (head) |byte| try host.write_handle_all(fd, &[1]u8{byte});
+    if (body.len > 0) try host.write_handle_all(fd, body);
+}
+
+/// A warning of the supervisor's start, rendered as the caller would have, goes down the pipe.
+const FrameSink = struct {
+    host: Host,
+    fd: host_mod.Handle,
+    options: Options,
+};
+
+fn frame_warning_call(context: *anyopaque, diag: *const Diag) void {
+    const sink: *const FrameSink = @ptrCast(@alignCast(context));
+    assert(diag.code != null);
+    assert(sink.options.runs_container);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const text = render.render(diag, sink.options.mode(), false, &buffer);
+    write_frame(sink.host, sink.fd, frame_warning, null, text) catch return;
+}
+
+fn run_detached(
+    host: Host,
+    invocation: *const Invocation,
+    container: *const runtime_spec.Spec,
+    times: Times,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(diag.code == null);
+    assert(container.command.len > 0);
+    assert(invocation.run.detach);
+    assert(times.grace_ms <= constants.wait_timeout_ms_max);
+    const pipe = host.pipe() catch |err| return supervisor_failed(host, diag, err);
+    // A write to a caller that has gone is an error to ignore, not a signal that kills us.
+    host.ignore_broken_pipe(true);
+    const role = host.fork_supervisor() catch |err| {
+        host.close(pipe.read);
+        host.close(pipe.write);
+        return supervisor_failed(host, diag, err);
+    };
+    switch (role) {
+        .parent => {
+            host.close(pipe.write);
+            defer host.close(pipe.read);
+            return relay(host, pipe.read, invocation.options, diag);
+        },
+        .supervisor => {
+            host.close(pipe.read);
+            const code = supervise(host, invocation, container, times, storage, pipe.write);
+            // exit_now closes the pipe: `supervise` may already have, and that number may be
+            // another file by now.
+            host.exit_now(code);
+            return code;
+        },
+    }
+}
+
+fn supervisor_failed(host: Host, diag: *Diag, err: host_mod.Error) RunError {
+    assert(diag.code == null);
+    assert(@errorName(err).len > 0);
+    const fault: diagnose.SupervisorFault = .{
+        .fork = .{ .step = 0, .err = err, .errno = host.last_errno() },
+    };
+    diagnose.supervisor_failed(diag, fault);
+    return error.CommandFailed;
+}
+
+/// The supervisor: starts the container, says how it went, waits for it. The caller of
+/// `run -d` is waiting on `fd` for the first frame that is not a warning. Never writes to
+/// the terminal (its streams are on /dev/null).
+fn supervise(
+    host: Host,
+    invocation: *const Invocation,
+    container: *const runtime_spec.Spec,
+    times: Times,
+    storage: *Storage,
+    fd: host_mod.Handle,
+) u8 {
+    var sink: FrameSink = .{ .host = host, .fd = fd, .options = invocation.options };
+    assert(times.grace_ms <= constants.wait_timeout_ms_max);
+    assert(container.command.len > 0);
+    const options: runtime.StartOptions = .{
+        .warn = .{ .context = &sink, .call = frame_warning_call },
+        .timeout_ms = times.timeout_ms,
+        .grace_ms = times.grace_ms,
+        .detached = true,
+    };
+    var diag: Diag = undefined;
+    diag.reset();
+    const handle = &storage.handle;
+    runtime.start(host, container, options, handle, &diag) catch {
+        if (diag.code == null) {
+            diag.raise(.B0001);
+            diag.cause("a failure reached the supervisor with no diagnostic", .{});
+        }
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        const text = render.render(&diag, invocation.options.mode(), false, &buffer);
+        const code = diag.exit_code_in(.container_run);
+        write_frame(host, fd, frame_failed, code, text) catch return code;
+        return code;
+    };
+    const started_bytes_max = constants.container_name_bytes_max +
+        constants.scope_name_bytes_max + 24;
+    var body: [started_bytes_max]u8 = undefined;
+    const scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "-";
+    const made = std.fmt.bufPrint(&body, "{s} {d} {s}", .{
+        handle.name_slice(),
+        handle.pid,
+        scope,
+    }) catch unreachable; // A name, a pid and a scope name fit the buffer.
+    write_frame(host, fd, frame_started, null, made) catch {};
+    host.close(fd); // The caller can go; the container's end is ours to see to.
+    _ = runtime.wait(handle);
+    return constants.exit_ok;
+}
+
+/// Reads exactly `into.len` bytes; false at the end of the pipe.
+fn read_exact(host: Host, fd: host_mod.Handle, into: []u8) host_mod.Error!bool {
+    assert(into.len > 0);
+    assert(into.len <= constants.output_bytes_max);
+    var have: usize = 0;
+    while (have < into.len) {
+        const count = try host.read_some(fd, into[have..]);
+        if (count == 0) return false;
+        have += count;
+    }
+    return true;
+}
+
+/// The caller of `run -d`: passes the supervisor's warnings on, then prints how the start went.
+fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunError!u8 {
+    assert(diag.code == null);
+    assert(options.runs_container);
+    var body: [constants.output_bytes_max]u8 = undefined;
+    while (true) {
+        var header: [3]u8 = undefined;
+        const got_header = read_exact(host, fd, &header) catch false;
+        if (!got_header) break;
+        const length = @as(usize, header[1]) | (@as(usize, header[2]) << 8);
+        if (length > body.len) break;
+        const got_body = length == 0 or (read_exact(host, fd, body[0..length]) catch false);
+        if (!got_body) break;
+        switch (header[0]) {
+            frame_warning => host.write_all(.stderr, body[0..length]) catch {},
+            frame_failed => {
+                if (length < 1) break;
+                host.write_all(.stderr, body[1..length]) catch {};
+                return body[0];
+            },
+            frame_started => return print_started(host, options, body[0..length], diag),
+            else => break,
+        }
+    }
+    diagnose.supervisor_failed(diag, .ended_early);
+    return error.CommandFailed;
+}
+
+fn print_started(host: Host, options: Options, text: []const u8, diag: *Diag) RunError!u8 {
+    assert(diag.code == null);
+    assert(text.len < constants.output_bytes_max);
+    var fields = std.mem.splitScalar(u8, text, ' ');
+    const name = fields.next() orelse "";
+    const pid = fields.next() orelse "0";
+    const scope = fields.next() orelse "-";
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    // Cannot fail: the fields are bounded names and a number, in 512 bytes.
+    if (options.output == .json) {
+        const head = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":";
+        writer.writeAll(head) catch unreachable; // Same bound.
+        bundle.write_json_string(&writer, name) catch unreachable; // Same bound.
+        writer.print(",\"pid\":{s},\"scope\":", .{pid}) catch unreachable; // Same.
+        if (std.mem.eql(u8, scope, "-")) {
+            writer.writeAll("null") catch unreachable; // Same.
+        } else {
+            bundle.write_json_string(&writer, scope) catch unreachable; // Same.
+        }
+        writer.writeAll(",\"detached\":true}}\n") catch unreachable; // Same.
+    } else {
+        writer.print("{s}\n", .{name}) catch unreachable; // Same bound.
+    }
+    try print(host, writer.buffered(), diag);
+    return constants.exit_ok;
+}
+
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
 /// block says where it is. Any other diagnostic is left alone: a bundle is for bugs.
-pub fn keep_bundle_of_bug(host: Host, handle: *const runtime.Handle, diag: *Diag) void {
+pub fn keep_bundle_of_bug(
+    host: Host,
+    workspace: *bundle.Workspace,
+    handle: *const runtime.Handle,
+    diag: *Diag,
+) void {
     assert(diag.code != null);
     if (diag.entry().severity != .bug) return;
     if (handle.name_len == 0) return; // It failed before the run had a name or a record.
-    bundle.attach_to_bug(host, handle.name_slice(), diag);
+    bundle.attach_to_bug(host, workspace, handle.name_slice(), diag);
 }
 
 /// `zbx bundle`: writes the bundle and prints its path on stdout (a JSON object with --output
 /// json). `--no-redact` first warns on stderr.
-fn run_bundle(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+fn run_bundle(
+    host: Host,
+    invocation: *const Invocation,
+    workspace: *bundle.Workspace,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(invocation.command == .bundle);
     const no_redact = invocation.bundle.no_redact;
@@ -825,7 +1226,7 @@ fn run_bundle(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u
     }
     var saved: bundle.Saved = undefined;
     const request: bundle.Request = .{ .name = invocation.operand, .redact = !no_redact };
-    bundle.write(host, request, &saved, diag) catch return error.BundleFailed;
+    bundle.write(host, workspace, request, &saved, diag) catch return error.BundleFailed;
     var line: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&line);
     // Cannot fail: a path of at most 640 bytes escapes to at most six times that, plus a frame.
@@ -855,8 +1256,14 @@ fn report_outcome(
     assert(reason.code() != null);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
+    const timed_out = runtime.timed_out(handle);
     if (options.output == .json) {
         write_container_exit(&writer, reason);
+        // The line ends "}}\n"; a run that was stopped for its time says so inside.
+        if (timed_out) {
+            writer.end -= 3;
+            writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
+        }
     } else {
         if (options.verbose) {
             for (handle.note_slice()) |*note| {
@@ -864,15 +1271,88 @@ fn report_outcome(
                 writer.print("zbx: note: {s}\n", .{note.slice()}) catch unreachable;
             }
         }
+        if (options.verbose) write_ended_note(&writer, reason);
         write_signal_note(&writer, reason);
+        if (timed_out) {
+            const format = "zbx: stopped: timed out after {d} ms\n";
+            // Cannot fail: a short line into a buffer that holds a message.
+            writer.print(format, .{handle.wait_options.timeout_ms}) catch unreachable;
+        }
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
 }
 
+/// With --verbose, what the container's first process did when the report says something else
+/// (the exit code is 137 for an OOM kill whatever it did), so nothing is hidden.
+fn write_ended_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
+    assert(writer.end < writer.buffer.len);
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    const ended = switch (reason.*) {
+        .oom => |hit| hit.ended,
+        .pid_limit => |hit| hit.ended,
+        else => return,
+    };
+    // Cannot fail: a short line into a buffer that holds a message.
+    switch (ended) {
+        .exited => |code| writer.print(
+            "zbx: note: the container's first process exited with code {d}\n",
+            .{code},
+        ) catch unreachable, // Same bound as above.
+        .signaled => |number| writer.print(
+            "zbx: note: the container's first process was killed by signal {d}\n",
+            .{number},
+        ) catch unreachable, // Same bound as above.
+    }
+}
+
+/// A size as the largest binary unit that divides it, "128 MiB".
+fn bytes_words(buffer: []u8, bytes: u64) []const u8 {
+    assert(buffer.len >= 32);
+    assert(bytes > 0);
+    const units = [_]struct { size: u64, name: []const u8 }{
+        .{ .size = 1 << 40, .name = "TiB" },
+        .{ .size = 1 << 30, .name = "GiB" },
+        .{ .size = 1 << 20, .name = "MiB" },
+        .{ .size = 1 << 10, .name = "KiB" },
+    };
+    for (units) |unit| {
+        if (bytes >= unit.size and bytes % unit.size == 0) {
+            // Cannot fail: twenty digits and a unit fit 32 bytes.
+            return std.fmt.bufPrint(buffer, "{d} {s}", .{ bytes / unit.size, unit.name }) catch
+                unreachable; // Same bound as above.
+        }
+    }
+    return std.fmt.bufPrint(buffer, "{d} bytes", .{bytes}) catch unreachable; // Same.
+}
+
 fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
     assert(writer.end < writer.buffer.len);
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    var words: [32]u8 = undefined;
+    // Cannot fail: short lines into a buffer that holds a message.
+    switch (reason.*) {
+        .oom => |hit| {
+            if (hit.limit_bytes) |limit| {
+                writer.print("zbx: killed: out of memory (limit {s})\n", .{
+                    bytes_words(&words, limit),
+                }) catch unreachable; // Same bound as above.
+            } else {
+                writer.print("zbx: killed: out of memory\n", .{}) catch unreachable; // Same.
+            }
+            return;
+        },
+        .pid_limit => |hit| {
+            if (hit.limit) |limit| {
+                writer.print("zbx: stopped: process limit reached (limit {d})\n", .{limit}) catch
+                    unreachable; // Same bound as above.
+            } else {
+                writer.writeAll("zbx: stopped: process limit reached\n") catch unreachable; // Same.
+            }
+            return;
+        },
+        else => {},
+    }
     const number = switch (reason.*) {
         .signaled => |signal| signal,
         else => return,
@@ -884,6 +1364,17 @@ fn write_signal_note(writer: *std.Io.Writer, reason: *const runtime.ExitReason) 
         unreachable; // Same bound as above.
 }
 
+fn write_optional(writer: *std.Io.Writer, value: anytype) void {
+    assert(writer.end < writer.buffer.len);
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    // Cannot fail: a number or null in a buffer that holds a message.
+    if (value) |number| {
+        writer.print("{d}", .{number}) catch unreachable; // Same bound as above.
+    } else {
+        writer.writeAll("null") catch unreachable; // Same.
+    }
+}
+
 fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReason) void {
     const code = reason.code().?; // Only called for a command that ran.
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
@@ -891,11 +1382,26 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
     // Cannot fail: a short line into a buffer that holds a message.
     switch (reason.*) {
         .signaled => |number| {
-            const format = "{{\"container_exit\":{{\"signal\":{d},\"code\":{d}}}}}\n";
+            const format = "{{\"container_exit\":{{\"reason\":\"signal\",\"signal\":{d}," ++
+                "\"code\":{d}}}}}\n";
             writer.print(format, .{ number, code }) catch unreachable; // Same bound as above.
         },
-        else => writer.print("{{\"container_exit\":{{\"code\":{d}}}}}\n", .{code}) catch
-            unreachable, // Same bound as above.
+        .oom => |hit| {
+            writer.writeAll("{\"container_exit\":{\"reason\":\"oom\",\"limit_bytes\":") catch
+                unreachable; // Same bound as above.
+            write_optional(writer, hit.limit_bytes);
+            writer.print(",\"code\":{d}}}}}\n", .{code}) catch unreachable; // Same.
+        },
+        .pid_limit => |hit| {
+            writer.writeAll("{\"container_exit\":{\"reason\":\"pid_limit\",\"limit\":") catch
+                unreachable; // Same bound as above.
+            write_optional(writer, hit.limit);
+            writer.print(",\"code\":{d}}}}}\n", .{code}) catch unreachable; // Same.
+        },
+        else => {
+            const format = "{{\"container_exit\":{{\"reason\":\"exited\",\"code\":{d}}}}}\n";
+            writer.print(format, .{code}) catch unreachable; // Same bound as above.
+        },
     }
 }
 
@@ -903,10 +1409,10 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
 /// in check order, in the requested mode. Text blocks are separated by a blank line; JSON is
 /// one object per line. The exit code is the blame of the failures' diagnostics (the
 /// environment's) and, if stderr cannot be written, the same: there is nowhere to say so.
-fn run_doctor(host: Host, options: Options, diag: *Diag) RunError!u8 {
+fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     var report: doctor.Report = undefined;
-    try doctor.run(host, &report, diag);
+    try doctor.run(host, facts, &report, diag);
     const mode = options.mode();
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -1404,4 +1910,304 @@ test "parse: every way a run command line is wrong has its code" {
         const found = try parse_case(case.args, &invocation);
         try testing.expectEqual(case.code, found);
     }
+}
+
+// ---- Tests of ps, stop, schema, run -d and the times ----------------------------------------
+
+const sim_run = @import("runtime/sim_run.zig");
+
+var test_storage: Storage = undefined;
+
+fn command_line(sim: *HostSim, args: []const []const u8) u8 {
+    return run_slice(sim.interface(), args, &test_storage);
+}
+
+fn parse_json(bytes: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+}
+
+fn running_container(sim: *HostSim, name: []const u8) !void {
+    sim_run.init(sim, 4);
+    sim.world.command_runs_ms = 3_600_000;
+    var diag: Diag = undefined;
+    diag.reset();
+    const container: runtime_spec.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = name,
+        .command = &.{ "/bin/sh", "-c", "sleep 1000" },
+    };
+    const options: runtime.StartOptions = .{ .detached = true };
+    try runtime.start(sim.interface(), &container, options, &test_storage.handle, &diag);
+}
+
+test "parse: ps, stop, schema, -d and the times take what the brief says" {
+    // Goal: the new commands and flags parse into the fields the dispatcher reads. Method: one
+    // command line each, checking the field, and the lines that must be refused.
+    var invocation: Invocation = undefined;
+    try testing.expect(try parse_case(&.{ "ps", "--all" }, &invocation) == null);
+    try testing.expect(invocation.run.all);
+    try testing.expect(try parse_case(&.{"ps"}, &invocation) == null);
+    try testing.expect(!invocation.run.all);
+    const stop_line = [_][]const u8{ "stop", "web-1", "--grace", "250", "--timeout=900" };
+    try testing.expect(try parse_case(&stop_line, &invocation) == null);
+    try testing.expectEqualStrings("web-1", invocation.operand.?);
+    try testing.expectEqualStrings("250", invocation.run.grace.?);
+    try testing.expectEqualStrings("900", invocation.run.timeout.?);
+    try testing.expect(try parse_case(&.{ "schema", "ps" }, &invocation) == null);
+    const detached_line = [_][]const u8{ "run", "-d", "--rootfs", "r", "--", "x" };
+    try testing.expect(try parse_case(&detached_line, &invocation) == null);
+    try testing.expect(invocation.run.detach);
+    const refused = [_]struct { args: []const []const u8, code: codes.Code }{
+        .{ .args = &.{"stop"}, .code = .E0006 },
+        .{ .args = &.{"schema"}, .code = .E0006 },
+        .{ .args = &.{ "stop", "a", "b" }, .code = .E0003 },
+        .{ .args = &.{ "ps", "extra" }, .code = .E0003 },
+        .{ .args = &.{ "ps", "--grace", "5" }, .code = .E0004 },
+        .{ .args = &.{ "stop", "web-1", "-d" }, .code = .E0004 },
+        .{ .args = &.{ "stop", "web-1", "--grace" }, .code = .E0005 },
+        .{ .args = &.{ "stop", "a", "--grace", "1", "--grace", "2" }, .code = .E0003 },
+    };
+    for (refused) |case| {
+        const found = try parse_case(case.args, &invocation);
+        try testing.expectEqual(@as(?codes.Code, case.code), found);
+    }
+}
+
+test "schema prints the versioned schema of each command, and refuses the others" {
+    // Goal: `zbx schema <command>` for run, bundle, ps, stop and doctor, and E0402 otherwise.
+    var sim: HostSim = undefined;
+    sim.init(1, &.{});
+    for ([_][]const u8{ "run", "bundle", "ps", "stop", "doctor" }) |name| {
+        sim.init(1, &.{});
+        try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "schema", name }));
+        try testing.expect(std.mem.indexOf(u8, sim.stdout(), "/schema/") != null);
+        try testing.expect(std.mem.endsWith(u8, sim.stdout(), "}\n"));
+        try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    }
+    sim.init(1, &.{});
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "logs" }));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
+    sim.init(1, &.{});
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
+}
+
+test "ps lists a running container in text and in JSON that matches the schema's fields" {
+    // Goal: the same view in both forms, from the record and the kernel's view of the pid.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{"ps"}));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "web-1") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "running") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "sleep 1000") != null);
+    // JSON: one object, the containers inside it, every field of the schema's `required`.
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("zbx.ps/1", parsed.value.object.get("schema").?.string);
+    const list = parsed.value.object.get("containers").?.array;
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    const one = list.items[0].object;
+    const required = [_][]const u8{ "name", "state", "pid", "started", "timed_out" } ++
+        [_][]const u8{ "command", "labels", "limits" };
+    for (required) |key| {
+        try testing.expect(one.get(key) != null);
+    }
+    try testing.expectEqualStrings("running", one.get("state").?.string);
+    try testing.expect(!one.get("timed_out").?.bool);
+    try testing.expectEqual(@as(usize, 3), one.get("command").?.array.items.len);
+    _ = runtime.wait(&test_storage.handle);
+}
+
+test "stop ends a running container, says so in text and JSON, and is a no-op the second time" {
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const grace = [_][]const u8{ "stop", "web-1", "--grace", "100", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &grace));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("zbx.stop/1", parsed.value.object.get("schema").?.string);
+    try testing.expectEqualStrings("web-1", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("killed", parsed.value.object.get("result").?.string);
+    _ = runtime.wait(&test_storage.handle);
+    sim.stdout_len = 0;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "stop", "web-1" }));
+    try testing.expectEqualStrings("web-1 was not running, exit code 137\n", sim.stdout());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+}
+
+test "stop and ps refuse what they cannot do with one line and a code" {
+    // Goal: a bad time is E0401 before anything is looked at; an unknown name is E0402.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const soon = [_][]const u8{ "stop", "web-1", "--grace", "soon" };
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &soon));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0401") != null);
+    sim.stderr_len = 0;
+    const zero = [_][]const u8{ "stop", "web-1", "--timeout", "0" };
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &zero));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0401") != null);
+    sim.stderr_len = 0;
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "stop", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    _ = runtime.wait(&test_storage.handle);
+}
+
+test "run --timeout stops the container when its time is up and says so" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    sim.world.command_runs_ms = 3_600_000;
+    const sleeping = [_][]const u8{ "/bin/sh", "-c", "sleep 1000" };
+    const head = [_][]const u8{ "run", "--rootfs", sim_run.rootfs_path, "--timeout", "2000", "--" };
+    const args = head ++ sleeping;
+    const code = command_line(&sim, &args);
+    try testing.expectEqual(@as(u8, 143), code);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "timed out after 2000 ms") != null);
+    sim_run.init(&sim, 6);
+    sim.world.command_runs_ms = 3_600_000;
+    sim.stderr_len = 0;
+    const json = [_][]const u8{ "run", "--output", "json", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--timeout", "2000", "--" } ++ sleeping;
+    try testing.expectEqual(@as(u8, 143), command_line(&sim, &json));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
+}
+
+const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
+
+fn framed(sim: *HostSim, frames: []const Frame) !host_mod.Handle {
+    const host = sim.interface();
+    const pipe = try host.pipe();
+    for (frames) |frame| try write_frame(host, pipe.write, frame.tag, frame.head, frame.body);
+    host.close(pipe.write);
+    return pipe.read;
+}
+
+test "run -d: the caller passes warnings on and prints the name once the start is reported" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 7);
+    const read = try framed(&sim, &.{
+        .{ .tag = frame_warning, .head = null, .body = "zbx: warning: something\n" },
+        .{ .tag = frame_started, .head = null, .body = "web-1 502 zbx-web-1.scope" },
+    });
+    var diag: Diag = undefined;
+    diag.reset();
+    const options: Options = .{ .runs_container = true };
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), read, options, &diag));
+    sim.interface().close(read);
+    try testing.expectEqualStrings("web-1\n", sim.stdout());
+    try testing.expectEqualStrings("zbx: warning: something\n", sim.stderr());
+
+    sim_run.init(&sim, 7);
+    const bare: Frame = .{ .tag = frame_started, .head = null, .body = "web-1 502 -" };
+    const again = try framed(&sim, &.{bare});
+    const json: Options = .{ .runs_container = true, .output = .json };
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &diag));
+    sim.interface().close(again);
+    const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
+        "\"pid\":502,\"scope\":null,\"detached\":true}}\n";
+    try testing.expectEqualStrings(expected, sim.stdout());
+}
+
+test "run -d: a failed start passes the supervisor's diagnostic and code through" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 8);
+    const refused: Frame = .{ .tag = frame_failed, .head = 126, .body = "zbx: refused\n" };
+    const read = try framed(&sim, &.{refused});
+    var diag: Diag = undefined;
+    diag.reset();
+    const options: Options = .{ .runs_container = true };
+    try testing.expectEqual(@as(u8, 126), try relay(sim.interface(), read, options, &diag));
+    sim.interface().close(read);
+    try testing.expectEqualStrings("zbx: refused\n", sim.stderr());
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+}
+
+test "run -d: a supervisor that ends without a report, or sends nonsense, is E0405" {
+    // Goal: the caller never hangs and never prints a success it did not see.
+    const cases = [_][]const u8{ "", "\x09\x00\x00", "\x02\xff\xff", "\x03\x00\x00" };
+    for (cases) |bytes| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 9);
+        const host = sim.interface();
+        const pipe = try host.pipe();
+        if (bytes.len > 0) try host.write_handle_all(pipe.write, bytes);
+        host.close(pipe.write);
+        var diag: Diag = undefined;
+        diag.reset();
+        const options: Options = .{ .runs_container = true };
+        try testing.expectError(error.CommandFailed, relay(host, pipe.read, options, &diag));
+        host.close(pipe.read);
+        try testing.expectEqual(codes.Code.E0405, diag.code.?);
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    }
+}
+
+test "run -d as the supervisor starts the container, reports it and records it as detached" {
+    // Goal: the supervisor's half end to end in the simulator: it forks into the supervisor
+    // role, starts, waits for the container's end and leaves a finished record.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 10);
+    sim.world.fork_role = .supervisor;
+    sim.world.command_runs_ms = 5000;
+    const args = [_][]const u8{ "run", "-d", "--name", "web-1", "--rootfs", sim_run.rootfs_path } ++
+        [_][]const u8{ "--", "/bin/sh", "-c", "sleep 5" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    try testing.expectEqual(@as(?u8, 0), sim.world.exited_with);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    var state: lifecycle.State = undefined;
+    var ref: lifecycle.Ref = undefined;
+    try lifecycle.adopt(sim.interface(), "web-1", &ref, &state);
+    try testing.expectEqual(lifecycle.State.stopped, state);
+}
+
+test "run -d as the caller, when the fork fails or the supervisor never reports, is E0405" {
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 11);
+    sim.world.fork_errno = 11;
+    const args = [_][]const u8{ "run", "-d", "--rootfs", sim_run.rootfs_path, "--", "/bin/true" };
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0405") != null);
+    sim_run.init(&sim, 11);
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0405") != null);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "stop takes a name from the command line as a name, never as a path" {
+    // Goal: a name that is not a run name names no container (E0402); it is not made into a path.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const names = [_][]const u8{ repeat('x', 255), "../web-1", "a/b", "WEB", "-", "web-1.zon", "" };
+    for (names) |name| {
+        sim.stderr_len = 0;
+        try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "stop", name }));
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
+    }
+    _ = runtime.wait(&test_storage.handle);
+}
+
+test "a detached run stopped for its time reads as timed out in the record and in ps" {
+    // Goal: the record keeps what `--timeout` did, so a later `ps` can say it. Method: the
+    // supervisor's half with a time shorter than the command, then `ps --all` in text and JSON.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 13);
+    sim.world.fork_role = .supervisor;
+    sim.world.command_runs_ms = 3_600_000;
+    const head = [_][]const u8{ "run", "-d", "--name", "web-1", "--rootfs", sim_run.rootfs_path };
+    const args = head ++ [_][]const u8{ "--timeout", "2000", "--", "/bin/sh", "-c", "sleep 1000" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    sim.world.fork_role = .parent;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--all" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "timed_out") != null);
+    sim.stdout_len = 0;
+    const listing = [_][]const u8{ "ps", "--all", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &listing));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    const one = parsed.value.object.get("containers").?.array.items[0].object;
+    try testing.expect(one.get("timed_out").?.bool);
+    try testing.expectEqualStrings("signal", one.get("reason").?.string);
 }

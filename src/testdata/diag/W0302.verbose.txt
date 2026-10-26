@@ -1,0 +1,7 @@
+warning[ZBX-W0302]: the container's cgroup scope was left behind
+  while  making sure the container's scope zbx-web-1.scope is gone
+  cause  systemd answered org.freedesktop.DBus.Error.AccessDenied: Refused
+  scope  zbx-web-1.scope
+  fix    remove it by hand:   systemctl --user stop zbx-web-1.scope
+  more   zbx explain W0302
+  docs   https://zigbox.github.io/zigbox/errors/W0302.html

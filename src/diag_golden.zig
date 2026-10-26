@@ -19,6 +19,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const fixtures = @import("doctor_fixtures.zig");
+const run = @import("runtime/run.zig");
+const Diag = @import("diag/diag.zig").Diag;
 const plan_mod = @import("runtime/plan.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const HostSim = @import("host_sim.zig").HostSim;
@@ -46,6 +48,25 @@ const Case = struct {
 /// The index of the first step of `kind` in a plan for a host that maps a full range of ids.
 fn step_of(kind: plan_mod.Kind) u32 {
     return sim_run.step_index(kind, true);
+}
+
+/// A host where one step of the hardening, or of the read-only setup, is refused.
+fn prepare_step_refused(sim: *HostSim, index: u32, errno: u16) void {
+    sim_run.init(sim, 1);
+    sim.faults.fail_step = index;
+    sim.faults.fail_step_errno = errno;
+}
+
+fn prepare_capabilities_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, step_of(.restrict_capabilities), 1);
+}
+
+fn prepare_seccomp_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, step_of(.install_seccomp), 22);
+}
+
+fn prepare_no_tmp(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_read_only(.make_tmp_dir), 13);
 }
 
 fn prepare_container(sim: *HostSim) void {
@@ -86,11 +107,45 @@ fn prepare_records_unreadable(sim: *HostSim) void {
     }
 }
 
+/// One container, started and left running, for the commands that look at containers.
+var golden_handle: run.Handle = undefined;
+
+fn prepare_running(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.command_runs_ms = 3_600_000;
+    var diag: Diag = undefined;
+    diag.reset();
+    const container: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "web-1",
+        .command = &.{"/bin/sh"},
+    };
+    run.start(sim.interface(), &container, .{ .detached = true }, &golden_handle, &diag) catch {
+        unreachable; // The simulated host starts a container.
+    };
+}
+
+fn prepare_unsignalable(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.kill_errno = 1; // EPERM.
+}
+
+fn prepare_immortal(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.immortal = true;
+}
+
+fn prepare_no_fork(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.fork_errno = 11; // EAGAIN.
+}
+
 /// The user's bus is perfect for the probe (the first connection) and meets `model` after it, so
 /// the run gets as far as the scope step before the fault.
 fn prepare_scope_fault(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.bus.model.quiet_connections = 1;
+    sim.world.bus.model.perfect_from = 2;
 }
 
 fn prepare_no_bus(sim: *HostSim) void {
@@ -110,12 +165,20 @@ fn prepare_bus_rejects(sim: *HostSim) void {
 
 fn prepare_bus_garbage(sim: *HostSim) void {
     prepare_scope_fault(sim);
-    sim.world.bus.model.misbehave = .{ .at_call = 2, .how = .garbage_reply };
+    sim.world.bus.model.misbehave = .{ .at_call = 3, .how = .garbage_reply };
 }
 
 fn prepare_systemd_refuses(sim: *HostSim) void {
     prepare_scope_fault(sim);
     sim.world.bus.model.start_error = "org.freedesktop.DBus.Error.AccessDenied";
+}
+
+/// The container ends and its scope stays: the manager refuses to stop it.
+fn prepare_scope_lingers(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.bus.model.quiet_connections = 2; // The probe and the scope step; not the cleanup.
+    sim.world.bus.model.scope_removal = .never;
+    sim.world.bus.model.stop_error = "org.freedesktop.DBus.Error.AccessDenied";
 }
 
 fn prepare_name_taken(sim: *HostSim) void {
@@ -207,6 +270,52 @@ const base_cases = [_]Case{
         .exit = 125,
     },
     .{
+        .code = .E0207,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_capabilities_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0208,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_seccomp_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0209,
+        .args = &.{
+            "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--read-only", "--", "/bin/sh",
+        },
+        .prepare = prepare_no_tmp,
+        .exit = 125,
+    },
+    .{ .code = .E0401, .args = &.{ "stop", "web-1", "--grace", "soon" }, .exit = 1 },
+    .{
+        .code = .E0402,
+        .args = &.{ "stop", "web-1" },
+        .prepare = prepare_container,
+        .exit = 1,
+    },
+    .{
+        .code = .E0403,
+        .args = &.{ "stop", "web-1" },
+        .prepare = prepare_unsignalable,
+        .exit = 2,
+    },
+    .{
+        .code = .E0404,
+        .args = &.{ "stop", "web-1", "--grace", "100" },
+        .prepare = prepare_immortal,
+        .exit = 2,
+    },
+    .{
+        .code = .E0405,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "-d", "--", "/bin/sh" },
+        .prepare = prepare_no_fork,
+        .exit = 125,
+    },
+    .{ .code = .E0406, .args = &.{ "schema", "explain" }, .exit = 1 },
+    .{
         .code = .E0206,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },
         .prepare = prepare_container,
@@ -267,6 +376,13 @@ const base_cases = [_]Case{
         .code = .W0301,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_no_bus,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0302,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_scope_lingers,
         .warning = true,
         .exit = 0,
     },
@@ -421,7 +537,10 @@ test "golden: every code in default, verbose and JSON output" {
                 case.code,
                 style,
             );
-            try testing.expectEqualStrings(golden, shown);
+            testing.expectEqualStrings(golden, shown) catch |err| {
+                std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+                return err;
+            };
             try testing.expectEqual(case.exit, code);
             const is_run = case.args.len > 0 and std.mem.eql(u8, case.args[0], "run");
             if (!case.warning and !is_run) {

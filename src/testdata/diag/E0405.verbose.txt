@@ -1,0 +1,8 @@
+error[ZBX-E0405]: can't start the supervisor of a detached run
+  while  starting the supervisor of a detached run
+  cause  creating the supervisor process failed: the resource is busy, try again
+         (EAGAIN)
+  fix    check the process limit:                       ulimit -u
+         run it in the foreground to see the failure:   zbx run ...
+  more   zbx explain E0405
+  docs   https://zigbox.github.io/zigbox/errors/E0405.html

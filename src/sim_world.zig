@@ -23,9 +23,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host = @import("host.zig");
+const bpf = @import("runtime/bpf.zig");
+const seccomp = @import("runtime/seccomp.zig");
 const sim_bus = @import("sim_bus.zig");
 
 pub const errno_perm: u16 = 1;
+pub const errno_acces: u16 = 13;
 pub const errno_noent: u16 = 2;
 pub const errno_srch: u16 = 3;
 pub const errno_child: u16 = 10;
@@ -90,6 +93,8 @@ pub const Mount = struct {
     /// Set for a procfs: whether it was mounted by a process in its own new PID namespace. A
     /// procfs of the host's namespace would show the host's processes.
     own_pid_namespace: bool,
+    /// Remounted read-only (`MountKind.remount_readonly`).
+    read_only: bool = false,
 };
 
 pub const MountTable = struct {
@@ -183,7 +188,16 @@ pub const Process = struct {
     /// After `pivot_root` the old root is still mounted on the new one until it is detached.
     old_root_attached: bool,
     die_with_parent: bool,
+    /// The capability mask the process was restricted to (`restrict_capabilities`), if it was.
+    capabilities: ?u64,
+    ambient_cleared: bool,
+    no_new_privs: bool,
+    /// A seccomp filter is installed (`install_seccomp`), and it answered ALLOW for the calls the
+    /// process still has to make: write, close and exit_group (to report a failure), and execve.
+    seccomp: bool,
     sealed: bool,
+    /// When a command that started ends by itself, on the world's clock.
+    ends_at_ms: u64,
     execd: bool,
     exec_path: SimPath,
     /// The argv and envp the command got, one string per line, for tests to compare.
@@ -202,7 +216,9 @@ pub const Process = struct {
     }
 };
 
-const pipe_bytes_max: u32 = constants.sync_record_bytes * constants.sync_records_max + 4;
+/// Room for the sync records of a start and for the frames a detached run's supervisor sends.
+const pipe_bytes_max: u32 =
+    @max(constants.sync_record_bytes * constants.sync_records_max + 4, 2048);
 
 const SimPipe = struct {
     used: bool,
@@ -278,6 +294,33 @@ pub const World = struct {
     scope_started_before_child_ran: bool,
     /// The user's D-Bus socket and the systemd manager behind it (sim_bus.zig).
     bus: sim_bus.Bus,
+    /// A clock for waits, in milliseconds: only sleeps and timed waits advance it.
+    now_ms: u64,
+    /// How long a command that started runs, in milliseconds of that clock, before it ends by
+    /// itself. Zero: it ends the moment it is waited for (what every earlier test assumes).
+    command_runs_ms: u32,
+    /// A SIGTERM that the command catches ends it (with `term_exit_code`), as a daemon's does.
+    term_exits: bool,
+    term_exit_code: u8,
+    /// What `fork_supervisor` answers, and the code the last `exit_now` was given.
+    fork_role: host.Role,
+    exited_with: ?u8,
+    /// Faults for the lifecycle tests: `fork_supervisor` fails with this errno; a signal (but
+    /// not the existence check, number 0) is refused with it; SIGKILL has no effect on the
+    /// command (a process the kernel cannot kill).
+    fork_errno: ?u16,
+    kill_errno: ?u16,
+    immortal: bool,
+    /// What the kernel counted in the container's cgroup by the time it ended: processes the
+    /// OOM killer killed (`memory.events`), and forks refused at the limit (`pids.events`).
+    oom_kills: u32,
+    pids_max_hits: u32,
+    /// A scope's cgroup directory stays after the manager is done with its unit (a cgroup that
+    /// something still holds).
+    cgroup_stays: bool,
+    /// What `memory.max` held in the last scope's cgroup when the cgroup went (the fallback
+    /// write for an old systemd), since the file goes with it.
+    ended_memory_max: ?host.Text,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -310,6 +353,19 @@ pub const World = struct {
         world.helper_fails_with = null;
         world.scope_started_before_child_ran = false;
         world.bus.init();
+        world.now_ms = 1_000_000;
+        world.command_runs_ms = 0;
+        world.term_exits = false;
+        world.term_exit_code = 0;
+        world.fork_role = .parent;
+        world.exited_with = null;
+        world.fork_errno = null;
+        world.kill_errno = null;
+        world.immortal = false;
+        world.oom_kills = 0;
+        world.pids_max_hits = 0;
+        world.cgroup_stays = false;
+        world.ended_memory_max = null;
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -611,8 +667,9 @@ pub const World = struct {
         world.step = previous_step;
         assert(child.state == .running);
         child.holds = @splat(false);
-        if (child.execd and world.script_len > 0) {
-            child.state = .command; // Still running: the scripted signals decide how it ends.
+        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0)) {
+            // Still running: the scripted signals and the clock decide how it ends.
+            child.state = .command;
             return;
         }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
@@ -622,6 +679,11 @@ pub const World = struct {
     /// Ends a child that has not run: it never gets to. Returns false if it is not pending.
     pub fn kill(world: *World, pid: u32, number: u8) ?u16 {
         const process = world.find_process(pid) orelse return errno_srch;
+        if (number == 0) {
+            const gone = process.state == .reaped or process.state == .unused;
+            return if (gone) errno_srch else null;
+        }
+        if (world.kill_errno) |errno| return errno;
         switch (process.state) {
             .command => {
                 assert(world.received_count < world.received.len);
@@ -629,9 +691,16 @@ pub const World = struct {
                 world.received_count += 1;
                 // PID 1 of a namespace ignores a signal it has no handler for, from outside it;
                 // only SIGKILL (and SIGSTOP) cannot be ignored.
-                if (number == constants.signal_kill) {
+                if (number == constants.signal_kill and !world.immortal) {
                     process.exit = .{ .signaled = number };
                     process.state = .zombie;
+                    world.process_died(process.pid);
+                }
+                const handled = host.SignalState.has(world.command_caught, number);
+                if (number == constants.signal_term and handled and world.term_exits) {
+                    process.exit = .{ .exited = world.term_exit_code };
+                    process.state = .zombie;
+                    world.process_died(process.pid);
                 }
             },
             .pending => {
@@ -659,7 +728,68 @@ pub const World = struct {
     fn reap(world: *World, process: *Process) void {
         assert(process.state == .zombie);
         process.state = .reaped;
-        world.bus.process_ended(process.pid);
+        world.drop_proc_files(process.pid);
+        const slot = world.bus.process_ended(process.pid) orelse return;
+        if (world.bus.model.scope_removal == .promptly) world.end_scope(slot);
+    }
+
+    /// A scope the manager has finished with leaves it, and its cgroup directory goes with it.
+    /// The manager gets to it when someone next connects to the bus, unless the model says
+    /// otherwise (`Model.scope_removal`).
+    pub fn settle_scopes(world: *World) void {
+        assert(world.nodes_count <= constants.sim_nodes_max);
+        assert(world.written_count <= constants.sim_written_files_max);
+        if (world.bus.model.scope_removal == .never) return;
+        for (&world.bus.scopes, 0..) |*scope, index| {
+            if (scope.active and scope.exited) world.end_scope(@intCast(index));
+        }
+    }
+
+    /// What `memory.max` holds in the last scope's cgroup, or held when the cgroup went.
+    pub fn last_memory_max(world: *const World) ?[]const u8 {
+        if (world.ended_memory_max) |*text| return text.slice();
+        var relative: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const path = scope_cgroup_path(&relative, &world.bus.last_scope);
+        var file: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
+        // Cannot fail: a bounded path and a short name.
+        const where = std.fmt.bufPrint(&file, "/sys/fs/cgroup{s}/memory.max", .{path}) catch
+            unreachable; // Same bound as above.
+        return world.read_written(where);
+    }
+
+    /// The scope is gone from the manager and from the cgroup tree.
+    pub fn end_scope(world: *World, slot: u32) void {
+        assert(slot < world.bus.scopes.len);
+        const scope = &world.bus.scopes[slot];
+        assert(scope.active);
+        assert(scope.name.len > 0);
+        scope.active = false;
+        if (world.cgroup_stays) return;
+        var path_buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const relative = scope_cgroup_path(&path_buffer, scope);
+        var directory_buffer: [constants.cgroup_path_bytes_max + 16]u8 = undefined;
+        // Cannot fail: a bounded relative path and a short prefix fit the buffer.
+        const prefix = "/sys/fs/cgroup{s}";
+        const directory = std.fmt.bufPrint(&directory_buffer, prefix, .{relative}) catch
+            unreachable; // Same bound as above.
+        var limit_path: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+        // Cannot fail: a bounded directory and a short name.
+        const memory_path = std.fmt.bufPrint(&limit_path, "{s}/memory.max", .{directory}) catch
+            unreachable; // Same bound as above.
+        world.ended_memory_max = if (world.read_written(memory_path)) |text|
+            host.Text.from_slice(text)
+        else
+            null;
+        var at: u32 = 0;
+        while (at < world.written_count) {
+            const under = world.written[at].path.under(directory);
+            if (under) world.drop_written(at) else at += 1;
+        }
+        if (world.find_node(directory)) |index| {
+            world.nodes[index] = world.nodes[world.nodes_count - 1];
+            world.nodes_count -= 1;
+        }
+        assert(world.find_node(directory) == null);
     }
 
     /// Gives a scope the manager just started its files: the cgroup directory, and the
@@ -681,6 +811,7 @@ pub const World = struct {
         if (world.find_process(scope.pid)) |process| {
             world.scope_started_before_child_ran = process.state == .pending;
         }
+        world.write_event_files(directory);
         var file_buffer: [48]u8 = undefined;
         // Cannot fail: same.
         const file = std.fmt.bufPrint(&file_buffer, "{s}/cgroup", .{proc_directory}) catch
@@ -691,15 +822,95 @@ pub const World = struct {
         _ = world.write_file(file, line);
     }
 
+    /// The files the kernel keeps in a cgroup that say what happened to it. They hold the final
+    /// counts from the start: the model has no time, and a command ends the way it is told to.
+    fn write_event_files(world: *World, directory: []const u8) void {
+        assert(directory.len > 0);
+        assert(directory[0] == '/');
+        var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+        var text_buffer: [128]u8 = undefined;
+        const memory = "low 0\nhigh 0\nmax 0\noom {d}\noom_kill {d}\noom_group_kill 0\n";
+        // Cannot fail: a short format with two numbers in 128 bytes.
+        const counts = .{ world.oom_kills, world.oom_kills };
+        const events = std.fmt.bufPrint(&text_buffer, memory, counts) catch
+            unreachable; // Same bound as above.
+        const memory_path = std.fmt.bufPrint(&path_buffer, "{s}/memory.events", .{directory}) catch
+            unreachable; // The directory is bounded and the name short.
+        _ = world.write_file(memory_path, events);
+        // Cannot fail: same.
+        const pids = std.fmt.bufPrint(&text_buffer, "max {d}\n", .{world.pids_max_hits}) catch
+            unreachable; // Same.
+        const pids_path = std.fmt.bufPrint(&path_buffer, "{s}/pids.events", .{directory}) catch
+            unreachable; // Same.
+        _ = world.write_file(pids_path, pids);
+        const populated = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.events", .{directory}) catch
+            unreachable; // Same.
+        _ = world.write_file(populated, "populated 1\nfrozen 0\n");
+    }
+
+    /// The process is gone, and so are its files in /proc.
+    fn drop_proc_files(world: *World, pid: u32) void {
+        inline for (.{ "status", "cgroup" }) |name| {
+            var path: [48]u8 = undefined;
+            // Cannot fail: a short path and a pid of at most ten digits.
+            const where = std.fmt.bufPrint(&path, "/proc/{d}/" ++ name, .{pid}) catch unreachable;
+            if (world.find_written(where)) |index| world.drop_written(index);
+        }
+    }
+
+    /// `/proc/<pid>/status` of a container's PID 1, as far as a lookup of its identity goes: its
+    /// innermost pid is 1 (`NSpid`). Written straight, not through the process's own root.
+    fn put_status_file(world: *World, pid: u32) void {
+        var path: [48]u8 = undefined;
+        var text: [48]u8 = undefined;
+        // Cannot fail: a short path and a short line with a pid of at most ten digits.
+        const where = std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}) catch unreachable;
+        const line = std.fmt.bufPrint(&text, "NSpid:\t{d}\t1\n", .{pid}) catch unreachable; // Same.
+        world.put_raw(where, line);
+    }
+
+    /// Stores a file by its real path, bypassing the current process's root.
+    pub fn put_raw(world: *World, path: []const u8, bytes: []const u8) void {
+        var real: SimPath = .{};
+        const fits = real.set(path);
+        assert(fits);
+        const existing = world.find_written(path);
+        if (existing == null and world.written_count == constants.sim_written_files_max) return;
+        const index = existing orelse world.written_count;
+        if (existing == null) world.written_count += 1;
+        world.written[index].path = real;
+        @memcpy(world.written[index].content[0..bytes.len], bytes);
+        world.written[index].len = @intCast(bytes.len);
+    }
+
     /// The command ends by itself, the way the model says it does.
     fn finish_command(world: *World, process: *Process) void {
         assert(process.state == .command);
         process.exit = world.command_exit;
         process.state = .zombie;
+        world.process_died(process.pid);
+    }
+
+    /// The kernel counts a zombie out of its cgroup: the scope is no longer populated.
+    fn process_died(world: *World, pid: u32) void {
+        for (&world.bus.scopes) |*scope| {
+            if (!scope.active or scope.pid != pid) continue;
+            var relative: [constants.cgroup_path_bytes_max]u8 = undefined;
+            const path = scope_cgroup_path(&relative, scope);
+            var file: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
+            // Cannot fail: a bounded path and a short name.
+            const where = std.fmt.bufPrint(&file, "/sys/fs/cgroup{s}/cgroup.events", .{path}) catch
+                unreachable; // Same bound as above.
+            if (world.find_written(where) != null) world.put_raw(where, "populated 0\nfrozen 0\n");
+        }
     }
 
     /// Waits for the child to end or for a scripted signal to arrive.
-    pub fn wait_event(world: *World, pid: u32) union(enum) { event: host.Event, errno: u16 } {
+    pub fn wait_event(
+        world: *World,
+        pid: u32,
+        timeout_ms: u32,
+    ) union(enum) { event: host.Event, errno: u16 } {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
@@ -709,6 +920,12 @@ pub const World = struct {
                 defer world.script_at += 1;
                 return .{ .event = .{ .signal = world.script[world.script_at] } };
             }
+            const left = process.ends_at_ms -| world.now_ms;
+            if (timeout_ms > 0 and left > timeout_ms) {
+                world.now_ms += timeout_ms;
+                return .{ .event = .timeout };
+            }
+            world.now_ms += left;
             world.finish_command(process);
         }
         if (process.state != .zombie) return .{ .errno = errno_child };
@@ -953,6 +1170,12 @@ pub const World = struct {
             table.private = true;
             return null;
         }
+        if (request.kind == .remount_readonly) {
+            // Only a mount point can be remounted; the rootfs bind is one.
+            const index = table.find(target.slice()) orelse return errno_inval;
+            table.mounts[index].read_only = true;
+            return null;
+        }
         if (world.mount_target_error(request.kind, &target)) |errno| return errno;
         if (request.kind == .devpts) {
             if (world.devpts_refused) return errno_perm;
@@ -1033,6 +1256,43 @@ pub const World = struct {
         world.processes[world.current].sealed = true;
     }
 
+    /// The capability calls of a container's setup, in the order the child makes them.
+    pub fn restrict_capabilities(world: *World, keep: u64) ?u16 {
+        assert(keep != 0);
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        if (process.no_new_privs or process.seccomp) return errno_inval; // Out of order.
+        process.capabilities = keep;
+        return null;
+    }
+
+    pub fn clear_ambient(world: *World) void {
+        assert(world.current < world.processes.len);
+        world.processes[world.current].ambient_cleared = true;
+    }
+
+    pub fn no_new_privs(world: *World) void {
+        assert(world.current < world.processes.len);
+        world.processes[world.current].no_new_privs = true;
+    }
+
+    /// The filter is run on the calls the child makes after it: execve, write, close and
+    /// exit_group must be allowed on this machine's architecture, or the container could not
+    /// start (or report why not).
+    pub fn install_seccomp(world: *World, program: []const bpf.Insn) ?u16 {
+        assert(program.len > 0);
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        if (!process.no_new_privs) return errno_acces; // The kernel needs it, or CAP_SYS_ADMIN.
+        if (bpf.verify(program) != null) return errno_inval;
+        if (!seccomp.allows_native(program, "execve")) return errno_perm;
+        if (!seccomp.allows_native(program, "write")) return errno_perm;
+        if (!seccomp.allows_native(program, "close")) return errno_perm;
+        if (!seccomp.allows_native(program, "exit_group")) return errno_perm;
+        process.seccomp = true;
+        return null;
+    }
+
     pub fn die_with_parent(world: *World) void {
         world.processes[world.current].die_with_parent = true;
     }
@@ -1049,7 +1309,9 @@ pub const World = struct {
         process.exec_argv_len = copy_lines(&process.exec_argv, request.argv);
         process.exec_envp_len = copy_lines(&process.exec_envp, request.envp);
         process.execd = true;
+        process.ends_at_ms = world.now_ms + world.command_runs_ms;
         process.holds = @splat(false);
+        world.put_status_file(process.pid);
         return null;
     }
 };
@@ -1081,7 +1343,12 @@ fn unused_process() Process {
         .root = null,
         .old_root_attached = false,
         .die_with_parent = false,
+        .capabilities = null,
+        .ambient_cleared = false,
+        .no_new_privs = false,
+        .seccomp = false,
         .sealed = false,
+        .ends_at_ms = 0,
         .execd = false,
         .exec_path = .{},
         .exec_argv = undefined,

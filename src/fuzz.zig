@@ -19,6 +19,7 @@ const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
 const dbus_fuzz = @import("fuzz_dbus.zig");
+const seccomp_fuzz = @import("fuzz_seccomp.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -44,6 +45,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
     .{ .name = "dbus", .run_iteration = dbus_fuzz.fuzz_dbus },
+    .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },
@@ -177,10 +179,12 @@ fn random_args(
     long: *[constants.arg_bytes_max + 8]u8,
 ) FuzzArgs {
     const words = [_][]const u8{
-        "doctor",  "help",     "--help",        "--version", "version", "",          "-",
-        "explain", "E0001",    "zbx-b0001",     "E9999",     "-v",      "--verbose", "--output",
-        "json",    "text",     "--output=json", "--output=", "--bogus", "-x",        "run",
-        "--",      "--rootfs", "--name",        "/srv/x",    "bundle",  "--last",
+        "doctor",  "help",     "--help",        "--version", "version",   "",          "-",
+        "explain", "E0001",    "zbx-b0001",     "E9999",     "-v",        "--verbose", "--output",
+        "json",    "text",     "--output=json", "--output=", "--bogus",   "-x",        "run",
+        "--",      "--rootfs", "--name",        "/srv/x",    "bundle",    "--last",    "ps",
+        "stop",    "schema",   "--all",         "-d",        "--timeout", "--grace",   "1000",
+        "web-1",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };

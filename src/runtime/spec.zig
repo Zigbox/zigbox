@@ -43,6 +43,12 @@ pub const Spec = struct {
     labels: []const Label = &.{},
     /// Resource limits, applied through the container's cgroup scope.
     limits: Limits = .{},
+    /// The rootfs is remounted read-only, with a tmpfs at /tmp and /run.
+    read_only: bool = false,
+    /// Variables added to the container's environment (PATH, HOME, HOSTNAME and TERM are always
+    /// there; one of these with the same name replaces it). Not kept in the run record: a value
+    /// may be a secret.
+    env: []const Label = &.{},
 };
 
 /// The index of the first label that does not fit, or null. Too many labels is reported at the
@@ -161,6 +167,27 @@ test "labels: the bounds are exact and a key is a plain word" {
     try testing.expectEqual(@as(?u32, constants.labels_count_max), labels_problem(&many));
 }
 
+/// The index of the first variable that does not fit, or null; too many is reported at the index
+/// of the first one past the bound. A name is non-empty printable ASCII without '='; a value
+/// holds no NUL. The command, the defaults and these together must fit the exec image.
+pub fn env_problem(env: []const Label, command: []const []const u8) ?u32 {
+    assert(command_problem(command) == null);
+    if (env.len > constants.env_vars_count_max) return constants.env_vars_count_max;
+    var total: u64 = environment_bytes_max + command_bytes(command);
+    for (env, 0..) |variable, index| {
+        const name_ok = variable.key.len > 0 and variable.key.len <= constants.env_name_bytes_max;
+        if (!name_ok) return @intCast(index);
+        if (variable.value.len > constants.env_value_bytes_max) return @intCast(index);
+        for (variable.key) |byte| {
+            if (byte <= 0x20 or byte >= 0x7f or byte == '=') return @intCast(index);
+        }
+        if (std.mem.indexOfScalar(u8, variable.value, 0) != null) return @intCast(index);
+        total += variable.key.len + variable.value.len + 2;
+        if (total > constants.exec_strings_bytes_max) return @intCast(index);
+    }
+    return null;
+}
+
 comptime {
     assert(environment_bytes_max < constants.exec_strings_bytes_max);
 }
@@ -187,6 +214,40 @@ test "name_problem accepts hostname labels and refuses everything else, at the b
     try testing.expectEqual(NameProblem.hyphen_at_edge, name_problem("web-").?);
     try testing.expectEqual(NameProblem.hyphen_at_edge, name_problem("-").?);
     try testing.expect(name_problem("w-e-b") == null);
+}
+
+test "env_problem: the bounds are exact and a name is a plain word" {
+    // Goal: where a variable stops fitting. Method: the longest name and value, one byte over,
+    // each bad character, the count, and the exec image's total.
+    const command: []const []const u8 = &.{"ls"};
+    const name = repeat('k', constants.env_name_bytes_max);
+    const value = repeat('v', constants.env_value_bytes_max);
+    try testing.expect(env_problem(&.{}, command) == null);
+    try testing.expect(env_problem(&.{.{ .key = name, .value = value }}, command) == null);
+    const long_name = repeat('k', constants.env_name_bytes_max + 1);
+    const long_value = repeat('v', constants.env_value_bytes_max + 1);
+    const second_bad = [2]Label{
+        .{ .key = "A", .value = "" },
+        .{ .key = long_name, .value = "" },
+    };
+    try testing.expectEqual(@as(?u32, 1), env_problem(&second_bad, command));
+    const bad_ones = [_]Label{
+        .{ .key = "A", .value = long_value },
+        .{ .key = "", .value = "x" },
+        .{ .key = "A=B", .value = "x" },
+        .{ .key = "A B", .value = "x" },
+        .{ .key = "A", .value = "x\x00y" },
+    };
+    for (&bad_ones) |*bad| {
+        try testing.expectEqual(@as(?u32, 0), env_problem(bad[0..1], command));
+    }
+    const many: [constants.env_vars_count_max + 1]Label = @splat(.{ .key = "K", .value = "v" });
+    try testing.expect(env_problem(many[0..constants.env_vars_count_max], command) == null);
+    try testing.expectEqual(@as(?u32, constants.env_vars_count_max), env_problem(&many, command));
+    // Eight maximal values do not fit the exec image with the defaults.
+    const big: [8]Label = @splat(.{ .key = "K", .value = value });
+    try testing.expect(env_problem(big[0..6], command) == null);
+    try testing.expectEqual(@as(?u32, 7), env_problem(&big, command));
 }
 
 test "rootfs_problem and command_problem: the limits are exact" {

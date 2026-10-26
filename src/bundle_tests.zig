@@ -14,6 +14,9 @@ const render = @import("diag/render.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const sim_run = @import("runtime/sim_run.zig");
 
+/// The tests run one at a time, so one workspace serves them all.
+var test_workspace: bundle.Workspace = undefined;
+
 const testing = std.testing;
 const HostSim = host_sim.HostSim;
 const flate = std.compress.flate;
@@ -328,7 +331,7 @@ test "a bug from a run gets a bundle and a saved line; other diagnostics do not"
     bug.reset();
     bug.raise(.B0001);
     bug.cause("an invariant broke", .{});
-    bundle.attach_to_bug(sim.interface(), "web-1", &bug);
+    bundle.attach_to_bug(sim.interface(), &test_workspace, "web-1", &bug);
     const path = sim_run.bundles_path ++ "/2026-10-24T20-23-04Z-web-1.tar.gz";
     try testing.expectEqualStrings(path, bug.saved.slice());
     try testing.expect(sim.world.read_written(path) != null);
@@ -348,11 +351,11 @@ test "a bug with no record or no room just has no saved line" {
     var bug: Diag = undefined;
     bug.reset();
     bug.raise(.B0001);
-    bundle.attach_to_bug(sim.interface(), "web-1", &bug); // No record.
+    bundle.attach_to_bug(sim.interface(), &test_workspace, "web-1", &bug); // No record.
     try testing.expectEqual(@as(u32, 0), bug.saved.len);
     prepare_golden(&sim);
     sim.world.disk_full = true;
-    bundle.attach_to_bug(sim.interface(), "web-1", &bug); // No room.
+    bundle.attach_to_bug(sim.interface(), &test_workspace, "web-1", &bug); // No room.
     try testing.expectEqual(@as(u32, 0), bug.saved.len);
 }
 

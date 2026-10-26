@@ -10,6 +10,7 @@ const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const child_mod = @import("child.zig");
 const diagnose = @import("diagnose.zig");
+const doctor = @import("../doctor.zig");
 const plan_mod = @import("plan.zig");
 const scope_mod = @import("scope.zig");
 const signals = @import("signals.zig");
@@ -41,6 +42,14 @@ const HelperRecord = struct {
     output_len: u32,
 };
 
+/// What `Session.cleanup_scope` found.
+pub const Cleanup = union(enum) {
+    /// There was no scope to see to.
+    none,
+    done: scope_mod.Cleaned,
+    failed,
+};
+
 pub const Session = struct {
     host: Host,
     plan: *const Plan,
@@ -49,16 +58,30 @@ pub const Session = struct {
     open: Open,
     report: sync.Report,
     helper: ?HelperRecord,
+    /// The caller's room for the doctor's facts, for the diagnostic of a refused namespace.
+    facts: *doctor.Facts,
     /// Why the scope step failed, for its diagnostic.
     scope_problem: ?scope_mod.Problem,
+    /// The scope's cgroup directory (empty if unknown), and whether a scope may exist that
+    /// `cleanup_scope` has to see to.
+    scope_directory: scope_mod.Directory,
+    scope_up: bool,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
+    /// The container's PID 1 as the host sees it: set when it is spawned and never cleared, so
+    /// that another thread can stop the container while this one waits for it.
+    container_pid: u32,
+    /// The container has been reaped: nothing is left to signal. Set by `wait`.
+    reaped: std.atomic.Value(bool),
+    /// `wait` stopped the container because the time given to it ran out.
+    timed_out: bool,
 
-    pub fn start(session: *Session, host: Host, plan: *const Plan) void {
+    pub fn start(session: *Session, host: Host, plan: *const Plan, facts: *doctor.Facts) void {
         assert(plan.count == plan.steps_expected());
         assert(plan.candidates_count > 0);
         session.host = host;
         session.plan = plan;
+        session.facts = facts;
         session.child = .{ .host = host, .plan = plan, .ready = undefined, .report = undefined };
         session.pid = null;
         session.open = .{
@@ -70,7 +93,12 @@ pub const Session = struct {
         session.report.reset();
         session.helper = null;
         session.scope_problem = null;
+        session.scope_directory = .{};
+        session.scope_up = false;
         session.substituted = null;
+        session.container_pid = 0;
+        session.reaped = std.atomic.Value(bool).init(false);
+        session.timed_out = false;
         assert(!session.open.any());
         assert(session.pid == null);
     }
@@ -108,7 +136,7 @@ pub const Session = struct {
                 .err = host_mod.error_for_errno(record.errno),
                 .errno = record.errno,
             };
-            diagnose.step_failed(host, diag, plan, info, failure, .{});
+            diagnose.step_failed(host, diag, plan, info, failure, .{ .facts = session.facts });
             return error.StartFailed;
         }
         session.finish();
@@ -121,7 +149,7 @@ pub const Session = struct {
             problem
         else
             null;
-        return .{ .helper = session.helper_end(), .scope = scope };
+        return .{ .helper = session.helper_end(), .scope = scope, .facts = session.facts };
     }
 
     fn helper_end(session: *const Session) ?diagnose.HelperEnd {
@@ -197,6 +225,7 @@ pub const Session = struct {
             .ipc = true,
         };
         session.pid = try host.spawn(flags, child_mod.entry, &session.child);
+        session.container_pid = session.pid.?;
         // From here a write to the ready pipe may find no reader; that is an error to report.
         host.ignore_broken_pipe(true);
         // The child has its own copies of these. Closing ours is what makes end of file reach
@@ -261,9 +290,39 @@ pub const Session = struct {
         assert(session.plan.scoped);
         assert(session.scope_problem == null);
         var problem: scope_mod.Problem = undefined;
-        if (scope_mod.start(session.host, session.plan, session.pid.?, &problem)) return;
+        const pid = session.pid.?;
+        if (scope_mod.start(session.host, session.plan, pid, &session.scope_directory, &problem)) {
+            session.scope_up = true;
+            return;
+        }
+        // The scope exists, or may: the request went out and the answer was lost, or the job
+        // ended badly. A refusal (a taken name above all: that scope is someone else's) means
+        // there is nothing of ours to clean up.
+        session.scope_up = switch (problem) {
+            .bus => |failure| switch (failure.kind) {
+                .remote => failure.stage == .job,
+                .timeout, .io, .protocol => failure.stage == .call or failure.stage == .job,
+                .no_bus, .auth_refused => false,
+            },
+            .bus_retried, .no_address, .bad_address, .scope_left => false,
+            .no_cgroup_path, .cgroup_write => true,
+        };
         session.scope_problem = problem;
         return error.IoFailed;
+    }
+
+    /// After the container has ended (or never ran): makes sure the scope is gone. A scope that
+    /// is not is a problem for the caller to warn about (ZBX-W0302).
+    pub fn cleanup_scope(session: *Session, problem: *scope_mod.Problem) Cleanup {
+        assert(session.pid == null);
+        assert(session.scope_up == (session.scope_up and session.plan.scoped));
+        if (!session.scope_up) return .none;
+        session.scope_up = false;
+        const name = session.plan.text(session.plan.scope_name);
+        const directory = session.scope_directory.slice();
+        const how = scope_mod.cleanup(session.host, name, directory, problem) orelse
+            return .failed;
+        return .{ .done = how };
     }
 
     fn release_child(session: *Session) host_mod.Error!void {
@@ -301,18 +360,35 @@ pub const Session = struct {
 
     // ---- Waiting ----
 
+    /// How long `wait` lets the container run, and then how it stops it.
+    pub const WaitOptions = struct {
+        /// Total wall time in milliseconds; zero is for ever.
+        timeout_ms: u32 = 0,
+        /// After the time is up: SIGTERM (as the forwarding rule sends it), then SIGKILL this
+        /// many milliseconds later if the container is still there.
+        grace_ms: u32 = constants.stop_grace_ms_default,
+    };
+
     /// Waits for the container to end, forwarding the signals zbx catches. The signals are
     /// blocked while it waits, so one that arrives between two looks waits in the queue and is
     /// read next: none is lost, and no handler runs. The loop ends only when the child does
-    /// (`wait_event` returns its exit); a flood of signals is cut off by killing it.
-    pub fn wait(session: *Session) host_mod.Error!host_mod.ExitStatus {
+    /// (`wait_event` returns its exit); a flood of signals is cut off by killing it. When the
+    /// options give a time, the container is stopped when it is up: SIGTERM, a grace period,
+    /// SIGKILL (`timed_out` says so).
+    pub fn wait(session: *Session, options: WaitOptions) host_mod.Error!host_mod.ExitStatus {
         const host = session.host;
         assert(session.pid != null);
         assert(!session.open.any());
         try host.block_signals(true);
         var received: u32 = 0;
+        const began = host.monotonic_ms();
+        var stage: enum { running, terminated, killed } = .running;
+        var deadline: u64 = began + options.timeout_ms;
         const status = while (true) {
-            const event = host.wait_event(session.pid.?) catch |err| {
+            const timed = stage != .killed and (stage != .running or options.timeout_ms > 0);
+            const left: u64 = if (timed) deadline -| host.monotonic_ms() else 0;
+            const slice_ms: u32 = if (timed) @intCast(@max(left, 1)) else 0;
+            const event = host.wait_event(session.pid.?, slice_ms) catch |err| {
                 host.block_signals(false) catch {};
                 return err;
             };
@@ -323,9 +399,24 @@ pub const Session = struct {
                     assert(received < std.math.maxInt(u32));
                     session.forward(number, received > constants.forwarded_signals_max);
                 },
+                .timeout => switch (stage) {
+                    .running => {
+                        session.timed_out = true;
+                        session.forward(constants.signal_term, false);
+                        stage = .terminated;
+                        deadline = host.monotonic_ms() + options.grace_ms;
+                    },
+                    .terminated => {
+                        // The grace is up: a real SIGKILL, reported as one.
+                        host.signal(session.pid.?, constants.signal_kill) catch {};
+                        stage = .killed;
+                    },
+                    .killed => unreachable, // A wait with no time cannot time out.
+                },
             }
         };
         session.pid = null;
+        session.reaped.store(true, .release);
         host.block_signals(false) catch {}; // The child is gone; a mask that stays is harmless.
         return session.reported_status(status);
     }

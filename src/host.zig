@@ -16,6 +16,7 @@
 //! the same code that runs in production.
 
 const std = @import("std");
+const bpf = @import("runtime/bpf.zig");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const linux = std.os.linux;
@@ -178,6 +179,15 @@ pub const MountKind = enum {
     shm_tmpfs,
     /// `/dev/pts`: a private devpts instance whose ptmx is mode 0666.
     devpts,
+    /// A read-only rootfs gets `/tmp`: tmpfs, mode 1777, nosuid, nodev, sized by
+    /// `constants.tmpfs_bytes_max`.
+    tmp_tmpfs,
+    /// ... and `/run`: tmpfs, mode 0755, nosuid, nodev.
+    run_tmpfs,
+    /// `target` (a bind mount) becomes read-only. In a user namespace the kernel requires the
+    /// flags the mount already has (nosuid, nodev, noexec, atime) to be kept, so the host reads
+    /// them first.
+    remount_readonly,
 };
 
 pub const MountRequest = struct {
@@ -208,6 +218,16 @@ pub const Event = union(enum) {
     exited: ExitStatus,
     /// A signal zbx forwards arrived (INT, TERM, HUP or QUIT).
     signal: u8,
+    /// The wait's time ran out with neither (only for a wait given a time).
+    timeout,
+};
+
+/// Which side of `fork_supervisor` a process is on.
+pub const Role = enum {
+    /// The caller that asked for a detached run; it goes on, and the supervisor is its child.
+    parent,
+    /// The new process: its own session, its stdin, stdout and stderr on /dev/null.
+    supervisor,
 };
 
 /// Which signals a process has handlers for or ignores, as bit masks (bit n-1 is signal n).
@@ -329,6 +349,15 @@ pub const VTable = struct {
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
     die_with_parent: *const fn (context: *anyopaque) Error!void,
+    /// Drops every capability not in `keep` (a mask by capability number) from the bounding set,
+    /// then makes it the effective, permitted and inheritable sets (`PR_CAPBSET_DROP`, `capset`).
+    restrict_capabilities: *const fn (context: *anyopaque, keep: u64) Error!void,
+    /// Empties the ambient capability set (`PR_CAP_AMBIENT_CLEAR_ALL`).
+    clear_ambient: *const fn (context: *anyopaque) Error!void,
+    /// Sets `no_new_privs` (`PR_SET_NO_NEW_PRIVS`), which stays for the process and its children.
+    no_new_privs: *const fn (context: *anyopaque) Error!void,
+    /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
+    install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
     /// success to model a command that started.
     exec: *const fn (context: *anyopaque, request: ExecRequest) Error!void,
@@ -349,8 +378,22 @@ pub const VTable = struct {
     /// Blocks (or unblocks) INT, TERM, HUP, QUIT and CHLD, so that they wait to be read by
     /// `wait_event` instead of acting.
     block_signals: *const fn (context: *anyopaque, block: bool) Error!void,
-    /// Waits for the child to end or for a forwarded signal; the signals must be blocked.
-    wait_event: *const fn (context: *anyopaque, pid: Pid) Error!Event,
+    /// Waits for the child to end or for a forwarded signal; the signals must be blocked. With a
+    /// `timeout_ms` above zero it also ends, with `.timeout`, when that long has passed.
+    wait_event: *const fn (context: *anyopaque, pid: Pid, timeout_ms: u32) Error!Event,
+    /// This process's id.
+    own_pid: *const fn (context: *anyopaque) Pid,
+    /// Sleeps at least `ms` milliseconds (the library's polls and graces use it).
+    sleep_ms: *const fn (context: *anyopaque, ms: u32) void,
+    /// A clock that only goes forward, in milliseconds, for measuring waits.
+    monotonic_ms: *const fn (context: *anyopaque) u64,
+    /// Forks a supervisor: a new process, detached from the terminal and the caller's session,
+    /// with its standard streams on /dev/null, that goes on with the same memory. The caller
+    /// must be single-threaded. The real host's supervisor ends with `exit_now`.
+    fork_supervisor: *const fn (context: *anyopaque) Error!Role,
+    /// Ends the process now with `code`. The real host does not return; the simulator does, so
+    /// that a test can look at what the supervisor left behind.
+    exit_now: *const fn (context: *anyopaque, code: u8) void,
     signal_state: *const fn (context: *anyopaque, pid: Pid) Error!SignalState,
     /// Seconds since the epoch.
     time_now: *const fn (context: *anyopaque) u64,
@@ -647,9 +690,10 @@ pub const Host = struct {
         return error.IoFailed;
     }
 
+    /// Sends a signal. Number 0 sends nothing and asks whether the process exists (and may be
+    /// signalled by this user): an error `NotFound` says it does not.
     pub fn signal(host: Host, pid: Pid, number: u8) Error!void {
         assert(pid > 0);
-        assert(number > 0);
         assert(number < constants.signal_number_max);
         try host.vtable.signal(host.context, pid, number);
         assert(host.vtable.last_errno(host.context) == 0);
@@ -742,6 +786,33 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
+    pub fn restrict_capabilities(host: Host, keep: u64) Error!void {
+        assert(keep != 0); // A container keeps something, and the mask is never empty by policy.
+        try host.vtable.restrict_capabilities(host.context, keep);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn clear_ambient(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        try host.vtable.clear_ambient(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn no_new_privs(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
+        try host.vtable.no_new_privs(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn install_seccomp(host: Host, program: []const bpf.Insn) Error!void {
+        assert(program.len > 0);
+        assert(program.len <= bpf.insns_max);
+        try host.vtable.install_seccomp(host.context, program);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
     pub fn exec(host: Host, request: ExecRequest) Error!void {
         assert(request.path.len > 0);
         assert(request.path[request.path.len] == 0);
@@ -797,15 +868,17 @@ pub const Host = struct {
     }
 
     /// Waits for the child or a forwarded signal, retrying interrupted waits.
-    pub fn wait_event(host: Host, pid: Pid) Error!Event {
+    pub fn wait_event(host: Host, pid: Pid, timeout_ms: u32) Error!Event {
         assert(pid > 0);
+        assert(timeout_ms <= constants.wait_timeout_ms_max);
         for (0..constants.wait_interrupts_max + 1) |_| {
-            const event = host.vtable.wait_event(host.context, pid) catch |err| switch (err) {
+            const waited = host.vtable.wait_event(host.context, pid, timeout_ms);
+            const event = waited catch |err| switch (err) {
                 error.Interrupted => continue,
                 else => return err,
             };
             switch (event) {
-                .exited => {},
+                .exited, .timeout => {},
                 .signal => |number| assert(number > 0),
             }
             return event;
@@ -818,6 +891,34 @@ pub const Host = struct {
         const state = try host.vtable.signal_state(host.context, pid);
         assert(host.vtable.last_errno(host.context) == 0);
         return state;
+    }
+
+    pub fn own_pid(host: Host) Pid {
+        const pid = host.vtable.own_pid(host.context);
+        assert(pid > 0);
+        return pid;
+    }
+
+    pub fn sleep_ms(host: Host, ms: u32) void {
+        assert(ms > 0);
+        assert(ms <= constants.sleep_ms_max);
+        host.vtable.sleep_ms(host.context, ms);
+    }
+
+    pub fn monotonic_ms(host: Host) u64 {
+        const now = host.vtable.monotonic_ms(host.context);
+        assert(now < 1 << 50);
+        return now;
+    }
+
+    pub fn fork_supervisor(host: Host) Error!Role {
+        const role = try host.vtable.fork_supervisor(host.context);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return role;
+    }
+
+    pub fn exit_now(host: Host, code: u8) void {
+        host.vtable.exit_now(host.context, code);
     }
 
     pub fn time_now(host: Host) u64 {

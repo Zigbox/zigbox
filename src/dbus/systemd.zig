@@ -13,6 +13,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const client = @import("client.zig");
+const message_mod = @import("message.zig");
 const wire = @import("wire.zig");
 
 const Connection = client.Connection;
@@ -124,16 +125,59 @@ pub const ScopeRequest = struct {
     cpu_quota_usec: ?u64,
 };
 
+/// Asks the manager to send this connection the job signals: a `JobRemoved` match rule on the
+/// bus and `Manager.Subscribe`. systemd sends a job's signals to the client that created it only
+/// as a courtesy of the bus, and to subscribers by rule; zbx does not depend on the courtesy
+/// (go-systemd does the same). `unsubscribe` undoes the second half.
+pub fn watch_jobs(conn: *Connection) CallError!void {
+    assert(conn.is_open);
+    try conn.add_match("type='signal',sender='org.freedesktop.systemd1'," ++
+        "interface='org.freedesktop.systemd1.Manager',member='JobRemoved'");
+    try manager_call(conn, "Subscribe");
+}
+
+pub fn unsubscribe(conn: *Connection) CallError!void {
+    assert(conn.is_open);
+    assert(conn.jobs_count <= conn.jobs.len);
+    try manager_call(conn, "Unsubscribe");
+}
+
+/// A method of the manager that takes no arguments and returns nothing.
+fn manager_call(conn: *Connection, member: []const u8) CallError!void {
+    assert(member.len > 0);
+    assert(conn.receive_start <= conn.receive_end);
+    assert(conn.is_open);
+    const reply = try conn.call(.{
+        .destination = systemd_name,
+        .path = manager_path,
+        .interface = manager_interface,
+        .member = member,
+    }, .call);
+    if (reply.signature.len != 0) return protocol(conn, error.BadSignature);
+}
+
 /// Starts the scope and waits for its job. On success the container's pid is inside the scope.
 /// A taken name is the remote error `org.freedesktop.systemd1.UnitExists`; any other refusal,
-/// and a job that ends in anything but "done", are failures the caller diagnoses.
+/// and a job that ends in anything but "done", are failures the caller diagnoses. The job
+/// signals are subscribed to before the call and unsubscribed from after the wait; a failure to
+/// unsubscribe is not a failure of the scope, which is already up.
 pub fn start_scope(conn: *Connection, request: *const ScopeRequest) CallError!void {
     assert(request.pid > 1);
     assert(std.mem.endsWith(u8, request.name, constants.scope_suffix));
     assert(conn.is_open);
     assert(request.description.len > 0);
-    try conn.add_match("type='signal',sender='org.freedesktop.systemd1'," ++
-        "interface='org.freedesktop.systemd1.Manager',member='JobRemoved'");
+    try watch_jobs(conn);
+    const result = start_and_wait(conn, request);
+    const kept = conn.failure;
+    unsubscribe(conn) catch {
+        conn.failure = kept;
+    };
+    return result;
+}
+
+fn start_and_wait(conn: *Connection, request: *const ScopeRequest) CallError!void {
+    assert(conn.is_open);
+    assert(request.pid > 1);
     var body_buffer: [2048]u8 = undefined;
     const body = marshal_scope(&body_buffer, request) catch |err| return protocol(conn, err);
     const reply = try conn.call(.{
@@ -144,6 +188,13 @@ pub fn start_scope(conn: *Connection, request: *const ScopeRequest) CallError!vo
         .signature = "ssa(sv)a(sa(sv))",
         .body = body,
     }, .call);
+    return finish_job(conn, &reply);
+}
+
+/// Reads the job path out of a reply and waits for the job to end with "done".
+fn finish_job(conn: *Connection, reply: *const message_mod.Message) CallError!void {
+    assert(conn.is_open);
+    assert(reply.kind == .method_return);
     if (!std.mem.eql(u8, reply.signature, "o")) return protocol(conn, error.BadSignature);
     var reader = reply.body_reader();
     var job_path_buffer: [96]u8 = undefined;
@@ -159,6 +210,45 @@ pub fn start_scope(conn: *Connection, request: *const ScopeRequest) CallError!vo
     conn.failure.text = .{};
     return error.Failed;
 }
+
+/// What stopping a scope found.
+pub const Stopped = enum {
+    /// The manager no longer knows the unit: it ended by itself.
+    gone,
+    /// The unit was still there and its stop job ended "done".
+    stopped,
+};
+
+/// `StopUnit(name, "fail")` and the wait for its job. A unit the manager does not know
+/// (`NoSuchUnit`) is the good case: the scope went away by itself. The job signals must have
+/// been asked for (`watch_jobs`).
+pub fn stop_scope(conn: *Connection, name: []const u8) CallError!Stopped {
+    assert(conn.is_open);
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    var body_buffer: [constants.scope_name_bytes_max + 32]u8 = undefined;
+    var writer = wire.Writer.init(&body_buffer);
+    writer.string(name);
+    writer.string("fail");
+    const body = writer.finish() catch |err| return protocol(conn, err);
+    const reply = conn.call(.{
+        .destination = systemd_name,
+        .path = manager_path,
+        .interface = manager_interface,
+        .member = "StopUnit",
+        .signature = "ss",
+        .body = body,
+    }, .call) catch |err| {
+        const failure = &conn.failure;
+        const unknown = failure.kind == .remote and
+            std.mem.eql(u8, failure.name.slice(), no_such_unit);
+        if (unknown) return .gone;
+        return err;
+    };
+    try finish_job(conn, &reply);
+    return .stopped;
+}
+
+const no_such_unit = "org.freedesktop.systemd1.NoSuchUnit";
 
 /// The body of `StartTransientUnit(name, "fail", properties, [])`. "fail" means: an existing
 /// unit of that name is an error, never silently reused.

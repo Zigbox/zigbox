@@ -4,6 +4,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const linux = std.os.linux;
+const bpf = @import("runtime/bpf.zig");
+const capabilities = @import("runtime/capabilities.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
 
@@ -28,10 +30,35 @@ pub fn exit_now(code: u8) noreturn {
     linux.exit_group(code);
 }
 
-/// The errno of the most recent call checked by `check`, 0 after a success. Process-wide because
-/// `check` is a free function used by the probe code too; zbx is single-threaded where it
-/// matters (AGENTS.md), and a forked probe child has its own copy.
-var errno_last: u16 = 0;
+fn timespec_of(ms: u64) linux.timespec {
+    assert(ms <= std.math.maxInt(u32));
+    return .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+}
+
+fn monotonic_now_ms() u64 {
+    var now: linux.timespec = undefined;
+    const result = linux.clock_gettime(.MONOTONIC, &now);
+    assert(linux.errno(result) == .SUCCESS); // A valid clock and a valid pointer.
+    assert(now.sec >= 0);
+    return @as(u64, @intCast(now.sec)) * 1000 + @as(u64, @intCast(now.nsec)) / 1_000_000;
+}
+
+/// The errno of the most recent call checked by `check`, 0 after a success. One per thread,
+/// because `check` is a free function used by the probe code too and the library is called from
+/// several threads (each caller's host reads the errno of its own last call); a forked child has
+/// its own copy.
+//
+// The alignment is a workaround for a std defect, not decoration. The binary's TLS segment is
+// already 256 KiB: std's default `signal_stack_size` (1 << 18) is a `threadlocal` alternate
+// signal stack that `std.Thread.maybeAttachSignalStack` installs for every thread. A static
+// binary without libc lays out its own thread area at startup (`std.os.linux.tls.initStatic`),
+// and with this two-byte variable added to the segment it put the thread control block at a
+// misaligned offset and panicked (`incorrectAlignment`) before `main`, in ReleaseSafe only. That
+// is a defect in `std.os.linux.tls`: minimal programs with a `u16` threadlocal do not reproduce
+// it, so it depends on the layout of the whole segment. `align(16)` made the layout work here.
+// The guard is the `zig build release` smoke run, which starts the binary: a later change to
+// the thread-locals, or a new Zig, can break this again and only that run would show it.
+threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
@@ -80,6 +107,10 @@ pub const HostReal = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .restrict_capabilities = restrict_capabilities,
+        .clear_ambient = clear_ambient,
+        .no_new_privs = no_new_privs,
+        .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -88,6 +119,11 @@ pub const HostReal = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .own_pid = own_pid,
+        .sleep_ms = sleep_ms,
+        .monotonic_ms = monotonic_ms,
+        .fork_supervisor = fork_supervisor,
+        .exit_now = exit_process,
         .signal_state = signal_state,
         .time_now = time_now,
         .write_file = write_file,
@@ -346,8 +382,8 @@ pub const HostReal = struct {
     fn signal(context: *anyopaque, pid: host.Pid, number: u8) host.Error!void {
         _ = from_context(context);
         assert(pid > 0);
-        assert(number > 0);
-        try check(linux.kill(@intCast(pid), @fromBackingInt(number)));
+        // Raw, so that number 0 (does the process exist?) is expressible.
+        try check(linux.syscall2(.kill, pid, number));
     }
 
     fn write_id_map(
@@ -383,7 +419,8 @@ pub const HostReal = struct {
             .make_private => linux.mount(null, target, null, linux.MS.REC | linux.MS.PRIVATE, 0),
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
-            .proc, .dev_tmpfs, .shm_tmpfs, .devpts => blk: {
+            .remount_readonly => return remount_readonly(request.target),
+            .proc, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -470,6 +507,53 @@ pub const HostReal = struct {
         try check(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0));
     }
 
+    /// Capabilities are dropped from the bounding set one by one (`PR_CAPBSET_DROP`, which needs
+    /// CAP_SETPCAP, still held at this point), then the three sets are set to `keep` in one
+    /// `capset` (version 3 data: two words each).
+    fn restrict_capabilities(context: *anyopaque, keep: u64) host.Error!void {
+        _ = from_context(context);
+        assert(keep != 0);
+        assert(keep >> (capabilities.last_known + 1) == 0);
+        var capability: u32 = 0;
+        while (capability <= capabilities.last_known) : (capability += 1) {
+            if (keep & (@as(u64, 1) << @intCast(capability)) != 0) continue;
+            const result = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), capability, 0, 0, 0);
+            // A kernel older than this build knows has fewer capabilities: EINVAL, nothing to drop.
+            if (linux.errno(result) == .INVAL) continue;
+            try check(result);
+        }
+        const header: CapHeader = .{ .version = cap_version_3, .pid = 0 };
+        const low: u32 = @truncate(keep);
+        const high: u32 = @truncate(keep >> 32);
+        const data = [2]CapData{
+            .{ .effective = low, .permitted = low, .inheritable = low },
+            .{ .effective = high, .permitted = high, .inheritable = high },
+        };
+        try check(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
+    }
+
+    fn clear_ambient(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(linux.PR.CAP_AMBIENT_CLEAR_ALL == 4);
+        const operation = linux.PR.CAP_AMBIENT_CLEAR_ALL;
+        try check(linux.prctl(@backingInt(linux.PR.CAP_AMBIENT), operation, 0, 0, 0));
+    }
+
+    fn no_new_privs(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(@backingInt(linux.PR.SET_NO_NEW_PRIVS) == 38);
+        try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
+    }
+
+    fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
+        _ = from_context(context);
+        assert(program.len > 0);
+        assert(program.len <= bpf.insns_max);
+        const filter: SockFprog = .{ .len = @intCast(program.len), .filter = program.ptr };
+        const operation = linux.SECCOMP.SET_MODE_FILTER;
+        try check(linux.seccomp(operation, 0, &filter));
+    }
+
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {
         _ = from_context(context);
         assert(request.path.len > 0);
@@ -548,22 +632,35 @@ pub const HostReal = struct {
         try check(linux.sigprocmask(how, &set, null));
     }
 
-    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+    fn wait_event(context: *anyopaque, pid: host.Pid, timeout_ms: u32) host.Error!host.Event {
         _ = from_context(context);
         assert(pid > 0);
         const set = forwarded_set();
         var info: linux.siginfo_t = undefined;
+        // Zero waits for ever; a time is a limit on each wait for a signal, and a signal that is
+        // not the child's end (a stop, say) is not a reason to start the time again: the
+        // deadline is fixed once.
+        var limit = timespec_of(timeout_ms);
+        const started = monotonic_now_ms();
         // Each pass takes one signal off the queue, so the loop ends when the child does; a
         // SIGCHLD for a child that is still running (a stop, say) is skipped.
         for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
             const size = linux.NSIG / 8;
+            if (timeout_ms > 0) {
+                const spent = monotonic_now_ms() -| started;
+                if (spent >= timeout_ms) return .timeout;
+                const left: u64 = timeout_ms - spent;
+                limit = timespec_of(left);
+            }
+            const wait_for: usize = if (timeout_ms > 0) @intFromPtr(&limit) else 0;
             const taken = linux.syscall4(
                 .rt_sigtimedwait,
                 @intFromPtr(&set),
                 @intFromPtr(&info),
-                0,
+                wait_for,
                 size,
             );
+            if (timeout_ms > 0 and linux.errno(taken) == .AGAIN) return .timeout;
             try check(taken);
             assert(taken > 0);
             assert(taken < constants.signal_number_max);
@@ -576,6 +673,46 @@ pub const HostReal = struct {
             return .{ .exited = try decode_status(status) };
         }
         return error.Stalled;
+    }
+
+    fn own_pid(context: *anyopaque) host.Pid {
+        _ = from_context(context);
+        return @intCast(linux.getpid());
+    }
+
+    fn sleep_ms(context: *anyopaque, ms: u32) void {
+        _ = from_context(context);
+        assert(ms > 0);
+        var left = timespec_of(ms);
+        // An interrupted sleep ends early: the callers poll, so a short sleep costs one more look.
+        _ = linux.nanosleep(&left, &left);
+    }
+
+    fn monotonic_ms(context: *anyopaque) u64 {
+        _ = from_context(context);
+        return monotonic_now_ms();
+    }
+
+    /// Forks. The supervisor leaves the caller's session and process group (so a hang-up of the
+    /// terminal does not reach it) and has /dev/null for its standard streams. Zbx has one thread
+    /// when this is called, so the child is a faithful copy.
+    fn fork_supervisor(context: *anyopaque) host.Error!host.Role {
+        _ = from_context(context);
+        const forked = linux.fork();
+        try check(forked);
+        if (forked != 0) return .parent;
+        try check(linux.setsid());
+        const opened = linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+        try check(opened);
+        const null_fd: i32 = @intCast(opened);
+        for ([_]i32{ 0, 1, 2 }) |target| try check(linux.dup2(null_fd, target));
+        if (null_fd > 2) _ = linux.close(null_fd);
+        return .supervisor;
+    }
+
+    fn exit_process(context: *anyopaque, code: u8) void {
+        _ = from_context(context);
+        linux.exit_group(code);
     }
 
     fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {
@@ -724,12 +861,50 @@ fn clone_flags(flags: host.SpawnFlags) u64 {
 /// The arguments of `mount` for a filesystem made new for the container. Fixed text, so the
 /// child formats nothing. `newinstance` gives the container its own devpts, so it cannot see the
 /// host's terminals.
+/// `struct __user_cap_header_struct` and `__user_cap_data_struct` of capset(2), version 3.
+const CapHeader = extern struct { version: u32, pid: i32 };
+const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const cap_version_3: u32 = 0x20080522;
+
+/// `struct sock_fprog`.
+const SockFprog = extern struct { len: u16, filter: [*]const bpf.Insn };
+
+/// `struct statfs` of the 64-bit architectures; only `f_flags` is read.
+const StatFs = extern struct {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [2]i32,
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [4]i64,
+};
+
 const Fresh = struct {
     source: [:0]const u8,
     type: [:0]const u8,
     flags: u32,
     data: [:0]const u8,
 };
+
+/// Makes a bind mount read-only. A bind remount that does not repeat the mount's own flags
+/// (nosuid, nodev, noexec, noatime, nodiratime, relatime) is refused in a user namespace, where
+/// those flags are locked: they are read from the mount first.
+fn remount_readonly(target: [:0]const u8) host.Error!void {
+    assert(target.len > 0);
+    var found: StatFs = undefined;
+    try HostReal.check(linux.syscall2(.statfs, @intFromPtr(target.ptr), @intFromPtr(&found)));
+    const ms = linux.MS;
+    const locked = ms.NOSUID | ms.NODEV | ms.NOEXEC | ms.NOATIME | ms.NODIRATIME | ms.RELATIME;
+    const current: u32 = @intCast(found.f_flags);
+    const flags = ms.REMOUNT | ms.BIND | ms.RDONLY | (current & locked);
+    try HostReal.check(linux.mount(null, target.ptr, null, flags, 0));
+}
 
 fn fresh_filesystem(kind: host.MountKind) Fresh {
     const ms = linux.MS;
@@ -751,6 +926,18 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .type = "tmpfs",
             .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
             .data = "mode=1777,size=65536k",
+        },
+        .tmp_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.NODEV,
+            .data = std.fmt.comptimePrint("mode=1777,size={d}", .{constants.tmpfs_bytes_max}),
+        },
+        .run_tmpfs => .{
+            .source = "tmpfs",
+            .type = "tmpfs",
+            .flags = ms.NOSUID | ms.NODEV,
+            .data = std.fmt.comptimePrint("mode=755,size={d}", .{constants.tmpfs_bytes_max}),
         },
         .devpts => .{
             .source = "devpts",

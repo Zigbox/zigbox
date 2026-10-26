@@ -33,6 +33,10 @@ pub fn problem_code(problem: *const scope_mod.Problem) codes.Code {
         .no_address, .bad_address => return .E0301,
         .no_cgroup_path, .cgroup_write => return .E0308,
         .bus => |failure| return bus_code(&failure),
+        // The inherited address is the user's mistake to fix, but what decides the code is
+        // whether the user's own bus can be had.
+        .bus_retried => |retried| return bus_code(&retried.failure),
+        .scope_left => return .W0302,
     }
 }
 
@@ -73,6 +77,17 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
             .{address_reason(reason)},
         ),
         .bus => |failure| bus_causes(diag, &failure),
+        .bus_retried => |retried| {
+            diag.cause("the inherited bus at {s} turned this user away ({s}), so " ++
+                "zbx tried {s}, this user's own bus", .{
+                retried.refused.path.slice(),
+                refusal_words(&retried.refused.failure),
+                retried.own_path.slice(),
+            });
+            bus_causes(diag, &retried.failure);
+        },
+        .scope_left => diag.cause("the scope's cgroup is still there after the manager was " ++
+            "asked to stop the scope", .{}),
         .no_cgroup_path => |io| {
             const operation = "reading the scope's cgroup from /proc";
             errors.cause_host_error(diag, operation, io.err, io.errno);
@@ -89,6 +104,48 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
                 "controller is not delegated to this user", .{});
         },
     }
+}
+
+/// What the cleanup of the scope found, for `--verbose`.
+pub fn cleanup_note(name: []const u8, how: scope_mod.Cleaned, buffer: []u8) []const u8 {
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    assert(buffer.len >= 160);
+    const result = switch (how) {
+        .already_gone => std.fmt.bufPrint(buffer, "scope {s} was gone when the run ended", .{name}),
+        .manager_done => std.fmt.bufPrint(
+            buffer,
+            "scope {s} went by itself just after the run ended",
+            .{name},
+        ),
+        .stopped => std.fmt.bufPrint(
+            buffer,
+            "scope {s} was still there at the end; stopped with StopUnit",
+            .{name},
+        ),
+    };
+    return result catch buffer[0..0];
+}
+
+/// How the first bus turned the user away, in a few words.
+fn refusal_words(failure: *const client.Failure) []const u8 {
+    assert(failure.errno < 4096);
+    assert(failure.kind != .remote);
+    return switch (failure.kind) {
+        .auth_refused => "it did not accept this user's authentication",
+        else => if (failure.errno == 1) "permission denied" else "access denied",
+    };
+}
+
+/// The note `--verbose` shows when the inherited bus did not work and the user's own did.
+pub fn fallback_note(via: *const scope_mod.Via, buffer: []u8) []const u8 {
+    const refused = via.refused orelse return buffer[0..0];
+    assert(via.own_path.len > 0);
+    const format = "the bus at {s} turned this user away ({s}); connected to {s} instead";
+    return std.fmt.bufPrint(buffer, format, .{
+        refused.path.slice(),
+        refusal_words(&refused.failure),
+        via.own_path.slice(),
+    }) catch buffer[0..0];
 }
 
 fn address_reason(reason: auth.AddressError) []const u8 {

@@ -120,21 +120,29 @@ pub const Streams = struct {
 };
 
 /// Cuts the console output of a `split_command` at its marker line. Trailing newlines are the
-/// session's to trim, so the stderr part may or may not end in one.
+/// session's to trim, so the stderr part may or may not end in one. The marker may follow spaces
+/// on its line: when readline redraws the echo of a long typed command, the padding it writes
+/// before a carriage return is left in front of the next output once the session drops the `\r`
+/// (seen in CI under KVM, where the output can race the redraw).
 pub fn split_streams(combined: []const u8) CheckError!Streams {
     var found: ?usize = null;
+    var found_line: usize = 0;
     var offset: usize = 0;
     while (std.mem.indexOfPos(u8, combined, offset, stderr_marker)) |at| : (offset = at + 1) {
-        const line_start = at == 0 or combined[at - 1] == '\n';
+        var line: usize = at;
+        while (line > 0 and combined[line - 1] == ' ') line -= 1;
+        const line_start = line == 0 or combined[line - 1] == '\n';
         const after = at + stderr_marker.len;
         const line_end = after == combined.len or combined[after] == '\n';
         if (!line_start or !line_end) continue;
         if (found != null) return error.StreamsNotSplit; // Twice: the output is not ours.
         found = at;
+        found_line = line;
     }
     const at = found orelse return error.StreamsNotSplit;
+    assert(found_line <= at);
     const rest = combined[@min(at + stderr_marker.len + 1, combined.len)..];
-    return .{ .stdout = combined[0..at], .stderr = rest };
+    return .{ .stdout = combined[0..found_line], .stderr = rest };
 }
 
 // ---- The doctor report ---------------------------------------------------------------------
@@ -332,6 +340,12 @@ test "streams: the console output is cut at the marker, and only at a marker lin
     const no_stdout = try split_streams(stderr_marker ++ "\nerr\n");
     try testing.expectEqualStrings("", no_stdout.stdout);
     try testing.expectEqualStrings("err\n", no_stdout.stderr);
+
+    // The padding a readline redraw leaves in front of the marker (CI run 40378288342).
+    const padding: [52]u8 = @splat(' ');
+    const padded = try split_streams("out\n" ++ padding ++ stderr_marker ++ "\nerr\n");
+    try testing.expectEqualStrings("out\n", padded.stdout);
+    try testing.expectEqualStrings("err\n", padded.stderr);
 
     try testing.expectError(error.StreamsNotSplit, split_streams("no marker at all"));
     try testing.expectError(error.StreamsNotSplit, split_streams("echo " ++ stderr_marker ++ "\n"));

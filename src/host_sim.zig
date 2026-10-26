@@ -10,6 +10,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
+const bpf = @import("runtime/bpf.zig");
 const host = @import("host.zig");
 const sim_world = @import("sim_world.zig");
 
@@ -191,6 +192,10 @@ pub const HostSim = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .restrict_capabilities = restrict_capabilities,
+        .clear_ambient = clear_ambient,
+        .no_new_privs = no_new_privs,
+        .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
         .environment = environment,
@@ -199,6 +204,11 @@ pub const HostSim = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .own_pid = own_pid,
+        .sleep_ms = sleep_ms,
+        .monotonic_ms = monotonic_ms,
+        .fork_supervisor = fork_supervisor,
+        .exit_now = exit_now,
         .signal_state = signal_state,
         .time_now = time_now,
         .write_file = write_file,
@@ -491,6 +501,7 @@ pub const HostSim = struct {
     fn socket_connect(context: *anyopaque, path: [:0]const u8) host.Error!host.Handle {
         const sim = from_context(context);
         try sim.begin_call();
+        sim.world.settle_scopes(); // The manager has had its moment.
         switch (sim.world.bus.connect(path, sim.uid_value)) {
             .index => |index| return sim_world.bus_handle_base + index,
             .errno => |errno| return sim.model_error(errno),
@@ -539,6 +550,10 @@ pub const HostSim = struct {
         if (sim.world.bus.scope_started) |slot| {
             sim.world.bus.scope_started = null;
             sim.world.start_scope_files(&sim.world.bus.scopes[slot]);
+        }
+        if (sim.world.bus.scope_stopped) |slot| {
+            sim.world.bus.scope_stopped = null;
+            sim.world.end_scope(slot);
         }
         return @intCast(bytes.len);
     }
@@ -669,6 +684,32 @@ pub const HostSim = struct {
         sim.world.die_with_parent();
     }
 
+    fn restrict_capabilities(context: *anyopaque, keep: u64) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.restrict_capabilities(keep)) |errno| return sim.model_error(errno);
+    }
+
+    fn clear_ambient(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        assert(sim.world.current < sim.world.processes.len);
+        try sim.begin_call();
+        sim.world.clear_ambient();
+    }
+
+    fn no_new_privs(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        assert(sim.world.current < sim.world.processes.len);
+        try sim.begin_call();
+        sim.world.no_new_privs();
+    }
+
+    fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.install_seccomp(program)) |errno| return sim.model_error(errno);
+    }
+
     fn exec(context: *anyopaque, request: host.ExecRequest) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
@@ -725,14 +766,38 @@ pub const HostSim = struct {
         sim.world.signals_blocked = block;
     }
 
-    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+    fn wait_event(context: *anyopaque, pid: host.Pid, timeout_ms: u32) host.Error!host.Event {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
-        switch (sim.world.wait_event(pid)) {
+        switch (sim.world.wait_event(pid, timeout_ms)) {
             .event => |event| return event,
             .errno => |errno| return sim.model_error(errno),
         }
+    }
+
+    fn own_pid(context: *anyopaque) host.Pid {
+        const world = &from_context(context).world;
+        return world.processes[world.current].pid;
+    }
+
+    fn sleep_ms(context: *anyopaque, ms: u32) void {
+        from_context(context).world.now_ms += ms;
+    }
+
+    fn monotonic_ms(context: *anyopaque) u64 {
+        return from_context(context).world.now_ms;
+    }
+
+    fn fork_supervisor(context: *anyopaque) host.Error!host.Role {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.fork_errno) |errno| return sim.model_error(errno);
+        return sim.world.fork_role;
+    }
+
+    fn exit_now(context: *anyopaque, code: u8) void {
+        from_context(context).world.exited_with = code;
     }
 
     fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {

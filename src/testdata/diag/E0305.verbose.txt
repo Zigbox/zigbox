@@ -6,7 +6,7 @@ error[ZBX-E0305]: a scope with this container's name already exists
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (5 of 44)
+  step   start_scope (5 of 48)
   fix    choose another name:      zbx run --name <other-name> ...
          or stop the other unit:   systemctl --user stop zbx-web-1.scope
   more   zbx explain E0305

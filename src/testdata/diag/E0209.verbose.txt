@@ -1,0 +1,13 @@
+error[ZBX-E0209]: can't set up the read-only rootfs
+  while  starting container web-1
+  cause  creating /tmp in the rootfs failed: permission denied (EACCES)
+  cause  the rootfs has no such directory and is not writable by this user, so
+         it cannot be made; a read-only rootfs needs /tmp and /run before it is
+         made read-only
+  name   web-1
+  rootfs /srv/alpine
+  step   make_tmp_dir (37 of 53)
+  fix    make them as the rootfs's owner:   mkdir -p "/srv/alpine/tmp" "/srv/alpine/run"
+         or unpack the rootfs as the user who runs zbx
+  more   zbx explain E0209
+  docs   https://zigbox.github.io/zigbox/errors/E0209.html

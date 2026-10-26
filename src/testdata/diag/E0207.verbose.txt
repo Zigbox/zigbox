@@ -1,0 +1,14 @@
+error[ZBX-E0207]: can't restrict the container's capabilities
+  while  starting container web-1
+  cause  dropping the capabilities the container does not keep failed: operation
+         not permitted (EPERM)
+  cause  the container's root should hold these capabilities in its own user
+         namespace; a security module or an old kernel is the usual reason they
+         cannot be changed
+  name   web-1
+  rootfs /srv/alpine
+  step   restrict_capabilities (42 of 48)
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0207
+  docs   https://zigbox.github.io/zigbox/errors/E0207.html

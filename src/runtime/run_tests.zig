@@ -246,7 +246,9 @@ test "when /dev/pts is refused the run goes on, the step is skipped and noted" {
     const args = [_][:0]const u8{ "zbx", "-v", "run", "--rootfs", rootfs, "--", "/bin/sh" };
     try testing.expectEqual(@as(u8, 0), run(&sim, &args));
     const note = "zbx: note: skipped mounting devpts on /dev/pts: refused by the kernel (EPERM)\n";
-    try testing.expectEqualStrings(note, sim.stderr());
+    // The scope's cleanup note follows (the model's manager lets go of a scope a moment late).
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), note));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr()[note.len..], "went by itself") != null);
     try no_leak(&sim, &before);
     try testing.expect(sim_run.started(&sim, .{ .name = "x", .devpts = false }) != null); // Name.
     const child = &sim.world.processes[1];
@@ -268,6 +270,9 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
         .start_scope => .E0301, // The first call is the connect to the bus.
         .exec => .E0202,
         .mount_pts => null,
+        .restrict_capabilities, .clear_ambient => .E0207,
+        .set_no_new_privs, .install_seccomp => .E0208,
+        .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => .E0209,
         else => .E0205,
     };
 }
@@ -279,18 +284,28 @@ test "a failure injected into every step is a diagnostic naming that step, and c
     // the rest; the devpts mount alone is skipped), the verbose output names the step, the exit
     // code is 125 (126 for the command), and nothing leaked: the child is reaped, no descriptor
     // is open and the host's mounts and hostname are as they were.
+    try walk_steps(false);
+    try walk_steps(true);
+}
+
+/// The walk over the steps of a plan, with and without `--read-only`.
+fn walk_steps(read_only: bool) !void {
     var plan: plan_mod.Plan = undefined;
-    sim_run.sample_plan(&plan, true);
+    sim_run.sample_plan_ro(&plan, true, true, read_only);
     for (plan.steps[0..plan.count], 0..) |step, index| {
         var sim: HostSim = undefined;
         sim_run.init(&sim, 7);
         const before = sim_run.baseline(&sim);
         sim.faults.fail_step = @intCast(index);
         sim.faults.fail_step_errno = 1;
-        const args = [_][:0]const u8{
+        const plain = [_][:0]const u8{
             "zbx", "-v", "run", "--rootfs", rootfs, "--name", "walk", "--", "/bin/sh",
         };
-        const code = run(&sim, &args);
+        const limited = [_][:0]const u8{
+            "zbx",  "-v",          "run", "--rootfs", rootfs, "--name",
+            "walk", "--read-only", "--",  "/bin/sh",
+        };
+        const code = run(&sim, if (read_only) &limited else &plain);
         try testing.expect(sim.step_fault_fired); // The step really made a fallible call.
         try no_leak(&sim, &before);
         if (expected_code(step.kind)) |expected| {
@@ -568,7 +583,8 @@ test "the library: start, inspect, signal and wait, with a warning handed over a
     try testing.expectEqual(@as(?codes.Code, .W0201), collector.code);
     try testing.expectEqualStrings("lib-1", handle.name_slice());
     const reason = lib.wait(&handle);
-    try testing.expectEqual(lib.Status.stopped, lib.inspect(&handle));
+    // The contract's Status carries the reason: the same one `wait` returned.
+    try testing.expectEqual(@as(u8, 2), lib.inspect(&handle).stopped.signaled);
     try testing.expectEqual(@as(u8, 2), reason.signaled);
     try testing.expectEqual(@as(?u8, 130), reason.code());
     try testing.expectEqual(@as(u32, 1), collector.count);
@@ -645,7 +661,7 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
     try testing.expectEqual(@as(u8, 42), run(&sim, &args));
     var parsed: records.Parsed = undefined;
     try records.parse(record_text(&sim, "rec-1").?, &parsed);
-    try testing.expectEqual(@as(u32, 1), parsed.version);
+    try testing.expectEqual(@as(u32, 3), parsed.version);
     try testing.expectEqual(@as(u64, 1_760_000_100), parsed.started);
     try testing.expectEqual(@as(?u64, 1_760_000_100), parsed.ended);
     try testing.expectEqual(records.Exit{ .exited = 42 }, parsed.exit);

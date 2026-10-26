@@ -169,7 +169,7 @@ pub const sim_processes_max: u32 = 3;
 pub const sim_pipe_ends_max: u32 = 8;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
-pub const sim_written_files_max: u32 = 56;
+pub const sim_written_files_max: u32 = 72;
 pub const sim_written_bytes_max: u32 = 16 * 1024;
 
 // Doctor policy, used from slice 2 on and kept here so every limit has one home.
@@ -203,6 +203,11 @@ pub const exec_strings_bytes_max: u32 = 32 * 1024;
 pub const term_bytes_max: u32 = 64;
 /// Environment variables the container gets: PATH, HOME, HOSTNAME and (if set) TERM.
 pub const environment_count_max: u32 = 4;
+/// Variables a caller may add (`Spec.env`), each with a bounded name and value. They count
+/// against `exec_strings_bytes_max` with the command.
+pub const env_vars_count_max: u32 = 32;
+pub const env_name_bytes_max: u32 = 64;
+pub const env_value_bytes_max: u32 = 4096;
 /// The container's PATH, in the order a shell searches it. Counted for the exec candidates.
 pub const container_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub const container_path_dirs_count: u32 = 6;
@@ -211,7 +216,20 @@ pub const container_devices_count: u32 = 6;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 64;
+pub const plan_steps_max: u32 = 80;
+
+/// The size of the tmpfs mounts of a read-only rootfs (`/tmp` and `/run`): memory the container
+/// may use for scratch files, in addition to any memory limit it has.
+/// The longest a single wait may be given, and a single sleep: a bound on a stuck caller.
+pub const wait_timeout_ms_max: u32 = 24 * 60 * 60 * 1000;
+pub const sleep_ms_max: u32 = 60 * 1000;
+
+/// How many scopes without a record `list` adds beyond the records, and the longest a caller
+/// should let pass between two `poll`s of a watcher.
+pub const scopes_listed_max: u32 = 16;
+pub const events_poll_ms_max: u32 = 1000;
+
+pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
 pub const plan_paths_bytes_max: u32 = 64 * 1024;
 /// One id map line, "0 4294967295 1\n", with room to spare.
@@ -232,6 +250,10 @@ pub const child_exit_setup_failed: u8 = 125;
 pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
+pub const signal_term: u8 = 15;
+
+/// How long a stop waits between SIGTERM and SIGKILL when nobody says.
+pub const stop_grace_ms_default: u32 = 10_000;
 /// A signal number is below this on every Linux architecture.
 pub const signal_number_max: u8 = 64;
 /// Added to a signal number to make the exit code of a container killed by it.
@@ -311,7 +333,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 1;
+pub const record_version: u32 = 3;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 32 * 1024;
 pub const record_command_bytes_max: u32 = 2048;
@@ -343,9 +365,9 @@ pub const write_bytes_max: u32 = 256 * 1024;
 pub const bundle_files_max: u32 = 12;
 /// The bundle's static workspace: staged files, the compressor's window and tables, its mask.
 pub const facts_bytes_max: u32 = 256 * 1024;
-pub const bundle_workspace_bytes_max: u32 = 768 * 1024;
+pub const bundle_workspace_bytes_max: u32 = 1024 * 1024;
 /// The run `Handle` of a foreground run, kept off the stack too.
-pub const handle_bytes_max: u32 = 160 * 1024;
+pub const handle_bytes_max: u32 = 480 * 1024;
 /// The environment variables listed in a bundle, and those whose values are scrubbed elsewhere.
 pub const environment_entries_max: u32 = 256;
 pub const bundle_secrets_max: u32 = 32;
