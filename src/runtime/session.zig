@@ -406,7 +406,8 @@ pub const Session = struct {
                         deadline = host.monotonic_ms() + options.grace_ms;
                     },
                     .terminated => {
-                        session.forward(constants.signal_term, true); // Forced: SIGKILL.
+                        // The grace is up: a real SIGKILL, reported as one.
+                        host.signal(session.pid.?, constants.signal_kill) catch {};
                         stage = .killed;
                     },
                     .killed => unreachable, // A wait with no time cannot time out.

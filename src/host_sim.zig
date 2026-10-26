@@ -204,6 +204,7 @@ pub const HostSim = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .own_pid = own_pid,
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
@@ -773,6 +774,11 @@ pub const HostSim = struct {
             .event => |event| return event,
             .errno => |errno| return sim.model_error(errno),
         }
+    }
+
+    fn own_pid(context: *anyopaque) host.Pid {
+        const world = &from_context(context).world;
+        return world.processes[world.current].pid;
     }
 
     fn sleep_ms(context: *anyopaque, ms: u32) void {

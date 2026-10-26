@@ -145,6 +145,8 @@ pub const StartOptions = struct {
     warn: ?Warn = null,
     /// Total wall time for the run in milliseconds, then SIGTERM; zero is no limit.
     timeout_ms: u32 = 0,
+    /// The run is a detached one: the record says so (`zbx run -d` supervises it).
+    detached: bool = false,
     /// After SIGTERM, how long before SIGKILL (for the timeout and for `stop`'s default).
     grace_ms: u32 = constants.stop_grace_ms_default,
 };
@@ -171,6 +173,9 @@ pub const Handle = struct {
     record_dir: ?records.Dir,
     warn: ?Warn,
     wait_options: Session.WaitOptions,
+    detached: bool,
+    /// The container's PID 1 as the host sees it, once it is running; zero before.
+    pid: u32,
     record_warned: bool,
     /// Steps that were allowed to fail and did (the devpts mount), as sentences.
     notes: [constants.sync_records_max + 2]Note,
@@ -233,6 +238,8 @@ pub fn start(
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
+    handle.detached = options.detached;
+    handle.pid = 0;
     handle.wait_options = .{ .timeout_ms = options.timeout_ms, .grace_ms = options.grace_ms };
     handle.record_warned = false;
     handle.notes_count = 0;
@@ -285,6 +292,9 @@ pub fn start(
     collect_notes(handle);
     handle.status = .running;
     assert(handle.session.pid != null);
+    handle.pid = handle.session.container_pid;
+    // Again, now that the container's pid is known: this is what a later process finds it by.
+    save_record(handle, .running, null, null);
 }
 
 /// Waits for the container to end, forwarding the signals this process receives. Call it once.
@@ -594,6 +604,9 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .reason = handle.end_reason,
         .limits = handle.limits,
         .scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "",
+        .detached = handle.detached,
+        .pid = handle.pid,
+        .supervisor = handle.host.own_pid(),
         .zbx_version = build_options.version,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };

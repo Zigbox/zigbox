@@ -656,8 +656,9 @@ pub const World = struct {
         world.step = previous_step;
         assert(child.state == .running);
         child.holds = @splat(false);
-        if (child.execd and world.script_len > 0) {
-            child.state = .command; // Still running: the scripted signals decide how it ends.
+        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0)) {
+            // Still running: the scripted signals and the clock decide how it ends.
+            child.state = .command;
             return;
         }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
@@ -678,11 +679,13 @@ pub const World = struct {
                 if (number == constants.signal_kill) {
                     process.exit = .{ .signaled = number };
                     process.state = .zombie;
+                    world.process_died(process.pid);
                 }
                 const handled = host.SignalState.has(world.command_caught, number);
                 if (number == constants.signal_term and handled and world.term_exits) {
                     process.exit = .{ .exited = world.term_exit_code };
                     process.state = .zombie;
+                    world.process_died(process.pid);
                 }
             },
             .pending => {
@@ -870,6 +873,21 @@ pub const World = struct {
         assert(process.state == .command);
         process.exit = world.command_exit;
         process.state = .zombie;
+        world.process_died(process.pid);
+    }
+
+    /// The kernel counts a zombie out of its cgroup: the scope is no longer populated.
+    fn process_died(world: *World, pid: u32) void {
+        for (&world.bus.scopes) |*scope| {
+            if (!scope.active or scope.pid != pid) continue;
+            var relative: [constants.cgroup_path_bytes_max]u8 = undefined;
+            const path = scope_cgroup_path(&relative, scope);
+            var file: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
+            // Cannot fail: a bounded path and a short name.
+            const where = std.fmt.bufPrint(&file, "/sys/fs/cgroup{s}/cgroup.events", .{path}) catch
+                unreachable; // Same bound as above.
+            if (world.find_written(where) != null) world.put_raw(where, "populated 0\nfrozen 0\n");
+        }
     }
 
     /// Waits for the child to end or for a scripted signal to arrive.

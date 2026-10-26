@@ -5,7 +5,8 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 2 added the limits, the scope's name, why the run ended
+//! skipped, never misread. Version 3 added the host pid of the container's PID 1 and of the
+//! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the scope's name, why the run ended
 //! (`EndReason`) and whether it was detached; a version 1 record reads with no limits, no scope,
 //! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may
 //! add some. The file is
@@ -75,6 +76,10 @@ pub const View = struct {
     /// The cgroup scope's name, or empty if the run had none.
     scope: []const u8 = "",
     detached: bool = false,
+    /// The host's pid of the container's PID 1, and of the process that waits for it (the
+    /// `zbx` that started the run, or the supervisor of a detached one); zero if unknown.
+    pid: u32 = 0,
+    supervisor: u32 = 0,
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -161,6 +166,8 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
     write_bytes(writer, "    .scope = ");
     write_string(writer, view.scope);
     write_bytes(writer, ",\n");
+    write_format(writer, "    .pid = {d},\n", .{view.pid});
+    write_format(writer, "    .supervisor = {d},\n", .{view.supervisor});
     write_limit(writer, "limit_memory", view.limits.memory_bytes);
     write_limit(writer, "limit_pids", view.limits.pids);
     write_limit(writer, "limit_cpu_millis", view.limits.cpu_millis);
@@ -262,6 +269,40 @@ pub const Parsed = struct {
     scope: [constants.scope_name_bytes_max]u8,
     scope_len: u8,
     limits: spec_mod.Limits,
+    /// Version 3: the host pids (zero for an older record).
+    pid: u32,
+    supervisor: u32,
+    /// The command's words, each followed by a NUL; `command_truncated` says the record cut it.
+    command: [constants.record_command_bytes_max + constants.command_words_count_max]u8,
+    command_len: u16,
+    command_words: u8,
+    /// The labels, key then value, each followed by a NUL.
+    labels: [constants.labels_count_max * (constants.label_key_bytes_max + constants.label_value_bytes_max + 2)]u8,
+    labels_len: u16,
+    labels_count: u8,
+
+    /// The `index`th word of the command.
+    pub fn command_word(parsed: *const Parsed, index: u32) []const u8 {
+        assert(index < parsed.command_words);
+        var words = std.mem.splitScalar(u8, parsed.command[0..parsed.command_len], 0);
+        var at: u32 = 0;
+        while (words.next()) |word| : (at += 1) {
+            if (at == index) return word;
+        }
+        unreachable; // The count says it is there.
+    }
+
+    /// The `index`th label's key and value.
+    pub fn label(parsed: *const Parsed, index: u32) [2][]const u8 {
+        assert(index < parsed.labels_count);
+        var parts = std.mem.splitScalar(u8, parsed.labels[0..parsed.labels_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |key| : (at += 1) {
+            const value = parts.next().?; // Written in pairs.
+            if (at == index) return .{ key, value };
+        }
+        unreachable; // The count says it is there.
+    }
 
     pub fn scope_slice(parsed: *const Parsed) []const u8 {
         return parsed.scope[0..parsed.scope_len];
@@ -368,6 +409,12 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.detached = false;
     out.scope_len = 0;
     out.limits = .{};
+    out.pid = 0;
+    out.supervisor = 0;
+    out.command_len = 0;
+    out.command_words = 0;
+    out.labels_len = 0;
+    out.labels_count = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -453,6 +500,16 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         out.scope_len = @intCast(length);
         return true;
     }
+    if (std.mem.eql(u8, key, "pid")) {
+        out.pid = std.fmt.parseInt(u32, value, 10) catch return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "supervisor")) {
+        out.supervisor = std.fmt.parseInt(u32, value, 10) catch return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
+    if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
         out.limits.memory_bytes = parse_limit(u64, value) orelse return false;
         return true;
@@ -466,6 +523,58 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         return true;
     }
     return null;
+}
+
+/// The next string literal of `text` from `at`: its slice including the quotes, and where to go
+/// on. Null when there is none. A backslash escapes the next byte (the writer's only escapes).
+fn next_literal(text: []const u8, at: usize) ?struct { literal: []const u8, next: usize } {
+    assert(at <= text.len);
+    const open = std.mem.indexOfScalarPos(u8, text, at, '"') orelse return null;
+    var end = open + 1;
+    while (end < text.len) : (end += 1) {
+        if (text[end] == '\\') {
+            end += 1;
+            continue;
+        }
+        if (text[end] == '"') return .{ .literal = text[open .. end + 1], .next = end + 1 };
+    }
+    return null;
+}
+
+/// `.{ "word", "word" }`: the words of the command, kept NUL-separated (cut at the room).
+fn parse_command(value: []const u8, out: *Parsed) bool {
+    assert(out.command_len == 0);
+    var at: usize = 0;
+    while (next_literal(value, at)) |found| : (at = found.next) {
+        const room = out.command[out.command_len..];
+        if (room.len < 2) break;
+        const length = parse_string(found.literal, room[0 .. room.len - 1]) orelse return false;
+        room[length] = 0;
+        out.command_len += @intCast(length + 1);
+        out.command_words += 1;
+        if (out.command_words == constants.command_words_count_max) break;
+    }
+    return true;
+}
+
+/// `.{ .{ "key", "value" }, ... }`: the labels as key and value, NUL-separated.
+fn parse_labels(value: []const u8, out: *Parsed) bool {
+    assert(out.labels_len == 0);
+    var at: usize = 0;
+    while (next_literal(value, at)) |key| {
+        const second = next_literal(value, key.next) orelse return false;
+        at = second.next;
+        if (out.labels_count == constants.labels_count_max) return false;
+        for ([_][]const u8{ key.literal, second.literal }) |literal| {
+            const room = out.labels[out.labels_len..];
+            if (room.len < 2) return false;
+            const length = parse_string(literal, room[0 .. room.len - 1]) orelse return false;
+            room[length] = 0;
+            out.labels_len += @intCast(length + 1);
+        }
+        out.labels_count += 1;
+    }
+    return true;
 }
 
 /// `null` is no limit; a number is the limit. Anything else is not a limit at all, which the
@@ -737,6 +846,35 @@ fn remove_record(host: Host, dir: *const Dir, file_name: []const u8) host_mod.Er
     try host.remove_file(text);
 }
 
+pub const LoadError = error{ NotFound, Unreadable, Damaged, Newer };
+
+/// Reads the record of the run called `name` into `out`.
+pub fn load(host: Host, dir: *const Dir, name: []const u8, out: *Parsed) LoadError!void {
+    assert(name.len > 0);
+    var path_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
+    const path = record_path(dir, name, &path_storage);
+    var bytes: [constants.record_bytes_max]u8 = undefined;
+    const content = host.read_file(path, &bytes) catch |err| {
+        return if (err == error.NotFound) error.NotFound else error.Unreadable;
+    };
+    parse(content, out) catch |err| return if (err == error.Newer) error.Newer else error.Damaged;
+    assert(std.mem.eql(u8, out.name_slice(), name));
+}
+
+/// The names of the records in the directory, in no order. The listing is the caller's.
+pub fn names(host: Host, dir: *const Dir, listing: *host_mod.DirListing) host_mod.Error!void {
+    try host.list_directory(dir.text(), listing);
+    assert(listing.count <= constants.dir_entries_max);
+}
+
+/// The run name in a listed file name ("web-1.zon" is "web-1"), or null if it is not a record's.
+pub fn name_of(file_name: []const u8) ?[]const u8 {
+    if (!is_record_name(file_name)) return null;
+    const stem = file_name[0 .. file_name.len - constants.record_suffix.len];
+    if (stem.len > constants.container_name_bytes_max) return null;
+    return stem;
+}
+
 /// The start time of the record in `file_name`, or 0 if it cannot be used (and noted).
 fn started_of(host: Host, dir: *const Dir, file_name: []const u8, skipped: *Skipped) u64 {
     var path_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
@@ -790,11 +928,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 2,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 3,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(@as(u32, 2), parsed.version);
+        try testing.expectEqual(@as(u32, 3), parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -827,7 +965,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try testing.expect(parsed.ids == null);
     const head = ".{\n    .version = 1,\n    .name = \"x\",\n    .started = 5,\n";
     try parse(head ++ "    .future = .{ 1, 2 },\n}\n", &parsed);
-    const newer = ".{\n    .version = 3,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 4,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",

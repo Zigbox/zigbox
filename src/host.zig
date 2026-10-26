@@ -381,6 +381,8 @@ pub const VTable = struct {
     /// Waits for the child to end or for a forwarded signal; the signals must be blocked. With a
     /// `timeout_ms` above zero it also ends, with `.timeout`, when that long has passed.
     wait_event: *const fn (context: *anyopaque, pid: Pid, timeout_ms: u32) Error!Event,
+    /// This process's id.
+    own_pid: *const fn (context: *anyopaque) Pid,
     /// Sleeps at least `ms` milliseconds (the library's polls and graces use it).
     sleep_ms: *const fn (context: *anyopaque, ms: u32) void,
     /// A clock that only goes forward, in milliseconds, for measuring waits.
@@ -888,6 +890,12 @@ pub const Host = struct {
         const state = try host.vtable.signal_state(host.context, pid);
         assert(host.vtable.last_errno(host.context) == 0);
         return state;
+    }
+
+    pub fn own_pid(host: Host) Pid {
+        const pid = host.vtable.own_pid(host.context);
+        assert(pid > 0);
+        return pid;
     }
 
     pub fn sleep_ms(host: Host, ms: u32) void {

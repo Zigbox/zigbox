@@ -146,7 +146,7 @@ fn check_damaged(random: std.Random, text: []const u8) void {
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = "    .version = 2,\n";
+    const marker = "    .version = 3,\n";
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

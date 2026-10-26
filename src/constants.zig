@@ -196,6 +196,11 @@ pub const plan_steps_max: u32 = 80;
 pub const wait_timeout_ms_max: u32 = 24 * 60 * 60 * 1000;
 pub const sleep_ms_max: u32 = 60 * 1000;
 
+/// How many scopes without a record `list` adds beyond the records, and the longest a caller
+/// should let pass between two `poll`s of a watcher.
+pub const scopes_listed_max: u32 = 16;
+pub const events_poll_ms_max: u32 = 1000;
+
 pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
 pub const plan_paths_bytes_max: u32 = 64 * 1024;
@@ -300,7 +305,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 2;
+pub const record_version: u32 = 3;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 32 * 1024;
 pub const record_command_bytes_max: u32 = 2048;

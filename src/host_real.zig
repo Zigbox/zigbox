@@ -103,6 +103,7 @@ pub const HostReal = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .own_pid = own_pid,
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
@@ -656,6 +657,11 @@ pub const HostReal = struct {
             return .{ .exited = try decode_status(status) };
         }
         return error.Stalled;
+    }
+
+    fn own_pid(context: *anyopaque) host.Pid {
+        _ = from_context(context);
+        return @intCast(linux.getpid());
     }
 
     fn sleep_ms(context: *anyopaque, ms: u32) void {
