@@ -6,7 +6,7 @@ Read `AGENTS.md`, `docs/STYLE.md`, `DIAGNOSTICS.md`, the M2 section and the "Pro
 
 A misbehaving container cannot take down the host or regain privilege.
 
-1. `zbx run --rootfs ./alpine --pids 64 -- sh -c ':(){ :|:& };:'`: the fork bomb stalls, the host stays responsive, and `zbx` exits reporting the PID limit.
+1. `zbx run --rootfs ./alpine --pids 64 -- sh -c 'b(){ b|b& }; b; wait'`: the fork bomb stalls, the host stays responsive, and `zbx` exits reporting the PID limit. (Spec rev 48 changed this from `:(){ :|:& };:`, which Alpine's `sh` rejects and which lets PID 1 exit before the limit is hit.)
 2. `zbx run --rootfs ./alpine --memory 128m -- stress-ng --vm 1 --vm-bytes 512m`: output ends with `killed: out of memory (limit 128 MiB)`.
 3. `zbx run --rootfs ./alpine -- mount -t tmpfs none /mnt` fails with `operation not permitted`.
 4. `zbx run --rootfs ./alpine --read-only -- touch /x` fails; `touch /tmp/x` succeeds (tmpfs).

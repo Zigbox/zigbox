@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 47; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-24 (doc rev 48; doc date 2026-10-23), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -92,7 +92,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Demo script:**
 
-1. `zbx run --rootfs ./alpine --pids 64 -- sh -c ':(){ :|:& };:'`. The fork bomb stalls; the host stays responsive; `zbx` exits reporting the PID limit.
+1. `zbx run --rootfs ./alpine --pids 64 -- sh -c 'b(){ b|b& }; b; wait'`. The fork bomb stalls; the host stays responsive; `zbx` exits reporting the PID limit. (The classic `:(){ :|:& };:` cannot be used: Alpine's `sh` rejects `:` as a function name, and it returns at once, so PID 1 exits before the limit is reached; `wait` keeps PID 1 alive.)
 2. `zbx run --rootfs ./alpine --memory 128m -- stress-ng --vm 1 --vm-bytes 512m`. Output ends with `killed: out of memory (limit 128 MiB)`.
 3. `zbx run --rootfs ./alpine -- mount -t tmpfs none /mnt` fails with `operation not permitted`.
 4. `zbx run --rootfs ./alpine --read-only -- touch /x` fails; `touch /tmp/x` succeeds (tmpfs).
