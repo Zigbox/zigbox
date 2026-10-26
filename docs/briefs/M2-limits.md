@@ -130,6 +130,8 @@ Hardening failures (`capset`, `prctl`, `seccomp`, the remount) are `E02xx`, each
 
 - **Seccomp allowlist.** It follows Docker's default profile but has only been exercised with Alpine's busybox. Before M4 runs real images (Debian-based `python`, `postgres`), test a glibc rootfs, and grow the allowlist from what fails. A missing syscall shows up as `EPERM`, not a crash, so it can look like an application bug; the failure-modes section of `docs/demos/m2.md` should say so.
 - **The `mount` refusal message.** Busybox prints "permission denied (are you root?)" for the kernel's `EPERM`, and glibc's `mount` prints "Operation not permitted". Demo assertions match the exit status and either text.
+- **No `/sys` in the container.** M1 and M2 mount `/proc` and `/dev` but not `/sys`; stress-ng in the M2 demo prints `no CPUs found in /sys/devices/system/cpu`. Real images (M4) expect at least a read-only `/sys`. A rootless sysfs mount needs the container to own a network namespace, so decide this with networking.
+- **Thread-local storage costs 256 KiB per thread.** std's default `signal_stack_size` gives every thread a `threadlocal` alternate signal stack, on top of its own stack (see `docs/demos/m2.md`). Zigcube's agent thread pool pays it per thread.
 
 ## Done means
 
