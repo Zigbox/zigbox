@@ -55,6 +55,7 @@ pub fn run_schema(host: Host, topic: []const u8, diag: *Diag) Error!void {
 
 /// `prefix` and a number; the caller's buffer is at least 32 bytes.
 fn number_words(buffer: []u8, prefix: []const u8, number: u32) []const u8 {
+    assert(prefix.len > 0);
     assert(buffer.len >= 32);
     assert(prefix.len <= 8);
     // Cannot fail: a prefix of at most eight bytes and ten digits fit 32 bytes.

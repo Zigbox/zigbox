@@ -1036,6 +1036,9 @@ fn run_detached(
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
+    assert(container.command.len > 0);
+    assert(invocation.run.detach);
+    assert(times.grace_ms <= constants.wait_timeout_ms_max);
     const pipe = host.pipe() catch |err| return supervisor_failed(host, diag, err);
     // A write to a caller that has gone is an error to ignore, not a signal that kills us.
     host.ignore_broken_pipe(true);

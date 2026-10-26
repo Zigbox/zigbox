@@ -224,6 +224,7 @@ fn has_scope(entries: []const Entry, scope: []const u8) bool {
 }
 
 fn orphan(entry: *Entry, stem: []const u8, scope: []const u8) void {
+    assert(stem.len <= constants.container_name_bytes_max);
     assert(stem.len > 0);
     assert(scope.len <= constants.scope_name_bytes_max);
     entry.state = .running;
@@ -470,6 +471,7 @@ pub const Watcher = struct {
 
     pub fn init(watcher: *Watcher) void {
         assert(watcher.seen.len > 0);
+        assert(constants.runs_max > 0);
         watcher.count = 0;
     }
 
