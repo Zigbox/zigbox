@@ -79,6 +79,8 @@ jobs:
           - redact
           - dbus
           - seccomp
+          - tree
+          - store
           - parse_sysctl
           - parse_kernel
           - parse_controllers
