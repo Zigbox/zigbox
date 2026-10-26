@@ -14,6 +14,7 @@ const doctor = @import("doctor.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const parse_fuzz = @import("fuzz_parse.zig");
 const diag_fuzz = @import("fuzz_diag.zig");
+const diagnostic_fuzz = @import("fuzz_diagnostic.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
@@ -38,6 +39,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "text", .run_iteration = fuzz_text },
     .{ .name = "doctor", .run_iteration = fuzz_doctor },
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
+    .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
