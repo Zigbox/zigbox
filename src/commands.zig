@@ -76,7 +76,7 @@ fn state_words(entry: *const lifecycle.Entry, buffer: []u8) []const u8 {
     return switch (record.reason) {
         .oom => "oom",
         .pid_limit => "pid_limit",
-        else => switch (record.exit) {
+        else => if (record.timed_out) "timed_out" else switch (record.exit) {
             .exited => |code| number_words(buffer, "exited:", code),
             .signaled => |number| number_words(buffer, "signal:", number),
             .start_failed => "start_failed",
@@ -210,8 +210,9 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
     } else {
         try json_string(writer, record.scope_slice());
     }
-    try writer.print(",\"detached\":{s},\"started\":{d},\"ended\":", .{
+    try writer.print(",\"detached\":{s},\"timed_out\":{s},\"started\":{d},\"ended\":", .{
         if (record.detached) "true" else "false",
+        if (record.timed_out) "true" else "false",
         record.started,
     });
     try optional_number(writer, record.ended);

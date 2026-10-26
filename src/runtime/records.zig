@@ -79,6 +79,9 @@ pub const View = struct {
     /// The cgroup scope's name, or empty if the run had none.
     scope: []const u8 = "",
     detached: bool = false,
+    /// The run was stopped because its time (`--timeout`) was up; `exit` and `reason` still say
+    /// how it ended (the signal that did it).
+    timed_out: bool = false,
     /// The host's pid of the container's PID 1, and of the process that waits for it (the
     /// `zbx` that started the run, or the supervisor of a detached one); zero if unknown.
     pid: u32 = 0,
@@ -166,6 +169,7 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
     const reason = if (view.reason == .none) reason_of(view.exit) else view.reason;
     write_format(writer, "    .reason = .{s},\n", .{@tagName(reason)});
     write_format(writer, "    .detached = {s},\n", .{if (view.detached) "true" else "false"});
+    write_format(writer, "    .timed_out = {s},\n", .{if (view.timed_out) "true" else "false"});
     write_bytes(writer, "    .scope = ");
     write_string(writer, view.scope);
     write_bytes(writer, ",\n");
@@ -270,6 +274,8 @@ pub const Parsed = struct {
     /// Version 2: why it ended (derived from `exit` for an older record).
     reason: EndReason,
     detached: bool,
+    /// Version 3: the run was stopped for its time.
+    timed_out: bool,
     scope: [constants.scope_name_bytes_max]u8,
     scope_len: u8,
     limits: spec_mod.Limits,
@@ -418,6 +424,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.diagnostic_len = 0;
     out.reason = .none;
     out.detached = false;
+    out.timed_out = false;
     out.scope_len = 0;
     out.limits = .{};
     out.pid = 0;
@@ -507,6 +514,12 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         const yes = std.mem.eql(u8, value, "true");
         if (!yes and !std.mem.eql(u8, value, "false")) return false;
         out.detached = yes;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "timed_out")) {
+        const yes = std.mem.eql(u8, value, "true");
+        if (!yes and !std.mem.eql(u8, value, "false")) return false;
+        out.timed_out = yes;
         return true;
     }
     if (std.mem.eql(u8, key, "scope")) {

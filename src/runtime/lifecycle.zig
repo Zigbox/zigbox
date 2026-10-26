@@ -54,6 +54,17 @@ pub const Entry = struct {
     has_record: bool,
     record: records.Parsed,
 
+    /// The state as the contract's `Status`: `lost` is the `ExitReason` `.lost`, and a stopped
+    /// container's reason is read from its record. (Kept as a method, not a field: an
+    /// `ExitReason` can hold a `Diag`, 5.6 KiB, and `ps` lists dozens.)
+    pub fn status(entry: *const Entry) run.Status {
+        return switch (entry.state) {
+            .running => .running,
+            .lost => .{ .stopped = .lost },
+            .stopped => .{ .stopped = exit_reason_of(&entry.record) },
+        };
+    }
+
     pub fn name(entry: *const Entry) []const u8 {
         return entry.record.name_slice();
     }
@@ -241,6 +252,7 @@ fn orphan(entry: *Entry, stem: []const u8, scope: []const u8) void {
     record.diagnostic_len = 0;
     record.reason = .none;
     record.detached = false;
+    record.timed_out = false;
     @memcpy(record.scope[0..scope.len], scope);
     record.scope_len = @intCast(scope.len);
     record.limits = .{};

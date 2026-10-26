@@ -583,7 +583,8 @@ test "the library: start, inspect, signal and wait, with a warning handed over a
     try testing.expectEqual(@as(?codes.Code, .W0201), collector.code);
     try testing.expectEqualStrings("lib-1", handle.name_slice());
     const reason = lib.wait(&handle);
-    try testing.expectEqual(lib.Status.stopped, lib.inspect(&handle));
+    // The contract's Status carries the reason: the same one `wait` returned.
+    try testing.expectEqual(@as(u8, 2), lib.inspect(&handle).stopped.signaled);
     try testing.expectEqual(@as(u8, 2), reason.signaled);
     try testing.expectEqual(@as(?u8, 130), reason.code());
     try testing.expectEqual(@as(u32, 1), collector.count);

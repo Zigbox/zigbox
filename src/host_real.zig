@@ -48,10 +48,16 @@ fn monotonic_now_ms() u64 {
 /// several threads (each caller's host reads the errno of its own last call); a forked child has
 /// its own copy.
 //
-// The alignment is not decoration. A static binary without libc sets up its own thread-local
-// area at startup (`std.os.linux.tls`), and with a TLS segment aligned to 2 bytes it lays out the
-// thread control block at a misaligned offset and panics (`incorrectAlignment`) before `main`,
-// in ReleaseSafe only. 16 makes the segment's alignment that of the block it holds.
+// The alignment is a workaround for a std defect, not decoration. The binary's TLS segment is
+// already 256 KiB: std's default `signal_stack_size` (1 << 18) is a `threadlocal` alternate
+// signal stack that `std.Thread.maybeAttachSignalStack` installs for every thread. A static
+// binary without libc lays out its own thread area at startup (`std.os.linux.tls.initStatic`),
+// and with this two-byte variable added to the segment it put the thread control block at a
+// misaligned offset and panicked (`incorrectAlignment`) before `main`, in ReleaseSafe only. That
+// is a defect in `std.os.linux.tls`: minimal programs with a `u16` threadlocal do not reproduce
+// it, so it depends on the layout of the whole segment. `align(16)` made the layout work here.
+// The guard is the `zig build release` smoke run, which starts the binary: a later change to
+// the thread-locals, or a new Zig, can break this again and only that run would show it.
 threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {

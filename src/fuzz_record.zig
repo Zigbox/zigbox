@@ -107,6 +107,7 @@ fn check_round_trip(random: std.Random) void {
         },
         .scope = if (random.boolean()) "zbx-web-1.scope" else "",
         .detached = random.boolean(),
+        .timed_out = random.boolean(),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -124,6 +125,7 @@ fn check_round_trip(random: std.Random) void {
     assert(std.meta.eql(parsed.limits, view.limits));
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
+    assert(parsed.timed_out == view.timed_out);
     check_damaged(random, text);
 }
 

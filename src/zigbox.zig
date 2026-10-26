@@ -11,7 +11,7 @@
 //!   - `wait(handle)`: how it ended, as an `ExitReason`. `StartOptions.timeout_ms` ends a run
 //!     that lasts too long (SIGTERM, then SIGKILL after `grace_ms`); `timed_out(handle)` says so.
 //!   - `signal(handle, number)`: sends it a signal, with the forwarding rule of PID 1.
-//!   - `inspect(handle)`: a `Status`.
+//!   - `inspect(handle)`: a `Status`, `stopped` carrying the `ExitReason`.
 //!   - `lifecycle.stop(ref, grace_ms, kill_wait_ms)`: SIGTERM, then SIGKILL; `list`, `adopt` (a
 //!     `Ref` to a container by name, from the record and the kernel, in any process), and
 //!     `Watcher.poll` for the changes. See `runtime/lifecycle.zig` for how "alive" is decided
@@ -28,7 +28,7 @@
 //! Nothing here prints. Warnings go to the `Warn` in `StartOptions` as they happen.
 //!
 //! Where the contract as written cannot be met as is, docs/demos/m2.md says so (the shape of
-//! `Spec` and `Status`, the poll-based event stream, `list` returning `Entry`).
+//! `Spec`, the poll-based event stream, `list` returning `Entry`).
 
 const std = @import("std");
 

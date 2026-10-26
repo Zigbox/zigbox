@@ -53,11 +53,13 @@ const ps_schema =
     \\"type":"object","required":["schema","containers"],
     \\"properties":{"schema":{"const":"zbx.ps/1"},
     \\"containers":{"type":"array","items":{"type":"object",
-    \\"required":["name","state","pid","started","command","labels","limits"],"properties":{
+    \\"required":["name","state","pid","started","timed_out","command","labels","limits"],
+    \\"properties":{
     \\"name":{"type":"string"},"state":{"enum":["running","stopped","lost"]},
     \\"pid":{"type":"integer"},
     \\"supervisor":{"type":"integer"},"scope":{"type":["string","null"]},
     \\"detached":{"type":"boolean"},
+    \\"timed_out":{"type":"boolean","description":"stopped because --timeout was up"},
     \\"started":{"type":"integer",
     \\"description":"seconds since the epoch; 0 for a scope without a record"},
     \\"ended":{"type":["integer","null"]},

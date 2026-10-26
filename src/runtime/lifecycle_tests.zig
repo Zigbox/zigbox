@@ -82,6 +82,10 @@ test "a container is found again by name and stopped by a process that did not s
     // The supervisor's side: it reaps the container and finishes the record.
     const reason = run.wait(&handle);
     try testing.expectEqual(@as(u8, 137), reason.code().?);
+    // A record's Status is the contract's: stopped, with the reason `wait` gave.
+    try testing.expectEqual(@as(u32, 1), try lifecycle.list(sim.interface(), &entries));
+    try testing.expectEqual(@as(u8, 9), entries[0].status().stopped.signaled);
+    try testing.expectEqual(@as(u8, 9), run.inspect(&handle).stopped.signaled);
     var again: lifecycle.State = undefined;
     try lifecycle.adopt(sim.interface(), "web-1", &ref, &again);
     try testing.expectEqual(lifecycle.State.stopped, again);
@@ -129,6 +133,7 @@ test "a record that says running when nothing is left is lost; one that ended is
     const count = try lifecycle.list(sim.interface(), &entries);
     try testing.expectEqual(@as(u32, 1), count);
     try testing.expectEqual(lifecycle.State.lost, entries[0].state);
+    try testing.expect(entries[0].status().stopped == .lost);
 }
 
 test "a watcher reports a container once when it starts and once when it stops" {

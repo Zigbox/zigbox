@@ -60,7 +60,16 @@ pub const Limits = spec_mod.Limits;
 pub const Error = session_mod.Error;
 
 /// Where a run is. `starting` is only seen from inside `start`.
-pub const Status = enum { starting, running, stopped };
+/// Where a handle's run is. The union is the contract's `Status`; the plain phase is what the
+/// handle keeps in its own field.
+pub const Phase = enum { starting, running, stopped };
+
+pub const Status = union(enum) {
+    starting,
+    running,
+    /// How it ended; known once `wait` has returned (or the start failed).
+    stopped: ExitReason,
+};
 
 /// How the container's PID 1 ended, before the cgroup's counters are looked at.
 pub const Ended = union(enum) {
@@ -160,7 +169,9 @@ pub const Note = text_util.Bounded(160);
 /// freed until `wait` has returned.
 pub const Handle = struct {
     host: Host,
-    status: Status,
+    status: Phase,
+    /// How the run ended; set when `status` becomes `.stopped`.
+    ended: ExitReason,
     plan: Plan,
     session: Session,
     name: [constants.container_name_bytes_max]u8,
@@ -224,7 +235,11 @@ pub fn timed_out(handle: *const Handle) bool {
 
 pub fn inspect(handle: *const Handle) Status {
     assert(handle.name_len > 0);
-    return handle.status;
+    return switch (handle.status) {
+        .starting => .starting,
+        .running => .running,
+        .stopped => .{ .stopped = handle.ended },
+    };
 }
 
 /// Starts the container described by `container`. On return the command has started and
@@ -287,7 +302,7 @@ pub fn start(
         .rootfs = handle.rootfs_slice(),
     };
     handle.session.execute(diag, info) catch |err| {
-        assert(diag.code != null);
+        handle.ended = failed_start(diag); // Asserts that the diagnostic has a code.
         handle.status = .stopped;
         save_record(handle, .{ .start_failed = diag.code.? }, host.time_now(), diag);
         finish_scope(handle);
@@ -326,6 +341,7 @@ pub fn wait(handle: *Handle) ExitReason {
         });
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         finish_scope(handle); // `abandon` ended the container.
+        handle.ended = .lost;
         return .lost;
     };
     // First thing after the reap: the manager removes the cgroup once it is empty.
@@ -351,6 +367,7 @@ pub fn wait(handle: *Handle) ExitReason {
     };
     save_record(handle, exit, host.time_now(), null);
     finish_scope(handle);
+    handle.ended = reason;
     return reason;
 }
 
@@ -615,6 +632,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .limits = handle.limits,
         .scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "",
         .detached = handle.detached,
+        .timed_out = handle.session.timed_out,
         .pid = handle.pid,
         .supervisor = handle.host.own_pid(),
         .zbx_version = build_options.version,

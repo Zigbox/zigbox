@@ -2010,10 +2010,13 @@ test "ps lists a running container in text and in JSON that matches the schema's
     const list = parsed.value.object.get("containers").?.array;
     try testing.expectEqual(@as(usize, 1), list.items.len);
     const one = list.items[0].object;
-    for ([_][]const u8{ "name", "state", "pid", "started", "command", "labels", "limits" }) |key| {
+    const required = [_][]const u8{ "name", "state", "pid", "started", "timed_out" } ++
+        [_][]const u8{ "command", "labels", "limits" };
+    for (required) |key| {
         try testing.expect(one.get(key) != null);
     }
     try testing.expectEqualStrings("running", one.get("state").?.string);
+    try testing.expect(!one.get("timed_out").?.bool);
     try testing.expectEqual(@as(usize, 3), one.get("command").?.array.items.len);
     _ = runtime.wait(&test_storage.handle);
 }
@@ -2184,4 +2187,27 @@ test "stop takes a name from the command line as a name, never as a path" {
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
     }
     _ = runtime.wait(&test_storage.handle);
+}
+
+test "a detached run stopped for its time reads as timed out in the record and in ps" {
+    // Goal: the record keeps what `--timeout` did, so a later `ps` can say it. Method: the
+    // supervisor's half with a time shorter than the command, then `ps --all` in text and JSON.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 13);
+    sim.world.fork_role = .supervisor;
+    sim.world.command_runs_ms = 3_600_000;
+    const head = [_][]const u8{ "run", "-d", "--name", "web-1", "--rootfs", sim_run.rootfs_path };
+    const args = head ++ [_][]const u8{ "--timeout", "2000", "--", "/bin/sh", "-c", "sleep 1000" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &args));
+    sim.world.fork_role = .parent;
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--all" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "timed_out") != null);
+    sim.stdout_len = 0;
+    const listing = [_][]const u8{ "ps", "--all", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &listing));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    const one = parsed.value.object.get("containers").?.array.items[0].object;
+    try testing.expect(one.get("timed_out").?.bool);
+    try testing.expectEqualStrings("signal", one.get("reason").?.string);
 }

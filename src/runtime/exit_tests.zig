@@ -386,6 +386,7 @@ test "a version 2 record round-trips, and version 3 is newer" {
     view.limits = .{ .memory_bytes = 64 << 20, .pids = 16, .cpu_millis = 500 };
     view.scope = "zbx-web-1.scope";
     view.detached = true;
+    view.timed_out = true;
     var buffer: [constants.record_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
@@ -395,6 +396,7 @@ test "a version 2 record round-trips, and version 3 is newer" {
     try testing.expectEqual(view.limits, parsed.limits);
     try testing.expectEqualStrings("zbx-web-1.scope", parsed.scope_slice());
     try testing.expect(parsed.detached);
+    try testing.expect(parsed.timed_out);
     const gpa = testing.allocator;
     const newer = try std.mem.replaceOwned(u8, gpa, text, ".version = 3,", ".version = 4,");
     defer testing.allocator.free(newer);
