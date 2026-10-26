@@ -382,6 +382,73 @@ pub const redaction_bytes_max: u32 = 32;
 pub const timestamp_bytes: u32 = 20;
 pub const bundle_name_bytes_max: u32 = timestamp_bytes + 1 + container_name_bytes_max + 7;
 
+// Store (M3). The layout is documented in the module doc of `src/store/store.zig`.
+/// A BLAKE3 digest, and its lowercase hex; the text form is "b3:" and the hex.
+pub const store_digest_bytes: u32 = 32;
+pub const store_digest_hex_bytes: u32 = 64;
+pub const store_digest_text_bytes: u32 = 67;
+/// The shortest digest prefix accepted as input, in hex digits. A shorter one is refused, never
+/// guessed at.
+pub const store_prefix_hex_min: u32 = 12;
+/// The version `store.zon` records. A store with a larger one is refused (written by a newer zbx).
+pub const store_format_version: u32 = 1;
+/// A file object records one BLAKE3 hash per chunk of this many bytes (the last may be shorter).
+pub const store_chunk_bytes: u32 = 1024 * 1024;
+/// The most chunks one object has, so the longest file is 4 GiB.
+pub const store_chunks_max: u32 = 4096;
+pub const store_file_bytes_max: u64 = @as(u64, store_chunk_bytes) * store_chunks_max;
+/// Every file of the store is stamped with this modification time (2000-01-01T00:00:00Z), so a
+/// materialized tree does not depend on when it was imported. Zero is avoided: some tools treat
+/// the epoch as "no time".
+pub const store_mtime_seconds: u64 = 946_684_800;
+/// The tree encoding's version byte.
+pub const store_tree_version: u8 = 1;
+/// The most entries one directory has, the longest name, and the deepest nesting. A source tree
+/// past any of them is refused with a message that names the path.
+pub const store_dir_entries_max: u32 = 16384;
+pub const store_name_bytes_max: u32 = 255;
+pub const store_depth_max: u32 = 64;
+pub const store_symlink_target_bytes_max: u32 = 4095;
+/// Extended attributes of one file: how many, and the longest name and value.
+pub const store_xattrs_max: u32 = 16;
+pub const store_xattr_name_bytes_max: u32 = 255;
+pub const store_xattr_value_bytes_max: u32 = 4096;
+/// The attributes' canonical encoding (count, then name and value of each, with lengths).
+pub const store_xattr_blob_bytes_max: u32 = 1 + store_xattrs_max * (4 + 255 + 4096);
+/// One encoded directory: the longest a tree object can be.
+pub const store_tree_bytes_max: u32 = 4 * 1024 * 1024;
+/// The working memory of a walk: names, sorting indexes and the encoded entries of every open
+/// directory. A tree that needs more is refused.
+pub const store_arena_bytes_max: u32 = 16 * 1024 * 1024;
+/// File contents move through a buffer of this size.
+pub const store_io_buffer_bytes: u32 = 256 * 1024;
+/// A root's record, and the most roots `ls` lists.
+pub const store_root_record_bytes_max: u32 = 8192;
+pub const store_roots_max: u32 = 1024;
+pub const store_source_bytes_max: u32 = 1024;
+/// The shard directories (the first byte of a digest).
+pub const store_shards_count: u32 = 256;
+/// Entries a walk of stored trees visits before it gives up (a damaged store, or one built by
+/// hand, could make a tree refer to itself through its subtrees).
+pub const store_walk_entries_max: u32 = 1 << 24;
+/// Warnings shown for one command; the rest are counted.
+pub const store_warnings_shown_max: u32 = 8;
+/// Temporary files of one process: `tmp/<pid>-<n>`.
+pub const store_tmp_attempts_max: u32 = 1 << 20;
+/// A store path: the data directory, then "/zbx/store/objects/ab/" and 62 hex digits, with room
+/// for a suffix.
+pub const store_path_bytes_max: u32 = 600;
+pub const store_data_base_bytes_max: u32 = 400;
+/// Failed attempts at a rename or write that are retried because the kernel was interrupted.
+pub const store_io_retries_max: u32 = 16;
+
+// The simulator's file tree for the store (`src/store/fs_sim.zig`): nodes, the bytes of every
+// file written, and open files.
+pub const sim_fs_nodes_max: u32 = 640;
+pub const sim_fs_path_bytes_max: u32 = 192;
+pub const sim_fs_pool_bytes_max: u32 = 2 * 1024 * 1024;
+pub const sim_fs_handles_max: u32 = 8;
+
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;
@@ -585,6 +652,30 @@ comptime {
     assert(secret_value_bytes_min < secret_value_bytes_max);
     assert(bundle_secrets_max * secret_value_bytes_max < bundle_file_bytes_max);
     assert(bundle_name_bytes_max < dir_name_bytes_max + 32);
+
+    assert(store_digest_hex_bytes == store_digest_bytes * 2);
+    assert(store_digest_text_bytes == store_digest_hex_bytes + "b3:".len);
+    assert(store_prefix_hex_min < store_digest_hex_bytes);
+    assert(store_chunk_bytes % 4096 == 0);
+    assert(store_io_buffer_bytes % 4096 == 0);
+    assert(store_file_bytes_max == 4 * 1024 * 1024 * 1024);
+    assert(store_name_bytes_max <= std.math.maxInt(u8));
+    assert(store_xattr_value_bytes_max <= std.math.maxInt(u16));
+    assert(store_xattr_blob_bytes_max < store_arena_bytes_max / 16);
+    assert(store_tree_bytes_max < store_arena_bytes_max / 2);
+    assert(store_dir_entries_max * 4 < store_arena_bytes_max / 8); // The sorting indexes.
+    assert(store_symlink_target_bytes_max < std.math.maxInt(u16));
+    assert(store_symlink_target_bytes_max <= path_bytes_max);
+    assert(store_depth_max * 2 < path_bytes_max);
+    assert(
+        store_path_bytes_max > store_data_base_bytes_max + "/zbx/store/objects/ab/".len + 62 + 16,
+    );
+    assert(store_root_record_bytes_max >= store_source_bytes_max * 4 + 512); // All escaped.
+    assert(store_source_bytes_max <= path_bytes_max);
+    assert(store_shards_count == 256);
+    assert(store_warnings_shown_max > 0);
+    assert(sim_fs_path_bytes_max > 100); // A store path: "/s/objects/ab/" and 62 digits.
+    assert(sim_fs_handles_max >= 4);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);
