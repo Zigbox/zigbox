@@ -781,7 +781,8 @@ pub fn no_schema(diag: *Diag, topic: []const u8) void {
     diag.raise(.E0406);
     diag.while_("looking up a schema", .{});
     diag.cause(
-        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop and doctor",
+        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop, doctor, and " ++
+            "store-import, store-ls, store-du and store-rm",
         .{echo},
     );
     diag.context("arg", "{s}", .{echo});

@@ -1,0 +1,5 @@
+error[ZBX-E0418]: a file changed while it was being imported
+  cause  '/src/bin/ls' was written to between zbx's two reads of it
+  fix    stop what writes to the directory, or import a copy, then run it again
+  more   zbx explain E0418 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0418.html

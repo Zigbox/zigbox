@@ -1,0 +1,6 @@
+error[ZBX-E0416]: the disk is full while writing the store
+  cause  2 objects (16 bytes) were written before the disk filled; they are
+         whole and kept
+  fix    free space on the disk that holds the store, then run the same command again:   df -h '/home/alice/.local/share/zbx/store'
+  more   zbx explain E0416 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0416.html

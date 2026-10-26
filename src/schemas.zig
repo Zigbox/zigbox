@@ -100,6 +100,72 @@ const doctor_schema =
     \\"$ref":"#/$defs/diagnostic","$defs":{
 ++ diagnostic_definition ++ "}}";
 
+const store_import_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-import/1","version":1,
+    \\"title":"zbx store import --output json",
+    \\"description":"stdout: what was imported. Warnings and failures are diagnostics on stderr.",
+    \\"type":"object","required":["schema","digest","source","files","directories","symlinks",
+    \\"skipped","bytes","new_objects","reused_objects","new_bytes","new_trees","reused_trees",
+    \\"ids"],
+    \\"properties":{"schema":{"const":"zbx.store.import/1"},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"source":{"type":"string"},
+    \\"files":{"type":"integer"},"directories":{"type":"integer"},"symlinks":{"type":"integer"},
+    \\"skipped":{"type":"integer","description":"devices, FIFOs and sockets left out"},
+    \\"xattrs_skipped":{"type":"integer"},"bytes":{"type":"integer",
+    \\"description":"the sum of the lengths of the files"},
+    \\"new_objects":{"type":"integer"},"reused_objects":{"type":"integer"},
+    \\"new_bytes":{"type":"integer","description":"bytes of the objects that were new"},
+    \\"new_trees":{"type":"integer"},"reused_trees":{"type":"integer"},
+    \\"ids":{"enum":["full","single"],"description":"how ids were mapped while importing"}}}
+;
+
+const store_ls_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-ls/1","version":1,
+    \\"title":"zbx store ls --output json",
+    \\"description":"stdout: the roots, newest first.",
+    \\"type":"object","required":["schema","roots"],
+    \\"properties":{"schema":{"const":"zbx.store.ls/1"},
+    \\"roots":{"type":"array","items":{"type":"object",
+    \\"required":["digest","kind","time","files","bytes","source","parent"],
+    \\"properties":{"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"kind":{"enum":["import","commit","container"]},
+    \\"time":{"type":"integer","description":"seconds since the epoch"},
+    \\"files":{"type":"integer"},"bytes":{"type":"integer"},
+    \\"source":{"type":"string"},"parent":{"type":["string","null"]}}}}}}
+;
+
+const store_du_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-du/1","version":1,
+    \\"title":"zbx store du --output json",
+    \\"description":"stdout: the store's totals, or with a digest one tree's sizes.",
+    \\"type":"object","required":["schema"],
+    \\"properties":{"schema":{"const":"zbx.store.du/1"},
+    \\"store":{"type":"object","required":["bytes","objects","trees"],
+    \\"properties":{"bytes":{"type":"integer"},"objects":{"type":"integer"},
+    \\"trees":{"type":"integer"}}},
+    \\"tree":{"type":"object","required":["digest","files","logical_bytes","objects",
+    \\"stored_bytes","shared_bytes"],
+    \\"properties":{"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"files":{"type":"integer"},"logical_bytes":{"type":"integer"},
+    \\"objects":{"type":"integer","description":"distinct objects"},
+    \\"stored_bytes":{"type":"integer","description":"bytes of the distinct objects"},
+    \\"shared_bytes":{"type":"integer","description":"of those, bytes other roots also use"}}}},
+    \\"oneOf":[{"required":["store"]},{"required":["tree"]}]}
+;
+
+const store_rm_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-rm/1","version":1,
+    \\"title":"zbx store rm --output json",
+    \\"description":"stdout: the root that was dropped. A failure is a diagnostic on stderr.",
+    \\"type":"object","required":["schema","digest","removed"],
+    \\"properties":{"schema":{"const":"zbx.store.rm/1"},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"removed":{"const":true}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -108,12 +174,16 @@ const table = [_]Entry{
     .{ .command = "ps", .text = ps_schema },
     .{ .command = "stop", .text = stop_schema },
     .{ .command = "doctor", .text = doctor_schema },
+    .{ .command = "store-import", .text = store_import_schema },
+    .{ .command = "store-ls", .text = store_ls_schema },
+    .{ .command = "store-du", .text = store_du_schema },
+    .{ .command = "store-rm", .text = store_rm_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 5);
+    assert(table.len == 9);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -131,8 +201,8 @@ const testing = std.testing;
 const test_util = @import("test_util.zig");
 
 test "every schema is valid JSON, names its command and its version" {
-    // Goal: the registry is complete and each document parses. Method: the five commands of the
-    // brief; an unknown command has none.
+    // Goal: the registry is complete and each document parses. Method: the five commands of M2
+    // and the four store commands; an unknown command has none.
     for (table) |entry| {
         try testing.expect(try test_util.json_is_valid(entry.text));
         var id: [64]u8 = undefined;
@@ -142,5 +212,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 5), table.len);
+    try testing.expectEqual(@as(usize, 9), table.len);
 }

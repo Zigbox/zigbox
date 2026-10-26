@@ -1,0 +1,5 @@
+error[ZBX-E0413]: can't use the store: its format is unknown
+  cause  the store's format is version 9; this zbx reads up to 1
+  fix    use the zbx that wrote it, or set the store aside to start a new one:   mv '/home/alice/.local/share/zbx/store' '/home/alice/.local/share/zbx/store.old'
+  more   zbx explain E0413 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0413.html

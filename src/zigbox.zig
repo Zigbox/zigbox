@@ -81,6 +81,11 @@ pub const explain = @import("diag/explain.zig");
 /// Run records: the state a run leaves in the state directory.
 pub const records = @import("runtime/records.zig");
 
+/// The store: content-addressed file trees (docs/briefs/M3-store.md). Its module doc has the
+/// layout; `Store` and `import.Workspace` are the caller's storage, and the work runs in a
+/// single-threaded child inside the user's namespace (`store.namespace`).
+pub const store = @import("store/store.zig");
+
 test "the module's surface is what the contract names" {
     // Goal: a rename or a removal in the runtime that Zigcube relies on fails here, loudly.
     _ = Spec;

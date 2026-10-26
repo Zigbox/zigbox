@@ -1,0 +1,6 @@
+error[ZBX-E0415]: the directory tree is bigger than an import limit
+  cause  '.../d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d'
+         is nested more than 64 levels deep
+  fix    split the directory, or leave out what the root filesystem does not need
+  more   zbx explain E0415 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0415.html

@@ -67,6 +67,22 @@ pub const Code = enum(u8) {
     E0404,
     E0405,
     E0406,
+    E0410,
+    E0411,
+    E0412,
+    E0413,
+    E0414,
+    E0415,
+    E0416,
+    E0417,
+    E0418,
+    E0419,
+    E0420,
+    E0421,
+    E0422,
+    E0423,
+    W0410,
+    W0411,
     E0701,
     E0702,
     E0703,
@@ -770,8 +786,247 @@ pub const registry = [_]Entry{
         .summary = "no schema for that command",
         .explanation =
         \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
-        \\doctor ("zbx schema ps"). Other commands have no machine-readable output
-        \\that needs one: explain and help print text, version prints a line.
+        \\doctor ("zbx schema ps"), and of the store commands, named store-import,
+        \\store-ls, store-du and store-rm. Other commands have no machine-readable
+        \\output that needs one: explain and help print text, version prints a line.
+        ,
+    },
+    .{
+        .code = .E0410,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no tree with that digest",
+        .explanation =
+        \\The store has no tree whose digest starts with what was given. A tree's
+        \\digest is printed by "zbx store import" (and by "zbx commit"), and
+        \\"zbx store ls" lists the trees the store keeps as roots. A tree that
+        \\was dropped with "zbx store rm" stays until "zbx store gc" collects it.
+        \\
+        \\A running container started from a digest the store does not have fails
+        \\with this code before anything is created.
+        ,
+    },
+    .{
+        .code = .E0411,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "that digest prefix matches more than one tree",
+        .explanation =
+        \\A digest may be shortened to a prefix of at least 12 hex digits, but
+        \\only while the prefix names one tree. zbx never picks one of several:
+        \\a wrong guess here could delete or run the wrong tree.
+        \\
+        \\The message names the first two matches. Give more digits, or the whole
+        \\digest from "zbx store ls".
+        ,
+    },
+    .{
+        .code = .E0412,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a digest",
+        .explanation =
+        \\A digest is "b3:" and 64 lowercase hex digits (BLAKE3). It may be
+        \\shortened to a prefix of at least 12 hex digits, with or without the
+        \\"b3:". Anything else is refused, as are uppercase digits: a digest has
+        \\one spelling.
+        \\
+        \\"zbx store ls" prints the digests the store keeps.
+        ,
+    },
+    .{
+        .code = .E0413,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't use the store: its format is unknown",
+        .explanation =
+        \\The store's store.zon is missing a readable format version, or names one
+        \\this zbx does not know. A newer zbx wrote it, or something else changed
+        \\the file. zbx does not touch a store it cannot read: it could damage
+        \\what a newer version put there.
+        \\
+        \\Run the zbx that wrote the store, or move the store directory away to
+        \\start a new one. The cause names the file.
+        ,
+    },
+    .{
+        .code = .E0414,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't read the directory to import",
+        .explanation =
+        \\"zbx store import" reads the directory it is given from inside your user
+        \\namespace, with the same ids a container would see. The path, or
+        \\something below it, is missing, is not what it should be (the source
+        \\must be a directory), or cannot be read by you.
+        \\
+        \\The cause names the path and the kernel's reason. Files that only you
+        \\cannot read (mode 0600 and owned by a subordinate id) are readable
+        \\inside the namespace; files owned by an id outside it are not.
+        ,
+    },
+    .{
+        .code = .E0415,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the directory tree is bigger than an import limit",
+        .explanation =
+        \\zbx holds a bounded amount in memory while it imports: at most 16384
+        \\entries in one directory, names up to 255 bytes, 64 levels of nesting,
+        \\a symlink target up to 4095 bytes, files up to 4 GiB, and 16 MiB for the
+        \\names and entries of all the directories being read at once.
+        \\
+        \\The cause names the limit and the path where it was passed. Split the
+        \\directory, or leave out what is not part of the root filesystem.
+        ,
+    },
+    .{
+        .code = .E0416,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the disk is full while writing the store",
+        .explanation =
+        \\The file system that holds the store has no room left. Everything zbx
+        \\wrote before is complete and stays: every write is a temporary file
+        \\that is renamed into place only when it is whole, so there is no half
+        \\file under any digest. The message says how much was written.
+        \\
+        \\Free space (or point XDG_DATA_HOME at a bigger disk) and run the same
+        \\command again: objects already stored are skipped, so it carries on.
+        ,
+    },
+    .{
+        .code = .E0417,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the store",
+        .explanation =
+        \\The kernel refused a write to the store directory (permissions, a
+        \\read-only file system, an I/O error). Nothing partial is left under a
+        \\digest: a failed write leaves at most a temporary file in the store's
+        \\tmp directory, which "zbx store gc" removes.
+        \\
+        \\The cause names the path and the kernel's reason. The store is in
+        \\$XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.
+        ,
+    },
+    .{
+        .code = .E0418,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a file changed while it was being imported",
+        .explanation =
+        \\zbx reads each file twice, once to learn its digest and once to copy
+        \\it, and the two reads did not agree: something wrote to the file in
+        \\between. Importing a tree that is being written would store a mixture,
+        \\so zbx stops.
+        \\
+        \\Stop whatever writes to the directory (a running container using it as
+        \\its root, a build), or import a copy, and run the command again.
+        ,
+    },
+    .{
+        .code = .E0419,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't run the store worker",
+        .explanation =
+        \\Store work runs in a short-lived child process inside your user
+        \\namespace. This one could not be created or set up (the same causes as
+        \\a container that will not start: see "zbx doctor"), or it was killed by
+        \\a signal before it finished. Nothing partial is left under a digest.
+        \\
+        \\The cause says which. Run the command again once it is fixed.
+        ,
+    },
+    .{
+        .code = .E0420,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "that tree is not a root",
+        .explanation =
+        \\"zbx store rm" drops a root: the record that keeps a tree in the store.
+        \\The digest names a tree the store has, but no root keeps it (it is only
+        \\part of another tree, or was already dropped), so there is nothing to
+        \\remove.
+        \\
+        \\"zbx store ls" lists the roots.
+        ,
+    },
+    .{
+        .code = .E0421,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "no data directory to keep the store in",
+        .explanation =
+        \\zbx keeps its store under $XDG_DATA_HOME/zbx/store, or
+        \\~/.local/share/zbx/store when that is not set. Neither variable names an
+        \\absolute directory here, so there is nowhere to put the store.
+        \\
+        \\Set HOME, or point XDG_DATA_HOME at a directory you can write to.
+        ,
+    },
+    .{
+        .code = .E0422,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a tree in the store is missing or damaged",
+        .explanation =
+        \\zbx followed a tree down through its subtrees and found one that is not
+        \\in the store, does not hash to its name, or cannot be decoded. A tree
+        \\object is a file named by the hash of its bytes, so this means the
+        \\store was changed or damaged outside zbx (a disk error, a file removed
+        \\by hand), or an earlier zbx wrote it wrongly.
+        \\
+        \\The cause names the tree. Nothing was changed. Importing the directory
+        \\again writes the trees it needs; objects that are already stored are
+        \\reused.
+        ,
+    },
+    .{
+        .code = .E0423,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the store",
+        .explanation =
+        \\The kernel refused to read something in the store directory, or the
+        \\store has more entries in one place than zbx can count at once. The
+        \\store is in $XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.
+        \\
+        \\The cause names the step and the kernel's reason. Check that the
+        \\directory belongs to you, and that the disk is healthy.
+        ,
+    },
+    .{
+        .code = .W0410,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "a file was left out of the import",
+        .explanation =
+        \\The store keeps regular files, directories and symlinks. A device
+        \\node, a FIFO or a socket in the imported directory was skipped, and the
+        \\message names it. A root filesystem normally has none of these on disk:
+        \\a container gets its own /dev, so the digest does not miss them.
+        \\
+        \\Past the first few, the warnings are counted and the last one says how
+        \\many were not shown.
+        ,
+    },
+    .{
+        .code = .W0411,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "an extended attribute was left out of the import",
+        .explanation =
+        \\The store keeps the user.* attributes and security.capability (the file
+        \\capabilities). Others were skipped, and the message names the file and
+        \\the attribute: the trusted.*, system.* and security.* attributes
+        \\other than the capability (SELinux labels, ACLs), an attribute with a
+        \\name or value over the store's limits, and any attribute past the
+        \\sixteenth on a file. user.overlay.* is overlayfs's own and is never
+        \\imported, without a warning.
+        \\
+        \\The digest does not include what was left out.
         ,
     },
     .{
@@ -870,7 +1125,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u8));
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(400_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));
@@ -987,6 +1242,8 @@ pub fn can_end_run(code: Code) bool {
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0701, .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
+        .E0411, .E0412, .E0413, .E0414, .E0415, .E0416, .E0417, .E0418 => false,
+        .E0419, .E0420, .E0421, .E0422, .E0423, .W0410, .W0411 => false,
         else => true,
     };
 }

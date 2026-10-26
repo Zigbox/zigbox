@@ -24,6 +24,10 @@ const Diag = @import("diag/diag.zig").Diag;
 const plan_mod = @import("runtime/plan.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const HostSim = @import("host_sim.zig").HostSim;
+const SimFs = @import("store/fs_sim.zig").SimFs;
+const tree = @import("store/tree.zig");
+const support = @import("store/test_support.zig");
+const Digest = @import("store/digest.zig").Digest;
 
 const testing = std.testing;
 
@@ -218,6 +222,109 @@ fn prepare_namespaces_refused(sim: *HostSim) void {
     sim.faults.fail_step_errno = 13; // EACCES
 }
 
+/// The store's file system for the store cases: a user with a home, and a source tree to import.
+var golden_files: SimFs = undefined;
+
+fn prepare_store_host(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    golden_files.put_dir("/home", 0o755);
+    golden_files.put_dir("/home/alice", 0o755);
+    sim.store_fs = &golden_files;
+}
+
+fn prepare_store_source(sim: *HostSim) void {
+    prepare_store_host(sim);
+    support.make_source(&golden_files, 0);
+}
+
+fn prepare_store_made(sim: *HostSim) void {
+    prepare_store_host(sim);
+    support.make_user_store(&golden_files, ".{\n    .format = 1,\n}\n");
+}
+
+fn prepare_ambiguous(sim: *HostSim) void {
+    prepare_store_made(sim);
+    const shard = support.user_store ++ "/trees/aa";
+    golden_files.put_dir(shard, 0o755);
+    // Two trees whose digests start with twelve a's: 62 digits in the name, ten of them a's.
+    const tail = "0123456789abcdef0123456789abcdef0123456789abcdef012";
+    inline for (.{ "1", "2" }) |last| {
+        golden_files.put_file(shard ++ "/aaaaaaaaaa" ++ tail ++ last, 0o644, "");
+    }
+}
+
+fn prepare_format_newer(sim: *HostSim) void {
+    prepare_store_host(sim);
+    support.make_user_store(&golden_files, ".{\n    .format = 9,\n}\n");
+}
+
+fn prepare_deep(sim: *HostSim) void {
+    prepare_store_host(sim);
+    support.make_chain(&golden_files, constants.store_depth_max + 1);
+}
+
+fn prepare_store_full(sim: *HostSim) void {
+    prepare_store_source(sim);
+    golden_files.faults.bytes_max = 85;
+}
+
+fn prepare_store_read_only(sim: *HostSim) void {
+    prepare_store_source(sim);
+    golden_files.faults.fail_mutation = 0;
+    golden_files.faults.fail_errno = 30; // EROFS
+}
+
+fn prepare_store_growing(sim: *HostSim) void {
+    prepare_store_source(sim);
+    golden_files.faults.grow_on_open = true;
+}
+
+fn prepare_store_helper_refuses(sim: *HostSim) void {
+    prepare_store_source(sim);
+    sim.world.helper_fails_with = 1;
+}
+
+/// A tree that exists but that no root keeps.
+fn prepare_tree_without_root(sim: *HostSim) void {
+    prepare_store_made(sim);
+    var buffer: [64]u8 = undefined;
+    var writer = tree.Writer.init(&buffer);
+    _ = support.put_tree_object(&golden_files, writer.finish());
+}
+
+/// A root tree whose subtree is not in the store.
+fn prepare_missing_subtree(sim: *HostSim) void {
+    prepare_store_made(sim);
+    var buffer: [256]u8 = undefined;
+    var writer = tree.Writer.init(&buffer);
+    writer.begin(
+        "lib",
+        .dir,
+        0o755,
+        0,
+        0,
+        &@import("store/xattrs.zig").empty,
+    ) catch unreachable; // Fits.
+    writer.end_dir(Digest.of("missing")) catch unreachable; // Fits.
+    _ = support.put_tree_object(&golden_files, writer.finish());
+}
+
+fn prepare_roots_unreadable(sim: *HostSim) void {
+    prepare_store_made(sim);
+    golden_files.set_unreadable(support.user_store ++ "/roots");
+}
+
+fn prepare_store_devices(sim: *HostSim) void {
+    prepare_store_source(sim);
+    golden_files.put("/src/null", .char_device, 0o666, .{ 0, 0 }, "");
+}
+
+fn prepare_store_attribute(sim: *HostSim) void {
+    prepare_store_source(sim);
+    golden_files.put_xattr("/src/etc/passwd", "trusted.thing", "1");
+}
+
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
@@ -315,6 +422,91 @@ const base_cases = [_]Case{
         .exit = 125,
     },
     .{ .code = .E0406, .args = &.{ "schema", "explain" }, .exit = 1 },
+    .{
+        .code = .E0410,
+        .args = &.{ "store", "du", "aaaaaaaaaaaa" },
+        .prepare = prepare_store_made,
+        .exit = 1,
+    },
+    .{
+        .code = .E0411,
+        .args = &.{ "store", "du", "aaaaaaaaaaaa" },
+        .prepare = prepare_ambiguous,
+        .exit = 1,
+    },
+    .{ .code = .E0412, .args = &.{ "store", "du", "12345" }, .exit = 1 },
+    .{ .code = .E0413, .args = &.{ "store", "ls" }, .prepare = prepare_format_newer, .exit = 2 },
+    .{
+        .code = .E0414,
+        .args = &.{ "store", "import", "/nowhere" },
+        .prepare = prepare_store_host,
+        .exit = 1,
+    },
+    .{
+        .code = .E0415,
+        .args = &.{ "store", "import", "/deep" },
+        .prepare = prepare_deep,
+        .exit = 1,
+    },
+    .{
+        .code = .E0416,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_full,
+        .exit = 2,
+    },
+    .{
+        .code = .E0417,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_read_only,
+        .exit = 2,
+    },
+    .{
+        .code = .E0418,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_growing,
+        .exit = 1,
+    },
+    .{
+        .code = .E0419,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_helper_refuses,
+        .exit = 2,
+    },
+    .{
+        .code = .E0420,
+        .args = &.{ "store", "rm", "b3:7784b17d1d8f" },
+        .prepare = prepare_tree_without_root,
+        .exit = 1,
+    },
+    .{ .code = .E0421, .args = &.{ "store", "ls" }, .prepare = prepare_no_state, .exit = 2 },
+    .{
+        .code = .E0422,
+        .args = &.{ "store", "du", "b3:62c3844fa34d" },
+        .prepare = prepare_missing_subtree,
+        .exit = 2,
+    },
+    .{
+        .code = .E0423,
+        .args = &.{ "store", "ls" },
+        .prepare = prepare_roots_unreadable,
+        .exit = 2,
+    },
+    .{
+        .code = .W0410,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_devices,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0411,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_attribute,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
     .{
         .code = .E0206,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },

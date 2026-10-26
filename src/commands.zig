@@ -86,7 +86,7 @@ fn state_words(entry: *const lifecycle.Entry, buffer: []u8) []const u8 {
 }
 
 /// "2026-10-26 12:30:05" for seconds since the epoch.
-fn clock_text(seconds: u64, buffer: *[19]u8) []const u8 {
+pub fn clock_text(seconds: u64, buffer: *[19]u8) []const u8 {
     assert(buffer.len == 19);
     assert(seconds < 1 << 40); // Year 36000: a corrupt record, not a clock.
     const epoch: std.time.epoch.EpochSeconds = .{ .secs = seconds };

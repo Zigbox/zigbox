@@ -1,0 +1,5 @@
+error[ZBX-E0414]: can't read the directory to import
+  cause  '/nowhere' does not exist
+  fix    look at it:   ls -ld -- '/nowhere'
+  more   zbx explain E0414 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0414.html

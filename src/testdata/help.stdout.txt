@@ -8,6 +8,7 @@ commands:
   doctor          check that this host can run zbx (a diagnostic per failing check)
   ps              list the containers (--all: the ones that ended too)
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+  store <cmd>     the content-addressed store: import, ls, du, rm (see below)
   schema <cmd>    print the JSON schema of a command's output
   explain <code>  explain a diagnostic code offline, for example E0001
   help            show this text
@@ -29,6 +30,13 @@ run:
 stop:
   zbx stop <name> [--grace <ms>] [--timeout <ms>]
   --timeout <ms>  give up (exit 2) if the container is still there after this long
+
+store:
+  zbx store import <dir>   read a directory into the store and print its digest
+  zbx store ls             list the roots (the trees the store keeps)
+  zbx store du [<digest>]  the store's size, or what one tree costs
+  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
+  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]

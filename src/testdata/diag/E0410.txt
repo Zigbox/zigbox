@@ -1,0 +1,5 @@
+error[ZBX-E0410]: no tree with that digest
+  cause  no tree in the store has a digest that starts with 'aaaaaaaaaaaa'
+  fix    list the trees the store keeps:   zbx store ls
+  more   zbx explain E0410 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0410.html

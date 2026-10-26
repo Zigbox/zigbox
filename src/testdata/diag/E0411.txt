@@ -1,0 +1,6 @@
+error[ZBX-E0411]: that digest prefix matches more than one tree
+  cause  b3:aaaaaaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdef0122 and
+         b3:aaaaaaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdef0121
+  fix    give more digits, or the whole digest from:   zbx store ls
+  more   zbx explain E0411 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0411.html

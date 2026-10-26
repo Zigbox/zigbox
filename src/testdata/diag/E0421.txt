@@ -1,0 +1,6 @@
+error[ZBX-E0421]: no data directory to keep the store in
+  cause  neither XDG_DATA_HOME nor HOME names an absolute directory to keep it
+         in
+  fix    name one:   export XDG_DATA_HOME=$HOME/.local/share
+  more   zbx explain E0421 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0421.html

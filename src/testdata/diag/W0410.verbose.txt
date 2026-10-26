@@ -1,0 +1,8 @@
+warning[ZBX-W0410]: a file was left out of the import
+  while  importing the directory
+  cause  '/src/null' is a character device; the store keeps files, directories
+         and symlinks only
+  path   /src/null
+  fix    nothing to do if a container makes its own /dev; else remove it
+  more   zbx explain W0410
+  docs   https://zigbox.github.io/zigbox/errors/W0410.html

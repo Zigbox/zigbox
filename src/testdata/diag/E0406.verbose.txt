@@ -1,7 +1,7 @@
 error[ZBX-E0406]: no schema for that command
   while  looking up a schema
   cause  'explain' has no JSON schema; the commands with one are run, bundle,
-         ps, stop and doctor
+         ps, stop, doctor, and store-import, store-ls, store-du and store-rm
   arg    explain
   fix    print one:   zbx schema ps
   more   zbx explain E0406
