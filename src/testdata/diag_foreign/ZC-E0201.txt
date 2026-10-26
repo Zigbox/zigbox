@@ -1,0 +1,6 @@
+error[ZC-E0201]: no node can place the container
+  cause  the node has no free memory for a 512 MiB limit
+  fix    free memory on the node, or lower the limit:   zcube run --memory 256M web
+         or place it on another node
+  more   zcube explain E0201 · rerun with --verbose for the full cause chain
+  docs   https://example.invalid/zigcube/errors/E0201.html

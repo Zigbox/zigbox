@@ -1,0 +1,6 @@
+bug[ZC-B0001]: an internal check failed
+  this is a bug in zcube, not something you did
+  saved  diagnostic bundle: /var/lib/zcube/bundles/2026-10-26
+  report https://example.invalid/zigcube/issues/new
+  more   zcube explain B0001 · rerun with --verbose for the message
+  docs   https://example.invalid/zigcube/errors/B0001.html

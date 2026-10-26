@@ -55,6 +55,9 @@ test {
     _ = @import("diag/render.zig");
     _ = @import("diag/errors.zig");
     _ = @import("diag/explain.zig");
+    _ = @import("diag/diagnostic.zig");
+    _ = @import("diag/product.zig");
+    _ = @import("diag_foreign.zig");
     _ = @import("diag/panic.zig");
     _ = @import("diag_golden.zig");
     _ = @import("sim_world.zig");

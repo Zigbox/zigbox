@@ -1,0 +1,8 @@
+error[QX-E0042]: a failure from elsewhere
+  while  asking the agent to start it
+  while  placing web-1 on node n2
+  cause  the agent answered 503
+  cause  the node has no free memory for a 512 MiB limit
+  node   n2
+  fix    free memory on the node, or lower the limit:   zcube run --memory 256M web
+         or place it on another node

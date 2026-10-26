@@ -97,14 +97,25 @@ fn List(comptime Item: type, comptime capacity: u32, comptime keep: Keep) type {
     };
 }
 
+/// The list types of a collector, named so that `Diagnostic` (a finished, plain copy) has the
+/// same ones.
+pub const Causes = List(Text, constants.diag_causes_count_max, .newest);
+pub const Whiles = List(Text, constants.diag_whiles_count_max, .newest);
+pub const Pairs = List(Pair, constants.diag_context_count_max, .oldest);
+pub const Fixes = List(Fix, constants.diag_fixes_count_max, .oldest);
+pub const Saved = text_util.Bounded(constants.state_path_bytes_max + 128);
+
+/// Words the renderer uses as labels of its own, so a context key may not be one.
+pub const reserved_keys = [_][]const u8{ "while", "cause", "fix", "more", "report" };
+
 pub const Diag = struct {
     code: ?codes.Code,
-    causes: List(Text, constants.diag_causes_count_max, .newest),
-    whiles: List(Text, constants.diag_whiles_count_max, .newest),
-    pairs: List(Pair, constants.diag_context_count_max, .oldest),
-    fixes: List(Fix, constants.diag_fixes_count_max, .oldest),
+    causes: Causes,
+    whiles: Whiles,
+    pairs: Pairs,
+    fixes: Fixes,
     /// The path of the bundle written for this bug, empty for none. Only a bug has one.
-    saved: text_util.Bounded(constants.state_path_bytes_max + 128),
+    saved: Saved,
     /// Set only on ZBX-E0202, when the cause is a command that was not found: a container run
     /// then exits 127 where a command that cannot be run exits 126.
     command_missing: bool,
@@ -251,9 +262,7 @@ fn check_key(comptime key: []const u8) void {
         assert(key.len > 0);
         assert(key.len <= constants.diag_key_bytes_max);
         for (key) |byte| assert(std.ascii.isLower(byte));
-        // The renderer uses these as labels of its own.
-        const reserved = [_][]const u8{ "while", "cause", "fix", "more", "report" };
-        for (reserved) |word| assert(!std.mem.eql(u8, key, word));
+        for (reserved_keys) |word| assert(!std.mem.eql(u8, key, word));
     }
 }
 
