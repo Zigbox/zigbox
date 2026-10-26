@@ -283,8 +283,8 @@ pub const AdoptError = error{
 /// Finds the container called `name`. It need not be running: `state` says. The ref of a
 /// stopped container is a ref to nothing (`stop` on it is a no-op).
 pub fn adopt(host: Host, name: []const u8, ref: *Ref, state: *State) AdoptError!void {
-    assert(name.len > 0);
-    assert(name.len <= constants.container_name_bytes_max);
+    assert(name.len <= constants.arg_bytes_max);
+    assert(@intFromPtr(ref) != @intFromPtr(state));
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) return error.NoState;
     var record: records.Parsed = undefined;

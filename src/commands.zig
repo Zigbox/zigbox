@@ -41,7 +41,7 @@ fn write(host: Host, text: []const u8, diag: *Diag) Error!void {
 // ---- schema ---------------------------------------------------------------------------------
 
 pub fn run_schema(host: Host, topic: []const u8, diag: *Diag) Error!void {
-    assert(topic.len > 0);
+    assert(topic.len <= constants.arg_bytes_max);
     assert(diag.code == null);
     const text = schemas.of(topic) orelse {
         diagnose.no_schema(diag, topic);
@@ -260,7 +260,7 @@ pub const StopOptions = struct {
 /// said so); an unknown name, a pid that cannot be signalled and a container that survives
 /// SIGKILL are diagnostics.
 pub fn run_stop(host: Host, options: StopOptions, diag: *Diag) Error!void {
-    assert(options.name.len > 0);
+    assert(options.name.len <= constants.arg_bytes_max);
     assert(options.grace_ms <= constants.wait_timeout_ms_max);
     var ref: lifecycle.Ref = undefined;
     var state: lifecycle.State = undefined;

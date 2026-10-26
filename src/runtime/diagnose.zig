@@ -690,17 +690,20 @@ pub fn no_such_container(diag: *Diag, name: []const u8, why: NoContainer) void {
         });
         return;
     }
+    // The name is what the user typed: no escape reaches the terminal, no line is too long.
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, name);
     diag.raise(.E0402);
-    diag.while_("looking for the container {s}", .{name});
+    diag.while_("looking for the container {s}", .{echo});
     switch (why) {
         .no_record => diag.cause("no run record is called '{s}'; zbx keeps the newest {d}", .{
-            name, constants.runs_max,
+            echo, constants.runs_max,
         }),
         .unreadable_record => diag.cause("the run record of '{s}' cannot be read or is from a " ++
-            "newer zbx", .{name}),
+            "newer zbx", .{echo}),
         .no_state, .unreadable_state => unreachable, // Handled above.
     }
-    diag.context("name", "{s}", .{name});
+    diag.context("name", "{s}", .{echo});
     diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps --all" });
     assert(diag.code.? == .E0402);
 }

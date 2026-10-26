@@ -1985,6 +1985,9 @@ test "schema prints the versioned schema of each command, and refuses the others
     try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "logs" }));
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
+    sim.init(1, &.{});
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
 }
 
 test "ps lists a running container in text and in JSON that matches the schema's fields" {
@@ -2165,4 +2168,17 @@ test "run -d as the caller, when the fork fails or the supervisor never reports,
     try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0405") != null);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "stop takes a name from the command line as a name, never as a path" {
+    // Goal: a name that is not a run name names no container (E0402); it is not made into a path.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    const names = [_][]const u8{ repeat('x', 255), "../web-1", "a/b", "WEB", "-", "web-1.zon", "" };
+    for (names) |name| {
+        sim.stderr_len = 0;
+        try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "stop", name }));
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
+    }
+    _ = runtime.wait(&test_storage.handle);
 }

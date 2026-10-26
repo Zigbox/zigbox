@@ -177,10 +177,12 @@ fn random_args(
     long: *[constants.arg_bytes_max + 8]u8,
 ) FuzzArgs {
     const words = [_][]const u8{
-        "doctor",  "help",     "--help",        "--version", "version", "",          "-",
-        "explain", "E0001",    "zbx-b0001",     "E9999",     "-v",      "--verbose", "--output",
-        "json",    "text",     "--output=json", "--output=", "--bogus", "-x",        "run",
-        "--",      "--rootfs", "--name",        "/srv/x",    "bundle",  "--last",
+        "doctor",  "help",     "--help",        "--version", "version",   "",          "-",
+        "explain", "E0001",    "zbx-b0001",     "E9999",     "-v",        "--verbose", "--output",
+        "json",    "text",     "--output=json", "--output=", "--bogus",   "-x",        "run",
+        "--",      "--rootfs", "--name",        "/srv/x",    "bundle",    "--last",    "ps",
+        "stop",    "schema",   "--all",         "-d",        "--timeout", "--grace",   "1000",
+        "web-1",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };

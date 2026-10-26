@@ -464,6 +464,7 @@ fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!voi
     var value = line[equals + 3 ..];
     if (value.len == 0 or value[value.len - 1] != ',') return error.Malformed;
     value = value[0 .. value.len - 1];
+    if (value.len == 0) return error.Malformed; // `.key = ,`: no field has an empty value.
     if (std.mem.eql(u8, key, "version")) {
         out.version = std.fmt.parseInt(u32, value, 10) catch return error.Malformed;
     } else if (std.mem.eql(u8, key, "name")) {
@@ -557,8 +558,8 @@ fn next_literal(text: []const u8, at: usize) ?struct { literal: []const u8, next
 
 /// `.{ "word", "word" }`: the words of the command, kept NUL-separated (cut at the room).
 fn parse_command(value: []const u8, out: *Parsed) bool {
-    assert(out.command_len == 0);
-    assert(out.command_words == 0);
+    out.command_len = 0; // A repeated field: the later one wins.
+    out.command_words = 0;
     var at: usize = 0;
     while (next_literal(value, at)) |found| : (at = found.next) {
         const room = out.command[out.command_len..];
@@ -574,8 +575,8 @@ fn parse_command(value: []const u8, out: *Parsed) bool {
 
 /// `.{ .{ "key", "value" }, ... }`: the labels as key and value, NUL-separated.
 fn parse_labels(value: []const u8, out: *Parsed) bool {
-    assert(out.labels_len == 0);
-    assert(out.labels_count == 0);
+    out.labels_len = 0; // A repeated field: the later one wins.
+    out.labels_count = 0;
     var at: usize = 0;
     while (next_literal(value, at)) |key| {
         const second = next_literal(value, key.next) orelse return false;
@@ -868,7 +869,9 @@ pub const LoadError = error{ NotFound, Unreadable, Damaged, Newer };
 
 /// Reads the record of the run called `name` into `out`.
 pub fn load(host: Host, dir: *const Dir, name: []const u8, out: *Parsed) LoadError!void {
-    assert(name.len > 0);
+    // The name comes from a command line: one that is not a run name (a slash, say) names no
+    // record, and is never made into a path.
+    if (spec_mod.name_problem(name) != null) return error.NotFound;
     var path_storage: [constants.state_path_bytes_max + 80]u8 = undefined;
     const path = record_path(dir, name, &path_storage);
     var bytes: [constants.record_bytes_max]u8 = undefined;
@@ -876,7 +879,9 @@ pub fn load(host: Host, dir: *const Dir, name: []const u8, out: *Parsed) LoadErr
         return if (err == error.NotFound) error.NotFound else error.Unreadable;
     };
     parse(content, out) catch |err| return if (err == error.Newer) error.Newer else error.Damaged;
-    assert(std.mem.eql(u8, out.name_slice(), name));
+    // A record under another name than its file's is not one of ours.
+    if (!std.mem.eql(u8, out.name_slice(), name)) return error.Damaged;
+    assert(out.name_len > 0);
 }
 
 /// The names of the records in the directory, in no order. The listing is the caller's.
@@ -984,6 +989,11 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try testing.expect(parsed.ids == null);
     const head = ".{\n    .version = 1,\n    .name = \"x\",\n    .started = 5,\n";
     try parse(head ++ "    .future = .{ 1, 2 },\n}\n", &parsed);
+    // A repeated field: the later one wins, and the counts start again.
+    const twice = head ++ "    .command = .{ \"a\" },\n    .command = .{ \"b\", \"c\" },\n}\n";
+    try parse(twice, &parsed);
+    try testing.expectEqual(@as(u8, 2), parsed.command_words);
+    try testing.expectEqualStrings("c", parsed.command_word(1));
     const newer = ".{\n    .version = 4,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
@@ -998,6 +1008,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
         ".{\n    .name = \"x\",\n    .started = 5,\n}\nextra\n",
         ".{\n    .name = \"unterminated,\n    .started = 5,\n}\n",
         ".{\n    .name = \"x\",\n    .started = 5\n}\n",
+        ".{\n    .name = \"x\",\n    .started = 5,\n    .scope = ,\n}\n",
     };
     for (bad) |text| try testing.expectError(error.Malformed, parse(text, &parsed));
 }
