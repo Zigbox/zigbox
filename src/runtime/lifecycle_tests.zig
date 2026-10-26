@@ -224,3 +224,62 @@ test "a container that ends before its time is not timed out" {
     try testing.expect(!run.timed_out(&handle));
     try testing.expectEqual(@as(usize, 0), sim.world.received_count);
 }
+
+// ---- Two callers at once ------------------------------------------------------------------------
+
+/// Everything one caller needs: a simulated host and a handle, in static storage (both are far
+/// bigger than a thread's stack should hold). Nothing here is shared between callers.
+const Caller = struct {
+    sim: HostSim,
+    handle: run.Handle,
+    exit_code: u8,
+    wanted: u8,
+    rounds: u32,
+    failed: bool,
+};
+
+var callers: [2]Caller = undefined;
+
+fn work(caller: *Caller, seed: u64) void {
+    var diag: Diag = undefined;
+    for (0..caller.rounds) |round| {
+        sim_run.init(&caller.sim, seed + round);
+        caller.sim.world.command_exit = .{ .exited = caller.wanted };
+        const container: run.Spec = .{
+            .rootfs = sim_run.rootfs_path,
+            .name = if (caller.wanted == 3) "alpha" else "beta",
+            .command = &.{ "/bin/sh", "-c", "true" },
+            .limits = .{ .pids = 32 },
+        };
+        diag.reset();
+        run.start(caller.sim.interface(), &container, .{}, &caller.handle, &diag) catch {
+            caller.failed = true;
+            return;
+        };
+        const reason = run.wait(&caller.handle);
+        caller.exit_code = reason.code() orelse 255;
+        if (caller.exit_code != caller.wanted) caller.failed = true;
+        // The scope of this caller's container, and only its container, was made and cleaned up.
+        if (caller.sim.world.bus.scopes_started != 1) caller.failed = true;
+        if (caller.sim.world.bus.scope_count() != 0) caller.failed = true;
+    }
+}
+
+test "two callers start and wait on containers at the same time and share nothing" {
+    // Goal: no module-level state is left in the library's start/wait path. Method: two threads
+    // each run many containers against a simulator of their own, with different exit codes and
+    // a scope each (so the D-Bus client, the doctor's facts, the plan and the records are all in
+    // use); an assertion on a shared static, or a result that is the other thread's, fails it.
+    // `std.Thread` is used here only; the container's child never is threaded (the simulator
+    // runs it inline, and the real one is a single-threaded process before `exec`).
+    callers[0] = .{ .sim = undefined, .handle = undefined, .exit_code = 0, .wanted = 3, .rounds = 40, .failed = false };
+    callers[1] = .{ .sim = undefined, .handle = undefined, .exit_code = 0, .wanted = 7, .rounds = 40, .failed = false };
+    const first = try std.Thread.spawn(.{}, work, .{ &callers[0], 100 });
+    const second = try std.Thread.spawn(.{}, work, .{ &callers[1], 900 });
+    first.join();
+    second.join();
+    try testing.expect(!callers[0].failed);
+    try testing.expect(!callers[1].failed);
+    try testing.expectEqual(@as(u8, 3), callers[0].exit_code);
+    try testing.expectEqual(@as(u8, 7), callers[1].exit_code);
+}

@@ -129,6 +129,9 @@ const Conn = struct {
     phase: Phase,
     inbox: [inbox_bytes]u8,
     inbox_len: u32,
+    /// The line `take_line` returned: kept here, not in a static, so two simulators on two
+    /// threads share nothing.
+    line: [inbox_bytes]u8,
     outbox: [outbox_bytes]u8,
     out_start: u32,
     out_end: u32,
@@ -313,14 +316,12 @@ pub const Bus = struct {
     /// A CRLF-terminated line from the inbox, copied out of the way of the shift that drops it.
     fn take_line(conn: *Conn) ?[]const u8 {
         const end = std.mem.indexOf(u8, conn.inbox[0..conn.inbox_len], "\r\n") orelse return null;
-        const storage = &line_storage;
+        const storage = &conn.line;
         assert(end <= storage.len);
         @memcpy(storage[0..end], conn.inbox[0..end]);
         drop(conn, @intCast(end + 2));
         return storage[0..end];
     }
-
-    var line_storage: [inbox_bytes]u8 = undefined;
 
     fn drop(conn: *Conn, count: u32) void {
         assert(count <= conn.inbox_len);
