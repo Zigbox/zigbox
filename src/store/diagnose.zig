@@ -391,6 +391,22 @@ pub fn more_skipped(diag: *Diag, count: u32) void {
     diag.fix(.{ .sentence = "nothing to do unless the container needs them" });
 }
 
+/// ZBX-W0412: owners the user namespace cannot map were recorded as 65534.
+pub fn unmapped_owners(diag: *Diag, users: u64, groups: u64, first: []const u8) void {
+    assert(diag.code == null);
+    assert(users + groups > 0);
+    assert(first.len > 0);
+    diag.raise(.W0412);
+    diag.while_("importing the directory", .{});
+    diag.cause(
+        "the owners of {d} entries and the groups of {d} cannot be mapped in this user " ++
+            "namespace; they are recorded as {d}. The first is '{s}'",
+        .{ users, groups, constants.store_overflow_id, first },
+    );
+    diag.context("path", "{s}", .{first});
+    diag.fix(.{ .sentence = "chown them to an id the user can map, then import again" });
+}
+
 pub const XattrFault = enum { namespace, name_too_long, value_too_long, too_many, unreadable };
 
 /// ZBX-W0411: an attribute was left out.

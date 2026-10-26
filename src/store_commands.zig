@@ -216,13 +216,16 @@ fn import_text(
     json_string(&writer, source[0..@min(source.len, constants.store_source_bytes_max)]) catch
         unreachable; // Same bound.
     writer.print(",\"files\":{d},\"directories\":{d},\"symlinks\":{d},\"skipped\":{d}," ++
-        "\"xattrs_skipped\":{d},\"bytes\":{d},\"new_objects\":{d},\"reused_objects\":{d}," ++
+        "\"xattrs_skipped\":{d},\"unmapped_owners\":{d},\"unmapped_groups\":{d}," ++
+        "\"bytes\":{d},\"new_objects\":{d},\"reused_objects\":{d}," ++
         "\"new_bytes\":{d},\"new_trees\":{d},\"reused_trees\":{d},\"ids\":\"{s}\"}}\n", .{
         result.files,
         result.directories,
         result.symlinks,
         result.skipped,
         result.xattrs_skipped,
+        result.unmapped_uids,
+        result.unmapped_gids,
         result.bytes,
         result.objects_new,
         result.objects_reused,

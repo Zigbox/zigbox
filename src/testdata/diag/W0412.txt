@@ -1,0 +1,7 @@
+warning[ZBX-W0412]: some files have an owner or group that could not be mapped
+  cause  the owners of 1 entries and the groups of 0 cannot be mapped in this
+         user namespace; they are recorded as 65534. The first is
+         '/src/etc/passwd'
+  fix    chown them to an id the user can map, then import again
+  more   zbx explain W0412 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0412.html

@@ -40,6 +40,9 @@ var planned: [entries_max]Planned = undefined;
 var bytes: [buffer_bytes]u8 = undefined;
 var other: [buffer_bytes]u8 = undefined;
 var mutated: [buffer_bytes]u8 = undefined;
+var own: tree.Own = undefined;
+var own_blob: [constants.store_xattr_blob_bytes_max]u8 = undefined;
+var own_attrs_len: u32 = 0;
 
 /// Names come from a small alphabet so that duplicates and order matter; they are sorted and
 /// made unique here, as the importer's sort does.
@@ -126,6 +129,7 @@ fn plan_attributes(random: std.Random, out: *[constants.store_xattr_blob_bytes_m
 }
 
 fn encode(count: u32, random: std.Random, out: []u8) []const u8 {
+    own = tree.Own.none;
     var writer = tree.Writer.init(out);
     for (planned[0..count]) |*item| {
         const attributes = item.blob[0..item.blob_len];
@@ -152,7 +156,16 @@ fn encode(count: u32, random: std.Random, out: []u8) []const u8 {
             },
         }
     }
-    return writer.finish();
+    // The root's own section is random too; the subtree case (none) is `finish`.
+    if (random.boolean()) return writer.finish();
+    own_attrs_len = plan_attributes(random, &own_blob);
+    own = .{
+        .mode = random.uintAtMost(u16, 0o7777),
+        .uid = random.int(u32) -| 1,
+        .gid = random.int(u32) -| 1,
+        .xattrs = own_blob[0..own_attrs_len],
+    };
+    return writer.finish_with(own) catch unreachable; // Small.
 }
 
 /// Property 1.
@@ -173,6 +186,10 @@ fn check_planned(count: u32, encoded: []const u8) void {
         if (item.kind == .symlink) assert(entry.target.len == item.target_len);
     }
     assert(!(decoder.next(&entry) catch unreachable)); // Same.
+    assert(decoder.own.mode == own.mode);
+    assert(decoder.own.uid == own.uid);
+    assert(decoder.own.gid == own.gid);
+    assert(std.mem.eql(u8, decoder.own.xattrs, own.xattrs));
     assert(tree.round_trips(encoded, &other));
 }
 

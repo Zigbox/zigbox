@@ -4,7 +4,8 @@
 //!
 //! Layout, all integers little-endian:
 //!
-//!   tree  = version:u8 (1) count:u32 entry*
+//!   tree  = version:u8 (1) count:u32 entry* own
+//!   own   = mode:u16 uid:u32 gid:u32 xattrs
 //!   entry = kind:u8 mode:u16 uid:u32 gid:u32 name_len:u8 name xattrs payload
 //!   xattrs  = the canonical section of `xattrs.zig`
 //!   payload = file:    size:u64 content:digest object:digest
@@ -20,7 +21,9 @@
 //! mtime, atime and ctime are not recorded: they are the one thing a re-import changes.
 //! `mode` holds the permission bits and setuid, setgid and sticky (07777), not the file type;
 //! `kind` is the type. A directory's own mode, owner and attributes are in its entry in the
-//! parent; the root directory's are in the root record's tree entry, see `import.zig`.
+//! parent. The `own` section at the end holds them for the one directory that has no parent
+//! entry, the imported root, which becomes the container's `/`; in every other tree it is
+//! zeros and no attributes, so a subtree is the same object wherever it sits.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -70,9 +73,22 @@ pub const Entry = struct {
     subtree: Digest,
 };
 
+/// The directory's own mode, owner and attributes: meaningful in the root of an import only.
+pub const Own = struct {
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    xattrs: []const u8,
+
+    pub const none: Own = .{ .mode = 0, .uid = 0, .gid = 0, .xattrs = &xattrs.empty };
+};
+
 pub const zero_digest: Digest = .{ .bytes = @splat(0) };
 
 const header_bytes: u32 = 5;
+
+/// What `own` takes when it has no attributes: the room every writer keeps for it.
+const own_bytes_min: u32 = 2 + 4 + 4 + xattrs.empty.len;
 
 /// A name the encoder accepts: not empty, at most 255 bytes, no slash, no NUL, not "." or "..".
 pub fn name_is_valid(name: []const u8) bool {
@@ -123,7 +139,8 @@ pub const Writer = struct {
         assert(writer.len >= header_bytes);
         assert(writer.len <= writer.buffer.len);
         const limit = @min(writer.buffer.len, constants.store_tree_bytes_max);
-        if (writer.len + bytes > limit) return error.TooLarge;
+        if (limit < own_bytes_min) return error.TooLarge;
+        if (writer.len + bytes > limit - own_bytes_min) return error.TooLarge;
     }
 
     fn put(writer: *Writer, bytes: []const u8) void {
@@ -215,10 +232,24 @@ pub const Writer = struct {
         assert(writer.count <= constants.store_dir_entries_max);
     }
 
-    /// The finished tree. Fills in the count.
+    /// The finished tree of a directory that is not a root: `own` is empty. Fills in the count.
     pub fn finish(writer: *Writer) []const u8 {
+        // Every `begin` and `end_*` left room for the empty `own`, so this cannot fail.
+        return writer.finish_with(Own.none) catch unreachable;
+    }
+
+    /// The finished tree of a root directory, with its own mode, owner and attributes.
+    pub fn finish_with(writer: *Writer, own: Own) Error![]const u8 {
         assert(writer.len >= header_bytes);
         assert(!writer.open);
+        assert(own.mode <= 0o7777);
+        assert(xattrs.validate(own.xattrs) == .none);
+        const limit = @min(writer.buffer.len, constants.store_tree_bytes_max);
+        if (writer.len + 2 + 4 + 4 + own.xattrs.len > limit) return error.TooLarge;
+        writer.put_int(u16, own.mode);
+        writer.put_int(u32, own.uid);
+        writer.put_int(u32, own.gid);
+        writer.put(own.xattrs);
         std.mem.writeInt(u32, writer.buffer[1..5], writer.count, .little);
         return writer.buffer[0..writer.len];
     }
@@ -231,6 +262,9 @@ pub const Decoder = struct {
     left: u32,
     previous: ?[]const u8,
     reason: Reason,
+    /// The directory's own attributes; set once `next` has returned false.
+    own: Own,
+    own_read: bool,
 
     pub fn init(decoder: *Decoder, bytes: []const u8) Malformed!void {
         assert(@intFromPtr(decoder) != 0);
@@ -241,9 +275,11 @@ pub const Decoder = struct {
             .left = 0,
             .previous = null,
             .reason = .none,
+            .own = Own.none,
+            .own_read = false,
         };
         if (bytes.len > constants.store_tree_bytes_max) return decoder.refuse(.too_large);
-        if (bytes.len < header_bytes) return decoder.refuse(.truncated);
+        if (bytes.len < header_bytes + own_bytes_min) return decoder.refuse(.truncated);
         if (bytes[0] != constants.store_tree_version) return decoder.refuse(.version);
         decoder.left = std.mem.readInt(u32, bytes[1..5], .little);
         if (decoder.left > constants.store_dir_entries_max) return decoder.refuse(.count);
@@ -289,6 +325,7 @@ pub const Decoder = struct {
         assert(decoder.at <= decoder.bytes.len);
         assert(decoder.left <= constants.store_dir_entries_max);
         if (decoder.left == 0) {
+            if (!decoder.own_read) try decoder.read_own();
             if (decoder.at != decoder.bytes.len) return decoder.refuse(.trailing);
             return false;
         }
@@ -301,6 +338,22 @@ pub const Decoder = struct {
         }
         decoder.previous = entry.name;
         return true;
+    }
+
+    fn read_own(decoder: *Decoder) Malformed!void {
+        assert(!decoder.own_read);
+        assert(decoder.left == 0);
+        const mode = try decoder.take_int(u16);
+        if (mode > 0o7777) return decoder.refuse(.mode);
+        const uid = try decoder.take_int(u32);
+        const gid = try decoder.take_int(u32);
+        if (uid == std.math.maxInt(u32)) return decoder.refuse(.owner);
+        if (gid == std.math.maxInt(u32)) return decoder.refuse(.owner);
+        const section = xattrs.section_length(decoder.bytes[decoder.at..]) orelse
+            return decoder.refuse(.xattrs);
+        const attributes = try decoder.take(section);
+        decoder.own = .{ .mode = mode, .uid = uid, .gid = gid, .xattrs = attributes };
+        decoder.own_read = true;
     }
 
     fn read_header(decoder: *Decoder, entry: *Entry) Malformed!void {
@@ -378,7 +431,8 @@ pub fn round_trips(bytes: []const u8, out: []u8) bool {
             .dir => writer.end_dir(entry.subtree) catch return false,
         }
     }
-    return std.mem.eql(u8, writer.finish(), bytes);
+    const again = writer.finish_with(decoder.own) catch return false;
+    return std.mem.eql(u8, again, bytes);
 }
 
 const testing = std.testing;
@@ -429,11 +483,13 @@ test "a tree decodes to the entries that were written, in order" {
     try testing.expect(Digest.of(bytes).eql(Digest.of(again)));
 }
 
-test "an empty directory is a tree of just its header" {
+test "an empty directory is a tree of just its header and an empty own section" {
     // Goal: the smallest tree is valid and has the same digest every time.
     var writer = Writer.init(&test_buffer);
     const bytes = writer.finish();
-    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0 }, bytes);
+    const zeros: [10]u8 = @splat(0);
+    const expected = [_]u8{ 1, 0, 0, 0, 0 } ++ zeros ++ xattrs.empty;
+    try testing.expectEqualSlices(u8, &expected, bytes);
     var decoder: Decoder = undefined;
     try decoder.init(bytes);
     var entry: Entry = undefined;
@@ -565,5 +621,66 @@ test "an attribute changes the encoding, and a changed owner does too" {
         try writer.end_file(0, Digest.of(""), Digest.of("o"));
         seen[index] = Digest.of(writer.finish());
         for (seen[0..index]) |before| try testing.expect(!before.eql(seen[index]));
+    }
+}
+
+test "the own section of a root is part of the digest, and survives a round trip" {
+    // Goal: the root directory's mode, owner and attributes change the identity and come back.
+    // Method: the same entries finished with four different own sections.
+    var builder: xattrs.Builder = undefined;
+    builder.reset();
+    try builder.add("user.k", "v");
+    var blob: [constants.store_xattr_blob_bytes_max]u8 = undefined;
+    const with_xattr = builder.finish(&blob);
+    const variants = [_]Own{
+        .{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = &xattrs.empty },
+        .{ .mode = 0o700, .uid = 0, .gid = 0, .xattrs = &xattrs.empty },
+        .{ .mode = 0o755, .uid = 3, .gid = 0, .xattrs = &xattrs.empty },
+        .{ .mode = 0o755, .uid = 0, .gid = 4, .xattrs = &xattrs.empty },
+        .{ .mode = 0o755, .uid = 0, .gid = 0, .xattrs = with_xattr },
+    };
+    var seen: [variants.len]Digest = undefined;
+    for (variants, 0..) |variant, index| {
+        var writer = Writer.init(&test_buffer);
+        try writer.begin("f", .file, 0o644, 0, 0, &xattrs.empty);
+        try writer.end_file(0, Digest.of(""), Digest.of("o"));
+        const bytes = try writer.finish_with(variant);
+        seen[index] = Digest.of(bytes);
+        for (seen[0..index]) |before| try testing.expect(!before.eql(seen[index]));
+        var decoder: Decoder = undefined;
+        try decoder.init(bytes);
+        var entry: Entry = undefined;
+        try testing.expect(try decoder.next(&entry));
+        try testing.expect(!(try decoder.next(&entry)));
+        try testing.expectEqual(variant.mode, decoder.own.mode);
+        try testing.expectEqual(variant.uid, decoder.own.uid);
+        try testing.expectEqual(variant.gid, decoder.own.gid);
+        try testing.expectEqualSlices(u8, variant.xattrs, decoder.own.xattrs);
+        try testing.expect(round_trips(bytes, &test_other));
+    }
+}
+
+test "a bad own section is refused for its reason" {
+    // Goal: the own section is as strict as an entry. Method: a mode past 07777, an owner
+    // of -1, a group of -1.
+    var writer = Writer.init(&test_buffer);
+    const good = try writer.finish_with(
+        .{ .mode = 0o755, .uid = 1, .gid = 2, .xattrs = &xattrs.empty },
+    );
+    const at = good.len - 11;
+    const cases = [_]struct { reason: Reason, offset: usize, bytes: []const u8 }{
+        .{ .reason = .mode, .offset = at, .bytes = &.{ 0xff, 0xff } },
+        .{ .reason = .owner, .offset = at + 2, .bytes = &.{ 0xff, 0xff, 0xff, 0xff } },
+        .{ .reason = .owner, .offset = at + 6, .bytes = &.{ 0xff, 0xff, 0xff, 0xff } },
+    };
+    for (cases) |case| {
+        var copy: [64]u8 = undefined;
+        @memcpy(copy[0..good.len], good);
+        @memcpy(copy[case.offset..][0..case.bytes.len], case.bytes);
+        var decoder: Decoder = undefined;
+        try decoder.init(copy[0..good.len]);
+        var entry: Entry = undefined;
+        try testing.expectError(error.Malformed, decoder.next(&entry));
+        try testing.expectEqual(case.reason, decoder.reason);
     }
 }

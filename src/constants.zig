@@ -403,6 +403,9 @@ pub const store_file_bytes_max: u64 = @as(u64, store_chunk_bytes) * store_chunks
 pub const store_mtime_seconds: u64 = 946_684_800;
 /// The tree encoding's version byte.
 pub const store_tree_version: u8 = 1;
+
+/// The id the kernel shows for an owner the user namespace has no mapping for.
+pub const store_overflow_id: u32 = 65534;
 /// The most entries one directory has, the longest name, and the deepest nesting. A source tree
 /// past any of them is refused with a message that names the path.
 pub const store_dir_entries_max: u32 = 16384;

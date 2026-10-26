@@ -83,6 +83,7 @@ pub const Code = enum(u8) {
     E0423,
     W0410,
     W0411,
+    W0412,
     E0701,
     E0702,
     E0703,
@@ -1030,6 +1031,25 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W0412,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "some files have an owner or group that could not be mapped",
+        .explanation =
+        \\The import runs in the user's namespace, where only the user (as 0) and
+        \\the subordinate range from /etc/subuid and /etc/subgid (as 1 and up)
+        \\exist. A file owned by any other host id shows as 65534, the kernel's
+        \\overflow id, and that is what the store records, so the container sees
+        \\those files owned by 65534 whatever their owner on the host.
+        \\
+        \\The message counts the owners and the groups and names the first path.
+        \\A file that really is owned by 65534 in the container is counted too,
+        \\because the kernel gives no way to tell the two apart. The digest holds
+        \\65534 either way. To record a real owner, chown the files to an id the
+        \\user can map, or import as a user with a subuid range.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -1243,7 +1263,7 @@ pub fn can_end_run(code: Code) bool {
         .E0701, .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0411, .E0412, .E0413, .E0414, .E0415, .E0416, .E0417, .E0418 => false,
-        .E0419, .E0420, .E0421, .E0422, .E0423, .W0410, .W0411 => false,
+        .E0419, .E0420, .E0421, .E0422, .E0423, .W0410, .W0411, .W0412 => false,
         else => true,
     };
 }

@@ -100,6 +100,8 @@ test "import --output json matches the schema's required keys and counts" {
     try testing.expectEqual(@as(i64, 4), object.get("directories").?.integer);
     try testing.expectEqual(@as(i64, 1), object.get("symlinks").?.integer);
     try testing.expectEqual(@as(i64, 41), object.get("bytes").?.integer);
+    try testing.expectEqual(@as(i64, 0), object.get("unmapped_owners").?.integer);
+    try testing.expectEqual(@as(i64, 0), object.get("unmapped_groups").?.integer);
     try testing.expectEqual(@as(i64, 6), object.get("new_objects").?.integer);
     try testing.expectEqualStrings("full", object.get("ids").?.string);
     const schema = schemas.of("store-import").?;
@@ -109,6 +111,26 @@ test "import --output json matches the schema's required keys and counts" {
         try testing.expect(object.get(key) != null);
     }
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+}
+
+test "import counts owners the namespace cannot map, warns once, and says so in JSON" {
+    // Goal: no silent loss of an owner. Method: two files and the root show the overflow id.
+    start();
+    files.set_owner_of("/src/etc/passwd", constants.store_overflow_id, 0);
+    files.set_owner_of("/src/etc/shadow", 0, constants.store_overflow_id);
+    files.set_owner_of("/src", constants.store_overflow_id, 0);
+    try testing.expectEqual(
+        @as(u8, 0),
+        try command(&.{ "--output", "json", "store", "import", "/src" }),
+    );
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0412"));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 2), parsed.value.object.get("unmapped_owners").?.integer);
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("unmapped_groups").?.integer);
+    const schema = schemas.of("store-import").?;
+    try testing.expect(std.mem.indexOf(u8, schema, "unmapped_owners") != null);
+    try testing.expect(std.mem.indexOf(u8, schema, "unmapped_groups") != null);
 }
 
 test "ls lists the roots newest first, in text and in JSON" {

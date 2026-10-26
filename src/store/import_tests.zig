@@ -133,7 +133,19 @@ test "everything that is content changes the digest" {
     start(1, 0);
     var warnings: Warnings = .{};
     const base = (try run_import("/src", &warnings)).digest;
-    const Change = enum { bytes, mode, owner, xattr, target, added, empty_dir };
+    const Change = enum {
+        bytes,
+        mode,
+        owner,
+        xattr,
+        target,
+        added,
+        empty_dir,
+        root_mode,
+        root_owner,
+        root_group,
+        root_xattr,
+    };
     for (std.enums.values(Change)) |change| {
         start(1, 0);
         switch (change) {
@@ -144,6 +156,10 @@ test "everything that is content changes the digest" {
             .target => @constCast(files.content_of("/src/bin/busybox").?)[0] = 'x',
             .added => files.put_file("/src/etc/new", 0o644, ""),
             .empty_dir => files.put_dir("/src/etc/newdir", 0o755),
+            .root_mode => files.set_mode_of("/src", 0o700),
+            .root_owner => files.set_owner_of("/src", 3, 0),
+            .root_group => files.set_owner_of("/src", 0, 3),
+            .root_xattr => files.put_xattr("/src", "user.x", "1"),
         }
         const changed = (try run_import("/src", &warnings)).digest;
         try testing.expect(!changed.eql(base));
@@ -217,6 +233,80 @@ test "modes, owners, attributes and symlinks round-trip through the objects and 
         checked += 1;
     }
     try testing.expectEqual(@as(u32, 4), checked);
+}
+
+test "the root directory's mode, owner and attributes are in the digest and come back" {
+    // Goal: the imported directory becomes the container's `/`, so its own metadata round-trips.
+    // Method: import with mode 0700, owner 3, group 4 and an attribute; the root tree's own
+    // section says so; setting the mode back gives the first digest again.
+    start(1, 0);
+    var warnings: Warnings = .{};
+    const original = (try run_import("/src", &warnings)).digest;
+    files.set_mode_of("/src", 0o700);
+    files.set_owner_of("/src", 3, 4);
+    files.put_xattr("/src", "user.root", "yes");
+    const changed = try run_import("/src", &warnings);
+    try testing.expect(!changed.digest.eql(original));
+    var buffer: [4096]u8 = undefined;
+    var errno: u16 = 0;
+    const bytes = try trees.load(&store, changed.digest, &buffer, &errno);
+    var decoder: tree.Decoder = undefined;
+    try decoder.init(bytes);
+    var entry: tree.Entry = undefined;
+    while (try decoder.next(&entry)) {}
+    try testing.expectEqual(@as(u16, 0o700), decoder.own.mode);
+    try testing.expectEqual(@as(u32, 3), decoder.own.uid);
+    try testing.expectEqual(@as(u32, 4), decoder.own.gid);
+    try testing.expectEqualSlices(u8, files.xattrs_of("/src").?, decoder.own.xattrs);
+    // A subdirectory's tree carries no own metadata: it is in the entry in its parent.
+    try decoder.init(bytes);
+    while (try decoder.next(&entry)) {
+        if (!std.mem.eql(u8, entry.name, "bin")) continue;
+        const sub_bytes = try trees.load(&store, entry.subtree, &buffer, &errno);
+        var sub: tree.Decoder = undefined;
+        try sub.init(sub_bytes);
+        var inner: tree.Entry = undefined;
+        while (try sub.next(&inner)) {}
+        try testing.expectEqual(@as(u16, 0), sub.own.mode);
+        try testing.expectEqual(@as(usize, 1), sub.own.xattrs.len);
+    }
+    // Back to what it was: the first digest, though it was written in between.
+    files.set_mode_of("/src", 0o755);
+    files.set_owner_of("/src", 0, 0);
+    files.remove_xattrs_of("/src");
+    try testing.expect((try run_import("/src", &warnings)).digest.eql(original));
+}
+
+test "an owner or group the namespace cannot map is counted, recorded as 65534, and warned once" {
+    // Goal: no silent loss. Method: three entries show the overflow id (a file's owner, another
+    // file's owner and group, the root's group); one warning for the import, with the counts and
+    // the first path; the digest holds 65534; a squashing import counts nothing.
+    start(1, 0);
+    const overflow = constants.store_overflow_id;
+    files.set_owner_of("/src/etc/passwd", overflow, 0);
+    files.set_owner_of("/src/etc/shadow", overflow, overflow);
+    files.set_owner_of("/src", 0, overflow);
+    var warnings: Warnings = .{};
+    const result = try run_import("/src", &warnings);
+    try testing.expectEqual(@as(u64, 2), result.unmapped_uids);
+    try testing.expectEqual(@as(u64, 2), result.unmapped_gids);
+    try testing.expectEqual(@as(u32, 1), warnings.count);
+    try testing.expect(warnings.has(.W0412));
+    start(1, 0);
+    files.set_owner_of("/src/etc/passwd", overflow, 0);
+    files.set_owner_of("/src/etc/shadow", overflow, overflow);
+    files.set_owner_of("/src", 0, overflow);
+    var squashed: Warnings = .{};
+    var again: import.Result = undefined;
+    try import.import(&store, &workspace, "/src", squashed.options(true), &again, &diag);
+    try testing.expectEqual(@as(u64, 0), again.unmapped_uids + again.unmapped_gids);
+    try testing.expectEqual(@as(u32, 0), squashed.count);
+    // An ordinary tree has none, and says nothing.
+    start(1, 0);
+    var clean: Warnings = .{};
+    const plain = try run_import("/src", &clean);
+    try testing.expectEqual(@as(u64, 0), plain.unmapped_uids + plain.unmapped_gids);
+    try testing.expectEqual(@as(u32, 0), clean.count);
 }
 
 test "a copy with one more file adds only that file's object" {

@@ -68,6 +68,10 @@ pub const Result = struct {
     /// Entries left out (devices, FIFOs, sockets), and attributes left out.
     skipped: u64,
     xattrs_skipped: u64,
+    /// Entries whose owner or group showed as the overflow id, 65534: the namespace could not
+    /// map it. They are recorded as 65534.
+    unmapped_uids: u64,
+    unmapped_gids: u64,
     /// The sum of the files' lengths.
     bytes: u64,
     objects_new: u64,
@@ -100,6 +104,8 @@ pub const Workspace = struct {
     xattr_names: [8192]u8,
     xattr_value: [constants.store_xattr_value_bytes_max + 1]u8,
     link_target: [constants.store_symlink_target_bytes_max + 1]u8,
+    /// The path of the first entry with an unmapped owner or group.
+    unmapped_path: [constants.path_bytes_max]u8,
 };
 
 const Run = struct {
@@ -112,6 +118,7 @@ const Run = struct {
     warning: Diag,
     warnings_shown: u32,
     warnings_hidden: u32,
+    unmapped_path_len: u32,
 
     fn path_text(run: *const Run, length: u32) [:0]const u8 {
         assert(length > 0);
@@ -251,10 +258,42 @@ const Run = struct {
         run.emit();
     }
 
+    /// Counts an entry whose owner or group is the overflow id; the first one's path is kept.
+    fn note_owner(run: *Run, path: []const u8, stat: *const fs_mod.Stat) void {
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        if (run.options.squash_owner) return; // Every owner is 0 by request; nothing is lost.
+        const uid = stat.uid == constants.store_overflow_id;
+        const gid = stat.gid == constants.store_overflow_id;
+        if (!uid and !gid) return;
+        if (run.unmapped_path_len == 0) {
+            @memcpy(run.ws.unmapped_path[0..path.len], path);
+            run.unmapped_path_len = @intCast(path.len);
+        }
+        if (uid) run.result.unmapped_uids += 1;
+        if (gid) run.result.unmapped_gids += 1;
+    }
+
+    /// After the walk: one warning, whatever the count, for owners that could not be mapped.
+    fn warn_unmapped(run: *Run) void {
+        if (run.unmapped_path_len == 0) return;
+        assert(run.result.unmapped_uids + run.result.unmapped_gids > 0);
+        if (run.options.warn == null) return;
+        run.warning.reset();
+        diagnose.unmapped_owners(
+            &run.warning,
+            run.result.unmapped_uids,
+            run.result.unmapped_gids,
+            run.ws.unmapped_path[0..run.unmapped_path_len],
+        );
+        run.emit();
+    }
+
     /// After the walk: one more warning that says how many were not shown.
     fn flush_warnings(run: *Run) void {
         assert(run.warnings_shown <= constants.store_warnings_shown_max);
         assert(run.depth == 0);
+        run.warn_unmapped();
         if (run.warnings_hidden == 0) return;
         run.warning.reset();
         diagnose.more_skipped(&run.warning, run.warnings_hidden);
@@ -388,6 +427,7 @@ const Run = struct {
         assert(name.len > 0);
         const blob = try run.gather_xattrs(path);
         const content = try run.hash_file(path, stat);
+        run.note_owner(path, stat);
         const attrs = run.attrs_of(stat, blob);
         const id = object.object_id(content.hash, attrs);
         try run.ensure_object(path, &content, attrs, id);
@@ -415,6 +455,7 @@ const Run = struct {
             return run.source_failure("readlink of", path, err, fs.last_errno());
         };
         if (target.len == 0) return run.vanished(path);
+        run.note_owner(path, stat);
         const attrs = run.attrs_of(stat, blob);
         frame.writer.begin(name, .symlink, attrs.mode, attrs.uid, attrs.gid, blob) catch {
             return run.writer_full(frame);
@@ -435,6 +476,7 @@ const Run = struct {
         // The root is level 0; `frames` has room for `store_depth_max` levels below it.
         if (run.depth > constants.store_depth_max) return run.limit(.depth, path);
         const blob = try run.gather_xattrs(path);
+        run.note_owner(path, stat);
         const attrs = run.attrs_of(stat, blob);
         frame.writer.begin(name, .dir, attrs.mode, attrs.uid, attrs.gid, blob) catch {
             return run.writer_full(frame);
@@ -448,7 +490,7 @@ const Run = struct {
         assert(run.depth > 0);
         assert(run.diag.code == null);
         const frame = &run.ws.frames[run.depth - 1];
-        const bytes = frame.writer.finish();
+        const bytes = if (run.depth == 1) try run.finish_root(frame) else frame.writer.finish();
         const digest = Digest.of(bytes);
         var failure: object.Failure = undefined;
         const created = trees.put(run.store, digest, bytes, &failure) catch |err| {
@@ -462,6 +504,31 @@ const Run = struct {
         }
         const parent = &run.ws.frames[run.depth - 1];
         parent.writer.end_dir(digest) catch return run.writer_full(parent);
+    }
+
+    /// The root directory's tree: its entries and its own mode, owner and attributes, which
+    /// become the container's `/`. They are read now, after its contents, so that what the
+    /// digest holds is what is on disk when the walk ends.
+    fn finish_root(run: *Run, frame: *Frame) Error![]const u8 {
+        assert(run.depth == 1);
+        assert(frame.path_len > 0);
+        const ws = run.ws;
+        ws.path[frame.path_len] = 0; // Deeper entries overwrote it.
+        const path = run.path_text(frame.path_len);
+        const fs = run.store.fs;
+        const stat = fs.lstat(path) catch |err| {
+            return run.source_failure("lstat of", path, err, fs.last_errno());
+        };
+        if (stat.kind != .dir) return run.vanished(path);
+        const blob = try run.gather_xattrs(path);
+        run.note_owner(path, &stat);
+        const attrs = run.attrs_of(&stat, blob);
+        return frame.writer.finish_with(.{
+            .mode = attrs.mode,
+            .uid = attrs.uid,
+            .gid = attrs.gid,
+            .xattrs = attrs.xattrs,
+        }) catch return run.writer_full(frame);
     }
 
     // ---- Files ------------------------------------------------------------------------------
@@ -617,6 +684,7 @@ pub fn import(
         .warning = undefined,
         .warnings_shown = 0,
         .warnings_hidden = 0,
+        .unmapped_path_len = 0,
     };
     try run.begin(source);
     // Each step handles one entry or finishes one directory; the walk ends because every entry

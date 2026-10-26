@@ -284,6 +284,10 @@ pub const SimFs = struct {
         node.gid = gid;
     }
 
+    pub fn remove_xattrs_of(sim: *SimFs, path: []const u8) void {
+        sim.nodes[sim.find(path).?].xattr_len = 0;
+    }
+
     pub fn set_mode_of(sim: *SimFs, path: []const u8, mode: u16) void {
         sim.nodes[sim.find(path).?].mode = mode;
     }

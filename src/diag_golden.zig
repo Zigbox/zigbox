@@ -325,6 +325,12 @@ fn prepare_store_attribute(sim: *HostSim) void {
     golden_files.put_xattr("/src/etc/passwd", "trusted.thing", "1");
 }
 
+fn prepare_store_unmapped(sim: *HostSim) void {
+    prepare_store_source(sim);
+    // The overflow id: what the kernel shows for an owner the namespace has no mapping for.
+    golden_files.set_owner_of("/src/etc/passwd", constants.store_overflow_id, 0);
+}
+
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
@@ -474,14 +480,14 @@ const base_cases = [_]Case{
     },
     .{
         .code = .E0420,
-        .args = &.{ "store", "rm", "b3:7784b17d1d8f" },
+        .args = &.{ "store", "rm", "b3:745006977617" },
         .prepare = prepare_tree_without_root,
         .exit = 1,
     },
     .{ .code = .E0421, .args = &.{ "store", "ls" }, .prepare = prepare_no_state, .exit = 2 },
     .{
         .code = .E0422,
-        .args = &.{ "store", "du", "b3:62c3844fa34d" },
+        .args = &.{ "store", "du", "b3:dc22adc080b1" },
         .prepare = prepare_missing_subtree,
         .exit = 2,
     },
@@ -503,6 +509,14 @@ const base_cases = [_]Case{
         .code = .W0411,
         .args = &.{ "store", "import", "/src" },
         .prepare = prepare_store_attribute,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0412,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_unmapped,
         .prints = true,
         .warning = true,
         .exit = 0,
