@@ -11,20 +11,22 @@
 //! shim. Two pipes carry the synchronisation: the parent tells the child when the id maps are
 //! written (`ready`), and the child tells the parent about a failed or skipped step (`report`).
 //!
-//! The parts of the contract that come in M2, and where each attaches (none changes the plan's
-//! steps, the pipes or the record format):
-//!   - `stop` with a grace period is `signal(SIGTERM)`, a timer around `wait`, then
-//!     `signal(SIGKILL)`. `wait` already takes signals as events, so the timer is one more.
-//!   - `list` reads the records directory (`records.zig`), which already keeps one record per run
-//!     by name; no registry is added.
-//!   - Re-adoption after a restart reads a record whose exit is `.running`, finds the container's
-//!     PID 1 by the pid the record will gain in a later version (the version field is there for
-//!     that), and waits on it through a pidfd instead of `wait4`.
-//!   - The event stream is the `report` pipe kept open for the container's life, with more record
-//!     kinds (`sync.zig`) for started, stopped and limit events.
-//!   - A detached run is `start` without `wait` in a supervisor process that is not the caller.
-//!   - `oom` and `pid_limit` are in `ExitReason` since slice 2 of M2: `wait` reads the scope's
-//!     `memory.events` and `pids.events` the moment PID 1 is reaped.
+//! Storage belongs to the caller. A `Handle` holds the plan, the doctor's `Facts` and the run's
+//! state, about 480 KiB (`constants.handle_bytes_max`); the caller passes it by pointer to `start`
+//! and may not move it until `wait` returns. The library has no module-level state but the real
+//! host's per-thread errno and the panic handler's settings (`diag/panic.zig`, which only the `zbx`
+//! program sets), so two callers on two threads each use their own (tested). The stack stays small:
+//! the plan is built in place in the handle, and what a start or a wait puts on the stack is a few
+//! buffers of at most `record_bytes_max` (32 KiB) and `output_bytes_max` (16 KiB). A thread that
+//! starts and waits for a container needs about 128 KiB of stack beyond the handle in a debug build
+//! (96 KiB was not enough in the test; the test uses 256 KiB), less in a release build.
+//!
+//! The rest of the contract is in `lifecycle.zig` (list, adopt by name, stop with a grace
+//! period, a poll for changes) and in `StartOptions`: `detached` (the record says a supervisor
+//! outlives the caller; the process split itself is the caller's, `cli.zig`'s `run -d`),
+//! `timeout_ms`/`grace_ms` (a run that lasts too long is sent SIGTERM and then SIGKILL).
+//! `oom` and `pid_limit` are in `ExitReason`: `wait` reads the scope's `memory.events` and
+//! `pids.events` the moment PID 1 is reaped.
 
 const std = @import("std");
 const builtin = @import("builtin");

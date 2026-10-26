@@ -244,6 +244,11 @@ const Caller = struct {
     failed: bool,
 };
 
+/// What a thread that starts and waits for a container needs besides the handle it is given:
+/// a debug build fails below 128 KiB (measured: 96 KiB crashes), so 256 KiB is twice that. The
+/// large buffers (16 and 32 KiB) are the only things that make it more than a few frames.
+const thread_options: std.Thread.SpawnConfig = .{ .stack_size = 256 * 1024 };
+
 var callers: [2]Caller = undefined;
 
 fn caller_for(wanted: u8) Caller {
@@ -291,8 +296,8 @@ test "two callers start and wait on containers at the same time and share nothin
     // runs it inline, and the real one is a single-threaded process before `exec`).
     callers[0] = caller_for(3);
     callers[1] = caller_for(7);
-    const first = try std.Thread.spawn(.{}, work, .{ &callers[0], 100 });
-    const second = try std.Thread.spawn(.{}, work, .{ &callers[1], 900 });
+    const first = try std.Thread.spawn(thread_options, work, .{ &callers[0], 100 });
+    const second = try std.Thread.spawn(thread_options, work, .{ &callers[1], 900 });
     first.join();
     second.join();
     try testing.expect(!callers[0].failed);

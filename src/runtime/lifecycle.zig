@@ -10,7 +10,7 @@
 //!   - `list` reads the records and checks which containers are alive, and adds the zbx scopes
 //!     that are running without a record.
 //!   - `adopt` makes a `Ref` to a running container by its name; `stop`, `signal` and `wait`
-//!     work on a `Ref`, which a run's own `Handle` also gives (`run.ref`).
+//!     work on a `Ref`, which a run's own `Handle` also gives (`ref_of`).
 //!   - `Watcher.poll` compares what is there with what it saw last time and reports the changes.
 //!
 //! "Alive" is checked, not assumed: the pid answers `kill(pid, 0)`; its innermost pid is 1
