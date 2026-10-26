@@ -146,6 +146,11 @@ pub const products_count_max: u32 = 8;
 pub const product_explain_bytes_max: u32 = 32;
 /// A diagnostic as JSON on the wire (`Diagnostic.parse_json`). Larger input is refused unread.
 pub const diag_wire_bytes_max: u32 = output_bytes_max;
+/// `parse_json` skips the members it does not know (a newer writer added them). How deep a
+/// skipped value may nest, and how many bytes of unknown members one line may carry in all
+/// (each counted from its key's quote to the end of its value).
+pub const diag_skip_depth_max: u32 = 8;
+pub const diag_skip_bytes_max: u32 = 4096;
 
 // The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
 // this; the bound is what the tool's buffers and file reads use.
@@ -478,6 +483,11 @@ comptime {
     const json_bytes_max = 2 * json_free_text + docs_url_bytes_max + 1024;
     assert(json_bytes_max <= diag_wire_bytes_max);
     assert(diag_wire_bytes_max == output_bytes_max);
+    assert(diag_skip_depth_max > 0);
+    assert(diag_skip_depth_max <= 16); // The skipper's stack is this many bytes.
+    assert(diag_skip_bytes_max > 0);
+    // Unknown members cannot be most of a line.
+    assert(diag_skip_bytes_max * 2 <= diag_wire_bytes_max);
 
     // A page holds the stylesheet (under 6 KiB), one explanation with every character escaped
     // to at most six bytes, and room for the index's table row per code.

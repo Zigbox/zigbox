@@ -7,11 +7,15 @@
 //!
 //!   - `from_diag` copies a collector.
 //!   - `write_json` writes the one-line JSON object that `zbx --output json` has always written.
-//!   - `parse_json` reads it back. It accepts exactly what `write_json` writes, and nothing
-//!     else: a field over its bound, an unknown severity or blame, a list over its capacity or a
-//!     key out of place is `error.Malformed`, never a truncation. So whatever it accepts,
-//!     `write_json` writes back byte for byte (the fuzzer checks that), and the renderer's
-//!     assertions (no empty text, printable ASCII, counts within the bounds) hold for it.
+//!   - `parse_json` reads it back. It is forward tolerant and strict on what it knows: members
+//!     may come in any order and a member it does not know is skipped (a newer writer added it;
+//!     the skipping is bounded by `diag_skip_depth_max` and `diag_skip_bytes_max`), but a known
+//!     member twice, a missing one, a field over its bound, an unknown severity or blame, or a
+//!     list over its capacity is `error.Malformed`, never a truncation. There is no version
+//!     member. Whitespace is not accepted. Whatever it accepts is a value `write_json` writes
+//!     in its own canonical form and `parse_json` reads back equal (the fuzzer checks that),
+//!     and the renderer's assertions (no empty text, printable ASCII, counts within the bounds)
+//!     hold for it.
 //!
 //! The wire form does not carry `command_missing` (it is not in today's JSON, which must not
 //! change): a parsed diagnostic has it false. It only matters for the exit code of a container
@@ -315,6 +319,8 @@ const Malformed = error{Malformed};
 const Cursor = struct {
     bytes: []const u8,
     at: u32,
+    /// Bytes of unknown members skipped so far, against `diag_skip_bytes_max`.
+    skipped: u32,
 
     fn next(cursor: *Cursor) ?u8 {
         assert(cursor.at <= cursor.bytes.len);
@@ -464,14 +470,191 @@ fn parse_context(cursor: *Cursor, list: *diag_mod.Pairs) Malformed!void {
     return error.Malformed;
 }
 
+// Unknown members. A newer writer may add members; they are skipped, not refused, so a rolling
+// upgrade does not turn every diagnostic from a newer node into `Malformed`. Skipping checks the
+// value is JSON of the shape `write_json` writes (printable ASCII, no whitespace), bounded in
+// depth and in bytes, and keeps no explicit recursion: the open containers are a small stack.
+
+fn skip_hex4(cursor: *Cursor) Malformed!void {
+    assert(cursor.at > 0); // After the `u`.
+    for (0..4) |_| {
+        const byte = cursor.next() orelse return error.Malformed;
+        if (!std.ascii.isHex(byte)) return error.Malformed;
+    }
+    assert(cursor.at <= cursor.bytes.len);
+}
+
+/// Skips a JSON string: printable ASCII, with the escapes JSON has.
+fn skip_string(cursor: *Cursor) Malformed!void {
+    assert(cursor.at <= cursor.bytes.len);
+    try cursor.take('"');
+    while (cursor.next()) |byte| {
+        if (byte == '"') return;
+        if (!text_util.is_printable(byte)) return error.Malformed;
+        if (byte != '\\') continue;
+        const escaped = cursor.next() orelse return error.Malformed;
+        if (escaped == 'u') {
+            try skip_hex4(cursor);
+        } else if (std.mem.indexOfScalar(u8, "\"\\/bfnrt", escaped) == null) {
+            return error.Malformed;
+        }
+    }
+    return error.Malformed; // The input ended inside the string.
+}
+
+fn skip_digits(cursor: *Cursor) u32 {
+    assert(cursor.at <= cursor.bytes.len);
+    const start = cursor.at;
+    while (cursor.at < cursor.bytes.len) {
+        if (!std.ascii.isDigit(cursor.bytes[cursor.at])) break;
+        cursor.at += 1;
+    }
+    assert(cursor.at >= start);
+    return cursor.at - start;
+}
+
+/// Skips a JSON number: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+fn skip_number(cursor: *Cursor) Malformed!void {
+    assert(cursor.at <= cursor.bytes.len);
+    const start = cursor.at;
+    _ = cursor.accept('-');
+    if (cursor.accept('0')) {
+        // A leading zero stands alone.
+    } else if (skip_digits(cursor) == 0) {
+        return error.Malformed;
+    }
+    if (cursor.accept('.')) {
+        if (skip_digits(cursor) == 0) return error.Malformed;
+    }
+    if (cursor.accept('e')) {
+        try skip_exponent(cursor);
+    } else if (cursor.accept('E')) {
+        try skip_exponent(cursor);
+    }
+    assert(cursor.at > start); // A number is at least one byte.
+    assert(cursor.at <= cursor.bytes.len);
+}
+
+/// The part of a number after its `e`.
+fn skip_exponent(cursor: *Cursor) Malformed!void {
+    assert(cursor.at > 0);
+    if (!cursor.accept('+')) _ = cursor.accept('-');
+    if (skip_digits(cursor) == 0) return error.Malformed;
+    assert(cursor.at <= cursor.bytes.len);
+}
+
+const Started = enum { scalar, opened };
+
+/// Skips a scalar, or opens a container and pushes it on `stack`.
+fn skip_start(
+    cursor: *Cursor,
+    stack: *[constants.diag_skip_depth_max]u8,
+    depth: *u32,
+) Malformed!Started {
+    assert(depth.* <= constants.diag_skip_depth_max);
+    if (cursor.at == cursor.bytes.len) return error.Malformed;
+    const byte = cursor.bytes[cursor.at];
+    switch (byte) {
+        '"' => try skip_string(cursor),
+        '[', '{' => {
+            if (depth.* == constants.diag_skip_depth_max) return error.Malformed;
+            stack[depth.*] = byte;
+            depth.* += 1;
+            cursor.at += 1;
+            return .opened;
+        },
+        't' => try cursor.take_literal("true"),
+        'f' => try cursor.take_literal("false"),
+        'n' => try cursor.take_literal("null"),
+        else => try skip_number(cursor),
+    }
+    assert(cursor.at > 0);
+    assert(depth.* <= constants.diag_skip_depth_max);
+    return .scalar;
+}
+
+/// Skips one JSON value of any type.
+fn skip_value(cursor: *Cursor) Malformed!void {
+    const start = cursor.at;
+    var stack: [constants.diag_skip_depth_max]u8 = undefined;
+    var depth: u32 = 0;
+    var state = try skip_start(cursor, &stack, &depth);
+    // Every pass consumes at least one byte or fails, and the budget below ends a long one.
+    while (depth > 0) {
+        if (cursor.at - start > constants.diag_skip_bytes_max) return error.Malformed;
+        const top = stack[depth - 1];
+        assert(top != 0);
+        if (top != '[') assert(top == '{');
+        if (cursor.accept(if (top == '[') ']' else '}')) {
+            depth -= 1;
+            state = .scalar; // A container is a finished value like a scalar.
+            continue;
+        }
+        if (state == .scalar) try cursor.take(',');
+        if (top == '{') {
+            try skip_string(cursor);
+            try cursor.take(':');
+        }
+        state = try skip_start(cursor, &stack, &depth);
+    }
+    assert(depth == 0);
+}
+
+/// The members of an object this parser knows. `read_member` returns the known one whose value
+/// is next, or null for an unknown one that it has skipped whole.
+fn read_member(cursor: *Cursor, comptime Field: type, seen: *u32) Malformed!?Field {
+    comptime assert(std.meta.fieldNames(Field).len <= 32); // One bit each in `seen`.
+    const start = cursor.at;
+    assert(cursor.skipped <= constants.diag_skip_bytes_max);
+    inline for (comptime std.meta.fieldNames(Field)) |name| {
+        if (cursor.accept_literal("\"" ++ name ++ "\":")) {
+            const bit = @as(u32, 1) << @backingInt(@field(Field, name));
+            if (seen.* & bit != 0) return error.Malformed; // A known member twice.
+            seen.* |= bit;
+            return @field(Field, name);
+        }
+    }
+    try skip_string(cursor);
+    try cursor.take(':');
+    try skip_value(cursor);
+    assert(cursor.at > start);
+    cursor.skipped += cursor.at - start;
+    if (cursor.skipped > constants.diag_skip_bytes_max) return error.Malformed;
+    return null;
+}
+
+/// After a member: true if the object ended, false if another follows.
+fn object_ended(cursor: *Cursor) Malformed!bool {
+    assert(cursor.at > 0); // A member was read.
+    assert(cursor.at <= cursor.bytes.len);
+    if (cursor.accept('}')) return true;
+    try cursor.take(',');
+    return false;
+}
+
+fn all_seen(comptime Field: type, seen: u32) bool {
+    const fields = comptime std.meta.fieldNames(Field);
+    assert(seen >> fields.len == 0); // No bit past the last field.
+    return seen == (@as(u32, 1) << fields.len) - 1;
+}
+
+const FixField = enum(u5) { sentence, command };
+
 fn parse_fix(cursor: *Cursor, item: *diag_mod.Fix) Malformed!void {
     item.sentence = .{};
     item.command = .{};
-    try cursor.take_literal("{\"sentence\":");
-    try read_text(cursor, &item.sentence);
-    try cursor.take_literal(",\"command\":");
-    if (!cursor.accept_literal("null")) try read_text(cursor, &item.command);
-    try cursor.take('}');
+    try cursor.take('{');
+    var seen: u32 = 0;
+    var ended = false; // Every pass reads a member, which consumes input or fails.
+    while (!ended) {
+        const field = try read_member(cursor, FixField, &seen);
+        if (field == .sentence) try read_text(cursor, &item.sentence);
+        if (field == .command) {
+            if (!cursor.accept_literal("null")) try read_text(cursor, &item.command);
+        }
+        ended = try object_ended(cursor);
+    }
+    if (!all_seen(FixField, seen)) return error.Malformed;
     assert(item.sentence.len > 0);
     assert(item.command.len <= constants.diag_command_bytes_max);
 }
@@ -502,58 +685,67 @@ fn set_omitted(list: anytype, omitted: u32) Malformed!void {
     if (list.omitted > 0) assert(list.slice().len == list.items.len);
 }
 
-fn parse_omitted(cursor: *Cursor, out: *Diagnostic) Malformed!void {
-    assert(out.causes.omitted == 0);
-    assert(out.fixes.omitted == 0);
-    try cursor.take_literal("\"omitted\":{\"causes\":");
-    try set_omitted(&out.causes, try read_count(cursor));
-    try cursor.take_literal(",\"while\":");
-    try set_omitted(&out.whiles, try read_count(cursor));
-    try cursor.take_literal(",\"context\":");
-    try set_omitted(&out.pairs, try read_count(cursor));
-    try cursor.take_literal(",\"fixes\":");
-    try set_omitted(&out.fixes, try read_count(cursor));
-    try cursor.take_literal("}}");
-    assert(out.pairs.omitted <= std.math.maxInt(u16));
+const OmittedField = enum(u5) { causes, @"while", context, fixes };
+
+/// The four counts, in the order of `OmittedField`.
+fn parse_omitted(cursor: *Cursor) Malformed![4]u32 {
+    var counts: [4]u32 = @splat(0);
+    try cursor.take('{');
+    var seen: u32 = 0;
+    var ended = false; // Every pass reads a member, which consumes input or fails.
+    while (!ended) {
+        const field = try read_member(cursor, OmittedField, &seen);
+        if (field) |known| counts[@backingInt(known)] = try read_count(cursor);
+        ended = try object_ended(cursor);
+    }
+    if (!all_seen(OmittedField, seen)) return error.Malformed;
+    assert(counts[0] <= std.math.maxInt(u16));
+    return counts;
 }
 
-fn parse_head(cursor: *Cursor, out: *Diagnostic) Malformed!void {
-    assert(cursor.at == 0);
-    assert(out.code.len == 0);
-    try cursor.take_literal("{\"code\":");
-    try read_text(cursor, &out.code);
-    if (!code_is_valid(out.code.slice())) return error.Malformed;
-    try cursor.take_literal(",\"severity\":");
-    out.severity = try read_enum(cursor, codes.Severity);
-    try cursor.take_literal(",\"blame\":");
-    out.blame = try read_enum(cursor, codes.Blame);
-    try cursor.take_literal(",\"summary\":");
-    try read_text(cursor, &out.summary);
-    try cursor.take(',');
-    assert(out.summary.len > 0);
-}
+const Member = enum(u5) {
+    code,
+    severity,
+    blame,
+    summary,
+    causes,
+    @"while",
+    context,
+    fixes,
+    saved,
+    docs,
+    omitted,
+};
 
-fn parse_body(cursor: *Cursor, out: *Diagnostic) Malformed!void {
+/// Every member `write_json` always writes. `saved` and `docs` are written when there is one.
+const required_fields: u32 = blk: {
+    const all: u32 = (@as(u32, 1) << std.meta.fieldNames(Member).len) - 1;
+    const saved = @as(u32, 1) << @backingInt(Member.saved);
+    const docs = @as(u32, 1) << @backingInt(Member.docs);
+    break :blk all & ~(saved | docs);
+};
+
+/// Reads the value of a known member into `out`. The counts of omitted items wait for the end,
+/// when the lists they refer to are known.
+fn parse_field(cursor: *Cursor, out: *Diagnostic, field: Member, counts: *[4]u32) Malformed!void {
     assert(cursor.at > 0);
-    assert(out.causes.count == 0);
-    try cursor.take_literal("\"causes\":");
-    try parse_texts(cursor, &out.causes);
-    try cursor.take_literal(",\"while\":");
-    try parse_texts(cursor, &out.whiles);
-    try cursor.take_literal(",\"context\":");
-    try parse_context(cursor, &out.pairs);
-    try cursor.take_literal(",\"fixes\":");
-    try parse_fixes(cursor, &out.fixes);
-    try cursor.take(',');
-    if (cursor.accept_literal("\"saved\":")) {
-        try read_text(cursor, &out.saved);
-        try cursor.take(',');
+    assert(out.code.len <= constants.diag_code_bytes);
+    switch (field) {
+        .code => {
+            try read_text(cursor, &out.code);
+            if (!code_is_valid(out.code.slice())) return error.Malformed;
+        },
+        .severity => out.severity = try read_enum(cursor, codes.Severity),
+        .blame => out.blame = try read_enum(cursor, codes.Blame),
+        .summary => try read_text(cursor, &out.summary),
+        .causes => try parse_texts(cursor, &out.causes),
+        .@"while" => try parse_texts(cursor, &out.whiles),
+        .context => try parse_context(cursor, &out.pairs),
+        .fixes => try parse_fixes(cursor, &out.fixes),
+        .saved => try read_text(cursor, &out.saved),
+        .docs => try read_text(cursor, &out.docs),
+        .omitted => counts.* = try parse_omitted(cursor),
     }
-    if (cursor.accept_literal("\"docs\":")) {
-        try read_text(cursor, &out.docs);
-        try cursor.take(',');
-    }
-    assert(out.fixes.count <= constants.diag_fixes_count_max);
 }
 
 /// The inverse of `write_json`. Initialises `out` in place; after an error it is empty. See the
@@ -563,10 +755,22 @@ pub fn parse_json(out: *Diagnostic, bytes: []const u8) Malformed!void {
     out.reset();
     errdefer out.reset();
     if (bytes.len > constants.diag_wire_bytes_max) return error.Malformed;
-    var cursor: Cursor = .{ .bytes = bytes, .at = 0 };
-    try parse_head(&cursor, out);
-    try parse_body(&cursor, out);
-    try parse_omitted(&cursor, out);
+    assert(bytes.len < std.math.maxInt(u32)); // Positions are u32; the bound above is far lower.
+    var cursor: Cursor = .{ .bytes = bytes, .at = 0, .skipped = 0 };
+    try cursor.take('{');
+    var seen: u32 = 0;
+    var counts: [4]u32 = @splat(0);
+    var ended = false; // Every pass reads a member, which consumes input or fails.
+    while (!ended) {
+        const field = try read_member(&cursor, Member, &seen);
+        if (field) |known| try parse_field(&cursor, out, known, &counts);
+        ended = try object_ended(&cursor);
+    }
+    if (seen & required_fields != required_fields) return error.Malformed;
+    try set_omitted(&out.causes, counts[@backingInt(OmittedField.causes)]);
+    try set_omitted(&out.whiles, counts[@backingInt(OmittedField.@"while")]);
+    try set_omitted(&out.pairs, counts[@backingInt(OmittedField.context)]);
+    try set_omitted(&out.fixes, counts[@backingInt(OmittedField.fixes)]);
     _ = cursor.accept('\n'); // The newline `write_json` ends with is optional.
     if (cursor.at != bytes.len) return error.Malformed;
     assert(code_is_valid(out.code.slice()));
@@ -693,7 +897,6 @@ test "parse_json refuses what write_json never writes, and never truncates" {
         .{ .from = "\"path\"", .to = "\"toolong\"" },
         .{ .from = "\"path\"", .to = "\"\"" },
         .{ .from = "\"causes\"", .to = "\"cause\"" }, // A key out of place.
-        .{ .from = "\"fixes\":[", .to = "\"extra\":1,\"fixes\":[" }, // An unknown key.
         .{ .from = "\"context\":0", .to = "\"context\":00" }, // Not canonical.
         .{ .from = "\"context\":0", .to = "\"context\":65536" }, // Over what is shown.
         .{ .from = "\"context\":0", .to = "\"context\":" }, // No count.
@@ -721,6 +924,162 @@ fn replace_once(buffer: []u8, text: []const u8, from: []const u8, to: []const u8
     @memcpy(buffer[at..][0..to.len], to);
     @memcpy(buffer[at + to.len ..][0..rest.len], rest);
     return buffer[0 .. at + to.len + rest.len];
+}
+
+/// Parses `good` with the one occurrence of `from` replaced by `to`; `parsed` is the result.
+fn parse_changed(parsed: *Diagnostic, good: []const u8, from: []const u8, to: []const u8) !void {
+    var changed: [constants.output_bytes_max]u8 = undefined;
+    try parse_json(parsed, try replace_once(&changed, good, from, to));
+}
+
+fn sample_json(buffer: []u8, original: *Diagnostic) ![]const u8 {
+    var diag: Diag = undefined;
+    fill_sample(&diag, .E0001);
+    from_diag(original, &diag);
+    return json_of(buffer, original);
+}
+
+test "an unknown member is skipped wherever it is and whatever its value" {
+    // Goal: forward tolerance. A newer writer adds members at the top, inside a fix and inside
+    // the omitted counts, of any JSON type; the result equals the diagnostic without them and
+    // writes back the canonical line.
+    var original: Diagnostic = undefined;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const good = try sample_json(&buffer, &original);
+    const values = [_][]const u8{
+        "1",
+        "-1.5e+3",
+        "0",
+        "\"s\\u00e9\\n\\/x\\\"\"",
+        "true",
+        "false",
+        "null",
+        "[]",
+        "{}",
+        "[1,[2,{\"a\":[]}]]",
+        "{\"a\":{\"b\":\"c\"},\"d\":[null]}",
+    };
+    const places = [_]struct { from: []const u8, key: []const u8, after: []const u8 }{
+        .{ .from = "{\"code\":", .key = "{\"v\":", .after = ",\"code\":" },
+        .{ .from = ",\"docs\":", .key = ",\"zz\":", .after = ",\"docs\":" },
+        .{ .from = "{\"sentence\":", .key = "{\"id\":", .after = ",\"sentence\":" },
+        .{ .from = "\"omitted\":{", .key = "\"omitted\":{\"extra\":", .after = "," },
+    };
+    var parsed: Diagnostic = undefined;
+    var line: [constants.output_bytes_max]u8 = undefined;
+    var again: [constants.output_bytes_max]u8 = undefined;
+    for (places) |place| {
+        for (values) |value| {
+            var writer = Writer.fixed(&line);
+            try writer.print("{s}{s}{s}", .{ place.key, value, place.after });
+            try parse_changed(&parsed, good, place.from, writer.buffered());
+            try testing.expect(original.equal(&parsed));
+            try testing.expectEqualStrings(good, try json_of(&again, &parsed));
+        }
+    }
+}
+
+test "members in any order parse; a missing member or a repeated known one is refused" {
+    // Goal: order is free, completeness and uniqueness are not.
+    var parsed: Diagnostic = undefined;
+    const reversed = "{\"omitted\":{\"fixes\":0,\"context\":0,\"while\":0,\"causes\":0}," ++
+        "\"fixes\":[],\"context\":{},\"while\":[],\"causes\":[\"c\"],\"summary\":\"s\"," ++
+        "\"blame\":\"user\",\"severity\":\"error\",\"code\":\"ZBX-E0001\"}\n";
+    try parse_json(&parsed, reversed);
+    try testing.expectEqualStrings("ZBX-E0001", parsed.code.slice());
+    try testing.expectEqualStrings("c", parsed.last_cause().?);
+    try testing.expectEqual(@as(u32, 0), parsed.fixes.count);
+
+    var original: Diagnostic = undefined;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const good = try sample_json(&buffer, &original);
+    const code = "{\"code\":\"ZBX-E0001\",";
+    const refused = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = code, .to = code ++ "\"code\":\"ZBX-E0001\"," }, // A known member twice.
+        .{ .from = "{\"sentence\":", .to = "{\"sentence\":\"a\",\"sentence\":" },
+        .{ .from = "\"omitted\":{", .to = "\"omitted\":{\"causes\":0," },
+        .{ .from = "\"summary\":\"unknown command\",", .to = "" }, // A missing one.
+        .{ .from = ",\"command\":null", .to = "" },
+        .{ .from = "\"fixes\":[", .to = "\"fixez\":[" },
+        .{ .from = ",\"fixes\":0}", .to = "}" },
+    };
+    for (refused) |case| {
+        const result = parse_changed(&parsed, good, case.from, case.to);
+        try testing.expectError(error.Malformed, result);
+        try testing.expectEqual(@as(u32, 0), parsed.causes.count);
+    }
+}
+
+/// `{"x":<payload>` placed first in a valid line; `payload` is built by `fill`.
+fn parse_with_unknown(parsed: *Diagnostic, good: []const u8, member: []const u8) !void {
+    var line: [constants.output_bytes_max]u8 = undefined;
+    var writer = Writer.fixed(&line);
+    try writer.print("{s},\"code\":", .{member});
+    try parse_changed(parsed, good, "\"code\":", writer.buffered());
+}
+
+test "skipping is bounded in depth and in bytes, and checks what it skips" {
+    // Goal: the two limits are exact (at the limit parses, one over is Malformed), they hold
+    // over all unknown members together, and a skipped value must still be well-formed JSON.
+    var original: Diagnostic = undefined;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const good = try sample_json(&buffer, &original);
+    var parsed: Diagnostic = undefined;
+    var member: [constants.diag_skip_bytes_max * 3]u8 = undefined;
+
+    const depth_max = constants.diag_skip_depth_max;
+    for ([_]u32{ depth_max, depth_max + 1 }) |depth| {
+        var writer = Writer.fixed(&member);
+        try writer.writeAll("\"x\":");
+        for (0..depth) |_| try writer.writeByte('[');
+        for (0..depth) |_| try writer.writeByte(']');
+        const result = parse_with_unknown(&parsed, good, writer.buffered());
+        if (depth <= depth_max) try result else try testing.expectError(error.Malformed, result);
+    }
+
+    const bytes_max = constants.diag_skip_bytes_max;
+    for ([_]u32{ bytes_max, bytes_max + 1 }) |bytes| {
+        var writer = Writer.fixed(&member);
+        try writer.writeAll("\"x\":\"");
+        try writer.splatByteAll('p', bytes - 6);
+        try writer.writeByte('"');
+        try testing.expectEqual(bytes, writer.buffered().len);
+        const result = parse_with_unknown(&parsed, good, writer.buffered());
+        if (bytes <= bytes_max) try result else try testing.expectError(error.Malformed, result);
+    }
+    // Two members that are each within the limit and together over it.
+    var writer = Writer.fixed(&member);
+    try writer.writeAll("\"x\":\"");
+    try writer.splatByteAll('p', bytes_max / 2);
+    try writer.writeAll("\",\"y\":\"");
+    try writer.splatByteAll('p', bytes_max / 2);
+    try writer.writeByte('"');
+    try testing.expectError(error.Malformed, parse_with_unknown(&parsed, good, writer.buffered()));
+
+    const bad_values = [_][]const u8{
+        "[1,]",
+        "{\"a\"}",
+        "tru",
+        "01",
+        "\"a\x01\"",
+        "\"\\q\"",
+        "-",
+        "1.",
+        "1e",
+        "[1 2]",
+        "[",
+        "{\"a\":1,}",
+        "\"\\u12g4\"",
+        "+1",
+        ".5",
+        "\"\xff\"",
+    };
+    for (bad_values) |value| {
+        writer = Writer.fixed(&member);
+        try writer.print("\"x\":{s}", .{value});
+        const result = parse_with_unknown(&parsed, good, writer.buffered());
+        try testing.expectError(error.Malformed, result);
+    }
 }
 
 test "a field one byte over its bound is refused and one at the bound is kept whole" {
