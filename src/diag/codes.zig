@@ -61,6 +61,12 @@ pub const Code = enum(u8) {
     E0308,
     W0301,
     W0302,
+    E0401,
+    E0402,
+    E0403,
+    E0404,
+    E0405,
+    E0406,
     E0701,
     E0702,
     E0703,
@@ -692,6 +698,83 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0401,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a time is not a number of milliseconds",
+        .explanation =
+        \\--timeout and --grace take a number of milliseconds: a whole number
+        \\from 1 to 86400000 (a day) for --timeout, and from 0 for --grace, which is
+        \\how long a container gets between SIGTERM and SIGKILL. Anything else is
+        \\refused before anything starts.
+        ,
+    },
+    .{
+        .code = .E0402,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no container with that name",
+        .explanation =
+        \\No run record has that name, so there is no container to stop. "zbx ps
+        \\--all" lists the containers zbx knows, running or not; the newest 32 are
+        \\kept. A container that ended is found, and "zbx stop" on it says it was
+        \\already stopped.
+        ,
+    },
+    .{
+        .code = .E0403,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't signal the container",
+        .explanation =
+        \\zbx found the container's PID 1 but the kernel refused to signal it.
+        \\That is unusual: the container belongs to the user who runs zbx. The
+        \\record may be another user's, or the pid was reused by a process that is
+        \\not ours. The cause names the kernel's reason.
+        ,
+    },
+    .{
+        .code = .E0404,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the container did not stop in time",
+        .explanation =
+        \\zbx sent the container SIGTERM, and SIGKILL after the grace period, and
+        \\it was still there when --timeout ran out (or a few seconds after SIGKILL).
+        \\A process in uninterruptible sleep (a stuck mount, a hung disk) cannot be
+        \\killed until the kernel lets it go.
+        \\
+        \\Look at what it is doing with "ps -o pid,stat,wchan -p <pid>" and try
+        \\again; the pid is in "zbx ps".
+        ,
+    },
+    .{
+        .code = .E0405,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't start the supervisor of a detached run",
+        .explanation =
+        \\A detached run ("zbx run -d") hands the container to a supervisor
+        \\process that stays to wait for it and to finish its record. The kernel
+        \\refused to create that process (a process limit, or no memory), so
+        \\nothing was started.
+        \\
+        \\The cause names the kernel's reason. Check the process limits with
+        \\"ulimit -u".
+        ,
+    },
+    .{
+        .code = .E0406,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no schema for that command",
+        .explanation =
+        \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
+        \\doctor ("zbx schema ps"). Other commands have no machine-readable output
+        \\that needs one: explain and help print text, version prints a line.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -903,6 +986,7 @@ pub fn can_end_run(code: Code) bool {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0701, .E0702, .E0703, .E0704 => false,
+        .E0402, .E0403, .E0404, .E0406 => false,
         else => true,
     };
 }

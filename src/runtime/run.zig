@@ -216,6 +216,7 @@ pub const Handle = struct {
 /// Whether `wait` had to stop the container because its time (`StartOptions.timeout_ms`) was up.
 pub fn timed_out(handle: *const Handle) bool {
     assert(handle.status != .starting);
+    assert(handle.name_len > 0);
     return handle.session.timed_out;
 }
 

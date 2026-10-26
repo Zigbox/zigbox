@@ -30,6 +30,11 @@ pub fn exit_now(code: u8) noreturn {
     linux.exit_group(code);
 }
 
+fn timespec_of(ms: u64) linux.timespec {
+    assert(ms <= std.math.maxInt(u32));
+    return .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+}
+
 fn monotonic_now_ms() u64 {
     var now: linux.timespec = undefined;
     const result = linux.clock_gettime(.MONOTONIC, &now);
@@ -624,7 +629,7 @@ pub const HostReal = struct {
         // Zero waits for ever; a time is a limit on each wait for a signal, and a signal that is
         // not the child's end (a stop, say) is not a reason to start the time again: the
         // deadline is fixed once.
-        var limit: linux.timespec = .{ .sec = @intCast(timeout_ms / 1000), .nsec = @intCast((timeout_ms % 1000) * 1_000_000) };
+        var limit = timespec_of(timeout_ms);
         const started = monotonic_now_ms();
         // Each pass takes one signal off the queue, so the loop ends when the child does; a
         // SIGCHLD for a child that is still running (a stop, say) is skipped.
@@ -634,7 +639,7 @@ pub const HostReal = struct {
                 const spent = monotonic_now_ms() -| started;
                 if (spent >= timeout_ms) return .timeout;
                 const left: u64 = timeout_ms - spent;
-                limit = .{ .sec = @intCast(left / 1000), .nsec = @intCast((left % 1000) * 1_000_000) };
+                limit = timespec_of(left);
             }
             const wait_for: usize = if (timeout_ms > 0) @intFromPtr(&limit) else 0;
             const taken = linux.syscall4(
@@ -667,7 +672,7 @@ pub const HostReal = struct {
     fn sleep_ms(context: *anyopaque, ms: u32) void {
         _ = from_context(context);
         assert(ms > 0);
-        var left: linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+        var left = timespec_of(ms);
         // An interrupted sleep ends early: the callers poll, so a short sleep costs one more look.
         _ = linux.nanosleep(&left, &left);
     }

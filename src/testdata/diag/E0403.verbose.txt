@@ -1,0 +1,11 @@
+error[ZBX-E0403]: can't signal the container
+  while  stopping the container web-1
+  cause  signalling the container's PID 1 failed: operation not permitted
+         (EPERM)
+  cause  the record names pid 502; it belongs to another user, or the number was
+         reused
+  name   web-1
+  pid    502
+  fix    look at the process:   ps -o pid,user,stat,args -p <pid>
+  more   zbx explain E0403
+  docs   https://zigbox.github.io/zigbox/errors/E0403.html

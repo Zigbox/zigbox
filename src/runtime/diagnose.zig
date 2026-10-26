@@ -644,6 +644,148 @@ pub fn scope_not_cleaned(diag: *Diag, unit: []const u8, problem: *const scope_mo
     assert(diag.causes.count >= 1);
 }
 
+// ---- The lifecycle commands ---------------------------------------------------------------
+
+/// ZBX-E0401: `--timeout` or `--grace` is not a number of milliseconds in range.
+pub fn time_invalid(diag: *Diag, flag: []const u8, text: []const u8) void {
+    assert(diag.code == null);
+    assert(flag.len > 2);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, text);
+    diag.raise(.E0401);
+    diag.while_("reading {s}", .{flag});
+    diag.cause("'{s}' is not a whole number of milliseconds from 0 to {d}", .{
+        echo, constants.wait_timeout_ms_max,
+    });
+    diag.context("value", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give a time in milliseconds:",
+        .command = "zbx stop web-1 --grace 5000",
+    });
+    assert(diag.code.? == .E0401);
+}
+
+pub const NoContainer = enum { no_record, unreadable_record, no_state, unreadable_state };
+
+/// ZBX-E0402: no container of that name (or no state directory to look in: ZBX-E0701).
+pub fn no_such_container(diag: *Diag, name: []const u8, why: NoContainer) void {
+    assert(diag.code == null);
+    if (why == .no_state) {
+        diag.raise(.E0701);
+        diag.while_("looking for the state directory", .{});
+        diag.cause("neither XDG_STATE_HOME nor HOME names an absolute directory", .{});
+        diag.fix(.{
+            .sentence = "name one:",
+            .command = "export XDG_STATE_HOME=$HOME/.local/state",
+        });
+        return;
+    }
+    if (why == .unreadable_state) {
+        diag.raise(.E0701);
+        diag.while_("looking for the containers", .{});
+        diag.cause("the runs directory under the state directory cannot be read", .{});
+        diag.fix(.{
+            .sentence = "look at it:",
+            .command = "ls -ld \"${XDG_STATE_HOME:-$HOME/.local/state}/zbx/runs\"",
+        });
+        return;
+    }
+    diag.raise(.E0402);
+    diag.while_("looking for the container {s}", .{name});
+    switch (why) {
+        .no_record => diag.cause("no run record is called '{s}'; zbx keeps the newest {d}", .{
+            name, constants.runs_max,
+        }),
+        .unreadable_record => diag.cause("the run record of '{s}' cannot be read or is from a " ++
+            "newer zbx", .{name}),
+        .no_state, .unreadable_state => unreachable, // Handled above.
+    }
+    diag.context("name", "{s}", .{name});
+    diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps --all" });
+    assert(diag.code.? == .E0402);
+}
+
+/// ZBX-E0403: the container's PID 1 cannot be signalled.
+pub fn cannot_signal(diag: *Diag, name: []const u8, pid: u32, failure: Failure) void {
+    assert(diag.code == null);
+    diag.raise(.E0403);
+    diag.while_("stopping the container {s}", .{name});
+    errors.cause_host_error(diag, "signalling the container's PID 1", failure.err, failure.errno);
+    diag.cause(
+        "the record names pid {d}; it belongs to another user, or the number was reused",
+        .{pid},
+    );
+    diag.context("name", "{s}", .{name});
+    diag.context("pid", "{d}", .{pid});
+    diag.fix(.{
+        .sentence = "look at the process:",
+        .command = "ps -o pid,user,stat,args -p <pid>",
+    });
+    assert(diag.code.? == .E0403);
+}
+
+/// ZBX-E0404: the container was still there when the time was up.
+pub fn did_not_stop(diag: *Diag, name: []const u8, pid: u32, waited_ms: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0404);
+    diag.while_("stopping the container {s}", .{name});
+    diag.cause("pid {d} was still there {d} ms after SIGKILL was sent; a process in " ++
+        "uninterruptible sleep cannot be killed until the kernel lets it go", .{ pid, waited_ms });
+    diag.context("name", "{s}", .{name});
+    diag.context("pid", "{d}", .{pid});
+    diag.fix(.{
+        .sentence = "see what it is waiting for:",
+        .command = "ps -o pid,stat,wchan -p <pid>",
+    });
+    assert(diag.code.? == .E0404);
+}
+
+pub const SupervisorFault = union(enum) {
+    /// The kernel refused to create the process.
+    fork: Failure,
+    /// The supervisor ended without saying whether the container started.
+    ended_early,
+};
+
+/// ZBX-E0405: the supervisor of a detached run could not be had.
+pub fn supervisor_failed(diag: *Diag, fault: SupervisorFault) void {
+    assert(diag.code == null);
+    diag.raise(.E0405);
+    diag.while_("starting the supervisor of a detached run", .{});
+    switch (fault) {
+        .fork => |failure| errors.cause_host_error(
+            diag,
+            "creating the supervisor process",
+            failure.err,
+            failure.errno,
+        ),
+        .ended_early => diag.cause("the supervisor ended before it said whether the container " ++
+            "started; its output is on /dev/null", .{}),
+    }
+    diag.fix(.{ .sentence = "check the process limit:", .command = "ulimit -u" });
+    diag.fix(.{
+        .sentence = "run it in the foreground to see the failure:",
+        .command = "zbx run ...",
+    });
+    assert(diag.code.? == .E0405);
+}
+
+/// ZBX-E0406: no schema for that command.
+pub fn no_schema(diag: *Diag, topic: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, topic);
+    diag.raise(.E0406);
+    diag.while_("looking up a schema", .{});
+    diag.cause(
+        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop and doctor",
+        .{echo},
+    );
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "print one:", .command = "zbx schema ps" });
+    assert(diag.code.? == .E0406);
+}
+
 // ---- Warnings ------------------------------------------------------------------------------
 
 /// ZBX-W0202: the run record could not be saved, or there is nowhere to save it.

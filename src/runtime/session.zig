@@ -387,7 +387,8 @@ pub const Session = struct {
         const status = while (true) {
             const timed = stage != .killed and (stage != .running or options.timeout_ms > 0);
             const left: u64 = if (timed) deadline -| host.monotonic_ms() else 0;
-            const event = host.wait_event(session.pid.?, if (timed) @intCast(@max(left, 1)) else 0) catch |err| {
+            const slice_ms: u32 = if (timed) @intCast(@max(left, 1)) else 0;
+            const event = host.wait_event(session.pid.?, slice_ms) catch |err| {
                 host.block_signals(false) catch {};
                 return err;
             };

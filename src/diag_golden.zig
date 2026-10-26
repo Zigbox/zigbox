@@ -19,6 +19,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const fixtures = @import("doctor_fixtures.zig");
+const run = @import("runtime/run.zig");
+const Diag = @import("diag/diag.zig").Diag;
 const plan_mod = @import("runtime/plan.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const HostSim = @import("host_sim.zig").HostSim;
@@ -103,6 +105,39 @@ fn prepare_records_unreadable(sim: *HostSim) void {
         const record = std.fmt.bufPrint(&body, text, args) catch unreachable;
         assert(sim.world.write_file(where, record) == null);
     }
+}
+
+/// One container, started and left running, for the commands that look at containers.
+var golden_handle: run.Handle = undefined;
+
+fn prepare_running(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.command_runs_ms = 3_600_000;
+    var diag: Diag = undefined;
+    diag.reset();
+    const container: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "web-1",
+        .command = &.{"/bin/sh"},
+    };
+    run.start(sim.interface(), &container, .{ .detached = true }, &golden_handle, &diag) catch {
+        unreachable; // The simulated host starts a container.
+    };
+}
+
+fn prepare_unsignalable(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.kill_errno = 1; // EPERM.
+}
+
+fn prepare_immortal(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.immortal = true;
+}
+
+fn prepare_no_fork(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.fork_errno = 11; // EAGAIN.
 }
 
 /// The user's bus is perfect for the probe (the first connection) and meets `model` after it, so
@@ -254,6 +289,32 @@ const base_cases = [_]Case{
         .prepare = prepare_no_tmp,
         .exit = 125,
     },
+    .{ .code = .E0401, .args = &.{ "stop", "web-1", "--grace", "soon" }, .exit = 1 },
+    .{
+        .code = .E0402,
+        .args = &.{ "stop", "web-1" },
+        .prepare = prepare_container,
+        .exit = 1,
+    },
+    .{
+        .code = .E0403,
+        .args = &.{ "stop", "web-1" },
+        .prepare = prepare_unsignalable,
+        .exit = 2,
+    },
+    .{
+        .code = .E0404,
+        .args = &.{ "stop", "web-1", "--grace", "100" },
+        .prepare = prepare_immortal,
+        .exit = 2,
+    },
+    .{
+        .code = .E0405,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "-d", "--", "/bin/sh" },
+        .prepare = prepare_no_fork,
+        .exit = 125,
+    },
+    .{ .code = .E0406, .args = &.{ "schema", "explain" }, .exit = 1 },
     .{
         .code = .E0206,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "Web_1", "--", "/bin/sh" },

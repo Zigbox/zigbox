@@ -86,6 +86,8 @@ test {
     _ = @import("runtime/seccomp.zig");
     _ = @import("runtime/capabilities.zig");
     _ = @import("runtime/lifecycle.zig");
+    _ = @import("commands.zig");
+    _ = @import("schemas.zig");
     _ = @import("runtime/lifecycle_tests.zig");
     _ = @import("runtime/exit_tests.zig");
     _ = @import("dbus/wire.zig");

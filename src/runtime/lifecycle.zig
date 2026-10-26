@@ -95,12 +95,20 @@ pub fn list(host: Host, out: []Entry) ListError!u32 {
     return count;
 }
 
+fn newer(a: Entry, b: Entry) bool {
+    assert(a.record.name_len > 0);
+    assert(b.record.name_len > 0);
+    return a.record.started > b.record.started;
+}
+
 fn sort_newest_first(entries: []Entry) void {
+    assert(entries.len <= constants.scopes_listed_max + constants.runs_max);
+    defer if (entries.len >= 2) assert(!newer(entries[entries.len - 1], entries[0]));
     // Insertion sort: at most a few dozen entries, and no allocation.
     var at: usize = 1;
     while (at < entries.len) : (at += 1) {
         var back = at;
-        while (back > 0 and entries[back].record.started > entries[back - 1].record.started) : (back -= 1) {
+        while (back > 0 and newer(entries[back], entries[back - 1])) : (back -= 1) {
             std.mem.swap(Entry, &entries[back], &entries[back - 1]);
         }
     }
@@ -108,6 +116,8 @@ fn sort_newest_first(entries: []Entry) void {
 
 /// The state a record's container is in now.
 pub fn state_of(host: Host, record: *const records.Parsed) State {
+    assert(record.name_len > 0);
+    assert(record.scope_len <= constants.scope_name_bytes_max);
     if (alive(host, record.pid, record.scope_slice())) return .running;
     if (record.exit != .running) return .stopped;
     // The record was never finished. A supervisor that is still there is finishing it.
@@ -123,6 +133,8 @@ fn process_exists(host: Host, pid: u32) bool {
 
 /// Whether `pid` is the PID 1 of a container of ours, still running. See the module doc.
 pub fn alive(host: Host, pid: u32, scope: []const u8) bool {
+    assert(scope.len <= constants.scope_name_bytes_max);
+    assert(pid != host.own_pid()); // We are never the PID 1 of a container we look at.
     if (pid == 0) return false;
     host.signal(pid, 0) catch return false;
     var buffer: [constants.status_bytes_max]u8 = undefined;
@@ -132,6 +144,7 @@ pub fn alive(host: Host, pid: u32, scope: []const u8) bool {
     const status = host.read_file(status_path, &buffer) catch return false;
     if (!innermost_pid_is_one(status)) return false;
     if (scope.len == 0) return true;
+    // Cannot fail: "/proc/" and "/cgroup" are 14 bytes and a pid at most ten digits.
     const cgroup_path = std.fmt.bufPrint(&path, "/proc/{d}/cgroup", .{pid}) catch unreachable;
     const cgroup = host.read_file(cgroup_path, &buffer) catch return false;
     if (std.mem.indexOf(u8, cgroup, scope) == null) return false;
@@ -157,6 +170,8 @@ pub fn innermost_pid_is_one(status: []const u8) bool {
 /// The scope's `cgroup.events` says `populated 1`; if it cannot be read, the pid and the cgroup
 /// line already agreed, so the container counts as alive.
 fn populated(host: Host, cgroup: []const u8) bool {
+    assert(cgroup.len <= constants.status_bytes_max);
+    assert(cgroup.len > 0);
     const relative = @import("scope.zig").unified_path(cgroup) orelse return true;
     var path: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
     const format = "/sys/fs/cgroup{s}/cgroup.events";
@@ -172,6 +187,8 @@ fn populated(host: Host, cgroup: []const u8) bool {
 /// holds it. The directory is the standard one for the user's manager; a host that puts scopes
 /// elsewhere shows none.
 fn add_orphan_scopes(host: Host, out: []Entry, count_in: u32) u32 {
+    assert(count_in <= out.len);
+    assert(out.len <= constants.scopes_listed_max);
     var path: [128]u8 = undefined;
     const format = "/sys/fs/cgroup/user.slice/user-{d}.slice/user@{d}.service/app.slice";
     const uid = host.uid();
@@ -198,6 +215,8 @@ fn add_orphan_scopes(host: Host, out: []Entry, count_in: u32) u32 {
 }
 
 fn has_scope(entries: []const Entry, scope: []const u8) bool {
+    assert(scope.len > 0);
+    assert(entries.len <= constants.scopes_listed_max);
     for (entries) |*entry| {
         if (std.mem.eql(u8, entry.record.scope_slice(), scope)) return true;
     }
@@ -246,6 +265,8 @@ pub const Ref = struct {
     reaped: ?*const std.atomic.Value(bool),
 
     fn is_gone(ref: *const Ref) bool {
+        assert(ref.pid > 0);
+        assert(ref.scope.slice().len <= constants.scope_name_bytes_max);
         if (ref.reaped) |flag| return flag.load(.acquire);
         return !alive(ref.host, ref.pid, ref.scope.slice());
     }
@@ -263,6 +284,7 @@ pub const AdoptError = error{
 /// stopped container is a ref to nothing (`stop` on it is a no-op).
 pub fn adopt(host: Host, name: []const u8, ref: *Ref, state: *State) AdoptError!void {
     assert(name.len > 0);
+    assert(name.len <= constants.container_name_bytes_max);
     var dir: records.Dir = undefined;
     if (!records.locate(host, &dir)) return error.NoState;
     var record: records.Parsed = undefined;
@@ -304,36 +326,44 @@ pub const kill_wait_ms: u32 = 5000;
 /// ignore it, so it gets SIGKILL at once. Returns when the container is gone or SIGKILL has
 /// been waited for. For a container this process waits for, "gone" is `wait` having reaped it:
 /// stop it from another thread than the one in `wait`.
-pub fn stop(ref: *const Ref, grace_ms: u32) (StopError || host_mod.Error)!Stopped {
+pub fn stop(
+    ref: *const Ref,
+    grace_ms: u32,
+    kill_wait: u32,
+) (StopError || host_mod.Error)!Stopped {
     const host = ref.host;
     assert(ref.pid > 0);
     assert(grace_ms <= constants.wait_timeout_ms_max);
     if (ref.is_gone()) return .already_stopped;
     const state: ?host_mod.SignalState = host.signal_state(ref.pid) catch null;
     const action = signals.decide(state, constants.signal_term);
-    deliver(ref, if (action == .forward) constants.signal_term else constants.signal_kill) catch |err| {
+    const signo = if (action == .forward) constants.signal_term else constants.signal_kill;
+    deliver(ref, signo) catch |err| {
         if (err == error.NotFound) return .already_stopped;
         if (err == error.AccessDenied) return error.NotPermitted;
         return err;
     };
-    if (action == .kill) return if (wait_gone(ref, kill_wait_ms)) .killed else error.Stuck;
+    if (action == .kill) return if (wait_gone(ref, kill_wait)) .killed else error.Stuck;
     if (wait_gone(ref, grace_ms)) return .graceful;
     deliver(ref, constants.signal_kill) catch |err| {
         if (err == error.NotFound) return .graceful;
         if (err == error.AccessDenied) return error.NotPermitted;
         return err;
     };
-    if (wait_gone(ref, kill_wait_ms)) return .killed;
+    if (wait_gone(ref, kill_wait)) return .killed;
     return error.Stuck;
 }
 
 fn deliver(ref: *const Ref, number: u8) host_mod.Error!void {
     assert(number > 0);
+    assert(ref.pid > 0);
     try ref.host.signal(ref.pid, number);
 }
 
 /// Polls until the container is gone, up to `limit_ms`.
 fn wait_gone(ref: *const Ref, limit_ms: u32) bool {
+    assert(limit_ms <= constants.wait_timeout_ms_max + kill_wait_ms);
+    assert(poll_step_ms > 0);
     const host = ref.host;
     const began = host.monotonic_ms();
     while (true) {
@@ -348,6 +378,7 @@ fn wait_gone(ref: *const Ref, limit_ms: u32) bool {
 /// A signal for the container, as the forwarding rule sends it.
 pub fn signal(ref: *const Ref, number: u8) host_mod.Error!void {
     assert(number > 0);
+    assert(ref.pid > 0);
     const state: ?host_mod.SignalState = ref.host.signal_state(ref.pid) catch null;
     const action = signals.decide(state, number);
     try deliver(ref, if (action == .forward) number else constants.signal_kill);
@@ -363,6 +394,7 @@ pub const WaitResult = union(enum) {
 /// Waits for a container this process did not start to end, then reads its record (waiting a
 /// little for the supervisor to finish it, `record_settle_ms`).
 pub fn wait_adopted(ref: *const Ref, limit_ms: u32, result: *WaitResult) records.LoadError!void {
+    assert(ref.name.slice().len > 0);
     assert(ref.reaped == null); // A container of this process is waited for by `run.wait`.
     if (!wait_gone(ref, limit_ms)) {
         result.* = .timeout;
@@ -387,6 +419,8 @@ pub const record_settle_ms: u32 = 3000;
 /// carries only its code in the record, so its reason is a diagnostic with that code and one
 /// cause that says where the rest is.
 pub fn exit_reason_of(record: *const records.Parsed) ExitReason {
+    assert(record.name_len > 0);
+    assert(record.version <= constants.record_version);
     const ended: run.Ended = switch (record.exit) {
         .exited => |code| .{ .exited = code },
         .signaled => |number| .{ .signaled = number },
@@ -435,10 +469,13 @@ pub const Watcher = struct {
     count: u32,
 
     pub fn init(watcher: *Watcher) void {
+        assert(watcher.seen.len > 0);
         watcher.count = 0;
     }
 
     fn find(watcher: *const Watcher, entry: *const Entry) ?*Seen {
+        assert(watcher.count <= watcher.seen.len);
+        assert(entry.record.name_len > 0);
         for (watcher.seen[0..watcher.count]) |*one| {
             const same = std.mem.eql(u8, one.name.slice(), entry.name());
             if (same and one.started == entry.record.started) return @constCast(one);
@@ -470,7 +507,11 @@ pub fn poll(host: Host, watcher: *Watcher, scratch: []Entry, out: []Event) ListE
             continue;
         }
         reported = emit(out, reported, before, entry);
-        next.seen[next.count] = .{ .name = .{}, .started = entry.record.started, .state = entry.state };
+        next.seen[next.count] = .{
+            .name = .{},
+            .started = entry.record.started,
+            .state = entry.state,
+        };
         next.seen[next.count].name.print("{s}", .{entry.name()});
         next.count += 1;
     }
@@ -480,6 +521,9 @@ pub fn poll(host: Host, watcher: *Watcher, scratch: []Entry, out: []Event) ListE
 }
 
 fn needed_events(before: ?*Seen, entry: *const Entry) usize {
+    assert(entry.record.name_len > 0);
+    if (entry.state == .stopped) assert(entry.record.exit != .running);
+    assert(entry.record.name_len <= constants.container_name_bytes_max);
     const was: ?State = if (before) |one| one.state else null;
     if (was == null) return if (entry.state == .running) 1 else 2;
     if (was.? == .running and entry.state != .running) return 1;
@@ -487,6 +531,8 @@ fn needed_events(before: ?*Seen, entry: *const Entry) usize {
 }
 
 fn emit(out: []Event, at: u32, before: ?*Seen, entry: *const Entry) u32 {
+    assert(at <= out.len);
+    assert(needed_events(before, entry) <= out.len - at);
     var index = at;
     const was: ?State = if (before) |one| one.state else null;
     if (was == null) {
@@ -501,6 +547,9 @@ fn emit(out: []Event, at: u32, before: ?*Seen, entry: *const Entry) u32 {
 }
 
 fn event(entry: *const Entry, kind: EventKind) Event {
+    assert(entry.record.name_len > 0);
+    if (kind == .stopped) assert(entry.state == .stopped);
+    assert(entry.record.name_len <= constants.container_name_bytes_max);
     var made: Event = .{
         .name = .{},
         .kind = kind,
@@ -515,6 +564,7 @@ fn event(entry: *const Entry, kind: EventKind) Event {
 /// than the one in `run.wait`. Valid while the handle is.
 pub fn ref_of(handle: *run.Handle) Ref {
     assert(handle.status != .starting);
+    assert(handle.session.container_pid > 0);
     var made: Ref = .{
         .host = handle.host,
         .pid = handle.session.container_pid,

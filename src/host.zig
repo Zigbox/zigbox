@@ -872,7 +872,8 @@ pub const Host = struct {
         assert(pid > 0);
         assert(timeout_ms <= constants.wait_timeout_ms_max);
         for (0..constants.wait_interrupts_max + 1) |_| {
-            const event = host.vtable.wait_event(host.context, pid, timeout_ms) catch |err| switch (err) {
+            const waited = host.vtable.wait_event(host.context, pid, timeout_ms);
+            const event = waited catch |err| switch (err) {
                 error.Interrupted => continue,
                 else => return err,
             };

@@ -303,6 +303,12 @@ pub const World = struct {
     /// What `fork_supervisor` answers, and the code the last `exit_now` was given.
     fork_role: host.Role,
     exited_with: ?u8,
+    /// Faults for the lifecycle tests: `fork_supervisor` fails with this errno; a signal (but
+    /// not the existence check, number 0) is refused with it; SIGKILL has no effect on the
+    /// command (a process the kernel cannot kill).
+    fork_errno: ?u16,
+    kill_errno: ?u16,
+    immortal: bool,
     /// What the kernel counted in the container's cgroup by the time it ended: processes the
     /// OOM killer killed (`memory.events`), and forks refused at the limit (`pids.events`).
     oom_kills: u32,
@@ -351,6 +357,9 @@ pub const World = struct {
         world.term_exit_code = 0;
         world.fork_role = .parent;
         world.exited_with = null;
+        world.fork_errno = null;
+        world.kill_errno = null;
+        world.immortal = false;
         world.oom_kills = 0;
         world.pids_max_hits = 0;
         world.cgroup_stays = false;
@@ -668,7 +677,11 @@ pub const World = struct {
     /// Ends a child that has not run: it never gets to. Returns false if it is not pending.
     pub fn kill(world: *World, pid: u32, number: u8) ?u16 {
         const process = world.find_process(pid) orelse return errno_srch;
-        if (number == 0) return if (process.state == .reaped or process.state == .unused) errno_srch else null;
+        if (number == 0) {
+            const gone = process.state == .reaped or process.state == .unused;
+            return if (gone) errno_srch else null;
+        }
+        if (world.kill_errno) |errno| return errno;
         switch (process.state) {
             .command => {
                 assert(world.received_count < world.received.len);
@@ -676,7 +689,7 @@ pub const World = struct {
                 world.received_count += 1;
                 // PID 1 of a namespace ignores a signal it has no handler for, from outside it;
                 // only SIGKILL (and SIGSTOP) cannot be ignored.
-                if (number == constants.signal_kill) {
+                if (number == constants.signal_kill and !world.immortal) {
                     process.exit = .{ .signaled = number };
                     process.state = .zombie;
                     world.process_died(process.pid);

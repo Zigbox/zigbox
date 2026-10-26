@@ -792,6 +792,7 @@ pub const HostSim = struct {
     fn fork_supervisor(context: *anyopaque) host.Error!host.Role {
         const sim = from_context(context);
         try sim.begin_call();
+        if (sim.world.fork_errno) |errno| return sim.model_error(errno);
         return sim.world.fork_role;
     }
 

@@ -6,11 +6,11 @@
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
 //! skipped, never misread. Version 3 added the host pid of the container's PID 1 and of the
-//! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the scope's name, why the run ended
-//! (`EndReason`) and whether it was detached; a version 1 record reads with no limits, no scope,
-//! not detached, and the reason its exit implies. Unknown fields are ignored, so a later zbx may
-//! add some. The file is
-//! plain ZON, but the reader is a line reader for the shape the writer produces (one field per
+//! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the
+//! scope's name, why the run ended (`EndReason`) and whether it was detached; a version 1
+//! record reads with no limits, no scope, not detached, and the reason its exit implies. Unknown
+//! fields are ignored, so a later zbx may add some. The file is plain ZON, but the reader is a
+//! line reader for the shape the writer produces (one field per
 //! line), because the standard ZON parser allocates and this must not.
 //!
 //! Writing is atomic: the bytes go to a temporary file in the same directory, which is renamed
@@ -26,6 +26,9 @@ const codes = @import("../diag/codes.zig");
 const spec_mod = @import("spec.zig");
 
 const Host = host_mod.Host;
+
+const labels_bytes_max = constants.labels_count_max *
+    (constants.label_key_bytes_max + constants.label_value_bytes_max + 2);
 
 pub const IdsMode = enum { single, full };
 
@@ -205,6 +208,7 @@ fn write_command(writer: *std.Io.Writer, command: []const []const u8) void {
 
 fn write_labels(writer: *std.Io.Writer, labels: []const Label) void {
     assert(labels.len <= constants.labels_count_max);
+    assert(writer.buffer.len >= constants.record_bytes_max);
     write_bytes(writer, "    .labels = .{");
     for (labels, 0..) |label, index| {
         write_bytes(writer, if (index == 0) " .{ " else ", .{ ");
@@ -277,13 +281,14 @@ pub const Parsed = struct {
     command_len: u16,
     command_words: u8,
     /// The labels, key then value, each followed by a NUL.
-    labels: [constants.labels_count_max * (constants.label_key_bytes_max + constants.label_value_bytes_max + 2)]u8,
+    labels: [labels_bytes_max]u8,
     labels_len: u16,
     labels_count: u8,
 
     /// The `index`th word of the command.
     pub fn command_word(parsed: *const Parsed, index: u32) []const u8 {
         assert(index < parsed.command_words);
+        assert(parsed.command_len > 0);
         var words = std.mem.splitScalar(u8, parsed.command[0..parsed.command_len], 0);
         var at: u32 = 0;
         while (words.next()) |word| : (at += 1) {
@@ -295,6 +300,7 @@ pub const Parsed = struct {
     /// The `index`th label's key and value.
     pub fn label(parsed: *const Parsed, index: u32) [2][]const u8 {
         assert(index < parsed.labels_count);
+        assert(parsed.labels_len > 0);
         var parts = std.mem.splitScalar(u8, parsed.labels[0..parsed.labels_len], 0);
         var at: u32 = 0;
         while (parts.next()) |key| : (at += 1) {
@@ -305,10 +311,12 @@ pub const Parsed = struct {
     }
 
     pub fn scope_slice(parsed: *const Parsed) []const u8 {
+        assert(parsed.scope_len <= constants.scope_name_bytes_max);
         return parsed.scope[0..parsed.scope_len];
     }
 
     pub fn diagnostic_slice(parsed: *const Parsed) []const u8 {
+        assert(parsed.diagnostic_len <= parsed.diagnostic.len);
         return parsed.diagnostic[0..parsed.diagnostic_len];
     }
 
@@ -318,6 +326,7 @@ pub const Parsed = struct {
     }
 
     pub fn rootfs_slice(parsed: *const Parsed) []const u8 {
+        assert(parsed.rootfs_len <= parsed.rootfs.len);
         return parsed.rootfs[0..parsed.rootfs_len];
     }
 };
@@ -369,6 +378,8 @@ fn parse_string(literal: []const u8, out: []u8) ?usize {
 }
 
 fn parse_exit(value: []const u8) ?Exit {
+    assert(value.len <= constants.record_bytes_max);
+    assert(value.len > 0);
     if (std.mem.eql(u8, value, ".running")) return .running;
     if (std.mem.eql(u8, value, ".lost")) return .lost;
     const open = ".{ .";
@@ -445,6 +456,8 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
 }
 
 fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!void {
+    assert(line.len <= constants.record_bytes_max);
+    assert(out.name_len <= constants.container_name_bytes_max);
     if (line[0] != '.') return error.Malformed;
     const equals = std.mem.indexOf(u8, line, " = ") orelse return error.Malformed;
     const key = line[1..equals];
@@ -529,6 +542,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
 /// on. Null when there is none. A backslash escapes the next byte (the writer's only escapes).
 fn next_literal(text: []const u8, at: usize) ?struct { literal: []const u8, next: usize } {
     assert(at <= text.len);
+    assert(text.len <= constants.record_bytes_max);
     const open = std.mem.indexOfScalarPos(u8, text, at, '"') orelse return null;
     var end = open + 1;
     while (end < text.len) : (end += 1) {
@@ -544,6 +558,7 @@ fn next_literal(text: []const u8, at: usize) ?struct { literal: []const u8, next
 /// `.{ "word", "word" }`: the words of the command, kept NUL-separated (cut at the room).
 fn parse_command(value: []const u8, out: *Parsed) bool {
     assert(out.command_len == 0);
+    assert(out.command_words == 0);
     var at: usize = 0;
     while (next_literal(value, at)) |found| : (at = found.next) {
         const room = out.command[out.command_len..];
@@ -560,6 +575,7 @@ fn parse_command(value: []const u8, out: *Parsed) bool {
 /// `.{ .{ "key", "value" }, ... }`: the labels as key and value, NUL-separated.
 fn parse_labels(value: []const u8, out: *Parsed) bool {
     assert(out.labels_len == 0);
+    assert(out.labels_count == 0);
     var at: usize = 0;
     while (next_literal(value, at)) |key| {
         const second = next_literal(value, key.next) orelse return false;
@@ -742,6 +758,8 @@ pub const Skipped = struct {
         skipped.count = 0;
         skipped.first_name_len = 0;
         skipped.first_reason = .unreadable;
+        assert(skipped.first_name.len == constants.dir_name_bytes_max);
+        assert(skipped.count == 0);
     }
 
     fn note(skipped: *Skipped, name: []const u8, reason: Reason) void {
@@ -863,6 +881,7 @@ pub fn load(host: Host, dir: *const Dir, name: []const u8, out: *Parsed) LoadErr
 
 /// The names of the records in the directory, in no order. The listing is the caller's.
 pub fn names(host: Host, dir: *const Dir, listing: *host_mod.DirListing) host_mod.Error!void {
+    assert(dir.len > 0);
     try host.list_directory(dir.text(), listing);
     assert(listing.count <= constants.dir_entries_max);
 }

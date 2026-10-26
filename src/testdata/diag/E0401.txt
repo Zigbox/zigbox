@@ -1,0 +1,5 @@
+error[ZBX-E0401]: a time is not a number of milliseconds
+  cause  'soon' is not a whole number of milliseconds from 0 to 86400000
+  fix    give a time in milliseconds:   zbx stop web-1 --grace 5000
+  more   zbx explain E0401 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0401.html

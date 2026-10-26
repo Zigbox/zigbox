@@ -77,7 +77,7 @@ test "a container is found again by name and stopped by a process that did not s
     try lifecycle.adopt(sim.interface(), "web-1", &ref, &state);
     try testing.expectEqual(lifecycle.State.running, state);
     try testing.expectEqual(handle.pid, ref.pid);
-    const how = try lifecycle.stop(&ref, 1000);
+    const how = try lifecycle.stop(&ref, 1000, lifecycle.kill_wait_ms);
     try testing.expectEqual(lifecycle.Stopped.killed, how);
     // The supervisor's side: it reaps the container and finishes the record.
     const reason = run.wait(&handle);
@@ -85,11 +85,13 @@ test "a container is found again by name and stopped by a process that did not s
     var again: lifecycle.State = undefined;
     try lifecycle.adopt(sim.interface(), "web-1", &ref, &again);
     try testing.expectEqual(lifecycle.State.stopped, again);
-    try testing.expectEqual(lifecycle.Stopped.already_stopped, try lifecycle.stop(&ref, 1000));
-    try testing.expectError(error.NoSuchContainer, lifecycle.adopt(sim.interface(), "nope", &ref, &again));
+    const stopped = try lifecycle.stop(&ref, 1000, lifecycle.kill_wait_ms);
+    try testing.expectEqual(lifecycle.Stopped.already_stopped, stopped);
+    const missing = lifecycle.adopt(sim.interface(), "nope", &ref, &again);
+    try testing.expectError(error.NoSuchContainer, missing);
 }
 
-test "a PID 1 that handles SIGTERM gets it and the grace period; one that ignores it is killed after" {
+test "a PID 1 that handles SIGTERM gets the grace period; one that ignores it is killed" {
     // Goal: stop's two outcomes with a handler. Method: PID 1 catches TERM and exits on it
     // (graceful), then one that catches it and carries on (killed once the grace is up, which the
     // simulated clock measures).
@@ -100,7 +102,8 @@ test "a PID 1 that handles SIGTERM gets it and the grace period; one that ignore
     var ref: lifecycle.Ref = undefined;
     var state: lifecycle.State = undefined;
     try lifecycle.adopt(sim.interface(), "web-1", &ref, &state);
-    try testing.expectEqual(lifecycle.Stopped.graceful, try lifecycle.stop(&ref, 5000));
+    const graceful = try lifecycle.stop(&ref, 5000, lifecycle.kill_wait_ms);
+    try testing.expectEqual(lifecycle.Stopped.graceful, graceful);
     try testing.expectEqual(@as(u8, 15), sim.world.received[0]);
     _ = run.wait(&handle);
 
@@ -109,7 +112,8 @@ test "a PID 1 that handles SIGTERM gets it and the grace period; one that ignore
     try start(&stubborn, "web-1");
     try lifecycle.adopt(stubborn.interface(), "web-1", &ref, &state);
     const began = stubborn.world.now_ms;
-    try testing.expectEqual(lifecycle.Stopped.killed, try lifecycle.stop(&ref, 2000));
+    const killed = try lifecycle.stop(&ref, 2000, lifecycle.kill_wait_ms);
+    try testing.expectEqual(lifecycle.Stopped.killed, killed);
     try testing.expect(stubborn.world.now_ms - began >= 2000); // It waited the grace out.
     try testing.expectEqual(@as(u8, 15), stubborn.world.received[0]);
     try testing.expectEqual(@as(u8, 9), stubborn.world.received[1]);
@@ -144,7 +148,7 @@ test "a watcher reports a container once when it starts and once when it stops" 
     var ref: lifecycle.Ref = undefined;
     var state: lifecycle.State = undefined;
     try lifecycle.adopt(host, "web-1", &ref, &state);
-    _ = try lifecycle.stop(&ref, 100);
+    _ = try lifecycle.stop(&ref, 100, lifecycle.kill_wait_ms);
     _ = run.wait(&handle);
     try testing.expectEqual(@as(u32, 1), try lifecycle.poll(host, &watcher, &entries, &events));
     try testing.expectEqual(lifecycle.EventKind.stopped, events[0].kind);
@@ -158,15 +162,17 @@ test "a watcher that meets an ended container reports it started and stopped, an
     var ref: lifecycle.Ref = undefined;
     var state: lifecycle.State = undefined;
     try lifecycle.adopt(sim.interface(), "web-1", &ref, &state);
-    _ = try lifecycle.stop(&ref, 100);
+    _ = try lifecycle.stop(&ref, 100, lifecycle.kill_wait_ms);
     _ = run.wait(&handle);
     var watcher: lifecycle.Watcher = undefined;
     watcher.init();
     var one: [1]lifecycle.Event = undefined;
     // Two events are due (started, stopped) and one fits: nothing is lost, it comes next time.
-    try testing.expectEqual(@as(u32, 0), try lifecycle.poll(sim.interface(), &watcher, &entries, &one));
+    const none = try lifecycle.poll(sim.interface(), &watcher, &entries, &one);
+    try testing.expectEqual(@as(u32, 0), none);
     var two: [2]lifecycle.Event = undefined;
-    try testing.expectEqual(@as(u32, 2), try lifecycle.poll(sim.interface(), &watcher, &entries, &two));
+    const both = try lifecycle.poll(sim.interface(), &watcher, &entries, &two);
+    try testing.expectEqual(@as(u32, 2), both);
     try testing.expectEqual(lifecycle.EventKind.started, two[0].kind);
     try testing.expectEqual(lifecycle.EventKind.stopped, two[1].kind);
 }
@@ -240,6 +246,17 @@ const Caller = struct {
 
 var callers: [2]Caller = undefined;
 
+fn caller_for(wanted: u8) Caller {
+    return .{
+        .sim = undefined,
+        .handle = undefined,
+        .exit_code = 0,
+        .wanted = wanted,
+        .rounds = 40,
+        .failed = false,
+    };
+}
+
 fn work(caller: *Caller, seed: u64) void {
     var diag: Diag = undefined;
     for (0..caller.rounds) |round| {
@@ -272,8 +289,8 @@ test "two callers start and wait on containers at the same time and share nothin
     // use); an assertion on a shared static, or a result that is the other thread's, fails it.
     // `std.Thread` is used here only; the container's child never is threaded (the simulator
     // runs it inline, and the real one is a single-threaded process before `exec`).
-    callers[0] = .{ .sim = undefined, .handle = undefined, .exit_code = 0, .wanted = 3, .rounds = 40, .failed = false };
-    callers[1] = .{ .sim = undefined, .handle = undefined, .exit_code = 0, .wanted = 7, .rounds = 40, .failed = false };
+    callers[0] = caller_for(3);
+    callers[1] = caller_for(7);
     const first = try std.Thread.spawn(.{}, work, .{ &callers[0], 100 });
     const second = try std.Thread.spawn(.{}, work, .{ &callers[1], 900 });
     first.join();
