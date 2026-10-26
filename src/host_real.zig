@@ -30,6 +30,14 @@ pub fn exit_now(code: u8) noreturn {
     linux.exit_group(code);
 }
 
+fn monotonic_now_ms() u64 {
+    var now: linux.timespec = undefined;
+    const result = linux.clock_gettime(.MONOTONIC, &now);
+    assert(linux.errno(result) == .SUCCESS); // A valid clock and a valid pointer.
+    assert(now.sec >= 0);
+    return @as(u64, @intCast(now.sec)) * 1000 + @as(u64, @intCast(now.nsec)) / 1_000_000;
+}
+
 /// The errno of the most recent call checked by `check`, 0 after a success. One per thread,
 /// because `check` is a free function used by the probe code too and the library is called from
 /// several threads (each caller's host reads the errno of its own last call); a forked child has
@@ -95,6 +103,10 @@ pub const HostReal = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .sleep_ms = sleep_ms,
+        .monotonic_ms = monotonic_ms,
+        .fork_supervisor = fork_supervisor,
+        .exit_now = exit_process,
         .signal_state = signal_state,
         .time_now = time_now,
         .write_file = write_file,
@@ -353,8 +365,8 @@ pub const HostReal = struct {
     fn signal(context: *anyopaque, pid: host.Pid, number: u8) host.Error!void {
         _ = from_context(context);
         assert(pid > 0);
-        assert(number > 0);
-        try check(linux.kill(@intCast(pid), @fromBackingInt(number)));
+        // Raw, so that number 0 (does the process exist?) is expressible.
+        try check(linux.syscall2(.kill, pid, number));
     }
 
     fn write_id_map(
@@ -603,22 +615,35 @@ pub const HostReal = struct {
         try check(linux.sigprocmask(how, &set, null));
     }
 
-    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+    fn wait_event(context: *anyopaque, pid: host.Pid, timeout_ms: u32) host.Error!host.Event {
         _ = from_context(context);
         assert(pid > 0);
         const set = forwarded_set();
         var info: linux.siginfo_t = undefined;
+        // Zero waits for ever; a time is a limit on each wait for a signal, and a signal that is
+        // not the child's end (a stop, say) is not a reason to start the time again: the
+        // deadline is fixed once.
+        var limit: linux.timespec = .{ .sec = @intCast(timeout_ms / 1000), .nsec = @intCast((timeout_ms % 1000) * 1_000_000) };
+        const started = monotonic_now_ms();
         // Each pass takes one signal off the queue, so the loop ends when the child does; a
         // SIGCHLD for a child that is still running (a stop, say) is skipped.
         for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
             const size = linux.NSIG / 8;
+            if (timeout_ms > 0) {
+                const spent = monotonic_now_ms() -| started;
+                if (spent >= timeout_ms) return .timeout;
+                const left: u64 = timeout_ms - spent;
+                limit = .{ .sec = @intCast(left / 1000), .nsec = @intCast((left % 1000) * 1_000_000) };
+            }
+            const wait_for: usize = if (timeout_ms > 0) @intFromPtr(&limit) else 0;
             const taken = linux.syscall4(
                 .rt_sigtimedwait,
                 @intFromPtr(&set),
                 @intFromPtr(&info),
-                0,
+                wait_for,
                 size,
             );
+            if (timeout_ms > 0 and linux.errno(taken) == .AGAIN) return .timeout;
             try check(taken);
             assert(taken > 0);
             assert(taken < constants.signal_number_max);
@@ -631,6 +656,41 @@ pub const HostReal = struct {
             return .{ .exited = try decode_status(status) };
         }
         return error.Stalled;
+    }
+
+    fn sleep_ms(context: *anyopaque, ms: u32) void {
+        _ = from_context(context);
+        assert(ms > 0);
+        var left: linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+        // An interrupted sleep ends early: the callers poll, so a short sleep costs one more look.
+        _ = linux.nanosleep(&left, &left);
+    }
+
+    fn monotonic_ms(context: *anyopaque) u64 {
+        _ = from_context(context);
+        return monotonic_now_ms();
+    }
+
+    /// Forks. The supervisor leaves the caller's session and process group (so a hang-up of the
+    /// terminal does not reach it) and has /dev/null for its standard streams. Zbx has one thread
+    /// when this is called, so the child is a faithful copy.
+    fn fork_supervisor(context: *anyopaque) host.Error!host.Role {
+        _ = from_context(context);
+        const forked = linux.fork();
+        try check(forked);
+        if (forked != 0) return .parent;
+        try check(linux.setsid());
+        const opened = linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+        try check(opened);
+        const null_fd: i32 = @intCast(opened);
+        for ([_]i32{ 0, 1, 2 }) |target| try check(linux.dup2(null_fd, target));
+        if (null_fd > 2) _ = linux.close(null_fd);
+        return .supervisor;
+    }
+
+    fn exit_process(context: *anyopaque, code: u8) void {
+        _ = from_context(context);
+        linux.exit_group(code);
     }
 
     fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {

@@ -192,6 +192,10 @@ pub const plan_steps_max: u32 = 80;
 
 /// The size of the tmpfs mounts of a read-only rootfs (`/tmp` and `/run`): memory the container
 /// may use for scratch files, in addition to any memory limit it has.
+/// The longest a single wait may be given, and a single sleep: a bound on a stuck caller.
+pub const wait_timeout_ms_max: u32 = 24 * 60 * 60 * 1000;
+pub const sleep_ms_max: u32 = 60 * 1000;
+
 pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
 pub const plan_paths_bytes_max: u32 = 64 * 1024;
@@ -213,6 +217,10 @@ pub const child_exit_setup_failed: u8 = 125;
 pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
+pub const signal_term: u8 = 15;
+
+/// How long a stop waits between SIGTERM and SIGKILL when nobody says.
+pub const stop_grace_ms_default: u32 = 10_000;
 /// A signal number is below this on every Linux architecture.
 pub const signal_number_max: u8 = 64;
 /// Added to a signal number to make the exit code of a container killed by it.

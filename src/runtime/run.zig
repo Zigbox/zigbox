@@ -143,6 +143,10 @@ pub const Warn = struct {
 
 pub const StartOptions = struct {
     warn: ?Warn = null,
+    /// Total wall time for the run in milliseconds, then SIGTERM; zero is no limit.
+    timeout_ms: u32 = 0,
+    /// After SIGTERM, how long before SIGKILL (for the timeout and for `stop`'s default).
+    grace_ms: u32 = constants.stop_grace_ms_default,
 };
 
 pub const Note = text_util.Bounded(160);
@@ -166,6 +170,7 @@ pub const Handle = struct {
     /// Where the record goes; null if there is nowhere (a warning said so).
     record_dir: ?records.Dir,
     warn: ?Warn,
+    wait_options: Session.WaitOptions,
     record_warned: bool,
     /// Steps that were allowed to fail and did (the devpts mount), as sentences.
     notes: [constants.sync_records_max + 2]Note,
@@ -203,6 +208,12 @@ pub const Handle = struct {
     }
 };
 
+/// Whether `wait` had to stop the container because its time (`StartOptions.timeout_ms`) was up.
+pub fn timed_out(handle: *const Handle) bool {
+    assert(handle.status != .starting);
+    return handle.session.timed_out;
+}
+
 pub fn inspect(handle: *const Handle) Status {
     assert(handle.name_len > 0);
     return handle.status;
@@ -222,6 +233,7 @@ pub fn start(
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
+    handle.wait_options = .{ .timeout_ms = options.timeout_ms, .grace_ms = options.grace_ms };
     handle.record_warned = false;
     handle.notes_count = 0;
     handle.limits = container.limits;
@@ -280,7 +292,7 @@ pub fn wait(handle: *Handle) ExitReason {
     assert(handle.status == .running);
     const host = handle.host;
     host.begin_step(@intCast(handle.plan.count - 1)); // The `reap` step.
-    const result = handle.session.wait();
+    const result = handle.session.wait(handle.wait_options);
     host.begin_step(host_mod.step_none);
     handle.status = .stopped;
     const status = result catch |err| {

@@ -68,6 +68,13 @@ pub const Session = struct {
     scope_up: bool,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
+    /// The container's PID 1 as the host sees it: set when it is spawned and never cleared, so
+    /// that another thread can stop the container while this one waits for it.
+    container_pid: u32,
+    /// The container has been reaped: nothing is left to signal. Set by `wait`.
+    reaped: std.atomic.Value(bool),
+    /// `wait` stopped the container because the time given to it ran out.
+    timed_out: bool,
 
     pub fn start(session: *Session, host: Host, plan: *const Plan, facts: *doctor.Facts) void {
         assert(plan.count == plan.steps_expected());
@@ -89,6 +96,9 @@ pub const Session = struct {
         session.scope_directory = .{};
         session.scope_up = false;
         session.substituted = null;
+        session.container_pid = 0;
+        session.reaped = std.atomic.Value(bool).init(false);
+        session.timed_out = false;
         assert(!session.open.any());
         assert(session.pid == null);
     }
@@ -215,6 +225,7 @@ pub const Session = struct {
             .ipc = true,
         };
         session.pid = try host.spawn(flags, child_mod.entry, &session.child);
+        session.container_pid = session.pid.?;
         // From here a write to the ready pipe may find no reader; that is an error to report.
         host.ignore_broken_pipe(true);
         // The child has its own copies of these. Closing ours is what makes end of file reach
@@ -349,18 +360,34 @@ pub const Session = struct {
 
     // ---- Waiting ----
 
+    /// How long `wait` lets the container run, and then how it stops it.
+    pub const WaitOptions = struct {
+        /// Total wall time in milliseconds; zero is for ever.
+        timeout_ms: u32 = 0,
+        /// After the time is up: SIGTERM (as the forwarding rule sends it), then SIGKILL this
+        /// many milliseconds later if the container is still there.
+        grace_ms: u32 = constants.stop_grace_ms_default,
+    };
+
     /// Waits for the container to end, forwarding the signals zbx catches. The signals are
     /// blocked while it waits, so one that arrives between two looks waits in the queue and is
     /// read next: none is lost, and no handler runs. The loop ends only when the child does
-    /// (`wait_event` returns its exit); a flood of signals is cut off by killing it.
-    pub fn wait(session: *Session) host_mod.Error!host_mod.ExitStatus {
+    /// (`wait_event` returns its exit); a flood of signals is cut off by killing it. When the
+    /// options give a time, the container is stopped when it is up: SIGTERM, a grace period,
+    /// SIGKILL (`timed_out` says so).
+    pub fn wait(session: *Session, options: WaitOptions) host_mod.Error!host_mod.ExitStatus {
         const host = session.host;
         assert(session.pid != null);
         assert(!session.open.any());
         try host.block_signals(true);
         var received: u32 = 0;
+        const began = host.monotonic_ms();
+        var stage: enum { running, terminated, killed } = .running;
+        var deadline: u64 = began + options.timeout_ms;
         const status = while (true) {
-            const event = host.wait_event(session.pid.?) catch |err| {
+            const timed = stage != .killed and (stage != .running or options.timeout_ms > 0);
+            const left: u64 = if (timed) deadline -| host.monotonic_ms() else 0;
+            const event = host.wait_event(session.pid.?, if (timed) @intCast(@max(left, 1)) else 0) catch |err| {
                 host.block_signals(false) catch {};
                 return err;
             };
@@ -371,9 +398,23 @@ pub const Session = struct {
                     assert(received < std.math.maxInt(u32));
                     session.forward(number, received > constants.forwarded_signals_max);
                 },
+                .timeout => switch (stage) {
+                    .running => {
+                        session.timed_out = true;
+                        session.forward(constants.signal_term, false);
+                        stage = .terminated;
+                        deadline = host.monotonic_ms() + options.grace_ms;
+                    },
+                    .terminated => {
+                        session.forward(constants.signal_term, true); // Forced: SIGKILL.
+                        stage = .killed;
+                    },
+                    .killed => unreachable, // A wait with no time cannot time out.
+                },
             }
         };
         session.pid = null;
+        session.reaped.store(true, .release);
         host.block_signals(false) catch {}; // The child is gone; a mask that stays is harmless.
         return session.reported_status(status);
     }

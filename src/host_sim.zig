@@ -204,6 +204,10 @@ pub const HostSim = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .sleep_ms = sleep_ms,
+        .monotonic_ms = monotonic_ms,
+        .fork_supervisor = fork_supervisor,
+        .exit_now = exit_now,
         .signal_state = signal_state,
         .time_now = time_now,
         .write_file = write_file,
@@ -761,14 +765,32 @@ pub const HostSim = struct {
         sim.world.signals_blocked = block;
     }
 
-    fn wait_event(context: *anyopaque, pid: host.Pid) host.Error!host.Event {
+    fn wait_event(context: *anyopaque, pid: host.Pid, timeout_ms: u32) host.Error!host.Event {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
-        switch (sim.world.wait_event(pid)) {
+        switch (sim.world.wait_event(pid, timeout_ms)) {
             .event => |event| return event,
             .errno => |errno| return sim.model_error(errno),
         }
+    }
+
+    fn sleep_ms(context: *anyopaque, ms: u32) void {
+        from_context(context).world.now_ms += ms;
+    }
+
+    fn monotonic_ms(context: *anyopaque) u64 {
+        return from_context(context).world.now_ms;
+    }
+
+    fn fork_supervisor(context: *anyopaque) host.Error!host.Role {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.world.fork_role;
+    }
+
+    fn exit_now(context: *anyopaque, code: u8) void {
+        from_context(context).world.exited_with = code;
     }
 
     fn signal_state(context: *anyopaque, pid: host.Pid) host.Error!host.SignalState {

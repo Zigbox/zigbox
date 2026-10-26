@@ -196,6 +196,8 @@ pub const Process = struct {
     /// process still has to make: write, close and exit_group (to report a failure), and execve.
     seccomp: bool,
     sealed: bool,
+    /// When a command that started ends by itself, on the world's clock.
+    ends_at_ms: u64,
     execd: bool,
     exec_path: SimPath,
     /// The argv and envp the command got, one string per line, for tests to compare.
@@ -290,6 +292,17 @@ pub const World = struct {
     scope_started_before_child_ran: bool,
     /// The user's D-Bus socket and the systemd manager behind it (sim_bus.zig).
     bus: sim_bus.Bus,
+    /// A clock for waits, in milliseconds: only sleeps and timed waits advance it.
+    now_ms: u64,
+    /// How long a command that started runs, in milliseconds of that clock, before it ends by
+    /// itself. Zero: it ends the moment it is waited for (what every earlier test assumes).
+    command_runs_ms: u32,
+    /// A SIGTERM that the command catches ends it (with `term_exit_code`), as a daemon's does.
+    term_exits: bool,
+    term_exit_code: u8,
+    /// What `fork_supervisor` answers, and the code the last `exit_now` was given.
+    fork_role: host.Role,
+    exited_with: ?u8,
     /// What the kernel counted in the container's cgroup by the time it ended: processes the
     /// OOM killer killed (`memory.events`), and forks refused at the limit (`pids.events`).
     oom_kills: u32,
@@ -332,6 +345,12 @@ pub const World = struct {
         world.helper_fails_with = null;
         world.scope_started_before_child_ran = false;
         world.bus.init();
+        world.now_ms = 1_000_000;
+        world.command_runs_ms = 0;
+        world.term_exits = false;
+        world.term_exit_code = 0;
+        world.fork_role = .parent;
+        world.exited_with = null;
         world.oom_kills = 0;
         world.pids_max_hits = 0;
         world.cgroup_stays = false;
@@ -648,6 +667,7 @@ pub const World = struct {
     /// Ends a child that has not run: it never gets to. Returns false if it is not pending.
     pub fn kill(world: *World, pid: u32, number: u8) ?u16 {
         const process = world.find_process(pid) orelse return errno_srch;
+        if (number == 0) return if (process.state == .reaped or process.state == .unused) errno_srch else null;
         switch (process.state) {
             .command => {
                 assert(world.received_count < world.received.len);
@@ -657,6 +677,11 @@ pub const World = struct {
                 // only SIGKILL (and SIGSTOP) cannot be ignored.
                 if (number == constants.signal_kill) {
                     process.exit = .{ .signaled = number };
+                    process.state = .zombie;
+                }
+                const handled = host.SignalState.has(world.command_caught, number);
+                if (number == constants.signal_term and handled and world.term_exits) {
+                    process.exit = .{ .exited = world.term_exit_code };
                     process.state = .zombie;
                 }
             },
@@ -685,6 +710,7 @@ pub const World = struct {
     fn reap(world: *World, process: *Process) void {
         assert(process.state == .zombie);
         process.state = .reaped;
+        world.drop_proc_files(process.pid);
         const slot = world.bus.process_ended(process.pid) orelse return;
         if (world.bus.model.scope_removal == .promptly) world.end_scope(slot);
     }
@@ -804,6 +830,41 @@ pub const World = struct {
         _ = world.write_file(populated, "populated 1\nfrozen 0\n");
     }
 
+    /// The process is gone, and so are its files in /proc.
+    fn drop_proc_files(world: *World, pid: u32) void {
+        inline for (.{ "status", "cgroup" }) |name| {
+            var path: [48]u8 = undefined;
+            // Cannot fail: a short path and a pid of at most ten digits.
+            const where = std.fmt.bufPrint(&path, "/proc/{d}/" ++ name, .{pid}) catch unreachable;
+            if (world.find_written(where)) |index| world.drop_written(index);
+        }
+    }
+
+    /// `/proc/<pid>/status` of a container's PID 1, as far as a lookup of its identity goes: its
+    /// innermost pid is 1 (`NSpid`). Written straight, not through the process's own root.
+    fn put_status_file(world: *World, pid: u32) void {
+        var path: [48]u8 = undefined;
+        var text: [48]u8 = undefined;
+        // Cannot fail: a short path and a short line with a pid of at most ten digits.
+        const where = std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}) catch unreachable;
+        const line = std.fmt.bufPrint(&text, "NSpid:\t{d}\t1\n", .{pid}) catch unreachable; // Same.
+        world.put_raw(where, line);
+    }
+
+    /// Stores a file by its real path, bypassing the current process's root.
+    pub fn put_raw(world: *World, path: []const u8, bytes: []const u8) void {
+        var real: SimPath = .{};
+        const fits = real.set(path);
+        assert(fits);
+        const existing = world.find_written(path);
+        if (existing == null and world.written_count == constants.sim_written_files_max) return;
+        const index = existing orelse world.written_count;
+        if (existing == null) world.written_count += 1;
+        world.written[index].path = real;
+        @memcpy(world.written[index].content[0..bytes.len], bytes);
+        world.written[index].len = @intCast(bytes.len);
+    }
+
     /// The command ends by itself, the way the model says it does.
     fn finish_command(world: *World, process: *Process) void {
         assert(process.state == .command);
@@ -812,7 +873,11 @@ pub const World = struct {
     }
 
     /// Waits for the child to end or for a scripted signal to arrive.
-    pub fn wait_event(world: *World, pid: u32) union(enum) { event: host.Event, errno: u16 } {
+    pub fn wait_event(
+        world: *World,
+        pid: u32,
+        timeout_ms: u32,
+    ) union(enum) { event: host.Event, errno: u16 } {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
@@ -822,6 +887,12 @@ pub const World = struct {
                 defer world.script_at += 1;
                 return .{ .event = .{ .signal = world.script[world.script_at] } };
             }
+            const left = process.ends_at_ms -| world.now_ms;
+            if (timeout_ms > 0 and left > timeout_ms) {
+                world.now_ms += timeout_ms;
+                return .{ .event = .timeout };
+            }
+            world.now_ms += left;
             world.finish_command(process);
         }
         if (process.state != .zombie) return .{ .errno = errno_child };
@@ -1205,7 +1276,9 @@ pub const World = struct {
         process.exec_argv_len = copy_lines(&process.exec_argv, request.argv);
         process.exec_envp_len = copy_lines(&process.exec_envp, request.envp);
         process.execd = true;
+        process.ends_at_ms = world.now_ms + world.command_runs_ms;
         process.holds = @splat(false);
+        world.put_status_file(process.pid);
         return null;
     }
 };
@@ -1242,6 +1315,7 @@ fn unused_process() Process {
         .no_new_privs = false,
         .seccomp = false,
         .sealed = false,
+        .ends_at_ms = 0,
         .execd = false,
         .exec_path = .{},
         .exec_argv = undefined,
