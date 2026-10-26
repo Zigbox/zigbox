@@ -4,13 +4,18 @@
 //!
 //!   1. writes it, parses it back and checks equality, the same bytes on a second write, and the
 //!      same rendering in every mode;
-//!   2. mutates the JSON (edits, truncation, duplication, splices) and parses that: the parser
-//!      either refuses and leaves `out` empty, or accepts, and then the accepted value writes
-//!      back to exactly the input, is valid JSON for the standard scanner (an independent reader),
-//!      and renders in every mode and for every list of products without tripping an assertion;
-//!   3. parses noise, and prefixes of the valid line.
+//!   2. recomposes the line out of order, with unknown members of every JSON type injected (some
+//!      nested past the depth limit, some past the byte limit) and sometimes a known member
+//!      repeated, and checks the oracle: the parse equals the original, or it is `Malformed`
+//!      exactly when the line has a repeated known member, an unknown value nested deeper than
+//!      `diag_skip_depth_max`, more than `diag_skip_bytes_max` bytes of unknown members, or is
+//!      longer than `diag_wire_bytes_max`;
+//!   3. mutates the canonical and the recomposed line (edits, truncation, duplication) and parses
+//!      that, and parses noise and prefixes of the valid line.
 //!
-//! The property is the one parse_json documents: it accepts exactly what write_json writes.
+//! For any input, the parser refuses and leaves `out` empty, or accepts, and then the value
+//! writes a canonical line that parses back equal, the standard scanner agrees the input is JSON,
+//! and it renders in every mode and for every list of products without tripping an assertion.
 //! Driven by `fuzz.zig`; a failure is replayed by its seed.
 
 const std = @import("std");
@@ -158,13 +163,17 @@ fn without_newline(line: []const u8) []const u8 {
 }
 
 /// Property of the parser on any input: it refuses and leaves `out` empty, or accepts, and then
-/// the value writes back to the input, the standard scanner agrees it is JSON, and it renders.
-fn check_parse(input: []const u8) void {
+/// the value writes a line that parses back equal (and, if `canonical`, is the input itself),
+/// the standard scanner agrees the input is JSON, and the value renders.
+fn check_parse(input: []const u8, canonical: bool) void {
     var parsed: Diagnostic = undefined;
     if (diagnostic_mod.parse_json(&parsed, input)) {
         var buffer: [constants.output_bytes_max]u8 = undefined;
         const again = write_to(&buffer, &parsed);
-        assert(std.mem.eql(u8, without_newline(input), without_newline(again)));
+        if (canonical) assert(std.mem.eql(u8, without_newline(input), without_newline(again)));
+        var reparsed: Diagnostic = undefined;
+        diagnostic_mod.parse_json(&reparsed, again) catch unreachable; // Its own output.
+        assert(parsed.equal(&reparsed));
         assert(test_util.json_is_valid(without_newline(input)) catch false);
         render_everywhere(&parsed);
     } else |err| {
@@ -173,6 +182,161 @@ fn check_parse(input: []const u8) void {
         assert(parsed.causes.count == 0);
         assert(parsed.fixes.count == 0);
     }
+}
+
+const members_max = 16;
+const compose_bytes_max = 2 * constants.diag_wire_bytes_max;
+
+/// Splits a canonical line into its top-level members, by scanning strings and brackets: a
+/// reading of the format that shares nothing with the parser.
+fn split_members(json: []const u8, members: *[members_max][]const u8) u32 {
+    assert(json[0] == '{');
+    var count: u32 = 0;
+    var depth: u32 = 0;
+    var start: usize = 1;
+    var in_string = false;
+    var escaped = false;
+    for (json, 0..) |byte, at| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (byte) {
+            '"' => in_string = true,
+            '{', '[' => depth += 1,
+            '}', ']' => {
+                depth -= 1;
+                if (depth == 0) {
+                    members[count] = json[start..at];
+                    return count + 1;
+                }
+            },
+            ',' => if (depth == 1) {
+                members[count] = json[start..at];
+                count += 1;
+                start = at + 1;
+            },
+            else => {},
+        }
+    }
+    unreachable; // A canonical line closes its object.
+}
+
+// The writers below are fixed buffers that hold the largest line the fuzzer composes, so a write
+// cannot fail; these are the only places that say so.
+
+fn put(writer: *std.Io.Writer, bytes: []const u8) void {
+    assert(writer.end + bytes.len <= writer.buffer.len);
+    writer.writeAll(bytes) catch unreachable; // Cannot fail: the buffer holds the largest line.
+}
+
+fn put_byte(writer: *std.Io.Writer, byte: u8) void {
+    assert(writer.end < writer.buffer.len);
+    writer.writeByte(byte) catch unreachable; // Cannot fail: same.
+}
+
+fn put_run(writer: *std.Io.Writer, byte: u8, count: u32) void {
+    assert(writer.end + count <= writer.buffer.len);
+    writer.splatByteAll(byte, count) catch unreachable; // Cannot fail: same.
+}
+
+/// What the injected members add up to, for the oracle.
+const Injected = struct { bytes: u32 = 0, depth_max: u32 = 0 };
+
+/// One unknown member `"key":value` of a random JSON type, nested up to two levels past the
+/// limit and sometimes long. Its depth and size go into `injected`.
+fn write_unknown(random: std.Random, writer: *std.Io.Writer, injected: *Injected) void {
+    const keys = [_][]const u8{ "v", "extra", "codes", "x-y", "a_long_unknown_member_name" };
+    const start = writer.end;
+    const key = keys[random.uintLessThan(usize, keys.len)];
+    // Cannot fail: the storage holds three members of the largest kind.
+    writer.print("\"{s}\":", .{key}) catch unreachable;
+    var depth: u32 = 0;
+    switch (random.uintLessThan(u8, 7)) {
+        0 => put(writer, "\"s\\u00e9\\n\\/x\\\"\""),
+        1 => put(writer, if (random.boolean()) "-1.5e+3" else "12"),
+        2 => put(writer, "true"),
+        3 => put(writer, "null"),
+        4 => {
+            const length = random.uintAtMost(u32, 2500);
+            put_byte(writer, '"');
+            put_run(writer, 'p', length);
+            put_byte(writer, '"');
+        },
+        else => depth = write_nested(random, writer),
+    }
+    injected.depth_max = @max(injected.depth_max, depth);
+    injected.bytes += @intCast(writer.end - start);
+}
+
+/// Nested containers `depth` deep around one scalar; returns the depth.
+fn write_nested(random: std.Random, writer: *std.Io.Writer) u32 {
+    var kinds: [constants.diag_skip_depth_max + 3]u8 = undefined;
+    const depth = random.uintAtMost(u32, constants.diag_skip_depth_max + 2);
+    for (kinds[0..depth]) |*kind| {
+        kind.* = if (random.boolean()) '[' else '{';
+        // Cannot fail: see `write_unknown`.
+        if (kind.* == '[') put_byte(writer, '[');
+        if (kind.* == '{') put(writer, "{\"k\":");
+    }
+    put(writer, if (random.boolean()) "1" else "\"s\"");
+    var index = depth;
+    while (index > 0) : (index -= 1) {
+        put_byte(writer, if (kinds[index - 1] == '[') ']' else '}');
+    }
+    return depth;
+}
+
+/// Property: out of order, with unknown members injected and sometimes a known one repeated, the
+/// line parses to `original`, or is Malformed exactly when it breaks a rule written here.
+fn check_recomposed(random: std.Random, original: *const Diagnostic, canonical: []const u8) void {
+    var members: [members_max][]const u8 = undefined;
+    var count = split_members(canonical, &members);
+    const known_count = count;
+    var storage: [8192]u8 = undefined;
+    var storage_writer = std.Io.Writer.fixed(&storage);
+    var injected: Injected = .{};
+    var malformed = false;
+    var previous_end: usize = 0;
+    for (0..random.uintAtMost(u8, 3)) |_| {
+        write_unknown(random, &storage_writer, &injected);
+        members[count] = storage[previous_end..storage_writer.end];
+        previous_end = storage_writer.end;
+        count += 1;
+    }
+    if (random.uintLessThan(u8, 8) == 0) {
+        members[count] = members[random.uintLessThan(u32, known_count)];
+        count += 1;
+        malformed = true; // A known member twice.
+    }
+    random.shuffle([]const u8, members[0..count]);
+    var line: [compose_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&line);
+    put_byte(&writer, '{'); // The line buffer holds every member.
+    for (members[0..count], 0..) |member, index| {
+        if (index > 0) put_byte(&writer, ','); // Same.
+        put(&writer, member); // Same.
+    }
+    put(&writer, if (random.boolean()) "}\n" else "}"); // Same.
+    if (injected.depth_max > constants.diag_skip_depth_max) malformed = true;
+    if (injected.bytes > constants.diag_skip_bytes_max) malformed = true;
+    if (writer.end > constants.diag_wire_bytes_max) malformed = true;
+
+    var parsed: Diagnostic = undefined;
+    if (diagnostic_mod.parse_json(&parsed, writer.buffered())) {
+        assert(!malformed);
+        assert(original.equal(&parsed));
+    } else |err| {
+        assert(err == error.Malformed);
+        assert(malformed);
+    }
+    check_parse(writer.buffered(), false);
 }
 
 fn mutate(random: std.Random, buffer: *[input_bytes_max]u8, length_in: usize) usize {
@@ -225,14 +389,16 @@ pub fn fuzz_diagnostic(seed: u64) void {
     var second: [constants.output_bytes_max]u8 = undefined;
     assert(std.mem.eql(u8, json, write_to(&second, &parsed)));
     render_everywhere(&original);
+    check_parse(json, true);
 
+    for (0..4) |_| check_recomposed(random, &original, json);
     var mutated: [input_bytes_max]u8 = undefined;
     for (0..8) |_| {
         @memcpy(mutated[0..json.len], json);
-        check_parse(mutated[0..mutate(random, &mutated, json.len)]);
+        check_parse(mutated[0..mutate(random, &mutated, json.len)], false);
     }
-    check_parse(json[0..random.uintAtMost(usize, json.len)]);
+    check_parse(json[0..random.uintAtMost(usize, json.len)], false);
     var noise: [64]u8 = undefined;
     random.bytes(&noise);
-    check_parse(noise[0..random.uintAtMost(usize, noise.len)]);
+    check_parse(noise[0..random.uintAtMost(usize, noise.len)], false);
 }
