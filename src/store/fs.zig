@@ -78,6 +78,9 @@ pub const VTable = struct {
     /// Creates a new file for writing with the given permission bits (before any umask the
     /// process has: the real host clears it). Fails if the path exists.
     create: *const fn (context: *anyopaque, path: [:0]const u8, mode: u16) Error!Fd,
+    /// Opens an existing regular file for writing at its end (a partial download that is
+    /// resumed). Refuses a symlink; fails if the path does not exist.
+    open_append: *const fn (context: *anyopaque, path: [:0]const u8) Error!Fd,
     write: *const fn (context: *anyopaque, fd: Fd, bytes: []const u8) Error!u32,
     fsync: *const fn (context: *anyopaque, fd: Fd) Error!void,
     close: *const fn (context: *anyopaque, fd: Fd) void,
@@ -239,6 +242,19 @@ pub const Fs = struct {
             };
             assert(count <= buffer.len);
             return count;
+        }
+        return error.IoFailed;
+    }
+
+    /// Opens the existing file at `path` to append to it.
+    pub fn open_append(fs: Fs, path: [:0]const u8) Error!Fd {
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            return fs.vtable.open_append(fs.context, path) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
         }
         return error.IoFailed;
     }

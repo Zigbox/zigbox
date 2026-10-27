@@ -15,6 +15,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const auth = @import("auth.zig");
+const blobs_mod = @import("blobs.zig");
 const constants = @import("../constants.zig");
 const codes = @import("../diag/codes.zig");
 const diagnose = @import("diagnose.zig");
@@ -63,6 +64,8 @@ pub const Client = struct {
     token_len: u32,
     /// The mirrors for docker.io, comma separated (`ZBX_REGISTRY_MIRRORS`); empty for none.
     mirrors: []const u8,
+    /// The places the last resolve could ask, for the blobs.
+    places: Candidates,
     /// Which candidate (see `Candidates`) answered the last resolve; blobs ask it first.
     winner: u32,
 
@@ -80,6 +83,7 @@ pub const Client = struct {
             .machine = machine,
             .token_len = 0,
             .mirrors = "",
+            .places = undefined,
             .winner = 0,
         };
     }
@@ -160,8 +164,8 @@ pub fn resolve(
 ) Error!void {
     assert(diag.code == null);
     assert(client.workspace.body.len == constants.registry_manifest_bytes_max);
-    var list: Candidates = undefined;
-    try candidates(client, reference, &list, diag);
+    const list = &client.places;
+    try candidates(client, reference, list, diag);
     var shown_storage: reference_mod.Formatted = undefined;
     const shown = reference.format(&shown_storage);
     for (list.origins[0..list.count], 0..) |origin, index| {
@@ -315,11 +319,12 @@ fn fetch_manifest(
     ) catch unreachable; // The storage holds the longest repository and name.
     var sink: net.BufferSink = .{ .buffer = &client.workspace.body };
     const had_token = client.token_len > 0;
-    try request_following(client, origin, target, manifest.accept, true, &sink, head, diag);
+    const receiver = Receiver.of_buffer(&sink);
+    try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     if (head.status == 401 and !had_token) {
         // The one repeat: with the token that was just given. A second 401 is a refusal.
         try authenticate(client, reference, origin, head, diag);
-        try request_following(client, origin, target, manifest.accept, true, &sink, head, diag);
+        try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     }
     try check_status(reference, origin, target, head, diag);
     assert(head.status == 200);
@@ -438,7 +443,8 @@ fn fetch_token(client: *Client, reference: *const Reference, url: net.Url, diag:
     var head: net.Head = .{};
     var sink: net.BufferSink = .{ .buffer = &client.workspace.token_body };
     const target = url.target;
-    try request_following(client, origin, target, "application/json", false, &sink, &head, diag);
+    const receiver = Receiver.of_buffer(&sink);
+    try request_following(client, origin, target, "application/json", false, receiver, &head, diag);
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
     const shown = url_of(&url_storage, origin, url.target);
     const registry = reference.registry();
@@ -494,6 +500,26 @@ fn is_redirect(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
 
+/// Where a response body goes and how much of it may come: a buffer that starts empty on every
+/// hop, or a sink that knows an answer that is not its blob when it sees one.
+const Receiver = struct {
+    sink: net.Sink,
+    body_bytes_max: u64,
+    range_from: u64 = 0,
+    buffer: ?*net.BufferSink = null,
+    total_timeout_ms: u32,
+
+    fn of_buffer(buffer: *net.BufferSink) Receiver {
+        assert(buffer.buffer.len > 0);
+        return .{
+            .sink = buffer.sink(),
+            .body_bytes_max = buffer.buffer.len,
+            .buffer = buffer,
+            .total_timeout_ms = constants.net_request_timeout_ms,
+        };
+    }
+};
+
 /// One GET that follows redirects. The token goes only to the origin the client started with
 /// (`use_token`, and the same origin); a hop to another host drops it.
 fn request_following(
@@ -502,20 +528,20 @@ fn request_following(
     target: []const u8,
     accept: []const u8,
     use_token: bool,
-    sink: *net.BufferSink,
+    receiver: Receiver,
     head: *net.Head,
     diag: *Diag,
 ) Error!void {
     assert(target.len > 0);
     assert(target[0] == '/');
-    assert(sink.buffer.len > 0);
+    assert(receiver.body_bytes_max > 0);
     assert(origin.port != 0);
     var host_storage: [256]u8 = undefined;
     var target_storage: [constants.registry_url_bytes_max]u8 = undefined;
     var current = origin;
     var current_target = target;
     for (0..constants.registry_redirects_max + 1) |hop| {
-        sink.len = 0;
+        if (receiver.buffer) |buffer| buffer.len = 0;
         const bearer: []const u8 = if (use_token and current.same(origin)) client.token() else "";
         const request: net.Request = .{
             .scheme = current.scheme,
@@ -524,11 +550,12 @@ fn request_following(
             .target = current_target,
             .accept = accept,
             .bearer = bearer,
-            .body_bytes_max = sink.buffer.len,
+            .body_bytes_max = receiver.body_bytes_max,
             .idle_timeout_ms = constants.net_idle_timeout_ms,
-            .total_timeout_ms = constants.net_request_timeout_ms,
+            .total_timeout_ms = receiver.total_timeout_ms,
+            .range_from = receiver.range_from,
         };
-        client.net.get(&request, head, sink.sink()) catch |err| {
+        client.net.get(&request, head, receiver.sink) catch |err| {
             const target_info: diagnose.Target = .{
                 .host = current.host,
                 .port = current.port,
@@ -621,4 +648,167 @@ test "a redirect target is followed only when it can go into a request line" {
     try std.testing.expect(!far.origin.same(secure));
     const plain: Origin = .{ .scheme = .http, .host = "127.0.0.1", .port = 80 };
     try std.testing.expect(follow(plain, "http://127.0.0.1:81/x", &host, &target) != null);
+}
+
+// ---- Blobs ---------------------------------------------------------------------------------
+
+/// What `fetch_blob` did.
+pub const BlobOutcome = enum { cached, downloaded, resumed };
+
+/// The blob `digest` of `size` bytes is in the cache when this returns, or the failure is in
+/// `diag`. It asks the place that answered the resolve first and then the others, in order; a
+/// candidate's refusal that another could answer differently falls through (see
+/// `falls_through`), and a blob whose bytes are wrong never does.
+pub fn fetch_blob(
+    client: *Client,
+    reference: *const Reference,
+    digest: Sha256,
+    size: u64,
+    blobs: blobs_mod.Blobs,
+    download: *blobs_mod.Download,
+    diag: *Diag,
+) Error!BlobOutcome {
+    assert(diag.code == null);
+    assert(size > 0);
+    const count = client.places.count;
+    assert(count >= 1);
+    assert(client.winner < count);
+    for (0..count) |attempt| {
+        const index: u32 = place_at(client.winner, @intCast(attempt));
+        if (attempt > 0) {
+            diag.reset(); // The earlier candidate's refusal was not the last word.
+            client.token_len = 0; // A token is for one registry.
+        }
+        const origin = client.places.origins[index];
+        const outcome = blob_from(client, reference, origin, digest, size, blobs, download, diag);
+        if (outcome) |done| return done else |err| {
+            const last = attempt + 1 == count;
+            if (!last and falls_through(diag.code.?)) continue;
+            return err;
+        }
+    }
+    unreachable; // The last candidate returns.
+}
+
+/// The `attempt`th place to ask: the winner first, then the others in their order.
+fn place_at(winner: u32, attempt: u32) u32 {
+    if (attempt == 0) return winner;
+    return if (attempt - 1 < winner) attempt - 1 else attempt;
+}
+
+fn cache_error(blobs: blobs_mod.Blobs, download: *const blobs_mod.Download, diag: *Diag) Error {
+    diagnose.cache_failed(diag, blobs.root, &download.failure);
+    return error.Failed;
+}
+
+fn blob_from(
+    client: *Client,
+    reference: *const Reference,
+    origin: Origin,
+    digest: Sha256,
+    size: u64,
+    blobs: blobs_mod.Blobs,
+    download: *blobs_mod.Download,
+    diag: *Diag,
+) Error!BlobOutcome {
+    assert(size > 0);
+    var head: net.Head = .{};
+    for (0..2) |round| {
+        const began = download.begin(blobs, digest, size, &head) catch {
+            return cache_error(blobs, download, diag);
+        };
+        if (began == .cached) return .cached;
+        const restart = if (download.complete()) false else try request_blob(
+            client,
+            reference,
+            origin,
+            download,
+            &head,
+            diag,
+        );
+        if (restart) {
+            download.abandon();
+            download.discard() catch return cache_error(blobs, download, diag);
+            continue;
+        }
+        const finished = download.finish() catch return cache_error(blobs, download, diag);
+        switch (finished) {
+            .ok => return if (download.was_resumed()) .resumed else .downloaded,
+            .short => |have| {
+                const what = "a layer that ended early";
+                var detail: [96]u8 = undefined;
+                const text = std.fmt.bufPrint(&detail, "{s}: {d} of {d} bytes", .{
+                    what, have, size,
+                }) catch what; // Two numbers and the words fit 96 bytes.
+                diagnose.http_error(diag, 200, "the blob", text);
+                return error.Failed;
+            },
+            .mismatch => |actual| {
+                // Bytes that were kept from an earlier try may be what is wrong: once, fresh.
+                if (round == 0 and download.was_resumed()) continue;
+                diagnose.digest_mismatch(diag, "a layer or config blob", digest, actual);
+                return error.Failed;
+            },
+        }
+    }
+    diagnose.digest_mismatch(diag, "a layer or config blob", digest, Sha256.of(""));
+    return error.Failed;
+}
+
+/// Asks for the blob (or the rest of it), with the one re-authentication a 401 gets. True if the
+/// registry says the range cannot be satisfied (the partial file is wrong: start again).
+fn request_blob(
+    client: *Client,
+    reference: *const Reference,
+    origin: Origin,
+    download: *blobs_mod.Download,
+    head: *net.Head,
+    diag: *Diag,
+) Error!bool {
+    assert(!download.complete());
+    var target_storage: [manifest_target_bytes_max]u8 = undefined;
+    const digest_text = download.digest.text();
+    const target = std.fmt.bufPrint(
+        &target_storage,
+        "/v2/{s}/blobs/{s}",
+        .{ reference.repository(), &digest_text },
+    ) catch unreachable; // The storage holds the longest repository and a digest.
+    for (0..2) |attempt| {
+        const receiver: Receiver = .{
+            .sink = download.sink(),
+            .body_bytes_max = download.size - download.offset,
+            .range_from = download.range_from(),
+            .total_timeout_ms = 0, // A blob is bounded by progress, not by time.
+        };
+        request_following(client, origin, target, "", true, receiver, head, diag) catch |err| {
+            download.abandon();
+            return blob_sink_failed(download, diag, err);
+        };
+        if (head.status == 401 and attempt == 0) {
+            // A token lasts minutes and a layer can take longer: ask for a fresh one, once.
+            client.token_len = 0;
+            try authenticate(client, reference, origin, head, diag);
+            continue;
+        }
+        break;
+    }
+    if (head.status == 416) return true;
+    if (head.status != 206) try check_status(reference, origin, target, head, diag);
+    return false;
+}
+
+const long_blob = "a blob longer than its manifest says";
+const wrong_range = "a partial answer for another range";
+
+/// A request that failed: if the sink refused the body, say why instead of the wire's error.
+fn blob_sink_failed(download: *const blobs_mod.Download, diag: *Diag, err: Error) Error {
+    if (download.problem == .none) return err;
+    diag.reset();
+    switch (download.problem) {
+        .io => diagnose.cache_failed(diag, download.blobs.root, &download.failure),
+        .too_long => diagnose.unusable_document(diag, error.BadDescriptor, long_blob),
+        .bad_range => diagnose.unusable_document(diag, error.BadDescriptor, wrong_range),
+        .none => unreachable, // Handled above.
+    }
+    return error.Failed;
 }

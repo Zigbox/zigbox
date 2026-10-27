@@ -31,6 +31,7 @@ const vtable: fs.VTable = .{
     .open_read = open_read,
     .read = read,
     .create = create,
+    .open_append = open_append,
     .write = write,
     .fsync = fsync,
     .close = close,
@@ -201,6 +202,22 @@ fn read(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
     const result = linux.read(@intCast(fd), buffer.ptr, buffer.len);
     try check(result);
     assert(result <= buffer.len);
+    return @intCast(result);
+}
+
+fn open_append(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
+    const self = from_context(context);
+    assert(path.len > 0);
+    const flags: linux.O = .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    };
+    const result = linux.open(path.ptr, flags, 0);
+    try check(result);
+    assert(result <= std.math.maxInt(i32));
+    self.open_count += 1;
     return @intCast(result);
 }
 

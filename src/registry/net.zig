@@ -68,6 +68,9 @@ pub const Request = struct {
     idle_timeout_ms: u32,
     /// How long the whole call may take; zero for no limit (a blob is bounded by progress).
     total_timeout_ms: u32,
+    /// A resumed download: ask for the bytes from this offset on (`Range: bytes=N-`). Zero asks
+    /// for the whole body and sends no header.
+    range_from: u64 = 0,
 };
 
 /// A header value kept whole, or marked cut: a value past its bound is never half-used.
@@ -109,6 +112,8 @@ pub const Head = struct {
     content_type: HeaderValue(constants.registry_header_bytes_max) = .{},
     content_digest: HeaderValue(constants.registry_header_bytes_max) = .{},
     location: HeaderValue(constants.registry_url_bytes_max) = .{},
+    /// "bytes first-last/total" of a 206 answer.
+    content_range: HeaderValue(constants.registry_header_bytes_max) = .{},
     /// Body bytes handed to the sink.
     body_len: u64 = 0,
 

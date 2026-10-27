@@ -170,6 +170,7 @@ pub const SimFs = struct {
         .open_read = open_read,
         .read = read,
         .create = create,
+        .open_append = open_append,
         .write = write,
         .fsync = fsync,
         .close = close,
@@ -675,6 +676,16 @@ pub const SimFs = struct {
         @memcpy(buffer[0..length], sim.pool[node.data_at + slot.offset ..][0..length]);
         slot.offset += length;
         return length;
+    }
+
+    fn open_append(context: *anyopaque, path: [:0]const u8) Error!Fd {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const index = sim.find(path) orelse return sim.fail(errno_noent);
+        const node = &sim.nodes[index];
+        if (node.kind == .symlink) return sim.fail(errno_loop);
+        if (node.kind != .file) return sim.fail(errno_isdir);
+        return sim.take_slot(index, true);
     }
 
     fn create(context: *anyopaque, path: [:0]const u8, mode: u16) Error!Fd {

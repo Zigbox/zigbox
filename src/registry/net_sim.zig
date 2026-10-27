@@ -24,6 +24,7 @@ pub const Served = struct {
     content_type: []const u8 = "",
     content_digest: []const u8 = "",
     location: []const u8 = "",
+    content_range: []const u8 = "",
     body: []const u8 = "",
     /// How many body bytes arrive before the connection drops; null means all of them.
     deliver: ?u64 = null,
@@ -206,6 +207,7 @@ fn fill_head(head: *net.Head, served: *const Served) void {
     if (served.content_type.len > 0) head.content_type.set(served.content_type);
     if (served.content_digest.len > 0) head.content_digest.set(served.content_digest);
     if (served.location.len > 0) head.location.set(served.location);
+    if (served.content_range.len > 0) head.content_range.set(served.content_range);
 }
 
 // ---- Tests ---------------------------------------------------------------------------------

@@ -531,6 +531,8 @@ pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
 pub const registry_mirrors_max: u32 = 4;
 pub const registry_mirrors_bytes_max: u32 = 1024;
+/// The buffer a blob is hashed and copied through.
+pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.
 pub const net_addresses_max: u32 = 8;
 

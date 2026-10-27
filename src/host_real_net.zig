@@ -581,6 +581,7 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     try writer.print("\r\nUser-Agent: zbx/{s}\r\n", .{build_options.version});
     try writer.writeAll("Accept-Encoding: identity\r\nConnection: close\r\n");
     if (request.accept.len > 0) try writer.print("Accept: {s}\r\n", .{request.accept});
+    if (request.range_from > 0) try writer.print("Range: bytes={d}-\r\n", .{request.range_from});
     if (request.bearer.len > 0) {
         try writer.print("Authorization: Bearer {s}\r\n", .{request.bearer});
     }
@@ -602,6 +603,8 @@ fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void 
             if (!head.retry_after.present) head.retry_after.set(header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "docker-content-digest")) {
             if (!head.content_digest.present) head.content_digest.set(header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-range")) {
+            if (!head.content_range.present) head.content_range.set(header.value);
         }
     }
     if (parsed.content_type) |text| head.content_type.set(text);

@@ -8,6 +8,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const blobs = @import("blobs.zig");
+const errors = @import("../diag/errors.zig");
 const net = @import("net.zig");
 const reference_mod = @import("reference.zig");
 const manifest = @import("manifest.zig");
@@ -98,6 +100,27 @@ pub fn bad_mirror(diag: *Diag, entry: []const u8) void {
         .command = "ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20",
     });
     assert(diag.code.? == .E0514);
+}
+
+/// ZBX-E0416 for a full disk and ZBX-E0417 for any other failure to write the blob cache.
+pub fn cache_failed(diag: *Diag, root: []const u8, failure: *const blobs.Failure) void {
+    assert(diag.code == null);
+    assert(failure.step.len > 0);
+    const full = failure.err == error.NoSpace;
+    diag.raise(if (full) .E0416 else .E0417);
+    diag.while_("writing the blob cache", .{});
+    errors.cause_host_error(diag, failure.step, failure.err, failure.errno);
+    diag.context("path", "{s}", .{root});
+    if (full) {
+        diag.fix_with(
+            "free space on the disk that holds the store, then run the same command again:",
+            "df -h '{s}'",
+            .{root},
+        );
+        diag.fix(.{ .sentence = "the blobs already downloaded are kept, and the pull resumes" });
+    } else {
+        diag.fix(.{ .sentence = "check that you can write to the store directory, and the disk" });
+    }
 }
 
 /// What the client was doing, for the causes: the host and port of the failed request.
