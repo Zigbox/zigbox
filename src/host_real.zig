@@ -1664,3 +1664,58 @@ test "real socket_connect names why a bus cannot be reached" {
     try std.testing.expectError(error.PathTooLong, subject.socket_connect(repeat('/', 108)));
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
 }
+
+/// The number of open descriptors of a process, from `/proc/<pid>/fd`; null if it cannot be read.
+fn descriptor_count(pid: host.Pid) ?u32 {
+    var path: [32:0]u8 = undefined;
+    // Cannot fail: "/proc/4294967295/fd" is 19 bytes.
+    const text = std.fmt.bufPrintSentinel(&path, "/proc/{d}/fd", .{pid}, 0) catch unreachable;
+    const opened = linux.open(text.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return null;
+    const directory: i32 = @intCast(opened);
+    defer _ = linux.close(directory);
+    var buffer: [4096]u8 align(8) = undefined;
+    var count: u32 = 0;
+    while (true) {
+        const read = linux.getdents64(directory, &buffer, buffer.len);
+        if (linux.errno(read) != .SUCCESS) return null;
+        if (read == 0) return count;
+        var at: usize = 0;
+        while (at < read) {
+            const length = std.mem.readInt(u16, buffer[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buffer[at + 19 ..], 0);
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+            at += length;
+        }
+    }
+}
+
+test "real keeper holds one descriptor, lives until its pipe's writers are gone, and ends 0" {
+    // Goal: Host.start_keeper on a real kernel. Method: open a second pipe first so there is
+    // something to inherit, start the keeper on the first pipe's read end, and wait until it has
+    // closed everything else (it holds exactly one descriptor, the pipe). It is alive while the
+    // write end is open and, with that closed, ends with status 0 and is reaped. The death
+    // signal and the parent check are the kernel's; the VM demo kills a zbx and looks.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const hold = try subject.pipe();
+    const other = try subject.pipe();
+    const pid = try subject.start_keeper(hold.read);
+    subject.close(hold.read);
+    subject.close(other.read);
+    subject.close(other.write);
+    var settled = false;
+    for (0..400) |_| {
+        if (descriptor_count(pid) == 1) {
+            settled = true;
+            break;
+        }
+        subject.sleep_ms(5);
+    }
+    try std.testing.expect(settled);
+    try subject.signal(pid, 0); // Alive: it is blocked reading.
+    subject.close(hold.write);
+    const status = try subject.wait_for(pid);
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, status);
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
