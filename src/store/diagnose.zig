@@ -639,24 +639,38 @@ pub fn damaged_thing(
     assert(refs.len <= 3);
     diag.raise(.E0429);
     diag.while_("verifying the store", .{});
-    if (errno != 0) {
-        diag.cause(
-            "{s} {s} is damaged: {s} (errno {d})",
-            .{ class_word, id.text(), reason, errno },
-        );
+    diag.cause("the file is {s}", .{file});
+    for (refs) |ref| diag.cause("reached by {s}", .{ref});
+    if (reached > refs.len) {
+        diag.cause("and {d} more paths in root trees reach it", .{reached - refs.len});
+    }
+    // The last cause is the one the default text shows: what, why, and the first path.
+    const errno_text = if (errno != 0) " (errno)" else "";
+    if (refs.len == 0) {
+        diag.cause("{s} {s}: {s}{s}", .{ class_word, id.text(), reason, errno_text });
+    } else if (reached > 1) {
+        diag.cause("{s} {s}: {s}; reached by {s} and {d} more", .{
+            class_word, id.text(), reason, refs[0], reached - 1,
+        });
     } else {
-        diag.cause("{s} {s} is damaged: {s}", .{ class_word, id.text(), reason });
+        diag.cause("{s} {s}: {s}; reached by {s}", .{ class_word, id.text(), reason, refs[0] });
     }
     diag.context("id", "{s}", .{id.text()});
     diag.context("file", "{s}", .{file});
-    if (refs.len > 0) diag.context("in", "{s}", .{refs[0]});
-    if (refs.len > 1) diag.context("in", "{s}", .{refs[1]});
-    if (refs.len > 2) diag.context("in", "{s}", .{refs[2]});
-    if (reached > 0) diag.context("paths", "{d}", .{reached});
-    diag.fix(.{
-        .sentence = "delete the file, import the directory it came from again, then verify:",
-        .command = "zbx store verify",
-    });
+    diag.context("paths", "{d}", .{reached});
+    if (errno != 0) diag.context("errno", "{d}", .{errno});
+    if (quotable(file)) {
+        diag.fix_with(
+            "delete the file, import the directory it came from again, then verify:",
+            "rm '{s}'",
+            .{file},
+        );
+    } else {
+        diag.fix(.{
+            .sentence = "delete the file, import its directory again, then verify:",
+            .command = "zbx store verify",
+        });
+    }
 }
 
 /// ZBX-E0430: the summary after the damaged things.

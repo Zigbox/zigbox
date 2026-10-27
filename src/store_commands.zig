@@ -889,7 +889,7 @@ fn ref_text(ws: *const verify.Workspace, ref: *const verify.Ref, out: *[200]u8) 
     var safe: [constants.path_bytes_max]u8 = undefined;
     const path = text_util.sanitise(&safe, ws.ref_path(ref));
     const hex = ref.root.hex();
-    return std.fmt.bufPrint(out, "{s}:{s}", .{ hex[0..12], path }) catch out[0..];
+    return std.fmt.bufPrint(out, "{s} in root {s}", .{ path, hex[0..12] }) catch out[0..];
 }
 
 fn report_damage(job: *const Job, store: *const Store, index: u32) void {

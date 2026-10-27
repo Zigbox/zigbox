@@ -77,7 +77,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
 <h2>What it means</h2>
 <p>&quot;zbx store verify&quot; read every object, tree and root record in the store and checked it against its name. This one does not match: its bytes (or, for a file object, its mode, owner or attributes) are not what its id says, or its chunk list disagrees with it, or it can not be read, or a tree names something that is not in the store.</p>
-<p>The message names the id and the file, and lists the paths in the trees of the roots that reach it (up to 16), so you know which images are affected. With --output json the whole list is in the output.</p>
+<p>The message names the id and the file, and the first path in the trees of the roots that reach it, with how many more there are, so you know which images are affected. --verbose lists three; --output json lists up to 16 for each damaged thing, with the root of each.</p>
 <p>Nothing was changed. A damaged file can not be repaired in place: delete it and import the directory it came from again (the import writes what is missing), or drop the roots that reach it with &quot;zbx store rm&quot;. A disk that damages files needs looking at; &quot;zbx store verify&quot; again afterwards.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

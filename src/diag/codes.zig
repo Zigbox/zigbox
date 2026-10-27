@@ -1112,9 +1112,10 @@ pub const registry = [_]Entry{
         \\says, or its chunk list disagrees with it, or it can not be read, or a
         \\tree names something that is not in the store.
         \\
-        \\The message names the id and the file, and lists the paths in the trees
-        \\of the roots that reach it (up to 16), so you know which images are
-        \\affected. With --output json the whole list is in the output.
+        \\The message names the id and the file, and the first path in the trees of
+        \\the roots that reach it, with how many more there are, so you know which
+        \\images are affected. --verbose lists three; --output json lists up to 16
+        \\for each damaged thing, with the root of each.
         \\
         \\Nothing was changed. A damaged file can not be repaired in place: delete
         \\it and import the directory it came from again (the import writes what is

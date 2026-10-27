@@ -544,10 +544,14 @@ test "verify names a damaged object, its file and every path that reaches it, an
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "error[ZBX-E0429]"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "error[ZBX-E0430]"));
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "1 damaged") != null);
+    // The default text names a path and says how many more, not only --verbose.
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "reached by") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "/etc/passwd") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "and 1 more") != null);
     try testing.expectEqual(@as(u8, 2), try command(&.{ "--verbose", "store", "verify" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), object_path) != null);
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), ":/etc/passwd") != null);
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), ":/etc/passwd-copy") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "reached by") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "/etc/passwd-copy in root") != null);
     try testing.expectEqual(@as(u8, 2), try command(&.{ "--output", "json", "store", "verify" }));
     const parsed = try parse_stdout();
     defer parsed.deinit();
