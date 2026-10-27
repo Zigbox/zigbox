@@ -55,6 +55,10 @@ pull:
                   or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
   --resolve-only  print the digest of the image manifest for this machine's platform,
                   as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY are used)
+  without it, the layers are downloaded into the store (a cut download resumes), unpacked
+  into one tree and recorded; the manifest digest is printed, or with --output json the
+  object of "zbx schema pull", which has the tree's digest
+  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]
