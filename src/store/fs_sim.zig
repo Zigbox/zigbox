@@ -86,6 +86,8 @@ const Node = struct {
     mtime: u64,
     inode: u64,
     unreadable: bool,
+    rdev_major: u32,
+    rdev_minor: u32,
 
     fn text(node: *const Node) []const u8 {
         return node.path[0..node.path_len];
@@ -234,6 +236,8 @@ pub const SimFs = struct {
             .size = if (node.kind == .dir) 0 else node.data_len,
             .inode = node.inode,
             .links = sim.links_of(node.inode),
+            .rdev_major = node.rdev_major,
+            .rdev_minor = node.rdev_minor,
         };
     }
 
@@ -292,6 +296,13 @@ pub const SimFs = struct {
         sim.store_xattr(index, name, value) catch unreachable; // A test's attribute fits.
     }
 
+    /// Gives a device node its numbers (a new one is 0/0).
+    pub fn set_rdev(sim: *SimFs, path: []const u8, major: u32, minor: u32) void {
+        const node = &sim.nodes[sim.find(path).?];
+        node.rdev_major = major;
+        node.rdev_minor = minor;
+    }
+
     pub fn set_unreadable(sim: *SimFs, path: []const u8) void {
         sim.nodes[sim.find(path).?].unreadable = true;
     }
@@ -347,6 +358,8 @@ pub const SimFs = struct {
         node.xattr_len = 0;
         node.mtime = 0;
         node.unreadable = false;
+        node.rdev_major = 0;
+        node.rdev_minor = 0;
         node.uid = 0;
         node.gid = 0;
         node.mode = 0;

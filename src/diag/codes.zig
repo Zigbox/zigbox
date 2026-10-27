@@ -83,6 +83,9 @@ pub const Code = enum(u8) {
     E0423,
     E0424,
     E0425,
+    E0426,
+    E0427,
+    E0428,
     W0410,
     W0411,
     W0412,
@@ -1041,6 +1044,54 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0426,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container has no layer to commit",
+        .explanation =
+        \\"zbx commit" turns what a container changed into a new tree. That needs
+        \\a container that was started from a tree digest ("zbx run <digest>"),
+        \\because its writes are in an upper layer of their own. A container run
+        \\on a directory ("zbx run --rootfs") wrote into that directory, a
+        \\container run with --read-only had no upper layer, and the upper layer
+        \\of an old container is removed with its record (the newest 32 are kept).
+        \\
+        \\The cause says which of these it is. To keep a directory's contents,
+        \\import it: "zbx store import <dir>".
+        ,
+    },
+    .{
+        .code = .E0427,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container is still running",
+        .explanation =
+        \\A commit reads the container's upper layer while nothing writes to it, so
+        \\that the new tree is one the container really had. The container is
+        \\still running, and zbx does not freeze a running container (a
+        \\"--pause" option is not part of this version).
+        \\
+        \\Stop it with "zbx stop <name>", then commit. Nothing was changed.
+        ,
+    },
+    .{
+        .code = .E0428,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the upper layer uses an overlayfs feature a commit can't follow",
+        .explanation =
+        \\A commit reads a container's upper layer file by file. Overlayfs can
+        \\also keep a change as a redirect (a renamed directory,
+        \\"user.overlay.redirect") or as metadata only ("user.overlay.metacopy"),
+        \\and the upper layer alone
+        \\does not say what the change was then. zbx mounts without those
+        \\features, so this means the layer was made by something else, or by a
+        \\kernel whose defaults turn them on.
+        \\
+        \\The cause names the file. Nothing was changed.
+        ,
+    },
+    .{
         .code = .W0410,
         .severity = .warning,
         .blame = .user,
@@ -1325,7 +1376,7 @@ pub fn can_end_run(code: Code) bool {
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
-        .E0414, .E0418, .E0420 => false,
+        .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
         else => true,
     };

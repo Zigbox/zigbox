@@ -35,6 +35,10 @@ pub const Stat = struct {
     size: u64,
     inode: u64,
     links: u32,
+    /// A device node's numbers; zero for anything else. A character device 0/0 is how an
+    /// overlay's upper layer records a deletion.
+    rdev_major: u32 = 0,
+    rdev_minor: u32 = 0,
 };
 
 /// Called once per name in a directory, "." and ".." excluded, in the order the file system

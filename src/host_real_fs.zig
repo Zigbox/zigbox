@@ -103,6 +103,8 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .size = buffer.size,
         .inode = buffer.ino,
         .links = buffer.nlink,
+        .rdev_major = buffer.rdev_major,
+        .rdev_minor = buffer.rdev_minor,
     };
 }
 

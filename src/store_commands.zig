@@ -1,4 +1,5 @@
-//! The `zbx store` commands: `import`, `ls`, `du` and `rm`. Each parses its digest in the parent
+//! The `zbx store` commands: `import`, `ls`, `du`, `rm` and `diff`, and `zbx commit`, which is
+//! store work too. Each parses its digest in the parent
 //! (a usage error needs no namespace), then runs in the store's child (`store/namespace.zig`):
 //! the child opens the store, does the work, writes the result to stdout (text, or one JSON
 //! object with `--output json`; the schemas are `schemas.zig`) and any diagnostic to stderr, and
@@ -19,11 +20,17 @@ const render = @import("diag/render.zig");
 const text_util = @import("text.zig");
 const diagnose = @import("store/diagnose.zig");
 const digest_mod = @import("store/digest.zig");
+const diff = @import("store/diff.zig");
 const import = @import("store/import.zig");
+const lifecycle = @import("runtime/lifecycle.zig");
+const records = @import("runtime/records.zig");
+const runtime_diagnose = @import("runtime/diagnose.zig");
+const spec = @import("runtime/spec.zig");
 const layout = @import("store/layout.zig");
 const namespace = @import("store/namespace.zig");
 const open = @import("store/open.zig");
 const roots = @import("store/roots.zig");
+const tree = @import("store/tree.zig");
 const trees = @import("store/trees.zig");
 const usage = @import("store/usage.zig");
 
@@ -33,12 +40,15 @@ const Store = layout.Store;
 
 pub const Error = error{Failed};
 
-pub const Action = enum { import, ls, du, rm };
+pub const Action = enum { import, ls, du, rm, diff, commit };
 
 pub const Args = struct {
     action: Action,
-    /// The directory (`import`), or a digest or prefix (`du`, `rm`).
+    /// The directory (`import`), a digest or prefix (`du`, `rm`, `diff`), or the container's
+    /// name (`commit`).
     operand: ?[]const u8,
+    /// `diff`: the second digest or prefix.
+    second: ?[]const u8 = null,
 };
 
 /// How results and diagnostics are written.
@@ -53,6 +63,9 @@ pub const Workspace = struct {
     import: import.Workspace,
     tree_buffer: [constants.store_tree_bytes_max]u8,
     root_list: [constants.store_roots_max]roots.Root,
+    diff: diff.Workspace,
+    /// `commit`: the container's record, read before the child starts.
+    record: records.Parsed,
 };
 
 const Job = struct {
@@ -60,6 +73,8 @@ const Job = struct {
     args: Args,
     output: Output,
     workspace: *Workspace,
+    /// `commit`: the tree the container started from.
+    parent: Digest,
 };
 
 /// Runs a store command. The result is the exit code; `diag` holds a failure of the parent's
@@ -75,31 +90,47 @@ pub fn run(
 ) Error!u8 {
     assert(diag.code == null);
     switch (args.action) {
-        .import, .rm => assert(args.operand != null),
+        .import, .rm, .commit => assert(args.operand != null),
         .ls => assert(args.operand == null),
+        .diff => {
+            assert(args.operand != null);
+            assert(args.second != null);
+        },
         .du => {},
     }
-    if (args.action == .du or args.action == .rm) {
-        if (args.operand) |text| {
+    assert((args.second != null) == (args.action == .diff));
+    const digests = [2]?[]const u8{ args.operand, args.second };
+    if (args.action == .du or args.action == .rm or args.action == .diff) {
+        for (digests) |maybe| {
+            const text = maybe orelse continue;
             if (digest_mod.Prefix.parse(text) == null) {
                 diagnose.bad_digest(diag, text);
                 return error.Failed;
             }
         }
     }
+    var parent = tree.zero_digest;
+    if (args.action == .commit) parent = try prepare_commit(host, args.operand.?, workspace, diag);
     // Without a data directory there is nothing to do, and no reason to make a namespace first.
     var probe: Store = undefined;
     if (!probe.locate(host)) {
         diagnose.no_data_directory(diag);
         return error.Failed;
     }
-    var job: Job = .{ .host = host, .args = args, .output = output, .workspace = workspace };
+    var job: Job = .{
+        .host = host,
+        .args = args,
+        .output = output,
+        .workspace = workspace,
+        .parent = parent,
+    };
     var reporter: Reporter = .{ .host = host, .output = output };
     const work: namespace.Work = .{ .context = &job, .call = work_call };
     // The id map decides what an import records; the other commands only read, so a one-id map
     // is no news to them.
     const warn: namespace.Warn = .{ .context = &reporter, .call = report_warning };
-    const sink: ?namespace.Warn = if (args.action == .import) warn else null;
+    const shows_warnings = args.action == .import or args.action == .commit;
+    const sink: ?namespace.Warn = if (shows_warnings) warn else null;
     return namespace.run(host, facts, work, sink, diag) catch return error.Failed;
 }
 
@@ -147,6 +178,8 @@ fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
         .ls => try do_ls(job, diag),
         .du => try do_du(job, diag),
         .rm => try do_rm(job, diag),
+        .diff => try do_diff(job, diag),
+        .commit => try do_commit(job, squash_owner, diag),
     }
 }
 
@@ -354,13 +387,14 @@ fn do_du(job: *Job, diag: *Diag) Error!void {
     try put(job, writer.buffered(), diag);
 }
 
-fn du_tree(job: *Job, store: *const Store, digest: Digest, diag: *Diag) Error!void {
-    assert(job.args.action == .du);
+/// The memory a tree's usage is counted in: the import workspace's arena, which no other
+/// command is using at the time.
+fn usage_memory(job: *Job) usage.Memory {
     assert(job.workspace.tree_buffer.len >= constants.store_tree_bytes_max);
     const ws = &job.workspace.import;
     const half = ws.arena.len / 2;
     const quarter = ws.arena.len / 4;
-    var memory: usage.Memory = .{
+    return .{
         .tree_buffer = &job.workspace.tree_buffer,
         .objects = @alignCast(ws.arena[0..half]),
         .visited = @alignCast(ws.arena[half .. half + quarter]),
@@ -368,6 +402,12 @@ fn du_tree(job: *Job, store: *const Store, digest: Digest, diag: *Diag) Error!vo
         .root_list = &job.workspace.root_list,
         .names = &ws.io,
     };
+}
+
+fn du_tree(job: *Job, store: *const Store, digest: Digest, diag: *Diag) Error!void {
+    assert(job.args.action == .du);
+    assert(job.workspace.tree_buffer.len >= constants.store_tree_bytes_max);
+    var memory = usage_memory(job);
     var result: usage.TreeUsage = undefined;
     var failure: usage.Failure = undefined;
     usage.tree_usage(store, &memory, digest, &result, &failure) catch {
@@ -490,4 +530,288 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
         std.fmt.bufPrint(&buffer, "removed {s}\n", .{digest.text()});
     // Cannot fail: one short line.
     try put(job, text catch unreachable, diag); // Same bound.
+}
+
+// ---- commit --------------------------------------------------------------------------------
+
+/// In the parent, before the namespace: the container's record says what it started from, and
+/// whether it is still running. Returns the tree it started from; the record is in the workspace.
+fn prepare_commit(host: Host, name: []const u8, ws: *Workspace, diag: *Diag) Error!Digest {
+    assert(diag.code == null);
+    assert(name.len <= constants.arg_bytes_max);
+    var dir: records.Dir = undefined;
+    if (!records.locate(host, &dir)) {
+        runtime_diagnose.no_such_container(diag, name, .no_state);
+        return error.Failed;
+    }
+    const record = &ws.record;
+    records.load(host, &dir, name, record) catch |err| {
+        const why: runtime_diagnose.NoContainer = switch (err) {
+            error.NotFound => .no_record,
+            else => .unreadable_record,
+        };
+        runtime_diagnose.no_such_container(diag, name, why);
+        return error.Failed;
+    };
+    if (lifecycle.state_of(host, record) == .running) {
+        diagnose.container_running(diag, name);
+        return error.Failed;
+    }
+    if (record.tree_len == 0) {
+        diagnose.no_layer(diag, name, .directory);
+        return error.Failed;
+    }
+    if (record.upper_len == 0) {
+        diagnose.no_layer(diag, name, .read_only);
+        return error.Failed;
+    }
+    return Digest.parse(record.tree_slice()) orelse {
+        runtime_diagnose.no_such_container(diag, name, .unreadable_record);
+        return error.Failed;
+    };
+}
+
+fn do_commit(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
+    assert(job.args.action == .commit);
+    assert(diag.code == null);
+    const name = job.args.operand.?;
+    const record = &job.workspace.record;
+    var upper: [constants.containers_path_bytes_max + 1]u8 = undefined;
+    @memcpy(upper[0..record.upper_len], record.upper_slice());
+    upper[record.upper_len] = 0;
+    const upper_path = upper[0..record.upper_len :0];
+    var store: Store = undefined;
+    const exists = try open_store(job, &store, .existing, diag);
+    if (!exists) {
+        const text = job.parent.text();
+        diagnose.unknown_digest(diag, &text);
+        return error.Failed;
+    }
+    _ = store.fs.lstat(upper_path) catch |err| {
+        if (err != error.NotFound) {
+            const errno = store.fs.last_errno();
+            diagnose.cannot_read(diag, &store, "looking for the upper layer", err, errno);
+        } else {
+            diagnose.no_layer(diag, name, .gone);
+        }
+        return error.Failed;
+    };
+    var reporter: Reporter = .{ .host = job.host, .output = job.output };
+    const options: import.Options = .{
+        .squash_owner = squash_owner,
+        .warn = .{ .context = &reporter, .call = report_warning },
+        .parent = job.parent,
+    };
+    var result: import.Result = undefined;
+    import.commit(&store, &job.workspace.import, upper_path, options, &result, diag) catch {
+        return error.Failed;
+    };
+    const unchanged = result.digest.eql(job.parent);
+    var totals: usage.TreeUsage = undefined;
+    var failure: usage.Failure = undefined;
+    var memory = usage_memory(job);
+    usage.tree_usage(&store, &memory, result.digest, &totals, &failure) catch {
+        return usage_failed(&store, &failure, diag);
+    };
+    if (!unchanged) try save_commit_root(&store, name, &result, &totals, job.parent, diag);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    try put(job, commit_text(job, name, &result, &totals, unchanged, &buffer), diag);
+}
+
+/// The new tree is a root, recording the container and the parent.
+fn save_commit_root(
+    store: *Store,
+    name: []const u8,
+    result: *const import.Result,
+    totals: *const usage.TreeUsage,
+    parent: Digest,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    var root: roots.Root = undefined;
+    root.digest = result.digest;
+    root.kind = .commit;
+    root.time = store.host.time_now();
+    root.files = totals.files;
+    root.bytes = totals.logical_bytes;
+    root.set_source(name);
+    root.parent = parent;
+    var failure: object_failure = undefined;
+    roots.save(store, &root, &failure) catch {
+        diagnose.write_failed(diag, store, "writing the root record", failure.err, failure.errno);
+        return error.Failed;
+    };
+}
+
+const object_failure = @import("store/object.zig").Failure;
+
+fn commit_text(
+    job: *const Job,
+    name: []const u8,
+    result: *const import.Result,
+    totals: *const usage.TreeUsage,
+    unchanged: bool,
+    buffer: *[constants.output_bytes_max]u8,
+) []const u8 {
+    assert(name.len > 0);
+    var writer = std.Io.Writer.fixed(buffer);
+    // Cannot fail: a digest line, or a JSON object of a few hundred bytes, fits the buffer.
+    if (!job.output.json) {
+        writer.print("{s}\n", .{result.digest.text()}) catch unreachable; // Same bound.
+        return writer.buffered();
+    }
+    writer.print("{{\"schema\":\"zbx.commit/1\",\"digest\":\"{s}\",\"parent\":\"{s}\"," ++
+        "\"container\":", .{ result.digest.text(), job.parent.text() }) catch {
+        unreachable; // The object's head is a few hundred bytes at most.
+    };
+    json_string(&writer, name) catch unreachable; // Same bound.
+    writer.print(",\"unchanged\":{},\"files\":{d},\"bytes\":{d},\"new_objects\":{d}," ++
+        "\"new_bytes\":{d},\"new_trees\":{d},\"deleted\":{d}}}\n", .{
+        unchanged,
+        totals.files,
+        totals.logical_bytes,
+        result.objects_new,
+        result.bytes_new,
+        result.trees_new,
+        result.whiteouts,
+    }) catch unreachable; // Same bound.
+    return writer.buffered();
+}
+
+// ---- diff ----------------------------------------------------------------------------------
+
+/// The room one line needs at most: a path of `path_bytes_max` bytes with every byte escaped as
+/// six, and the fixed words around it.
+const diff_line_bytes_max: u32 = constants.path_bytes_max * 6 + 512;
+
+/// Collects diff lines and writes them out in large pieces.
+const DiffOut = struct {
+    job: *const Job,
+    buffer: [diff_line_bytes_max * 2]u8,
+    len: u32,
+    count: u64,
+
+    fn call(context: *anyopaque, change: *const diff.Change, diag: *Diag) bool {
+        const out: *DiffOut = @ptrCast(@alignCast(context));
+        out.line(change, diag) catch return false;
+        return true;
+    }
+
+    fn line(out: *DiffOut, change: *const diff.Change, diag: *Diag) Error!void {
+        assert(out.len <= diff_line_bytes_max);
+        var writer = std.Io.Writer.fixed(out.buffer[out.len..][0..diff_line_bytes_max]);
+        // Cannot fail: the room is the longest line.
+        if (out.job.output.json) {
+            diff_json(&writer, change, out.count);
+        } else {
+            diff_text(&writer, change);
+        }
+        out.len += @intCast(writer.buffered().len);
+        out.count += 1;
+        if (out.len > diff_line_bytes_max) try out.flush(diag);
+    }
+
+    fn flush(out: *DiffOut, diag: *Diag) Error!void {
+        try put_big(out.job, out.buffer[0..out.len], diag);
+        out.len = 0;
+    }
+};
+
+/// Like `put`, for text that may be longer than a command's usual output.
+fn put_big(job: *const Job, text: []const u8, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    if (text.len == 0) return;
+    job.host.write_all(.stdout, text) catch |err| {
+        errors.output_failed(diag, .stdout, err, job.host.last_errno());
+        return error.Failed;
+    };
+}
+
+fn diff_text(writer: *std.Io.Writer, change: *const diff.Change) void {
+    const word: u8 = switch (change.what) {
+        .added => 'A',
+        .removed => 'D',
+        .changed => 'M',
+    };
+    var safe: [constants.path_bytes_max]u8 = undefined;
+    const path = text_util.sanitise(&safe, change.path);
+    const slash: []const u8 = if (change.kind == .dir and path.len > 1) "/" else "";
+    // The room is the longest line.
+    writer.print("{c} {s}{s}", .{ word, path, slash }) catch unreachable;
+    if (change.what == .changed) {
+        const attrs = change.attrs;
+        var first = true;
+        inline for (.{ "content", "mode", "owner", "xattrs", "target", "kind" }) |field| {
+            if (@field(attrs, field)) {
+                const word_ = if (std.mem.eql(u8, field, "kind")) "type" else field;
+                const separator = if (first) "  " else ", ";
+                // The room is the longest line.
+                writer.print("{s}{s}", .{ separator, word_ }) catch unreachable;
+                first = false;
+            }
+        }
+    }
+    writer.writeByte('\n') catch unreachable; // The room is the longest.
+}
+
+fn diff_json(writer: *std.Io.Writer, change: *const diff.Change, index: u64) void {
+    if (index > 0) writer.writeByte(',') catch unreachable; // The room is the longest.
+    writer.print("{{\"change\":\"{s}\",\"kind\":\"{s}\",\"path\":", .{
+        @tagName(change.what),
+        switch (change.kind) {
+            .file => "file",
+            .dir => "dir",
+            .symlink => "symlink",
+        },
+    }) catch unreachable; // The room is the longest.
+    json_string(writer, change.path) catch unreachable; // The room is the longest.
+    if (change.what == .changed) {
+        writer.writeAll(",\"attributes\":[") catch unreachable; // The room is the longest.
+        var first = true;
+        inline for (.{ "content", "mode", "owner", "xattrs", "target", "kind" }) |field| {
+            if (@field(change.attrs, field)) {
+                const word = if (std.mem.eql(u8, field, "kind")) "type" else field;
+                const separator = if (first) "" else ",";
+                // The room is the longest line.
+                writer.print("{s}\"{s}\"", .{ separator, word }) catch unreachable;
+                first = false;
+            }
+        }
+        writer.writeByte(']') catch unreachable; // The room is the longest.
+    }
+    writer.writeByte('}') catch unreachable; // The room is the longest.
+}
+
+fn do_diff(job: *Job, diag: *Diag) Error!void {
+    assert(job.args.action == .diff);
+    assert(diag.code == null);
+    var store: Store = undefined;
+    const exists = try open_store(job, &store, .existing, diag);
+    const a = try resolve(&store, exists, job.args.operand.?, diag);
+    const b = try resolve(&store, exists, job.args.second.?, diag);
+    var out: DiffOut = .{ .job = job, .buffer = undefined, .len = 0, .count = 0 };
+    if (job.output.json) {
+        var head: [256]u8 = undefined;
+        const text = std.fmt.bufPrint(
+            &head,
+            "{{\"schema\":\"zbx.store.diff/1\",\"from\":\"{s}\",\"to\":\"{s}\",\"changes\":[",
+            .{ a.text(), b.text() },
+        ) catch unreachable; // A short fixed line.
+        try put(job, text, diag);
+    }
+    var summary: diff.Summary = .{};
+    const sink: diff.Sink = .{ .context = &out, .call = DiffOut.call };
+    const arena: []align(8) u8 = &job.workspace.import.arena;
+    diff.diff(&store, &job.workspace.diff, arena, a, b, sink, &summary, diag) catch {
+        return error.Failed;
+    };
+    try out.flush(diag);
+    if (!job.output.json) return;
+    var tail: [160]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &tail,
+        "],\"summary\":{{\"added\":{d},\"removed\":{d},\"changed\":{d}}}}}\n",
+        .{ summary.added, summary.removed, summary.changed },
+    ) catch unreachable; // A short fixed line.
+    try put(job, text, diag);
 }

@@ -360,6 +360,22 @@ pub fn tree_damaged(diag: *Diag, where: Digest, kind: []const u8) void {
     );
 }
 
+/// ZBX-E0422 or ZBX-E0423: `trees.load` of `digest` failed.
+pub fn tree_load_failed(
+    diag: *Diag,
+    store: *const layout.Store,
+    digest: Digest,
+    err: anyerror,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    switch (err) {
+        error.NotFound => tree_damaged(diag, digest, "is missing from the store"),
+        error.Damaged => tree_damaged(diag, digest, "does not hash to its name"),
+        else => cannot_read(diag, store, "reading a tree", error.IoFailed, errno),
+    }
+}
+
 /// ZBX-E0701: nowhere to keep a container's layers.
 pub fn no_state_directory(diag: *Diag) void {
     assert(diag.code == null);
@@ -526,6 +542,72 @@ pub fn skipped_xattr(diag: *Diag, path: []const u8, name: []const u8, fault: Xat
             .sentence = "nothing to do unless the container needs it; the digest does not cover it",
         },
     );
+}
+
+/// Why a container has no layer to commit.
+pub const NoLayer = enum { directory, read_only, gone };
+
+/// ZBX-E0426: nothing to commit for that container.
+pub fn no_layer(diag: *Diag, name: []const u8, why: NoLayer) void {
+    assert(diag.code == null);
+    assert(name.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, name);
+    diag.raise(.E0426);
+    diag.while_("committing the container {s}", .{echo});
+    switch (why) {
+        .directory => diag.cause(
+            "'{s}' was started on a directory (--rootfs), not on a tree, so it has no upper " ++
+                "layer; its writes went into that directory",
+            .{echo},
+        ),
+        .read_only => diag.cause(
+            "'{s}' ran with --read-only, so it had no upper layer and changed nothing",
+            .{echo},
+        ),
+        .gone => diag.cause(
+            "the upper layer of '{s}' is not there any more: it is removed with the run " ++
+                "record, and by a new run of the same name",
+            .{echo},
+        ),
+    }
+    diag.context("name", "{s}", .{echo});
+    if (why == .directory) {
+        diag.fix(.{
+            .sentence = "keep a directory by importing it:",
+            .command = "zbx store import <dir>",
+        });
+    } else {
+        diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps --all" });
+    }
+}
+
+/// ZBX-E0427: a commit of a container that is running.
+pub fn container_running(diag: *Diag, name: []const u8) void {
+    assert(diag.code == null);
+    assert(name.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, name);
+    diag.raise(.E0427);
+    diag.while_("committing the container {s}", .{echo});
+    diag.cause("'{s}' is still running, and zbx does not freeze a running container", .{echo});
+    diag.context("name", "{s}", .{echo});
+    diag.fix_with("stop it, then commit:", "zbx stop {s}", .{echo});
+}
+
+/// ZBX-E0428: an upper layer with a redirect or a metadata-only copy-up.
+pub fn overlay_feature(diag: *Diag, path: []const u8, feature: []const u8) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    assert(feature.len > 0);
+    diag.raise(.E0428);
+    diag.while_("committing the upper layer", .{});
+    diag.cause(
+        "'{s}' has an overlayfs {s} mark, which a commit does not follow",
+        .{ path, feature },
+    );
+    diag.context("path", "{s}", .{path});
+    diag.fix(.{ .sentence = "run the container again; zbx's own mounts make no redirects" });
 }
 
 const testing = std.testing;

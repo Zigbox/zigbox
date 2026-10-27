@@ -1,0 +1,6 @@
+error[ZBX-E0428]: the upper layer uses an overlayfs feature a commit can't follow
+  cause  '/home/alice/.local/state/zbx/containers/web-1/upper/renamed' has an
+         overlayfs redirect mark, which a commit does not follow
+  fix    run the container again; zbx's own mounts make no redirects
+  more   zbx explain E0428 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0428.html

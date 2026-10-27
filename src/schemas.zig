@@ -170,6 +170,49 @@ const store_rm_schema =
     \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"removed":{"const":true}}}
 ;
 
+const commit_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/commit/1","version":1,
+    \\"title":"zbx commit --output json",
+    \\"description":"stdout: the tree a container's changes made. A failure is a diagnostic",
+    \\"type":"object","required":["schema","digest","parent","container","unchanged","files",
+    \\"bytes","new_objects","new_bytes","new_trees","deleted"],
+    \\"properties":{"schema":{"const":"zbx.commit/1"},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"parent":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the tree the container started from"},
+    \\"container":{"type":"string"},
+    \\"unchanged":{"type":"boolean",
+    \\"description":"true if digest equals parent: nothing changed, no root written"},
+    \\"files":{"type":"integer","description":"files in the whole new tree"},
+    \\"bytes":{"type":"integer","description":"their total length"},
+    \\"new_objects":{"type":"integer"},"new_bytes":{"type":"integer"},
+    \\"new_trees":{"type":"integer"},
+    \\"deleted":{"type":"integer","description":"names the container deleted from the parent"}}}
+;
+
+const store_diff_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-diff/1","version":1,
+    \\"title":"zbx store diff --output json",
+    \\"description":"stdout: the paths that differ, in path order, a directory first",
+    \\"type":"object","required":["schema","from","to","changes","summary"],
+    \\"properties":{"schema":{"const":"zbx.store.diff/1"},
+    \\"from":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"to":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"changes":{"type":"array","items":{"type":"object","required":["change","kind","path"],
+    \\"properties":{"change":{"enum":["added","removed","changed"]},
+    \\"kind":{"enum":["file","dir","symlink"],
+    \\"description":"in the second tree, or the first for a removed path"},
+    \\"path":{"type":"string",
+    \\"description":"from the root, with a leading slash; / is the root directory itself"},
+    \\"attributes":{"type":"array","description":"only for changed: what differs",
+    \\"items":{"enum":["content","mode","owner","xattrs","target","type"]}}}}},
+    \\"summary":{"type":"object","required":["added","removed","changed"],
+    \\"properties":{"added":{"type":"integer"},"removed":{"type":"integer"},
+    \\"changed":{"type":"integer"}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -182,12 +225,14 @@ const table = [_]Entry{
     .{ .command = "store-ls", .text = store_ls_schema },
     .{ .command = "store-du", .text = store_du_schema },
     .{ .command = "store-rm", .text = store_rm_schema },
+    .{ .command = "commit", .text = commit_schema },
+    .{ .command = "store-diff", .text = store_diff_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 9);
+    assert(table.len == 11);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -216,5 +261,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 9), table.len);
+    try testing.expectEqual(@as(usize, 11), table.len);
 }

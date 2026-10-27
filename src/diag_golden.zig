@@ -231,6 +231,8 @@ var golden_files: SimFs = undefined;
 
 var golden_import: @import("store/import.zig").Workspace = undefined;
 var golden_store: @import("store/layout.zig").Store = undefined;
+/// The digest of the sample tree `prepare_store_with_tree` imported.
+var golden_digest: Digest = undefined;
 
 /// A user's store that holds the sample tree, imported; the host can run containers.
 fn prepare_store_with_tree(sim: *HostSim) void {
@@ -250,6 +252,7 @@ fn prepare_store_with_tree(sim: *HostSim) void {
         "store/import.zig",
     ).import(&golden_store, &golden_import, "/src", options, &result, &diag) catch
         unreachable; // The sample tree imports.
+    golden_digest = result.digest;
 }
 
 const golden_state = "/home/alice/.local/state/zbx/containers";
@@ -267,6 +270,47 @@ fn prepare_overlay_dirs(sim: *HostSim) void {
 fn prepare_link_limit(sim: *HostSim) void {
     prepare_store_with_tree(sim);
     golden_files.faults.link_max = 2; // The object and one name: the second shell is one too many.
+}
+
+/// A finished container "web-1" that ran the sample tree, with the upper layer a commit reads
+/// (one new file in it, and whatever `extra` puts there).
+const Extra = *const fn (files: *SimFs, upper: []const u8) void;
+
+fn prepare_committable(sim: *HostSim, extra: ?Extra) void {
+    prepare_store_with_tree(sim);
+    const upper = golden_state ++ "/web-1/upper";
+    const parents = [_][]const u8{
+        "/home/alice/.local/state",
+        "/home/alice/.local/state/zbx",
+        golden_state,
+        golden_state ++ "/web-1",
+        upper,
+    };
+    for (parents) |parent| {
+        if (golden_files.kind_of(parent) == null) golden_files.put_dir(parent, 0o755);
+    }
+    golden_files.put_file(upper ++ "/new", 0o644, "added\n");
+    if (extra) |change| change(&golden_files, upper);
+    const text = golden_digest.text();
+    var view = sim_run.sample_view("web-1", 1000);
+    view.tree = &text;
+    view.upper = upper;
+    sim_run.put_record(sim, &view);
+}
+
+fn prepare_commit_redirect(sim: *HostSim) void {
+    prepare_committable(sim, put_redirect);
+}
+
+fn put_redirect(files: *SimFs, upper: []const u8) void {
+    assert(std.mem.endsWith(u8, upper, "/upper"));
+    files.put_dir(golden_state ++ "/web-1/upper/renamed", 0o755);
+    files.put_xattr(golden_state ++ "/web-1/upper/renamed", "user.overlay.redirect", "/etc");
+}
+
+fn prepare_commit_directory(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim_run.put_record(sim, &sim_run.sample_view("web-1", 1000));
 }
 
 fn prepare_overlay_refused(sim: *HostSim) void {
@@ -602,6 +646,24 @@ const base_cases = [_]Case{
         .args = &.{ "run", "4ccf5b88ec09", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_overlay_refused,
         .exit = 125,
+    },
+    .{
+        .code = .E0426,
+        .args = &.{ "commit", "web-1" },
+        .prepare = prepare_commit_directory,
+        .exit = 1,
+    },
+    .{
+        .code = .E0427,
+        .args = &.{ "commit", "web-1" },
+        .prepare = prepare_running,
+        .exit = 1,
+    },
+    .{
+        .code = .E0428,
+        .args = &.{ "commit", "web-1" },
+        .prepare = prepare_commit_redirect,
+        .exit = 2,
     },
     .{
         .code = .W0413,

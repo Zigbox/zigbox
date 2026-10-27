@@ -22,6 +22,21 @@
 //! lacks the object, a second time to copy it, checking that the bytes are the same (`E0418`
 //! otherwise). An import that is killed leaves only files in `tmp/`; a second run skips every
 //! object that is already complete.
+//!
+//! The same walk makes a commit (`commit` below; docs/briefs/M3-store.md, "Commit and diff"):
+//! the directory is a container's upper layer and `Options.parent` is the tree the container
+//! started from. Each directory is then the merge of two sorted lists, the upper's names and the
+//! parent tree's entries:
+//!   - a name only in the parent is copied through unchanged (a directory by its subtree digest,
+//!     so nothing below it is read);
+//!   - a name in the upper wins over the parent's, except that a directory in the upper which is
+//!     not opaque is merged with the parent's directory of that name;
+//!   - a whiteout in the upper (a character device 0/0, or a file with `user.overlay.whiteout`)
+//!     removes the name outright: no entry, so the new tree has no trace of it;
+//!   - a directory with `user.overlay.opaque` replaces the parent's directory of that name.
+//! An upper layer that uses redirects or metadata-only copy-up (`user.overlay.redirect`,
+//! `user.overlay.metacopy`) is refused: the container's changes can not be told from the upper
+//! alone then.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -58,6 +73,8 @@ pub const Options = struct {
     /// (W0201): ids other than 0 do not exist there.
     squash_owner: bool,
     warn: ?Warn,
+    /// Set for a commit: the tree the walked directory (an upper layer) is applied to.
+    parent: ?Digest = null,
 };
 
 pub const Result = struct {
@@ -67,6 +84,8 @@ pub const Result = struct {
     symlinks: u64,
     /// Entries left out (devices, FIFOs, sockets), and attributes left out.
     skipped: u64,
+    /// A commit: names the upper layer removed from the parent (whiteouts it holds).
+    whiteouts: u64,
     xattrs_skipped: u64,
     /// Entries whose owner or group showed as the overflow id, 65534: the namespace could not
     /// map it. They are recorded as 65534.
@@ -89,6 +108,22 @@ const Frame = struct {
     next: u32,
     out_at: u32,
     writer: tree.Writer,
+    /// A commit: the parent's directory, decoded one entry ahead (`peek`, valid if `has_peek`).
+    /// Empty for an import, and for a directory that is new or opaque.
+    parent: tree.Decoder,
+    peek: tree.Entry,
+    has_peek: bool,
+    parent_digest: Digest,
+};
+
+/// What overlayfs says about a file in an upper layer, by its `user.overlay.*` attributes.
+const Marks = struct {
+    whiteout: bool,
+    opaque_dir: bool,
+    /// Redirects and metadata-only copy-ups, which a commit does not follow.
+    unsupported: ?[]const u8,
+
+    const none: Marks = .{ .whiteout = false, .opaque_dir = false, .unsupported = null };
 };
 
 /// The caller's memory for an import, about 17 MiB; keep it in static or heap storage.
@@ -119,6 +154,9 @@ const Run = struct {
     warnings_shown: u32,
     warnings_hidden: u32,
     unmapped_path_len: u32,
+    /// A commit: the walk merges with a parent tree and obeys overlayfs's marks.
+    merging: bool,
+    marks: Marks,
 
     fn path_text(run: *const Run, length: u32) [:0]const u8 {
         assert(length > 0);
@@ -327,11 +365,11 @@ const Run = struct {
                 return error.Failed;
             },
         }
-        try run.push_frame(length);
+        try run.push_frame(length, run.options.parent);
     }
 
     /// Reads the directory at the current path and starts a frame for it.
-    fn push_frame(run: *Run, path_len: u32) Error!void {
+    fn push_frame(run: *Run, path_len: u32, below: ?Digest) Error!void {
         assert(path_len > 0);
         const ws = run.ws;
         assert(run.depth <= constants.store_depth_max);
@@ -351,34 +389,111 @@ const Run = struct {
         if (names.full) return run.limit(.arena, path);
         const offsets_at = align_up(base + names.used, 4);
         const offsets_end = offsets_at + names.count * 4;
-        const out_at = align_up(offsets_end, 8);
+        const parent_at = align_up(offsets_end, 8);
+        const parent_bytes = try run.load_parent(below, parent_at, path);
+        const out_at = align_up(parent_at + @as(u32, @intCast(parent_bytes.len)), 8);
         if (out_at + 256 > ws.arena.len) return run.limit(.arena, path);
         const region: []align(4) u8 = @alignCast(ws.arena[offsets_at..offsets_end]);
         const offsets: []u32 = std.mem.bytesAsSlice(u32, region);
-        ws.frames[run.depth] = .{
+        const frame = &ws.frames[run.depth];
+        frame.* = .{
             .path_len = path_len,
             .names = names,
             .offsets = names.sorted(offsets),
             .next = 0,
             .out_at = out_at,
             .writer = tree.Writer.init(ws.arena[out_at..]),
+            .parent = undefined,
+            .peek = undefined,
+            .has_peek = false,
+            .parent_digest = below orelse tree.zero_digest,
         };
+        if (below != null) {
+            frame.parent.init(parent_bytes) catch return run.parent_damaged(frame);
+            try run.advance_parent(frame);
+        }
         run.depth += 1;
         run.result.directories += 1;
+    }
+
+    /// A commit: reads the parent's directory into the arena at `at`. Empty for no parent.
+    fn load_parent(run: *Run, parent: ?Digest, at: u32, path: [:0]const u8) Error![]const u8 {
+        assert(at <= run.ws.arena.len);
+        const digest = parent orelse return &.{};
+        const arena = &run.ws.arena;
+        if (at + constants.store_tree_bytes_max + 256 > arena.len) return run.limit(.arena, path);
+        var errno: u16 = 0;
+        const room = arena[at..][0..constants.store_tree_bytes_max];
+        const loaded = trees.load(run.store, digest, room, &errno);
+        return loaded catch |err| {
+            diagnose.tree_load_failed(run.diag, run.store, digest, err, errno);
+            return error.Failed;
+        };
+    }
+
+    fn parent_damaged(run: *Run, frame: *const Frame) Error {
+        assert(run.diag.code == null);
+        diagnose.tree_damaged(run.diag, frame.parent_digest, "does not decode");
+        return error.Failed;
+    }
+
+    /// Reads the parent's next entry into `peek`.
+    fn advance_parent(run: *Run, frame: *Frame) Error!void {
+        assert(run.merging);
+        frame.has_peek = frame.parent.next(&frame.peek) catch return run.parent_damaged(frame);
     }
 
     fn step(run: *Run) Error!void {
         assert(run.depth <= constants.store_depth_max + 1);
         assert(run.depth > 0);
         const frame = &run.ws.frames[run.depth - 1];
-        if (frame.next == frame.offsets.len) return run.finish_frame();
+        const upper_left = frame.next < frame.offsets.len;
+        if (!upper_left and !frame.has_peek) return run.finish_frame();
+        if (!frame.has_peek) {
+            const name = frame.names.at(frame.offsets[frame.next]);
+            frame.next += 1;
+            return run.entry(frame, name, null);
+        }
+        const order: std.math.Order = if (!upper_left)
+            .gt
+        else
+            std.mem.order(u8, frame.names.at(frame.offsets[frame.next]), frame.peek.name);
+        if (order == .gt) { // Only in the parent: it stays as it is.
+            try run.copy_parent(frame);
+            return run.advance_parent(frame);
+        }
         const name = frame.names.at(frame.offsets[frame.next]);
         frame.next += 1;
-        try run.entry(frame, name);
+        const matched: ?tree.Entry = if (order == .eq) frame.peek else null;
+        if (order == .eq) try run.advance_parent(frame);
+        try run.entry(frame, name, matched);
+    }
+
+    /// The parent's entry, written again unchanged: for a file the same object, for a directory
+    /// the same subtree (so nothing below it is read).
+    fn copy_parent(run: *Run, frame: *Frame) Error!void {
+        assert(run.merging);
+        assert(frame.has_peek);
+        const entry_ = frame.peek;
+        frame.writer.begin(
+            entry_.name,
+            entry_.kind,
+            entry_.mode,
+            entry_.uid,
+            entry_.gid,
+            entry_.xattrs,
+        ) catch return run.writer_full(frame);
+        switch (entry_.kind) {
+            .file => frame.writer.end_file(entry_.size, entry_.content, entry_.object) catch {
+                return run.writer_full(frame);
+            },
+            .symlink => frame.writer.end_symlink(entry_.target) catch return run.writer_full(frame),
+            .dir => frame.writer.end_dir(entry_.subtree) catch return run.writer_full(frame),
+        }
     }
 
     /// One name of the top directory: its path is built in `ws.path`, and its kind decides.
-    fn entry(run: *Run, frame: *Frame, name: []const u8) Error!void {
+    fn entry(run: *Run, frame: *Frame, name: []const u8, matched: ?tree.Entry) Error!void {
         assert(name.len > 0);
         assert(frame.path_len > 0);
         const ws = run.ws;
@@ -400,8 +515,13 @@ const Run = struct {
         switch (stat.kind) {
             .file => try run.file_entry(frame, name, path, &stat),
             .symlink => try run.symlink_entry(frame, name, path, &stat),
-            .dir => try run.dir_entry(frame, name, path, &stat),
-            .char_device, .block_device, .fifo, .socket => run.warn_file(path, stat.kind),
+            .dir => try run.dir_entry(frame, name, path, &stat, matched),
+            .char_device => if (run.merging and stat.rdev_major == 0 and stat.rdev_minor == 0) {
+                run.result.whiteouts += 1; // A deletion: no entry, and the parent's is gone.
+            } else {
+                run.warn_file(path, stat.kind);
+            },
+            .block_device, .fifo, .socket => run.warn_file(path, stat.kind),
         }
     }
 
@@ -426,6 +546,13 @@ const Run = struct {
         assert(stat.kind == .file);
         assert(name.len > 0);
         const blob = try run.gather_xattrs(path);
+        if (run.merging) {
+            try run.check_marks(path);
+            if (run.marks.whiteout) { // A deletion, as a file (a mount made by a user namespace).
+                run.result.whiteouts += 1;
+                return;
+            }
+        }
         const content = try run.hash_file(path, stat);
         run.note_owner(path, stat);
         const attrs = run.attrs_of(stat, blob);
@@ -450,6 +577,7 @@ const Run = struct {
         assert(name.len > 0);
         const fs = run.store.fs;
         const blob = try run.gather_xattrs(path);
+        if (run.merging) try run.check_marks(path);
         const target = fs.read_link(path, &run.ws.link_target) catch |err| {
             if (err == error.FileTooLarge) return run.limit(.target, path);
             return run.source_failure("readlink of", path, err, fs.last_errno());
@@ -470,18 +598,26 @@ const Run = struct {
         name: []const u8,
         path: [:0]const u8,
         stat: *const fs_mod.Stat,
+        matched: ?tree.Entry,
     ) Error!void {
         assert(stat.kind == .dir);
         assert(name.len > 0);
         // The root is level 0; `frames` has room for `store_depth_max` levels below it.
         if (run.depth > constants.store_depth_max) return run.limit(.depth, path);
         const blob = try run.gather_xattrs(path);
+        if (run.merging) try run.check_marks(path);
+        // Merged with the parent's directory of that name, unless it replaces it (opaque) or
+        // the parent has something else there.
+        var below: ?Digest = null;
+        if (matched) |found| {
+            if (found.kind == .dir and !run.marks.opaque_dir) below = found.subtree;
+        }
         run.note_owner(path, stat);
         const attrs = run.attrs_of(stat, blob);
         frame.writer.begin(name, .dir, attrs.mode, attrs.uid, attrs.gid, blob) catch {
             return run.writer_full(frame);
         };
-        try run.push_frame(@intCast(path.len));
+        try run.push_frame(@intCast(path.len), below);
     }
 
     /// The top directory is done: its encoding becomes a tree object, and its digest completes
@@ -607,6 +743,7 @@ const Run = struct {
         assert(run.ws.xattr_names.len > 0);
         const ws = run.ws;
         ws.builder.reset();
+        run.marks = Marks.none;
         const listed = run.store.fs.list_xattrs(path, &ws.xattr_names) catch |err| {
             if (err == error.NotFound) return run.vanished(path);
             run.warn_xattr(path, "(the list)", .unreadable);
@@ -621,12 +758,36 @@ const Run = struct {
         return ws.builder.finish(&ws.blob);
     }
 
+    /// Overlayfs's own attributes are never imported, but a commit reads what they say.
+    fn note_overlay(run: *Run, path: [:0]const u8, name: [:0]const u8) Error!void {
+        assert(name.len > 0);
+        if (!run.merging) return;
+        const marks = &run.marks;
+        if (std.mem.eql(u8, name, "user.overlay.whiteout")) marks.whiteout = true;
+        if (std.mem.eql(u8, name, "user.overlay.redirect")) marks.unsupported = "redirect";
+        if (std.mem.eql(u8, name, "user.overlay.metacopy")) marks.unsupported = "metacopy";
+        if (!std.mem.eql(u8, name, "user.overlay.opaque")) return;
+        const value = run.store.fs.get_xattr(path, name, &run.ws.xattr_value) catch |err| {
+            if (err == error.NotFound) return run.vanished(path);
+            return;
+        };
+        marks.opaque_dir = std.mem.eql(u8, value, "y");
+    }
+
+    /// A commit can not follow a redirect or a metadata-only copy-up.
+    fn check_marks(run: *Run, path: [:0]const u8) Error!void {
+        const feature = run.marks.unsupported orelse return;
+        assert(run.diag.code == null);
+        diagnose.overlay_feature(run.diag, path, feature);
+        return error.Failed;
+    }
+
     fn collect(run: *Run, path: [:0]const u8, name: [:0]const u8) Error!void {
         assert(name.len > 0);
         assert(path.len > 0);
         const ws = run.ws;
         switch (xattrs.class_of(name)) {
-            .overlay => return,
+            .overlay => return run.note_overlay(path, name),
             .unsupported => return run.warn_xattr(path, name, .namespace),
             .keep => {},
         }
@@ -673,6 +834,38 @@ pub fn import(
 ) Error!void {
     assert(diag.code == null);
     assert(source.len > 0);
+    assert(options.parent == null);
+    var run = try walk(store, ws, source, options, result, diag);
+    try run.save_root(source);
+    assert(run.depth == 0);
+}
+
+/// Applies the upper layer at `upper` to the tree `options.parent`: the new tree is in
+/// `result.digest`, written to the store, and is not yet a root (the caller records one, with
+/// the totals only it has). Nothing in `upper` is changed.
+pub fn commit(
+    store: *Store,
+    ws: *Workspace,
+    upper: []const u8,
+    options: Options,
+    result: *Result,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    assert(upper.len > 0);
+    assert(options.parent != null);
+    const run = try walk(store, ws, upper, options, result, diag);
+    assert(run.depth == 0);
+}
+
+fn walk(
+    store: *Store,
+    ws: *Workspace,
+    source: []const u8,
+    options: Options,
+    result: *Result,
+    diag: *Diag,
+) Error!Run {
     result.* = std.mem.zeroes(Result);
     var run: Run = .{
         .store = store,
@@ -685,14 +878,15 @@ pub fn import(
         .warnings_shown = 0,
         .warnings_hidden = 0,
         .unmapped_path_len = 0,
+        .merging = options.parent != null,
+        .marks = Marks.none,
     };
     try run.begin(source);
     // Each step handles one entry or finishes one directory; the walk ends because every entry
     // is handled once and the stack is at most `store_depth_max` deep.
     while (run.depth > 0) try run.step();
     run.flush_warnings();
-    try run.save_root(source);
-    assert(run.depth == 0);
+    return run;
 }
 
 fn align_up(value: u32, alignment: u32) u32 {

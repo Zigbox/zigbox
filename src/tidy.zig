@@ -78,6 +78,7 @@ const shipped_files = [_][]const u8{
     "src/host_real_fs.zig",
     "src/store_commands.zig",
     "src/store/diagnose.zig",
+    "src/store/diff.zig",
     "src/store/digest.zig",
     "src/store/fs.zig",
     "src/store/import.zig",

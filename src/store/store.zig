@@ -60,6 +60,7 @@ pub const object = @import("object.zig");
 pub const trees = @import("trees.zig");
 pub const roots = @import("roots.zig");
 pub const import = @import("import.zig");
+pub const diff = @import("diff.zig");
 pub const usage = @import("usage.zig");
 pub const walk = @import("walk.zig");
 pub const namespace = @import("namespace.zig");
@@ -87,6 +88,7 @@ test {
     _ = trees;
     _ = roots;
     _ = import;
+    _ = diff;
     _ = usage;
     _ = walk;
     _ = namespace;
@@ -106,5 +108,7 @@ test "the library surface Zigcube's C2 uses" {
     _ = chunks;
     _ = get_tree;
     _ = import.import;
+    _ = import.commit;
+    _ = diff.diff;
     try std.testing.expect(std.mem.eql(u8, Digest.of("").text()[0..3], "b3:"));
 }
