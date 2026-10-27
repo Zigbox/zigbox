@@ -154,4 +154,5 @@ test {
     _ = @import("run_image.zig");
     _ = @import("image_diagnose.zig");
     _ = @import("store/image_find.zig");
+    _ = @import("testing/vm/checks_m4.zig");
 }

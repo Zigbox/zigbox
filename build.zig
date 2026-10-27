@@ -84,6 +84,7 @@ fn add_test_step(
         "src/testing/vm/main_m1.zig",
         "src/testing/vm/main_m2.zig",
         "src/testing/vm/main_m3.zig",
+        "src/testing/vm/main_m4.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -192,6 +193,35 @@ fn add_release_step(b: *std.Build, options: *std.Build.Step.Options) void {
     if (strip) step.dependOn(&check.step);
 }
 
+/// The milestone demos: the step, the harness's root file and the help line.
+const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }{
+    .{
+        .step = "demo-m0",
+        .root = "src/testing/vm/main.zig",
+        .help = "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
+    },
+    .{
+        .step = "demo-m1",
+        .root = "src/testing/vm/main_m1.zig",
+        .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
+    },
+    .{
+        .step = "demo-m2",
+        .root = "src/testing/vm/main_m2.zig",
+        .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
+    },
+    .{
+        .step = "demo-m3",
+        .root = "src/testing/vm/main_m3.zig",
+        .help = "Run the M3 demo, as far as it is built: the store and running by digest",
+    },
+    .{
+        .step = "demo-m4",
+        .root = "src/testing/vm/main_m4.zig",
+        .help = "Run the M4 demo, as far as it is built: pull, the lock, run by name",
+    },
+};
+
 /// `zig build demo-m0` and `demo-m1`: the milestone demos in a real Ubuntu VM. They use the
 /// stripped ReleaseSafe binaries, the ones that ship. -Daccel=kvm|tcg|auto chooses the accelerator:
 /// auto means KVM and fails with a one-line message if /dev/kvm is unusable; tcg (software
@@ -207,28 +237,6 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
     const reuse_help = "demos: boot the kept, provisioned overlay (development)";
     const reuse = b.option(bool, "reuse-overlay", reuse_help) orelse false;
 
-    const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }{
-        .{
-            .step = "demo-m0",
-            .root = "src/testing/vm/main.zig",
-            .help = "Run the M0 demo in a real Ubuntu 24.04 VM (see docs/demos/m0.md)",
-        },
-        .{
-            .step = "demo-m1",
-            .root = "src/testing/vm/main_m1.zig",
-            .help = "Run the M1 demo: zbx run in an Alpine rootfs, in the VM (docs/demos/m1.md)",
-        },
-        .{
-            .step = "demo-m2",
-            .root = "src/testing/vm/main_m2.zig",
-            .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
-        },
-        .{
-            .step = "demo-m3",
-            .root = "src/testing/vm/main_m3.zig",
-            .help = "Run the M3 demo, as far as it is built: the store and running by digest",
-        },
-    };
     for (demos) |demo| {
         const vm = b.addExecutable(.{
             .name = "vm",

@@ -273,3 +273,33 @@ test "every demo command that runs zbx as the demo user goes through the session
         }
     }
 }
+
+/// Writes `text` to `path` in the guest through base64 in short pieces (a typed line is at most
+/// 1 KiB, and the text has quotes in it), and makes it executable.
+pub fn put_file(session: *Session, path: []const u8, text: []const u8) !void {
+    const encoder = std.base64.standard.Encoder;
+    var encoded: [2048]u8 = undefined;
+    if (encoder.calcSize(text.len) > encoded.len) return error.ScriptTooBig;
+    const whole = encoder.encode(&encoded, text);
+    const piece = 600;
+    var at: usize = 0;
+    var command_buffer: [900]u8 = undefined;
+    _ = try session.run("rm -f /tmp/put.b64", limits.command_timeout_kvm_s);
+    while (at < whole.len) : (at += piece) {
+        const end = @min(at + piece, whole.len);
+        const command = try std.fmt.bufPrint(
+            &command_buffer,
+            "printf %s {s} >> /tmp/put.b64",
+            .{whole[at..end]},
+        );
+        const result = try session.run(command, limits.command_timeout_kvm_s);
+        if (result.status != 0) return error.ScriptNotWritten;
+    }
+    const decode = try std.fmt.bufPrint(
+        &command_buffer,
+        "base64 -d /tmp/put.b64 > {s} && chmod 755 {s}",
+        .{ path, path },
+    );
+    const result = try session.run(decode, limits.command_timeout_kvm_s);
+    if (result.status != 0) return error.ScriptNotWritten;
+}

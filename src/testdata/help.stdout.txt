@@ -17,8 +17,13 @@ commands:
   --version       print the version
 
 run:
+  zbx run <image> [--name <name>] [-- <command> [args...]]
   zbx run <digest> [--name <name>] -- <command> [args...]
   zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
+  <image>         a pulled image by name (alpine:3.20, name@sha256:...): it runs what the
+                  image says (entrypoint, command, environment, directory, user); words
+                  after -- replace its command. A tag is looked up in zbx.lock, which is
+                  made if the project has none, and refused if it and the store disagree
   <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
                   an overlay: its writes go to the container's own layer, never the store
   --rootfs <dir>  or a directory to use as the container's root, read and written in place
@@ -38,9 +43,10 @@ stop:
 
 store:
   zbx store import <dir>   read a directory into the store and print its digest
-  zbx store ls             list the roots (the trees the store keeps)
+  zbx store ls             list the roots (the trees the store keeps) and the images
   zbx store du [<digest>]  the store's size, or what one tree costs
-  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
+  zbx store du --by-image  what each pulled image costs, and how much it shares
+  zbx store rm <digest>    drop a root and its image records (the data stays until gc)
   zbx store diff <a> <b>   list the paths that differ between two trees
   zbx store verify         rehash everything; name each damaged file and the paths it breaks
   zbx store gc             plan a collection of what no root reaches (changes nothing)
@@ -56,8 +62,9 @@ pull:
   --resolve-only  print the digest of the image manifest for this machine's platform,
                   as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY are used)
   without it, the layers are downloaded into the store (a cut download resumes), unpacked
-  into one tree and recorded; the manifest digest is printed, or with --output json the
-  object of "zbx schema pull", which has the tree's digest
+  into one tree and recorded, and zbx.lock (the nearest one up from here, else here) gets
+  the entry; the manifest digest is printed, or with --output json the object of
+  "zbx schema pull", which has the tree's digest
   ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
 
 bundle:
