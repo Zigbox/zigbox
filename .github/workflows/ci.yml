@@ -82,6 +82,7 @@ jobs:
           - tree
           - store
           - commit
+          - gc
           - parse_sysctl
           - parse_kernel
           - parse_controllers

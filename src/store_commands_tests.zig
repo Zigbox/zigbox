@@ -8,6 +8,7 @@ const cli = @import("cli.zig");
 const constants = @import("constants.zig");
 const host_sim = @import("host_sim.zig");
 const schemas = @import("schemas.zig");
+const store_commands = @import("store_commands.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
@@ -42,15 +43,20 @@ fn start() void {
 
 /// Runs `zbx <args>` and returns the exit code; the output is in the simulator.
 fn command(args: []const [:0]const u8) !u8 {
+    const code = command_raw(args);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+    return code;
+}
+
+/// The same, for a test that has a container running (its pipes stay open).
+fn command_raw(args: []const [:0]const u8) u8 {
     var items: [16][:0]const u8 = undefined;
     items[0] = "zbx";
     @memcpy(items[1 .. 1 + args.len], args);
     var iterator: Items = .{ .items = items[0 .. 1 + args.len] };
     sim.stdout_len = 0;
     sim.stderr_len = 0;
-    const code = cli.run_from_iterator(sim.interface(), &iterator);
-    try testing.expectEqual(@as(u32, 0), sim.open_count());
-    return code;
+    return cli.run_from_iterator(sim.interface(), &iterator);
 }
 
 fn parse_stdout() !std.json.Parsed(std.json.Value) {
@@ -475,4 +481,264 @@ test "diff of equal trees prints nothing, and usage errors are E0006" {
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0006") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{"commit"}));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0006") != null);
+}
+
+const zero_hash = "b3:" ++ test_util.repeat('0', 64);
+
+// ---- verify, gc and restore ----------------------------------------------------------------
+
+fn stored_object(source_path: []const u8, buffer: *[200]u8) []const u8 {
+    const object = @import("store/object.zig");
+    const stat = files.stat_of(source_path).?;
+    const attrs: object.Attrs = .{
+        .mode = stat.mode,
+        .uid = stat.uid,
+        .gid = stat.gid,
+        .xattrs = files.xattrs_of(source_path) orelse &@import("store/xattrs.zig").empty,
+    };
+    const id = object.object_id(Digest.of(files.content_of(source_path).?), attrs);
+    const hex = id.hex();
+    return std.fmt.bufPrint(buffer, support.user_store ++ "/objects/{s}/{s}", .{
+        hex[0..2], hex[2..],
+    }) catch unreachable; // Short.
+}
+
+fn json_object_has(object: std.json.ObjectMap, schema: []const u8, keys: []const []const u8) !void {
+    for (keys) |key| {
+        try testing.expect(std.mem.indexOf(u8, schema, key) != null);
+        try testing.expect(object.get(key) != null);
+    }
+}
+
+test "verify of a whole store says so, in text and in JSON" {
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "0 roots: no damage") != null);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "1 roots: no damage") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "verify" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqualStrings("zbx.store.verify/1", object.get("schema").?.string);
+    try testing.expect(object.get("ok").?.bool);
+    const keys = [_][]const u8{
+        "schema", "ok",    "objects",         "object_bytes", "chunk_lists",
+        "trees",  "roots", "paths_truncated", "things",
+    };
+    try json_object_has(object, schemas.of("store-verify").?, &keys);
+    try testing.expectEqual(@as(usize, 0), object.get("things").?.array.items.len);
+}
+
+test "verify names a damaged object, its file and every path that reaches it, and exits 2" {
+    // Goal: the demo's step 4. Method: the byte of the object /etc/passwd became is changed.
+    start();
+    files.put_file("/src/etc/passwd-copy", 0o644, "root:x:0:0\n");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [200]u8 = undefined;
+    const object_path = stored_object("/src/etc/passwd", &buffer);
+    files.flip_byte(object_path, 1);
+    try testing.expectEqual(@as(u8, 2), try command(&.{ "store", "verify" }));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "error[ZBX-E0429]"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "error[ZBX-E0430]"));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "1 damaged") != null);
+    try testing.expectEqual(@as(u8, 2), try command(&.{ "--verbose", "store", "verify" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), object_path) != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), ":/etc/passwd") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), ":/etc/passwd-copy") != null);
+    try testing.expectEqual(@as(u8, 2), try command(&.{ "--output", "json", "store", "verify" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expect(!object.get("ok").?.bool);
+    try testing.expectEqual(@as(i64, 1), object.get("damaged").?.integer);
+    const thing = object.get("things").?.array.items[0].object;
+    try testing.expectEqualStrings("content", thing.get("kind").?.string);
+    try testing.expectEqual(@as(i64, 2), thing.get("reached").?.integer);
+    const paths = thing.get("paths").?.array.items;
+    try testing.expectEqualStrings("/etc/passwd", paths[0].object.get("path").?.string);
+    try testing.expectEqualStrings("/etc/passwd-copy", paths[1].object.get("path").?.string);
+    try testing.expect(Digest.parse(paths[0].object.get("root").?.string) != null);
+    try json_object_has(
+        thing,
+        schemas.of("store-verify").?,
+        &.{ "id", "class", "reason", "errno" },
+    );
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, sim.stderr(), "\"code\":\"ZBX-E04"));
+}
+
+/// The plan hash a `gc --output json` printed.
+fn printed_plan(buffer: *[80]u8) ![:0]const u8 {
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    return term(buffer, parsed.value.object.get("plan").?.string);
+}
+
+/// Two trees imported and the second's root dropped; returns the plan's hash in `buffer`.
+fn drop_second_root(buffer: *[80]u8) ![:0]const u8 {
+    var argument: [80]u8 = undefined;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    files.put_file("/src/etc/extra", 0o644, "extra bytes\n");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const second = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(second);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "gc" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "nothing is unreachable") != null);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "rm", term(&argument, second) }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "gc" }));
+    return printed_plan(buffer);
+}
+
+fn stored_files() u32 {
+    return support.count_files(&files, support.user_store ++ "/objects") +
+        support.count_files(&files, support.user_store ++ "/trees");
+}
+
+test "gc plans what a dropped root frees, and refuses a hash that is not the plan" {
+    // Goal: plan, then confirm by hash. Method: two trees, one root dropped.
+    start();
+    var hash_storage: [80]u8 = undefined;
+    const hash = try drop_second_root(&hash_storage);
+    {
+        const parsed = try parse_stdout();
+        defer parsed.deinit();
+        const plan = parsed.value.object;
+        try testing.expect(!plan.get("applied").?.bool);
+        try testing.expectEqual(@as(i64, 1), plan.get("objects").?.integer);
+        try testing.expectEqual(@as(i64, 2), plan.get("trees").?.integer);
+        const keys = [_][]const u8{ "schema", "applied", "plan", "objects", "lists", "trees" };
+        try json_object_has(plan, schemas.of("store-gc").?, &keys);
+    }
+    const before = stored_files();
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "gc", "--confirm", zero_hash }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0431]") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), hash) != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expectEqual(before, stored_files());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "gc" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "would move to the trash") != null);
+}
+
+test "gc applies the right hash, lists the trash, and restore puts it back" {
+    start();
+    var hash_storage: [80]u8 = undefined;
+    const hash = try drop_second_root(&hash_storage);
+    const before = stored_files();
+    try testing.expectEqual(
+        @as(u8, 0),
+        try command(&.{ "--output", "json", "store", "gc", "--confirm", hash }),
+    );
+    var id_storage: [80]u8 = undefined;
+    const id = id: {
+        const parsed = try parse_stdout();
+        defer parsed.deinit();
+        const applied = parsed.value.object;
+        try testing.expect(applied.get("applied").?.bool);
+        break :id term(&id_storage, applied.get("gc").?.string);
+    };
+    try testing.expectEqual(before - 3, stored_files());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "gc", "--trash" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), id) != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "complete") != null);
+    const listing = [_][:0]const u8{ "--output", "json", "store", "gc", "--trash" };
+    try testing.expectEqual(@as(u8, 0), try command(&listing));
+    {
+        const parsed = try parse_stdout();
+        defer parsed.deinit();
+        const entry = parsed.value.object.get("trash").?.array.items[0].object;
+        try testing.expect(entry.get("complete").?.bool);
+        try json_object_has(entry, schemas.of("store-trash").?, &.{ "gc", "readable", "expires" });
+    }
+    try testing.expectEqual(
+        @as(u8, 0),
+        try command(&.{ "--output", "json", "store", "restore", id }),
+    );
+    {
+        const parsed = try parse_stdout();
+        defer parsed.deinit();
+        try testing.expectEqual(@as(i64, 2), parsed.value.object.get("trees").?.integer);
+        const keys = [_][]const u8{ "schema", "gc", "objects", "trees", "farms" };
+        try json_object_has(parsed.value.object, schemas.of("store-restore").?, &keys);
+    }
+    try testing.expectEqual(before, stored_files());
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "restore", id }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0433") != null);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+}
+
+test "the usage errors of verify, gc and restore are coded, with nothing on stdout" {
+    start();
+    const cases = [_]struct { args: []const [:0]const u8, code: []const u8 }{
+        .{ .args = &.{ "store", "verify", "x" }, .code = "ZBX-E0003" },
+        .{ .args = &.{ "store", "gc", "x" }, .code = "ZBX-E0003" },
+        .{ .args = &.{ "store", "restore" }, .code = "ZBX-E0006" },
+        .{ .args = &.{ "store", "restore", "a", "b" }, .code = "ZBX-E0003" },
+        .{ .args = &.{ "store", "restore", "not-an-id" }, .code = "ZBX-E0433" },
+        .{ .args = &.{ "store", "restore", "0123456789ab" }, .code = "ZBX-E0433" },
+        .{ .args = &.{ "store", "gc", "--confirm" }, .code = "ZBX-E0005" },
+        .{ .args = &.{ "store", "gc", "--confirm", "abc" }, .code = "ZBX-E0412" },
+        .{ .args = &.{ "store", "gc", "--confirm", zero_hash, "--trash" }, .code = "ZBX-E0003" },
+        .{ .args = &.{ "store", "ls", "--trash" }, .code = "ZBX-E0004" },
+        .{ .args = &.{ "store", "verify", "--confirm", zero_hash }, .code = "ZBX-E0004" },
+    };
+    for (cases) |case| {
+        try testing.expect(try command(case.args) != 0);
+        testing.expect(std.mem.indexOf(u8, sim.stderr(), case.code) != null) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ case.args[case.args.len - 1], sim.stderr() });
+            return err;
+        };
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "error[ZBX-"));
+    }
+}
+
+var live_handle: @import("runtime/run.zig").Handle = undefined;
+var live_workspace: store_commands.Workspace = undefined;
+
+test "the trees of running containers, and only of those, are what gc is told to keep" {
+    // Goal: live containers are roots. Method: a detached run in the simulator, its record
+    // made to name a tree (as a run by digest writes it); gc's preparation finds it while the
+    // container runs and not after it ends.
+    start();
+    const run = @import("runtime/run.zig");
+    const container: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "web-1",
+        .command = &.{"/bin/sh"},
+    };
+    sim.world.command_runs_ms = 3_600_000;
+    var diag: @import("diag/diag.zig").Diag = undefined;
+    diag.reset();
+    try run.start(sim.interface(), &container, .{ .detached = true }, &live_handle, &diag);
+    const record_path = sim_run.runs_path ++ "/web-1.zon";
+    const text = sim.world.read_written(record_path).?;
+    var patched: [constants.record_bytes_max]u8 = undefined;
+    const marker = ".tree = \"\"";
+    const at = std.mem.indexOf(u8, text, marker).?;
+    const tree_text = "b3:" ++ test_util.repeat('c', 64);
+    const record = try std.fmt.bufPrint(&patched, "{s}.tree = \"{s}\"{s}", .{
+        text[0..at], tree_text, text[at + marker.len ..],
+    });
+    try testing.expect(sim.world.write_file(record_path, record) == null);
+    const args: store_commands.Args = .{ .action = .gc, .operand = null };
+    _ = try store_commands.prepare_gc(sim.interface(), args, &live_workspace, &diag);
+    try testing.expectEqual(@as(u32, 1), live_workspace.live_count);
+    try testing.expectEqualStrings(tree_text, &live_workspace.live[0].text());
+    // A container that ended names a tree too, and is not live.
+    const other = "b3:" ++ test_util.repeat('d', 64);
+    var done = sim_run.sample_view("done-1", 1000);
+    done.tree = other;
+    sim_run.put_record(&sim, &done);
+    _ = try store_commands.prepare_gc(sim.interface(), args, &live_workspace, &diag);
+    try testing.expectEqual(@as(u32, 1), live_workspace.live_count);
+    try testing.expectEqualStrings(tree_text, &live_workspace.live[0].text());
+    // `--trash` does not look at containers at all.
+    const trash: store_commands.Args = .{ .action = .gc, .operand = null, .trash = true };
+    _ = try store_commands.prepare_gc(sim.interface(), trash, &live_workspace, &diag);
+    try testing.expectEqual(@as(u32, 0), live_workspace.live_count);
+    live_handle.session.release_keeper();
+    sim.world.command_runs_ms = 0;
 }

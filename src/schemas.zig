@@ -213,6 +213,80 @@ const store_diff_schema =
     \\"changed":{"type":"integer"}}}}}
 ;
 
+const store_verify_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-verify/1","version":1,
+    \\"title":"zbx store verify --output json",
+    \\"description":"stdout: what was checked and what is damaged (exit 2 if anything is)",
+    \\"type":"object","required":["schema","ok","objects","object_bytes","chunk_lists",
+    \\"orphan_lists","trees","roots","damaged","paths_truncated","things"],
+    \\"properties":{"schema":{"const":"zbx.store.verify/1"},"ok":{"type":"boolean"},
+    \\"objects":{"type":"integer"},"object_bytes":{"type":"integer"},
+    \\"chunk_lists":{"type":"integer"},
+    \\"orphan_lists":{"type":"integer","description":"chunk lists with no object: not damage"},
+    \\"trees":{"type":"integer"},"roots":{"type":"integer"},
+    \\"damaged":{"type":"integer","description":"all damaged things, listed or not"},
+    \\"paths_truncated":{"type":"boolean","description":"the walk for paths ran out of room"},
+    \\"things":{"type":"array","items":{"type":"object",
+    \\"required":["id","class","kind","reason","errno","reached","paths"],
+    \\"properties":{"id":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"class":{"enum":["object","tree","root"]},
+    \\"kind":{"enum":["content","chunk_list","unreadable","not_a_file","tree_damaged",
+    \\"tree_missing","object_missing","root_unusable"]},
+    \\"reason":{"type":"string"},"errno":{"type":"integer"},
+    \\"reached":{"type":"integer","description":"paths in root trees that reach it"},
+    \\"paths":{"type":"array","description":"up to 16 of them, sorted",
+    \\"items":{"type":"object","required":["root","path"],
+    \\"properties":{"root":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"path":{"type":"string","description":"from the root, with a leading slash"}}}}}}}}}
+;
+
+const store_gc_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-gc/1","version":1,
+    \\"title":"zbx store gc --output json",
+    \\"description":"stdout: the plan (applied false), or what a confirmed plan moved (true)",
+    \\"type":"object","required":["schema","applied","plan","objects","lists","trees","farms",
+    \\"tmp","bytes"],
+    \\"properties":{"schema":{"const":"zbx.store.gc/1"},"applied":{"type":"boolean"},
+    \\"plan":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the hash to confirm with"},
+    \\"generation":{"type":"integer","description":"plans only: the store's generation counter"},
+    \\"gc":{"type":"string","description":"applied only: the id of the trash"},
+    \\"expires":{"type":"integer","description":"applied only: when the trash is emptied"},
+    \\"expired":{"type":"integer","description":"applied only: old trash emptied now"},
+    \\"objects":{"type":"integer"},"lists":{"type":"integer","description":"chunk lists"},
+    \\"trees":{"type":"integer"},"farms":{"type":"integer","description":"materialized dirs"},
+    \\"tmp":{"type":"integer","description":"leftovers of dead processes in tmp/"},
+    \\"bytes":{"type":"integer"}}}
+;
+
+const store_trash_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-trash/1","version":1,
+    \\"title":"zbx store gc --trash --output json",
+    \\"description":"stdout: the trash that is left, oldest first",
+    \\"type":"object","required":["schema","trash"],
+    \\"properties":{"schema":{"const":"zbx.store.trash/1"},
+    \\"trash":{"type":"array","items":{"type":"object","required":["gc","readable"],
+    \\"properties":{"gc":{"type":"string"},"readable":{"type":"boolean"},
+    \\"time":{"type":"integer"},"expires":{"type":"integer"},
+    \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
+    \\"farms":{"type":"integer"},"bytes":{"type":"integer"},
+    \\"complete":{"type":"boolean","description":"false if a gc or restore was interrupted"}}}}}}
+;
+
+const store_restore_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-restore/1","version":1,
+    \\"title":"zbx store restore --output json",
+    \\"description":"stdout: what was moved back from the trash",
+    \\"type":"object","required":["schema","gc","objects","lists","trees","farms"],
+    \\"properties":{"schema":{"const":"zbx.store.restore/1"},"gc":{"type":"string"},
+    \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
+    \\"farms":{"type":"integer"}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -227,12 +301,16 @@ const table = [_]Entry{
     .{ .command = "store-rm", .text = store_rm_schema },
     .{ .command = "commit", .text = commit_schema },
     .{ .command = "store-diff", .text = store_diff_schema },
+    .{ .command = "store-verify", .text = store_verify_schema },
+    .{ .command = "store-gc", .text = store_gc_schema },
+    .{ .command = "store-trash", .text = store_trash_schema },
+    .{ .command = "store-restore", .text = store_restore_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 11);
+    assert(table.len == 15);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -261,5 +339,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 11), table.len);
+    try testing.expectEqual(@as(usize, 15), table.len);
 }

@@ -120,6 +120,9 @@ pub const Error = error{Failed};
 pub const Workspace = struct {
     tree_buffer: [constants.store_tree_bytes_max]u8,
     removal: remove.Workspace,
+    /// A restore that has to make a chunk list reads the object into these.
+    io: [constants.store_io_buffer_bytes]u8,
+    chunks: [constants.store_chunks_max]Digest,
 };
 
 pub const meta_bytes_max = 512;
@@ -1157,5 +1160,45 @@ fn restore_one(
         const shard = run.store.shard_path(&shard_storage, class.directory(), id);
         fs.make_directory(shard, true) catch |err| return run.io("making a shard directory", err);
     }
+    if (class == .object) try ensure_list(run, from, id);
     fs.rename(from, to) catch |err| return run.io("moving back from the trash", err);
+}
+
+/// An object that is longer than one chunk must not come back without its chunk list, and its
+/// list may be in another trash (a gc that was killed between the two moves, then another gc
+/// that took the list). If the store has no list for it, one is made from the object's bytes
+/// before the object is moved, so no object ever lacks its list.
+fn ensure_list(run: *Run, from: [:0]const u8, id: Digest) Error!void {
+    assert(from.len > 0);
+    assert(id.bytes.len == constants.store_digest_bytes);
+    const fs = run.store.fs;
+    const stat = fs.lstat(from) catch |err| return run.io("looking in the trash", err);
+    if (!object.list_is_stored(stat.size, run.store.chunk_bytes)) return;
+    var list_storage: PathBuf = undefined;
+    const list_path = run.store.chunks_path(&list_storage, id);
+    if (fs.lstat(list_path)) |_| return else |err| {
+        if (err != error.NotFound) return run.io("looking in the store", err);
+    }
+    const ws = run.ws;
+    const fd = fs.open_read(from) catch |err| return run.io("reading from the trash", err);
+    defer fs.close(fd);
+    var reader = object.Reader.init(run.store.chunk_bytes);
+    while (true) {
+        const count = fs.read(fd, &ws.io) catch |err| return run.io("reading from the trash", err);
+        if (count == 0) break;
+        if (!reader.update(ws.io[0..count], &ws.chunks)) {
+            return run.io("reading from the trash", error.FileTooLarge);
+        }
+    }
+    _ = reader.finish(&ws.chunks);
+    const total = reader.count * constants.store_digest_bytes;
+    for (ws.chunks[0..reader.count], 0..) |hash, at| @memcpy(ws.io[at * 32 ..][0..32], &hash.bytes);
+    var temporary: PathBuf = undefined;
+    var directory: PathBuf = undefined;
+    var failure: fs_mod.Failure = undefined;
+    const shard = run.store.shard_path(&directory, "objects", id);
+    const staged = run.store.tmp_path(&temporary);
+    fs.write_atomic(staged, list_path, shard, ws.io[0..total], 0o644, &failure) catch |err| {
+        return run.io("writing a chunk list", err);
+    };
 }

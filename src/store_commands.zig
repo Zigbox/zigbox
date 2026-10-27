@@ -1032,7 +1032,7 @@ fn damage_json(job: *const Job, index: u32, diag: *Diag) Error!void {
 
 /// In the parent: the trees the running containers use are kept by gc. A listing that does not
 /// fit is a refusal, never a shorter list.
-fn prepare_gc(host: Host, args: Args, ws: *Workspace, diag: *Diag) Error!Digest {
+pub fn prepare_gc(host: Host, args: Args, ws: *Workspace, diag: *Diag) Error!Digest {
     assert(args.action == .gc);
     assert(diag.code == null);
     ws.live_count = 0;

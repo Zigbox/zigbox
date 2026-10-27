@@ -800,9 +800,11 @@ pub const registry = [_]Entry{
         .summary = "no schema for that command",
         .explanation =
         \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
-        \\doctor ("zbx schema ps"), and of the store commands, named store-import,
-        \\store-ls, store-du and store-rm. Other commands have no machine-readable
-        \\output that needs one: explain and help print text, version prints a line.
+        \\doctor ("zbx schema ps"), of commit, and of the store commands, named
+        \\store-import, store-ls, store-du, store-rm, store-diff, store-verify,
+        \\store-gc, store-trash (gc --trash) and store-restore. Other commands have
+        \\no machine-readable output that needs one: explain and help print text,
+        \\version prints a line.
         ,
     },
     .{
