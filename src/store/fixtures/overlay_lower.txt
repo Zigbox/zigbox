@@ -1,0 +1,30 @@
+d 775 0 0 0:0 / -
+d 775 0 0 0:0 /bin -
+f 755 0 0 0:0 /bin/busybox 4242
+l 777 0 0 0:0 /bin/chmod 62757379626f78
+l 777 0 0 0:0 /bin/echo 62757379626f78
+l 777 0 0 0:0 /bin/ln 62757379626f78
+l 777 0 0 0:0 /bin/ls 62757379626f78
+l 777 0 0 0:0 /bin/mkdir 62757379626f78
+l 777 0 0 0:0 /bin/mv 62757379626f78
+l 777 0 0 0:0 /bin/rm 62757379626f78
+l 777 0 0 0:0 /bin/sh 62757379626f78
+d 775 0 0 0:0 /dev -
+d 775 0 0 0:0 /etc -
+f 600 0 0 0:0 /etc/chmod-me 746f2063686d6f640a
+f 664 0 0 0:0 /etc/delete-me 746f2064656c6574650a
+f 664 0 0 0:0 /etc/hostname 616c70696e650a
+f 664 0 0 0:0 /etc/keep 6b656570206d650a
+f 664 0 0 0:0 /etc/passwd 726f6f743a783a303a303a726f6f743a2f726f6f743a2f62696e2f73680a
+f 664 0 0 0:0 /etc/tagged 7461676765640a user.note=68656c6c6f
+d 775 0 0 0:0 /proc -
+d 775 0 0 0:0 /run -
+d 775 0 0 0:0 /tmp -
+d 775 0 0 0:0 /usr -
+d 775 0 0 0:0 /usr/lib - user.dirnote=646972
+f 664 0 0 0:0 /usr/lib/libx 6c69620a
+d 775 0 0 0:0 /usr/share -
+d 775 0 0 0:0 /usr/share/doc -
+f 664 0 0 0:0 /usr/share/doc/one 646f63206f6e650a
+f 664 0 0 0:0 /usr/share/doc/two 646f632074776f0a
+d 775 0 0 0:0 /var -

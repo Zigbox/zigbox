@@ -395,3 +395,120 @@ test "the root directory's own change is listed as /" {
     try run_diff(a, b, &listing, &summary);
     try listing.expect(&.{"M /  mode"});
 }
+
+// ---- fixtures captured from a real overlayfs -----------------------------------------------
+
+const fixture_lower = @embedFile("fixtures/overlay_lower.txt");
+const fixture_upper = @embedFile("fixtures/overlay_upper.txt");
+const fixture_diff = @embedFile("fixtures/overlay_diff.txt");
+
+/// Builds the directory a fixture lists under `prefix`. A line is `kind mode uid gid major:minor
+/// path data xattr...`: kind d, f, l or c; data is hex (a file's bytes, a link's target) or `-`
+/// for none; an attribute is `name=hex`. Parents come before their children.
+fn load_listing(text: []const u8, prefix: []const u8) void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var words = std.mem.tokenizeScalar(u8, line, ' ');
+        const kind = words.next().?;
+        const mode = std.fmt.parseInt(u16, words.next().?, 8) catch unreachable; // A fixture.
+        const uid = std.fmt.parseInt(u32, words.next().?, 10) catch unreachable; // A fixture.
+        const gid = std.fmt.parseInt(u32, words.next().?, 10) catch unreachable; // A fixture.
+        const rdev = words.next().?;
+        const rel = words.next().?;
+        var path_buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+        const shown = if (std.mem.eql(u8, rel, "/")) "" else rel;
+        const path = std.fmt.bufPrint(&path_buffer, "{s}{s}", .{ prefix, shown }) catch {
+            unreachable; // A fixture path is short.
+        };
+        put_listed(kind[0], path, mode, .{ uid, gid }, rdev, words.next().?);
+        while (words.next()) |attribute| {
+            const equals = std.mem.indexOfScalar(u8, attribute, '=').?;
+            var value: [256]u8 = undefined;
+            const hex = attribute[equals + 1 ..];
+            const bytes = if (std.mem.eql(u8, hex, "-")) value[0..0] else decode(&value, hex);
+            files.put_xattr(path, attribute[0..equals], bytes);
+        }
+    }
+}
+
+fn decode(buffer: []u8, hex: []const u8) []const u8 {
+    if (std.mem.eql(u8, hex, "-")) return buffer[0..0];
+    return std.fmt.hexToBytes(buffer, hex) catch unreachable; // A fixture.
+}
+
+fn put_listed(
+    kind: u8,
+    path: []const u8,
+    mode: u16,
+    owner: [2]u32,
+    rdev: []const u8,
+    data: []const u8,
+) void {
+    var content: [4096]u8 = undefined;
+    switch (kind) {
+        'd' => files.put(path, .dir, mode, owner, ""),
+        'f' => files.put(path, .file, mode, owner, decode(&content, data)),
+        'l' => files.put_symlink(path, decode(&content, data)),
+        'c' => {
+            files.put(path, .char_device, mode, owner, "");
+            const colon = std.mem.indexOfScalar(u8, rdev, ':').?;
+            const major = std.fmt.parseInt(u32, rdev[0..colon], 10) catch unreachable; // A fixture.
+            const minor = std.fmt.parseInt(u32, rdev[colon + 1 ..], 10) catch unreachable; // Same.
+            files.set_rdev(path, major, minor);
+        },
+        else => unreachable, // A fixture has no other kind.
+    }
+}
+
+test "an upper layer captured from a real overlayfs commits to what the real commit listed" {
+    // Goal: the simulator's idea of an upper layer is the kernel's. Method: the lower tree and
+    // the upper layer of a container that added, rewrote, chmod'ed, deleted (files and a
+    // directory), replaced a directory (opaque), renamed a directory (copied, as overlayfs
+    // without redirects does), linked and recreated files were captured from a real overlay
+    // mounted with `userxattr` (docs/demos/m3.md, "Fixtures"), along with the diff that `zbx
+    // store diff` printed for the real commit. The simulator commits the captured layer and must
+    // print the same diff, and no `user.overlay` attribute reaches an object or a tree.
+    sim.init(1, &.{});
+    files.init(1);
+    sim.store_fs = &files;
+    files.put_dir("/data", 0o755);
+    support.make_store_directories(&files, root_path);
+    store.at(sim.interface(), root_path);
+    load_listing(fixture_lower, "/lower");
+    const parent = import_directory("/lower");
+    load_listing(fixture_upper, "/upper");
+    const result = try commit_upper("/upper", parent);
+    try testing.expectEqual(@as(u64, 2), result.whiteouts);
+    var listing: Listing = .{};
+    var summary: diff.Summary = undefined;
+    try run_diff(parent, result.digest, &listing, &summary);
+    var expected: [64][]const u8 = undefined;
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, fixture_diff, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        expected[count] = line;
+        count += 1;
+    }
+    try listing.expect(expected[0..count]);
+    try expect_no_overlay_marks(root_path);
+}
+
+/// Nothing under the store holds the text `overlay`: not an object's attributes, not a tree.
+fn expect_no_overlay_marks(root: []const u8) !void {
+    var index: u32 = 0;
+    var seen: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (!std.mem.startsWith(u8, path, root)) continue;
+        seen += 1;
+        if (files.xattrs_of(path)) |blob| {
+            try testing.expect(std.mem.indexOf(u8, blob, "overlay") == null);
+        }
+        if (files.kind_of(path) != .file) continue;
+        const content = files.content_of(path).?;
+        try testing.expect(std.mem.indexOf(u8, content, "overlay") == null);
+    }
+    try testing.expect(seen > 10);
+}
