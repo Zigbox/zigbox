@@ -694,6 +694,8 @@ pub const Applier = struct {
             .uid = uid,
             .gid = gid,
             .mtime = @min(entry.mtime, max_mtime),
+            // A one-id map changes no owner, as `owner_of_fd` does not.
+            .set_owner = !applier.squash_owner,
         }) catch |err| return applier.owner_failed(entry, err);
         try applier.xattrs_of_path(path, entry);
     }
@@ -726,6 +728,8 @@ pub const Applier = struct {
             .uid = uid,
             .gid = gid,
             .mtime = @min(entry.mtime, max_mtime),
+            // A one-id map changes no owner, as `owner_of_fd` does not.
+            .set_owner = !applier.squash_owner,
         }) catch |err| return applier.owner_failed(entry, err);
         applier.counts.symlinks += 1;
     }
@@ -1172,7 +1176,8 @@ test "on a real file system a symlink is not followed, and links, modes and whit
     archive.add(.{ .name = "bin/tool", .data = "tool", .mode = 0o4755 });
     archive.add(.{ .name = "bin/alias", .kind = .hardlink, .link = "bin/tool" });
     archive.add(.{ .name = "bin/gone", .data = "gone" });
-    archive.add(.{ .name = "lib/", .kind = .directory });
+    // 0o755, not the builder's default 0o644: only root may create in a directory it cannot search.
+    archive.add(.{ .name = "lib/", .kind = .directory, .mode = 0o755 });
     archive.add(.{ .name = "lib/old", .data = "old" });
     archive.finish();
     test_applier.start(fs, stage.text(), true);

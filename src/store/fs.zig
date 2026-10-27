@@ -55,6 +55,8 @@ pub const PathAttributes = struct {
     uid: u32,
     gid: u32,
     mtime: u64,
+    /// False leaves the owner as it is (a one-id map: every owner is the user's own already).
+    set_owner: bool = true,
 };
 
 pub const VTable = struct {

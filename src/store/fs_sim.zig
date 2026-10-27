@@ -971,8 +971,10 @@ pub const SimFs = struct {
         // Every name of the inode shows the change, as in a real file system.
         for (sim.nodes[0..sim.count]) |*node| {
             if (!node.alive or node.inode != inode) continue;
-            node.uid = attributes.uid;
-            node.gid = attributes.gid;
+            if (attributes.set_owner) {
+                node.uid = attributes.uid;
+                node.gid = attributes.gid;
+            }
             if (attributes.mode) |mode| node.mode = mode;
             node.mtime = attributes.mtime;
         }

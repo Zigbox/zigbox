@@ -391,7 +391,7 @@ fn set_path_attributes(
     _ = from_context(context);
     assert(path.len > 0);
     assert(attributes.mtime < 1 << 40);
-    try check(linux.lchown(path.ptr, attributes.uid, attributes.gid));
+    if (attributes.set_owner) try check(linux.lchown(path.ptr, attributes.uid, attributes.gid));
     // A change of owner clears the setuid and setgid bits, so the mode is set after it.
     if (attributes.mode) |mode| {
         assert(mode <= 0o7777);
