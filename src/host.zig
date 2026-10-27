@@ -18,6 +18,7 @@
 const std = @import("std");
 const bpf = @import("runtime/bpf.zig");
 const store_fs = @import("store/fs.zig");
+const registry_net = @import("registry/net.zig");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const linux = std.os.linux;
@@ -428,6 +429,10 @@ pub const VTable = struct {
     /// The file-system half of the host, which the store is written against (`store/fs.zig`).
     /// The simulator's, when a test gives it none, is a machine that is down: every call fails.
     filesystem: *const fn (context: *anyopaque) store_fs.Fs,
+    /// The network half of the host, which the registry client is written against
+    /// (`registry/net.zig`). The simulator's, when a test gives it none, is a machine with no
+    /// network: every request fails to connect.
+    network: *const fn (context: *anyopaque) registry_net.Net,
 };
 
 /// What `read_prefix` found.
@@ -1011,6 +1016,14 @@ pub const Host = struct {
         const fs = host.vtable.filesystem(host.context);
         assert(@intFromPtr(fs.vtable) != 0);
         return fs;
+    }
+
+    /// The network, for the registry client. Its calls block (with their own timeouts), so a
+    /// caller makes them from the parent process, never from the namespace child.
+    pub fn network(host: Host) registry_net.Net {
+        const net = host.vtable.network(host.context);
+        assert(@intFromPtr(net.vtable) != 0);
+        return net;
     }
 
     fn open_retrying(host: Host, path: [:0]const u8) Error!Handle {

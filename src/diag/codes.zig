@@ -98,6 +98,19 @@ pub const Code = enum(u8) {
     W0411,
     W0412,
     W0413,
+    E0501,
+    E0502,
+    E0503,
+    E0504,
+    E0505,
+    E0506,
+    E0507,
+    E0508,
+    E0509,
+    E0510,
+    E0511,
+    E0512,
+    E0513,
     E0701,
     E0702,
     E0703,
@@ -1306,6 +1319,221 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0501,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not an image reference",
+        .explanation =
+        \\zbx was given text that is not an image reference. A reference is
+        \\
+        \\    [registry/][namespace/]name[:tag][@sha256:<64 hex digits>]
+        \\
+        \\and zbx never guesses a repair: an uppercase name, a space, a URL, a
+        \\missing name or a digest of another kind is refused with the reason.
+        \\
+        \\Without a registry the image is on Docker Hub (docker.io), and a name of
+        \\one part there lives in the library/ namespace, so "alpine:3.20" is
+        \\docker.io/library/alpine:3.20. The first part names a registry when it
+        \\has a dot or a port, or is "localhost"; otherwise it is a namespace.
+        \\With no tag and no digest the tag is "latest". With both a tag and a
+        \\digest, the digest decides.
+        \\
+        \\The message names what is wrong with the text.
+        ,
+    },
+    .{
+        .code = .E0502,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the registry's name does not resolve",
+        .explanation =
+        \\zbx could not find an address for the registry's host name. Either the
+        \\name is misspelled in the reference, or this machine has no working DNS,
+        \\or the network is down.
+        \\
+        \\When the machine reaches the internet through an HTTPS proxy (the
+        \\HTTPS_PROXY variable), the proxy looks the name up and this error means
+        \\the proxy could not. Check the name in the reference first, then that
+        \\other programs on this machine can resolve names.
+        ,
+    },
+    .{
+        .code = .E0503,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't reach the registry",
+        .explanation =
+        \\zbx found the registry's address but the connection failed: it was
+        \\refused, the network is unreachable, the proxy refused to open a tunnel,
+        \\or nothing answered within 30 seconds.
+        \\
+        \\zbx honours HTTPS_PROXY and NO_PROXY (and the lower-case spellings). A
+        \\proxy that is set but not running, or a firewall that blocks the
+        \\registry, shows up here. The message names the host, the port and the
+        \\reason; --verbose adds the system error.
+        \\
+        \\A registry on localhost is spoken to in plain HTTP on the port in the
+        \\reference.
+        ,
+    },
+    .{
+        .code = .E0504,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the registry's certificate can't be trusted",
+        .explanation =
+        \\The TLS handshake with the registry failed its checks: the certificate
+        \\does not lead to a root this machine trusts, it has expired, or it is for
+        \\another host name. zbx verifies every HTTPS connection and has no option
+        \\to turn that off.
+        \\
+        \\Behind a proxy that inspects traffic, the proxy's own certificate
+        \\authority must be trusted: put it in the system store, or point
+        \\SSL_CERT_FILE at a file holding the certificates to trust. A wrong clock
+        \\makes every certificate look expired or not yet valid.
+        ,
+    },
+    .{
+        .code = .E0505,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry answered with an error",
+        .explanation =
+        \\The registry answered a request with an HTTP status that zbx does not
+        \\handle, or a redirect it could not follow. The message names the URL
+        \\without its query (a query can carry a signature) and the status.
+        \\
+        \\A 5xx status is the registry's own failure and usually passes: run the
+        \\command again later. Statuses with their own meaning have their own
+        \\codes: 401 is ZBX-E0507, 404 is ZBX-E0508 and 429 is ZBX-E0506.
+        ,
+    },
+    .{
+        .code = .E0506,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry is rate limiting this host",
+        .explanation =
+        \\The registry answered 429 Too Many Requests. Docker Hub limits anonymous
+        \\pulls by the address they come from, so machines behind one NAT, and
+        \\CI runners, share one allowance.
+        \\
+        \\zbx does not retry on its own: a retry inside the limit only uses more
+        \\of it. When the registry says how long to wait (Retry-After) the message
+        \\gives it. Try again after that, pull from a registry or mirror that has
+        \\the image, or reuse an image already in the store (zbx store ls).
+        ,
+    },
+    .{
+        .code = .E0507,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused anonymous access",
+        .explanation =
+        \\zbx pulls anonymously: when a registry answers 401 it asks for a token
+        \\from the realm in the WWW-Authenticate header, with no credentials, and
+        \\repeats the request once. This time that did not work: the token
+        \\service refused, the registry refused the token, or the challenge asked
+        \\for credentials (Basic) that zbx does not have.
+        \\
+        \\A private image, or one that does not exist (some registries answer
+        \\"denied" for both), ends here. Private registries are not supported
+        \\yet. Check the name; the message says which step was refused.
+        ,
+    },
+    .{
+        .code = .E0508,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the registry has no such image",
+        .explanation =
+        \\The registry answered 404 for the manifest: the repository does not
+        \\exist, or the tag or digest is not in it. The message names the
+        \\registry, the repository and the tag or digest.
+        \\
+        \\Check the spelling, and the tag with the registry's own listing. On
+        \\Docker Hub an official image lives in library/, which zbx adds for a
+        \\name of one part.
+        ,
+    },
+    .{
+        .code = .E0509,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image has no build for this platform",
+        .explanation =
+        \\An image index lists one image per platform. zbx runs linux/amd64 and
+        \\linux/arm64 images, the one that matches this machine (arm64 images
+        \\with variant v8 or none), and the index has none for it. The message
+        \\lists the platforms the image offers, up to eight.
+        \\
+        \\Choose another tag or image, or run on a machine of a platform the
+        \\image has. An image built for another CPU cannot run here.
+        ,
+    },
+    .{
+        .code = .E0510,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry sent a type of document zbx does not read",
+        .explanation =
+        \\zbx reads the OCI image index and manifest and the Docker v2 manifest
+        \\list and manifest, with layers that are tar, gzip tar or zstd tar. The
+        \\registry sent something else and the message names its media type:
+        \\the old Docker schema 1 manifests, a Helm chart or other artifact, a
+        \\layer type that cannot be unpacked here, or a document whose own type
+        \\and Content-Type disagree.
+        \\
+        \\zbx refuses rather than guess from the shape of the JSON. Pull an image
+        \\that is published in the supported formats.
+        ,
+    },
+    .{
+        .code = .E0511,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a manifest does not match its digest",
+        .explanation =
+        \\Every manifest is named by the SHA-256 of its bytes, and zbx hashes what
+        \\the registry sends before using it. These bytes hash to something else
+        \\than the digest that named them (or than the Docker-Content-Digest
+        \\header). The message shows both digests.
+        \\
+        \\The bytes were damaged on the way, or the registry or a proxy in
+        \\between is serving something it should not. Nothing from this answer
+        \\was kept. Try again; if it repeats, the source is not to be trusted.
+        ,
+    },
+    .{
+        .code = .E0512,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry's answer can't be used",
+        .explanation =
+        \\The registry answered, but the answer is not a document zbx can use:
+        \\the JSON is malformed or too complex, a manifest is larger than 1 MiB,
+        \\an index has more than 256 entries, an image more than 128 layers, a
+        \\digest is not sha256 and 64 hex digits, or a size is zero or too large.
+        \\
+        \\The message says which. Nothing was kept. This is the registry's or a
+        \\proxy's fault, not something to fix on this machine.
+        ,
+    },
+    .{
+        .code = .E0513,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry's answer ended early",
+        .explanation =
+        \\The connection ended, or went quiet, before the whole answer arrived: the
+        \\body was shorter than the Content-Length the registry declared. zbx does
+        \\not use part of a document.
+        \\
+        \\A network drop or a proxy timeout is the usual cause. Run the command
+        \\again.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -1522,6 +1750,8 @@ pub fn can_end_run(code: Code) bool {
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
+        .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
+        .E0508, .E0509, .E0510, .E0511, .E0512, .E0513 => false,
         else => true,
     };
 }

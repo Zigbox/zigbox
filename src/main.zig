@@ -116,4 +116,12 @@ test {
 test {
     _ = @import("registry/digest.zig");
     _ = @import("registry/reference.zig");
+    _ = @import("registry/net.zig");
+    _ = @import("registry/net_sim.zig");
+    _ = @import("registry/auth.zig");
+    _ = @import("registry/manifest.zig");
+    _ = @import("registry/client.zig");
+    _ = @import("registry/client_tests.zig");
+    _ = @import("registry/test_registry.zig");
+    _ = @import("testing/vm/registry_fixture.zig");
 }

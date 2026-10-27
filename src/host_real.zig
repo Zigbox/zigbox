@@ -1,6 +1,6 @@
 //! The production `Host`: raw Linux syscalls through `std.os.linux`, no libc. This file,
-//! `host_real_fs.zig` (the store's file system) and `host.zig` are the only places that may name
-//! syscalls, or paths under /proc and /sys.
+//! `host_real_fs.zig` (the store's file system), `host_real_net.zig` (sockets) and `host.zig` are
+//! the only places that may name syscalls, or paths under /proc and /sys.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -10,6 +10,8 @@ const capabilities = @import("runtime/capabilities.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
 const host_real_fs = @import("host_real_fs.zig");
+const host_real_net = @import("host_real_net.zig");
+const registry_net = @import("registry/net.zig");
 const store_fs = @import("store/fs.zig");
 
 /// Writes to stderr with no state, no vtable and no error path, for the panic handler: when an
@@ -139,6 +141,7 @@ pub const HostReal = struct {
         .read_timeout = read_timeout,
         .begin_step = begin_step,
         .filesystem = filesystem,
+        .network = network,
     };
 
     fn from_context(context: *anyopaque) *HostReal {
@@ -850,6 +853,10 @@ pub const HostReal = struct {
 
     fn filesystem(context: *anyopaque) store_fs.Fs {
         return host_real_fs.interface(from_context(context));
+    }
+
+    fn network(context: *anyopaque) registry_net.Net {
+        return host_real_net.interface(from_context(context));
     }
 
     fn begin_step(context: *anyopaque, index: u32) void {
