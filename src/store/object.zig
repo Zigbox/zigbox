@@ -373,9 +373,10 @@ pub fn chunk_hashes(
     while (true) {
         const count = try fs.read(fd, io[0..constants.store_io_buffer_bytes]);
         if (count == 0) break;
-        // An object past one chunk without its list is damaged: it has more than one hash.
+        // An object past one chunk without its list is damaged: it has more than one hash. (One
+        // chunk exactly full has closed its hash and is fine, unless more bytes follow.)
         if (!reader.update(io[0..count], out)) return error.FileTooLarge;
-        if (reader.count > 0) return error.IoFailed;
+        if (reader.size > reader.chunk_bytes) return error.IoFailed;
     }
     _ = reader.finish(out);
     return out[0..reader.count];

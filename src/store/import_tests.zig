@@ -262,7 +262,9 @@ test "the root directory's mode, owner and attributes are in the digest and come
     try decoder.init(bytes);
     while (try decoder.next(&entry)) {
         if (!std.mem.eql(u8, entry.name, "bin")) continue;
-        const sub_bytes = try trees.load(&store, entry.subtree, &buffer, &errno);
+        // Its own buffer: `bytes` points into `buffer`, which the decoder is still reading.
+        var sub_buffer: [4096]u8 = undefined;
+        const sub_bytes = try trees.load(&store, entry.subtree, &sub_buffer, &errno);
         var sub: tree.Decoder = undefined;
         try sub.init(sub_bytes);
         var inner: tree.Entry = undefined;

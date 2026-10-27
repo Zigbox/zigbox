@@ -498,3 +498,8 @@ fn step_commit_refusals(
     };
     try timer.lap(out, "commit refusals");
 }
+
+test {
+    _ = @import("checks_m3.zig");
+    _ = @import("harness.zig");
+}
