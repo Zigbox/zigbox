@@ -1,0 +1,36 @@
+// The images the weekly top-20 run pulls and runs (docs/demos/m4.md, "The top-20 check"). It is
+// the twenty most-pulled official images of Docker Hub, read on `date` from the Hub's API:
+//   https://hub.docker.com/v2/repositories/library/?page_size=25&ordering=pull_count
+// Refresh it by reading that list again and changing `date`; a changed list is a reviewed change.
+//
+// Each image runs its default command for 20 s (zbx run --timeout). A server that is still up
+// then has run. An entry with a `known` reason is an image that cannot run its default command
+// as a rootless, unconfigured container: the run records that reason instead of a failure, and
+// the harness still runs it, so a note that is no longer true shows as a pass with a warning.
+// An empty `known` means the image must pass. A failure without a reason fails the whole run.
+.{
+    .date = "2026-10-27",
+    .source = "Docker Hub official images, ordered by pull count",
+    .images = .{
+        .{ .ref = "nginx:latest", .known = "" },
+        .{ .ref = "memcached:latest", .known = "" },
+        .{ .ref = "busybox:latest", .known = "" },
+        .{ .ref = "alpine:latest", .known = "" },
+        .{ .ref = "postgres:latest", .known = "" },
+        .{ .ref = "redis:latest", .known = "" },
+        .{ .ref = "ubuntu:latest", .known = "" },
+        .{ .ref = "python:latest", .known = "" },
+        .{ .ref = "node:latest", .known = "" },
+        .{ .ref = "mysql:latest", .known = "" },
+        .{ .ref = "mongo:latest", .known = "" },
+        .{ .ref = "httpd:latest", .known = "" },
+        .{ .ref = "rabbitmq:latest", .known = "" },
+        .{ .ref = "docker:latest", .known = "" },
+        .{ .ref = "traefik:latest", .known = "" },
+        .{ .ref = "hello-world:latest", .known = "" },
+        .{ .ref = "mariadb:latest", .known = "" },
+        .{ .ref = "golang:latest", .known = "" },
+        .{ .ref = "openjdk:latest", .known = "" },
+        .{ .ref = "registry:latest", .known = "" },
+    },
+}

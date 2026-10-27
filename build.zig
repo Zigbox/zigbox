@@ -86,6 +86,7 @@ fn add_test_step(
         "src/testing/vm/main_m2.zig",
         "src/testing/vm/main_m3.zig",
         "src/testing/vm/main_m4.zig",
+        "src/testing/vm/main_top20.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -100,6 +101,10 @@ fn add_test_step(
             .optimize = optimize,
             .link_libc = false,
             .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+        });
+        // Only the top-20 harness reads it; the policy is a data file, so an import costs nothing.
+        module.addAnonymousImport("seccomp_policy", .{
+            .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
         const unit_tests = b.addTest(.{ .root_module = module });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
@@ -221,6 +226,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .root = "src/testing/vm/main_m4.zig",
         .help = "Run the M4 demo, as far as it is built: pull, the lock, run by name",
     },
+    .{
+        .step = "top20",
+        .root = "src/testing/vm/main_top20.zig",
+        .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
+    },
 };
 
 /// `zig build demo-m0` and `demo-m1`: the milestone demos in a real Ubuntu VM. They use the
@@ -238,7 +248,13 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
     const reuse_help = "demos: boot the kept, provisioned overlay (development)";
     const reuse = b.option(bool, "reuse-overlay", reuse_help) orelse false;
 
+    const mirror_help = "top20: a docker.io mirror for the guest (the weekly run uses none)";
+    const mirror = b.option([]const u8, "mirror", mirror_help);
+    const ca_help = "demos: a CA bundle the guest trusts, for a host that inspects TLS";
+    const ca_file = b.option(std.Build.LazyPath, "ca-file", ca_help);
+
     for (demos) |demo| {
+        const is_top20 = std.mem.eql(u8, demo.step, "top20");
         const vm = b.addExecutable(.{
             .name = "vm",
             .root_module = b.createModule(.{
@@ -247,11 +263,22 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
                 .optimize = .ReleaseSafe,
             }),
         });
+        // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
+        if (is_top20) {
+            vm.root_module.addAnonymousImport("seccomp_policy", .{
+                .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
+            });
+        }
         const run = b.addRunArtifact(vm);
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
         if (std.mem.eql(u8, demo.step, "demo-m3")) add_old_binary(b, run);
+        if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
+        if (ca_file) |path| {
+            run.addArg("--ca-file");
+            run.addFileArg(path);
+        }
         if (keep) run.addArg("--keep-overlay");
         if (reuse) run.addArg("--reuse-overlay");
         const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };

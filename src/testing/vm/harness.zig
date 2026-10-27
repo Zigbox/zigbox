@@ -55,6 +55,9 @@ pub const Options = struct {
     /// A development aid: a CA bundle the guest's `zbx` is told to trust (SSL_CERT_FILE), for a
     /// host behind a network that inspects TLS. CI runs on a direct network and sets none.
     ca_file: []const u8 = "",
+    /// The top-20 run only: a registry mirror for docker.io (ZBX_REGISTRY_MIRRORS). Empty means
+    /// the real Docker Hub, which is what the weekly workflow uses.
+    mirror: []const u8 = "",
 };
 
 pub fn parse_options(init: std.process.Init) !Options {
@@ -86,6 +89,8 @@ pub fn parse_options(init: std.process.Init) !Options {
             options.old_zbx = value;
         } else if (std.mem.eql(u8, name, "--ca-file")) {
             options.ca_file = value;
+        } else if (std.mem.eql(u8, name, "--mirror")) {
+            options.mirror = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             options.cache_dir = value;
         } else {
