@@ -611,6 +611,24 @@ fn devpts_skipped(scenario: *const Scenario) bool {
     return plan.steps[found].kind == .mount_pts;
 }
 
+/// How many steps were skipped with a note, which `--verbose` prints: the devpts mount, and the
+/// /sys steps. A failure in the directory step leaves nothing to bind, so the bind and the remount
+/// fail after it (both are tolerant); a failure in the bind leaves nothing to remount.
+fn skipped_notes(scenario: *const Scenario) u32 {
+    var count: u32 = @intFromBool(devpts_skipped(scenario));
+    const found = scenario.fault_step orelse return count;
+    var plan: plan_mod.Plan = undefined;
+    plan_for(&plan, scenario);
+    if (found >= plan.count) return count;
+    count += switch (plan.steps[found].kind) {
+        .make_sys_dir => 3,
+        .bind_sys => 2,
+        .remount_sys => 1,
+        else => 0,
+    };
+    return count;
+}
+
 fn command_words(scenario: *const Scenario, storage: *[3][:0]const u8) []const [:0]const u8 {
     switch (scenario.command) {
         .shell_path => storage[0] = "/bin/sh",
@@ -1087,7 +1105,7 @@ fn check_started_output(
         return;
     }
     const skipped = std.mem.count(u8, stderr, "zbx: note: skipped");
-    assert(skipped == @intFromBool(scenario.verbose and devpts_skipped(scenario)));
+    assert(skipped == if (scenario.verbose) skipped_notes(scenario) else 0);
     const oom = scenario.counts_as_oom();
     const limited = scenario.counts_as_pid_limit();
     const killed = std.mem.count(u8, stderr, "the container was killed by signal");

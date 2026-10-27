@@ -679,7 +679,7 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     // An image named by a tag has a command of its own, so the words after `--` are optional;
     // a rootfs and a tree digest have none.
-    const has_default = digest != null and !is_tree_operand(digest.?);
+    const has_default = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
     if (run_args.command.len == 0 and !has_default) {
         return missing_argument(diag, .run, .command);
     }
@@ -1428,7 +1428,7 @@ fn run_container(
         .user = null,
     };
     if (invocation.operand) |operand| {
-        if (!is_tree_operand(operand)) {
+        if (operand.len > 0 and !is_tree_operand(operand)) {
             prepare_image(host, invocation, storage, operand, &prepared, diag) catch |err| {
                 // A pull the run began has written its own diagnostic: only the exit code is left.
                 if (err == error.PullFailed) return constants.exit_run_failed;
