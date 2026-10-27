@@ -47,9 +47,9 @@ test "a run gets a scope named for it, with the container in it before it runs" 
 }
 
 test "the limit flags become the scope's properties, in either spelling" {
-    // Goal: --memory 128m is MemoryMax 128 MiB with MemorySwapMax 0, --pids 64 is TasksMax 64,
-    // --cpus 0.5 is 500000 microseconds of CPU per second; "--flag=value" is the same as
-    // "--flag value".
+    // Goal: --memory 128m is MemoryMax 128 MiB with MemorySwapMax 0, --pids 64 is TasksMax 65
+    // (the scope's keeper takes one), --cpus 0.5 is 500000 microseconds of CPU per second;
+    // "--flag=value" is the same as "--flag value".
     var sim: HostSim = undefined;
     sim_run.init(&sim, 2);
     const spaced = [_][:0]const u8{
@@ -60,7 +60,7 @@ test "the limit flags become the scope's properties, in either spelling" {
     var scope = sim.world.bus.last_scope;
     try testing.expectEqual(@as(?u64, 128 << 20), scope.memory_max);
     try testing.expectEqual(@as(?u64, 0), scope.memory_swap_max);
-    try testing.expectEqual(@as(?u64, 64), scope.tasks_max);
+    try testing.expectEqual(@as(?u64, 65), scope.tasks_max);
     try testing.expectEqual(@as(?u64, 500_000), scope.cpu_quota_usec);
 
     sim_run.init(&sim, 3);
@@ -71,7 +71,7 @@ test "the limit flags become the scope's properties, in either spelling" {
     try testing.expectEqual(@as(u8, 0), run(&sim, &inline_form));
     scope = sim.world.bus.last_scope;
     try testing.expectEqual(@as(?u64, 1 << 30), scope.memory_max);
-    try testing.expectEqual(@as(?u64, 1), scope.tasks_max);
+    try testing.expectEqual(@as(?u64, 2), scope.tasks_max);
     try testing.expectEqual(@as(?u64, 1_250_000), scope.cpu_quota_usec);
 }
 
@@ -265,6 +265,7 @@ test "a taken scope name is refused and the other container's scope is left alon
         .uid = 1000,
         .name = .{},
         .pid = 4242,
+        .keeper_pid = 0,
         .slice = .{},
         .delegate = true,
         .memory_max = null,
@@ -273,6 +274,8 @@ test "a taken scope name is refused and the other container's scope is left alon
         .cpu_quota_usec = null,
         .accounting = 4,
         .exited = false,
+        .container_gone = false,
+        .keeper_gone = false,
     };
     sim.world.bus.scopes[0].name.print("zbx-web-1.scope", .{});
     const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "sh" };
@@ -296,7 +299,7 @@ test "a systemd too old for a property gets the limit in the scope's cgroup file
     try testing.expectEqual(@as(u8, 0), run(&sim, &args));
     const scope = &sim.world.bus.last_scope;
     try testing.expect(scope.memory_max == null);
-    try testing.expectEqual(@as(?u64, 8), scope.tasks_max);
+    try testing.expectEqual(@as(?u64, 9), scope.tasks_max);
     try testing.expectEqual(@as(usize, 0), scope.slice.len); // app.slice needs 247.
     // The scope and its files are gone after the run; the world kept what memory.max held.
     try testing.expectEqualStrings("67108864", sim.world.ended_memory_max.?.slice());

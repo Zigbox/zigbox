@@ -206,6 +206,9 @@ pub const Process = struct {
     exec_envp: [text_bytes_max]u8,
     exec_envp_len: u16,
     holds: [constants.sim_pipe_ends_max]bool,
+    /// A scope's keeper (`World.start_keeper`): alive in the `command` state until the pipe it
+    /// holds has no writer left, or it is killed.
+    keeper: bool,
 
     pub fn argv(process: *const Process) []const u8 {
         return process.exec_argv[0..process.exec_argv_len];
@@ -326,6 +329,12 @@ pub const World = struct {
     /// What `memory.max` held in the last scope's cgroup when the cgroup went (the fallback
     /// write for an old systemd), since the file goes with it.
     ended_memory_max: ?host.Text,
+    /// Faults for the keeper: forking it fails with this errno; it ends by itself (as if
+    /// something killed it) the moment its scope has started.
+    keeper_fork_errno: ?u16,
+    keeper_dies_early: bool,
+    /// Keepers started so far.
+    keepers_started: u32,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -372,6 +381,9 @@ pub const World = struct {
         world.pids_max_hits = 0;
         world.cgroup_stays = false;
         world.ended_memory_max = null;
+        world.keeper_fork_errno = null;
+        world.keeper_dies_early = false;
+        world.keepers_started = 0;
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -578,6 +590,54 @@ pub const World = struct {
         if (!world.reader_exists(pipe_index)) {
             if (!world.writer_exists(pipe_index)) world.pipes[pipe_index].used = false;
         }
+        if (!world.writer_exists(pipe_index)) world.end_keepers_reading(pipe_index);
+    }
+
+    /// A keeper blocked reading a pipe that has lost its last writer sees the end of file and
+    /// ends, which may leave its scope empty.
+    fn end_keepers_reading(world: *World, pipe_index: u32) void {
+        for (&world.processes) |*process| {
+            if (!process.keeper or process.state != .command) continue;
+            if (!process.holds[2 * pipe_index]) continue;
+            world.keeper_ends(process, .{ .exited = 0 });
+        }
+    }
+
+    fn keeper_ends(world: *World, process: *Process, status: host.ExitStatus) void {
+        assert(process.keeper);
+        assert(process.state == .command);
+        process.exit = status;
+        process.state = .zombie;
+        process.holds = @splat(false);
+        world.process_died(process.pid);
+        world.scope_lost_process(process.pid);
+    }
+
+    /// Forks a keeper that holds the read end `hold`, outside every namespace. Null if no
+    /// process is free or the fault says the fork fails (the errno is `keeper_fork_errno`).
+    pub fn start_keeper(world: *World, hold: host.Handle) ?u32 {
+        const slot = for (world.processes[1..], 1..) |*process, index| {
+            if (process.state == .unused or process.state == .reaped) break index;
+        } else return null;
+        const read_end = end_index(hold);
+        assert(read_end % 2 == 0); // The read end.
+        assert(world.processes[world.current].holds[read_end]);
+        const keeper = &world.processes[slot];
+        keeper.* = unused_process();
+        keeper.state = .command;
+        keeper.keeper = true;
+        keeper.pid = world.take_pid();
+        keeper.cwd = world.processes[world.current].cwd;
+        keeper.holds[read_end] = true; // It closes everything else.
+        world.keepers_started += 1;
+        return keeper.pid;
+    }
+
+    /// The scope the process was in has one process fewer; with none left, the manager removes
+    /// it at once if the model says it does.
+    fn scope_lost_process(world: *World, pid: u32) void {
+        const slot = world.bus.process_ended(pid) orelse return;
+        if (world.bus.model.scope_removal == .promptly) world.end_scope(slot);
     }
 
     /// Reads from a pipe end the current process holds. 0 means end of file. A read that waits
@@ -695,6 +755,12 @@ pub const World = struct {
             return if (gone) errno_srch else null;
         }
         if (world.kill_errno) |errno| return errno;
+        if (process.keeper) {
+            // A keeper has no handlers and is not PID 1 of anything: SIGKILL ends it and the
+            // other signals end it too, but only SIGKILL is ever sent to it.
+            if (process.state == .command) world.keeper_ends(process, .{ .signaled = number });
+            return null;
+        }
         switch (process.state) {
             .command => {
                 assert(world.received_count < world.received.len);
@@ -729,7 +795,8 @@ pub const World = struct {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
-        if (process.state == .command) world.finish_command(process);
+        // A keeper never ends by itself: waiting for one that is alive would never return.
+        if (process.state == .command and !process.keeper) world.finish_command(process);
         if (process.state != .zombie) return .{ .errno = errno_child };
         world.reap(process);
         return .{ .status = process.exit.? };
@@ -740,8 +807,7 @@ pub const World = struct {
         assert(process.state == .zombie);
         process.state = .reaped;
         world.drop_proc_files(process.pid);
-        const slot = world.bus.process_ended(process.pid) orelse return;
-        if (world.bus.model.scope_removal == .promptly) world.end_scope(slot);
+        world.scope_lost_process(process.pid);
     }
 
     /// A scope the manager has finished with leaves it, and its cgroup directory goes with it.
@@ -823,6 +889,11 @@ pub const World = struct {
             world.scope_started_before_child_ran = process.state == .pending;
         }
         world.write_event_files(directory);
+        if (world.keeper_dies_early and scope.keeper_pid != 0) {
+            if (world.find_process(scope.keeper_pid)) |keeper| {
+                if (keeper.state == .command) world.keeper_ends(keeper, .{ .signaled = 9 });
+            }
+        }
         var file_buffer: [48]u8 = undefined;
         // Cannot fail: same.
         const file = std.fmt.bufPrint(&file_buffer, "{s}/cgroup", .{proc_directory}) catch
@@ -859,6 +930,15 @@ pub const World = struct {
         _ = world.write_file(populated, "populated 1\nfrozen 0\n");
     }
 
+    /// The process exists and is not a zombie: the kernel counts it in its cgroup.
+    fn process_alive(world: *World, pid: u32) bool {
+        const process = world.find_process(pid) orelse return false;
+        return switch (process.state) {
+            .pending, .running, .command => true,
+            .unused, .zombie, .reaped => false,
+        };
+    }
+
     /// The process is gone, and so are its files in /proc.
     fn drop_proc_files(world: *World, pid: u32) void {
         inline for (.{ "status", "cgroup" }) |name| {
@@ -871,12 +951,14 @@ pub const World = struct {
 
     /// `/proc/<pid>/status` of a container's PID 1, as far as a lookup of its identity goes: its
     /// innermost pid is 1 (`NSpid`). Written straight, not through the process's own root.
-    fn put_status_file(world: *World, pid: u32) void {
+    fn put_status_file(world: *World, pid: u32, zombie: bool) void {
         var path: [48]u8 = undefined;
-        var text: [48]u8 = undefined;
+        var text: [64]u8 = undefined;
         // Cannot fail: a short path and a short line with a pid of at most ten digits.
         const where = std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}) catch unreachable;
-        const line = std.fmt.bufPrint(&text, "NSpid:\t{d}\t1\n", .{pid}) catch unreachable; // Same.
+        const state = if (zombie) "Z (zombie)" else "S (sleeping)";
+        const format = "State:\t{s}\nNSpid:\t{d}\t1\n";
+        const line = std.fmt.bufPrint(&text, format, .{ state, pid }) catch unreachable; // Same.
         world.put_raw(where, line);
     }
 
@@ -904,8 +986,17 @@ pub const World = struct {
 
     /// The kernel counts a zombie out of its cgroup: the scope is no longer populated.
     fn process_died(world: *World, pid: u32) void {
+        if (world.find_process(pid)) |process| {
+            // The status file of a process that ended and is not reaped says so.
+            if (process.execd) world.put_status_file(pid, true);
+        }
         for (&world.bus.scopes) |*scope| {
-            if (!scope.active or scope.pid != pid) continue;
+            if (!scope.active) continue;
+            const mine = scope.pid == pid or (scope.keeper_pid != 0 and scope.keeper_pid == pid);
+            if (!mine) continue;
+            // The scope is empty only when its container and its keeper are both out of it.
+            if (world.process_alive(scope.pid)) continue;
+            if (scope.keeper_pid != 0 and world.process_alive(scope.keeper_pid)) continue;
             var relative: [constants.cgroup_path_bytes_max]u8 = undefined;
             const path = scope_cgroup_path(&relative, scope);
             var file: [constants.cgroup_path_bytes_max + 48]u8 = undefined;
@@ -1325,7 +1416,7 @@ pub const World = struct {
         process.execd = true;
         process.ends_at_ms = world.now_ms + world.command_runs_ms;
         process.holds = @splat(false);
-        world.put_status_file(process.pid);
+        world.put_status_file(process.pid, false);
         return null;
     }
 };
@@ -1370,6 +1461,7 @@ fn unused_process() Process {
         .exec_envp = undefined,
         .exec_envp_len = 0,
         .holds = @splat(false),
+        .keeper = false,
     };
 }
 

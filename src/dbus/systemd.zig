@@ -4,10 +4,10 @@
 //! the job that creates it.
 //!
 //! The design follows runc's systemd driver (docs/DECISIONS.md): one transient `.scope` per
-//! container, the container's pid in `PIDs`, `Delegate=true` so the container's own cgroup tree
-//! belongs to the user, accounting on, and the limits as unit properties wherever the running
-//! systemd has them. What zbx drops from runc is OCI-only (`cgroupsPath`, annotations): the
-//! unit's name is `zbx-<container>.scope` and nothing else names it.
+//! container, the container's pid and its keeper's in `PIDs`, `Delegate=true` so the container's
+//! own cgroup tree belongs to the user, accounting on, and the limits as unit properties wherever
+//! the running systemd has them. What zbx drops from runc is OCI-only (`cgroupsPath`,
+//! annotations): the unit's name is `zbx-<container>.scope` and nothing else names it.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -115,6 +115,9 @@ pub const ScopeRequest = struct {
     /// "zbx: <container>".
     description: []const u8,
     pid: u32,
+    /// The scope's keeper (`Host.start_keeper`), put in `PIDs` after the container so that the
+    /// scope is never empty before zbx has read its counters.
+    keeper_pid: u32,
     /// The user manager's `app.slice`, or null for the manager's default.
     slice: ?[]const u8,
     memory_max: ?u64,
@@ -163,6 +166,8 @@ fn manager_call(conn: *Connection, member: []const u8) CallError!void {
 /// unsubscribe is not a failure of the scope, which is already up.
 pub fn start_scope(conn: *Connection, request: *const ScopeRequest) CallError!void {
     assert(request.pid > 1);
+    assert(request.keeper_pid > 1);
+    assert(request.keeper_pid != request.pid);
     assert(std.mem.endsWith(u8, request.name, constants.scope_suffix));
     assert(conn.is_open);
     assert(request.description.len > 0);
@@ -270,7 +275,7 @@ pub fn marshal_scope(buffer: []u8, request: *const ScopeRequest) wire.WireError!
         "TasksAccounting",
     };
     for (accounting) |name| property_bool(&writer, name, true, &count);
-    property_pids(&writer, request.pid, &count);
+    property_pids(&writer, request.pid, request.keeper_pid, &count);
     if (request.memory_max) |value| property_u64(&writer, "MemoryMax", value, &count);
     if (request.memory_swap_zero) property_u64(&writer, "MemorySwapMax", 0, &count);
     if (request.tasks_max) |value| property_u64(&writer, "TasksMax", value, &count);
@@ -320,12 +325,15 @@ fn property_u64(writer: *wire.Writer, name: []const u8, value: u64, count: *u32)
     writer.uint64(value);
 }
 
-fn property_pids(writer: *wire.Writer, pid: u32, count: *u32) void {
+fn property_pids(writer: *wire.Writer, pid: u32, keeper_pid: u32, count: *u32) void {
     assert(pid > 1);
+    assert(keeper_pid > 1);
+    assert(pid != keeper_pid);
     assert(count.* < constants.scope_properties_max);
     property_start(writer, "PIDs", "au", count);
     const array = writer.array_begin(4);
     writer.uint32(pid);
+    writer.uint32(keeper_pid);
     writer.array_end(array);
 }
 
@@ -365,6 +373,7 @@ test "the scope request marshals into the body StartTransientUnit takes" {
         .name = "zbx-web.scope",
         .description = "zbx: web",
         .pid = 4242,
+        .keeper_pid = 4243,
         .slice = "app.slice",
         .memory_max = 128 * 1024 * 1024,
         .memory_swap_zero = true,
@@ -386,8 +395,11 @@ test "the scope request marshals into the body StartTransientUnit takes" {
             'b' => _ = try reader.boolean(),
             't' => _ = try reader.uint64(),
             'a' => {
+                // PIDs: the container, then its keeper.
                 const array_end = try reader.array_begin(4);
-                while (reader.at < array_end) _ = try reader.uint32();
+                try testing.expectEqual(@as(u32, 4242), try reader.uint32());
+                try testing.expectEqual(@as(u32, 4243), try reader.uint32());
+                try testing.expectEqual(array_end, reader.at);
             },
             else => return error.TestUnexpectedResult,
         }
@@ -412,6 +424,7 @@ test "a request with no limits and no slice has only the always-on properties" {
         .name = "zbx-a.scope",
         .description = "zbx: a",
         .pid = 7,
+        .keeper_pid = 8,
         .slice = null,
         .memory_max = null,
         .memory_swap_zero = false,

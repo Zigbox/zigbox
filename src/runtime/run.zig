@@ -26,7 +26,14 @@
 //! outlives the caller; the process split itself is the caller's, `cli.zig`'s `run -d`),
 //! `timeout_ms`/`grace_ms` (a run that lasts too long is sent SIGTERM and then SIGKILL).
 //! `oom` and `pid_limit` are in `ExitReason`: `wait` reads the scope's `memory.events` and
-//! `pids.events` the moment PID 1 is reaped.
+//! `pids.events` as soon as PID 1 is reaped. The manager removes a transient scope the moment
+//! it is empty, so a container whose PID 1 exits right after the OOM killer ran would take its
+//! counters with it; a scope therefore has a second process, the keeper (`Host.start_keeper`),
+//! forked before the scope is requested, put in `PIDs` beside the container's, and released by
+//! `wait` after the counters are read. The keeper takes one pid of the scope's `TasksMax`, which
+//! is `--pids` plus one, so the container has exactly the pids it asked for. The thread that
+//! calls `start` must be the one that calls `wait`: the kernel ends the keeper when that thread
+//! ends.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -375,11 +382,15 @@ pub fn wait(handle: *Handle) ExitReason {
         handle.ended = .lost;
         return .lost;
     };
-    // First thing after the reap: the manager removes the cgroup once it is empty.
+    // Right after the reap, while the keeper still holds the scope: the manager removes the
+    // cgroup as soon as nothing is left in it, and its counters go with it.
     const events = if (handle.plan.scoped)
         scope_mod.read_events(host, handle.session.scope_directory.slice())
     else
         scope_mod.Events{ .oom_kill = null, .pids_max = null };
+    // The keeper has held the scope open until now; with the counters read it can go, and the
+    // manager removes the scope.
+    handle.session.release_keeper();
     const ended: Ended = switch (status) {
         .exited => |code| .{ .exited = code },
         .signaled => |number| .{ .signaled = number },

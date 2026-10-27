@@ -50,6 +50,13 @@ pub const Cleanup = union(enum) {
     failed,
 };
 
+/// The process that keeps the container's scope alive (`Host.start_keeper`), and the write end
+/// of the pipe it waits on: closing that ends it.
+const Keeper = struct {
+    pid: host_mod.Pid,
+    hold: host_mod.Handle,
+};
+
 pub const Session = struct {
     host: Host,
     plan: *const Plan,
@@ -66,6 +73,10 @@ pub const Session = struct {
     /// `cleanup_scope` has to see to.
     scope_directory: scope_mod.Directory,
     scope_up: bool,
+    /// The scope's keeper, from its step until `release_keeper`. While it lives the scope has a
+    /// process in it, so the manager cannot remove the scope's cgroup and take its counters
+    /// (`memory.events`, `pids.events`) with it before `run.zig` has read them.
+    keeper: ?Keeper,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
     /// The container's PID 1 as the host sees it: set when it is spawned and never cleared, so
@@ -95,6 +106,7 @@ pub const Session = struct {
         session.scope_problem = null;
         session.scope_directory = .{};
         session.scope_up = false;
+        session.keeper = null;
         session.substituted = null;
         session.container_pid = 0;
         session.reaped = std.atomic.Value(bool).init(false);
@@ -185,6 +197,7 @@ pub const Session = struct {
                 plan.text(step.target),
             ),
             .run_newuidmap, .run_newgidmap => try session.run_helper(step),
+            .spawn_keeper => try session.spawn_keeper(),
             .start_scope => try session.start_scope(),
             .release_child => try session.release_child(),
             .await_report => try session.await_report(),
@@ -283,6 +296,40 @@ pub const Session = struct {
         return error.IoFailed;
     }
 
+    /// Forks the scope's keeper, which blocks on a pipe until `release_keeper` closes it (see
+    /// `Host.start_keeper`). It is forked after the child and before the scope, so that the
+    /// child has no copy of the pipe and the scope request can name the keeper's pid.
+    fn spawn_keeper(session: *Session) host_mod.Error!void {
+        const host = session.host;
+        assert(session.plan.scoped);
+        assert(session.keeper == null);
+        const hold = try host.pipe();
+        const pid = host.start_keeper(hold.read) catch |err| {
+            host.close(hold.read);
+            host.close(hold.write);
+            return err;
+        };
+        host.close(hold.read); // The keeper has its own copy; ours would keep it from seeing EOF.
+        session.keeper = .{ .pid = pid, .hold = hold.write };
+        assert(pid != session.pid.?);
+    }
+
+    /// Lets the keeper go and reaps it: its pipe is closed, which is its end of file. The scope
+    /// then loses its last process (when the container is gone too) and the manager removes it.
+    /// It is killed as well, so that a keeper that did not see the end of file (the kernel
+    /// stopped it, say) cannot make the wait for it last: it is zbx's own child, so its pid is
+    /// not reused before it is reaped here. Nothing here can fail in a way that helps anyone, so
+    /// errors are not reported: a keeper left behind ends with zbx anyway.
+    pub fn release_keeper(session: *Session) void {
+        const host = session.host;
+        const keeper = session.keeper orelse return;
+        session.keeper = null;
+        host.close(keeper.hold);
+        host.signal(keeper.pid, constants.signal_kill) catch {};
+        _ = host.wait_for(keeper.pid) catch {};
+        assert(session.keeper == null);
+    }
+
     /// Asks for the container's scope with the child's pid in it (scope.zig) and waits for the
     /// job. The child is blocked waiting for `release_child`, so it runs nothing until the scope
     /// and its limits exist. The bus connection lives for this step only.
@@ -291,7 +338,16 @@ pub const Session = struct {
         assert(session.scope_problem == null);
         var problem: scope_mod.Problem = undefined;
         const pid = session.pid.?;
-        if (scope_mod.start(session.host, session.plan, pid, &session.scope_directory, &problem)) {
+        const keeper_pid = session.keeper.?.pid;
+        const started = scope_mod.start(
+            session.host,
+            session.plan,
+            pid,
+            keeper_pid,
+            &session.scope_directory,
+            &problem,
+        );
+        if (started) {
             session.scope_up = true;
             return;
         }
@@ -471,6 +527,7 @@ pub const Session = struct {
             _ = host.wait_for(pid) catch {};
             session.pid = null;
         }
+        session.release_keeper();
         session.close_all();
         host.ignore_broken_pipe(false);
         assert(!session.open.any());

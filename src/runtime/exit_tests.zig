@@ -6,8 +6,10 @@
 
 const std = @import("std");
 const constants = @import("../constants.zig");
+const host_mod = @import("../host.zig");
 const host_sim = @import("../host_sim.zig");
 const records = @import("records.zig");
+const sim_world = @import("../sim_world.zig");
 const sim_run = @import("sim_run.zig");
 
 const HostSim = host_sim.HostSim;
@@ -170,12 +172,69 @@ test "plain exits and signals keep M1's reporting" {
     try testing.expectEqual(records.EndReason.signal, parsed.reason);
 }
 
-test "a cgroup the manager removed before it could be read gives the plain exit" {
-    // Goal: the race is survivable. The counters cannot be read, nothing is claimed, and
-    // nothing is left behind or warned about.
+fn expect_clean(sim: *const HostSim, before: *const sim_run.Baseline) !void {
+    if (sim_run.leak(sim, before)) |text| {
+        std.debug.print("the host leaked: {s}\n", .{text});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "an OOM kill is reported when the manager removes the cgroup the moment it is empty" {
+    // Goal: the regression for CI run 40433220043 (demo-m2, step 2). The OOM killer killed the
+    // worker of the command, the command's PID 1 then exited 0, and the manager removed the
+    // scope as soon as PID 1 was reaped, taking `memory.events` with it: zbx saw no counters
+    // and reported a plain exit 0. The model removes a scope the instant its last process is
+    // reaped (`scope_removal = .promptly`), the OOM kill is in the counters, PID 1 exits 0.
+    // The keeper holds the scope open until the counters are read, so the reason is oom, the
+    // exit code 137 and the report line is there; and then the keeper is released and the
+    // scope goes (nothing is left behind). Method: the same run with the process limit.
     var sim: HostSim = undefined;
     sim_run.init(&sim, 7);
+    const before = sim_run.baseline(&sim);
     sim.world.bus.model.scope_removal = .promptly;
+    sim.world.oom_kills = 1;
+    sim.world.command_exit = .{ .exited = 0 };
+    const args = [_][:0]const u8{
+        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m", "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 137), run(&sim, &args));
+    try testing.expectEqualStrings(
+        "zbx: killed: out of memory (limit 64 MiB)\n",
+        sim.stderr(),
+    );
+    try testing.expectEqual(@as(u32, 1), sim.world.keepers_started);
+    try testing.expectEqual(@as(u32, 0), sim.world.bus.scope_count());
+    try expect_clean(&sim, &before);
+    const parsed = try parsed_record(&sim);
+    try testing.expectEqual(records.EndReason.oom, parsed.reason);
+
+    sim_run.init(&sim, 8);
+    sim.world.bus.model.scope_removal = .promptly;
+    sim.world.pids_max_hits = 3;
+    sim.world.command_exit = .{ .exited = 0 };
+    const limited = [_][:0]const u8{
+        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--pids", "16", "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &limited));
+    try testing.expectEqualStrings(
+        "zbx: stopped: process limit reached (limit 16)\n",
+        sim.stderr(),
+    );
+    try testing.expectEqual(@as(?u64, 17), sim.world.bus.last_scope.tasks_max);
+    try testing.expectEqual(@as(u32, 0), sim.world.bus.scope_count());
+}
+
+test "without the keeper the same removal loses the counters (the model can show the race)" {
+    // Goal: the test above would pass for the wrong reason if the model never lost the counters.
+    // Method: the keeper dies the moment the scope has started (it is killed by someone), the
+    // manager removes the scope the instant the container is reaped, and the counters are gone:
+    // the plain exit, nothing claimed, nothing crashed, nothing left behind. This is the
+    // documented state when the keeper fails; the fix cannot do better then.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 9);
+    const before = sim_run.baseline(&sim);
+    sim.world.bus.model.scope_removal = .promptly;
+    sim.world.keeper_dies_early = true;
     sim.world.oom_kills = 1;
     sim.world.command_exit = .{ .exited = 4 };
     const args = [_][:0]const u8{
@@ -184,6 +243,52 @@ test "a cgroup the manager removed before it could be read gives the plain exit"
     try testing.expectEqual(@as(u8, 4), run(&sim, &args));
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     try testing.expectEqual(@as(u32, 0), sim.world.bus.scope_count());
+    try expect_clean(&sim, &before);
+}
+
+test "a keeper that cannot be forked is a coded start failure, and nothing is left behind" {
+    // Goal: the keeper is a step of the plan like any other. A refused fork (EAGAIN, the user's
+    // process limit) is ZBX-E0205 naming the step, exit 125, before any scope exists, with the
+    // container reaped and every descriptor closed.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 10);
+    const before = sim_run.baseline(&sim);
+    sim.world.keeper_fork_errno = 11;
+    const args = [_][:0]const u8{
+        "zbx", "-v", "run", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m", "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 125), run(&sim, &args));
+    const text = sim.stderr();
+    try testing.expect(std.mem.startsWith(u8, text, "error[ZBX-E0205]: "));
+    const step = "starting the process that keeps the container's cgroup scope alive";
+    try testing.expect(std.mem.indexOf(u8, text, step) != null);
+    try testing.expectEqual(@as(u32, 0), sim.world.bus.scopes_started);
+    try expect_clean(&sim, &before);
+}
+
+test "the keeper is outside the container's namespaces and holds nothing but its pipe" {
+    // Goal: the keeper does not appear inside the container. Method: run, then look at the
+    // model's process table: the keeper was created without the container's user, pid and IPC
+    // namespaces, in the host's mount table and hostname, and it is the second pid of the scope.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 11);
+    const args = [_][:0]const u8{
+        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m", "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &args));
+    var found: ?*const sim_world.Process = null;
+    for (&sim.world.processes) |*process| {
+        if (process.keeper) found = process;
+    }
+    const keeper = found.?;
+    try testing.expect(!keeper.new_user);
+    try testing.expect(!keeper.new_pid);
+    try testing.expect(!keeper.new_ipc);
+    try testing.expectEqual(@as(u8, 0), keeper.table);
+    try testing.expectEqual(@as(u8, 0), keeper.uts);
+    try testing.expectEqual(keeper.pid, sim.world.bus.last_scope.keeper_pid);
+    try testing.expect(keeper.pid != sim.world.bus.last_scope.pid);
+    try testing.expectEqual(host_mod.ExitStatus{ .exited = 0 }, keeper.exit.?);
 }
 
 test "a scope that lingers is stopped, and one that cannot be stopped is a warning" {

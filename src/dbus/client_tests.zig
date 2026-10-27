@@ -47,6 +47,7 @@ fn scope_request(name: []const u8, pid: u32) systemd.ScopeRequest {
         .name = name,
         .description = "zbx: test",
         .pid = pid,
+        .keeper_pid = pid + 1,
         .slice = "app.slice",
         .memory_max = 128 * 1024 * 1024,
         .memory_swap_zero = true,

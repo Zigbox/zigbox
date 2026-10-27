@@ -328,6 +328,8 @@ pub const VTable = struct {
         entry: ChildEntry,
         entry_context: *anyopaque,
     ) Error!Pid,
+    /// Forks the scope's keeper (see `Host.start_keeper`).
+    start_keeper: *const fn (context: *anyopaque, hold: Handle) Error!Pid,
     /// Blocks until the child ends and reaps it.
     wait: *const fn (context: *anyopaque, pid: Pid) Error!ExitStatus,
     signal: *const fn (context: *anyopaque, pid: Pid, signal: u8) Error!void,
@@ -677,6 +679,24 @@ pub const Host = struct {
         assert(flags.user); // Every other namespace is created owned by a new user namespace.
         const pid = try host.vtable.spawn(host.context, flags, entry, entry_context);
         assert(pid > 0);
+        return pid;
+    }
+
+    /// Forks the keeper of a container's cgroup scope: a process outside every namespace of the
+    /// container whose only job is to be in the scope, so that the scope is never empty (and the
+    /// manager never removes it) while zbx has still to read its counters. It blocks reading the
+    /// pipe end `hold`, and ends when the pipe's writers are all gone, when a read fails, or when
+    /// the process that started it ends (the kernel kills it then, `PR_SET_PDEATHSIG`). It closes
+    /// every descriptor it inherited but `hold`, so that it keeps no pipe, socket or terminal
+    /// open on behalf of zbx. The caller closes its own copy of `hold`, keeps the write end, and
+    /// ends the keeper by closing that, then reaps it with `wait_for`.
+    ///
+    /// The kernel sends the death signal when the *thread* that forked ends, not the process:
+    /// the thread that starts a run must be the one that waits for it, as `run.zig` requires.
+    pub fn start_keeper(host: Host, hold: Handle) Error!Pid {
+        assert(hold < std.math.maxInt(i32));
+        const pid = try host.vtable.start_keeper(host.context, hold);
+        assert(pid > 1);
         return pid;
     }
 

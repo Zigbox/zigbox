@@ -113,6 +113,9 @@ fn prepare_records_unreadable(sim: *HostSim) void {
 
 /// One container, started and left running, for the commands that look at containers.
 var golden_handle: run.Handle = undefined;
+/// The container above is running and its scope's keeper still holds its pipe, which is the
+/// state of a running container; the case that looked at it ends it before the check for leaks.
+var golden_started = false;
 
 fn prepare_running(sim: *HostSim) void {
     sim_run.init(sim, 1);
@@ -127,6 +130,7 @@ fn prepare_running(sim: *HostSim) void {
     run.start(sim.interface(), &container, .{ .detached = true }, &golden_handle, &diag) catch {
         unreachable; // The simulated host starts a container.
     };
+    golden_started = true;
 }
 
 fn prepare_unsignalable(sim: *HostSim) void {
@@ -770,6 +774,10 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     }
     var iterator: SliceIterator = .{ .items = items[0..count] };
     const code = cli.run_from_iterator(sim.interface(), &iterator);
+    if (golden_started) {
+        golden_handle.session.release_keeper();
+        golden_started = false;
+    }
     try testing.expectEqual(@as(u32, 0), sim.open_count());
     return code;
 }

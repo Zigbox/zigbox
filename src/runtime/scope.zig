@@ -211,11 +211,14 @@ pub fn probe(host: Host, out: *Probe, problem: *Problem) bool {
     return true;
 }
 
-/// The request for `plan`'s scope with the container's `pid` in it. A limit goes to the unit
-/// only if the systemd that was probed has the property; the rest is `fallback`'s.
-pub fn request_for(plan: *const plan_mod.Plan, pid: u32) systemd.ScopeRequest {
+/// The request for `plan`'s scope with the container's `pid` and the scope's keeper in it. A
+/// limit goes to the unit only if the systemd that was probed has the property; the rest is
+/// `fallback`'s.
+pub fn request_for(plan: *const plan_mod.Plan, pid: u32, keeper_pid: u32) systemd.ScopeRequest {
     assert(plan.scoped);
     assert(pid > 1);
+    assert(keeper_pid > 1);
+    assert(keeper_pid != pid);
     const version = plan.scope_version;
     const limits = plan.scope_limits;
     const memory = limits.memory_bytes;
@@ -224,6 +227,7 @@ pub fn request_for(plan: *const plan_mod.Plan, pid: u32) systemd.ScopeRequest {
         .name = plan.text(plan.scope_name),
         .description = plan.text(plan.scope_description),
         .pid = pid,
+        .keeper_pid = keeper_pid,
         .slice = if (systemd.supports(version, .app_slice)) "app.slice" else null,
         .memory_max = if (systemd.supports(version, .memory_max)) memory else null,
         .memory_swap_zero = memory != null and systemd.supports(version, .memory_swap_max),
@@ -234,10 +238,14 @@ pub fn request_for(plan: *const plan_mod.Plan, pid: u32) systemd.ScopeRequest {
     return request;
 }
 
+/// `TasksMax`: the pids the container asked for, plus the one the keeper takes. The keeper is a
+/// process of the scope and counts against its limit, so without the extra one the container
+/// would get a pid fewer than `--pids` says (and `pids.events` would count refusals one fork
+/// early).
 fn tasks_max(limits: spec.Limits) ?u64 {
     const pids = limits.pids orelse return null;
     assert(pids >= constants.limit_pids_min);
-    return pids;
+    return @as(u64, pids) + constants.scope_keeper_tasks;
 }
 
 /// `CPUQuotaPerSecUSec`: microseconds of CPU per second, 1000 for each thousandth of a CPU.
@@ -278,7 +286,7 @@ pub fn fallback(
     if (limits.pids) |pids| {
         if (!systemd.supports(version, .tasks_max)) {
             out[count] = .{ .name = "pids.max", .value = .{} };
-            out[count].value.print("{d}", .{pids});
+            out[count].value.print("{d}", .{@as(u64, pids) + constants.scope_keeper_tasks});
             count += 1;
         }
     }
@@ -297,25 +305,27 @@ pub fn fallback(
 /// The scope's cgroup directory under /sys/fs/cgroup; empty if it could not be found.
 pub const Directory = text_util.Bounded(constants.cgroup_path_bytes_max);
 
-/// Asks for the scope with `pid` in it, waits for the job, and writes the limits systemd could
-/// not take. Returns true with the pid inside the scope and `directory` set to its cgroup (empty
-/// if `/proc` would not say, which matters only when a limit has to be written there);
-/// otherwise `problem` says why.
+/// Asks for the scope with `pid` and `keeper_pid` in it, waits for the job, and writes the limits
+/// systemd could not take. Returns true with the pids inside the scope and `directory` set to its
+/// cgroup (empty if `/proc` would not say, which matters only when a limit has to be written
+/// there); otherwise `problem` says why.
 pub fn start(
     host: Host,
     plan: *const plan_mod.Plan,
     pid: u32,
+    keeper_pid: u32,
     directory: *Directory,
     problem: *Problem,
 ) bool {
     assert(pid > 1);
+    assert(keeper_pid > 1);
     assert(plan.scoped);
     directory.* = .{};
     var conn: client.Connection = undefined;
     var via: Via = undefined;
     if (!open_bus(host, &conn, problem, &via)) return false;
     defer conn.close();
-    const request = request_for(plan, pid);
+    const request = request_for(plan, pid, keeper_pid);
     systemd.start_scope(&conn, &request) catch {
         problem.* = .{ .bus = conn.failure };
         return false;
@@ -378,10 +388,12 @@ pub const Events = struct {
     pids_max: ?u64,
 };
 
-/// Reads the scope's `memory.events` and `pids.events`. Call it as soon as the container's
-/// PID 1 is reaped: the manager removes the cgroup once nothing is left in it, and a cgroup that
-/// is gone has no events to read (the result is then all null, and the run is reported as the
-/// plain exit it was).
+/// Reads the scope's `memory.events` and `pids.events`. Call it after the container's PID 1 is
+/// reaped and before the scope's keeper is released (`Session.release_keeper`): the keeper is
+/// still in the cgroup, so the manager cannot have removed it, and the counters are there. The
+/// manager removes a cgroup the moment nothing is left in it, with its counters; if the keeper
+/// is gone already (something killed it, or the fork was refused and the run went on) the
+/// result can be all null, and the run is reported as the plain exit it was.
 pub fn read_events(host: Host, directory: []const u8) Events {
     assert(directory.len <= constants.cgroup_path_bytes_max);
     if (directory.len > 0) assert(directory[0] == '/');
@@ -581,19 +593,20 @@ test "limits go to the unit when systemd has the property, and to cgroupfs when 
     var plan: plan_mod.Plan = undefined;
     const limits: spec.Limits = .{ .memory_bytes = 128 << 20, .pids = 64, .cpu_millis = 500 };
     scoped_plan(&plan, 255, limits);
-    const modern = request_for(&plan, 77);
+    const modern = request_for(&plan, 77, 78);
     try testing.expectEqualStrings("zbx-web-1.scope", modern.name);
     try testing.expectEqualStrings("zbx: web-1", modern.description);
     try testing.expectEqualStrings("app.slice", modern.slice.?);
     try testing.expectEqual(@as(?u64, 128 << 20), modern.memory_max);
     try testing.expect(modern.memory_swap_zero);
-    try testing.expectEqual(@as(?u64, 64), modern.tasks_max);
+    try testing.expectEqual(@as(?u64, 65), modern.tasks_max); // 64 and the keeper.
+    try testing.expectEqual(@as(u32, 78), modern.keeper_pid);
     try testing.expectEqual(@as(?u64, 500_000), modern.cpu_quota_usec);
     var files: [fallback_files_max]FileWrite = undefined;
     try testing.expectEqual(@as(u32, 0), fallback(255, limits, &files));
 
     scoped_plan(&plan, 230, limits);
-    const old = request_for(&plan, 77);
+    const old = request_for(&plan, 77, 78);
     try testing.expect(old.slice == null);
     try testing.expect(old.memory_max == null);
     try testing.expect(!old.memory_swap_zero);
@@ -609,7 +622,7 @@ test "limits go to the unit when systemd has the property, and to cgroupfs when 
     scoped_plan(&plan, 200, limits);
     try testing.expectEqual(@as(u32, 4), fallback(200, limits, &files));
     try testing.expectEqualStrings("pids.max", files[2].name);
-    try testing.expectEqualStrings("64", files[2].value.slice());
+    try testing.expectEqualStrings("65", files[2].value.slice()); // 64 and the keeper.
     try testing.expectEqualStrings("cpu.max", files[3].name);
     try testing.expectEqualStrings("50000 100000", files[3].value.slice());
 }
@@ -617,7 +630,7 @@ test "limits go to the unit when systemd has the property, and to cgroupfs when 
 test "no limits means no property and no file" {
     var plan: plan_mod.Plan = undefined;
     scoped_plan(&plan, 255, .{});
-    const request = request_for(&plan, 9);
+    const request = request_for(&plan, 9, 10);
     try testing.expect(request.memory_max == null);
     try testing.expect(!request.memory_swap_zero);
     try testing.expect(request.tasks_max == null);
@@ -651,10 +664,10 @@ test "an old systemd's limits are written to the scope's own cgroup files" {
     scoped_plan(&plan, 230, .{ .memory_bytes = 64 << 20, .pids = 8 });
     var problem: Problem = undefined;
     var directory: Directory = undefined;
-    try testing.expect(start(sim.interface(), &plan, 600, &directory, &problem));
+    try testing.expect(start(sim.interface(), &plan, 600, 601, &directory, &problem));
     const scope = sim.world.bus.find_scope("zbx-web-1.scope").?;
     try testing.expect(scope.memory_max == null);
-    try testing.expectEqual(@as(?u64, 8), scope.tasks_max);
+    try testing.expectEqual(@as(?u64, 9), scope.tasks_max);
     const base = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service";
     const memory = sim.world.read_written(base ++ "/zbx-web-1.scope/memory.max");
     try testing.expectEqualStrings("67108864", memory.?);
@@ -676,7 +689,7 @@ test "a limit that cannot be written is a cgroup_write problem naming the file" 
     scoped_plan(&plan, 230, .{ .memory_bytes = 64 << 20 });
     var problem: Problem = undefined;
     var directory: Directory = undefined;
-    try testing.expect(!start(sim.interface(), &plan, 600, &directory, &problem));
+    try testing.expect(!start(sim.interface(), &plan, 600, 601, &directory, &problem));
     try testing.expectEqualStrings("memory.max", problem.cgroup_write.file.slice());
     try testing.expectEqual(host_mod.Error.NotFound, problem.cgroup_write.io.err);
 }

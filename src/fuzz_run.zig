@@ -181,6 +181,10 @@ const Scenario = struct {
     /// The kernel counted an OOM kill, or a refused fork, in the container's cgroup.
     oom: bool,
     pids_hit: bool,
+    /// The scope's keeper cannot be forked (the run is refused), or ends the moment its scope is
+    /// up (the manager may then remove the scope, and its counters, before they are read).
+    keeper_fork_fails: bool,
+    keeper_dies: bool,
     removal: Removal,
     stop_fault: StopFault,
     inherited: Inherited,
@@ -202,7 +206,11 @@ const Scenario = struct {
 
     /// Whether the counters of the cgroup can be read after the container ends.
     fn events_readable(scenario: *const Scenario) bool {
-        return scenario.scoped() and scenario.removal != .promptly;
+        if (!scenario.scoped()) return false;
+        // The keeper holds the scope open until the counters are read, so a manager that
+        // removes a scope the moment it is empty still leaves them readable, unless the keeper
+        // is already gone.
+        return scenario.removal != .promptly or !scenario.keeper_dies;
     }
 
     /// Whether the cleanup after the run ends in the warning that the scope was left behind.
@@ -315,6 +323,8 @@ fn random_scenario(random: std.Random) Scenario {
 fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     scenario.oom = random.uintLessThan(u8, 6) == 0;
     scenario.pids_hit = random.uintLessThan(u8, 6) == 0;
+    scenario.keeper_fork_fails = random.uintLessThan(u8, 10) == 0;
+    scenario.keeper_dies = random.uintLessThan(u8, 5) == 0;
     // Scope cleanup and inherited-address faults are drawn only where nothing else is failing,
     // so that every warning and every connection of the run can be accounted for.
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
@@ -403,6 +413,11 @@ fn early_verdict(scenario: *const Scenario, fault: ?Fault) ?Verdict {
         const helper = index_of(scenario, .run_newuidmap);
         const sooner = if (early) |event| helper < event.refused.step.? else true;
         if (sooner) early = refusal(.E0204, helper, true);
+    }
+    if (scenario.scoped() and scenario.keeper_fork_fails) {
+        const at = index_of(scenario, .spawn_keeper);
+        const sooner = if (early) |event| at < event.refused.step.? else true;
+        if (sooner) early = refusal(.E0205, at, true);
     }
     if (scenario.scoped()) {
         if (scope_fault_code(scenario)) |code| {
@@ -844,6 +859,8 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
     sim.world.cgroup_stays = scenario.stop_effective() == .stays;
     sim.world.oom_kills = @intFromBool(scenario.oom);
+    sim.world.keeper_dies_early = scenario.keeper_dies;
+    if (scenario.keeper_fork_fails) sim.world.keeper_fork_errno = 11;
     sim.world.pids_max_hits = @intFromBool(scenario.pids_hit);
     switch (scenario.inherited) {
         .none, .stale => {},
@@ -1022,7 +1039,8 @@ fn check_scope(sim: *const HostSim, scenario: *const Scenario, name: []const u8)
     const memory: ?u64 = if (scenario.memory) |item| item.value else null;
     const pids: ?u64 = if (scenario.pids) |item| item.value else null;
     const cpus: ?u64 = if (scenario.cpus) |item| item.value else null;
-    assert(scope.tasks_max == pids); // systemd 227 has TasksMax, so both versions use it.
+    // systemd 227 has TasksMax, so both versions use it; the keeper takes one pid of it.
+    assert(scope.tasks_max == if (pids) |count| count + constants.scope_keeper_tasks else null);
     assert(scope.cpu_quota_usec == if (cpus) |millis| millis * 1000 else null);
     if (!scenario.old_systemd) {
         assert(std.mem.eql(u8, scope.slice.slice(), "app.slice"));

@@ -29,6 +29,10 @@ pub const Kind = enum {
     write_uid_map,
     run_newuidmap,
     run_newgidmap,
+    /// In a plan built with a scope: forks the scope's keeper (`Host.start_keeper`), which is
+    /// put in the scope beside the container so that the scope cannot be removed while zbx
+    /// has still to read its counters.
+    spawn_keeper,
     /// Asks the user's systemd manager for the container's scope and waits for its job; only in
     /// a plan built with a scope.
     start_scope,
@@ -78,7 +82,7 @@ pub const Kind = enum {
 pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
-        .run_newuidmap, .run_newgidmap, .start_scope => .parent,
+        .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -111,6 +115,9 @@ pub const links = [constants.container_links_count]Link{
 pub const child_steps_count: u32 = 23 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
+/// The steps a scope adds to the parent's: the keeper and the scope itself.
+pub const scope_steps_count: u32 = 2;
+
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
 
@@ -119,7 +126,7 @@ pub const read_only_steps_count: u32 = 5;
 pub const steps_count_single: u32 = 8 + child_steps_count;
 
 /// Steps of a plan that uses the helpers: the parent has seven (one step per helper). A plan with
-/// a scope has one more, whichever map it uses.
+/// a scope has two more (the keeper and the scope), whichever map it uses.
 pub const steps_count_full: u32 = 7 + child_steps_count;
 
 /// How the container's ids are mapped to the host's.
@@ -266,6 +273,7 @@ pub const Plan = struct {
         const child_start = plan.first_child();
         assert(plan.steps[child_start - 1].kind == .release_child);
         assert((plan.steps[child_start - 2].kind == .start_scope) == plan.scoped);
+        assert((plan.steps[child_start - 3].kind == .spawn_keeper) == plan.scoped);
         for (plan.steps[0..child_start]) |step| assert(side_of(step.kind) == .parent);
         for (plan.steps[child_start .. plan.count - 2]) |step| {
             assert(side_of(step.kind) == .child);
@@ -282,7 +290,7 @@ pub const Plan = struct {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
-        return base + @intFromBool(plan.scoped) + read_only;
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -290,7 +298,7 @@ pub const Plan = struct {
     pub fn first_child(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const parent: u32 = if (plan.full) 5 else 6;
-        return parent + @intFromBool(plan.scoped);
+        return parent + scope_steps_count * @intFromBool(plan.scoped);
     }
 
     /// The unit name and description of a scoped plan: "zbx-<name>.scope" and "zbx: <name>".
@@ -368,7 +376,9 @@ pub const Plan = struct {
             .single => plan.push_direct_maps(input),
             .full => |helpers| plan.push_helper_maps(input, helpers),
         }
-        // The scope exists before the child may run its first step, and so before its command.
+        // The scope exists before the child may run its first step, and so before its command;
+        // the keeper is forked first, so that it can be put in the scope with the child.
+        if (plan.scoped) plan.push(.spawn_keeper, empty_text, empty_text, 0);
         if (plan.scoped) plan.push(.start_scope, plan.scope_name, plan.scope_description, 0);
         plan.push(.release_child, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .release_child);
@@ -623,6 +633,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map => "writing the container's uid map",
         .run_newuidmap => "running newuidmap to write the container's uid map",
         .run_newgidmap => "running newgidmap to write the container's gid map",
+        .spawn_keeper => "starting the process that keeps the container's cgroup scope alive",
         .start_scope => "starting the container's cgroup scope",
         .release_child => "letting the container continue",
         .await_report => "waiting for the container to start its command",
@@ -897,7 +908,8 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
     var input = test_input(&.{"sh"});
     input.scope = .{ .version = 255, .limits = .{ .pids = 64 } };
     plan.build(&input);
-    try testing.expectEqual(steps_count_single + 1, plan.count);
+    try testing.expectEqual(steps_count_single + 2, plan.count);
+    try testing.expectEqual(Kind.spawn_keeper, plan.steps[plan.first_child() - 3].kind);
     try testing.expectEqual(Kind.start_scope, plan.steps[plan.first_child() - 2].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[plan.first_child() - 1].kind);
     const step = plan.steps[plan.first_child() - 2];
@@ -913,8 +925,9 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
 
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
-    try testing.expectEqual(steps_count_full + 1, plan.count);
-    try testing.expectEqual(Kind.start_scope, plan.steps[4].kind);
+    try testing.expectEqual(steps_count_full + 2, plan.count);
+    try testing.expectEqual(Kind.spawn_keeper, plan.steps[4].kind);
+    try testing.expectEqual(Kind.start_scope, plan.steps[5].kind);
 
     input.scope = null;
     plan.build(&input);

@@ -306,6 +306,13 @@ pub const dbus_messages_per_wait_max: u32 = 64;
 pub const dbus_job_results_max: u32 = 4;
 /// The pids, properties and text of the scope request.
 pub const scope_properties_max: u32 = 16;
+/// Pids the scope's keeper process takes from the scope's `TasksMax`: the container gets the
+/// `--pids` it asked for, so the unit's limit is that plus this.
+pub const scope_keeper_tasks: u32 = 1;
+/// Reads the keeper makes of its pipe before it gives up and ends. Nothing is ever written to
+/// the pipe, so one read that waits for the end of file is the whole life of a keeper; the bound
+/// is for interrupted reads and for a pipe that someone writes to by mistake.
+pub const keeper_reads_max: u32 = 4096;
 pub const scope_prefix = "zbx-";
 pub const scope_suffix = ".scope";
 pub const scope_name_bytes_max: u32 = 4 + container_name_bytes_max + 6;
@@ -496,6 +503,8 @@ comptime {
     assert(scope_prefix.len + container_name_bytes_max + scope_suffix.len == scope_name_bytes_max);
     assert(limit_memory_bytes_min < limit_memory_bytes_max);
     assert(limit_pids_min < limit_pids_max);
+    assert(limit_pids_max + scope_keeper_tasks > limit_pids_max); // Cannot overflow a u32.
+    assert(scope_keeper_tasks == 1);
     assert(limit_cpu_millis_min < limit_cpu_millis_max);
     assert(dbus_signature_bytes_max == 255);
 

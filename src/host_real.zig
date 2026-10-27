@@ -97,6 +97,7 @@ pub const HostReal = struct {
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
+        .start_keeper = start_keeper,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -363,6 +364,19 @@ pub const HostReal = struct {
         assert(result > 0);
         assert(result <= std.math.maxInt(i32));
         return @intCast(result);
+    }
+
+    fn start_keeper(context: *anyopaque, hold: host.Handle) host.Error!host.Pid {
+        _ = from_context(context);
+        const parent: i32 = linux.getpid();
+        const forked = linux.fork();
+        // In the child (result 0) only raw system calls run, and it never returns into the
+        // caller: `keeper_main` ends it.
+        if (forked == 0) keeper_main(parent, @intCast(hold));
+        try check(forked);
+        assert(forked > 1);
+        assert(forked <= std.math.maxInt(i32));
+        return @intCast(forked);
     }
 
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
@@ -846,6 +860,36 @@ pub const HostReal = struct {
 
 /// The arguments of `clone3` up to and including `tls`: `CLONE_ARGS_SIZE_VER0`, 64 bytes. The
 /// later fields (`set_tid`, `cgroup`) are not used, and the kernel accepts the short size.
+/// The keeper's whole life, in the forked child: raw system calls only, no allocation. It asks
+/// to be killed with its parent, checks the parent is still the one that forked it (it may have
+/// ended before the request took effect), leaves the terminal's process group so that a ^C meant
+/// for the container does not reach it, closes every descriptor but `hold`, and reads `hold`
+/// until the end of file. Any failure ends it, which at worst makes the scope empty early; that
+/// is the state before the keeper existed, and zbx copes with it.
+fn keeper_main(parent: i32, hold: i32) noreturn {
+    assert(parent > 1);
+    assert(hold >= 0);
+    const kill: usize = @backingInt(linux.SIG.KILL);
+    if (linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0) != 0) linux.exit_group(1);
+    if (linux.getppid() != parent) linux.exit_group(1);
+    _ = linux.setpgid(0, 0); // Best effort: the keeper still ends with its parent without it.
+    const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = false };
+    if (hold > 0) {
+        if (linux.close_range(0, hold - 1, flags) != 0) linux.exit_group(1);
+    }
+    if (linux.close_range(hold + 1, -1, flags) != 0) linux.exit_group(1);
+    var byte: [1]u8 = undefined;
+    for (0..constants.keeper_reads_max) |_| {
+        const result = linux.read(hold, &byte, byte.len);
+        switch (linux.errno(result)) {
+            .SUCCESS => if (result == 0) linux.exit_group(0), // The writers are gone.
+            .INTR => {},
+            else => linux.exit_group(1),
+        }
+    }
+    linux.exit_group(1);
+}
+
 const CloneArgs = extern struct {
     flags: u64,
     pidfd: u64,
