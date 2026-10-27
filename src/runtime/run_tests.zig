@@ -269,7 +269,7 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
         .run_newuidmap, .run_newgidmap => .E0204,
         .start_scope => .E0301, // The first call is the connect to the bus.
         .exec => .E0202,
-        .mount_pts, .bind_sys, .remount_sys => null,
+        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys => null,
         .restrict_capabilities, .clear_ambient => .E0207,
         .set_no_new_privs, .install_seccomp => .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => .E0209,

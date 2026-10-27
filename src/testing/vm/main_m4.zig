@@ -64,12 +64,11 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     if (!options.reuse_overlay) try image.make_overlay(init, base, overlay);
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
-    const ca_file: []const u8 = if (options.ca_file.len == 0) "" else try Io.Dir.cwd().readFileAlloc(
-        io,
-        options.ca_file,
-        arena,
-        .limited(limits.http_body_bytes_max),
-    );
+    var ca_file: []const u8 = "";
+    if (options.ca_file.len > 0) {
+        const limit: Io.Limit = .limited(limits.http_body_bytes_max);
+        ca_file = try Io.Dir.cwd().readFileAlloc(io, options.ca_file, arena, limit);
+    }
     var session: Session = undefined;
     try session.start(init, out, overlay, accel, .{
         .user_data = @import("cloud_init.zig").user_data,
@@ -217,7 +216,8 @@ fn step_lock_refusal(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
     var wrong_storage: [67]u8 = undefined;
-    const wrong_tree = try std.fmt.bufPrint(&wrong_storage, "{s}{s}", .{ wrong, tree[wrong.len..] });
+    const rest = tree[wrong.len..];
+    const wrong_tree = try std.fmt.bufPrint(&wrong_storage, "{s}{s}", .{ wrong, rest });
     const digests = [_][]const u8{ tree, wrong_tree };
     checks_m4.check_refusal(result.streams, result.status, "ZBX-E0519", &digests) catch |err| {
         return fail_step(out, "SPEC 5", "expected E0519 naming both trees, exit 125", err);

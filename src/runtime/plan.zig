@@ -19,6 +19,13 @@ const spec = @import("spec.zig");
 
 pub const Side = enum { parent, child };
 
+/// The steps that give the container the host's /sys.
+pub fn is_sys(kind: Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(Kind.exec));
+    if (kind == .bind_sys) assert(side_of(kind) == .child);
+    return kind == .make_sys_dir or kind == .bind_sys or kind == .remount_sys;
+}
+
 /// What a step does. Parent steps first in the declaration, then the child's.
 pub const Kind = enum {
     // The parent.
@@ -59,8 +66,9 @@ pub const Kind = enum {
     mount_pts,
     link_dev,
     /// The host's /sys bound read-only (the M4 decision, until M5's network namespace gives the
-    /// container a sysfs of its own). Tolerant: a host that will not bind it gives a container
-    /// without /sys, with a note.
+    /// container a sysfs of its own). All three are tolerant: a root file system that cannot take
+    /// the directory, or a host that will not bind it, gives a container without /sys, with a
+    /// note.
     make_sys_dir,
     bind_sys,
     remount_sys,
@@ -396,7 +404,7 @@ pub const Plan = struct {
             .target = target,
             .source = source,
             .index = index,
-            .tolerant = kind == .mount_pts or kind == .bind_sys or kind == .remount_sys,
+            .tolerant = kind == .mount_pts or is_sys(kind),
         };
         plan.count += 1;
     }
@@ -802,7 +810,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
 test "the plan has the steps in order, parent and child interleaved, and all within bounds" {
     // Goal: the shape every other module relies on. Method: build once and walk it; each step
     // belongs to the side the order says, the device and link steps repeat per device and link,
-    // and only the devpts mount and the two of /sys are tolerant.
+    // and only the devpts mount and the three of /sys are tolerant.
     var plan: Plan = undefined;
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
@@ -814,14 +822,13 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     for (plan.steps[0..plan.count]) |step| {
         if (step.tolerant) {
             tolerant += 1;
-            const allowed = step.kind == .mount_pts or step.kind == .bind_sys or
-                step.kind == .remount_sys;
+            const allowed = step.kind == .mount_pts or is_sys(step.kind);
             try testing.expect(allowed);
         }
         if (step.kind == .bind_device) devices_seen += 1;
         if (step.kind == .link_dev) links_seen += 1;
     }
-    try testing.expectEqual(@as(u32, 3), tolerant);
+    try testing.expectEqual(@as(u32, 4), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
     // The mounts come in the order the kernel needs: private, bind, proc, dev, ... pivot, exec.

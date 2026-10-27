@@ -32,12 +32,14 @@ var record_damaged: [constants.image_record_bytes_max]u8 = undefined;
 var image: images.Image = undefined;
 var back: images.Image = undefined;
 
+const digest_text = "abababababababababababababababababababababababababababababababab";
+
 const references = [_][]const u8{
     "alpine:3.20",
     "docker.io/library/alpine:3.20",
     "python:3.12-slim",
     "ghcr.io/owner/image:v1",
-    "registry.test:5000/team/app@sha256:abababababababababababababababababababababababababababababababab",
+    "registry.test:5000/team/app@sha256:" ++ digest_text,
     "a",
     "b/c:1",
     "x\"y",

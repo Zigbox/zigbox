@@ -557,7 +557,7 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
         .mount_overlay => return .E0425,
         // The steps that may fail: skipped with a note.
-        .mount_pts, .bind_sys, .remount_sys => return null,
+        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys => return null,
         .exec => {
             // A shell looks on: a missing or unrunnable first candidate is not the end while
             // another directory of PATH may have the program.
