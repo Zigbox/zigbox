@@ -98,6 +98,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_hostname => try host.set_hostname(plan.hostname()),
         .make_mounts_private => try mount(host, .make_private, target, null),
         .bind_rootfs => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .mount_overlay => try mount(host, .overlay, target, plan.text(step.source)),
         .mount_proc => try mount(host, .proc, target, null),
         .mount_dev => try mount(host, .dev_tmpfs, target, null),
         .mount_shm => try mount(host, .shm_tmpfs, target, null),
@@ -122,7 +123,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .seal_descriptors => try host.seal_descriptors(),
         .exec => try exec(child, state),
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
-        .run_newuidmap, .run_newgidmap, .start_scope => unreachable,
+        .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
     }
 }
@@ -135,7 +136,7 @@ fn mount(
 ) host_mod.Error!void {
     assert(target.len > 0);
     assert(target[0] != 0);
-    assert((source != null) == (kind == .bind_tree or kind == .bind_file));
+    assert((source != null) == (kind == .bind_tree or kind == .bind_file or kind == .overlay));
     try host.mount(.{ .kind = kind, .target = target, .source = source });
 }
 

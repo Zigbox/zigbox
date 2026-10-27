@@ -1,0 +1,7 @@
+error[ZBX-E0423]: can't read the store
+  while  reading the store
+  cause  listing the roots failed: permission denied (EACCES)
+  path   /home/alice/.local/share/zbx/store
+  fix    check that the directory belongs to you and that its disk is healthy
+  more   zbx explain E0423
+  docs   https://zigbox.github.io/zigbox/errors/E0423.html

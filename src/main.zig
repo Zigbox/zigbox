@@ -90,6 +90,16 @@ test {
     _ = @import("runtime/capabilities.zig");
     _ = @import("runtime/lifecycle.zig");
     _ = @import("commands.zig");
+    _ = @import("store_commands.zig");
+    _ = @import("store/materialize.zig");
+    _ = @import("store/remove.zig");
+    _ = @import("store/store.zig"); // Its test block brings in import_tests and usage_tests.
+    _ = @import("store/commit_tests.zig");
+    _ = @import("runtime/image.zig");
+    _ = @import("runtime/image_tests.zig");
+    _ = @import("runtime/image.zig");
+    _ = @import("runtime/image_tests.zig");
+    _ = @import("store_commands_tests.zig");
     _ = @import("schemas.zig");
     _ = @import("runtime/lifecycle_tests.zig");
     _ = @import("runtime/exit_tests.zig");

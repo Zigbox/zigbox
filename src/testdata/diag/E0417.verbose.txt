@@ -1,0 +1,7 @@
+error[ZBX-E0417]: can't write the store
+  while  writing the store
+  cause  creating the store directory failed: read-only file system (EROFS)
+  path   /home/alice/.local/share/zbx/store
+  fix    check that you can write to the store directory, and the disk
+  more   zbx explain E0417
+  docs   https://zigbox.github.io/zigbox/errors/E0417.html

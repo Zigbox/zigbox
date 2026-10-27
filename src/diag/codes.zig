@@ -67,6 +67,37 @@ pub const Code = enum(u8) {
     E0404,
     E0405,
     E0406,
+    E0410,
+    E0411,
+    E0412,
+    E0413,
+    E0414,
+    E0415,
+    E0416,
+    E0417,
+    E0418,
+    E0419,
+    E0420,
+    E0421,
+    E0422,
+    E0423,
+    E0424,
+    E0425,
+    E0426,
+    E0427,
+    E0428,
+    E0429,
+    E0430,
+    E0431,
+    E0432,
+    E0433,
+    E0434,
+    E0435,
+    E0436,
+    W0410,
+    W0411,
+    W0412,
+    W0413,
     E0701,
     E0702,
     E0703,
@@ -770,8 +801,508 @@ pub const registry = [_]Entry{
         .summary = "no schema for that command",
         .explanation =
         \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
-        \\doctor ("zbx schema ps"). Other commands have no machine-readable output
-        \\that needs one: explain and help print text, version prints a line.
+        \\doctor ("zbx schema ps"), of commit, and of the store commands, named
+        \\store-import, store-ls, store-du, store-rm, store-diff, store-verify,
+        \\store-gc, store-trash (gc --trash) and store-restore. Other commands have
+        \\no machine-readable output that needs one: explain and help print text,
+        \\version prints a line.
+        ,
+    },
+    .{
+        .code = .E0410,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no tree with that digest",
+        .explanation =
+        \\The store has no tree whose digest starts with what was given. A tree's
+        \\digest is printed by "zbx store import" (and by "zbx commit"), and
+        \\"zbx store ls" lists the trees the store keeps as roots. A tree that
+        \\was dropped with "zbx store rm" stays until "zbx store gc" collects it.
+        \\
+        \\A running container started from a digest the store does not have fails
+        \\with this code before anything is created.
+        ,
+    },
+    .{
+        .code = .E0411,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "that digest prefix matches more than one tree",
+        .explanation =
+        \\A digest may be shortened to a prefix of at least 12 hex digits, but
+        \\only while the prefix names one tree. zbx never picks one of several:
+        \\a wrong guess here could delete or run the wrong tree.
+        \\
+        \\The message names the first two matches. Give more digits, or the whole
+        \\digest from "zbx store ls".
+        ,
+    },
+    .{
+        .code = .E0412,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a digest",
+        .explanation =
+        \\A digest is "b3:" and 64 lowercase hex digits (BLAKE3). It may be
+        \\shortened to a prefix of at least 12 hex digits, with or without the
+        \\"b3:". Anything else is refused, as are uppercase digits: a digest has
+        \\one spelling.
+        \\
+        \\"zbx store ls" prints the digests the store keeps.
+        ,
+    },
+    .{
+        .code = .E0413,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't use the store: its format is unknown",
+        .explanation =
+        \\The store's store.zon is missing a readable format version, or names one
+        \\this zbx does not know. A newer zbx wrote it, or something else changed
+        \\the file. zbx does not touch a store it cannot read: it could damage
+        \\what a newer version put there.
+        \\
+        \\Run the zbx that wrote the store, or move the store directory away to
+        \\start a new one. The cause names the file.
+        ,
+    },
+    .{
+        .code = .E0414,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't read the directory to import",
+        .explanation =
+        \\"zbx store import" reads the directory it is given from inside your user
+        \\namespace, with the same ids a container would see. The path, or
+        \\something below it, is missing, is not what it should be (the source
+        \\must be a directory), or cannot be read by you.
+        \\
+        \\The cause names the path and the kernel's reason. Files that only you
+        \\cannot read (mode 0600 and owned by a subordinate id) are readable
+        \\inside the namespace; files owned by an id outside it are not.
+        ,
+    },
+    .{
+        .code = .E0415,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the directory tree is bigger than an import limit",
+        .explanation =
+        \\zbx holds a bounded amount in memory while it imports: at most 16384
+        \\entries in one directory, names up to 255 bytes, 64 levels of nesting,
+        \\a symlink target up to 4095 bytes, files up to 4 GiB, and 16 MiB for the
+        \\names and entries of all the directories being read at once.
+        \\
+        \\The cause names the limit and the path where it was passed. Split the
+        \\directory, or leave out what is not part of the root filesystem.
+        ,
+    },
+    .{
+        .code = .E0416,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the disk is full while writing the store",
+        .explanation =
+        \\The file system that holds the store has no room left. Everything zbx
+        \\wrote before is complete and stays: every write is a temporary file
+        \\that is renamed into place only when it is whole, so there is no half
+        \\file under any digest. The message says how much was written.
+        \\
+        \\Free space (or point XDG_DATA_HOME at a bigger disk) and run the same
+        \\command again: objects already stored are skipped, so it carries on.
+        ,
+    },
+    .{
+        .code = .E0417,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the store",
+        .explanation =
+        \\The kernel refused a write to the store directory (permissions, a
+        \\read-only file system, an I/O error). Nothing partial is left under a
+        \\digest: a failed write leaves at most a temporary file in the store's
+        \\tmp directory, which "zbx store gc" removes.
+        \\
+        \\The cause names the path and the kernel's reason. The store is in
+        \\$XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.
+        ,
+    },
+    .{
+        .code = .E0418,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a file changed while it was being imported",
+        .explanation =
+        \\zbx reads each file twice, once to learn its digest and once to copy
+        \\it, and the two reads did not agree: something wrote to the file in
+        \\between. Importing a tree that is being written would store a mixture,
+        \\so zbx stops.
+        \\
+        \\Stop whatever writes to the directory (a running container using it as
+        \\its root, a build), or import a copy, and run the command again.
+        ,
+    },
+    .{
+        .code = .E0419,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't run the store worker",
+        .explanation =
+        \\Store work runs in a short-lived child process inside your user
+        \\namespace. This one could not be created or set up (the same causes as
+        \\a container that will not start: see "zbx doctor"), or it was killed by
+        \\a signal before it finished. Nothing partial is left under a digest.
+        \\
+        \\The cause says which. Run the command again once it is fixed.
+        ,
+    },
+    .{
+        .code = .E0420,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "that tree is not a root",
+        .explanation =
+        \\"zbx store rm" drops a root: the record that keeps a tree in the store.
+        \\The digest names a tree the store has, but no root keeps it (it is only
+        \\part of another tree, or was already dropped), so there is nothing to
+        \\remove.
+        \\
+        \\"zbx store ls" lists the roots.
+        ,
+    },
+    .{
+        .code = .E0421,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "no data directory to keep the store in",
+        .explanation =
+        \\zbx keeps its store under $XDG_DATA_HOME/zbx/store, or
+        \\~/.local/share/zbx/store when that is not set. Neither variable names an
+        \\absolute directory here, so there is nowhere to put the store.
+        \\
+        \\Set HOME, or point XDG_DATA_HOME at a directory you can write to.
+        ,
+    },
+    .{
+        .code = .E0422,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a tree in the store is missing or damaged",
+        .explanation =
+        \\zbx followed a tree down through its subtrees and found one that is not
+        \\in the store, does not hash to its name, or cannot be decoded. A tree
+        \\object is a file named by the hash of its bytes, so this means the
+        \\store was changed or damaged outside zbx (a disk error, a file removed
+        \\by hand), or an earlier zbx wrote it wrongly.
+        \\
+        \\The cause names the tree. Nothing was changed. Importing the directory
+        \\again writes the trees it needs; objects that are already stored are
+        \\reused.
+        ,
+    },
+    .{
+        .code = .E0423,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the store",
+        .explanation =
+        \\The kernel refused to read something in the store directory, or the
+        \\store has more entries in one place than zbx can count at once. The
+        \\store is in $XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.
+        \\
+        \\The cause names the step and the kernel's reason. Check that the
+        \\directory belongs to you, and that the disk is healthy.
+        ,
+    },
+    .{
+        .code = .E0424,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file name in the store has too many links",
+        .explanation =
+        \\Building the directory a container runs on makes a hard link from every
+        \\file of the tree to its object. The file system refused one because the
+        \\object already has as many names as the file system allows (ext4: about
+        \\65,000). A file that appears under many names in one tree, or in many
+        \\trees that are all in use, can reach it.
+        \\
+        \\Nothing was changed: the half-built directory was removed. The usual
+        \\ways out are to import a tree in which that file is not repeated so
+        \\often, or to move the store to a file system with a higher limit (xfs
+        \\and btrfs allow far more).
+        ,
+    },
+    .{
+        .code = .E0425,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "overlayfs can't be mounted for this container",
+        .explanation =
+        \\A container started from a tree digest runs on an overlayfs mount: the
+        \\tree is the read-only lower layer and the container's own writes go to
+        \\an upper layer under the state directory. The kernel refused to mount
+        \\it in the container's user and mount namespaces.
+        \\
+        \\Unprivileged overlayfs needs Linux 5.11 or newer with the overlay
+        \\module, and an upper layer on a file system that keeps user.* extended
+        \\attributes. A security policy can also deny the mount. "zbx doctor"
+        \\runs the same mount in a scratch directory and says which of these it
+        \\is. A path that contains a comma, a colon or a backslash can not be
+        \\given to the mount and is refused with this code too.
+        \\
+        \\A container can still run on a plain directory: "zbx run --rootfs".
+        ,
+    },
+    .{
+        .code = .E0426,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container has no layer to commit",
+        .explanation =
+        \\"zbx commit" turns what a container changed into a new tree. That needs
+        \\a container that was started from a tree digest ("zbx run <digest>"),
+        \\because its writes are in an upper layer of their own. A container run
+        \\on a directory ("zbx run --rootfs") wrote into that directory, a
+        \\container run with --read-only had no upper layer, and the upper layer
+        \\of an old container is removed with its record (the newest 32 are kept).
+        \\
+        \\The cause says which of these it is. To keep a directory's contents,
+        \\import it: "zbx store import <dir>".
+        ,
+    },
+    .{
+        .code = .E0427,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container is still running",
+        .explanation =
+        \\A commit reads the container's upper layer while nothing writes to it, so
+        \\that the new tree is one the container really had. The container is
+        \\still running, and zbx does not freeze a running container (a
+        \\"--pause" option is not part of this version).
+        \\
+        \\Stop it with "zbx stop <name>", then commit. Nothing was changed.
+        ,
+    },
+    .{
+        .code = .E0428,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the upper layer uses an overlayfs feature a commit can't follow",
+        .explanation =
+        \\A commit reads a container's upper layer file by file. Overlayfs can
+        \\also keep a change as a redirect (a renamed directory,
+        \\"user.overlay.redirect") or as metadata only ("user.overlay.metacopy"),
+        \\and the upper layer alone
+        \\does not say what the change was then. zbx mounts without those
+        \\features, so this means the layer was made by something else, or by a
+        \\kernel whose defaults turn them on.
+        \\
+        \\The cause names the file. Nothing was changed.
+        ,
+    },
+    .{
+        .code = .E0429,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file in the store is damaged",
+        .explanation =
+        \\"zbx store verify" read every object, tree and root record in the store
+        \\and checked it against its name. This one does not match: its bytes (or,
+        \\for a file object, its mode, owner or attributes) are not what its id
+        \\says, or its chunk list disagrees with it, or it can not be read, or a
+        \\tree names something that is not in the store.
+        \\
+        \\The message names the id and the file, and the first path in the trees of
+        \\the roots that reach it, with how many more there are, so you know which
+        \\images are affected. --verbose lists three; --output json lists up to 16
+        \\for each damaged thing, with the root of each.
+        \\
+        \\Nothing was changed. A damaged file can not be repaired in place: delete
+        \\it and import the directory it came from again (the import writes what is
+        \\missing), or drop the roots that reach it with "zbx store rm". A disk
+        \\that damages files needs looking at; "zbx store verify" again afterwards.
+        ,
+    },
+    .{
+        .code = .E0430,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the store failed verification",
+        .explanation =
+        \\"zbx store verify" found damage; this is the summary after one
+        \\ZBX-E0429 for each damaged thing (the first 256, then a count). The exit
+        \\code is 2, because the store is part of the environment: zbx did not
+        \\do wrong, and neither did the command.
+        \\
+        \\Nothing was changed. See the diagnostics above this one.
+        ,
+    },
+    .{
+        .code = .E0431,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the store changed since that gc plan was made",
+        .explanation =
+        \\"zbx store gc --confirm <hash>" acts only on the plan the hash names. A plan
+        \\hash covers the ids of everything the plan would move and a counter that
+        \\every write to the store raises, so a plan can not be applied after an
+        \\import, a commit, a "store rm", a restore or another gc, even one that
+        \\changed nothing the plan holds.
+        \\
+        \\Nothing was moved. The message gives the hash of the plan as the store
+        \\is now: run "zbx store gc" to read it, and confirm that one if it is what
+        \\you want.
+        ,
+    },
+    .{
+        .code = .E0432,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a restore would overwrite something that is back in the store",
+        .explanation =
+        \\"zbx store restore" puts back what a gc moved to the trash. Something in
+        \\that trash is in the store again (an import or a commit wrote the same
+        \\object, tree or materialized directory in the meantime), and restore
+        \\does not decide which copy is right.
+        \\
+        \\Nothing was moved. The message names the first one and how many there
+        \\are. Drop the roots that brought them back with "zbx store rm" and gc
+        \\again, or leave the trash to expire.
+        ,
+    },
+    .{
+        .code = .E0433,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no trash with that id",
+        .explanation =
+        \\A gc id is the 12 hex digits of the plan hash a gc ran with. "zbx store
+        \\gc --trash" lists the trash that is still there. Trash is emptied by the
+        \\first gc after its time is up (seven days), and a restore removes the
+        \\trash it restored.
+        ,
+    },
+    .{
+        .code = .E0434,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the trash is missing things the gc moved into it",
+        .explanation =
+        \\The trash holds fewer objects, trees or materialized directories than
+        \\the gc that made it recorded, so putting it back would give a store
+        \\with holes. Something removed files from the trash directory by hand.
+        \\
+        \\Nothing was moved. The message says how many were recorded and how many
+        \\are there. What is missing can be imported again from its source.
+        ,
+    },
+    .{
+        .code = .E0435,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a root record can't be used",
+        .explanation =
+        \\A gc keeps what the roots reach, and a root's record in the store can not
+        \\be read or is from a newer zbx, so what it keeps is not known. gc
+        \\refuses rather than guess: a wrong guess deletes a tree somebody needs.
+        \\
+        \\The message names the root. "zbx store verify" says more. Delete the
+        \\record if the tree is not wanted, or import the directory again to
+        \\write it afresh.
+        ,
+    },
+    .{
+        .code = .E0436,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the store is in use by another zbx command",
+        .explanation =
+        \\A store has one lock file. Every command that writes to the store and may
+        \\reuse what is in it (an import, a commit, building a directory to run on,
+        \\writing an object chunk by chunk) holds it shared while it works. "zbx
+        \\store gc --confirm" and "zbx store restore", which move things out of
+        \\the store, hold it alone. Without that, a gc could move an object to the
+        \\trash in the very moment an import decided to reuse it, and the new tree
+        \\would name an object that is not there.
+        \\
+        \\The command waited ten seconds for the lock and gave up; nothing was
+        \\changed. The message names the command that holds the lock when it is a
+        \\gc or a restore, and says "writers" when it is shared importers that are
+        \\keeping a gc waiting. Run the command again when the other one is done. A
+        \\lock never outlives its process: if nothing else is running, it was held
+        \\for the last of those ten seconds only.
+        ,
+    },
+    .{
+        .code = .W0410,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "a file was left out of the import",
+        .explanation =
+        \\The store keeps regular files, directories and symlinks. A device
+        \\node, a FIFO or a socket in the imported directory was skipped, and the
+        \\message names it. A root filesystem normally has none of these on disk:
+        \\a container gets its own /dev, so the digest does not miss them.
+        \\
+        \\Past the first few, the warnings are counted and the last one says how
+        \\many were not shown.
+        ,
+    },
+    .{
+        .code = .W0411,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "an extended attribute was left out of the import",
+        .explanation =
+        \\The store keeps the user.* attributes and security.capability (the file
+        \\capabilities). Others were skipped, and the message names the file and
+        \\the attribute: the trusted.*, system.* and security.* attributes
+        \\other than the capability (SELinux labels, ACLs), an attribute with a
+        \\name or value over the store's limits, and any attribute past the
+        \\sixteenth on a file. user.overlay.* is overlayfs's own and is never
+        \\imported, without a warning.
+        \\
+        \\The digest does not include what was left out.
+        ,
+    },
+    .{
+        .code = .W0412,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "some files have an owner or group that could not be mapped",
+        .explanation =
+        \\The import runs in the user's namespace, where only the user (as 0) and
+        \\the subordinate range from /etc/subuid and /etc/subgid (as 1 and up)
+        \\exist. A file owned by any other host id shows as 65534, the kernel's
+        \\overflow id, and that is what the store records, so the container sees
+        \\those files owned by 65534 whatever their owner on the host.
+        \\
+        \\The message counts the owners and the groups and names the first path.
+        \\A file that really is owned by 65534 in the container is counted too,
+        \\because the kernel gives no way to tell the two apart. The digest holds
+        \\65534 either way. To record a real owner, chown the files to an id the
+        \\user can map, or import as a user with a subuid range.
+        ,
+    },
+    .{
+        .code = .W0413,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "a container's upper layer could not be removed",
+        .explanation =
+        \\Every container started from a tree digest has an upper layer under
+        \\$XDG_STATE_HOME/zbx/containers/<name>, which is kept as long as its run
+        \\record is. When the record is dropped (zbx keeps the newest 32), or a
+        \\new run takes the name, the layer is removed, from inside the user's
+        \\namespace because it holds files owned by subordinate ids. This one
+        \\could not be removed, and the message names the path and the reason.
+        \\
+        \\Nothing else is affected. After checking that no container uses it,
+        \\remove the directory by hand from inside a user namespace that maps
+        \\your subordinate id range, the one zbx itself uses: its files belong to
+        \\those ids, and the next zbx run with the same container name tries
+        \\again.
         ,
     },
     .{
@@ -781,9 +1312,10 @@ pub const registry = [_]Entry{
         .summary = "no state directory to keep bundles and run records in",
         .explanation =
         \\zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx,
-        \\or ~/.local/state/zbx when that is not set. Neither variable names an
-        \\absolute directory here, so there is nowhere to read a run record from or
-        \\to write a bundle to.
+        \\or ~/.local/state/zbx when that is not set, and the layers of a container
+        \\started from a tree digest under its containers directory. Neither
+        \\variable names an absolute directory here, so there is nowhere to read a
+        \\run record from, to write a bundle to or to put a container.
         \\
         \\Set HOME, or point XDG_STATE_HOME at a directory you can write to.
         ,
@@ -870,7 +1402,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u8));
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(400_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));
@@ -985,8 +1517,11 @@ pub fn can_end_run(code: Code) bool {
     return switch (code) {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
-        .E0701, .E0702, .E0703, .E0704 => false,
+        .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
+        .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
+        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
+        .W0410, .W0411, .W0412, .W0413 => false,
         else => true,
     };
 }

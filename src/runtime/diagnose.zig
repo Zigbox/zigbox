@@ -30,6 +30,8 @@ const Plan = plan_mod.Plan;
 pub const RunInfo = struct {
     name: []const u8,
     rootfs: []const u8,
+    /// The digest of the tree the run started from; empty for a run of a directory.
+    tree: []const u8 = "",
 };
 
 /// What a failed step's diagnostic may need besides the step: how a helper ended, and why a
@@ -180,6 +182,7 @@ pub fn step_failed(
         ),
         .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
         .exec => command_failed(diag, plan, info, failure),
+        .mount_overlay => overlay_failed(diag, operation, failure),
         .restrict_capabilities,
         .clear_ambient,
         => hardening_failed(diag, .E0207, operation, failure),
@@ -205,6 +208,26 @@ fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {
     assert(diag.code != null);
     const step = &plan.steps[index];
     diag.context("step", "{s} ({d} of {d})", .{ @tagName(step.kind), index + 1, plan.count });
+}
+
+/// ZBX-E0425: the kernel refused the container's overlay mount.
+fn overlay_failed(diag: *Diag, operation: []const u8, failure: Failure) void {
+    assert(diag.code == null);
+    diag.raise(.E0425);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    diag.cause("overlayfs needs Linux 5.11 or newer with the overlay module, and an upper layer " ++
+        "on a file system that keeps user.* extended attributes", .{});
+    if (failure.err == error.AccessDenied) {
+        diag.fix(.{ .sentence = "look for the policy that denies it:", .command = dmesg_policy });
+    }
+    diag.fix(.{ .sentence = "see what this host allows:", .command = "zbx doctor" });
+    diag.fix(
+        .{
+            .sentence = "or run a directory instead:",
+            .command = "zbx run --rootfs ./alpine -- sh",
+        },
+    );
+    assert(diag.code.? == .E0425);
 }
 
 fn namespaces_failed(host: Host, facts: *doctor.Facts, diag: *Diag, failure: Failure) void {
@@ -324,7 +347,10 @@ fn setup_failed(
     switch (step.kind) {
         // The directories zbx makes in the user's own rootfs: a problem with that directory,
         // not with the host.
-        .make_proc_dir, .make_dev_dir => {
+        .make_proc_dir, .make_dev_dir => if (info.tree.len > 0) {
+            diag.fix(.{ .sentence = "the tree has no such directory and a read-only run can't " ++
+                "make it: import a root filesystem that has /proc and /dev" });
+        } else {
             diag.fix_with("make the directories as the rootfs's owner:", "mkdir -p \"{s}/proc\" " ++
                 "\"{s}/dev\"", .{ info.rootfs, info.rootfs });
             diag.fix(.{ .sentence = "or unpack the rootfs as the user who runs zbx" });
@@ -377,7 +403,11 @@ fn read_only_failed(
     diag.raise(.E0209);
     errors.cause_host_error(diag, operation, failure.err, failure.errno);
     const makes = step.kind == .make_tmp_dir or step.kind == .make_run_dir;
-    if (makes) {
+    if (makes and info.tree.len > 0) {
+        diag.cause("the tree has no such directory and a read-only run can't make it", .{});
+        diag.fix(.{ .sentence = "import a root filesystem that has /tmp and /run, or run it " ++
+            "without --read-only" });
+    } else if (makes) {
         diag.cause("the rootfs has no such directory and is not writable by this user, so it " ++
             "cannot be made; a read-only rootfs needs /tmp and /run before it is made " ++
             "read-only", .{});
@@ -467,6 +497,12 @@ fn command_failed(diag: *Diag, plan: *const Plan, info: RunInfo, failure: Failur
         },
     }
     diag.context("cmd", "{s}", .{program});
+    if (info.tree.len > 0) {
+        diag.fix_with("look in the tree:", "zbx run {s} -- /bin/busybox ls /bin", .{info.tree});
+        diag.fix_with("or use the program's full path:", "zbx run {s} -- /bin/sh", .{info.tree});
+        assert(diag.code.? == .E0202);
+        return;
+    }
     diag.fix_with("look in the rootfs:", "ls -l \"{s}/bin\"", .{info.rootfs});
     diag.fix_with("or use the program's full path:", "zbx run --rootfs {s} -- /bin/sh", .{
         info.rootfs,
@@ -781,7 +817,8 @@ pub fn no_schema(diag: *Diag, topic: []const u8) void {
     diag.raise(.E0406);
     diag.while_("looking up a schema", .{});
     diag.cause(
-        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop and doctor",
+        "'{s}' has no JSON schema; the commands with one are run, bundle, ps, stop, doctor, and " ++
+            "store-import, store-ls, store-du and store-rm",
         .{echo},
     );
     diag.context("arg", "{s}", .{echo});

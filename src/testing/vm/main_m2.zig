@@ -345,13 +345,22 @@ fn accept_limits_visible(session: *Session, out: *Io.Writer, timer: *H.Timer) !v
     };
     const scope = app_slice ++ "/zbx-lim1.scope";
     const look = "sleep 2; " ++ comptime scope_of("lim1") ++ "d=" ++ scope ++
-        "; for f in memory.max memory.swap.max pids.max cpu.max; do echo $f=$(cat $d/$f); done";
+        "; for f in memory.max memory.swap.max pids.max cpu.max; do echo $f=$(cat $d/$f); done" ++
+        "; echo PROCS:$(wc -l < $d/cgroup.procs)";
     const result = try session.run(look, limits.command_timeout_kvm_s);
     try H.show(out, "lim1 while it runs: the scope's files", result);
     checks_m2.check_limits_visible(result.output) catch |err| {
         return fail_step(out, "ACCEPT limits", "expected memory.max=67108864, " ++
-            "memory.swap.max=0, pids.max=20, cpu.max=50000 100000", err);
+            "memory.swap.max=0, pids.max=21 (20 and the keeper), cpu.max=50000 100000", err);
     };
+    const hidden = run_prefix ++
+        " --name lim2 -- sh -c 'cat /proc/[0-9]*/comm | grep -c zbx; true'";
+    const unseen = try H.run_split(session, hidden);
+    try H.show_split(out, "the keeper is not inside the container: no process named zbx", unseen);
+    if (!std.mem.eql(u8, std.mem.trim(u8, unseen.streams.stdout, " \r\n"), "0")) {
+        return fail_step(out, "ACCEPT limits", "the scope's keeper is visible inside the " ++
+            "container", error.KeeperVisible);
+    }
     const stop = zbx ++ " stop lim1";
     _ = try session.run(stop, limits.command_timeout_kvm_s);
     try expect_scope_gone(session, out, "lim1", "ACCEPT limits");

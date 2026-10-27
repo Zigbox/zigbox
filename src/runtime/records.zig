@@ -5,7 +5,9 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 3 added the host pid of the container's PID 1 and of the
+//! skipped, never misread. Version 4 added the digest of the tree the container was started from
+//! and the path of its upper layer (both empty for a run of a plain `--rootfs` directory).
+//! Version 3 added the host pid of the container's PID 1 and of the
 //! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the
 //! scope's name, why the run ended (`EndReason`) and whether it was detached; a version 1
 //! record reads with no limits, no scope, not detached, and the reason its exit implies. Unknown
@@ -86,6 +88,10 @@ pub const View = struct {
     /// `zbx` that started the run, or the supervisor of a detached one); zero if unknown.
     pid: u32 = 0,
     supervisor: u32 = 0,
+    /// Version 4: the digest of the tree the run started from, and the upper layer of its
+    /// overlay; empty for a run of a directory.
+    tree: []const u8 = "",
+    upper: []const u8 = "",
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -178,6 +184,13 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
     write_limit(writer, "limit_memory", view.limits.memory_bytes);
     write_limit(writer, "limit_pids", view.limits.pids);
     write_limit(writer, "limit_cpu_millis", view.limits.cpu_millis);
+    assert(view.tree.len <= constants.store_digest_text_bytes);
+    assert(view.upper.len <= constants.containers_path_bytes_max);
+    write_bytes(writer, "    .tree = ");
+    write_string(writer, view.tree);
+    write_bytes(writer, ",\n    .upper = ");
+    write_string(writer, view.upper);
+    write_bytes(writer, ",\n");
 }
 
 fn write_limit(writer: *std.Io.Writer, name: []const u8, value: anytype) void {
@@ -251,7 +264,10 @@ comptime {
     const labels = constants.labels_count_max * (label_bytes + 16);
     const diagnostic = 4 * constants.diag_json_bytes_max + 32;
     const scope = 4 * constants.scope_name_bytes_max + 160; // The name and the version 2 lines.
-    assert(strings + command + labels + diagnostic + scope + 512 <= constants.record_bytes_max);
+    const store_strings = constants.store_digest_text_bytes + constants.containers_path_bytes_max;
+    const store = 4 * store_strings + 64;
+    const total = strings + command + labels + diagnostic + scope + store + 512;
+    assert(total <= constants.record_bytes_max);
 }
 
 // ---- Reading -------------------------------------------------------------------------------
@@ -282,6 +298,11 @@ pub const Parsed = struct {
     /// Version 3: the host pids (zero for an older record).
     pid: u32,
     supervisor: u32,
+    /// Version 4: the tree digest and the upper layer; empty for an older record.
+    tree: [constants.store_digest_text_bytes]u8,
+    tree_len: u8,
+    upper: [constants.containers_path_bytes_max]u8,
+    upper_len: u16,
     /// The command's words, each followed by a NUL; `command_truncated` says the record cut it.
     command: [constants.record_command_bytes_max + constants.command_words_count_max]u8,
     command_len: u16,
@@ -314,6 +335,16 @@ pub const Parsed = struct {
             if (at == index) return .{ key, value };
         }
         unreachable; // The count says it is there.
+    }
+
+    pub fn tree_slice(parsed: *const Parsed) []const u8 {
+        assert(parsed.tree_len <= parsed.tree.len);
+        return parsed.tree[0..parsed.tree_len];
+    }
+
+    pub fn upper_slice(parsed: *const Parsed) []const u8 {
+        assert(parsed.upper_len <= parsed.upper.len);
+        return parsed.upper[0..parsed.upper_len];
     }
 
     pub fn scope_slice(parsed: *const Parsed) []const u8 {
@@ -429,6 +460,8 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.limits = .{};
     out.pid = 0;
     out.supervisor = 0;
+    out.tree_len = 0;
+    out.upper_len = 0;
     out.command_len = 0;
     out.command_words = 0;
     out.labels_len = 0;
@@ -533,6 +566,16 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     }
     if (std.mem.eql(u8, key, "supervisor")) {
         out.supervisor = std.fmt.parseInt(u32, value, 10) catch return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "tree")) {
+        const length = parse_string(value, &out.tree) orelse return false;
+        out.tree_len = @intCast(length);
+        return true;
+    }
+    if (std.mem.eql(u8, key, "upper")) {
+        const length = parse_string(value, &out.upper) orelse return false;
+        out.upper_len = @intCast(length);
         return true;
     }
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
@@ -791,6 +834,29 @@ pub const Skipped = struct {
     }
 };
 
+/// The names of the runs whose records `prune` deleted, so that whoever kept something for
+/// them (a container's upper layer) can let it go.
+pub const Pruned = struct {
+    count: u32,
+    names: [constants.dir_entries_max][constants.container_name_bytes_max]u8,
+    lengths: [constants.dir_entries_max]u8,
+
+    fn add(pruned: *Pruned, stem: []const u8) void {
+        assert(stem.len > 0);
+        // Not a name we made (a stray `Notes.zon`): it owns no container directory.
+        if (spec_mod.name_problem(stem) != null) return;
+        if (pruned.count == pruned.names.len) return;
+        @memcpy(pruned.names[pruned.count][0..stem.len], stem);
+        pruned.lengths[pruned.count] = @intCast(stem.len);
+        pruned.count += 1;
+    }
+
+    pub fn name(pruned: *const Pruned, index: u32) []const u8 {
+        assert(index < pruned.count);
+        return pruned.names[index][0..pruned.lengths[index]];
+    }
+};
+
 const Entry = struct {
     index: u32,
     started: u64,
@@ -806,8 +872,15 @@ fn is_record_name(name: []const u8) bool {
 
 /// Deletes the oldest records until at most `runs_max` remain. `keep` (the one just saved) is
 /// never deleted. Records that cannot be read count as the oldest and are noted in `skipped`.
-pub fn prune(host: Host, dir: *const Dir, keep: []const u8, skipped: *Skipped) host_mod.Error!void {
+pub fn prune(
+    host: Host,
+    dir: *const Dir,
+    keep: []const u8,
+    skipped: *Skipped,
+    pruned: *Pruned,
+) host_mod.Error!void {
     skipped.reset();
+    pruned.count = 0;
     var listing: host_mod.DirListing = undefined;
     try host.list_directory(dir.text(), &listing);
     var records_listed: u32 = 0;
@@ -835,7 +908,9 @@ pub fn prune(host: Host, dir: *const Dir, keep: []const u8, skipped: *Skipped) h
     for (0..count) |_| {
         if (remaining <= constants.runs_max) break;
         const oldest = oldest_of(&listing, entries[0..count]) orelse break;
-        try remove_record(host, dir, listing.name(entries[oldest].index));
+        const gone = listing.name(entries[oldest].index);
+        try remove_record(host, dir, gone);
+        pruned.add(gone[0 .. gone.len - constants.record_suffix.len]);
         entries[oldest].keep = true; // Gone: out of the running.
         entries[oldest].started = std.math.maxInt(u64);
         remaining -= 1;
@@ -965,11 +1040,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 3,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 4,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(@as(u32, 3), parsed.version);
+        try testing.expectEqual(@as(u32, 4), parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -1007,7 +1082,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 4,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 5,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1120,7 +1195,8 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     view.started = 2_000;
     try save(sim.interface(), &dir, &view);
     var skipped: Skipped = undefined;
-    try prune(sim.interface(), &dir, "latest", &skipped);
+    var pruned: Pruned = undefined;
+    try prune(sim.interface(), &dir, "latest", &skipped, &pruned);
     try testing.expectEqual(@as(u32, 2), skipped.count);
     var listing: host_mod.DirListing = undefined;
     try sim.interface().list_directory(dir.text(), &listing);
@@ -1130,4 +1206,75 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     try testing.expect(sim.world.read_written(prefix ++ "future.zon") == null);
     try testing.expect(sim.world.read_written(prefix ++ "legacy.zon") != null);
     try testing.expect(sim.world.read_written(prefix ++ "run-00.zon") != null);
+}
+
+test "a record file whose stem is not a container name owns no container directory" {
+    // Goal: pruning must not hand `Notes` or `my run` to the code that removes a container's
+    // directory (it asserts a valid name). Method: 31 good records, the one just saved and two
+    // strays that cannot be read make 34; the strays go as the oldest, and are not in `pruned`.
+    var sim: HostSim = undefined;
+    sim_with_home(&sim);
+    var dir: Dir = undefined;
+    try testing.expect(locate(sim.interface(), &dir));
+    try ensure(sim.interface(), &dir);
+    var view = sample_view();
+    var name_buffer: [16]u8 = undefined;
+    for (0..31) |number| {
+        view.name = try std.fmt.bufPrint(&name_buffer, "run-{d:0>2}", .{number});
+        view.started = 1_000 + number;
+        try save(sim.interface(), &dir, &view);
+    }
+    const prefix = "/home/alice/.local/state/zbx/runs/";
+    try testing.expect(sim.world.write_file(prefix ++ "Notes.zon", "notes") == null);
+    try testing.expect(sim.world.write_file(prefix ++ "my run.zon", "x") == null);
+    view.name = "latest";
+    view.started = 2_000;
+    try save(sim.interface(), &dir, &view);
+    var skipped: Skipped = undefined;
+    var pruned: Pruned = undefined;
+    try prune(sim.interface(), &dir, "latest", &skipped, &pruned);
+    try testing.expect(sim.world.read_written(prefix ++ "Notes.zon") == null);
+    try testing.expectEqual(@as(u32, 0), pruned.count);
+    try testing.expect(sim.world.read_written(prefix ++ "run-00.zon") != null);
+}
+
+test "version 4 keeps the tree and the upper layer, and an older record has neither" {
+    // Goal: the fields the store added read back, and version 3 records (written by the M2
+    // release) still read, with the two empty. Method: render with both, then cut them out.
+    var view: View = .{
+        .name = "web-1",
+        .rootfs = "/home/alice/.local/state/zbx/containers/web-1/merged",
+        .command = &.{"sh"},
+        .labels = &.{},
+        .started = 5,
+        .ended = null,
+        .exit = .running,
+        .ids = .full,
+        .zbx_version = "0.0.0",
+    };
+    view.tree = "b3:" ++ @import("../test_util.zig").repeat('a', 64);
+    view.upper = "/home/alice/.local/state/zbx/containers/web-1/upper";
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqualStrings(view.tree, parsed.tree_slice());
+    try testing.expectEqualStrings(view.upper, parsed.upper_slice());
+    // A version 3 record: no such lines, and the version says 3.
+    var old: [constants.record_bytes_max]u8 = undefined;
+    var length: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "    .tree = ")) continue;
+        if (std.mem.startsWith(u8, line, "    .upper = ")) continue;
+        const fixed = if (std.mem.eql(u8, line, "    .version = 4,")) "    .version = 3," else line;
+        @memcpy(old[length..][0..fixed.len], fixed);
+        old[length + fixed.len] = '\n';
+        length += fixed.len + 1;
+    }
+    try parse(old[0 .. length - 1], &parsed);
+    try testing.expectEqual(@as(u32, 3), parsed.version);
+    try testing.expectEqual(@as(usize, 0), parsed.tree_slice().len);
+    try testing.expectEqual(@as(usize, 0), parsed.upper_slice().len);
+    try testing.expectEqualStrings("web-1", parsed.name_slice());
 }

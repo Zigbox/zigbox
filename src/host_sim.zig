@@ -13,6 +13,8 @@ const constants = @import("constants.zig");
 const bpf = @import("runtime/bpf.zig");
 const host = @import("host.zig");
 const sim_world = @import("sim_world.zig");
+const fs_sim = @import("store/fs_sim.zig");
+const store_fs = @import("store/fs.zig");
 
 pub const File = struct {
     path: []const u8,
@@ -73,6 +75,20 @@ const OpenFile = struct {
     offset: u32,
 };
 
+/// The file system of a host that was given none: a machine that is down, on which every call
+/// fails with EIO. One for all hosts, since it never holds anything.
+var down_files: fs_sim.SimFs = undefined;
+var down_ready: bool = false;
+
+fn down_fs() store_fs.Fs {
+    if (!down_ready) {
+        down_files.init(0);
+        down_files.crashed = true;
+        down_ready = true;
+    }
+    return down_files.interface();
+}
+
 pub const HostSim = struct {
     prng: std.Random.Xoshiro256,
     faults: Faults,
@@ -105,6 +121,9 @@ pub const HostSim = struct {
     gid_value: u32,
     environment_variables: []const EnvironmentVariable,
     step_fault_fired: bool,
+    /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
+    /// uses it; null for a host with none.
+    store_fs: ?*fs_sim.SimFs,
 
     /// Initialises in place: the output buffers make this struct large.
     pub fn init(sim: *HostSim, seed: u64, files: []const File) void {
@@ -133,6 +152,7 @@ pub const HostSim = struct {
         sim.gid_value = 1000;
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
+        sim.store_fs = null;
         assert(sim.open_count() == 0);
         assert(sim.stdout().len == 0);
     }
@@ -159,7 +179,8 @@ pub const HostSim = struct {
             if (slot != null) count += 1;
         }
         assert(count <= constants.sim_open_files_max);
-        return count + sim.world.open_pipe_ends() + sim.world.bus.open_count();
+        const store_open = if (sim.store_fs) |files| files.open_count() else 0;
+        return count + sim.world.open_pipe_ends() + sim.world.bus.open_count() + store_open;
     }
 
     const vtable: host.VTable = .{
@@ -179,6 +200,7 @@ pub const HostSim = struct {
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
+        .start_keeper = start_keeper,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -219,6 +241,7 @@ pub const HostSim = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .filesystem = filesystem,
     };
 
     fn from_context(context: *anyopaque) *HostSim {
@@ -591,6 +614,13 @@ pub const HostSim = struct {
         return sim.world.spawn(flags, entry, entry_context) orelse sim.model_error(11);
     }
 
+    fn start_keeper(context: *anyopaque, hold: host.Handle) host.Error!host.Pid {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.keeper_fork_errno) |errno| return sim.model_error(errno);
+        return sim.world.start_keeper(hold) orelse sim.model_error(11);
+    }
+
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
         const sim = from_context(context);
         try sim.begin_call();
@@ -840,6 +870,12 @@ pub const HostSim = struct {
 
     fn ignore_broken_pipe(context: *anyopaque, ignore: bool) void {
         from_context(context).world.broken_pipe_ignored = ignore;
+    }
+
+    fn filesystem(context: *anyopaque) store_fs.Fs {
+        const sim = from_context(context);
+        if (sim.store_fs) |files| return files.interface();
+        return down_fs();
     }
 
     fn begin_step(context: *anyopaque, index: u32) void {

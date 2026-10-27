@@ -154,12 +154,29 @@ pub fn alive(host: Host, pid: u32, scope: []const u8) bool {
     const status_path = std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}) catch unreachable;
     const status = host.read_file(status_path, &buffer) catch return false;
     if (!innermost_pid_is_one(status)) return false;
+    // A PID 1 that ended and has not been reaped answers `kill(pid, 0)` and keeps its status
+    // file. The scope's `populated` used to tell it from a live one; the scope's keeper keeps
+    // the scope populated until the owner has read its counters, so the process says it itself.
+    if (is_zombie(status)) return false;
     if (scope.len == 0) return true;
     // Cannot fail: "/proc/" and "/cgroup" are 14 bytes and a pid at most ten digits.
     const cgroup_path = std.fmt.bufPrint(&path, "/proc/{d}/cgroup", .{pid}) catch unreachable;
     const cgroup = host.read_file(cgroup_path, &buffer) catch return false;
     if (std.mem.indexOf(u8, cgroup, scope) == null) return false;
     return populated(host, cgroup);
+}
+
+/// `State:\tZ (zombie)` (or `X`, dead): the process ended and its parent has not collected it.
+pub fn is_zombie(status: []const u8) bool {
+    assert(status.len <= constants.status_bytes_max);
+    var lines = std.mem.splitScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        const key = "State:";
+        if (!std.mem.startsWith(u8, line, key)) continue;
+        const state = std.mem.trimStart(u8, line[key.len..], " \t");
+        return state.len > 0 and (state[0] == 'Z' or state[0] == 'X');
+    }
+    return false;
 }
 
 /// `NSpid:\t<host pid>\t...\t1`: more than one pid, the last is 1.

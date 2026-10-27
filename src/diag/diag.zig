@@ -247,6 +247,66 @@ pub const Diag = struct {
         return exit;
     }
 
+    /// The diagnostic as plain lines, for a pipe: the code, then one line per item, fields
+    /// separated by a tab (text is printable ASCII, so neither tab nor newline is in it). The
+    /// store's worker (a child in a user namespace) sends its failure this way, and the caller
+    /// gets the same diagnostic back with `decode`.
+    pub fn encode(diag: *const Diag, out: *[constants.diag_carry_bytes_max]u8) []const u8 {
+        assert(diag.code != null);
+        var writer = std.Io.Writer.fixed(out);
+        // Cannot fail: the buffer holds the most a diagnostic can be (checked below).
+        writer.print("{s}\n", .{codes.full_name(diag.code.?)}) catch unreachable;
+        for (diag.whiles.slice()) |item| {
+            writer.print("w\t{s}\n", .{item.slice()}) catch unreachable; // Same bound.
+        }
+        for (diag.causes.slice()) |item| {
+            writer.print("c\t{s}\n", .{item.slice()}) catch unreachable; // Same bound.
+        }
+        for (diag.pairs.slice()) |item| {
+            writer.print("k\t{s}\t{s}\n", .{ item.key_slice(), item.value.slice() }) catch
+                unreachable;
+        }
+        for (diag.fixes.slice()) |item| {
+            writer.print("f\t{s}\t{s}\n", .{ item.sentence.slice(), item.command.slice() }) catch
+                unreachable;
+        }
+        return writer.buffered();
+    }
+
+    /// Reads what `encode` wrote into a fresh collector. False if the bytes are not that.
+    pub fn decode(diag: *Diag, bytes: []const u8) bool {
+        assert(diag.code == null);
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        const first = lines.next() orelse return false;
+        diag.code = codes.parse(first) orelse return false;
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            if (line.len < 3 or line[1] != '\t') return false;
+            const rest = line[2..];
+            switch (line[0]) {
+                'w' => diag.while_("{s}", .{rest}),
+                'c' => diag.cause("{s}", .{rest}),
+                'k' => {
+                    const tab = std.mem.indexOfScalar(u8, rest, '\t') orelse return false;
+                    if (tab == 0 or tab > constants.diag_key_bytes_max) return false;
+                    const slot = diag.pairs.next() orelse continue;
+                    slot.key = @splat(0);
+                    @memcpy(slot.key[0..tab], rest[0..tab]);
+                    slot.key_len = @intCast(tab);
+                    slot.value = .{};
+                    put(&slot.value, "{s}", .{rest[tab + 1 ..]});
+                },
+                'f' => {
+                    const tab = std.mem.indexOfScalar(u8, rest, '\t') orelse return false;
+                    if (tab == 0) return false;
+                    diag.fix(.{ .sentence = rest[0..tab], .command = rest[tab + 1 ..] });
+                },
+                else => return false,
+            }
+        }
+        return diag.causes.count > 0;
+    }
+
     /// The newest cause: the one default output shows. Null if none was added.
     pub fn last_cause(diag: *const Diag) ?[]const u8 {
         assert(diag.causes.count <= constants.diag_causes_count_max);
@@ -361,4 +421,34 @@ test "reset clears everything, including the code" {
     try testing.expectEqual(@as(u32, 0), diag.causes.count);
     diag.raise(.E0002); // Allowed again: reset starts a new diagnostic.
     try testing.expectEqual(@as(u8, constants.exit_user), diag.exit_code());
+}
+
+test "a diagnostic crosses a pipe as lines and comes back the same" {
+    // Goal: the store's worker can report a failure whole. Method: a diagnostic with every kind
+    // of item, encoded and decoded, rendered the same; and bytes that are not one are refused.
+    var diag: Diag = undefined;
+    diag.reset();
+    diag.raise(.E0416);
+    diag.while_("writing the store", .{});
+    diag.cause("write failed: no space left on the device (ENOSPC)", .{});
+    diag.cause("2 objects were written", .{});
+    diag.context("path", "{s}", .{"/home/alice/.local/share/zbx/store"});
+    diag.fix(.{ .sentence = "free space:", .command = "df -h '/home/alice'" });
+    diag.fix(.{ .sentence = "then run it again" });
+    var buffer: [constants.diag_carry_bytes_max]u8 = undefined;
+    const bytes = diag.encode(&buffer);
+    var back: Diag = undefined;
+    back.reset();
+    try testing.expect(back.decode(bytes));
+    try testing.expectEqual(diag.code, back.code);
+    try testing.expectEqualStrings(diag.last_cause().?, back.last_cause().?);
+    try testing.expectEqual(diag.causes.count, back.causes.count);
+    try testing.expectEqual(diag.fixes.count, back.fixes.count);
+    try testing.expectEqualStrings("df -h '/home/alice'", back.fixes.items[0].command.slice());
+    try testing.expectEqualStrings("path", back.pairs.items[0].key_slice());
+    var other: Diag = undefined;
+    other.reset();
+    try testing.expect(!other.decode("not a diagnostic\n"));
+    other.reset();
+    try testing.expect(!other.decode("ZBX-E0416\nx\tbad\n"));
 }

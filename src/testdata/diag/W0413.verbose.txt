@@ -1,0 +1,17 @@
+warning[ZBX-W0413]: a container's upper layer could not be removed
+  while  removing a container's layers
+  cause  removing a file or directory failed: permission denied (EACCES)
+  cause  it stopped at '/home/alice/.local/state/zbx/containers/damaged/left'
+  path   /home/alice/.local/state/zbx/containers/damaged/left
+  fix    remove the container's directory by hand (zbx explain W0413)
+  more   zbx explain W0413
+  docs   https://zigbox.github.io/zigbox/errors/W0413.html
+warning[ZBX-W0203]: skipped a run record that can't be read
+  while  looking through the run records
+  cause  2 run records were skipped; the first, 'damaged.zon', is not a valid
+         record
+  path   /home/alice/.local/state/zbx/runs
+  fix    look at them:   ls -l "/home/alice/.local/state/zbx/runs"
+  more   zbx explain W0203
+  docs   https://zigbox.github.io/zigbox/errors/W0203.html
+zbx: note: scope zbx-web-1.scope went by itself just after the run ended

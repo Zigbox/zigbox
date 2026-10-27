@@ -3,24 +3,29 @@ zbx - rootless container runtime
 usage: zbx [options] <command>
 
 commands:
-  run             run a command in a container whose root is a directory (see below)
+  run             run a command in a container whose root is a tree or a directory (see below)
   bundle          collect a redacted diagnostic bundle for a run (see below)
   doctor          check that this host can run zbx (a diagnostic per failing check)
   ps              list the containers (--all: the ones that ended too)
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+  commit <name>   turn what a stopped container changed into a new tree and print its digest
+  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
   schema <cmd>    print the JSON schema of a command's output
   explain <code>  explain a diagnostic code offline, for example E0001
   help            show this text
   --version       print the version
 
 run:
+  zbx run <digest> [--name <name>] -- <command> [args...]
   zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
-  --rootfs <dir>  the directory to use as the container's root (required)
+  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
+                  an overlay: its writes go to the container's own layer, never the store
+  --rootfs <dir>  or a directory to use as the container's root, read and written in place
   --name <name>   the container's name and hostname (default: zbx- and six hex digits)
   --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
   --pids <n>      limit on processes and threads, as in 64
   --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
-  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
+  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -29,6 +34,19 @@ run:
 stop:
   zbx stop <name> [--grace <ms>] [--timeout <ms>]
   --timeout <ms>  give up (exit 2) if the container is still there after this long
+
+store:
+  zbx store import <dir>   read a directory into the store and print its digest
+  zbx store ls             list the roots (the trees the store keeps)
+  zbx store du [<digest>]  the store's size, or what one tree costs
+  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
+  zbx store diff <a> <b>   list the paths that differ between two trees
+  zbx store verify         rehash everything; name each damaged file and the paths it breaks
+  zbx store gc             plan a collection of what no root reaches (changes nothing)
+  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
+  zbx store gc --trash     list the trash
+  zbx store restore <id>   put a gc's trash back
+  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]

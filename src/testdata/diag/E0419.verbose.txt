@@ -1,0 +1,8 @@
+error[ZBX-E0419]: can't run the store worker
+  while  starting the store worker
+  cause  newuidmap ended with status 1
+  cause  newuidmap said: newuidmap: write to uid_map failed: Operation not
+         permitted?
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0419
+  docs   https://zigbox.github.io/zigbox/errors/E0419.html

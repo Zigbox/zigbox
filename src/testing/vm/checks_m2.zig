@@ -140,7 +140,9 @@ pub fn check_hardening_status(streams: Streams, status: u8) Error!void {
 pub fn check_limits_visible(output: []const u8) Error!void {
     const wanted = [_][]const u8{
         "SCOPE-lim1:1", "memory.max=67108864",  "memory.swap.max=0",
-        "pids.max=20",  "cpu.max=50000 100000",
+        "pids.max=21",  "cpu.max=50000 100000",
+        // The container's PID 1 and the scope's keeper, and nothing else.
+        "PROCS:2",
     };
     for (wanted) |line| {
         if (!has_line(output, line)) return error.LimitsWrong;
@@ -355,8 +357,15 @@ test "hardening status: the allowlist mask, no_new_privs, seccomp filter mode" {
 
 test "limits and cleanup" {
     const running = "SCOPE-lim1:1\nmemory.max=67108864\nmemory.swap.max=0\n" ++
-        "pids.max=20\ncpu.max=50000 100000\n";
+        "pids.max=21\ncpu.max=50000 100000\nPROCS:2\n";
     try check_limits_visible(running);
+    // The file holds --pids 20 and the keeper's one, not 20; and the scope has two processes.
+    const unkept = "SCOPE-lim1:1\nmemory.max=67108864\nmemory.swap.max=0\n" ++
+        "pids.max=20\ncpu.max=50000 100000\nPROCS:2\n";
+    try testing.expectError(error.LimitsWrong, check_limits_visible(unkept));
+    const third = "SCOPE-lim1:1\nmemory.max=67108864\nmemory.swap.max=0\n" ++
+        "pids.max=21\ncpu.max=50000 100000\nPROCS:3\n";
+    try testing.expectError(error.LimitsWrong, check_limits_visible(third));
     try testing.expectError(error.LimitsWrong, check_limits_visible("SCOPE-lim1:1\n"));
     const gone = "SCOPE-lim1:0\nAFTER-CGROUP:0\nAFTER-MANAGER:0\n";
     try check_scope_gone(gone, "lim1");

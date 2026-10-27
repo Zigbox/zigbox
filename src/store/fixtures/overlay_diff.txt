@@ -1,0 +1,17 @@
+A /etc/added
+M /etc/chmod-me  mode
+D /etc/delete-me
+M /etc/hostname  content
+M /etc/keep  content
+M /etc/tagged  content
+D /usr/lib/
+D /usr/lib/libx
+A /usr/lib2/
+A /usr/lib2/libx
+D /usr/share/doc/one
+A /usr/share/doc/three
+D /usr/share/doc/two
+A /var/keep-hard
+A /var/link
+A /var/newdir/
+A /var/newdir/file

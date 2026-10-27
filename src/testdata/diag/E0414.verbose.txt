@@ -1,0 +1,8 @@
+error[ZBX-E0414]: can't read the directory to import
+  while  reading the directory to import
+  cause  lstat of /nowhere failed: no such file or directory (ENOENT)
+  cause  '/nowhere' does not exist
+  path   /nowhere
+  fix    look at it:   ls -ld -- '/nowhere'
+  more   zbx explain E0414
+  docs   https://zigbox.github.io/zigbox/errors/E0414.html

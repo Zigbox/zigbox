@@ -74,9 +74,9 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0701</h1>
 <p class="summary">no state directory to keep bundles and run records in</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx, or ~/.local/state/zbx when that is not set. Neither variable names an absolute directory here, so there is nowhere to read a run record from or to write a bundle to.</p>
+<p>zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx, or ~/.local/state/zbx when that is not set, and the layers of a container started from a tree digest under its containers directory. Neither variable names an absolute directory here, so there is nowhere to read a run record from, to write a bundle to or to put a container.</p>
 <p>Set HOME, or point XDG_STATE_HOME at a directory you can write to.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

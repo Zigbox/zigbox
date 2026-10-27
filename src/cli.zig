@@ -20,11 +20,13 @@ const explain = @import("diag/explain.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
+const image_mod = @import("runtime/image.zig");
 const runtime = @import("runtime/run.zig");
 const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
+const store_commands = @import("store_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 
 const Host = host_mod.Host;
@@ -35,24 +37,29 @@ const help_text =
     \\usage: zbx [options] <command>
     \\
     \\commands:
-    \\  run             run a command in a container whose root is a directory (see below)
+    \\  run             run a command in a container whose root is a tree or a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
     \\  doctor          check that this host can run zbx (a diagnostic per failing check)
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+    \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
+    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
     \\  --version       print the version
     \\
     \\run:
+    \\  zbx run <digest> [--name <name>] -- <command> [args...]
     \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
-    \\  --rootfs <dir>  the directory to use as the container's root (required)
+    \\  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
+    \\                  an overlay: its writes go to the container's own layer, never the store
+    \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
     \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
     \\  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
-    \\  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
+    \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -61,6 +68,19 @@ const help_text =
     \\stop:
     \\  zbx stop <name> [--grace <ms>] [--timeout <ms>]
     \\  --timeout <ms>  give up (exit 2) if the container is still there after this long
+    \\
+    \\store:
+    \\  zbx store import <dir>   read a directory into the store and print its digest
+    \\  zbx store ls             list the roots (the trees the store keeps)
+    \\  zbx store du [<digest>]  the store's size, or what one tree costs
+    \\  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
+    \\  zbx store diff <a> <b>   list the paths that differ between two trees
+    \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
+    \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
+    \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
+    \\  zbx store gc --trash     list the trash
+    \\  zbx store restore <id>   put a gc's trash back
+    \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -89,7 +109,19 @@ comptime {
     assert(version_text[version_text.len - 1] == '\n');
 }
 
-pub const Command = enum { bundle, doctor, explain, help, ps, run, schema, stop, version };
+pub const Command = enum {
+    bundle,
+    commit,
+    doctor,
+    explain,
+    help,
+    ps,
+    run,
+    schema,
+    stop,
+    store,
+    version,
+};
 
 pub const OutputFormat = enum { text, json };
 
@@ -170,6 +202,17 @@ pub const BundleArgs = struct {
     no_redact: bool = false,
 };
 
+/// What `store` was given: the subcommand and its one operand.
+pub const StoreArgs = struct {
+    action: store_commands.Action,
+    operand: ?[]const u8,
+    /// `store diff`: the second digest.
+    second: ?[]const u8 = null,
+    /// `store gc --confirm <hash>`, and `store gc --trash`.
+    confirm: ?[]const u8 = null,
+    trash: bool = false,
+};
+
 pub const Invocation = struct {
     command: Command,
     /// The one operand of `explain`; null for commands that take none.
@@ -179,6 +222,8 @@ pub const Invocation = struct {
     run: RunArgs,
     /// Set only when `command` is `bundle`.
     bundle: BundleArgs,
+    /// Set only when `command` is `store`.
+    store: StoreArgs,
 };
 
 pub const ParseError = error{
@@ -223,6 +268,11 @@ const Token = union(enum) {
     read_only,
     detach,
     all,
+    /// `--confirm`, whose value is the next argument, and `--confirm=<value>`: `store gc`'s.
+    confirm_next,
+    confirm_inline: []const u8,
+    /// `--trash`: `store gc`'s.
+    trash,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -263,6 +313,11 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "-d")) return .detach;
     if (std.mem.eql(u8, argument, "--detach")) return .detach;
     if (std.mem.eql(u8, argument, "--all")) return .all;
+    if (std.mem.eql(u8, argument, "--confirm")) return .confirm_next;
+    if (std.mem.startsWith(u8, argument, "--confirm=")) {
+        return .{ .confirm_inline = argument["--confirm=".len..] };
+    }
+    if (std.mem.eql(u8, argument, "--trash")) return .trash;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -287,6 +342,7 @@ fn command_named(name: []const u8) ?Command {
     assert(name.len <= constants.arg_bytes_max); // collect() refuses longer arguments.
     var found: ?Command = null;
     if (std.mem.eql(u8, name, "bundle")) found = .bundle;
+    if (std.mem.eql(u8, name, "commit")) found = .commit;
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
@@ -294,6 +350,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "run")) found = .run;
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "stop")) found = .stop;
+    if (std.mem.eql(u8, name, "store")) found = .store;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -304,9 +361,10 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop => 1,
+        .explain, .schema, .stop, .commit => 1,
+        .store => 2,
     };
-    assert(count <= 1);
+    assert(count <= 2);
     return count;
 }
 
@@ -339,6 +397,10 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
+            .confirm_next => {
+                if (index + 1 < args.len) index += 1;
+            },
+            .confirm_inline, .trash => {},
             .run_option_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
@@ -365,13 +427,12 @@ pub fn parse(
     var count: u32 = 0;
     var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var bundle_args: BundleArgs = .{};
+    var gc_args: GcArgs = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
         const is_run = count > 0 and command_named(operands[0]) == .run;
         const is_bundle = count > 0 and command_named(operands[0]) == .bundle;
-        const is_stop = count > 0 and command_named(operands[0]) == .stop;
-        const is_ps = count > 0 and command_named(operands[0]) == .ps;
         switch (classify(argument)) {
             .verbose => {},
             .output_inline => |value| try check_output_value(diag, value),
@@ -381,15 +442,14 @@ pub fn parse(
                 try check_output_value(diag, args[index]);
             },
             .run_option_next, .run_option_inline => {
+                const is_stop = count > 0 and command_named(operands[0]) == .stop;
                 if (!is_run and !is_stop) return unknown_option(diag, argument);
                 try take_run_option(diag, &run_args, args, &index, is_run);
             },
-            .detach => {
-                if (!is_run) return unknown_option(diag, argument);
-                run_args.detach = true;
-            },
             .all => {
-                if (!is_ps) return unknown_option(diag, argument);
+                if (count == 0 or command_named(operands[0]) != .ps) {
+                    return unknown_option(diag, argument);
+                }
                 run_args.all = true;
             },
             .separator => {
@@ -397,17 +457,18 @@ pub fn parse(
                 run_args.command = args[index + 1 ..];
                 break;
             },
-            .read_only => {
+            .detach, .read_only => {
                 if (!is_run) return unknown_option(diag, argument);
-                run_args.read_only = true;
+                run_args.detach = run_args.detach or classify(argument) == .detach;
+                run_args.read_only = run_args.read_only or classify(argument) == .read_only;
+            },
+            .confirm_next, .confirm_inline, .trash => {
+                try take_gc_option(diag, &gc_args, operands[0..count], args, &index);
             },
             .last, .no_redact => {
                 if (!is_bundle) return unknown_option(diag, argument);
-                if (classify(argument) == .last) {
-                    bundle_args.last = true;
-                } else {
-                    bundle_args.no_redact = true;
-                }
+                bundle_args.last = bundle_args.last or classify(argument) == .last;
+                bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -421,8 +482,62 @@ pub fn parse(
     invocation.run = run_args;
     invocation.bundle = bundle_args;
     try resolve(args, operands[0..count], invocation, diag);
-    if (invocation.command == .run) try check_run_args(diag, &invocation.run);
+    try check_options(&gc_args, invocation, diag);
+}
+
+/// The checks that need the command resolved: what `store gc`, `run` and `bundle` were given.
+fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) ParseError!void {
+    assert(diag.code == null);
+    if (invocation.command == .store and invocation.store.action == .gc) {
+        try check_gc_args(diag, gc_args, invocation);
+    }
+    if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
+}
+
+/// What `store gc` was given besides its words.
+const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false };
+
+fn is_gc(operands: []const []const u8) bool {
+    return operands.len >= 2 and command_named(operands[0]) == .store and
+        std.mem.eql(u8, operands[1], "gc");
+}
+
+/// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
+fn take_gc_option(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(diag.code == null);
+    const argument = args[index.*];
+    if (!is_gc(operands)) return unknown_option(diag, argument);
+    switch (classify(argument)) {
+        .trash => gc_args.trash = true,
+        .confirm_inline => |value| {
+            if (gc_args.confirm != null) return unexpected_argument(diag, .store, argument);
+            gc_args.confirm = value;
+        },
+        else => {
+            if (gc_args.confirm != null) return unexpected_argument(diag, .store, argument);
+            if (index.* + 1 == args.len) return missing_option_value(diag, "--confirm");
+            index.* += 1;
+            gc_args.confirm = args[index.*];
+        },
+    }
+}
+
+/// `gc` takes `--confirm <hash>` or `--trash`, not both.
+fn check_gc_args(diag: *Diag, gc_args: *const GcArgs, invocation: *Invocation) ParseError!void {
+    assert(diag.code == null);
+    if (gc_args.confirm != null and gc_args.trash) {
+        return unexpected_argument(diag, .store, "--trash");
+    }
+    invocation.store.confirm = gc_args.confirm;
+    invocation.store.trash = gc_args.trash;
 }
 
 /// Reads one value option of `run` and its value (inline, or the next argument). A value that
@@ -470,13 +585,16 @@ fn take_run_option(
 }
 
 /// `run` needs a rootfs and a command: the two things a user is most likely to forget.
-fn check_run_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
-    if (run_args.rootfs == null) return missing_argument(diag, .run, .rootfs);
+    if (run_args.rootfs == null and digest == null) {
+        return missing_argument(diag, .run, .rootfs);
+    }
+    if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     if (run_args.command.len == 0) return missing_argument(diag, .run, .command);
     // `-- ""` names no program either.
     if (run_args.command[0].len == 0) return missing_argument(diag, .run, .command);
-    assert(run_args.rootfs != null);
+    assert((run_args.rootfs != null) != (digest != null));
     assert(run_args.command.len > 0);
 }
 
@@ -500,15 +618,21 @@ fn resolve(
     diag: *Diag,
 ) ParseError!void {
     assert(operands.len <= constants.args_count_max);
+    invocation.store = .{ .action = .ls, .operand = null }; // Only `store` and `commit` set it.
     if (operands.len == 0) return missing_command(diag, args.len);
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
+    if (command == .store) return resolve_store(operands, invocation, diag);
+    defer if (invocation.command == .commit) {
+        invocation.store = .{ .action = .commit, .operand = invocation.operand };
+    };
     // `bundle` takes at most one operand (a run's name) and checks the rest itself.
-    const wanted = if (command == .bundle) 1 else operands_count(command);
+    // `run` takes at most one: the digest of the tree to run (or `--rootfs`, checked below).
+    const wanted = if (command == .bundle or command == .run) 1 else operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
-    if (given < wanted and command != .bundle) {
+    if (given < wanted and command != .bundle and command != .run) {
         const what: Missing = switch (command) {
-            .stop => .container,
+            .stop, .commit => .container,
             .schema => .topic,
             else => .code,
         };
@@ -517,6 +641,105 @@ fn resolve(
     invocation.command = command;
     invocation.operand = if (given == 1) operands[1] else null;
     if (invocation.operand == null) assert(given == 0);
+}
+
+/// `store` takes a subcommand, and for `import` and `rm` an operand; `du` takes one if it likes.
+fn resolve_store(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .store);
+    if (operands.len == 1) return store_usage(diag, .{ .missing = .action });
+    const action = std.meta.stringToEnum(store_commands.Action, operands[1]) orelse {
+        return store_usage(diag, .{ .unknown = operands[1] });
+    };
+    const given: usize = operands.len - 2;
+    const wanted: usize = switch (action) {
+        .ls, .verify, .gc => 0,
+        .diff => 2,
+        else => 1,
+    };
+    if (given > wanted) return store_usage(diag, .{ .extra = operands[2 + wanted] });
+    if (given < wanted and action != .du) {
+        const what: StoreMissing = switch (action) {
+            .import => .directory,
+            .diff => .two_digests,
+            .restore => .gc_id,
+            else => .digest,
+        };
+        return store_usage(diag, .{ .missing = what });
+    }
+    if (action == .commit) return store_usage(diag, .{ .unknown = operands[1] }); // A command.
+    invocation.command = .store;
+    invocation.operand = null;
+    invocation.store = .{
+        .action = action,
+        .operand = if (given >= 1) operands[2] else null,
+        .second = if (given == 2) operands[3] else null,
+    };
+    assert((invocation.store.operand != null) == (given >= 1));
+}
+
+const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
+
+const StoreUsage = union(enum) {
+    missing: StoreMissing,
+    unknown: []const u8,
+    extra: []const u8,
+};
+
+fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    diag.while_("reading the command line", .{});
+    switch (problem) {
+        .missing => |what| {
+            diag.raise(.E0006);
+            switch (what) {
+                .action => diag.cause(
+                    "'store' needs a subcommand: import, ls, du, rm, diff, verify, gc or restore",
+                    .{},
+                ),
+                .directory => diag.cause("'store import' needs the directory to import", .{}),
+                .digest => diag.cause("'store rm' needs the digest of the root to drop", .{}),
+                .two_digests => diag.cause("'store diff' needs two digests to compare", .{}),
+                .gc_id => diag.cause("'store restore' needs the id of the trash to restore", .{}),
+            }
+            diag.context("cmd", "store", .{});
+            diag.fix(
+                .{ .sentence = "see the roots and their digests:", .command = "zbx store ls" },
+            );
+            return error.MissingArgument;
+        },
+        .unknown => |word| {
+            const echo = echo_of(&storage, word);
+            diag.raise(.E0001);
+            diag.cause(
+                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, verify, gc " ++
+                    "and restore",
+                .{echo},
+            );
+            diag.context("arg", "{s}", .{echo});
+            diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+            return error.UnknownCommand;
+        },
+        .extra => |word| {
+            const echo = echo_of(&storage, word);
+            diag.raise(.E0003);
+            diag.cause("'store' was given '{s}' after its operand, and takes no more", .{echo});
+            diag.context("cmd", "store", .{});
+            diag.context("arg", "{s}", .{echo});
+            diag.fix(
+                .{
+                    .sentence = "give one operand at a time, for example:",
+                    .command = "zbx store ls",
+                },
+            );
+            return error.UnexpectedArgument;
+        },
+    }
 }
 
 // ---- The usage diagnostics ----------------------------------------------------------------
@@ -557,6 +780,22 @@ fn unknown_command(diag: *Diag, argument: []const u8) ParseError {
     return error.UnknownCommand;
 }
 
+/// `run` was given a digest and a --rootfs: one root, not two.
+fn both_roots(diag: *Diag, digest: []const u8) ParseError {
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, digest);
+    assert(diag.code == null);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    diag.cause("'run' was given the tree '{s}' and --rootfs; it runs one root filesystem", .{echo});
+    diag.context("cmd", "run", .{});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(
+        .{ .sentence = "give one of them:", .command = "zbx run --rootfs ./alpine -- /bin/sh" },
+    );
+    return error.UnexpectedArgument;
+}
+
 fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) ParseError {
     var storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const echo = echo_of(&storage, argument);
@@ -588,6 +827,8 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix_with("run it on its own:", "zbx {s}", .{name});
     } else if (command == .stop) {
         diag.fix(.{ .sentence = "stop one container at a time:", .command = "zbx stop web-1" });
+    } else if (command == .commit) {
+        diag.fix(.{ .sentence = "commit one container at a time:", .command = "zbx commit web-1" });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
     } else {
@@ -604,7 +845,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .run) assert(missing != .code);
     if (command == .explain) assert(missing == .code);
     if (command == .bundle) assert(missing == .target);
-    if (command == .stop) assert(missing == .container);
+    if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
     assert(command != .doctor);
     assert(command != .ps);
@@ -621,9 +862,16 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             });
         },
         .rootfs => {
-            diag.cause("'run' needs --rootfs <dir>, the directory to use as the root", .{});
+            diag.cause(
+                "'run' needs the digest of a tree, or --rootfs <dir>, to use as the root",
+                .{},
+            );
             diag.fix(.{
-                .sentence = "name the root filesystem directory:",
+                .sentence = "name a tree of the store (they are listed by zbx store ls):",
+                .command = "zbx run b3:2f9c4a1d7e03 -- /bin/sh",
+            });
+            diag.fix(.{
+                .sentence = "or a root filesystem directory:",
                 .command = "zbx run --rootfs ./alpine -- /bin/sh",
             });
         },
@@ -634,8 +882,12 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             );
         },
         .container => {
-            diag.cause("'stop' needs the name of the container to stop", .{});
-            diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps" });
+            if (command == .commit) {
+                diag.cause("'commit' needs the name of the container to commit", .{});
+            } else {
+                diag.cause("'stop' needs the name of the container to stop", .{});
+            }
+            diag.fix(.{ .sentence = "see the containers:", .command = "zbx ps --all" });
         },
         .topic => {
             diag.cause("'schema' needs the command whose output schema to print", .{});
@@ -756,6 +1008,10 @@ pub fn collect(
 pub const Storage = struct {
     handle: runtime.Handle,
     workspace: bundle.Workspace,
+    /// The store commands' memory: names, entries and trees of the directories being read.
+    store: store_commands.Workspace,
+    /// A run of a tree from the store prepares it here (`runtime/image.zig`).
+    image: image_mod.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
 };
@@ -815,7 +1071,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop => true,
+        .explain, .bundle, .schema, .stop, .run, .commit => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -838,6 +1094,8 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             return command_error(err);
         },
         .stop => return run_stop(host, invocation, diag),
+        .commit => return run_store(host, invocation, storage, diag),
+        .store => return run_store(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -864,6 +1122,40 @@ fn run_stop(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 
     if (invocation.run.timeout != null) options.timeout_ms = times.timeout_ms;
     commands.run_stop(host, options, diag) catch |err| return command_error(err);
     return constants.exit_ok;
+}
+
+/// `zbx store ...`: the work runs in the store's child; its exit code is ours.
+fn run_store(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    if (invocation.command != .store) assert(invocation.command == .commit);
+    assert(diag.code == null);
+    const mode = invocation.options.mode();
+    const output: store_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = invocation.options.output == .json,
+    };
+    const args: store_commands.Args = .{
+        .action = invocation.store.action,
+        .operand = invocation.store.operand,
+        .second = invocation.store.second,
+        .confirm = invocation.store.confirm,
+        .trash = invocation.store.trash,
+    };
+    return store_commands.run(
+        host,
+        args,
+        output,
+        &storage.handle.facts,
+        &storage.store,
+        diag,
+    ) catch {
+        return error.CommandFailed;
+    };
 }
 
 const Times = struct { timeout_ms: u32, grace_ms: u32 };
@@ -926,7 +1218,8 @@ fn run_container(
     const given = invocation.run;
     const times = try times_of(&given, diag);
     const container: runtime_spec.Spec = .{
-        .rootfs = given.rootfs.?, // check_run_args refused a missing one.
+        .rootfs = given.rootfs orelse "", // check_run_args refused neither or both.
+        .image = invocation.operand,
         .name = given.name,
         .command = given.command,
         .limits = try limits_of(&given, diag),
@@ -938,6 +1231,7 @@ fn run_container(
         .warn = .{ .context = &reporter, .call = report_warning },
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
+        .image_workspace = &storage.image,
     };
     const handle = &storage.handle;
     runtime.start(host, &container, options, handle, diag) catch {
@@ -1093,6 +1387,7 @@ fn supervise(
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
         .detached = true,
+        .image_workspace = &storage.image,
     };
     var diag: Diag = undefined;
     diag.reset();
@@ -2210,4 +2505,40 @@ test "a detached run stopped for its time reads as timed out in the record and i
     const one = parsed.value.object.get("containers").?.array.items[0].object;
     try testing.expect(one.get("timed_out").?.bool);
     try testing.expectEqualStrings("signal", one.get("reason").?.string);
+}
+
+test "parse: run takes a tree digest or --rootfs, one of them" {
+    // Goal: `zbx run <digest> -- cmd` is the same command as `--rootfs`, with the tree as the
+    // operand. Method: each form parses to the fields the dispatcher reads; neither and both
+    // are refused with the codes that name the mistake; a second operand is refused.
+    var invocation: Invocation = undefined;
+    try testing.expect(
+        try parse_case(&.{ "run", "b3:2f9c4a1d7e03", "--", "sh" }, &invocation) == null,
+    );
+    try testing.expectEqualStrings("b3:2f9c4a1d7e03", invocation.operand.?);
+    try testing.expect(invocation.run.rootfs == null);
+    try testing.expect(
+        try parse_case(
+            &.{ "run", "--read-only", "2f9c4a1d7e03", "--name", "a", "--", "sh" },
+            &invocation,
+        ) == null,
+    );
+    try testing.expect(invocation.run.read_only);
+    try testing.expectEqualStrings("2f9c4a1d7e03", invocation.operand.?);
+    try testing.expect(
+        try parse_case(&.{ "run", "--rootfs", "alpine", "--", "sh" }, &invocation) == null,
+    );
+    try testing.expect(invocation.operand == null);
+    try testing.expectEqual(
+        @as(?codes.Code, .E0006),
+        try parse_case(&.{ "run", "--", "sh" }, &invocation),
+    );
+    try testing.expectEqual(
+        @as(?codes.Code, .E0003),
+        try parse_case(&.{ "run", "2f9c4a1d7e03", "--rootfs", "alpine", "--", "sh" }, &invocation),
+    );
+    try testing.expectEqual(
+        @as(?codes.Code, .E0003),
+        try parse_case(&.{ "run", "2f9c4a1d7e03", "another", "--", "sh" }, &invocation),
+    );
 }

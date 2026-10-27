@@ -7,7 +7,7 @@ error[ZBX-E0308]: can't write a limit to the container's cgroup
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (5 of 48)
+  step   start_scope (6 of 49)
   fix    check this host (ZBX-E0103):   zbx doctor
   more   zbx explain E0308
   docs   https://zigbox.github.io/zigbox/errors/E0308.html

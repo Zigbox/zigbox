@@ -1,0 +1,5 @@
+error[ZBX-E0433]: no trash with that id
+  cause  there is no trash 'bbbbbbbbbbbb'; it may have expired or been restored
+  fix    list the trash that is left:   zbx store gc --trash
+  more   zbx explain E0433 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0433.html

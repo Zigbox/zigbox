@@ -1,0 +1,7 @@
+error[ZBX-E0427]: the container is still running
+  while  committing the container web-1
+  cause  'web-1' is still running, and zbx does not freeze a running container
+  name   web-1
+  fix    stop it, then commit:   zbx stop web-1
+  more   zbx explain E0427
+  docs   https://zigbox.github.io/zigbox/errors/E0427.html

@@ -75,6 +75,31 @@ const shipped_files = [_][]const u8{
     "src/runtime/sync.zig",
     "src/zigbox.zig",
     "src/text.zig",
+    "src/host_real_fs.zig",
+    "src/store_commands.zig",
+    "src/store/chunks.zig",
+    "src/store/diagnose.zig",
+    "src/store/diff.zig",
+    "src/store/digest.zig",
+    "src/store/fs.zig",
+    "src/store/gc.zig",
+    "src/store/generation.zig",
+    "src/store/import.zig",
+    "src/store/layout.zig",
+    "src/store/lock.zig",
+    "src/store/names.zig",
+    "src/store/namespace.zig",
+    "src/store/object.zig",
+    "src/store/open.zig",
+    "src/store/roots.zig",
+    "src/store/sets.zig",
+    "src/store/shards.zig",
+    "src/store/tree.zig",
+    "src/store/trees.zig",
+    "src/store/usage.zig",
+    "src/store/verify.zig",
+    "src/store/walk.zig",
+    "src/store/xattrs.zig",
 };
 const asserts_per_function_min: u32 = 2;
 
@@ -690,6 +715,202 @@ fn workflow_lists(workflow: []const u8, name: []const u8) bool {
     return false;
 }
 
+// ---- Tests that run ------------------------------------------------------------------------
+
+/// A source file under `src/`: its path from the repository root, and its text.
+pub const SourceFile = struct { path: []const u8, source: []const u8 };
+
+const build_path = "build.zig";
+const roots_header = "const roots = [_][]const u8{";
+
+/// The test roots named in the text of build.zig: the quoted paths of its `roots` list.
+pub fn test_roots(build_source: []const u8, out: [][]const u8) []const []const u8 {
+    assert(out.len > 0);
+    const start = std.mem.indexOf(u8, build_source, roots_header) orelse return out[0..0];
+    const rest = build_source[start + roots_header.len ..];
+    const end = std.mem.indexOf(u8, rest, "};") orelse return out[0..0];
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, rest[0..end], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " ,");
+        if (line.len < 2 or line[0] != '"' or line[line.len - 1] != '"') continue;
+        if (count == out.len) break;
+        out[count] = line[1 .. line.len - 1];
+        count += 1;
+    }
+    return out[0..count];
+}
+
+/// True if a line of the file starts a named test (`test "..."`), the kind a test run reports.
+fn has_named_test(source: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "test \"")) return true;
+    }
+    return false;
+}
+
+/// The path `target` names, relative to the directory of `from`, with `..` and `.` folded away.
+/// Null if it is not a `.zig` path, or leaves the repository, or does not fit `buffer`.
+fn resolve_import(buffer: []u8, from: []const u8, target: []const u8) ?[]const u8 {
+    assert(buffer.len > 0);
+    if (!std.mem.endsWith(u8, target, ".zig")) return null;
+    const slash = std.mem.lastIndexOfScalar(u8, from, '/');
+    const directory = if (slash) |at| from[0..at] else "";
+    var length: usize = 0;
+    var parts = std.mem.splitScalar(u8, directory, '/');
+    while (parts.next()) |part| length = push_part(buffer, length, part) orelse return null;
+    parts = std.mem.splitScalar(u8, target, '/');
+    while (parts.next()) |part| length = push_part(buffer, length, part) orelse return null;
+    return buffer[0..length];
+}
+
+/// Adds one path component to the path in `buffer[0..length]`: `..` drops the last one.
+fn push_part(buffer: []u8, length: usize, part: []const u8) ?usize {
+    assert(length <= buffer.len);
+    if (part.len == 0 or std.mem.eql(u8, part, ".")) return length;
+    if (std.mem.eql(u8, part, "..")) {
+        const slash = std.mem.lastIndexOfScalar(u8, buffer[0..length], '/');
+        return if (slash) |at| at else if (length > 0) 0 else null;
+    }
+    const separator: usize = if (length > 0) 1 else 0;
+    if (length + separator + part.len > buffer.len) return null;
+    if (separator == 1) buffer[length] = '/';
+    @memcpy(buffer[length + separator ..][0..part.len], part);
+    return length + separator + part.len;
+}
+
+/// Marks in `reached` every file a test run of `roots` analyses: a root, and any `.zig` file
+/// that a `test { ... }` block of a reached file imports. An import anywhere else does not
+/// bring a file's tests in (Zig analyses a file's tests only when something in a test refers
+/// to the file). `reached` is parallel to `files`.
+pub fn mark_reached(files: []const SourceFile, roots: []const []const u8, reached: []bool) void {
+    assert(files.len == reached.len);
+    @memset(reached, false);
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (files, 0..) |file, index| {
+            const is_root = for (roots) |root| {
+                if (std.mem.eql(u8, root, file.path)) break true;
+            } else false;
+            if (is_root and !reached[index]) {
+                reached[index] = true;
+                changed = true;
+            }
+            if (!reached[index]) continue;
+            if (mark_test_imports(files, file, reached)) changed = true;
+        }
+    }
+}
+
+/// Marks the files whose tests a run of `file` brings in: those imported inside its anonymous
+/// `test { ... }` blocks, and those it imports and uses (unless it has a `main`). A top-level
+/// `const name = @import(..)` is a use only if `name` appears again in the file; Zig analyses a
+/// resolved. True if any file was newly marked.
+/// resolved. True if any
+fn mark_test_imports(files: []const SourceFile, file: SourceFile, reached: []bool) bool {
+    assert(files.len == reached.len);
+    var any = false;
+    var inside = false;
+    // `main` and what only it uses are not analysed in a test run: only test blocks count.
+    const only_tests = std.mem.indexOf(u8, file.source, "\npub fn main(") != null;
+    var lines = std.mem.splitScalar(u8, file.source, '\n');
+    while (lines.next()) |raw| {
+        if (!inside) {
+            inside = std.mem.startsWith(u8, raw, "test {");
+        } else if (std.mem.eql(u8, raw, "}")) {
+            inside = false;
+        }
+        const comment = std.mem.indexOf(u8, raw, "//") orelse raw.len;
+        const code = raw[0..comment];
+        const needle = "@import(\"";
+        const at = std.mem.indexOf(u8, code, needle) orelse continue;
+        const name = declared_name(code[0..at]);
+        if (!inside and only_tests) continue;
+        if (!inside and name != null) {
+            const is_public = std.mem.eql(u8, name.?, "pub");
+            if (is_public or !word_used_again(file.source, name.?)) continue;
+        }
+        const rest = code[at + needle.len ..];
+        const close = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+        var buffer: [256]u8 = undefined;
+        const path = resolve_import(&buffer, file.path, rest[0..close]) orelse continue;
+        for (files, 0..) |other, index| {
+            if (reached[index] or !std.mem.eql(u8, other.path, path)) continue;
+            reached[index] = true;
+            any = true;
+        }
+    }
+    return any;
+}
+
+/// `name` from a prefix like `const name = ` at column 0, "pub" for a public declaration, or
+/// null if it is not a declaration.
+fn declared_name(prefix: []const u8) ?[]const u8 {
+    var text = prefix;
+    if (std.mem.startsWith(u8, text, "pub ")) return "pub"; // Never resolved by being declared.
+    if (!std.mem.startsWith(u8, text, "const ")) return null;
+    text = text["const ".len..];
+    const end = std.mem.indexOfAny(u8, text, " =:") orelse return null;
+    return if (end == 0) null else text[0..end];
+}
+
+/// True if `name` is a whole word at two or more places in `source` (not inside a path).
+fn word_used_again(source: []const u8, name: []const u8) bool {
+    assert(name.len > 0);
+    var found: u32 = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, source, at, name)) |position| {
+        at = position + name.len;
+        const previous = if (position == 0) ' ' else source[position - 1];
+        const before = !is_word_byte(previous) and previous != '"' and previous != '/';
+        const after = at >= source.len or !is_word_byte(source[at]);
+        if (before and after) found += 1;
+        if (found == 2) return true;
+    }
+    return false;
+}
+
+/// Prints each file with a named test that no test root reaches. Returns how many.
+fn report_unreached(out: *std.Io.Writer, files: []const SourceFile, reached: []const bool) !u32 {
+    assert(files.len == reached.len);
+    var count: u32 = 0;
+    for (files, reached) |file, is_reached| {
+        if (is_reached or !has_named_test(file.source)) continue;
+        try out.print(
+            "{s}: has tests that `zig build test` never runs; import it in a `test {{}}` " ++
+                "block reached from a root in {s}\n",
+            .{ file.path, build_path },
+        );
+        count += 1;
+    }
+    return count;
+}
+
+/// Every file with a named test must be reached from a test root of build.zig. Returns the
+/// number of violations printed.
+fn check_test_reach(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    out: *std.Io.Writer,
+    root: std.Io.Dir,
+    sources: []const SourceFile,
+) !u32 {
+    const limit: std.Io.Limit = .limited(source_bytes_max);
+    const build_source = try root.readFileAlloc(io, build_path, arena, limit);
+    var root_names: [64][]const u8 = undefined;
+    const roots = test_roots(build_source, &root_names);
+    var violations: u32 = 0;
+    if (roots.len == 0) {
+        try out.print("{s}: no test roots found in its `roots` list\n", .{build_path});
+        violations += 1;
+    }
+    const reached = try arena.alloc(bool, sources.len);
+    mark_reached(sources, roots, reached);
+    return violations + try report_unreached(out, sources, reached);
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
@@ -704,6 +925,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var violations: u32 = 0;
     var files: u32 = 0;
+    var sources: std.ArrayList(SourceFile) = .empty;
     var shipped_functions: u32 = 0;
     var shipped_asserts: u32 = 0;
     while (try walker.next(io)) |entry| {
@@ -721,6 +943,10 @@ pub fn main(init: std.process.Init) !u8 {
             const limit: std.Io.Limit = .limited(source_bytes_max);
             const source = try entry.dir.readFileAlloc(io, entry.basename, arena, limit);
             check_source(&report, entry.path, source);
+            if (std.mem.startsWith(u8, entry.path, "src/")) {
+                const path = try arena.dupe(u8, entry.path);
+                try sources.append(arena, .{ .path = path, .source = source });
+            }
         }
         try print_violations(out, entry.path, &report);
         violations += report.total();
@@ -736,6 +962,7 @@ pub fn main(init: std.process.Init) !u8 {
         try out.print("fuzzer {s} is not in the CI matrix of {s}\n", .{ name, workflow_path });
         violations += 1;
     }
+    violations += try check_test_reach(io, arena, out, root, sources.items);
     if (!density_ok(shipped_asserts, shipped_functions)) {
         try out.print(
             "shipped code: {d} assertions in {d} functions, below {d} per function\n",
@@ -1097,4 +1324,50 @@ test "the repository's own sources are clean" {
         std.debug.print("tidy.zig:{d}: {s}\n", .{ item.line, item.rule.message() });
     }
     try testing.expectEqual(@as(u32, 0), report.total());
+}
+
+test "test roots are the quoted paths of the roots list" {
+    const text = "x\nconst roots = [_][]const u8{\n" ++
+        "    \"src/a.zig\",\n    \"src/b/c.zig\",\n};\n\"d\"";
+    var out: [8][]const u8 = undefined;
+    const found = test_roots(text, &out);
+    try testing.expectEqual(@as(usize, 2), found.len);
+    try testing.expectEqualStrings("src/b/c.zig", found[1]);
+    try testing.expectEqual(@as(usize, 0), test_roots("nothing", &out).len);
+}
+
+test "imports resolve against the importing file's directory" {
+    var buffer: [64]u8 = undefined;
+    const sibling = resolve_import(&buffer, "src/store/store.zig", "import_tests.zig");
+    try testing.expectEqualStrings("src/store/import_tests.zig", sibling.?);
+    const up = resolve_import(&buffer, "src/testing/vm/main.zig", "../fixtures/x.zig");
+    try testing.expectEqualStrings("src/testing/fixtures/x.zig", up.?);
+    try testing.expect(resolve_import(&buffer, "src/a.zig", "std") == null);
+    try testing.expect(resolve_import(&buffer, "a.zig", "../b.zig") == null);
+    try testing.expect(resolve_import(buffer[0..4], "src/a.zig", "long_name.zig") == null);
+}
+
+test "a file's tests count only if a test block of a reached file imports it" {
+    // Goal: the guard that found four test files nobody ran. Method: a root that imports one
+    // file in a test block, one at top level only, and a chain through a reached file.
+    const files = [_]SourceFile{
+        .{ .path = "src/main.zig", .source = "const top = @import(\"top.zig\");\n" ++
+            "test {\n    _ = @import(\"in_test.zig\"); // x\n" ++
+            "    _ = @import(\"sub/mid.zig\");\n}\n" },
+        .{ .path = "src/top.zig", .source = "test \"t\" {}\n" },
+        .{ .path = "src/in_test.zig", .source = "test \"t\" {}\n" },
+        .{ .path = "src/sub/mid.zig", .source = "test {\n    _ = @import(\"../deep.zig\");\n}\n" },
+        .{ .path = "src/deep.zig", .source = "test \"t\" {}\n" },
+        .{ .path = "src/orphan.zig", .source = "test {\n    _ = @import(\"deep.zig\");\n}\n" ++
+            "test \"t\" {}\n" },
+    };
+    var reached: [files.len]bool = undefined;
+    mark_reached(&files, &.{"src/main.zig"}, &reached);
+    try testing.expectEqualSlices(bool, &.{ true, false, true, true, true, false }, &reached);
+    var storage: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&storage);
+    try testing.expectEqual(@as(u32, 2), try report_unreached(&writer, &files, &reached));
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "src/top.zig:") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "src/orphan.zig:") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "src/deep.zig") == null);
 }

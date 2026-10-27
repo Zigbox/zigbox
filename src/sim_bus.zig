@@ -94,6 +94,8 @@ pub const Scope = struct {
     uid: u32,
     name: text_util.Bounded(constants.scope_name_bytes_max + 8),
     pid: u32,
+    /// The scope's keeper: the second of `PIDs`, zero when the request had one pid.
+    keeper_pid: u32,
     slice: text_util.Bounded(32),
     delegate: bool,
     memory_max: ?u64,
@@ -103,6 +105,10 @@ pub const Scope = struct {
     accounting: u32,
     /// Its last process has gone; the unit stays until the model removes it.
     exited: bool,
+    /// The container's process (`pid`) and the keeper have each gone. The scope is empty, and
+    /// `exited`, when both have (a scope without a keeper has only the first to wait for).
+    container_gone: bool,
+    keeper_gone: bool,
 };
 
 const inbox_bytes: u32 = 8192;
@@ -203,12 +209,22 @@ pub const Bus = struct {
         return null;
     }
 
-    /// The process is gone: its scope has no process left. The index of that scope, if any.
+    /// The process is gone. If that leaves its scope with no process, the index of the scope,
+    /// once: telling the bus again about the same process (a zombie that is then reaped) finds
+    /// the scope already `exited` and returns null.
     pub fn process_ended(bus: *Bus, pid: u32) ?u32 {
         assert(pid > 0);
         assert(bus.scopes.len == scopes_max);
         for (&bus.scopes, 0..) |*scope, index| {
-            if (!scope.active or scope.pid != pid) continue;
+            if (!scope.active) continue;
+            const is_container = scope.pid == pid;
+            const is_keeper = scope.keeper_pid != 0 and scope.keeper_pid == pid;
+            if (!is_container and !is_keeper) continue;
+            if (is_container) scope.container_gone = true;
+            if (is_keeper) scope.keeper_gone = true;
+            if (scope.exited) return null;
+            const keeper_left = scope.keeper_pid != 0 and !scope.keeper_gone;
+            if (!scope.container_gone or keeper_left) return null;
             scope.exited = true;
             return @intCast(index);
         }
@@ -685,6 +701,7 @@ fn parse_scope(call: *const message_mod.Message, scope: *Scope) wire.WireError!v
         .uid = 0,
         .name = .{},
         .pid = 0,
+        .keeper_pid = 0,
         .slice = .{},
         .delegate = false,
         .memory_max = null,
@@ -693,6 +710,8 @@ fn parse_scope(call: *const message_mod.Message, scope: *Scope) wire.WireError!v
         .cpu_quota_usec = null,
         .accounting = 0,
         .exited = false,
+        .container_gone = false,
+        .keeper_gone = false,
     };
     scope.name.append_sanitised(try reader.string(), constants.scope_name_bytes_max + 8);
     if (!std.mem.eql(u8, try reader.string(), "fail")) return error.BadValue;
@@ -734,9 +753,15 @@ fn read_property(
         if (std.mem.eql(u8, name, "CPUQuotaPerSecUSec")) scope.cpu_quota_usec = value;
     } else if (std.mem.eql(u8, kind, "au")) {
         const array_end = try reader.array_begin(4);
-        while (reader.at < array_end) {
+        var seen: u32 = 0;
+        while (reader.at < array_end) : (seen += 1) {
             const pid = try reader.uint32();
-            if (std.mem.eql(u8, name, "PIDs")) scope.pid = pid;
+            if (!std.mem.eql(u8, name, "PIDs")) continue;
+            switch (seen) {
+                0 => scope.pid = pid,
+                1 => scope.keeper_pid = pid,
+                else => return error.TooLong, // The container and its keeper, no more.
+            }
         }
     } else {
         return error.Unsupported;

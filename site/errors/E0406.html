@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">no schema for that command</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx publishes a JSON schema for the output of run, bundle, ps, stop and doctor (&quot;zbx schema ps&quot;). Other commands have no machine-readable output that needs one: explain and help print text, version prints a line.</p>
+<p>zbx publishes a JSON schema for the output of run, bundle, ps, stop and doctor (&quot;zbx schema ps&quot;), of commit, and of the store commands, named store-import, store-ls, store-du, store-rm, store-diff, store-verify, store-gc, store-trash (gc --trash) and store-restore. Other commands have no machine-readable output that needs one: explain and help print text, version prints a line.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0406</pre>

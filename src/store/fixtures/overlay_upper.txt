@@ -1,0 +1,20 @@
+d 775 0 0 0:0 / - user.overlay.impure=79 user.overlay.uuid=7e365193cfc5427d9f3872fa2f3a27fa
+d 775 0 0 0:0 /etc - user.overlay.impure=79 user.overlay.origin=-
+f 664 0 0 0:0 /etc/added 61646465640a
+f 755 0 0 0:0 /etc/chmod-me 746f2063686d6f640a
+c 0 0 0 0:0 /etc/delete-me -
+f 664 0 0 0:0 /etc/hostname 616c70696e652d320a
+f 664 0 0 0:0 /etc/keep 616761696e0a
+f 664 0 0 0:0 /etc/tagged 7461676765640a6d6f72650a user.note=68656c6c6f
+d 775 0 0 0:0 /usr - user.overlay.impure=79 user.overlay.origin=-
+c 0 0 0 0:0 /usr/lib -
+d 775 0 0 0:0 /usr/lib2 -
+f 664 0 0 0:0 /usr/lib2/libx 6c69620a
+d 775 0 0 0:0 /usr/share - user.overlay.impure=79 user.overlay.origin=-
+d 775 0 0 0:0 /usr/share/doc - user.overlay.opaque=79
+f 664 0 0 0:0 /usr/share/doc/three 646f632074687265650a
+d 775 0 0 0:0 /var - user.overlay.origin=-
+f 664 0 0 0:0 /var/keep-hard 6b656570206d650a
+l 777 0 0 0:0 /var/link 2f6574632f686f73746e616d65
+d 775 0 0 0:0 /var/newdir -
+f 664 0 0 0:0 /var/newdir/file 696e736964650a

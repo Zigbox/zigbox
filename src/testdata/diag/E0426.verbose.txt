@@ -1,0 +1,8 @@
+error[ZBX-E0426]: the container has no layer to commit
+  while  committing the container web-1
+  cause  'web-1' was started on a directory (--rootfs), not on a tree, so it has
+         no upper layer; its writes went into that directory
+  name   web-1
+  fix    keep a directory by importing it:   zbx store import <dir>
+  more   zbx explain E0426
+  docs   https://zigbox.github.io/zigbox/errors/E0426.html

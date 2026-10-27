@@ -20,6 +20,10 @@ const record_fuzz = @import("fuzz_record.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
 const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
+const tree_fuzz = @import("fuzz_tree.zig");
+const store_fuzz = @import("fuzz_store.zig");
+const commit_fuzz = @import("fuzz_commit.zig");
+const gc_fuzz = @import("fuzz_gc.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -46,6 +50,10 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
     .{ .name = "dbus", .run_iteration = dbus_fuzz.fuzz_dbus },
     .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
+    .{ .name = "tree", .run_iteration = tree_fuzz.fuzz_tree },
+    .{ .name = "store", .run_iteration = store_fuzz.fuzz_store },
+    .{ .name = "commit", .run_iteration = commit_fuzz.fuzz_commit },
+    .{ .name = "gc", .run_iteration = gc_fuzz.fuzz_gc },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },
@@ -184,7 +192,7 @@ fn random_args(
         "json",    "text",     "--output=json", "--output=", "--bogus",   "-x",        "run",
         "--",      "--rootfs", "--name",        "/srv/x",    "bundle",    "--last",    "ps",
         "stop",    "schema",   "--all",         "-d",        "--timeout", "--grace",   "1000",
-        "web-1",
+        "web-1",   "store",    "import",        "ls",        "du",        "rm",        "b3:",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -338,7 +346,8 @@ fn is_run_line(args: FuzzArgs) bool {
         const word = args.items[index];
         if (word.len > constants.arg_bytes_max) return false;
         if (std.mem.eql(u8, word, "--output")) {
-            index += 1; // Its value, whatever it is.
+            index += 1; // Its value, whatever it is, but collection stops at one that is too long.
+            if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return false;
             continue;
         }
         const is_option = word.len > 1 and word[0] == '-';
@@ -697,4 +706,19 @@ test "every fuzzer survives a fixed seed for a few hundred iterations" {
         var splitmix = std.Random.SplitMix64.init(12345);
         for (0..500) |_| fuzzer.run_iteration(splitmix.next());
     }
+}
+
+test "a run word after an over-long --output value is not seen: collection stops there" {
+    // Goal: a regression found by the `cli` fuzzer (seed 6, after the store words joined its
+    // list): `--output <over-long> run` was judged a run line, but the command line is refused
+    // while it is collected, before `run` is read, so it exits 1 and not 125. Method: that line.
+    var long: [constants.arg_bytes_max + 1]u8 = @splat('x');
+    var args: FuzzArgs = .{ .items = undefined, .count = 4, .index = 0 };
+    args.items[0] = "zbx";
+    args.items[1] = "--output";
+    args.items[2] = &long;
+    args.items[3] = "run";
+    try std.testing.expect(!is_run_line(args));
+    args.items[2] = "json";
+    try std.testing.expect(is_run_line(args));
 }

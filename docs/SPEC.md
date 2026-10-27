@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 51; doc date 2026-10-26), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 52; doc date 2026-10-26), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -348,8 +348,8 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 ### Open questions
 
 - [ ] Build file format for M7: ZON (Zig's native object notation), a small Starlark subset, or a typed config language? Decide before M7 starts.
-- [ ] Chunking for M3: whole-file hashing first, or content-defined chunking from the start? Whole-file is simpler; chunking matters for large files that change slightly.
-- [ ] Should the store be shareable across users on one host, or strictly per-user?
+- [x] Chunking for M3, decided: whole files. Each file is one object, hashed with BLAKE3 and stored whole so it can be hardlinked into a container's lower directory. Each object also carries a list of fixed-size chunk hashes, which gives Zigcube's C2 verified fetch-by-hash from the start. Content-defined chunking can come later behind the same interface, for large files that change slightly.
+- [x] Store scope, decided: strictly per-user, under the user's data directory, written from inside the user's own namespace so ownership round-trips. A store shared across users would need privileged setup and cross-user trust rules; revisit with Zigcube's node agent.
 - [ ] Final project name and CLI name (`zigbox` / `zbx` are placeholders).
 
 ## Part II · Zigcube: orchestrating Zigbox

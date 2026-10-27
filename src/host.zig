@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const bpf = @import("runtime/bpf.zig");
+const store_fs = @import("store/fs.zig");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const linux = std.os.linux;
@@ -188,6 +189,9 @@ pub const MountKind = enum {
     /// flags the mount already has (nosuid, nodev, noexec, atime) to be kept, so the host reads
     /// them first.
     remount_readonly,
+    /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
+    /// the kernel reads it as text, so it is the one request whose source is not a path.
+    overlay,
 };
 
 pub const MountRequest = struct {
@@ -324,6 +328,8 @@ pub const VTable = struct {
         entry: ChildEntry,
         entry_context: *anyopaque,
     ) Error!Pid,
+    /// Forks the scope's keeper (see `Host.start_keeper`).
+    start_keeper: *const fn (context: *anyopaque, hold: Handle) Error!Pid,
     /// Blocks until the child ends and reaps it.
     wait: *const fn (context: *anyopaque, pid: Pid) Error!ExitStatus,
     signal: *const fn (context: *anyopaque, pid: Pid, signal: u8) Error!void,
@@ -419,6 +425,9 @@ pub const VTable = struct {
         timeout_ms: u32,
     ) Error!u32,
     begin_step: *const fn (context: *anyopaque, index: u32) void,
+    /// The file-system half of the host, which the store is written against (`store/fs.zig`).
+    /// The simulator's, when a test gives it none, is a machine that is down: every call fails.
+    filesystem: *const fn (context: *anyopaque) store_fs.Fs,
 };
 
 /// What `read_prefix` found.
@@ -673,6 +682,24 @@ pub const Host = struct {
         return pid;
     }
 
+    /// Forks the keeper of a container's cgroup scope: a process outside every namespace of the
+    /// container whose only job is to be in the scope, so that the scope is never empty (and the
+    /// manager never removes it) while zbx has still to read its counters. It blocks reading the
+    /// pipe end `hold`, and ends when the pipe's writers are all gone, when a read fails, or when
+    /// the process that started it ends (the kernel kills it then, `PR_SET_PDEATHSIG`). It closes
+    /// every descriptor it inherited but `hold`, so that it keeps no pipe, socket or terminal
+    /// open on behalf of zbx. The caller closes its own copy of `hold`, keeps the write end, and
+    /// ends the keeper by closing that, then reaps it with `wait_for`.
+    ///
+    /// The kernel sends the death signal when the *thread* that forked ends, not the process:
+    /// the thread that starts a run must be the one that waits for it, as `run.zig` requires.
+    pub fn start_keeper(host: Host, hold: Handle) Error!Pid {
+        assert(hold < std.math.maxInt(i32));
+        const pid = try host.vtable.start_keeper(host.context, hold);
+        assert(pid > 1);
+        return pid;
+    }
+
     /// Waits for the child to end, retrying interrupted waits. Returns once, with its status.
     pub fn wait_for(host: Host, pid: Pid) Error!ExitStatus {
         assert(pid > 0);
@@ -712,7 +739,7 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay => assert(request.source != null),
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);
@@ -976,6 +1003,14 @@ pub const Host = struct {
         if (index != step_none) assert(index < constants.plan_steps_max);
         host.vtable.begin_step(host.context, index);
         assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    /// The file system the store works on. Calls on it are made by the single-threaded child
+    /// that runs inside the user namespace, so the ids it sees are the container's.
+    pub fn filesystem(host: Host) store_fs.Fs {
+        const fs = host.vtable.filesystem(host.context);
+        assert(@intFromPtr(fs.vtable) != 0);
+        return fs;
     }
 
     fn open_retrying(host: Host, path: [:0]const u8) Error!Handle {

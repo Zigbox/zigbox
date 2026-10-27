@@ -1,0 +1,6 @@
+warning[ZBX-W0411]: an extended attribute was left out of the import
+  cause  attribute 'trusted.thing' of '/src/etc/passwd' was left out: only
+         user.* and security.capability are kept
+  fix    nothing to do unless the container needs it; the digest does not cover it
+  more   zbx explain W0411 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0411.html

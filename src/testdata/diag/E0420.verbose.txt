@@ -1,0 +1,8 @@
+error[ZBX-E0420]: that tree is not a root
+  while  dropping a root
+  cause  b3:74500697761748e7dc0302d36778f89c6ab324ef942773976b92a7bbefa18cd2 is
+         a tree in the store but not a root, so there is nothing to drop
+  digest b3:74500697761748e7dc0302d36778f89c6ab324ef942773976b92a7bbefa18cd2
+  fix    list the roots:   zbx store ls
+  more   zbx explain E0420
+  docs   https://zigbox.github.io/zigbox/errors/E0420.html

@@ -421,6 +421,7 @@ fn converse(conn: *client.Connection) bool {
         .name = "zbx-fuzz.scope",
         .description = "zbx: fuzz",
         .pid = 600,
+        .keeper_pid = 601,
         .slice = "app.slice",
         .memory_max = 1 << 28,
         .memory_swap_zero = true,

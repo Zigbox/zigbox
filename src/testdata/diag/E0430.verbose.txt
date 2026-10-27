@@ -1,0 +1,22 @@
+error[ZBX-E0429]: a file in the store is damaged
+  while  verifying the store
+  cause  the file is
+         /home/alice/.local/share/zbx/store/objects/55/0620ec2d3261528efaff6c552298beada9b8945d8bbc842d1cae80763fd85c
+  cause  reached by /etc/passwd in root 4ccf5b88ec09
+  cause  object
+         b3:550620ec2d3261528efaff6c552298beada9b8945d8bbc842d1cae80763fd85c:
+         its bytes and attributes do not hash to its name; reached by
+         /etc/passwd in root 4ccf5b88ec09
+  id     b3:550620ec2d3261528efaff6c552298beada9b8945d8bbc842d1cae80763fd85c
+  file   /home/alice/.local/share/zbx/store/objects/55/0620ec2d3261528efaff6c552298beada9b8945d8bbc842d1cae80763fd85c
+  paths  1
+  fix    delete the file, import the directory it came from again, then verify:   rm '/home/alice/.local/share/zbx/store/objects/55/0620ec2d3261528efaff6c552298beada9b8945d8bbc842d1cae80763fd85c'
+  more   zbx explain E0429
+  docs   https://zigbox.github.io/zigbox/errors/E0429.html
+error[ZBX-E0430]: the store failed verification
+  while  verifying the store
+  cause  1 of the 11 things in the store are damaged
+  bad    1
+  fix    see the diagnostics above; drop the roots that reach them with:   zbx store rm <digest>
+  more   zbx explain E0430
+  docs   https://zigbox.github.io/zigbox/errors/E0430.html

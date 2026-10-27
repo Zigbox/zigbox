@@ -1,5 +1,6 @@
-//! The production `Host`: raw Linux syscalls through `std.os.linux`, no libc. This file and
-//! `host.zig` are the only places that may name syscalls, or paths under /proc and /sys.
+//! The production `Host`: raw Linux syscalls through `std.os.linux`, no libc. This file,
+//! `host_real_fs.zig` (the store's file system) and `host.zig` are the only places that may name
+//! syscalls, or paths under /proc and /sys.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -8,6 +9,8 @@ const bpf = @import("runtime/bpf.zig");
 const capabilities = @import("runtime/capabilities.zig");
 const constants = @import("constants.zig");
 const host = @import("host.zig");
+const host_real_fs = @import("host_real_fs.zig");
+const store_fs = @import("store/fs.zig");
 
 /// Writes to stderr with no state, no vtable and no error path, for the panic handler: when an
 /// invariant has broken, nothing else can be trusted. Short writes and errors are ignored
@@ -58,7 +61,7 @@ fn monotonic_now_ms() u64 {
 // it, so it depends on the layout of the whole segment. `align(16)` made the layout work here.
 // The guard is the `zig build release` smoke run, which starts the binary: a later change to
 // the thread-locals, or a new Zig, can break this again and only that run would show it.
-threadlocal var errno_last: u16 align(16) = 0;
+pub threadlocal var errno_last: u16 align(16) = 0;
 
 pub const HostReal = struct {
     /// Files opened and not yet closed. Pair assertion for the simulator's handle table: a
@@ -94,6 +97,7 @@ pub const HostReal = struct {
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
+        .start_keeper = start_keeper,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -134,6 +138,7 @@ pub const HostReal = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .filesystem = filesystem,
     };
 
     fn from_context(context: *anyopaque) *HostReal {
@@ -361,6 +366,19 @@ pub const HostReal = struct {
         return @intCast(result);
     }
 
+    fn start_keeper(context: *anyopaque, hold: host.Handle) host.Error!host.Pid {
+        _ = from_context(context);
+        const parent: i32 = linux.getpid();
+        const forked = linux.fork();
+        // In the child (result 0) only raw system calls run, and it never returns into the
+        // caller: `keeper_main` ends it.
+        if (forked == 0) keeper_main(parent, @intCast(hold));
+        try check(forked);
+        assert(forked > 1);
+        assert(forked <= std.math.maxInt(i32));
+        return @intCast(forked);
+    }
+
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
         _ = from_context(context);
         assert(pid > 0);
@@ -420,6 +438,13 @@ pub const HostReal = struct {
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
             .remount_readonly => return remount_readonly(request.target),
+            .overlay => linux.mount(
+                "overlay",
+                target,
+                "overlay",
+                0,
+                @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
+            ),
             .proc, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
@@ -637,11 +662,23 @@ pub const HostReal = struct {
         assert(pid > 0);
         const set = forwarded_set();
         var info: linux.siginfo_t = undefined;
+        var early_status: i32 = 0;
         // Zero waits for ever; a time is a limit on each wait for a signal, and a signal that is
         // not the child's end (a stop, say) is not a reason to start the time again: the
         // deadline is fixed once.
         var limit = timespec_of(timeout_ms);
         const started = monotonic_now_ms();
+        // A child that ended before the caller blocked the signals has had its SIGCHLD dropped
+        // (the default action ignores it, and a signal that is not blocked is not queued), so
+        // looking only at the queue would wait for ever for a child that is already a zombie. A
+        // child that ends after this look raises a SIGCHLD that waits in the queue: the caller
+        // has the signals blocked.
+        const early = linux.wait4(@intCast(pid), &early_status, linux.W.NOHANG, null);
+        try check(early);
+        if (early != 0) {
+            assert(early == pid);
+            return .{ .exited = try decode_status(early_status) };
+        }
         // Each pass takes one signal off the queue, so the loop ends when the child does; a
         // SIGCHLD for a child that is still running (a stop, say) is skipped.
         for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
@@ -811,13 +848,17 @@ pub const HostReal = struct {
         assert(linux.errno(result) == .SUCCESS); // A valid signal and a valid handler.
     }
 
+    fn filesystem(context: *anyopaque) store_fs.Fs {
+        return host_real_fs.interface(from_context(context));
+    }
+
     fn begin_step(context: *anyopaque, index: u32) void {
         _ = from_context(context);
         _ = index; // The kernel needs no hint; see Host.begin_step.
     }
 
     /// Converts a raw syscall return value into an error, or passes success through.
-    fn check(result: usize) host.Error!void {
+    pub fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
         errno_last = @backingInt(code);
         if (code == .SUCCESS) return;
@@ -831,6 +872,36 @@ pub const HostReal = struct {
 
 /// The arguments of `clone3` up to and including `tls`: `CLONE_ARGS_SIZE_VER0`, 64 bytes. The
 /// later fields (`set_tid`, `cgroup`) are not used, and the kernel accepts the short size.
+/// The keeper's whole life, in the forked child: raw system calls only, no allocation. It asks
+/// to be killed with its parent, checks the parent is still the one that forked it (it may have
+/// ended before the request took effect), leaves the terminal's process group so that a ^C meant
+/// for the container does not reach it, closes every descriptor but `hold`, and reads `hold`
+/// until the end of file. Any failure ends it, which at worst makes the scope empty early; that
+/// is the state before the keeper existed, and zbx copes with it.
+fn keeper_main(parent: i32, hold: i32) noreturn {
+    assert(parent > 1);
+    assert(hold >= 0);
+    const kill: usize = @backingInt(linux.SIG.KILL);
+    if (linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0) != 0) linux.exit_group(1);
+    if (linux.getppid() != parent) linux.exit_group(1);
+    _ = linux.setpgid(0, 0); // Best effort: the keeper still ends with its parent without it.
+    const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = false };
+    if (hold > 0) {
+        if (linux.close_range(0, hold - 1, flags) != 0) linux.exit_group(1);
+    }
+    if (linux.close_range(hold + 1, -1, flags) != 0) linux.exit_group(1);
+    var byte: [1]u8 = undefined;
+    for (0..constants.keeper_reads_max) |_| {
+        const result = linux.read(hold, &byte, byte.len);
+        switch (linux.errno(result)) {
+            .SUCCESS => if (result == 0) linux.exit_group(0), // The writers are gone.
+            .INTR => {},
+            else => linux.exit_group(1),
+        }
+    }
+    linux.exit_group(1);
+}
+
 const CloneArgs = extern struct {
     flags: u64,
     pidfd: u64,
@@ -1603,5 +1674,79 @@ test "real socket_connect names why a bus cannot be reached" {
     try std.testing.expectError(error.IoFailed, subject.socket_connect("/dev/null"));
     try std.testing.expectEqual(@as(u16, 111), subject.last_errno());
     try std.testing.expectError(error.PathTooLong, subject.socket_connect(repeat('/', 108)));
+    try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+/// The number of open descriptors of a process, from `/proc/<pid>/fd`; null if it cannot be read.
+fn descriptor_count(pid: host.Pid) ?u32 {
+    var path: [32:0]u8 = undefined;
+    // Cannot fail: "/proc/4294967295/fd" is 19 bytes.
+    const text = std.fmt.bufPrintSentinel(&path, "/proc/{d}/fd", .{pid}, 0) catch unreachable;
+    const opened = linux.open(text.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return null;
+    const directory: i32 = @intCast(opened);
+    defer _ = linux.close(directory);
+    var buffer: [4096]u8 align(8) = undefined;
+    var count: u32 = 0;
+    while (true) {
+        const read = linux.getdents64(directory, &buffer, buffer.len);
+        if (linux.errno(read) != .SUCCESS) return null;
+        if (read == 0) return count;
+        var at: usize = 0;
+        while (at < read) {
+            const length = std.mem.readInt(u16, buffer[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(buffer[at + 19 ..], 0);
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+            at += length;
+        }
+    }
+}
+
+test "real wait_event sees a child that ended before the signals were blocked" {
+    // Goal: the hang of `zbx run ... -- true` that showed once in a few dozen runs in the VM: the
+    // container ended between the start of its command and the block of SIGCHLD, so the signal
+    // was dropped and the wait looked at an empty queue for ever. Method: a child that exits at
+    // once, a pause long enough for it to be a zombie and its SIGCHLD to be gone, then the
+    // block and the wait, which must answer with the child's status and not run out its time.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const forked = linux.fork();
+    try std.testing.expect(linux.errno(forked) == .SUCCESS);
+    if (forked == 0) linux.exit_group(7);
+    const pid: host.Pid = @intCast(forked);
+    subject.sleep_ms(200);
+    try subject.block_signals(true);
+    defer subject.block_signals(false) catch {};
+    const event = try subject.wait_event(pid, 5000);
+    try std.testing.expectEqual(host.Event{ .exited = .{ .exited = 7 } }, event);
+}
+
+test "real keeper holds one descriptor, lives until its pipe's writers are gone, and ends 0" {
+    // Goal: Host.start_keeper on a real kernel. Method: open a second pipe first so there is
+    // something to inherit, start the keeper on the first pipe's read end, and wait until it has
+    // closed everything else (it holds exactly one descriptor, the pipe). It is alive while the
+    // write end is open and, with that closed, ends with status 0 and is reaped. The death
+    // signal and the parent check are the kernel's; the VM demo kills a zbx and looks.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const hold = try subject.pipe();
+    const other = try subject.pipe();
+    const pid = try subject.start_keeper(hold.read);
+    subject.close(hold.read);
+    subject.close(other.read);
+    subject.close(other.write);
+    var settled = false;
+    for (0..400) |_| {
+        if (descriptor_count(pid) == 1) {
+            settled = true;
+            break;
+        }
+        subject.sleep_ms(5);
+    }
+    try std.testing.expect(settled);
+    try subject.signal(pid, 0); // Alive: it is blocked reading.
+    subject.close(hold.write);
+    const status = try subject.wait_for(pid);
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, status);
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
 }

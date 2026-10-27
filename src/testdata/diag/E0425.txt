@@ -1,0 +1,8 @@
+error[ZBX-E0425]: overlayfs can't be mounted for this container
+  cause  overlayfs needs Linux 5.11 or newer with the overlay module, and an
+         upper layer on a file system that keeps user.* extended attributes
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
+         see what this host allows:            zbx doctor
+         or run a directory instead:           zbx run --rootfs ./alpine -- sh
+  more   zbx explain E0425 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0425.html

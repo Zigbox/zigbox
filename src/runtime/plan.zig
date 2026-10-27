@@ -29,6 +29,10 @@ pub const Kind = enum {
     write_uid_map,
     run_newuidmap,
     run_newgidmap,
+    /// In a plan built with a scope: forks the scope's keeper (`Host.start_keeper`), which is
+    /// put in the scope beside the container so that the scope cannot be removed while zbx
+    /// has still to read its counters.
+    spawn_keeper,
     /// Asks the user's systemd manager for the container's scope and waits for its job; only in
     /// a plan built with a scope.
     start_scope,
@@ -41,6 +45,8 @@ pub const Kind = enum {
     set_hostname,
     make_mounts_private,
     bind_rootfs,
+    /// In a plan that runs a tree from the store: the overlay replaces the bind of a rootfs.
+    mount_overlay,
     make_proc_dir,
     mount_proc,
     make_dev_dir,
@@ -76,7 +82,7 @@ pub const Kind = enum {
 pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
-        .run_newuidmap, .run_newgidmap, .start_scope => .parent,
+        .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -109,6 +115,9 @@ pub const links = [constants.container_links_count]Link{
 pub const child_steps_count: u32 = 23 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
+/// The steps a scope adds to the parent's: the keeper and the scope itself.
+pub const scope_steps_count: u32 = 2;
+
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
 
@@ -117,7 +126,7 @@ pub const read_only_steps_count: u32 = 5;
 pub const steps_count_single: u32 = 8 + child_steps_count;
 
 /// Steps of a plan that uses the helpers: the parent has seven (one step per helper). A plan with
-/// a scope has one more, whichever map it uses.
+/// a scope has two more (the keeper and the scope), whichever map it uses.
 pub const steps_count_full: u32 = 7 + child_steps_count;
 
 /// How the container's ids are mapped to the host's.
@@ -178,6 +187,21 @@ pub const Input = struct {
     read_only: bool = false,
     /// Added to the container's environment, replacing a default of the same name.
     env: []const spec.Label = &.{},
+    /// Set for a run of a tree from the store: `rootfs` is then the empty directory the overlay
+    /// is mounted on, and the layers are these.
+    overlay: ?Overlay = null,
+};
+
+/// The layers of an overlay (docs/briefs/M3-store.md, "Materialize and run"). The lower layer
+/// is the tree's materialized directory and is never written: a container's writes go to the
+/// upper layer by copy-up. A read-only run has no upper layer (and no work directory); the
+/// kernel wants two lower layers then, so the second is an empty directory.
+pub const Overlay = struct {
+    lower: []const u8,
+    upper: ?[]const u8,
+    work: ?[]const u8,
+    /// An empty directory; set exactly when there is no upper layer.
+    empty: ?[]const u8,
 };
 
 const empty_text: Text = .{ .offset = 0, .len = 0 };
@@ -189,6 +213,8 @@ pub const Plan = struct {
     full: bool,
     /// Whether the rootfs is remounted read-only.
     read_only: bool,
+    /// Whether the rootfs is an overlay of a tree from the store.
+    overlay: bool,
     /// Whether the plan has a `start_scope` step, and what it is made with.
     scoped: bool,
     scope_name: Text,
@@ -217,6 +243,7 @@ pub const Plan = struct {
         plan.full = input.mapping == .full;
         plan.scoped = input.scope != null;
         plan.read_only = input.read_only;
+        plan.overlay = input.overlay != null;
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
@@ -227,7 +254,7 @@ pub const Plan = struct {
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
-        plan.push_child_steps(input.rootfs);
+        plan.push_child_steps(input.rootfs, input.overlay);
         plan.push(.await_report, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
         assert(plan.count == plan.steps_expected());
@@ -246,6 +273,7 @@ pub const Plan = struct {
         const child_start = plan.first_child();
         assert(plan.steps[child_start - 1].kind == .release_child);
         assert((plan.steps[child_start - 2].kind == .start_scope) == plan.scoped);
+        assert((plan.steps[child_start - 3].kind == .spawn_keeper) == plan.scoped);
         for (plan.steps[0..child_start]) |step| assert(side_of(step.kind) == .parent);
         for (plan.steps[child_start .. plan.count - 2]) |step| {
             assert(side_of(step.kind) == .child);
@@ -262,7 +290,7 @@ pub const Plan = struct {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
-        return base + @intFromBool(plan.scoped) + read_only;
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -270,7 +298,7 @@ pub const Plan = struct {
     pub fn first_child(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const parent: u32 = if (plan.full) 5 else 6;
-        return parent + @intFromBool(plan.scoped);
+        return parent + scope_steps_count * @intFromBool(plan.scoped);
     }
 
     /// The unit name and description of a scoped plan: "zbx-<name>.scope" and "zbx: <name>".
@@ -348,7 +376,9 @@ pub const Plan = struct {
             .single => plan.push_direct_maps(input),
             .full => |helpers| plan.push_helper_maps(input, helpers),
         }
-        // The scope exists before the child may run its first step, and so before its command.
+        // The scope exists before the child may run its first step, and so before its command;
+        // the keeper is forked first, so that it can be put in the scope with the child.
+        if (plan.scoped) plan.push(.spawn_keeper, empty_text, empty_text, 0);
         if (plan.scoped) plan.push(.start_scope, plan.scope_name, plan.scope_description, 0);
         plan.push(.release_child, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .release_child);
@@ -400,7 +430,7 @@ pub const Plan = struct {
         );
     }
 
-    fn push_child_steps(plan: *Plan, rootfs_text: []const u8) void {
+    fn push_child_steps(plan: *Plan, rootfs_text: []const u8, overlay: ?Overlay) void {
         assert(plan.count == plan.first_child()); // After the parent's start.
         assert(rootfs_text.len > 0);
         const rootfs = plan.add_text(&.{rootfs_text});
@@ -410,7 +440,11 @@ pub const Plan = struct {
         plan.push(.await_release, empty_text, empty_text, 0);
         plan.push(.set_hostname, plan.name, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
-        plan.push(.bind_rootfs, rootfs, rootfs, 0);
+        if (overlay) |layers| {
+            plan.push(.mount_overlay, rootfs, plan.overlay_options(layers), 0);
+        } else {
+            plan.push(.bind_rootfs, rootfs, rootfs, 0);
+        }
         plan.push(.make_proc_dir, proc, empty_text, 0);
         plan.push(.mount_proc, proc, empty_text, 0);
         plan.push(.make_dev_dir, dev, empty_text, 0);
@@ -432,6 +466,25 @@ pub const Plan = struct {
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
         assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+    }
+
+    /// The mount data of an overlay: `userxattr` (a mount made from a user namespace keeps its
+    /// metadata in user.* attributes), then the layers. The paths hold no comma, colon or
+    /// backslash (`spec.overlay_path_problem`), which the kernel would read as separators.
+    fn overlay_options(plan: *Plan, layers: Overlay) Text {
+        assert(spec.overlay_path_problem(layers.lower) == null);
+        assert((layers.upper == null) == (layers.work == null));
+        assert((layers.upper == null) == (layers.empty != null));
+        if (layers.upper) |upper| {
+            assert(spec.overlay_path_problem(upper) == null);
+            assert(spec.overlay_path_problem(layers.work.?) == null);
+            const work = layers.work.?;
+            return plan.add_text(&.{
+                "userxattr,lowerdir=", layers.lower, ",upperdir=", upper, ",workdir=", work,
+            });
+        }
+        assert(spec.overlay_path_problem(layers.empty.?) == null);
+        return plan.add_text(&.{ "userxattr,lowerdir=", layers.lower, ":", layers.empty.? });
     }
 
     /// `/tmp` and `/run` as tmpfs (their mount points are made first, while the rootfs is still
@@ -580,6 +633,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map => "writing the container's uid map",
         .run_newuidmap => "running newuidmap to write the container's uid map",
         .run_newgidmap => "running newgidmap to write the container's gid map",
+        .spawn_keeper => "starting the process that keeps the container's cgroup scope alive",
         .start_scope => "starting the container's cgroup scope",
         .release_child => "letting the container continue",
         .await_report => "waiting for the container to start its command",
@@ -589,6 +643,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .set_hostname => "setting the container's hostname",
         .make_mounts_private => "making the container's mounts private",
         .bind_rootfs => "bind-mounting the rootfs onto itself",
+        .mount_overlay => "mounting the overlay filesystem of the tree",
         .make_proc_dir => "creating /proc in the rootfs",
         .mount_proc => "mounting a fresh /proc",
         .make_dev_dir => "creating /dev in the rootfs",
@@ -853,7 +908,8 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
     var input = test_input(&.{"sh"});
     input.scope = .{ .version = 255, .limits = .{ .pids = 64 } };
     plan.build(&input);
-    try testing.expectEqual(steps_count_single + 1, plan.count);
+    try testing.expectEqual(steps_count_single + 2, plan.count);
+    try testing.expectEqual(Kind.spawn_keeper, plan.steps[plan.first_child() - 3].kind);
     try testing.expectEqual(Kind.start_scope, plan.steps[plan.first_child() - 2].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[plan.first_child() - 1].kind);
     const step = plan.steps[plan.first_child() - 2];
@@ -869,11 +925,123 @@ test "a plan with a scope has the start_scope step before the go-ahead, with its
 
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
-    try testing.expectEqual(steps_count_full + 1, plan.count);
-    try testing.expectEqual(Kind.start_scope, plan.steps[4].kind);
+    try testing.expectEqual(steps_count_full + 2, plan.count);
+    try testing.expectEqual(Kind.spawn_keeper, plan.steps[4].kind);
+    try testing.expectEqual(Kind.start_scope, plan.steps[5].kind);
 
     input.scope = null;
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
     try testing.expect(!plan.scoped);
+}
+
+const store_cache = "/home/alice/.local/share/zbx/store/cache/b3abc";
+const state_containers = "/home/alice/.local/state/zbx/containers/web-1";
+
+fn overlay_input(read_only: bool) Input {
+    var input = test_input(&.{"sh"});
+    input.rootfs = state_containers ++ "/merged";
+    input.read_only = read_only;
+    input.overlay = if (read_only) .{
+        .lower = store_cache,
+        .upper = null,
+        .work = null,
+        .empty = state_containers ++ "/empty",
+    } else .{
+        .lower = store_cache,
+        .upper = state_containers ++ "/upper",
+        .work = state_containers ++ "/work",
+        .empty = null,
+    };
+    return input;
+}
+
+test "a run of a tree mounts the overlay where a rootfs is bound, and has as many steps" {
+    // Goal: the overlay is a replacement, not an addition. Method: build with and without; the
+    // step count is the same, the bind is gone, the overlay's target is the merged directory
+    // and its data names the three layers.
+    var plain: Plan = undefined;
+    plain.build(&test_input(&.{"sh"}));
+    var plan: Plan = undefined;
+    plan.build(&overlay_input(false));
+    try testing.expectEqual(plain.count, plan.count);
+    var found: ?Step = null;
+    for (plan.steps[0..plan.count]) |step| {
+        try testing.expect(step.kind != .bind_rootfs);
+        if (step.kind == .mount_overlay) found = step;
+    }
+    const step = found.?;
+    try testing.expectEqualStrings(state_containers ++ "/merged", plan.text(step.target));
+    try testing.expectEqualStrings(
+        "userxattr,lowerdir=" ++ store_cache ++ ",upperdir=" ++ state_containers ++ "/upper" ++
+            ",workdir=" ++ state_containers ++ "/work",
+        plan.text(step.source),
+    );
+    // Everything the container sets up is inside the merged directory.
+    try testing.expect(
+        std.mem.startsWith(
+            u8,
+            plan.text(plan.steps[plan.first_child() + 5].target),
+            state_containers,
+        ),
+    );
+}
+
+test "a read-only run of a tree has no upper layer, and a second empty lower one" {
+    // Goal: `--read-only` with a digest is an overlay without an upper. Method: the data has
+    // two lower layers and neither upperdir nor workdir.
+    var plan: Plan = undefined;
+    plan.build(&overlay_input(true));
+    for (plan.steps[0..plan.count]) |step| {
+        if (step.kind != .mount_overlay) continue;
+        const data = plan.text(step.source);
+        try testing.expectEqualStrings(
+            "userxattr,lowerdir=" ++ store_cache ++ ":" ++ state_containers ++ "/empty",
+            data,
+        );
+        try testing.expect(std.mem.indexOf(u8, data, "upperdir") == null);
+        try testing.expect(std.mem.indexOf(u8, data, "workdir") == null);
+    }
+}
+
+fn under_store(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "/zbx/store/") != null;
+}
+
+test "no step ever mounts a path of the store writable, or makes anything in it" {
+    // Goal: "running a container never writes into the shared store", at the plan. Method: for
+    // a writable and a read-only run of a tree, every step's target and source is checked: the
+    // store's path appears in exactly one place, the lowerdir of the overlay; nothing is bound,
+    // remounted, created or linked in it; and the upper and work layers are elsewhere.
+    for ([_]bool{ false, true }) |read_only| {
+        var plan: Plan = undefined;
+        plan.build(&overlay_input(read_only));
+        var mentions: u32 = 0;
+        for (plan.steps[0..plan.count]) |step| {
+            const target = plan.text(step.target);
+            const source = plan.text(step.source);
+            try testing.expect(!under_store(target)); // Nothing is made, bound or mounted there.
+            if (!under_store(source)) continue;
+            try testing.expectEqual(Kind.mount_overlay, step.kind);
+            mentions += 1;
+            // The store's path is the lower layer, and only that.
+            const lower = "lowerdir=" ++ store_cache;
+            try testing.expect(std.mem.indexOf(u8, source, lower) != null);
+            if (std.mem.indexOf(u8, source, "upperdir=")) |at| {
+                try testing.expect(!under_store(source[at..]));
+            }
+            if (std.mem.indexOf(u8, source, "workdir=")) |at| {
+                try testing.expect(!under_store(source[at..]));
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), mentions);
+    }
+}
+
+test "a path the kernel would split is not a layer" {
+    // Goal: the mount data is text split at commas and colons. Method: each separator.
+    try testing.expectEqual(@as(?u8, ','), spec.overlay_path_problem("/a,b"));
+    try testing.expectEqual(@as(?u8, ':'), spec.overlay_path_problem("/a:b"));
+    try testing.expectEqual(@as(?u8, '\\'), spec.overlay_path_problem("/a\\b"));
+    try testing.expectEqual(@as(?u8, null), spec.overlay_path_problem("/home/alice/.local/state"));
 }

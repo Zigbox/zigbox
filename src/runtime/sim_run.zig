@@ -119,6 +119,18 @@ pub fn sample_plan_with(plan: *plan_mod.Plan, full: bool, scoped: bool) void {
 
 /// Like `sample_plan_with`, for a run with (`read_only`) or without a read-only rootfs.
 pub fn sample_plan_ro(plan: *plan_mod.Plan, full: bool, scoped: bool, read_only: bool) void {
+    sample_plan_image(plan, full, scoped, read_only, false);
+}
+
+/// Like `sample_plan_ro`, for a run of a tree from the store (`image`): the overlay replaces the
+/// bind of the rootfs, and there are as many steps.
+pub fn sample_plan_image(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -135,6 +147,12 @@ pub fn sample_plan_ro(plan: *plan_mod.Plan, full: bool, scoped: bool, read_only:
         .mapping = mapping,
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
         .read_only = read_only,
+        .overlay = if (image) .{
+            .lower = "/store/cache/b3",
+            .upper = if (read_only) null else "/state/up",
+            .work = if (read_only) null else "/state/work",
+            .empty = if (read_only) "/state/empty" else null,
+        } else null,
     });
 }
 
@@ -223,6 +241,9 @@ pub const Started = struct {
     full: bool = true,
     /// The run was `--read-only`.
     read_only: bool = false,
+    /// A run of a tree from the store: the merged directory it pivoted into, which is an
+    /// overlay mount where a rootfs run has a bind mount.
+    merged: ?[]const u8 = null,
 };
 
 /// Null if the child process the last run created reached its command in the state the plan
@@ -235,7 +256,8 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     if (!child.die_with_parent) return "the child was not tied to its parent";
     if (child.old_root_attached) return "the old root was not detached";
     const root = child.root orelse return "the child never pivoted";
-    if (!root.eql(rootfs_path)) return "the child pivoted into the wrong root";
+    const want_root = expected.merged orelse rootfs_path;
+    if (!root.eql(want_root)) return "the child pivoted into the wrong root";
     // The helpers leave setgroups alone (programs in the container may need it); the direct
     // write of the single-id map must deny it first.
     if (child.maps.setgroups_denied == expected.full) return "setgroups is wrong for this map";
@@ -246,7 +268,13 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     const hostname = sim.world.hostnames[child.uts].slice();
     if (!std.mem.eql(u8, hostname, expected.name)) return "the child's hostname is wrong";
     if (hardening(child)) |problem| return problem;
-    return container_mounts(&sim.world.tables[child.table], expected.devpts, expected.read_only);
+    return container_mounts(
+        &sim.world.tables[child.table],
+        want_root,
+        if (expected.merged != null) .overlay else .bind_tree,
+        expected.devpts,
+        expected.read_only,
+    );
 }
 
 /// The capabilities, no_new_privs and the filter are all in place when the command starts.
@@ -263,30 +291,47 @@ fn hardening(child: *const sim_world.Process) ?[]const u8 {
 
 fn container_mounts(
     table: *const sim_world.MountTable,
+    root_path: []const u8,
+    root_kind: host_mod.MountKind,
     devpts: bool,
     read_only: bool,
 ) ?[]const u8 {
     if (!table.private) return "the mounts were not made private";
-    if (!table.has(.bind_tree, rootfs_path)) return "the rootfs was not bind-mounted";
-    if (!table.has(.proc, rootfs_path ++ "/proc")) return "no /proc";
-    if (!table.has(.dev_tmpfs, rootfs_path ++ "/dev")) return "no /dev";
-    if (!table.has(.shm_tmpfs, rootfs_path ++ "/dev/shm")) return "no /dev/shm";
-    if (table.has(.devpts, rootfs_path ++ "/dev/pts") != devpts) return "/dev/pts is wrong";
-    for (plan_mod.devices) |device| {
-        var buffer: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&buffer, rootfs_path ++ "/dev/{s}", .{device}) catch
-            unreachable; // The rootfs path and a device name are short.
-        if (!table.has(.bind_file, path)) return "a device is not bound";
+    if (!table.has(root_kind, root_path)) return "the rootfs was not mounted as the plan says";
+    var buffer: [constants.sim_path_bytes_max]u8 = undefined;
+    const proc = join(&buffer, root_path, "/proc");
+    if (!table.has(.proc, proc)) return "no /proc";
+    if (!table.has(.dev_tmpfs, join(&buffer, root_path, "/dev"))) return "no /dev";
+    if (!table.has(.shm_tmpfs, join(&buffer, root_path, "/dev/shm"))) return "no /dev/shm";
+    if (table.has(.devpts, join(&buffer, root_path, "/dev/pts")) != devpts) {
+        return "/dev/pts is wrong";
     }
-    if (table.has(.tmp_tmpfs, rootfs_path ++ "/tmp") != read_only) return "/tmp is wrong";
-    if (table.has(.run_tmpfs, rootfs_path ++ "/run") != read_only) return "/run is wrong";
-    const root = table.find(rootfs_path) orelse return "the rootfs is not a mount";
+    for (plan_mod.devices) |device| {
+        var path_buffer: [constants.sim_path_bytes_max]u8 = undefined;
+        const name = std.fmt.bufPrint(&path_buffer, "{s}/dev/{s}", .{ root_path, device }) catch
+            unreachable; // The root path and a device name are short.
+        if (!table.has(.bind_file, name)) return "a device is not bound";
+    }
+    const tmp = table.has(.tmp_tmpfs, join(&buffer, root_path, "/tmp"));
+    if (tmp != read_only) return "/tmp is wrong";
+    const run = table.has(.run_tmpfs, join(&buffer, root_path, "/run"));
+    if (run != read_only) return "/run is wrong";
+    const root = table.find(root_path) orelse return "the rootfs is not a mount";
     if (table.mounts[root].read_only != read_only) return "the rootfs is not as read-only as asked";
     for (table.slice()) |*mount| {
-        if (!mount.target.under(rootfs_path)) return "a host mount is still visible";
+        if (!mount.target.under(root_path)) return "a host mount is still visible";
         if (mount.kind == .proc and !mount.own_pid_namespace) return "/proc shows the host";
     }
     return null;
+}
+
+fn join(
+    buffer: *[constants.sim_path_bytes_max]u8,
+    root_path: []const u8,
+    suffix: []const u8,
+) []const u8 {
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ root_path, suffix }) catch
+        unreachable; // The root path and a suffix are short.
 }
 
 test "tables_equal compares counts, order of content and privacy" {

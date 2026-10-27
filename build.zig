@@ -83,6 +83,7 @@ fn add_test_step(
         "src/testing/vm/main.zig",
         "src/testing/vm/main_m1.zig",
         "src/testing/vm/main_m2.zig",
+        "src/testing/vm/main_m3.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -221,6 +222,11 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             .root = "src/testing/vm/main_m2.zig",
             .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
         },
+        .{
+            .step = "demo-m3",
+            .root = "src/testing/vm/main_m3.zig",
+            .help = "Run the M3 demo, as far as it is built: the store and running by digest",
+        },
     };
     for (demos) |demo| {
         const vm = b.addExecutable(.{
@@ -235,6 +241,7 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
+        if (std.mem.eql(u8, demo.step, "demo-m3")) add_old_binary(b, run);
         if (keep) run.addArg("--keep-overlay");
         if (reuse) run.addArg("--reuse-overlay");
         const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
@@ -255,6 +262,25 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// demo-m3's upgrade test: the older zbx, built from a worktree of the pinned commit by
+/// `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
+fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run) void {
+    const builder = b.addExecutable(.{
+        .name = "build_old",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/vm/build_old.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const old = b.addRunArtifact(builder);
+    old.setCwd(b.path("."));
+    old.addArg(b.graph.zig_exe);
+    old.addArg(@import("src/testing/vm/old_release.zon").commit);
+    run.addArg("--old-zbx");
+    run.addFileArg(old.addOutputFileArg("zbx-old"));
 }
 
 /// `zig build dbus-live`: the D-Bus client against a real bus (see src/dbus_live.zig). It is not

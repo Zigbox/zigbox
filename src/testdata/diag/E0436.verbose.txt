@@ -1,0 +1,7 @@
+error[ZBX-E0436]: the store is in use by another zbx command
+  while  importing a directory
+  cause  'zbx store gc' (process 4242) holds the store lock; nothing was changed
+  holder 4242 gc
+  fix    wait for the other command to finish, then run this one again
+  more   zbx explain E0436
+  docs   https://zigbox.github.io/zigbox/errors/E0436.html

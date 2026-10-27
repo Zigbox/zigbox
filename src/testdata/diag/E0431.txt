@@ -1,0 +1,6 @@
+error[ZBX-E0431]: the store changed since that gc plan was made
+  cause  the plan now has the hash
+         b3:d6502e06b87bf0d461398667ba0cdb7cc35332cdcfb0c6aefc0bceaae7e339ea
+  fix    read the plan again, and confirm that one if it is right:   zbx store gc --confirm b3:d6502e06b87bf0d461398667ba0cdb7cc35332cdcfb0c6aefc0bceaae7e339ea
+  more   zbx explain E0431 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0431.html

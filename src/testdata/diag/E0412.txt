@@ -1,0 +1,5 @@
+error[ZBX-E0412]: not a digest
+  cause  '12345' is not 12 to 64 lowercase hex digits (with or without b3:)
+  fix    list the digests the store keeps:   zbx store ls
+  more   zbx explain E0412 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0412.html

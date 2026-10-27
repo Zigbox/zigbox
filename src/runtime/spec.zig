@@ -2,8 +2,10 @@
 //! kernel, no allocation. A problem found here is the user's (a bad name, a missing rootfs, a
 //! command that does not fit); `run.zig` turns each into its diagnostic.
 //!
-//! In M1 the root file system is a directory. The `Runtime` contract of Zigcube holds an image
-//! digest where `rootfs` is; the field is replaced in M4, when images exist.
+//! The root file system is either a directory (`rootfs`, read and written in place) or a tree
+//! from the store (`image`, a digest or a unique prefix of at least 12 hex digits), which runs
+//! on an overlay: the tree is the read-only lower layer and the container's writes go to its
+//! own upper layer. The `Runtime` contract of Zigcube holds an image digest: it is `image`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -33,8 +35,12 @@ pub const Limits = struct {
 };
 
 pub const Spec = struct {
-    /// The directory to use as the container's root, read and written in place.
-    rootfs: []const u8,
+    /// The directory to use as the container's root, read and written in place. Empty when
+    /// `image` is set; exactly one of the two is.
+    rootfs: []const u8 = "",
+    /// A tree of the store to run on an overlay (M3): its digest, or a unique prefix of at least
+    /// 12 hex digits, with or without "b3:".
+    image: ?[]const u8 = null,
     /// The container's name, also its hostname. Null: a generated `zbx-xxxxxx`.
     name: ?[]const u8,
     /// The program and its arguments. Never empty; the first word is the program.
@@ -87,6 +93,17 @@ pub fn name_problem(name: []const u8) ?NameProblem {
     }
     if (name[0] == '-' or name[name.len - 1] == '-') return .hyphen_at_edge;
     assert(name.len <= constants.container_name_bytes_max);
+    return null;
+}
+
+/// Null if `path` can be a layer of an overlay mount: the kernel reads the mount data as text
+/// and splits it at commas and colons, with a backslash to escape; a path with any of the three
+/// would be misread, so it is refused instead.
+pub fn overlay_path_problem(path: []const u8) ?u8 {
+    assert(path.len <= constants.file_bytes_max);
+    for (path) |byte| {
+        if (byte == ',' or byte == ':' or byte == '\\') return byte;
+    }
     return null;
 }
 
