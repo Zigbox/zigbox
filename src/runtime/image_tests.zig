@@ -87,15 +87,7 @@ fn spec_for(digest_text: []const u8, name: []const u8, read_only: bool) lib.Spec
 
 fn start(spec: *const lib.Spec, started: *lib.Handle, diag: *Diag) !void {
     diag.reset();
-    lib.start(sim.interface(), spec, .{ .image_workspace = &image_ws }, started, diag) catch |err| {
-        if (diag.code) |code| {
-            std.debug.print(
-                "start failed: {s}: {s}\n",
-                .{ codes.full_name(code), diag.last_cause() orelse "" },
-            );
-        }
-        return err;
-    };
+    try lib.start(sim.interface(), spec, .{ .image_workspace = &image_ws }, started, diag);
 }
 
 var handle: lib.Handle = undefined;

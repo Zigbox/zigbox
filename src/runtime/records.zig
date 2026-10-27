@@ -843,7 +843,8 @@ pub const Pruned = struct {
 
     fn add(pruned: *Pruned, stem: []const u8) void {
         assert(stem.len > 0);
-        if (stem.len > constants.container_name_bytes_max) return; // Not a name we made.
+        // Not a name we made (a stray `Notes.zon`): it owns no container directory.
+        if (spec_mod.name_problem(stem) != null) return;
         if (pruned.count == pruned.names.len) return;
         @memcpy(pruned.names[pruned.count][0..stem.len], stem);
         pruned.lengths[pruned.count] = @intCast(stem.len);
@@ -1204,6 +1205,36 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     try testing.expect(sim.world.read_written(prefix ++ "damaged.zon") == null);
     try testing.expect(sim.world.read_written(prefix ++ "future.zon") == null);
     try testing.expect(sim.world.read_written(prefix ++ "legacy.zon") != null);
+    try testing.expect(sim.world.read_written(prefix ++ "run-00.zon") != null);
+}
+
+test "a record file whose stem is not a container name owns no container directory" {
+    // Goal: pruning must not hand `Notes` or `my run` to the code that removes a container's
+    // directory (it asserts a valid name). Method: 31 good records, the one just saved and two
+    // strays that cannot be read make 34; the strays go as the oldest, and are not in `pruned`.
+    var sim: HostSim = undefined;
+    sim_with_home(&sim);
+    var dir: Dir = undefined;
+    try testing.expect(locate(sim.interface(), &dir));
+    try ensure(sim.interface(), &dir);
+    var view = sample_view();
+    var name_buffer: [16]u8 = undefined;
+    for (0..31) |number| {
+        view.name = try std.fmt.bufPrint(&name_buffer, "run-{d:0>2}", .{number});
+        view.started = 1_000 + number;
+        try save(sim.interface(), &dir, &view);
+    }
+    const prefix = "/home/alice/.local/state/zbx/runs/";
+    try testing.expect(sim.world.write_file(prefix ++ "Notes.zon", "notes") == null);
+    try testing.expect(sim.world.write_file(prefix ++ "my run.zon", "x") == null);
+    view.name = "latest";
+    view.started = 2_000;
+    try save(sim.interface(), &dir, &view);
+    var skipped: Skipped = undefined;
+    var pruned: Pruned = undefined;
+    try prune(sim.interface(), &dir, "latest", &skipped, &pruned);
+    try testing.expect(sim.world.read_written(prefix ++ "Notes.zon") == null);
+    try testing.expectEqual(@as(u32, 0), pruned.count);
     try testing.expect(sim.world.read_written(prefix ++ "run-00.zon") != null);
 }
 
