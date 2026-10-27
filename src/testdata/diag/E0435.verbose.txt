@@ -1,0 +1,10 @@
+error[ZBX-E0435]: a root record can't be used
+  while  planning the gc
+  cause  the record of the root
+         b3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+         can't be read or understood
+  digest b3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  path   /home/alice/.local/share/zbx/store/roots
+  fix    see what else is damaged:   zbx store verify
+  more   zbx explain E0435
+  docs   https://zigbox.github.io/zigbox/errors/E0435.html

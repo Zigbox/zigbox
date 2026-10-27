@@ -59,6 +59,11 @@ pub const open = @import("open.zig");
 pub const object = @import("object.zig");
 pub const trees = @import("trees.zig");
 pub const roots = @import("roots.zig");
+pub const generation = @import("generation.zig");
+pub const shards = @import("shards.zig");
+pub const verify = @import("verify.zig");
+pub const gc = @import("gc.zig");
+pub const chunk_put = @import("chunks.zig");
 pub const import = @import("import.zig");
 pub const diff = @import("diff.zig");
 pub const usage = @import("usage.zig");
@@ -72,6 +77,9 @@ pub const Store = layout.Store;
 
 /// The chunk hashes of an object (the `chunks(object_id)` of Zigcube's contract).
 pub const chunks = object.chunk_hashes;
+
+/// The verified write of one chunk of an object (the `put_chunk` of Zigcube's contract).
+pub const put_chunk = chunk_put.put_chunk;
 
 /// A tree object's bytes, checked against its digest (the `get_tree` of Zigcube's contract).
 pub const get_tree = trees.load;
@@ -87,6 +95,11 @@ test {
     _ = object;
     _ = trees;
     _ = roots;
+    _ = generation;
+    _ = shards;
+    _ = verify;
+    _ = gc;
+    _ = chunk_put;
     _ = import;
     _ = diff;
     _ = usage;
@@ -97,6 +110,8 @@ test {
     _ = @import("sets.zig");
     _ = @import("import_tests.zig");
     _ = @import("commit_tests.zig");
+    _ = @import("gc_tests.zig");
+    _ = @import("chunks_tests.zig");
     _ = @import("usage_tests.zig");
     _ = @import("test_support.zig");
 }

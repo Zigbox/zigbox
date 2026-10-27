@@ -456,6 +456,16 @@ pub const store_path_bytes_max: u32 = 600;
 pub const store_data_base_bytes_max: u32 = 400;
 /// Failed attempts at a rename or write that are retried because the kernel was interrupted.
 pub const store_io_retries_max: u32 = 16;
+/// How long what gc moved stays in `trash/<gc id>/` before the next gc empties it: 7 days.
+pub const store_trash_seconds: u64 = 7 * 24 * 60 * 60;
+/// A gc id is this many hex digits of the plan hash it ran with.
+pub const store_gc_id_hex_bytes: u32 = 12;
+/// `verify` reports this many damaged things in full (and counts the rest), and for each names at
+/// most `store_verify_paths_max` of the paths that reach it.
+pub const store_verify_damaged_max: u32 = 256;
+pub const store_verify_paths_max: u32 = 16;
+/// The most gc ids `gc --trash` lists.
+pub const store_trash_entries_max: u32 = 256;
 
 // The simulator's file tree for the store (`src/store/fs_sim.zig`): nodes, the bytes of every
 // file written, and open files.

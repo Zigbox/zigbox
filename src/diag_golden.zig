@@ -229,6 +229,7 @@ fn prepare_namespaces_refused(sim: *HostSim) void {
 /// The store's file system for the store cases: a user with a home, and a source tree to import.
 var golden_files: SimFs = undefined;
 
+const gc_module = @import("store/gc.zig");
 var golden_import: @import("store/import.zig").Workspace = undefined;
 var golden_store: @import("store/layout.zig").Store = undefined;
 /// The digest of the sample tree `prepare_store_with_tree` imported.
@@ -311,6 +312,97 @@ fn put_redirect(files: *SimFs, upper: []const u8) void {
 fn prepare_commit_directory(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim_run.put_record(sim, &sim_run.sample_view("web-1", 1000));
+}
+
+/// The path of the stored object a file of the sample tree became.
+fn stored_object(source_path: []const u8, buffer: []u8) []const u8 {
+    const object = @import("store/object.zig");
+    const stat = golden_files.stat_of(source_path).?;
+    const attrs: object.Attrs = .{
+        .mode = stat.mode,
+        .uid = stat.uid,
+        .gid = stat.gid,
+        .xattrs = golden_files.xattrs_of(source_path) orelse &@import("store/xattrs.zig").empty,
+    };
+    const id = object.object_id(Digest.of(golden_files.content_of(source_path).?), attrs);
+    const hex = id.hex();
+    return std.fmt.bufPrint(
+        buffer,
+        support.user_store ++ "/objects/{s}/{s}",
+        .{ hex[0..2], hex[2..] },
+    ) catch
+        unreachable; // Short.
+}
+
+/// A store whose object for /etc/passwd has a changed byte.
+fn prepare_damaged_object(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    var buffer: [200]u8 = undefined;
+    golden_files.flip_byte(stored_object("/src/etc/passwd", &buffer), 2);
+}
+
+/// A trash `aaaaaaaaaaaa` holding the sample tree's root tree object, which the store has again;
+/// `promised` is what its metadata says it holds.
+fn put_trash(promised: u64, with_tree: bool) void {
+    const base = support.user_store ++ "/trash/aaaaaaaaaaaa";
+    golden_files.put_dir(base, 0o755);
+    var meta: [gc_module.meta_bytes_max]u8 = undefined;
+    const text = gc_module.render_meta(&.{
+        .time = 1_760_000_000,
+        .expires = 1_760_000_000 + constants.store_trash_seconds,
+        .objects = 0,
+        .lists = 0,
+        .trees = promised,
+        .farms = 0,
+        .bytes = 100,
+        .complete = true,
+    }, &meta);
+    golden_files.put_file(base ++ "/meta.zon", 0o644, text);
+    if (!with_tree) return;
+    const hex = golden_digest.hex();
+    var path: [200]u8 = undefined;
+    var source: [200]u8 = undefined;
+    golden_files.put_dir(base ++ "/trees", 0o755);
+    golden_files.put_dir(
+        std.fmt.bufPrint(&path, base ++ "/trees/{s}", .{hex[0..2]}) catch unreachable, // Short.
+        0o755,
+    ); // Short.
+    const content = golden_files.content_of(treefile(&source)).?;
+    const target = std.fmt.bufPrint(
+        &path,
+        base ++ "/trees/{s}/{s}",
+        .{ hex[0..2], hex[2..] },
+    ) catch unreachable; // Short.
+    golden_files.put_file(target, 0o644, content);
+}
+
+fn treefile(buffer: []u8) []const u8 {
+    const hex = golden_digest.hex();
+    return std.fmt.bufPrint(
+        buffer,
+        support.user_store ++ "/trees/{s}/{s}",
+        .{ hex[0..2], hex[2..] },
+    ) catch
+        unreachable; // Short.
+}
+
+fn prepare_restore_conflict(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    put_trash(1, true);
+}
+
+fn prepare_trash_incomplete(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    put_trash(3, false);
+}
+
+fn prepare_root_unusable(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    golden_files.put_file(
+        support.user_store ++ "/roots/" ++ test_util.repeat('e', 64),
+        0o644,
+        "not a record\n",
+    );
 }
 
 fn prepare_overlay_refused(sim: *HostSim) void {
@@ -663,6 +755,55 @@ const base_cases = [_]Case{
         .code = .E0428,
         .args = &.{ "commit", "web-1" },
         .prepare = prepare_commit_redirect,
+        .exit = 2,
+    },
+    .{
+        .code = .E0429,
+        .args = &.{ "store", "verify" },
+        .prepare = prepare_damaged_object,
+        .prints = true,
+        .exit = 2,
+    },
+    .{
+        .code = .E0430,
+        .args = &.{ "store", "verify" },
+        .prepare = prepare_damaged_object,
+        .prints = true,
+        .exit = 2,
+    },
+    .{
+        .code = .E0431,
+        .args = &.{
+            "store",
+            "gc",
+            "--confirm",
+            "b3:0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        .prepare = prepare_store_with_tree,
+        .exit = 1,
+    },
+    .{
+        .code = .E0432,
+        .args = &.{ "store", "restore", "aaaaaaaaaaaa" },
+        .prepare = prepare_restore_conflict,
+        .exit = 1,
+    },
+    .{
+        .code = .E0433,
+        .args = &.{ "store", "restore", "bbbbbbbbbbbb" },
+        .prepare = prepare_store_with_tree,
+        .exit = 1,
+    },
+    .{
+        .code = .E0434,
+        .args = &.{ "store", "restore", "aaaaaaaaaaaa" },
+        .prepare = prepare_trash_incomplete,
+        .exit = 2,
+    },
+    .{
+        .code = .E0435,
+        .args = &.{ "store", "gc" },
+        .prepare = prepare_root_unusable,
         .exit = 2,
     },
     .{

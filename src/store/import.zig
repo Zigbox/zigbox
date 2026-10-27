@@ -44,6 +44,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const diagnose = @import("diagnose.zig");
+const generation = @import("generation.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
@@ -867,6 +868,11 @@ fn walk(
     diag: *Diag,
 ) Error!Run {
     result.* = std.mem.zeroes(Result);
+    var raised: object.Failure = undefined;
+    generation.bump(store, &raised) catch {
+        diagnose.write_failed(diag, store, "raising the generation", raised.err, raised.errno);
+        return error.Failed;
+    };
     var run: Run = .{
         .store = store,
         .ws = ws,

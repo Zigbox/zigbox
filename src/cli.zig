@@ -43,7 +43,7 @@ const help_text =
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
-    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff (see below)
+    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
@@ -75,6 +75,11 @@ const help_text =
     \\  zbx store du [<digest>]  the store's size, or what one tree costs
     \\  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
     \\  zbx store diff <a> <b>   list the paths that differ between two trees
+    \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
+    \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
+    \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
+    \\  zbx store gc --trash     list the trash
+    \\  zbx store restore <id>   put a gc's trash back
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
     \\
     \\bundle:
@@ -203,6 +208,9 @@ pub const StoreArgs = struct {
     operand: ?[]const u8,
     /// `store diff`: the second digest.
     second: ?[]const u8 = null,
+    /// `store gc --confirm <hash>`, and `store gc --trash`.
+    confirm: ?[]const u8 = null,
+    trash: bool = false,
 };
 
 pub const Invocation = struct {
@@ -260,6 +268,11 @@ const Token = union(enum) {
     read_only,
     detach,
     all,
+    /// `--confirm`, whose value is the next argument, and `--confirm=<value>`: `store gc`'s.
+    confirm_next,
+    confirm_inline: []const u8,
+    /// `--trash`: `store gc`'s.
+    trash,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -300,6 +313,11 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "-d")) return .detach;
     if (std.mem.eql(u8, argument, "--detach")) return .detach;
     if (std.mem.eql(u8, argument, "--all")) return .all;
+    if (std.mem.eql(u8, argument, "--confirm")) return .confirm_next;
+    if (std.mem.startsWith(u8, argument, "--confirm=")) {
+        return .{ .confirm_inline = argument["--confirm=".len..] };
+    }
+    if (std.mem.eql(u8, argument, "--trash")) return .trash;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -379,6 +397,10 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
+            .confirm_next => {
+                if (index + 1 < args.len) index += 1;
+            },
+            .confirm_inline, .trash => {},
             .run_option_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
@@ -405,13 +427,12 @@ pub fn parse(
     var count: u32 = 0;
     var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var bundle_args: BundleArgs = .{};
+    var gc_args: GcArgs = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
         const is_run = count > 0 and command_named(operands[0]) == .run;
         const is_bundle = count > 0 and command_named(operands[0]) == .bundle;
-        const is_stop = count > 0 and command_named(operands[0]) == .stop;
-        const is_ps = count > 0 and command_named(operands[0]) == .ps;
         switch (classify(argument)) {
             .verbose => {},
             .output_inline => |value| try check_output_value(diag, value),
@@ -421,15 +442,14 @@ pub fn parse(
                 try check_output_value(diag, args[index]);
             },
             .run_option_next, .run_option_inline => {
+                const is_stop = count > 0 and command_named(operands[0]) == .stop;
                 if (!is_run and !is_stop) return unknown_option(diag, argument);
                 try take_run_option(diag, &run_args, args, &index, is_run);
             },
-            .detach => {
-                if (!is_run) return unknown_option(diag, argument);
-                run_args.detach = true;
-            },
             .all => {
-                if (!is_ps) return unknown_option(diag, argument);
+                if (count == 0 or command_named(operands[0]) != .ps) {
+                    return unknown_option(diag, argument);
+                }
                 run_args.all = true;
             },
             .separator => {
@@ -437,17 +457,18 @@ pub fn parse(
                 run_args.command = args[index + 1 ..];
                 break;
             },
-            .read_only => {
+            .detach, .read_only => {
                 if (!is_run) return unknown_option(diag, argument);
-                run_args.read_only = true;
+                run_args.detach = run_args.detach or classify(argument) == .detach;
+                run_args.read_only = run_args.read_only or classify(argument) == .read_only;
+            },
+            .confirm_next, .confirm_inline, .trash => {
+                try take_gc_option(diag, &gc_args, operands[0..count], args, &index);
             },
             .last, .no_redact => {
                 if (!is_bundle) return unknown_option(diag, argument);
-                if (classify(argument) == .last) {
-                    bundle_args.last = true;
-                } else {
-                    bundle_args.no_redact = true;
-                }
+                bundle_args.last = bundle_args.last or classify(argument) == .last;
+                bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -461,8 +482,62 @@ pub fn parse(
     invocation.run = run_args;
     invocation.bundle = bundle_args;
     try resolve(args, operands[0..count], invocation, diag);
+    try check_options(&gc_args, invocation, diag);
+}
+
+/// The checks that need the command resolved: what `store gc`, `run` and `bundle` were given.
+fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) ParseError!void {
+    assert(diag.code == null);
+    if (invocation.command == .store and invocation.store.action == .gc) {
+        try check_gc_args(diag, gc_args, invocation);
+    }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
+}
+
+/// What `store gc` was given besides its words.
+const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false };
+
+fn is_gc(operands: []const []const u8) bool {
+    return operands.len >= 2 and command_named(operands[0]) == .store and
+        std.mem.eql(u8, operands[1], "gc");
+}
+
+/// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
+fn take_gc_option(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(diag.code == null);
+    const argument = args[index.*];
+    if (!is_gc(operands)) return unknown_option(diag, argument);
+    switch (classify(argument)) {
+        .trash => gc_args.trash = true,
+        .confirm_inline => |value| {
+            if (gc_args.confirm != null) return unexpected_argument(diag, .store, argument);
+            gc_args.confirm = value;
+        },
+        else => {
+            if (gc_args.confirm != null) return unexpected_argument(diag, .store, argument);
+            if (index.* + 1 == args.len) return missing_option_value(diag, "--confirm");
+            index.* += 1;
+            gc_args.confirm = args[index.*];
+        },
+    }
+}
+
+/// `gc` takes `--confirm <hash>` or `--trash`, not both.
+fn check_gc_args(diag: *Diag, gc_args: *const GcArgs, invocation: *Invocation) ParseError!void {
+    assert(diag.code == null);
+    if (gc_args.confirm != null and gc_args.trash) {
+        return unexpected_argument(diag, .store, "--trash");
+    }
+    invocation.store.confirm = gc_args.confirm;
+    invocation.store.trash = gc_args.trash;
 }
 
 /// Reads one value option of `run` and its value (inline, or the next argument). A value that
@@ -582,7 +657,7 @@ fn resolve_store(
     };
     const given: usize = operands.len - 2;
     const wanted: usize = switch (action) {
-        .ls => 0,
+        .ls, .verify, .gc => 0,
         .diff => 2,
         else => 1,
     };
@@ -591,6 +666,7 @@ fn resolve_store(
         const what: StoreMissing = switch (action) {
             .import => .directory,
             .diff => .two_digests,
+            .restore => .gc_id,
             else => .digest,
         };
         return store_usage(diag, .{ .missing = what });
@@ -606,7 +682,7 @@ fn resolve_store(
     assert((invocation.store.operand != null) == (given >= 1));
 }
 
-const StoreMissing = enum { action, directory, digest, two_digests };
+const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
 
 const StoreUsage = union(enum) {
     missing: StoreMissing,
@@ -623,12 +699,13 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             diag.raise(.E0006);
             switch (what) {
                 .action => diag.cause(
-                    "'store' needs a subcommand: import, ls, du, rm or diff",
+                    "'store' needs a subcommand: import, ls, du, rm, diff, verify, gc or restore",
                     .{},
                 ),
                 .directory => diag.cause("'store import' needs the directory to import", .{}),
                 .digest => diag.cause("'store rm' needs the digest of the root to drop", .{}),
                 .two_digests => diag.cause("'store diff' needs two digests to compare", .{}),
+                .gc_id => diag.cause("'store restore' needs the id of the trash to restore", .{}),
             }
             diag.context("cmd", "store", .{});
             diag.fix(
@@ -640,7 +717,8 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             const echo = echo_of(&storage, word);
             diag.raise(.E0001);
             diag.cause(
-                "'{s}' is not a store subcommand; they are import, ls, du, rm and diff",
+                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, verify, gc " ++
+                    "and restore",
                 .{echo},
             );
             diag.context("arg", "{s}", .{echo});
@@ -1065,6 +1143,8 @@ fn run_store(
         .action = invocation.store.action,
         .operand = invocation.store.operand,
         .second = invocation.store.second,
+        .confirm = invocation.store.confirm,
+        .trash = invocation.store.trash,
     };
     return store_commands.run(
         host,

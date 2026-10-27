@@ -322,6 +322,13 @@ pub const SimFs = struct {
         sim.kill(sim.find(path).?);
     }
 
+    /// Flips the bits of one byte of a file's content: damage by hand.
+    pub fn flip_byte(sim: *SimFs, path: []const u8, at: u32) void {
+        const node = &sim.nodes[sim.find(path).?];
+        assert(at < node.data_len);
+        sim.pool[node.data_at + at] ^= 0xff;
+    }
+
     pub fn set_mode_of(sim: *SimFs, path: []const u8, mode: u16) void {
         sim.nodes[sim.find(path).?].mode = mode;
     }

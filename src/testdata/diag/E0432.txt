@@ -1,0 +1,7 @@
+error[ZBX-E0432]: a restore would overwrite something that is back in the store
+  cause  tree
+         b3:4ccf5b88ec09f8b7d574449458659c371dc26d367844f42028f2160e4e2fa087 is
+         in the store again (1 in all); nothing was moved
+  fix    drop the roots that brought them back and gc again, or let the trash expire:   zbx store gc --trash
+  more   zbx explain E0432 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0432.html

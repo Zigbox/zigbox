@@ -1,0 +1,7 @@
+error[ZBX-E0435]: a root record can't be used
+  cause  the record of the root
+         b3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+         can't be read or understood
+  fix    see what else is damaged:   zbx store verify
+  more   zbx explain E0435 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0435.html

@@ -30,6 +30,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const host_mod = @import("../host.zig");
 const diagnose = @import("diagnose.zig");
 const digest_mod = @import("digest.zig");
+const generation = @import("generation.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
 const remove = @import("remove.zig");
@@ -321,6 +322,10 @@ pub fn ensure(store: *Store, ws: *Workspace, digest: Digest, diag: *Diag) Error!
     var temporary_storage: PathBuf = undefined;
     const temporary = store.tmp_path(&temporary_storage);
     var run: Run = .{ .store = store, .ws = ws, .diag = diag, .depth = 0 };
+    var raised: fs_mod.Failure = undefined;
+    generation.bump(store, &raised) catch {
+        return run.write_failed("raising the generation", raised.err, raised.errno);
+    };
     fs.make_directory(temporary, false) catch |err| {
         return run.write_failed("making the directory to build the tree in", err, fs.last_errno());
     };

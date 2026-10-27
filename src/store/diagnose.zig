@@ -620,3 +620,196 @@ test "a path that needs quoting is not put in a runnable fix" {
     try testing.expect(!quotable(""));
     try testing.expect(!quotable("a\nb"));
 }
+
+// ---- verify, gc and restore (slice 4) -------------------------------------------------------
+
+/// ZBX-E0429: one damaged thing, as `verify` found it. `refs` are up to three "root:path" texts.
+pub fn damaged_thing(
+    diag: *Diag,
+    class_word: []const u8,
+    id: Digest,
+    reason: []const u8,
+    errno: u16,
+    file: []const u8,
+    refs: []const []const u8,
+    reached: u32,
+) void {
+    assert(diag.code == null);
+    assert(class_word.len > 0);
+    assert(refs.len <= 3);
+    diag.raise(.E0429);
+    diag.while_("verifying the store", .{});
+    if (errno != 0) {
+        diag.cause(
+            "{s} {s} is damaged: {s} (errno {d})",
+            .{ class_word, id.text(), reason, errno },
+        );
+    } else {
+        diag.cause("{s} {s} is damaged: {s}", .{ class_word, id.text(), reason });
+    }
+    diag.context("id", "{s}", .{id.text()});
+    diag.context("file", "{s}", .{file});
+    if (refs.len > 0) diag.context("in", "{s}", .{refs[0]});
+    if (refs.len > 1) diag.context("in", "{s}", .{refs[1]});
+    if (refs.len > 2) diag.context("in", "{s}", .{refs[2]});
+    if (reached > 0) diag.context("paths", "{d}", .{reached});
+    diag.fix(.{
+        .sentence = "delete the file, import the directory it came from again, then verify:",
+        .command = "zbx store verify",
+    });
+}
+
+/// ZBX-E0430: the summary after the damaged things.
+pub fn verify_failed(diag: *Diag, damaged: u64, listed: u32, checked: u64) void {
+    assert(diag.code == null);
+    assert(damaged > 0);
+    diag.raise(.E0430);
+    diag.while_("verifying the store", .{});
+    diag.cause("{d} of the {d} things in the store are damaged", .{ damaged, checked });
+    if (damaged > listed) diag.cause("{d} are not shown above", .{damaged - listed});
+    diag.context("bad", "{d}", .{damaged});
+    diag.fix(.{
+        .sentence = "see the diagnostics above; drop the roots that reach them with:",
+        .command = "zbx store rm <digest>",
+    });
+}
+
+/// ZBX-E0431: the plan a hash names is not the plan now.
+pub fn plan_stale(diag: *Diag, given: Digest, fresh: Digest) void {
+    assert(diag.code == null);
+    assert(!given.eql(fresh));
+    diag.raise(.E0431);
+    diag.while_("confirming the gc plan", .{});
+    diag.cause("the store changed since the plan {s} was made; nothing was moved", .{given.text()});
+    diag.cause("the plan now has the hash {s}", .{fresh.text()});
+    diag.context("plan", "{s}", .{given.text()});
+    diag.context("now", "{s}", .{fresh.text()});
+    diag.fix_with(
+        "read the plan again, and confirm that one if it is right:",
+        "zbx store gc --confirm {s}",
+        .{fresh.text()},
+    );
+}
+
+/// ZBX-E0432: something in the trash is in the store again.
+pub fn restore_conflict(
+    diag: *Diag,
+    gc: []const u8,
+    class_word: []const u8,
+    id: Digest,
+    count: u64,
+) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    diag.raise(.E0432);
+    diag.while_("restoring the trash {s}", .{gc});
+    diag.cause(
+        "{s} {s} is in the store again ({d} in all); nothing was moved",
+        .{ class_word, id.text(), count },
+    );
+    diag.context("gc", "{s}", .{gc});
+    diag.context("id", "{s}", .{id.text()});
+    diag.fix(.{
+        .sentence = "drop the roots that brought them back and gc again, or let the trash expire:",
+        .command = "zbx store gc --trash",
+    });
+}
+
+/// ZBX-E0433: no trash with this id.
+pub fn no_such_trash(diag: *Diag, text: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, text);
+    diag.raise(.E0433);
+    diag.while_("looking for a trash", .{});
+    diag.cause("there is no trash '{s}'; it may have expired or been restored", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "list the trash that is left:", .command = "zbx store gc --trash" });
+}
+
+/// ZBX-E0434: the trash holds fewer things than the gc recorded.
+pub fn trash_incomplete(diag: *Diag, gc: []const u8, promised: u64, found: u64) void {
+    assert(diag.code == null);
+    diag.raise(.E0434);
+    diag.while_("restoring the trash {s}", .{gc});
+    diag.cause(
+        "the gc moved {d} objects, trees and directories into it, and {d} are there",
+        .{ promised, found },
+    );
+    diag.context("gc", "{s}", .{gc});
+    diag.fix(.{
+        .sentence = "import what is missing again from its source, then:",
+        .command = "zbx store verify",
+    });
+}
+
+/// ZBX-E0435: a root record that can not be used, so gc can not tell what is kept.
+pub fn root_unusable(diag: *Diag, store: *const layout.Store, digest: Digest, errno: u16) void {
+    assert(diag.code == null);
+    diag.raise(.E0435);
+    diag.while_("planning the gc", .{});
+    diag.cause("the record of the root {s} can't be read or understood", .{digest.text()});
+    if (errno != 0) diag.cause("the read failed with errno {d}", .{errno});
+    diag.context("digest", "{s}", .{digest.text()});
+    diag.context("path", "{s}/roots", .{store.root_text()});
+    diag.fix(.{ .sentence = "see what else is damaged:", .command = "zbx store verify" });
+}
+
+/// ZBX-E0412 for a plan hash that is not a whole digest.
+pub fn bad_plan_hash(diag: *Diag, text: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, text);
+    diag.raise(.E0412);
+    diag.while_("reading a plan hash", .{});
+    diag.cause("'{s}' is not a plan hash: b3: and 64 lowercase hex digits", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "read the plan's hash:", .command = "zbx store gc" });
+}
+
+/// A gc, restore or verify failure that is the store's I/O or limits, as the E04xx it is.
+pub fn gc_failed(
+    diag: *Diag,
+    store: *const layout.Store,
+    failure: *const @import("gc.zig").Failure,
+) void {
+    assert(diag.code == null);
+    switch (failure.*) {
+        .io => |io| {
+            const reads = [_][]const u8{ "listing", "sizing", "looking", "reading" };
+            var reading = false;
+            for (reads) |word| {
+                if (std.mem.startsWith(u8, io.step, word)) reading = true;
+            }
+            if (reading) {
+                cannot_read(diag, store, io.step, io.err, io.errno);
+            } else {
+                write_failed(diag, store, io.step, io.err, io.errno);
+            }
+        },
+        .tree => |walked| tree_damaged(diag, walked.where, switch (walked.kind) {
+            .missing => "is missing from the store",
+            .damaged => "does not hash to its name or does not decode",
+            .unreadable => "cannot be read",
+            .too_many_entries => "is part of a tree with more entries than a walk follows",
+            .stack_full => "is below more directories than a walk keeps",
+        }),
+        .root => |root| root_unusable(diag, store, root.digest, root.errno),
+        .too_big => |what| cannot_read(diag, store, what, error.FileTooLarge, 0),
+        .changed => cannot_read(
+            diag,
+            store,
+            "the store changed while gc was moving",
+            error.IoFailed,
+            0,
+        ),
+        .damaged_trash => cannot_read(
+            diag,
+            store,
+            "reading the trash's metadata",
+            error.IoFailed,
+            0,
+        ),
+    }
+    assert(diag.code != null);
+}

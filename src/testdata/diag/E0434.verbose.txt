@@ -1,0 +1,7 @@
+error[ZBX-E0434]: the trash is missing things the gc moved into it
+  while  restoring the trash aaaaaaaaaaaa
+  cause  the gc moved 3 objects, trees and directories into it, and 0 are there
+  gc     aaaaaaaaaaaa
+  fix    import what is missing again from its source, then:   zbx store verify
+  more   zbx explain E0434
+  docs   https://zigbox.github.io/zigbox/errors/E0434.html

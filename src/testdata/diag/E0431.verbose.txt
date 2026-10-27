@@ -1,0 +1,12 @@
+error[ZBX-E0431]: the store changed since that gc plan was made
+  while  confirming the gc plan
+  cause  the store changed since the plan
+         b3:0000000000000000000000000000000000000000000000000000000000000000 was
+         made; nothing was moved
+  cause  the plan now has the hash
+         b3:d6502e06b87bf0d461398667ba0cdb7cc35332cdcfb0c6aefc0bceaae7e339ea
+  plan   b3:0000000000000000000000000000000000000000000000000000000000000000
+  now    b3:d6502e06b87bf0d461398667ba0cdb7cc35332cdcfb0c6aefc0bceaae7e339ea
+  fix    read the plan again, and confirm that one if it is right:   zbx store gc --confirm b3:d6502e06b87bf0d461398667ba0cdb7cc35332cdcfb0c6aefc0bceaae7e339ea
+  more   zbx explain E0431
+  docs   https://zigbox.github.io/zigbox/errors/E0431.html

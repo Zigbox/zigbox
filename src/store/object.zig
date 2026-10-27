@@ -204,7 +204,7 @@ pub fn put(
 }
 
 /// Makes a shard directory, and flushes the directory above it if it was new.
-fn ensure_directory(store: *Store, path: [:0]const u8, failure: *Failure) host_mod.Error!void {
+pub fn ensure_directory(store: *Store, path: [:0]const u8, failure: *Failure) host_mod.Error!void {
     assert(path.len > 0);
     assert(std.mem.indexOfScalar(u8, path, '/') != null);
     const fs = store.fs;
@@ -298,7 +298,7 @@ fn copy_to(
 
 /// The attributes, in the order the kernel needs: a change of owner clears setuid and the file
 /// capability, so the owner first, then the mode, then the attributes.
-fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host_mod.Error!void {
+pub fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host_mod.Error!void {
     assert(attrs.mode <= 0o7777);
     assert(xattrs.validate(attrs.xattrs) == .none);
     fs.set_owner(fd, attrs.uid, attrs.gid) catch |err| {

@@ -119,7 +119,7 @@ pub const Store = struct {
     /// A path inside the store: the root and the parts. The longest is far below the buffer.
     pub fn path(store: *const Store, buffer: *PathBuf, parts: []const []const u8) [:0]const u8 {
         assert(store.root_len > 1);
-        var all: [8][]const u8 = undefined;
+        var all: [12][]const u8 = undefined;
         assert(parts.len < all.len);
         all[0] = store.root_text();
         @memcpy(all[1..][0..parts.len], parts);

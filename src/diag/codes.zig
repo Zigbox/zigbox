@@ -86,6 +86,13 @@ pub const Code = enum(u8) {
     E0426,
     E0427,
     E0428,
+    E0429,
+    E0430,
+    E0431,
+    E0432,
+    E0433,
+    E0434,
+    E0435,
     W0410,
     W0411,
     W0412,
@@ -1092,6 +1099,116 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0429,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file in the store is damaged",
+        .explanation =
+        \\"zbx store verify" read every object, tree and root record in the store
+        \\and checked it against its name. This one does not match: its bytes (or,
+        \\for a file object, its mode, owner or attributes) are not what its id
+        \\says, or its chunk list disagrees with it, or it can not be read, or a
+        \\tree names something that is not in the store.
+        \\
+        \\The message names the id and the file, and lists the paths in the trees
+        \\of the roots that reach it (up to 16), so you know which images are
+        \\affected. With --output json the whole list is in the output.
+        \\
+        \\Nothing was changed. A damaged file can not be repaired in place: delete
+        \\it and import the directory it came from again (the import writes what is
+        \\missing), or drop the roots that reach it with "zbx store rm". A disk
+        \\that damages files needs looking at; "zbx store verify" again afterwards.
+        ,
+    },
+    .{
+        .code = .E0430,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the store failed verification",
+        .explanation =
+        \\"zbx store verify" found damage; this is the summary after one
+        \\ZBX-E0429 for each damaged thing (the first 256, then a count). The exit
+        \\code is 2, because the store is part of the environment: zbx did not
+        \\do wrong, and neither did the command.
+        \\
+        \\Nothing was changed. See the diagnostics above this one.
+        ,
+    },
+    .{
+        .code = .E0431,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the store changed since that gc plan was made",
+        .explanation =
+        \\"zbx store gc --confirm <hash>" acts only on the plan the hash names. A plan
+        \\hash covers the ids of everything the plan would move and a counter that
+        \\every write to the store raises, so a plan can not be applied after an
+        \\import, a commit, a "store rm", a restore or another gc, even one that
+        \\changed nothing the plan holds.
+        \\
+        \\Nothing was moved. The message gives the hash of the plan as the store
+        \\is now: run "zbx store gc" to read it, and confirm that one if it is what
+        \\you want.
+        ,
+    },
+    .{
+        .code = .E0432,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a restore would overwrite something that is back in the store",
+        .explanation =
+        \\"zbx store restore" puts back what a gc moved to the trash. Something in
+        \\that trash is in the store again (an import or a commit wrote the same
+        \\object, tree or materialized directory in the meantime), and restore
+        \\does not decide which copy is right.
+        \\
+        \\Nothing was moved. The message names the first one and how many there
+        \\are. Drop the roots that brought them back with "zbx store rm" and gc
+        \\again, or leave the trash to expire.
+        ,
+    },
+    .{
+        .code = .E0433,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no trash with that id",
+        .explanation =
+        \\A gc id is the 12 hex digits of the plan hash a gc ran with. "zbx store
+        \\gc --trash" lists the trash that is still there. Trash is emptied by the
+        \\first gc after its time is up (seven days), and a restore removes the
+        \\trash it restored.
+        ,
+    },
+    .{
+        .code = .E0434,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the trash is missing things the gc moved into it",
+        .explanation =
+        \\The trash holds fewer objects, trees or materialized directories than
+        \\the gc that made it recorded, so putting it back would give a store
+        \\with holes. Something removed files from the trash directory by hand.
+        \\
+        \\Nothing was moved. The message says how many were recorded and how many
+        \\are there. What is missing can be imported again from its source.
+        ,
+    },
+    .{
+        .code = .E0435,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a root record can't be used",
+        .explanation =
+        \\A gc keeps what the roots reach, and a root's record in the store can not
+        \\be read or is from a newer zbx, so what it keeps is not known. gc
+        \\refuses rather than guess: a wrong guess deletes a tree somebody needs.
+        \\
+        \\The message names the root. "zbx store verify" says more. Delete the
+        \\record if the tree is not wanted, or import the directory again to
+        \\write it afresh.
+        ,
+    },
+    .{
         .code = .W0410,
         .severity = .warning,
         .blame = .user,
@@ -1377,6 +1494,7 @@ pub fn can_end_run(code: Code) bool {
         .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
+        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
         else => true,
     };
