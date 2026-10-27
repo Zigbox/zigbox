@@ -217,3 +217,8 @@ Acceptance criteria:
   - what you did not run and why;
   - every deviation from this brief;
   - anything in the spec, this brief, `DIAGNOSTICS.md` or the Zigcube contract that seemed wrong.
+
+## Notes for later milestones (found during M3)
+
+- **The container's umask is the caller's.** `zbx run` inherits the umask of whoever started it (`0002` under some login shells), so files a container creates get different modes on different hosts, and a `zbx commit` of the same steps can give different digests. Docker starts containers with `022`. Decide before M7, whose builds must be reproducible: set a fixed umask in the child, or record the caller's in the plan.
+- **The scope keeper ties `start` and `wait` to one thread** (`docs/demos/m2.md`). Zigcube's agent must start and wait for a container on the same thread, or the keeper ends early and the out-of-memory and process-limit reasons are read racily again.
