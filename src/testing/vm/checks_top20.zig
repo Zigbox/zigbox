@@ -14,6 +14,10 @@ pub const Verdict = enum {
     fail,
 };
 
+/// What the probe of a long-running server found. `none`: the image has no probe, or it did not
+/// stay up long enough to be asked.
+pub const Probe = enum { none, ok, failed };
+
 /// What the guest showed for one image.
 pub const Observed = struct {
     pulled: bool,
@@ -21,6 +25,7 @@ pub const Observed = struct {
     status: u8,
     /// The run's stderr (or the pull's, when it failed).
     stderr: []const u8,
+    probe: Probe = .none,
 };
 
 pub const Result = struct {
@@ -28,6 +33,7 @@ pub const Result = struct {
     pulled: bool,
     ran: bool,
     status: u8,
+    probe: Probe = .none,
     verdict: Verdict,
     /// Syscall names that returned EPERM and are not on the seccomp allowlist; empty if none
     /// or not looked for.
@@ -47,11 +53,34 @@ pub fn command_started(status: u8) bool {
     return status < 125 or status > 127;
 }
 
+/// A server that is still up when the timeout stops it has run, unless its probe was asked and
+/// got no answer: up but not serving is not a pass.
 pub fn judge(observed: Observed, known: []const u8) Verdict {
     if (!observed.pulled) return if (known.len > 0) .known else .fail;
-    if (observed.status == 0) return .pass;
-    if (stopped_by_timeout(observed.stderr)) return .pass;
+    const up = observed.status == 0 or stopped_by_timeout(observed.stderr);
+    if (up and observed.probe != .failed) return .pass;
     return if (known.len > 0) .known else .fail;
+}
+
+/// A probe, as `top20.zon` writes it: "port|send|expect". The guest connects to 127.0.0.1:port,
+/// writes `send` (printf escapes) and looks for `expect` in the first bytes of the answer; an
+/// empty `expect` means a connection is enough.
+pub const ProbeSpec = struct {
+    port: u16,
+    send: []const u8,
+    expect: []const u8,
+};
+
+pub fn parse_probe(text: []const u8) ?ProbeSpec {
+    if (text.len == 0) return null;
+    var parts = std.mem.splitScalar(u8, text, '|');
+    const port_text = parts.next() orelse return null;
+    const send = parts.next() orelse return null;
+    const expect = parts.next() orelse return null;
+    if (parts.next() != null) return null;
+    const port = std.fmt.parseInt(u16, port_text, 10) catch return null;
+    if (port == 0) return null;
+    return .{ .port = port, .send = send, .expect = expect };
 }
 
 /// The last non-empty line of `text`, trimmed; "-" if there is none. A failed container's last
@@ -114,7 +143,7 @@ pub fn format_line(buffer: []u8, result: Result) std.fmt.BufPrintError![]const u
         "-";
     return std.fmt.bufPrint(
         buffer,
-        "{s} | pulled={s} | ran={s} | exit={s} | {s} | seccomp={s} | {s}",
+        "{s} | pulled={s} | ran={s} | exit={s} | {s} | seccomp={s} | probe={s} | {s}",
         .{
             result.ref,
             yes_no(result.pulled),
@@ -122,6 +151,7 @@ pub fn format_line(buffer: []u8, result: Result) std.fmt.BufPrintError![]const u
             exit,
             @tagName(result.verdict),
             seccomp,
+            @tagName(result.probe),
             result.reason,
         },
     );
@@ -160,6 +190,38 @@ test "a run passes on exit 0 or on the harness's own timeout, and on nothing els
     try testing.expectEqual(Verdict.pass, judge(ok, "needs a password"));
     const unpulled: Observed = .{ .pulled = false, .status = 0, .stderr = "error[ZBX-E0505]" };
     try testing.expectEqual(Verdict.fail, judge(unpulled, ""));
+}
+
+test "a server that is up but does not answer its probe does not pass" {
+    // Goal: the probe is part of the verdict. Method: a stopped-by-timeout run with each probe
+    // outcome.
+    const base: Observed = .{
+        .pulled = true,
+        .status = 143,
+        .stderr = "zbx: stopped: timed out after 30000 ms\n",
+    };
+    var observed = base;
+    observed.probe = .ok;
+    try testing.expectEqual(Verdict.pass, judge(observed, ""));
+    observed.probe = .none;
+    try testing.expectEqual(Verdict.pass, judge(observed, ""));
+    observed.probe = .failed;
+    try testing.expectEqual(Verdict.fail, judge(observed, ""));
+    try testing.expectEqual(Verdict.known, judge(observed, "listens on 80"));
+}
+
+test "a probe is port, what to send and what to expect" {
+    // Goal: the zon string. Method: a good one, an empty expect, and malformed ones.
+    const spec = parse_probe("6379|PING\\r\\n|PONG").?;
+    try testing.expectEqual(@as(u16, 6379), spec.port);
+    try testing.expectEqualStrings("PING\\r\\n", spec.send);
+    try testing.expectEqualStrings("PONG", spec.expect);
+    try testing.expectEqualStrings("", parse_probe("27017||").?.expect);
+    try testing.expect(parse_probe("") == null);
+    try testing.expect(parse_probe("0||") == null);
+    try testing.expect(parse_probe("80|x") == null);
+    try testing.expect(parse_probe("80|x|y|z") == null);
+    try testing.expect(parse_probe("http|x|y") == null);
 }
 
 test "the command started unless zbx itself failed" {
@@ -212,7 +274,7 @@ test "a result is one line with the fields in a fixed order" {
         .reason = "-",
     };
     try testing.expectEqualStrings(
-        "alpine:latest | pulled=yes | ran=yes | exit=0 | pass | seccomp=none | -",
+        "alpine:latest | pulled=yes | ran=yes | exit=0 | pass | seccomp=none | probe=none | -",
         try format_line(&buffer, pass),
     );
     var seccomp = pass;
@@ -222,7 +284,7 @@ test "a result is one line with the fields in a fixed order" {
     seccomp.reason = "Operation not permitted";
     try testing.expectEqualStrings(
         "alpine:latest | pulled=yes | ran=yes | exit=1 | fail | seccomp=fchmodat2 | " ++
-            "Operation not permitted",
+            "probe=none | Operation not permitted",
         try format_line(&buffer, seccomp),
     );
     var unpulled = pass;
@@ -230,7 +292,7 @@ test "a result is one line with the fields in a fixed order" {
     unpulled.ran = false;
     unpulled.verdict = .fail;
     try testing.expectEqualStrings(
-        "alpine:latest | pulled=no | ran=no | exit=- | fail | seccomp=none | -",
+        "alpine:latest | pulled=no | ran=no | exit=- | fail | seccomp=none | probe=none | -",
         try format_line(&buffer, unpulled),
     );
 }

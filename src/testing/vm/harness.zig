@@ -58,6 +58,8 @@ pub const Options = struct {
     /// The top-20 run only: a registry mirror for docker.io (ZBX_REGISTRY_MIRRORS). Empty means
     /// the real Docker Hub, which is what the weekly workflow uses.
     mirror: []const u8 = "",
+    /// The top-20 run only, a development aid: image names (before the tag), comma separated.
+    only: []const u8 = "",
 };
 
 pub fn parse_options(init: std.process.Init) !Options {
@@ -91,6 +93,8 @@ pub fn parse_options(init: std.process.Init) !Options {
             options.ca_file = value;
         } else if (std.mem.eql(u8, name, "--mirror")) {
             options.mirror = value;
+        } else if (std.mem.eql(u8, name, "--only")) {
+            options.only = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             options.cache_dir = value;
         } else {

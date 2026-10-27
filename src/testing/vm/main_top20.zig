@@ -24,17 +24,20 @@ const z = H.as_demo ++ "/home/demo/z";
 const project = "/home/demo/project";
 /// How long an image's default command may run before zbx stops it: a server that is still up
 /// has run. Milliseconds, as `--timeout` takes them.
-const run_timeout_ms = "30000";
+const run_timeout_ms = "45000";
+/// How long the probe keeps asking a server that is not answering yet, in 2 s steps.
+const probe_steps_max = 22;
+const probe_file = "/tmp/top20-probe";
 /// A pull or run of a large image under TCG needs far more than the demos' 60 s.
 const image_timeout_s: u32 = 900;
 const strace_log = "/tmp/top20-strace.log";
 
-const Entry = struct { ref: []const u8, known: []const u8 };
+const Entry = struct { ref: []const u8, known: []const u8, probe: []const u8 };
 
 const images = blk: {
     var all: [list.images.len]Entry = undefined;
     for (list.images, 0..) |entry, index| {
-        all[index] = .{ .ref = entry.ref, .known = entry.known };
+        all[index] = .{ .ref = entry.ref, .known = entry.known, .probe = entry.probe };
     }
     break :blk all;
 };
@@ -116,7 +119,7 @@ fn check(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try write_wrapper(&session, out, options.mirror, ca_file.len > 0);
     try make_output_files(&session);
     const traced = try install_strace(&session, out);
-    const failures = try run_all(&session, out, arena, traced);
+    const failures = try run_all(&session, out, arena, traced, options.only);
     try session.shutdown();
     return if (failures == 0) 0 else 1;
 }
@@ -165,12 +168,36 @@ fn install_strace(session: *Session, out: *Io.Writer) !bool {
     return result.status == 0;
 }
 
-fn run_all(session: *Session, out: *Io.Writer, arena: std.mem.Allocator, traced: bool) !u32 {
+/// A development aid (`-Donly=redis,nginx`): with a list, only the images it names run. The
+/// weekly workflow names none, so all twenty run.
+fn is_selected(only: []const u8, ref: []const u8) bool {
+    if (only.len == 0) return true;
+    const name = ref[0..std.mem.indexOfScalar(u8, ref, ':').?];
+    var names = std.mem.splitScalar(u8, only, ',');
+    while (names.next()) |wanted| {
+        if (std.mem.eql(u8, wanted, name)) return true;
+    }
+    return false;
+}
+
+fn run_all(
+    session: *Session,
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    traced: bool,
+    only: []const u8,
+) !u32 {
     try out.print("\ntop20: {d} images from {s} ({s})\n", .{ images.len, list.date, list.source });
     var lines: [images.len][]const u8 = undefined;
     var failures: u32 = 0;
     var known: u32 = 0;
+    var selected: u32 = 0;
     for (images, 0..) |entry, index| {
+        if (!is_selected(only, entry.ref)) {
+            lines[index] = "";
+            continue;
+        }
+        selected += 1;
         const result = try try_image(session, out, entry, traced);
         var buffer: [1024]u8 = undefined;
         const line = try checks_top20.format_line(&buffer, result);
@@ -180,14 +207,19 @@ fn run_all(session: *Session, out: *Io.Writer, arena: std.mem.Allocator, traced:
             try out.print("top20: SECCOMP: {s} was refused {s}\n", .{ entry.ref, result.seccomp });
         }
         switch (result.verdict) {
-            .pass => {},
+            .pass => if (entry.known.len > 0) {
+                const note = "top20: NOTE: {s} passes; its known reason no longer holds\n";
+                try out.print(note, .{entry.ref});
+            },
             .known => known += 1,
             .fail => failures += 1,
         }
     }
     try out.print("\ntop20: results ({s})\n", .{list.date});
-    for (lines) |line| try out.print("top20-result: {s}\n", .{line});
-    const passed = images.len - failures - known;
+    for (lines) |line| {
+        if (line.len > 0) try out.print("top20-result: {s}\n", .{line});
+    }
+    const passed = selected - failures - known;
     const summary = "top20: {d} passed, {d} known not to run, {d} failed\n";
     try out.print(summary, .{ passed, known, failures });
     return failures;
@@ -248,26 +280,68 @@ fn try_image(
         result.reason = reason_of(entry, result.verdict, stderr, "error[");
         return result;
     }
-    const run = try std.fmt.allocPrint(
-        arena,
-        z ++ " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null",
-        .{entry.ref},
-    );
+    const probe = checks_top20.parse_probe(entry.probe);
+    const run = try run_command(arena, entry.ref, probe);
     const ran = try split_long(session, run);
     try H.show_split(out, run, ran);
     const stderr = try arena.dupe(u8, ran.streams.stderr);
+    const probe_result = if (probe != null and checks_top20.stopped_by_timeout(stderr))
+        try read_probe(session)
+    else
+        checks_top20.Probe.none;
     const observed: checks_top20.Observed = .{
         .pulled = true,
         .status = ran.status,
         .stderr = stderr,
+        .probe = probe_result,
     };
+    result.probe = probe_result;
     result.status = ran.status;
     result.ran = checks_top20.command_started(ran.status);
     result.verdict = checks_top20.judge(observed, entry.known);
     const refused = !checks_top20.command_started(ran.status);
     result.reason = reason_of(entry, result.verdict, stderr, if (refused) "error[" else "");
-    result.seccomp = try find_seccomp(session, out, entry, traced);
+    // Only a failure is looked at again under strace: a pass needs no explanation.
+    if (result.verdict != .pass) result.seccomp = try find_seccomp(session, out, entry, traced);
     return result;
+}
+
+/// The command for one image's default run. A server with a probe runs in the background while
+/// the guest asks it, as root on 127.0.0.1 (the container shares the host's network), every 2 s
+/// until it answers, the container ends or `probe_steps_max` steps pass. The answer goes to
+/// `probe_file`; the run's own exit code stays the command's.
+fn run_command(
+    arena: std.mem.Allocator,
+    ref: []const u8,
+    probe: ?checks_top20.ProbeSpec,
+) ![]const u8 {
+    const plain = z ++ " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
+    const spec = probe orelse return std.fmt.allocPrint(arena, plain, .{ref});
+    var text: std.ArrayList(u8) = .empty;
+    try text.print(arena, "rm -f " ++ probe_file ++ "; {{ " ++ plain ++ " & ZP=$!; ZI=0; " ++
+        "while [ $ZI -lt {d} ] && kill -0 $ZP 2>/dev/null; do sleep 2; ZI=$((ZI+1)); ", .{
+        ref, probe_steps_max,
+    });
+    if (spec.expect.len == 0) {
+        try text.print(arena, "if timeout 6 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{d}' " ++
+            "2>/dev/null; then echo ok >" ++ probe_file ++ "; break; fi; done; wait $ZP; }}", .{
+            spec.port,
+        });
+    } else {
+        try text.print(arena, "ZR=$(timeout 6 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{d} && " ++
+            "printf \"{s}\" >&3 && timeout 3 head -c 300 <&3' 2>/dev/null); " ++
+            "case \"$ZR\" in *{s}*) echo ok >" ++ probe_file ++ "; break;; esac; " ++
+            "done; wait $ZP; }}", .{ spec.port, spec.send, spec.expect });
+    }
+    return text.items;
+}
+
+/// What the probe wrote: `ok`, or nothing (it never got its answer).
+fn read_probe(session: *Session) !checks_top20.Probe {
+    const command = "cat " ++ probe_file ++ " 2>/dev/null";
+    const read = try session.run(command, limits.command_timeout_kvm_s);
+    const text = std.mem.trim(u8, read.output, " \r\n");
+    return if (std.mem.eql(u8, text, "ok")) .ok else .failed;
 }
 
 fn reason_of(

@@ -250,6 +250,8 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
 
     const mirror_help = "top20: a docker.io mirror for the guest (the weekly run uses none)";
     const mirror = b.option([]const u8, "mirror", mirror_help);
+    const only_help = "top20: run only these images, e.g. redis,nginx (development)";
+    const only = b.option([]const u8, "only", only_help);
     const ca_help = "demos: a CA bundle the guest trusts, for a host that inspects TLS";
     const ca_file = b.option(std.Build.LazyPath, "ca-file", ca_help);
 
@@ -275,6 +277,7 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
         if (std.mem.eql(u8, demo.step, "demo-m3")) add_old_binary(b, run);
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
+        if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
         if (ca_file) |path| {
             run.addArg("--ca-file");
             run.addFileArg(path);
