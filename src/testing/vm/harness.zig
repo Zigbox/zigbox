@@ -117,7 +117,7 @@ pub const Timer = struct {
 };
 
 /// Reads both release binaries and checks them: static ELF for the right machine, under
-/// 2 MiB. Returns the x86_64 binary, which is the one the guest runs.
+/// 4 MiB. Returns the x86_64 binary, which is the one the guest runs.
 pub fn check_binaries(init: std.process.Init, out: *Io.Writer, options: Options) ![]const u8 {
     const arena = init.arena.allocator();
     const pairs = [_]struct { path: []const u8, machine: checks.Machine }{
@@ -129,7 +129,7 @@ pub fn check_binaries(init: std.process.Init, out: *Io.Writer, options: Options)
         const limit: Io.Limit = .limited(limits.elf_bytes_max);
         const bytes = try Io.Dir.cwd().readFileAlloc(init.io, pair.path, arena, limit);
         checks.check_static_elf(bytes, pair.machine) catch |err| {
-            try out.print("{s}: {s} is not a static {s} ELF under 2 MiB: {s}\n", .{
+            try out.print("{s}: {s} is not a static {s} ELF under 4 MiB: {s}\n", .{
                 demo_name,
                 pair.path,
                 @tagName(pair.machine),

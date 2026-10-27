@@ -4,7 +4,7 @@
 //!      stdout line (`[ZBX-E0101]`), stderr holds the `error[ZBX-E0101]` block with a fix that
 //!      names the sysctl, and the exit code is 2; the sysctls are restored and doctor is ok.
 //!   3. `file zbx` reports a statically linked ELF; both release binaries (x86_64 and aarch64)
-//!      are checked here, in Zig, to be static ELF files under 2 MiB.
+//!      are checked here, in Zig, to be static ELF files under 4 MiB.
 //!   4. `zbx frobnicate` prints `error[ZBX-E0001]` on stderr and exits 1.
 //! The guest console merges stdout and stderr, so every `zbx` command runs through
 //! `run_split`, which keeps stderr in a file in the guest and prints it after a marker.
