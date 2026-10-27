@@ -467,7 +467,7 @@ pub fn write(
     const directory = std.fmt.bufPrintSentinel(&directory_storage, "{s}", .{shown}, 0) catch {
         return fs.note(failure, error.FileTooLarge);
     };
-    try fs.write_atomic(made, located.text(), directory, text, 0o644, failure);
+    try fs.write_atomic_stamped(made, located.text(), directory, text, 0o644, false, failure);
 }
 
 /// The lock of the project and the memory to read and write it in; the caller's.

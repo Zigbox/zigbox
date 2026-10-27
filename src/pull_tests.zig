@@ -479,6 +479,9 @@ test "a pull writes zbx.lock: the reference as written, sorted, and never the mi
     try testing.expect(at_second < at_first or std.mem.order(u8, second, first) == .lt);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, ".reference = "));
     try testing.expect(std.mem.indexOf(u8, text, "mirror") == null);
+    // A file of the project keeps the time it was written, not the store's fixed one.
+    const stamped = store_files.mtime_of(lock_path).?;
+    try testing.expect(stamped != @import("constants.zig").store_mtime_seconds);
     try testing.expect(std.mem.indexOf(u8, text, &world.registry.fixture.oci.amd64.digest) != null);
     try testing.expect(std.mem.indexOf(u8, text, json_field(&again, "tree")) != null);
     // A digest reference needs no lock and leaves it alone.

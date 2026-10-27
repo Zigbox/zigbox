@@ -568,10 +568,26 @@ pub const Fs = struct {
         mode: u16,
         failure: *Failure,
     ) Error!void {
-        assert(bytes.len <= constants.store_tree_bytes_max);
+        return fs.write_atomic_stamped(temporary, final, directory, bytes, mode, true, failure);
+    }
+
+    /// Like `write_atomic`; `fixed_time` says whether the file gets the store's fixed
+    /// modification time (a store file does) or keeps the time it was written (a file of the
+    /// user's, like zbx.lock).
+    pub fn write_atomic_stamped(
+        fs: Fs,
+        temporary: [:0]const u8,
+        final: [:0]const u8,
+        directory: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+        fixed_time: bool,
+        failure: *Failure,
+    ) Error!void {
+        assert(bytes.len <= constants.lock_file_bytes_max + constants.store_tree_bytes_max);
         assert(!std.mem.eql(u8, temporary, final));
         const fd = fs.create(temporary, mode) catch |err| return fs.note(failure, err);
-        fs.fill(fd, bytes) catch |err| {
+        fs.fill(fd, bytes, fixed_time) catch |err| {
             const noted = fs.note(failure, err);
             fs.close(fd);
             fs.unlink(temporary) catch {}; // The write's own error is the one to report.
@@ -594,11 +610,11 @@ pub const Fs = struct {
         return err;
     }
 
-    fn fill(fs: Fs, fd: Fd, bytes: []const u8) Error!void {
+    fn fill(fs: Fs, fd: Fd, bytes: []const u8, fixed_time: bool) Error!void {
         assert(fd < std.math.maxInt(i32));
-        assert(bytes.len <= constants.store_tree_bytes_max);
+        assert(bytes.len <= constants.lock_file_bytes_max + constants.store_tree_bytes_max);
         try fs.write_all(fd, bytes);
-        try fs.set_mtime(fd, constants.store_mtime_seconds);
+        if (fixed_time) try fs.set_mtime(fd, constants.store_mtime_seconds);
         try fs.fsync(fd);
     }
 };
