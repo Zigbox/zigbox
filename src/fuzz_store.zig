@@ -36,13 +36,18 @@ var diag: Diag = undefined;
 
 /// Builds the same random tree in `target` for the same `seed`: it is a function of the seed.
 fn build_source(seed: u64, target: *fs_sim.SimFs) void {
+    build_tree(seed, target, "/src");
+}
+
+/// The same, at a root of four bytes (`/src`, `/dst`).
+pub fn build_tree(seed: u64, target: *fs_sim.SimFs, comptime root: *const [4]u8) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
-    target.put_dir("/src", 0o755);
+    target.put_dir(root, 0o755);
     var directories: [8][16]u8 = undefined;
     var lengths: [8]u8 = undefined;
     var count: u32 = 1;
-    directories[0][0..4].* = "/src".*;
+    directories[0][0..4].* = root.*;
     lengths[0] = 4;
     const wanted = random.intRangeAtMost(u32, 2, 24);
     for (0..wanted) |index| {

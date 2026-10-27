@@ -81,6 +81,7 @@ jobs:
           - seccomp
           - tree
           - store
+          - commit
           - parse_sysctl
           - parse_kernel
           - parse_controllers
