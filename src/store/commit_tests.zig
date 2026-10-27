@@ -239,7 +239,8 @@ const Listing = struct {
         inline for (.{ "content", "mode", "owner", "xattrs", "target", "kind" }) |field| {
             if (@field(change.attrs, field)) {
                 const label = if (std.mem.eql(u8, field, "kind")) "type" else field;
-                writer.print("{s}{s}", .{ if (first) "  " else ", ", label }) catch unreachable; // Short.
+                const separator = if (first) "  " else ", ";
+                writer.print("{s}{s}", .{ separator, label }) catch unreachable; // Short.
                 first = false;
             }
         }
