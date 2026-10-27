@@ -883,7 +883,8 @@ test "the round trip needs every mode, owner, kind and link line" {
     const wrong = "RT:/rt/suid 755 0:0 regular file\n";
     try testing.expectError(error.LineMissing, check_lines(wrong, &round_trip_lines));
     try testing.expectError(error.LineMissing, check_lines("", &owner_lines));
-    try check_lines("RT:/rt/owned 2750 5:6 regular empty file\nRT:/rt/olink 777 5:6 symbolic link\n" ++
+    try check_lines("RT:/rt/owned 2750 5:6 regular empty file\n" ++
+        "RT:/rt/olink 777 5:6 symbolic link\n" ++
         "LINK:/rt/olink owned\n", &owner_lines);
 }
 
