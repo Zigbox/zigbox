@@ -320,9 +320,9 @@ fn fuzz_cli(seed: u64) void {
     if (random.boolean()) faulted.faults.fail_call_index = random.uintLessThan(u32, 3);
     faulted.faults.fail_call_error = random_injected_error(random);
     // The doctor reads the host, so read faults change what it reports (that is the doctor
-    // fuzzer's subject); here only the output path is faulted for it.
+    // fuzzer's subject), and so does a pull; here only the output path is faulted for them.
     const runs_doctor = std.mem.indexOf(u8, reference.stdout(), "kernel") != null;
-    if (runs_doctor) faulted.faults = only_write_faults(faulted.faults);
+    if (runs_doctor or is_pull_line(args)) faulted.faults = only_write_faults(faulted.faults);
     if (random.boolean()) {
         faulted.faults.write_fault_stream = if (random.boolean()) .stdout else .stderr;
     }
@@ -343,28 +343,42 @@ fn fuzz_cli(seed: u64) void {
     }
 }
 
-/// Whether the command line is a `run` one, stated independently of `cli.scan_options`: the
-/// first word that is not an option, where `--output` takes the next word as its value.
-fn is_run_line(args: FuzzArgs) bool {
+/// The command word of the command line, stated independently of `cli.scan_options`: the first
+/// word that is not an option, where `--output` takes the next word as its value. Null if
+/// collection stops before one.
+fn command_word(args: FuzzArgs) ?[]const u8 {
     var index: u32 = 1;
     // Collection stops at the first argument that is too long or past the count bound; what came
     // before it is all the failure can see.
     const seen_max = @min(args.count, constants.args_count_max + 1);
     while (index < seen_max) : (index += 1) {
         const word = args.items[index];
-        if (word.len > constants.arg_bytes_max) return false;
+        if (word.len > constants.arg_bytes_max) return null;
         if (std.mem.eql(u8, word, "--output")) {
             index += 1; // Its value, whatever it is, but collection stops at one that is too long.
-            if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return false;
+            if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return null;
             continue;
         }
         const is_option = word.len > 1 and word[0] == '-';
         const is_command_like = std.mem.eql(u8, word, "--help") or
             std.mem.eql(u8, word, "--version");
         if (is_option and !is_command_like) continue;
-        return std.mem.eql(u8, word, "run");
+        return word;
     }
-    return false;
+    return null;
+}
+
+/// Whether the command line is a `run` one.
+fn is_run_line(args: FuzzArgs) bool {
+    const word = command_word(args) orelse return false;
+    return std.mem.eql(u8, word, "run");
+}
+
+/// Whether it is a `pull` one: like the doctor it reads the host (the machine type, the
+/// network), so a fault on a read changes what it reports and not only whether it gets there.
+fn is_pull_line(args: FuzzArgs) bool {
+    const word = command_word(args) orelse return false;
+    return std.mem.eql(u8, word, "pull");
 }
 
 /// An independent statement of "printable" (space to tilde), so a wrong `is_printable` is caught.

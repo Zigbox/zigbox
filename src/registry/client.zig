@@ -725,29 +725,33 @@ fn blob_from(
             return cache_error(blobs, download, diag);
         };
         if (began == .cached) return .cached;
-        const restart = if (download.complete()) false else try request_blob(
+        const restart = if (download.complete()) false else request_blob(
             client,
             reference,
             origin,
             download,
             &head,
             diag,
-        );
+        ) catch |err| {
+            download.abandon();
+            return err;
+        };
         if (restart) {
             download.abandon();
             download.discard() catch return cache_error(blobs, download, diag);
+            if (round == 1) return unsatisfiable(origin, digest, diag);
             continue;
         }
         const finished = download.finish() catch return cache_error(blobs, download, diag);
         switch (finished) {
             .ok => return if (download.was_resumed()) .resumed else .downloaded,
-            .short => |have| {
-                const what = "a layer that ended early";
-                var detail: [96]u8 = undefined;
-                const text = std.fmt.bufPrint(&detail, "{s}: {d} of {d} bytes", .{
-                    what, have, size,
-                }) catch what; // Two numbers and the words fit 96 bytes.
-                diagnose.http_error(diag, 200, "the blob", text);
+            .short => {
+                const target: diagnose.Target = .{
+                    .host = origin.host,
+                    .port = origin.port,
+                    .scheme = origin.scheme,
+                };
+                diagnose.network_failed(diag, error.Truncated, target, 0);
                 return error.Failed;
             },
             .mismatch => |actual| {
@@ -758,7 +762,15 @@ fn blob_from(
             },
         }
     }
-    diagnose.digest_mismatch(diag, "a layer or config blob", digest, Sha256.of(""));
+    unreachable; // The second round returns in every branch.
+}
+
+/// The registry answered 416 to a request for the whole blob.
+fn unsatisfiable(origin: Origin, digest: Sha256, diag: *Diag) Error {
+    assert(digest.bytes.len == constants.oci_digest_bytes);
+    var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
+    const url = url_of(&url_storage, origin, "/v2/blobs");
+    diagnose.http_error(diag, 416, url, "it would not give the blob from its start");
     return error.Failed;
 }
 

@@ -336,3 +336,62 @@ test "a pull cut in the middle resumes, and a hostile layer is refused with noth
     try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", special }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-W0501") != null);
 }
+
+test "a failed write anywhere in a pull is a coded refusal, and the next pull finishes the job" {
+    // Goal: the pull's own durability, as the gc tests have for theirs. Method: the first run
+    // gives the tree; then for every third write point of a pull the disk fails there
+    // (`ENOSPC`, once): the command ends with 0 or with a coded error, never a crash; the store
+    // is whole; a staging directory is left only when the failure was the removal of it, and
+    // the same command run again gives the same tree and leaves nothing.
+    var world: World = undefined;
+    pull_world(&world, 20);
+    const reference = test_registry.TestRegistry.reference(.open);
+    const args = [_][:0]const u8{ "zbx", "--output", "json", "pull", reference };
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &args));
+    const first = try parse_json(world.sim.stdout());
+    var tree: [67]u8 = undefined;
+    @memcpy(&tree, json_field(&first, "tree"));
+    const points = store_files.mutations;
+    first.deinit();
+    try testing.expect(points > 50);
+    var refused: u32 = 0;
+    var at: u32 = 0;
+    while (at < points) : (at += 3) {
+        pull_world(&world, 21);
+        store_files.faults.fail_mutation = at;
+        store_files.faults.fail_errno = 28;
+        const code = run_text(&world, &args);
+        if (code != 0) {
+            refused += 1;
+            // The diagnostics are JSON lines, as the command was asked for JSON.
+            try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "\"code\":\"ZBX-E") != null);
+        }
+        const left = staging_left();
+        if (left > 0) {
+            try testing.expect(code != 0);
+            const said = std.mem.indexOf(u8, world.sim.stderr(), "staging directory");
+            try testing.expect(said != null);
+        }
+        store_files.faults.fail_mutation = null;
+        try support.check_whole(&store_files, "/home/alice/.local/share/zbx/store", 1 << 20);
+        // The simulated process keeps its pid, so a second run would meet its own leftover; a
+        // real one is a new process and gc removes the leftover of the dead one.
+        if (left > 0) continue;
+        try testing.expectEqual(@as(u8, 0), run_text(&world, &args));
+        const again = try parse_json(world.sim.stdout());
+        defer again.deinit();
+        try testing.expectEqualStrings(&tree, json_field(&again, "tree"));
+        try testing.expectEqual(@as(u32, 0), staging_left());
+    }
+    try testing.expect(refused > 10);
+}
+
+/// Files and directories under the store's `tmp/`.
+fn staging_left() u32 {
+    var count: u32 = 0;
+    var index: u32 = 0;
+    while (store_files.alive_path(index)) |path| : (index += 1) {
+        if (std.mem.indexOf(u8, path, "/store/tmp/") != null) count += 1;
+    }
+    return count;
+}

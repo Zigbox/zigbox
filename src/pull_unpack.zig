@@ -117,19 +117,30 @@ fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
     };
     var result: import.Result = undefined;
     const outcome = unpack(job, &store, stage, squash_owner, &result, diag);
-    cleanup(job, stage, &store);
+    // The staging directory goes whatever happened. The unpack's own failure is the one to say.
+    var cleanup_diag: Diag = undefined;
+    cleanup_diag.reset();
+    const cleaned = cleanup(job, stage, &store, &cleanup_diag);
     try outcome;
+    cleaned catch {
+        diag.* = cleanup_diag;
+        return error.Failed;
+    };
     try finish(job, &store, &result, diag);
 }
 
-/// Removes the staging directory. If that fails it stays in `tmp/`, which gc empties of the
-/// leftovers of dead processes; the pull itself has succeeded or failed already.
-fn cleanup(job: *Job, stage: [:0]const u8, store: *const Store) void {
+/// Removes the staging directory. If that fails it stays in `tmp/`, where gc removes the
+/// leftovers of dead processes, and the pull says so: it has not finished.
+fn cleanup(job: *Job, stage: [:0]const u8, store: *const Store, diag: *Diag) Error!void {
     assert(stage.len > 0);
     assert(store.root_len > 1);
     const applier = &job.workspace.applier;
     var failure: remove.Failure = undefined;
-    remove.tree(store.fs, &applier.removal, &applier.removal_arena, stage, &failure) catch return;
+    remove.tree(store.fs, &applier.removal, &applier.removal_arena, stage, &failure) catch {
+        const step = "removing the staging directory";
+        store_diagnose.write_failed(diag, store, step, failure.err, failure.errno);
+        return error.Failed;
+    };
 }
 
 fn unpack(
