@@ -290,7 +290,10 @@ pub fn rate_limited(diag: *Diag, url: []const u8, retry_after: ?[]const u8) void
         diag.cause("{s} answered 429: the pull rate limit is used up", .{shown});
     }
     diag.fix(.{ .sentence = "wait a few minutes, then run the command again" });
-    diag.fix(.{ .sentence = "or pull from another registry or mirror that has the image" });
+    diag.fix(.{
+        .sentence = "or ask a mirror of Docker Hub first, for example:",
+        .command = "ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20",
+    });
 }
 
 /// Which step of the anonymous flow was refused.

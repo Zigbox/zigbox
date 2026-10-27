@@ -1425,8 +1425,9 @@ pub const registry = [_]Entry{
         \\
         \\zbx does not retry on its own: a retry inside the limit only uses more
         \\of it. When the registry says how long to wait (Retry-After) the message
-        \\gives it. Try again after that, pull from a registry or mirror that has
-        \\the image, or reuse an image already in the store (zbx store ls).
+        \\gives it. Try again after that, name a mirror of Docker Hub in
+        \\ZBX_REGISTRY_MIRRORS (for example mirror.gcr.io), pull from another
+        \\registry, or reuse an image already in the store (zbx store ls).
         ,
     },
     .{

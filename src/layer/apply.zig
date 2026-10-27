@@ -1106,3 +1106,106 @@ test "layers compressed by real tools are read: gzip level 9 and zstd level 19" 
         try expect_sample_layer();
     }
 }
+
+const host_real = @import("../host_real.zig");
+
+/// A directory of the real file system for a test, and the same path as C text.
+const RealDirectory = struct {
+    fs: Fs,
+    path: [96:0]u8,
+    len: u32,
+
+    fn make(real: *host_real.HostReal, name: []const u8) !RealDirectory {
+        var directory: RealDirectory = undefined;
+        directory.fs = real.interface().filesystem();
+        directory.path = @splat(0);
+        const written = try std.fmt.bufPrint(&directory.path, "/tmp/zbx-layer-{s}-{d}", .{
+            name, std.os.linux.getpid(),
+        });
+        directory.len = @intCast(written.len);
+        try directory.fs.make_directory(directory.text(), true);
+        return directory;
+    }
+
+    fn text(directory: *const RealDirectory) [:0]const u8 {
+        return directory.path[0..directory.len :0];
+    }
+
+    fn child(directory: *const RealDirectory, buffer: *[160:0]u8, name: []const u8) [:0]const u8 {
+        buffer.* = @splat(0);
+        const written = std.fmt.bufPrint(buffer, "{s}/{s}", .{ directory.text(), name }) catch "";
+        return buffer[0..written.len :0];
+    }
+
+    /// Removes it with all it holds; the test's own cleanup, so a failure is ignored.
+    fn remove_all(directory: *const RealDirectory) void {
+        var failure: remove.Failure = undefined;
+        const arena = &test_applier.removal_arena;
+        const applier = &test_applier;
+        remove.tree(directory.fs, &applier.removal, arena, directory.text(), &failure) catch {};
+    }
+};
+
+test "on a real file system a symlink is not followed, and links, modes and whiteouts are real" {
+    // Goal: the guarantee against the kernel, which does follow links. Method: a layer makes a
+    // symlink to a directory outside the root and then an entry through it; a second layer
+    // shows the ordinary entries as the kernel keeps them. The owners are not applied (one-id
+    // map), so any user can run it.
+    var real: host_real.HostReal = .{};
+    const outside = try RealDirectory.make(&real, "outside");
+    defer outside.remove_all();
+    const stage = try RealDirectory.make(&real, "stage");
+    defer stage.remove_all();
+    const fs = stage.fs;
+    var buffer: [160:0]u8 = undefined;
+    var archive = builder.Tar.init(&test_tar);
+    archive.add(.{ .name = "escape", .kind = .symlink, .link = outside.text() });
+    archive.add(.{ .name = "escape/planted", .data = "x" });
+    archive.finish();
+    test_applier.start(fs, stage.text(), true);
+    try testing.expectError(error.Failed, apply_real(archive.bytes(), fs));
+    try expect_refused(.through_symlink);
+    try testing.expectError(error.NotFound, fs.lstat(outside.child(&buffer, "planted")));
+
+    archive = builder.Tar.init(&test_tar);
+    archive.add(.{ .name = "bin/", .kind = .directory, .mode = 0o750 });
+    archive.add(.{ .name = "bin/tool", .data = "tool", .mode = 0o4755 });
+    archive.add(.{ .name = "bin/alias", .kind = .hardlink, .link = "bin/tool" });
+    archive.add(.{ .name = "bin/gone", .data = "gone" });
+    archive.add(.{ .name = "lib/", .kind = .directory });
+    archive.add(.{ .name = "lib/old", .data = "old" });
+    archive.finish();
+    test_applier.start(fs, stage.text(), true);
+    try apply_real(archive.bytes(), fs);
+    archive = builder.Tar.init(&test_tar);
+    archive.add(.{ .name = "bin/.wh.gone", .data = "" });
+    archive.add(.{ .name = "lib/.wh..wh..opq", .data = "" });
+    archive.add(.{ .name = "lib/new", .data = "new" });
+    archive.finish();
+    try apply_real(archive.bytes(), fs);
+    const tool = try fs.lstat(stage.child(&buffer, "bin/tool"));
+    try testing.expectEqual(@as(u16, 0o4755), tool.mode);
+    try testing.expectEqual(@as(u32, 2), tool.links);
+    try testing.expectEqual(@as(u16, 0o750), (try fs.lstat(stage.child(&buffer, "bin"))).mode);
+    try testing.expectError(error.NotFound, fs.lstat(stage.child(&buffer, "bin/gone")));
+    try testing.expectError(error.NotFound, fs.lstat(stage.child(&buffer, "lib/old")));
+    try testing.expect((try fs.lstat(stage.child(&buffer, "lib/new"))).kind == .file);
+}
+
+/// Applies `bytes` as one layer to the real directory the applier was started on.
+fn apply_real(bytes: []const u8, fs: Fs) Error!void {
+    assert(bytes.len > 0);
+    var name: [64:0]u8 = @splat(0);
+    const written = std.fmt.bufPrint(&name, "/tmp/zbx-layer-blob-{d}", .{
+        std.os.linux.getpid(),
+    }) catch unreachable; // Short.
+    const path = name[0..written.len :0];
+    fs.unlink(path) catch {}; // A leftover of an earlier run, if any.
+    const fd = fs.create(path, 0o600) catch return test_applier.fail(.unreadable, "", "");
+    fs.write_all(fd, bytes) catch return test_applier.fail(.unreadable, "", "");
+    fs.close(fd);
+    defer fs.unlink(path) catch {}; // The test's own cleanup.
+    test_layer.start(fs, path) catch return test_applier.fail(.unreadable, "", "");
+    defer test_layer.close();
+    try test_applier.apply_layer(&test_layer);
+}

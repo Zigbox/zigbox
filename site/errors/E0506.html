@@ -77,7 +77,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
 <p>The registry answered 429 Too Many Requests. Docker Hub limits anonymous pulls by the address they come from, so machines behind one NAT, and CI runners, share one allowance.</p>
-<p>zbx does not retry on its own: a retry inside the limit only uses more of it. When the registry says how long to wait (Retry-After) the message gives it. Try again after that, pull from a registry or mirror that has the image, or reuse an image already in the store (zbx store ls).</p>
+<p>zbx does not retry on its own: a retry inside the limit only uses more of it. When the registry says how long to wait (Retry-After) the message gives it. Try again after that, name a mirror of Docker Hub in ZBX_REGISTRY_MIRRORS (for example mirror.gcr.io), pull from another registry, or reuse an image already in the store (zbx store ls).</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0506</pre>
