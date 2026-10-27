@@ -524,6 +524,10 @@ pub const net_proxy_url_bytes_max: u32 = 512;
 pub const net_no_proxy_bytes_max: u32 = 2048;
 /// The CA certificates of the system, parsed once per process: the room for the bundle.
 pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
+/// The JSON result of a resolve: 128 layers of about 150 bytes, and the rest.
+pub const pull_output_bytes_max: u32 = 32 * 1024;
+/// Calls one read or write loop makes before it gives up (each wait inside is time bounded).
+pub const net_io_calls_max: u32 = 1 << 20;
 /// How many hosts one name may resolve to that are tried.
 pub const net_addresses_max: u32 = 8;
 
@@ -779,6 +783,7 @@ comptime {
     assert(registry_redirects_max > 0);
     assert(net_idle_timeout_ms < net_request_timeout_ms);
     assert(net_addresses_max > 0);
+    assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

@@ -55,8 +55,9 @@ pub const Logged = struct {
     port: u16,
     target: [160]u8,
     target_len: u8,
-    /// The token the request carried, empty for none. For tests only.
-    bearer: [constants.registry_token_bytes_max]u8,
+    /// The first bytes of the token the request carried, empty for none. For tests only: the
+    /// fixture's token is shorter than this, and `bearer_len` is the real length.
+    bearer: [96]u8,
     bearer_len: u32,
     status: u16,
 
@@ -69,7 +70,7 @@ pub const Logged = struct {
     }
 
     pub fn bearer_text(entry: *const Logged) []const u8 {
-        return entry.bearer[0..entry.bearer_len];
+        return entry.bearer[0..@min(entry.bearer_len, entry.bearer.len)];
     }
 };
 
@@ -128,7 +129,8 @@ pub const SimNet = struct {
         const target_len = @min(request.target.len, entry.target.len);
         @memcpy(entry.host[0..host_len], request.host[0..host_len]);
         @memcpy(entry.target[0..target_len], request.target[0..target_len]);
-        @memcpy(entry.bearer[0..request.bearer.len], request.bearer);
+        const kept = @min(request.bearer.len, entry.bearer.len);
+        @memcpy(entry.bearer[0..kept], request.bearer[0..kept]);
         entry.scheme = request.scheme;
         entry.host_len = @intCast(host_len);
         entry.target_len = @intCast(target_len);

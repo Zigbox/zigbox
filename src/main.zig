@@ -123,5 +123,11 @@ test {
     _ = @import("registry/client.zig");
     _ = @import("registry/client_tests.zig");
     _ = @import("registry/test_registry.zig");
+    _ = @import("registry/proxy.zig");
+    _ = @import("registry/diagnose.zig");
+    _ = @import("pull_commands.zig");
+    _ = @import("pull_tests.zig");
+    _ = @import("host_real_net.zig");
+    _ = @import("testing/vm/registry_server.zig");
     _ = @import("testing/vm/registry_fixture.zig");
 }

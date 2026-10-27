@@ -1,0 +1,6 @@
+error[ZBX-E0503]: can't reach the registry
+  cause  the connection to registry.test:443 failed
+  fix    check that the network is up and, if HTTPS_PROXY is set, that it works
+         then run the command again
+  more   zbx explain E0503 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0503.html

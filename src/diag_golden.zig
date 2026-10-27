@@ -28,6 +28,8 @@ const SimFs = @import("store/fs_sim.zig").SimFs;
 const tree = @import("store/tree.zig");
 const support = @import("store/test_support.zig");
 const Digest = @import("store/digest.zig").Digest;
+const net_sim = @import("registry/net_sim.zig");
+const test_registry = @import("registry/test_registry.zig");
 
 const testing = std.testing;
 
@@ -552,7 +554,7 @@ fn prepare_store_unmapped(sim: *HostSim) void {
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = base_cases ++ bundle_cases;
+const cases = base_cases ++ bundle_cases ++ registry_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -959,6 +961,72 @@ const bundle_cases = [_]Case{
         .warning = true,
         .exit = 0,
     },
+};
+
+// ---- The registry's codes ------------------------------------------------------------------
+
+/// One test registry and the wire to it, for the cases below (the cases run one at a time).
+var golden_registry: test_registry.TestRegistry = undefined;
+var golden_wire: net_sim.SimNet = undefined;
+
+fn prepare_registry(sim: *HostSim) void {
+    golden_registry.init();
+    golden_wire.init(1, golden_registry.responder());
+    sim.wire = &golden_wire;
+}
+
+fn prepare_wire_fault(sim: *HostSim, err: @import("registry/net.zig").Error) void {
+    prepare_registry(sim);
+    golden_wire.faults.fail_request = 0;
+    golden_wire.faults.fail_error = err;
+}
+
+fn prepare_unknown_host(sim: *HostSim) void {
+    prepare_wire_fault(sim, error.UnknownHost);
+}
+
+fn prepare_connect_failed(sim: *HostSim) void {
+    prepare_wire_fault(sim, error.ConnectFailed);
+}
+
+fn prepare_untrusted(sim: *HostSim) void {
+    prepare_wire_fault(sim, error.TlsUntrusted);
+}
+
+fn prepare_cut(sim: *HostSim) void {
+    prepare_registry(sim);
+}
+
+const pull = [_][:0]const u8{ "pull", "--resolve-only" };
+
+fn pull_case(
+    comptime code: codes.Code,
+    comptime reference: [:0]const u8,
+    comptime prepare: ?*const fn (sim: *HostSim) void,
+    comptime exit: u8,
+) Case {
+    return .{
+        .code = code,
+        .args = &(pull ++ [_][:0]const u8{reference}),
+        .prepare = prepare,
+        .exit = exit,
+    };
+}
+
+const registry_cases = [_]Case{
+    pull_case(.E0501, "Alpine:3.20", null, 1),
+    pull_case(.E0502, test_registry.TestRegistry.reference(.open), prepare_unknown_host, 2),
+    pull_case(.E0503, test_registry.TestRegistry.reference(.open), prepare_connect_failed, 2),
+    pull_case(.E0504, test_registry.TestRegistry.reference(.open), prepare_untrusted, 2),
+    pull_case(.E0505, test_registry.TestRegistry.reference(.broken), prepare_registry, 3),
+    pull_case(.E0506, test_registry.TestRegistry.reference(.limited), prepare_registry, 3),
+    pull_case(.E0507, test_registry.TestRegistry.reference(.denied), prepare_registry, 3),
+    pull_case(.E0508, test_registry.TestRegistry.reference(.missing), prepare_registry, 1),
+    pull_case(.E0509, test_registry.TestRegistry.reference(.nomatch), prepare_registry, 1),
+    pull_case(.E0510, test_registry.TestRegistry.reference(.media), prepare_registry, 3),
+    pull_case(.E0511, test_registry.TestRegistry.reference(.badsum), prepare_registry, 3),
+    pull_case(.E0512, test_registry.TestRegistry.reference(.huge), prepare_registry, 3),
+    pull_case(.E0513, test_registry.TestRegistry.reference(.cut), prepare_cut, 3),
 };
 
 const Style = enum { default, verbose, json };

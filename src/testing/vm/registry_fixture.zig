@@ -24,8 +24,9 @@
 //!   cut         the index body ends halfway, under its declared length
 //!   media       the index has a media type nobody knows
 //!   layermedia  the manifest has a layer of a media type nobody knows
-//!   nomatch     an index with only linux/arm v7 and linux/s390x
+//!   nomatch     an index with only linux/arm v7 and linux/ppc64le
 //!   missing     404 for every manifest
+//!   broken      503 for every manifest
 //!   huge        a manifest that declares two mebibytes
 //!   redirect    307 to the open repository, with a relative Location
 //!   redirectfar 307 to another host, which must not get the token
@@ -50,6 +51,7 @@ pub const Scenario = enum {
     layermedia,
     nomatch,
     missing,
+    broken,
     huge,
     redirect,
     redirectfar,
@@ -143,7 +145,7 @@ pub const Image = struct {
     index_layermedia: Item = .{},
     /// The index with an unknown media type.
     index_media: Item = .{},
-    /// The manifest the arm/v7 and s390x entries name; never served.
+    /// The manifest the arm/v7 and ppc64le entries name; never served.
     other: Item = .{},
     families: Family,
 };
@@ -245,7 +247,7 @@ fn build_image(image: *Image, family: Family) void {
     build_index(image, &image.index_layermedia, family.index, &layermedia_entries);
     const nomatch_entries = [_]Entry{
         .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "arm", .os = "linux", .variant = ",\"variant\":\"v7\"" },
-        .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "s390x", .os = "linux" },
+        .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "ppc64le", .os = "linux" },
     };
     build_index(image, &image.index_nomatch, family.index, &nomatch_entries);
 }
@@ -353,6 +355,7 @@ pub const Fixture = struct {
         const scenario = route.scenario;
         switch (scenario) {
             .missing => return missing(out),
+            .broken => return broken(out),
             .huge => {
                 out.content_length = huge_declared_bytes;
                 out.content_type = media_oci_index;
@@ -462,6 +465,12 @@ fn missing(out: *Answer) void {
     out.status = 404;
     out.content_type = "application/json";
     out.body = "{\"errors\":[{\"code\":\"MANIFEST_UNKNOWN\",\"message\":\"manifest unknown\"}]}";
+}
+
+fn broken(out: *Answer) void {
+    out.status = 503;
+    out.content_type = "text/plain";
+    out.body = "Service Unavailable";
 }
 
 fn limited(out: *Answer) void {

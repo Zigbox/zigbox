@@ -29,7 +29,7 @@ pub const TestRegistry = struct {
     }
 
     /// The reference text of a scenario's repository: `registry.test/fixture/<scenario>:3.20`.
-    pub fn reference(comptime scenario: Scenario) []const u8 {
+    pub fn reference(comptime scenario: Scenario) [:0]const u8 {
         return registry_host ++ "/fixture/" ++ @tagName(scenario) ++ ":3.20";
     }
 };

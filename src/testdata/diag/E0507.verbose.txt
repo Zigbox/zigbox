@@ -1,0 +1,10 @@
+error[ZBX-E0507]: the registry refused anonymous access
+  while  resolving registry.test/fixture/denied:3.20
+  cause  the token service of registry.test refused an anonymous token for
+         fixture/denied
+  host   registry.test
+  repo   fixture/denied
+  fix    check that the image is public and its name is right
+         private registries are not supported yet
+  more   zbx explain E0507
+  docs   https://zigbox.github.io/zigbox/errors/E0507.html

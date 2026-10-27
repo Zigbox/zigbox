@@ -1,0 +1,9 @@
+error[ZBX-E0501]: not an image reference
+  while  reading an image reference
+  cause  the repository in 'Alpine:3.20' has an uppercase letter, which a
+         repository never has
+  ref    Alpine:3.20
+  fix    write it as name[:tag]:   zbx pull alpine:3.20
+         or with a registry:       zbx pull ghcr.io/owner/image:v1
+  more   zbx explain E0501
+  docs   https://zigbox.github.io/zigbox/errors/E0501.html

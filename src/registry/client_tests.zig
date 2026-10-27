@@ -45,6 +45,13 @@ const Env = struct {
         return client_mod.resolve(&subject, &reference, &env.resolved, &env.diag);
     }
 
+    fn resolve_scenario(env: *Env, scenario: Scenario, machine: []const u8) client_mod.Error!void {
+        var text: [96]u8 = undefined;
+        const name = @tagName(scenario);
+        const reference = std.fmt.bufPrint(&text, "registry.test/fixture/{s}:3.20", .{name});
+        return env.resolve(reference catch unreachable, machine); // The name is short.
+    }
+
     fn expect_code(env: *const Env, expected: codes.Code) !void {
         try testing.expectEqual(@as(?codes.Code, expected), env.diag.code);
     }
@@ -56,6 +63,49 @@ const Env = struct {
 
 fn digest_text(digest: anytype) []const u8 {
     return &digest.text();
+}
+
+/// What each scenario of the test registry must give, in the simulator and over TCP alike: the
+/// image resolves (null) or the refusal has this code.
+pub const Expectation = struct { scenario: Scenario, code: ?codes.Code };
+
+pub const expectations = [_]Expectation{
+    .{ .scenario = .open, .code = null },
+    .{ .scenario = .docker, .code = null },
+    .{ .scenario = .single, .code = null },
+    .{ .scenario = .bearer, .code = null },
+    .{ .scenario = .redirect, .code = null },
+    .{ .scenario = .redirectfar, .code = null },
+    .{ .scenario = .limited, .code = .E0506 },
+    .{ .scenario = .tokenlimited, .code = .E0506 },
+    .{ .scenario = .denied, .code = .E0507 },
+    .{ .scenario = .private, .code = .E0507 },
+    .{ .scenario = .badsum, .code = .E0511 },
+    .{ .scenario = .badindex, .code = .E0511 },
+    .{ .scenario = .cut, .code = .E0513 },
+    .{ .scenario = .media, .code = .E0510 },
+    .{ .scenario = .layermedia, .code = .E0510 },
+    .{ .scenario = .nomatch, .code = .E0509 },
+    .{ .scenario = .missing, .code = .E0508 },
+    .{ .scenario = .broken, .code = .E0505 },
+    .{ .scenario = .huge, .code = .E0512 },
+};
+
+test "every scenario of the test registry gives its result in the simulator" {
+    // Goal: the table the real network tests also use; the scenarios are all covered by it.
+    var env: Env = undefined;
+    for (expectations) |expectation| {
+        env.setup(300);
+        const result = env.resolve_scenario(expectation.scenario, "x86_64");
+        if (expectation.code) |code| {
+            try testing.expectError(error.Failed, result);
+            try env.expect_code(code);
+        } else {
+            try result;
+            try testing.expectEqual(@as(?codes.Code, null), env.diag.code);
+        }
+    }
+    try testing.expectEqual(std.enums.values(Scenario).len, expectations.len);
 }
 
 test "an open registry: an index, this platform's manifest, and nothing else asked" {
@@ -196,7 +246,7 @@ test "documents that cannot be used, each with its code" {
     try testing.expectError(error.Failed, env.resolve(test_registry.TestRegistry.reference(.nomatch), "x86_64"));
     try env.expect_code(.E0509);
     try testing.expectEqualStrings(
-        "no linux/amd64 build: the image offers linux/arm/v7, linux/s390x",
+        "no linux/amd64 build: the image offers linux/arm/v7, linux/ppc64le",
         env.last_cause(),
     );
     env.setup(16);

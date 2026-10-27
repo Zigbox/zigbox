@@ -1,0 +1,5 @@
+error[ZBX-E0505]: the registry answered with an error
+  cause  https://registry.test/v2/fixture/broken/manifests/3.20 answered 503
+  fix    this is the registry's failure; run the command again later
+  more   zbx explain E0505 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0505.html

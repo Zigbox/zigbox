@@ -1,0 +1,7 @@
+error[ZBX-E0510]: the registry sent a type of document zbx does not read
+  while  resolving registry.test/fixture/media:3.20
+  cause  the media type 'application/vnd.example.unknown.v9+json' is not one zbx
+         reads
+  fix    zbx reads OCI and Docker v2 images with tar, gzip or zstd layers
+  more   zbx explain E0510
+  docs   https://zigbox.github.io/zigbox/errors/E0510.html

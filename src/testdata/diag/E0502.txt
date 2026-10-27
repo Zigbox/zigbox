@@ -1,0 +1,6 @@
+error[ZBX-E0502]: the registry's name does not resolve
+  cause  no address was found for 'registry.test'
+  fix    check the registry's name in the reference
+         and that this machine resolves names:   getent hosts docker.io
+  more   zbx explain E0502 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0502.html

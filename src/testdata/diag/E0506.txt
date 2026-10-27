@@ -1,0 +1,7 @@
+error[ZBX-E0506]: the registry is rate limiting this host
+  cause  https://registry.test/v2/fixture/limited/manifests/3.20 answered 429:
+         the pull rate limit is used up; wait 30
+  fix    wait a few minutes, then run the command again
+         or pull from another registry or mirror that has the image
+  more   zbx explain E0506 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0506.html

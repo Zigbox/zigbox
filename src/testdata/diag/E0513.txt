@@ -1,0 +1,5 @@
+error[ZBX-E0513]: the registry's answer ended early
+  cause  registry.test closed the connection before the whole answer arrived
+  fix    run the command again
+  more   zbx explain E0513 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0513.html

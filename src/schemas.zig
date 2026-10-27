@@ -287,6 +287,29 @@ const store_restore_schema =
     \\"farms":{"type":"integer"}}}
 ;
 
+const pull_resolve_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
+    \\"title":"zbx pull --resolve-only --output json",
+    \\"description":"stdout: what a reference names for this machine's platform. A failure is a diagnostic on stderr.",
+    \\"type":"object","required":["schema","reference","registry","repository","index_digest",
+    \\"manifest_digest","manifest_size","platform","config_digest","config_size","layers"],
+    \\"properties":{"schema":{"const":"zbx.pull.resolve/1"},
+    \\"reference":{"type":"string","description":"the canonical form of the reference"},
+    \\"registry":{"type":"string"},"repository":{"type":"string"},
+    \\"index_digest":{"type":["string","null"],"pattern":"^sha256:[0-9a-f]{64}$",
+    \\"description":"the index or manifest list the reference named; null for a single manifest"},
+    \\"manifest_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$",
+    \\"description":"the manifest of this platform: what zbx.lock records"},
+    \\"manifest_size":{"type":"integer"},
+    \\"platform":{"enum":["linux/amd64","linux/arm64"]},
+    \\"config_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"config_size":{"type":"integer"},
+    \\"layers":{"type":"array","items":{"type":"object","required":["digest","size","kind"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"size":{"type":"integer"},"kind":{"enum":["tar","tar_gzip","tar_zstd"]}}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -305,12 +328,13 @@ const table = [_]Entry{
     .{ .command = "store-gc", .text = store_gc_schema },
     .{ .command = "store-trash", .text = store_trash_schema },
     .{ .command = "store-restore", .text = store_restore_schema },
+    .{ .command = "pull-resolve", .text = pull_resolve_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 15);
+    assert(table.len == 16);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -339,5 +363,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 15), table.len);
+    try testing.expectEqual(@as(usize, 16), table.len);
 }

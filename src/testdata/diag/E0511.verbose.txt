@@ -1,0 +1,14 @@
+error[ZBX-E0511]: a manifest does not match its digest
+  while  resolving registry.test/fixture/badsum:3.20
+  cause  the manifest
+         sha256:ecd921f2c09520436ce6c326465af3bc0239d38e7afa20e2df9eaabfa5947773
+         failed its check
+  cause  expected
+         sha256:ecd921f2c09520436ce6c326465af3bc0239d38e7afa20e2df9eaabfa5947773
+         but got
+         sha256:554fb82958c60803aa1bd157e106c92d3ee7cac3d09cdc7cd13ad2b51e4d4c46
+  expect sha256:ecd921f2c09520436ce6c326465af3bc0239d38e7afa20e2df9eaabfa5947773
+  actual sha256:554fb82958c60803aa1bd157e106c92d3ee7cac3d09cdc7cd13ad2b51e4d4c46
+  fix    run the command again; if it repeats, do not trust this source
+  more   zbx explain E0511
+  docs   https://zigbox.github.io/zigbox/errors/E0511.html

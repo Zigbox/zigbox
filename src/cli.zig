@@ -27,6 +27,7 @@ const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 
 const Host = host_mod.Host;
@@ -44,6 +45,7 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  pull <ref>      find an image in a registry (so far: --resolve-only, see below)
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
@@ -82,6 +84,13 @@ const help_text =
     \\  zbx store restore <id>   put a gc's trash back
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
     \\
+    \\pull:
+    \\  zbx pull --resolve-only <reference>
+    \\  <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
+    \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
+    \\  --resolve-only  print the digest of the image manifest for this machine's platform,
+    \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY are used)
+    \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
     \\  --last          the most recent run; <name> is the run called that
@@ -116,6 +125,7 @@ pub const Command = enum {
     explain,
     help,
     ps,
+    pull,
     run,
     schema,
     stop,
@@ -213,6 +223,11 @@ pub const StoreArgs = struct {
     trash: bool = false,
 };
 
+/// What `pull` was given besides its reference.
+pub const PullArgs = struct {
+    resolve_only: bool = false,
+};
+
 pub const Invocation = struct {
     command: Command,
     /// The one operand of `explain`; null for commands that take none.
@@ -224,6 +239,8 @@ pub const Invocation = struct {
     bundle: BundleArgs,
     /// Set only when `command` is `store`.
     store: StoreArgs,
+    /// Set only when `command` is `pull`.
+    pull: PullArgs,
 };
 
 pub const ParseError = error{
@@ -276,6 +293,8 @@ const Token = union(enum) {
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
+    /// `--resolve-only`: `pull`'s.
+    resolve_only,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -318,6 +337,7 @@ fn classify(argument: []const u8) Token {
         return .{ .confirm_inline = argument["--confirm=".len..] };
     }
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
+    if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -347,6 +367,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
+    if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "run")) found = .run;
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "stop")) found = .stop;
@@ -361,7 +382,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit => 1,
+        .explain, .schema, .stop, .commit, .pull => 1,
         .store => 2,
     };
     assert(count <= 2);
@@ -400,7 +421,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash => {},
+            .confirm_inline, .trash, .resolve_only => {},
             .run_option_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
@@ -427,6 +448,7 @@ pub fn parse(
     var count: u32 = 0;
     var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var bundle_args: BundleArgs = .{};
+    var pull_args: PullArgs = .{};
     var gc_args: GcArgs = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -470,6 +492,11 @@ pub fn parse(
                 bundle_args.last = bundle_args.last or classify(argument) == .last;
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
+            .resolve_only => {
+                const is_pull = count > 0 and command_named(operands[0]) == .pull;
+                if (!is_pull) return unknown_option(diag, argument);
+                pull_args.resolve_only = true;
+            },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -481,6 +508,7 @@ pub fn parse(
     invocation.options = scan_options(args);
     invocation.run = run_args;
     invocation.bundle = bundle_args;
+    invocation.pull = pull_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
 }
@@ -493,6 +521,15 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
+    if (invocation.command == .pull) try check_pull_args(diag, invocation);
+}
+
+/// `pull` fetches nothing yet: without `--resolve-only` it has nothing to do, and says so.
+fn check_pull_args(diag: *Diag, invocation: *const Invocation) ParseError!void {
+    assert(invocation.command == .pull);
+    assert(invocation.operand != null);
+    if (invocation.pull.resolve_only) return;
+    return missing_argument(diag, .pull, .resolve_only);
 }
 
 /// What `store gc` was given besides its words.
@@ -634,6 +671,7 @@ fn resolve(
         const what: Missing = switch (command) {
             .stop, .commit => .container,
             .schema => .topic,
+            .pull => .reference,
             else => .code,
         };
         return missing_argument(diag, command, what);
@@ -838,7 +876,7 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic };
+const Missing = enum { code, rootfs, command, target, container, topic, reference, resolve_only };
 
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
@@ -847,6 +885,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .bundle) assert(missing == .target);
     if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
+    if (command == .pull) assert(missing == .reference or missing == .resolve_only);
     assert(command != .doctor);
     assert(command != .ps);
     assert(command != .help);
@@ -892,6 +931,23 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
         .topic => {
             diag.cause("'schema' needs the command whose output schema to print", .{});
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
+        },
+        .reference => {
+            diag.cause("'pull' needs the reference of the image to look for", .{});
+            diag.fix(.{
+                .sentence = "name an image:",
+                .command = "zbx pull --resolve-only alpine:3.20",
+            });
+        },
+        .resolve_only => {
+            diag.cause(
+                "'pull' only resolves so far: it needs --resolve-only, as fetching layers is not built",
+                .{},
+            );
+            diag.fix(.{
+                .sentence = "print the digest the reference names:",
+                .command = "zbx pull --resolve-only alpine:3.20",
+            });
         },
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
@@ -1012,6 +1068,8 @@ pub const Storage = struct {
     store: store_commands.Workspace,
     /// A run of a tree from the store prepares it here (`runtime/image.zig`).
     image: image_mod.Workspace,
+    /// A pull resolves a reference here (`pull_commands.zig`).
+    pull: pull_commands.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
 };
@@ -1071,7 +1129,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit => true,
+        .explain, .bundle, .schema, .stop, .run, .commit, .pull => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1094,6 +1152,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             return command_error(err);
         },
         .stop => return run_stop(host, invocation, diag),
+        .pull => try run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
     }
@@ -1106,6 +1165,20 @@ fn command_error(err: commands.Error) RunError {
     return switch (err) {
         error.Failed => error.CommandFailed,
         error.OutputFailed => error.OutputFailed,
+    };
+}
+
+/// `zbx pull --resolve-only <reference>`: the registry's answer for this machine's platform.
+fn run_pull(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!void {
+    assert(invocation.command == .pull);
+    assert(invocation.pull.resolve_only);
+    const args: pull_commands.Args = .{
+        .reference = invocation.operand.?,
+        .json = invocation.options.output == .json,
+    };
+    pull_commands.run_resolve(host, args, &storage.pull, diag) catch |err| switch (err) {
+        error.Failed => return error.CommandFailed,
+        error.OutputFailed => return error.OutputFailed,
     };
 }
 

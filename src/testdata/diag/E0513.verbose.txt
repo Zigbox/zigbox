@@ -1,0 +1,7 @@
+error[ZBX-E0513]: the registry's answer ended early
+  while  resolving registry.test/fixture/cut:3.20
+  cause  registry.test closed the connection before the whole answer arrived
+  host   registry.test
+  fix    run the command again
+  more   zbx explain E0513
+  docs   https://zigbox.github.io/zigbox/errors/E0513.html
