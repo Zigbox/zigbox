@@ -111,6 +111,71 @@ pub fn check_record(output: []const u8, digest: []const u8) Error!void {
     if (!contains(output, "/upper")) return error.LineMissing;
 }
 
+/// `zbx store diff` printed exactly the lines the container's changes make, and nothing else.
+pub fn check_diff(streams: Streams, status: u8, expected: []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!std.mem.eql(u8, streams.stdout, expected)) return error.ReportWrong;
+}
+
+/// The JSON diff counts what the text lists.
+pub fn check_diff_summary(output: []const u8, added: u32, removed: u32, changed: u32) Error!void {
+    var wanted: [96]u8 = undefined;
+    // Cannot fail: three small numbers fit 96 bytes.
+    const text = std.fmt.bufPrint(
+        &wanted,
+        "\"summary\":{{\"added\":{d},\"removed\":{d},\"changed\":{d}}}",
+        .{ added, removed, changed },
+    ) catch unreachable; // Same bound.
+    if (!contains(output, text)) return error.ReportWrong;
+    if (!contains(output, "\"schema\":\"zbx.store.diff/1\"")) return error.ReportWrong;
+}
+
+/// The number after `"stored_bytes":` in the JSON of `zbx store du <digest>`.
+pub fn stored_bytes(output: []const u8) Error!u64 {
+    const key = "\"stored_bytes\":";
+    const at = std.mem.indexOf(u8, output, key) orelse return error.LineMissing;
+    var end = at + key.len;
+    while (end < output.len and output[end] >= '0' and output[end] <= '9') end += 1;
+    return std.fmt.parseInt(u64, output[at + key.len .. end], 10) catch error.LineMissing;
+}
+
+/// The tree without the large file costs at least `drop` bytes less to store (the brief's
+/// demo step 5: no whiteout baggage).
+pub fn check_stored_drop(parent: []const u8, child: []const u8, drop: u64) Error!void {
+    const before = try stored_bytes(parent);
+    const after = try stored_bytes(child);
+    if (after >= before) return error.StoreChanged;
+    if (before - after < drop) return error.StoreChanged;
+}
+
+/// A commit of a container that is still running is ZBX-E0427 and exit 1, with nothing on stdout.
+pub fn check_commit_running(streams: Streams, status: u8) Error!void {
+    if (status != 1) return error.ExitCodeWrong;
+    if (!contains(streams.stderr, "error[ZBX-E0427]")) return error.ReportWrong;
+    if (streams.stdout.len != 0) return error.ReportWrong;
+}
+
+/// A commit of a container that ran on a directory is ZBX-E0426 and exit 1.
+pub fn check_no_layer(streams: Streams, status: u8) Error!void {
+    if (status != 1) return error.ExitCodeWrong;
+    if (!contains(streams.stderr, "error[ZBX-E0426]")) return error.ReportWrong;
+    if (streams.stdout.len != 0) return error.ReportWrong;
+}
+
+/// A commit that changed nothing prints the parent's digest.
+pub fn check_unchanged(streams: Streams, status: u8, parent: []const u8) Error!void {
+    const digest = try check_import(streams, status);
+    if (!std.mem.eql(u8, digest, parent)) return error.DigestWrong;
+}
+
+/// A commit that changed something prints another digest.
+pub fn check_changed(streams: Streams, status: u8, parent: []const u8) Error![]const u8 {
+    const digest = try check_import(streams, status);
+    if (std.mem.eql(u8, digest, parent)) return error.DigestWrong;
+    return digest;
+}
+
 const testing = std.testing;
 
 fn repeat(comptime byte: u8, comptime count: usize) [count]u8 {
@@ -188,4 +253,66 @@ test "the record names the tree and the upper layer" {
     try check_record("tree = \"b3:ab\"\nupper = \"/x/upper\"", "b3:ab");
     try testing.expectError(error.LineMissing, check_record("tree = \"b3:ab\"", "b3:ab"));
     try testing.expectError(error.LineMissing, check_record("upper = \"/x/upper\"", "b3:ab"));
+}
+
+fn out_err(stdout: []const u8, stderr: []const u8) Streams {
+    return .{ .stdout = stdout, .stderr = stderr };
+}
+
+test "the diff must be exactly the expected lines on a clean stderr" {
+    const lines = "A /a\nD /b\n";
+    try check_diff(out_err(lines, ""), 0, lines);
+    try testing.expectError(error.ExitCodeWrong, check_diff(out_err(lines, ""), 1, lines));
+    try testing.expectError(error.StderrNotEmpty, check_diff(out_err(lines, "w"), 0, lines));
+    try testing.expectError(error.ReportWrong, check_diff(out_err("A /a\n", ""), 0, lines));
+    const more = lines ++ "M /c\n";
+    try testing.expectError(error.ReportWrong, check_diff(out_err(more, ""), 0, lines));
+}
+
+test "the JSON diff's summary counts and schema" {
+    const summary = "\"summary\":{\"added\":1,\"removed\":2,\"changed\":2}";
+    const json = "{\"schema\":\"zbx.store.diff/1\",\"changes\":[]," ++ summary ++ "}";
+    try check_diff_summary(json, 1, 2, 2);
+    try testing.expectError(error.ReportWrong, check_diff_summary(json, 1, 2, 3));
+    const unnamed = "{" ++ summary ++ "}";
+    try testing.expectError(error.ReportWrong, check_diff_summary(unnamed, 1, 2, 2));
+}
+
+test "the stored size is read from the JSON and must drop by the large file" {
+    const parent = "{\"tree\":{\"stored_bytes\":8007000,\"files\":3}}";
+    const child = "{\"tree\":{\"stored_bytes\":7000,\"files\":2}}";
+    try testing.expectEqual(@as(u64, 8007000), try stored_bytes(parent));
+    try check_stored_drop(parent, child, 8_000_000);
+    try testing.expectError(error.StoreChanged, check_stored_drop(parent, child, 8_000_001));
+    try testing.expectError(error.StoreChanged, check_stored_drop(child, parent, 1));
+    try testing.expectError(error.StoreChanged, check_stored_drop(parent, parent, 0));
+    try testing.expectError(error.LineMissing, stored_bytes("{}"));
+    try testing.expectError(error.LineMissing, stored_bytes("\"stored_bytes\":x"));
+}
+
+test "a commit of a running container, and of a directory run, are refused with their codes" {
+    const running = out_err("", "error[ZBX-E0427]: the container is still running\n");
+    try check_commit_running(running, 1);
+    try testing.expectError(error.ExitCodeWrong, check_commit_running(running, 125));
+    const other = out_err("", "error[ZBX-E0426]");
+    try testing.expectError(error.ReportWrong, check_commit_running(other, 1));
+    const noisy = out_err("b3:", running.stderr);
+    try testing.expectError(error.ReportWrong, check_commit_running(noisy, 1));
+    const bare = out_err("", "error[ZBX-E0426]: the container has no layer to commit\n");
+    try check_no_layer(bare, 1);
+    try testing.expectError(error.ReportWrong, check_no_layer(running, 1));
+    try testing.expectError(error.ExitCodeWrong, check_no_layer(bare, 0));
+}
+
+test "a commit prints the parent's digest only if nothing changed" {
+    const parent = "b3:" ++ repeat('a', 64);
+    const child = "b3:" ++ repeat('b', 64);
+    const same = out_err(parent ++ "\n", "");
+    const other = out_err(child ++ "\n", "");
+    try check_unchanged(same, 0, parent);
+    try testing.expectError(error.DigestWrong, check_unchanged(other, 0, parent));
+    const printed = try check_changed(other, 0, parent);
+    try testing.expectEqualStrings(child, printed);
+    try testing.expectError(error.DigestWrong, check_changed(same, 0, parent));
+    try testing.expectError(error.ExitCodeWrong, check_changed(other, 1, parent));
 }

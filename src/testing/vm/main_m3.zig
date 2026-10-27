@@ -1,6 +1,6 @@
 //! The M3 demo, run in a real Ubuntu 24.04 VM (the M0/M1/M2 harness: same image, same
 //! provisioning, the pinned Alpine minirootfs unpacked as user `demo`). It grows slice by slice;
-//! this is slice 2, "Materialize and run":
+//! this is slice 3, "Commit and diff" (steps 6 to 8) on top of slice 2, "Materialize and run":
 //!   1. Import the rootfs; its digest is printed.
 //!   2. `zbx run <digest prefix>` runs on an overlay: a container that writes, changes modes,
 //!      changes owners and deletes across the tree leaves the store byte for byte as it was
@@ -11,6 +11,13 @@
 //!   4. A tree imported with a root directory of mode 711 is that in the container.
 //!   5. An unknown digest is ZBX-E0410 and exit 125. A second run with a name starts from a
 //!      fresh upper layer.
+//!   6. A copy of the rootfs with an 8 MB file is imported and run; the container adds a file,
+//!      rewrites one, changes a mode, deletes two (the large file and a small one) and exits.
+//!      `zbx commit` prints a new digest, `zbx store diff old new` lists exactly those five
+//!      paths (text and JSON), and the new tree's stored size is smaller by the large file.
+//!   7. A commit of a running container is ZBX-E0427; of a run on a directory ZBX-E0426; of a
+//!      container that changed nothing it prints the parent's digest. (There is no network in
+//!      the guest's containers yet, so `apk add` is not part of the demo: file operations are.)
 //! `zig build demo-m3` (KVM) or `zig build demo-m3 -Daccel=tcg`. See docs/demos/m3.md.
 
 const std = @import("std");
@@ -90,6 +97,8 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try step_read_only(&session, out, &timer, digest);
     try step_root_mode(&session, out, &timer);
     try step_refusals(&session, out, &timer, digest);
+    try step_commit(&session, out, &timer);
+    try step_commit_refusals(&session, out, &timer, digest);
     try session.shutdown();
     return 0;
 }
@@ -339,4 +348,151 @@ fn step_refusals(
         return fail_step(out, "STEP 5", wanted, error.NotFresh);
     }
     try timer.lap(out, "refusals");
+}
+
+/// What the container does in step 6: an addition, a rewrite, a mode change and two deletions,
+/// one of them the large file.
+const ops_script =
+    "set -e\n" ++
+    "echo added > /added.txt\n" ++
+    "echo changed >> /etc/hostname\n" ++
+    "chmod 600 /etc/passwd\n" ++
+    "rm /etc/shadow /big.bin\n" ++
+    "echo ops-done\n";
+
+/// The lines `store diff` must print for those operations, in path order.
+const ops_diff =
+    "A /added.txt\n" ++
+    "D /big.bin\n" ++
+    "M /etc/hostname  content\n" ++
+    "M /etc/passwd  mode\n" ++
+    "D /etc/shadow\n";
+
+fn step_commit(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m3: STEP 6: commit what a container changed, and diff\n", .{});
+    const arena = session.scratch_allocator();
+    const big_dir = "/home/demo/alpine-big";
+    const prepare = "runuser -u demo -- sh -c 'cp -a " ++ rootfs_dir ++ " " ++ big_dir ++
+        " && head -c 8000000 /dev/urandom > " ++ big_dir ++ "/big.bin'";
+    const prepared = try session.run(prepare, limits.command_timeout_kvm_s);
+    try H.show(out, "a copy with an 8 MB file", prepared);
+    if (prepared.status != 0) return error.PrepareFailed;
+    try put(session, big_dir ++ "/ops.sh", ops_script);
+    _ = try session.run("chown demo:demo " ++ big_dir ++ "/ops.sh", limits.command_timeout_kvm_s);
+    const import = zbx ++ " store import " ++ big_dir;
+    const imported = try H.run_split(session, import);
+    try H.show_split(out, import, imported);
+    const parent = checks_m3.check_import(imported.streams, imported.status) catch |err| {
+        return fail_step(out, "STEP 6", "expected a digest", err);
+    };
+    const parent_copy = try arena.dupe(u8, parent);
+    const run = try std.fmt.allocPrint(
+        arena,
+        "{s} run {s} --name ops1 -- sh /ops.sh",
+        .{ zbx, parent_copy[3..15] },
+    );
+    const ran = try H.run_split(session, run);
+    try H.show_split(out, run, ran);
+    if (ran.status != 0 or std.mem.indexOf(u8, ran.streams.stdout, "ops-done") == null) {
+        return fail_step(out, "STEP 6", "expected the operations to run", error.RunFailed);
+    }
+    const commit = zbx ++ " commit ops1";
+    const committed = try H.run_split(session, commit);
+    try H.show_split(out, commit, committed);
+    const changed = checks_m3.check_changed(committed.streams, committed.status, parent_copy);
+    const child = changed catch |err| {
+        return fail_step(out, "STEP 6", "expected a new digest from the commit", err);
+    };
+    const child_copy = try arena.dupe(u8, child);
+    try step_diff(session, out, parent_copy, child_copy);
+    try timer.lap(out, "commit and diff");
+}
+
+fn step_diff(session: *Session, out: *Io.Writer, parent: []const u8, child: []const u8) !void {
+    const arena = session.scratch_allocator();
+    const text_command = try std.fmt.allocPrint(
+        arena,
+        "{s} store diff {s} {s}",
+        .{ zbx, parent[3..15], child[3..15] },
+    );
+    const listed = try H.run_split(session, text_command);
+    try H.show_split(out, text_command, listed);
+    checks_m3.check_diff(listed.streams, listed.status, ops_diff) catch |err| {
+        return fail_step(out, "STEP 6", "expected exactly the five changed paths", err);
+    };
+    const json_command = try std.fmt.allocPrint(
+        arena,
+        "{s} --output json store diff {s} {s}",
+        .{ zbx, parent[3..15], child[3..15] },
+    );
+    const json = try H.run_split(session, json_command);
+    try H.show_split(out, json_command, json);
+    checks_m3.check_diff_summary(json.streams.stdout, 1, 2, 2) catch |err| {
+        return fail_step(out, "STEP 6", "expected 1 added, 2 removed, 2 changed", err);
+    };
+    const parent_du = try std.fmt.allocPrint(
+        arena,
+        "{s} --output json store du {s}",
+        .{ zbx, parent[3..15] },
+    );
+    const child_du = try std.fmt.allocPrint(
+        arena,
+        "{s} --output json store du {s}",
+        .{ zbx, child[3..15] },
+    );
+    const before = try H.run_split(session, parent_du);
+    try H.show_split(out, parent_du, before);
+    const after = try H.run_split(session, child_du);
+    try H.show_split(out, child_du, after);
+    const dropped = checks_m3.check_stored_drop(
+        before.streams.stdout,
+        after.streams.stdout,
+        8_000_000,
+    );
+    dropped catch |err| {
+        const wanted = "expected the deleted 8 MB file out of the stored size";
+        return fail_step(out, "STEP 6", wanted, err);
+    };
+}
+
+fn step_commit_refusals(
+    session: *Session,
+    out: *Io.Writer,
+    timer: *H.Timer,
+    digest: []const u8,
+) !void {
+    try out.print("\ndemo-m3: STEP 7: what a commit refuses, and a commit of nothing\n", .{});
+    const arena = session.scratch_allocator();
+    const start = try std.fmt.allocPrint(
+        arena,
+        "{s} run {s} -d --name live1 -- sleep 600",
+        .{ zbx, digest[3..15] },
+    );
+    const started = try H.run_split(session, start);
+    try H.show_split(out, start, started);
+    if (started.status != 0) return fail_step(out, "STEP 7", "the detached run", error.RunFailed);
+    const running = zbx ++ " commit live1";
+    const refused = try H.run_split(session, running);
+    try H.show_split(out, running, refused);
+    checks_m3.check_commit_running(refused.streams, refused.status) catch |err| {
+        return fail_step(out, "STEP 7", "expected ZBX-E0427 and exit 1", err);
+    };
+    const stop = zbx ++ " stop live1";
+    _ = try H.run_split(session, stop);
+    const directory = zbx ++ " run --rootfs " ++ rootfs_dir ++ " --name dir1 -- true";
+    _ = try H.run_split(session, directory);
+    const no_layer = zbx ++ " commit dir1";
+    const none = try H.run_split(session, no_layer);
+    try H.show_split(out, no_layer, none);
+    checks_m3.check_no_layer(none.streams, none.status) catch |err| {
+        return fail_step(out, "STEP 7", "expected ZBX-E0426 and exit 1", err);
+    };
+    // `prime1` ran `true` on the first tree and changed nothing.
+    const nothing = zbx ++ " commit prime1";
+    const same = try H.run_split(session, nothing);
+    try H.show_split(out, nothing, same);
+    checks_m3.check_unchanged(same.streams, same.status, digest) catch |err| {
+        return fail_step(out, "STEP 7", "expected the parent's digest back", err);
+    };
+    try timer.lap(out, "commit refusals");
 }
