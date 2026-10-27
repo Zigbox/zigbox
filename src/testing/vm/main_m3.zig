@@ -442,10 +442,12 @@ fn step_diff(session: *Session, out: *Io.Writer, parent: []const u8, child: []co
     );
     const before = try H.run_split(session, parent_du);
     try H.show_split(out, parent_du, before);
+    // The next command reuses the buffer the output is in.
+    const before_stdout = try arena.dupe(u8, before.streams.stdout);
     const after = try H.run_split(session, child_du);
     try H.show_split(out, child_du, after);
     const dropped = checks_m3.check_stored_drop(
-        before.streams.stdout,
+        before_stdout,
         after.streams.stdout,
         8_000_000,
     );
