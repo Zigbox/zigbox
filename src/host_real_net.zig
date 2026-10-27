@@ -927,7 +927,13 @@ test "a tunnel: CONNECT with the proxy's credentials, a refusal, and no TLS behi
         .userinfo = "user:pw",
     };
     try open_tunnel(&socket, proxy, &request);
-    try testing.expectError(error.TlsFailed, start_tls(&real, &socket, "registry.test"));
+    // The handshake reads a closed peer: TlsFailed. On a machine with no CA file at all the
+    // certificates are the first thing missing, which is a different, also honest, answer.
+    const handshake = start_tls(&real, &socket, "registry.test");
+    if (handshake) |_| return error.TestUnexpectedResult else |err| {
+        try testing.expect(err == error.TlsFailed or err == error.NoCertificates);
+    }
+
     socket.close();
     loopback.stop();
     const line = loopback.server.log[0].text();

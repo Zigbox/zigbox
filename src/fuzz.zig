@@ -198,6 +198,7 @@ fn random_args(
         "stop",    "schema",   "--all",         "-d",        "--timeout", "--grace",   "1000",
         "web-1",   "store",    "import",        "ls",        "du",        "rm",        "b3:",
     };
+    const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
     args.items[0] = "zbx";
@@ -211,7 +212,8 @@ fn random_args(
         // the count limit.
         const kind = if (many) random.uintLessThan(u8, 6) else random.uintLessThan(u8, 8);
         const argument: []const u8 = switch (kind) {
-            0...3 => words[random.uintLessThan(usize, words.len)],
+            0...2 => words[random.uintLessThan(usize, words.len)],
+            3 => pull_words[random.uintLessThan(usize, pull_words.len)],
             4...5 => blk: {
                 random.bytes(&short[slot]);
                 for (&short[slot]) |*byte| byte.* |= @intFromBool(byte.* == 0); // No NUL.
