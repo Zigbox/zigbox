@@ -91,8 +91,9 @@ pub fn lock_mismatch(
     const echo = echo_of(&storage, reference);
     diag.raise(.E0519);
     diag.while_("checking {s} against the lock", .{echo});
-    diag.cause("{s} says {s} is tree {s}", .{ path, echo, expected.text() });
-    diag.cause("but the store's image with that manifest is tree {s}", .{actual.text()});
+    diag.cause("zbx.lock has tree {s}; the store has tree {s}", .{
+        expected.text(), actual.text(),
+    });
     diag.context("ref", "{s}", .{echo});
     diag.context("expect", "{s}", .{expected.text()});
     diag.context("actual", "{s}", .{actual.text()});
@@ -120,17 +121,19 @@ pub fn locked_absent(
     const echo = echo_of(&storage, reference);
     diag.raise(.E0520);
     diag.while_("checking {s} against the lock", .{echo});
-    diag.cause("{s} locks {s} to manifest {s}, which is not in the store", .{
-        path, echo, &expected.text(),
-    });
-    diag.context("ref", "{s}", .{echo});
-    diag.context("expect", "{s}", .{&expected.text()});
     if (found) |actual| {
-        diag.cause("the store has {s} under that name", .{&actual.text()});
+        diag.cause("zbx.lock wants manifest {s}; the store has {s}", .{
+            &expected.text(), &actual.text(),
+        });
         diag.context("actual", "{s}", .{&actual.text()});
     } else {
+        diag.cause("zbx.lock wants manifest {s}, which the store does not have", .{
+            &expected.text(),
+        });
         diag.context("actual", "none", .{});
     }
+    diag.context("ref", "{s}", .{echo});
+    diag.context("expect", "{s}", .{&expected.text()});
     diag.context("path", "{s}", .{path});
     diag.fix_with("fetch the locked image:", "zbx pull '{s}'", .{pull_by_digest});
 }

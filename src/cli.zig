@@ -228,6 +228,8 @@ pub const StoreArgs = struct {
     /// `store gc --confirm <hash>`, and `store gc --trash`.
     confirm: ?[]const u8 = null,
     trash: bool = false,
+    /// `store du --by-image`.
+    by_image: bool = false,
 };
 
 /// What `pull` was given besides its reference.
@@ -297,6 +299,8 @@ const Token = union(enum) {
     /// `--confirm`, whose value is the next argument, and `--confirm=<value>`: `store gc`'s.
     confirm_next,
     confirm_inline: []const u8,
+    /// `--by-image`: `store du`'s.
+    by_image,
     /// `--trash`: `store gc`'s.
     trash,
     /// `--last` and `--no-redact`: options of `bundle`.
@@ -346,6 +350,7 @@ fn classify(argument: []const u8) Token {
         return .{ .confirm_inline = argument["--confirm=".len..] };
     }
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
+    if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
@@ -430,7 +435,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash, .resolve_only => {},
+            .confirm_inline, .trash, .resolve_only, .by_image => {},
             .run_option_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
@@ -497,6 +502,12 @@ pub fn parse(
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
+            .by_image => {
+                const is_du = count >= 2 and command_named(operands[0]) == .store and
+                    std.mem.eql(u8, operands[1], "du");
+                if (!is_du) return unknown_option(diag, argument);
+                gc_args.by_image = true;
+            },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -545,12 +556,17 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     if (invocation.command == .store and invocation.store.action == .gc) {
         try check_gc_args(diag, gc_args, invocation);
     }
+    if (gc_args.by_image) {
+        // `du --by-image` lists every image; a tree to measure is another question.
+        if (invocation.store.operand) |operand| return unexpected_argument(diag, .store, operand);
+        invocation.store.by_image = true;
+    }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
 /// What `store gc` was given besides its words.
-const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false };
+const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false, by_image: bool = false };
 
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
@@ -1278,6 +1294,7 @@ fn run_store(
         .second = invocation.store.second,
         .confirm = invocation.store.confirm,
         .trash = invocation.store.trash,
+        .by_image = invocation.store.by_image,
     };
     return store_commands.run(
         host,

@@ -27,6 +27,10 @@ const doctor = @import("../doctor.zig");
 const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const diagnose = @import("../store/diagnose.zig");
+const image_diagnose = @import("../image_diagnose.zig");
+const image_find = @import("../store/image_find.zig");
+const images = @import("../store/images.zig");
+const reference_mod = @import("../registry/reference.zig");
 const digest_mod = @import("../store/digest.zig");
 const layout = @import("../store/layout.zig");
 const materialize = @import("../store/materialize.zig");
@@ -46,6 +50,9 @@ pub const Error = error{Failed};
 pub const Workspace = struct {
     materialize: materialize.Workspace,
     blob: [constants.store_xattr_blob_bytes_max]u8,
+    /// A name that is not a digest is looked for among the image records.
+    find: image_find.Memory,
+    record: images.Image,
 };
 
 /// A path with its own room.
@@ -150,7 +157,7 @@ pub fn prepare(
         diagnose.no_data_directory(diag);
         return error.Failed;
     }
-    const digest = try resolve(&store, image, diag);
+    const digest = try resolve(&store, workspace, image, diag);
     var existing: u32 = 0;
     var base: Path = undefined;
     if (!container_directory(host, name, &base, &existing)) {
@@ -184,11 +191,10 @@ pub fn prepare(
 }
 
 /// The digest `image` names, or the store's diagnostic.
-fn resolve(store: *Store, image: []const u8, diag: *Diag) Error!Digest {
+fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
     assert(diag.code == null);
     const prefix = digest_mod.Prefix.parse(image) orelse {
-        diagnose.bad_digest(diag, image);
-        return error.Failed;
+        return resolve_name(store, workspace, image, diag);
     };
     const present = open.check(store, .existing, diag) catch return error.Failed;
     if (!present) {
@@ -210,6 +216,41 @@ fn resolve(store: *Store, image: []const u8, diag: *Diag) Error!Digest {
         },
         .one => |digest| return digest,
     }
+}
+
+/// A name that is not a digest: the tree of the newest image record that was pulled as it. A
+/// library caller that wants the project's lock to decide uses the cli's way (`run_image.zig`);
+/// this is the store's own answer, for a caller that has pulled and only names.
+fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *Diag) Error!Digest {
+    assert(diag.code == null);
+    var reference: reference_mod.Reference = undefined;
+    reference_mod.parse(name, &reference) catch {
+        diagnose.bad_digest(diag, name);
+        return error.Failed;
+    };
+    const present = open.check(store, .existing, diag) catch return error.Failed;
+    if (!present) {
+        image_diagnose.not_locked(diag, name, null);
+        return error.Failed;
+    }
+    var wanted: image_find.ByReference = .{ .text = name };
+    if (reference.digest) |manifest| {
+        var errno: u16 = 0;
+        images.load(store, manifest, &workspace.record, &errno) catch {
+            image_diagnose.not_locked(diag, name, null);
+            return error.Failed;
+        };
+        return workspace.record.tree;
+    }
+    image_find.scan(store, &workspace.find, &workspace.record, &wanted) catch {
+        diagnose.cannot_read(diag, store, "looking through the images", error.IoFailed, store.fs.last_errno());
+        return error.Failed;
+    };
+    if (!wanted.found) {
+        image_diagnose.not_locked(diag, name, null);
+        return error.Failed;
+    }
+    return wanted.tree;
 }
 
 // ---- The store's child ---------------------------------------------------------------------

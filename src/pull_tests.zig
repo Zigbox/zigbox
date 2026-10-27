@@ -422,10 +422,28 @@ fn project_world(world: *World, seed: u64, name: []const u8) void {
     }
 }
 
+/// The root of a second container, as `project_world` makes the first.
+fn second_container(world: *World, name: []const u8) void {
+    var path: [200]u8 = undefined;
+    var inner: [220]u8 = undefined;
+    const merged = std.fmt.bufPrint(&path, containers ++ "/{s}/merged", .{name}) catch unreachable;
+    world.sim.world.add_node(merged, .dir);
+    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
+        world.sim.world.add_node(text, .dir);
+    }
+    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/other" }) |program| {
+        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, program }) catch unreachable;
+        world.sim.world.add_node(text, .file);
+    }
+}
+
 /// Replaces a file of the store disk (or makes it).
 fn overwrite(path: []const u8, text: []const u8) void {
-    if (store_files.kind_of(path) != null) store_files.remove_path(path);
-    store_files.put_file(path, 0o644, text);
+    var copy: [256]u8 = undefined; // The caller's path may be the model's own storage.
+    @memcpy(copy[0..path.len], path);
+    if (store_files.kind_of(copy[0..path.len]) != null) store_files.remove_path(copy[0..path.len]);
+    store_files.put_file(copy[0..path.len], 0o644, text);
 }
 
 fn lock_text() []const u8 {
@@ -509,7 +527,10 @@ test "a run by tag starts the locked image with its entrypoint, command, env and
         if (std.mem.endsWith(u8, mount.target.slice(), "/sys")) found_sys = true;
     }
     try testing.expect(found_sys);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "one", "two" }));
+    second_container(&world, "web-2");
+    const second_code = run_text(&world, &.{ "zbx", "run", "--name", "web-2", reference, "--", "one", "two" });
+    if (second_code != 0) std.debug.print("RUN2: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), second_code);
     try testing.expectEqualStrings("/bin/hello\none\ntwo\n", started_argv(&world));
 }
 
@@ -575,7 +596,8 @@ test "a run by tag with no lock pulls, writes one, and says so in one warning" {
     try testing.expect(std.mem.indexOf(u8, lock_text(), reference) != null);
     try testing.expectEqualStrings("/bin/hello\nworld\n", started_argv(&world));
     // The second run has a lock and says nothing.
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    second_container(&world, "web-2");
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-2", reference }));
     try testing.expectEqual(@as(usize, 0), world.sim.stderr().len);
 }
 
@@ -597,10 +619,88 @@ test "an image with no command and none given is refused" {
             if (std.mem.startsWith(u8, trimmed, ".entrypoint") or std.mem.startsWith(u8, trimmed, ".cmd")) continue;
             try writer.print("{s}\n", .{line});
         }
-        store_files.put_file(path, 0o644, std.mem.trimEnd(u8, writer.buffered(), "\n"));
+        overwrite(path, std.mem.trimEnd(u8, writer.buffered(), "\n"));
     }
     try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", reference }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0524") != null);
     try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "/bin/other" }));
     try testing.expectEqualStrings("/bin/other\n", started_argv(&world));
+}
+
+var library_handle: @import("runtime/run.zig").Handle = undefined;
+var library_workspace: @import("runtime/image.zig").Workspace = undefined;
+
+test "the library starts an image by its tag, from the store's records" {
+    // Goal: Spec.image accepts a tag as well as a digest. Method: pull, then start through the
+    // library with the tag; the container runs on the pulled tree. A tag nothing was pulled as
+    // is E0522, and a digest reference of the manifest finds the same tree.
+    const lib = @import("runtime/run.zig");
+    var world: World = undefined;
+    project_world(&world, 36, "lib-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", reference }));
+    var diag: @import("diag/diag.zig").Diag = undefined;
+    diag.reset();
+    const container: lib.Spec = .{ .image = reference, .name = "lib-1", .command = &.{"/bin/sh"} };
+    const options: lib.StartOptions = .{ .image_workspace = &library_workspace };
+    try lib.start(world.sim.interface(), &container, options, &library_handle, &diag);
+    try testing.expectEqual(lib.Status.running, lib.inspect(&library_handle));
+    _ = lib.wait(&library_handle);
+    diag.reset();
+    const unknown: lib.Spec = .{ .image = "registry.test/fixture/never:1", .name = "lib-2", .command = &.{"/bin/sh"} };
+    try testing.expectError(error.StartFailed, lib.start(world.sim.interface(), &unknown, options, &library_handle, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0522), diag.code);
+}
+
+test "store ls and du --by-image show the images, and rm of a pulled tree takes its records" {
+    // Goal: the store knows images. Method: pull; ls lists the image (text and JSON); du
+    // --by-image gives the sizes, the compressed one being the layers' as downloaded; rm of the
+    // tree removes its image record with the root, after which gc plans the blobs.
+    var world: World = undefined;
+    project_world(&world, 37, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }));
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    const tree = try testing.allocator.dupe(u8, json_field(&pulled, "tree"));
+    defer testing.allocator.free(tree);
+    var layer_bytes: i64 = 0;
+    for (pulled.value.object.get("layers").?.array.items) |layer| layer_bytes += layer.object.get("size").?.integer;
+
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "\nIMAGE ") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), reference) != null);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "ls" }));
+    try testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, world.sim.stdout(), "\n")));
+    const listed = try parse_json(world.sim.stdout());
+    defer listed.deinit();
+    const images = listed.value.object.get("images").?.array.items;
+    try testing.expectEqual(@as(usize, 1), images.len);
+    try testing.expectEqualStrings(tree, images[0].object.get("tree").?.string);
+    try testing.expectEqualStrings(reference, images[0].object.get("reference").?.string);
+
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "du", "--by-image" }));
+    const sized = try parse_json(world.sim.stdout());
+    defer sized.deinit();
+    const row = sized.value.object.get("images").?.array.items[0].object;
+    try testing.expectEqualStrings(tree, row.get("tree").?.string);
+    try testing.expectEqual(layer_bytes, row.get("compressed_bytes").?.integer);
+    try testing.expect(row.get("logical_bytes").?.integer > 0);
+    try testing.expect(row.get("stored_bytes").?.integer > 0);
+    try testing.expectEqual(@as(i64, 0), row.get("shared_bytes").?.integer);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "du", "--by-image" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "COMPRESSED") != null);
+    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "store", "du", "--by-image", tree }));
+    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "store", "ls", "--by-image" }));
+
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "rm", tree }));
+    const removed = try parse_json(world.sim.stdout());
+    defer removed.deinit();
+    try testing.expectEqual(@as(i64, 1), removed.value.object.get("images").?.integer);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "IMAGE") == null);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "gc" }));
+    const plan = try parse_json(world.sim.stdout());
+    defer plan.deinit();
+    try testing.expectEqual(@as(i64, 3), plan.value.object.get("blobs").?.integer); // Config and two layers.
 }

@@ -312,6 +312,15 @@ pub fn save(store: *Store, image: *const Image, failure: *fs_mod.Failure) host_m
     try store.fs.write_atomic(temporary_path, final_path, directory_path, text, 0o644, failure);
 }
 
+/// Removes the record of the image; an absent one is not an error.
+pub fn remove(store: *const Store, manifest: Sha256) host_mod.Error!void {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
+    var path: PathBuf = undefined;
+    store.fs.unlink(record_path(store, &path, manifest)) catch |err| {
+        if (err != error.NotFound) return err;
+    };
+}
+
 pub const LoadError = error{ NotFound, Unreadable, Damaged, Newer };
 
 pub fn load(store: *const Store, manifest: Sha256, image: *Image, errno: *u16) LoadError!void {

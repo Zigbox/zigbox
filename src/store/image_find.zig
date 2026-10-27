@@ -61,14 +61,18 @@ pub const ByReference = struct {
     }
 };
 
-/// Counts the records that became the tree, and keeps the manifest of the last.
+/// The records that became the tree: how many, and the manifests of the first `kept_max`.
 pub const ByTree = struct {
+    pub const kept_max = 16;
+
     tree: Digest,
     count: u32 = 0,
+    manifests: [kept_max]Sha256 = undefined,
     manifest: Sha256 = undefined,
 
     pub fn visit(self: *ByTree, image: *const images.Image) void {
         if (!image.tree.eql(self.tree)) return;
+        if (self.count < kept_max) self.manifests[self.count] = image.manifest;
         self.count += 1;
         self.manifest = image.manifest;
     }

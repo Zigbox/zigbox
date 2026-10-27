@@ -192,11 +192,18 @@ test "a digest the store lacks is E0410 before anything is created" {
     try testing.expect(files.kind_of(state ++ "/img-2") == null);
     try testing.expectEqual(@as(?u8, null), lib.failed_start(&diag).code());
     diag.reset();
-    const bad = spec_for("not-a-digest", "img-2", false);
+    const bad = spec_for("Not A Digest", "img-2", false);
     try testing.expectError(error.StartFailed, lib.start(sim.interface(), &bad, .{
         .image_workspace = &image_ws,
     }, &handle, &diag));
     try testing.expectEqual(@as(?codes.Code, .E0412), diag.code);
+    // A lowercase word is a name, and nothing was pulled as it.
+    diag.reset();
+    const name = spec_for("not-a-digest", "img-2", false);
+    try testing.expectError(error.StartFailed, lib.start(sim.interface(), &name, .{
+        .image_workspace = &image_ws,
+    }, &handle, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0522), diag.code);
     // No store at all: the same refusal as an unknown tree.
     sim_run.init(&sim, 4);
     files.init(4);
