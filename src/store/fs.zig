@@ -44,6 +44,15 @@ pub const Visitor = struct {
     call: *const fn (context: *anyopaque, name: []const u8) void,
 };
 
+/// What `set_path_attributes` sets on a path, without following a symlink.
+pub const PathAttributes = struct {
+    /// Null for a symlink, which has no mode of its own.
+    mode: ?u16,
+    uid: u32,
+    gid: u32,
+    mtime: u64,
+};
+
 pub const VTable = struct {
     lstat: *const fn (context: *anyopaque, path: [:0]const u8) Error!Stat,
     read_dir: *const fn (context: *anyopaque, path: [:0]const u8, visitor: Visitor) Error!void,
@@ -85,6 +94,24 @@ pub const VTable = struct {
     remove_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
     /// Makes the directory's entries (a rename, a new file) durable.
     sync_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    /// A second name for the file at `from`, at `to` (`link(2)`): the same inode, so the same
+    /// bytes, owner, mode and attributes. The materialized cache is made of these.
+    link: *const fn (context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void,
+    /// A symbolic link at `path` pointing to `target`.
+    symlink: *const fn (context: *anyopaque, target: [:0]const u8, path: [:0]const u8) Error!void,
+    /// Owner, mode and modification time of the path itself (`lchown`, `chmod`, `utimensat`).
+    set_path_attributes: *const fn (
+        context: *anyopaque,
+        path: [:0]const u8,
+        attributes: PathAttributes,
+    ) Error!void,
+    /// An attribute of the path itself (`lsetxattr`).
+    set_path_xattr: *const fn (
+        context: *anyopaque,
+        path: [:0]const u8,
+        name: [:0]const u8,
+        value: []const u8,
+    ) Error!void,
     last_errno: *const fn (context: *anyopaque) u16,
 };
 
@@ -373,6 +400,68 @@ pub const Fs = struct {
         assert(path.len > 0);
         for (0..constants.store_io_retries_max + 1) |_| {
             fs.vtable.remove_directory(fs.context, path) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            return;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn link(fs: Fs, from: [:0]const u8, to: [:0]const u8) Error!void {
+        assert(from.len > 0);
+        assert(to.len > 0);
+        assert(!std.mem.eql(u8, from, to));
+        for (0..constants.store_io_retries_max + 1) |_| {
+            fs.vtable.link(fs.context, from, to) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            return;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn symlink(fs: Fs, target: [:0]const u8, path: [:0]const u8) Error!void {
+        assert(target.len > 0);
+        assert(path.len > 0);
+        assert(target.len <= constants.store_symlink_target_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            fs.vtable.symlink(fs.context, target, path) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            return;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn set_path_attributes(fs: Fs, path: [:0]const u8, attributes: PathAttributes) Error!void {
+        assert(path.len > 0);
+        assert(attributes.uid != std.math.maxInt(u32)); // (uid_t)-1 means "no change".
+        assert(attributes.gid != std.math.maxInt(u32));
+        if (attributes.mode) |mode| assert(mode <= 0o7777);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            fs.vtable.set_path_attributes(fs.context, path, attributes) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            return;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn set_path_xattr(
+        fs: Fs,
+        path: [:0]const u8,
+        name: [:0]const u8,
+        value: []const u8,
+    ) Error!void {
+        assert(path.len > 0);
+        assert(name.len > 0);
+        assert(value.len <= constants.store_xattr_value_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            fs.vtable.set_path_xattr(fs.context, path, name, value) catch |err| switch (err) {
                 error.Interrupted => continue,
                 else => return err,
             };

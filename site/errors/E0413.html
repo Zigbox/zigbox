@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0413</h1>
 <p class="summary">can't use the store: its format is unknown</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The store's store.zon is missing a readable format version, or names one this zbx does not know. A newer zbx wrote it, or something else changed the file. zbx does not touch a store it cannot read: it could damage what a newer version put there.</p>
 <p>Run the zbx that wrote the store, or move the store directory away to start a new one. The cause names the file.</p>

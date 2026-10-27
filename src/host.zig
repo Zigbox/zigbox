@@ -189,6 +189,9 @@ pub const MountKind = enum {
     /// flags the mount already has (nosuid, nodev, noexec, atime) to be kept, so the host reads
     /// them first.
     remount_readonly,
+    /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
+    /// the kernel reads it as text, so it is the one request whose source is not a path.
+    overlay,
 };
 
 pub const MountRequest = struct {
@@ -716,7 +719,7 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay => assert(request.source != null),
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);

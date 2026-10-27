@@ -218,7 +218,10 @@ pub const Process = struct {
 
 /// Room for the sync records of a start and for the frames a detached run's supervisor sends.
 const pipe_bytes_max: u32 =
-    @max(constants.sync_record_bytes * constants.sync_records_max + 4, 2048);
+    @max(
+        constants.sync_record_bytes * constants.sync_records_max + 4,
+        constants.diag_carry_bytes_max + 16,
+    );
 
 const SimPipe = struct {
     used: bool,
@@ -262,6 +265,8 @@ pub const World = struct {
     command_exit: host.ExitStatus,
     /// Mounting `/dev/pts` is refused (an environment without devpts for users).
     devpts_refused: bool,
+    /// The kernel refuses overlay mounts (no module, a policy).
+    overlay_refused: bool,
     broken_pipe_ignored: bool,
     next_pid: u32,
     /// The plan step the calls that follow belong to (`Host.begin_step`).
@@ -335,6 +340,7 @@ pub const World = struct {
         world.hostnames = .{ host.Text.from_slice("simhost"), host.Text.from_slice("simhost") };
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
+        world.overlay_refused = false;
         world.broken_pipe_ignored = false;
         world.next_pid = 500;
         world.step = host.step_none;
@@ -1185,7 +1191,9 @@ pub const World = struct {
         if (request.kind == .devpts) {
             if (world.devpts_refused) return errno_perm;
         }
-        if (request.source) |source| {
+        if (request.kind == .overlay) {
+            if (world.overlay_refused) return errno_perm;
+        } else if (request.source) |source| {
             if (world.bind_source_error(request.kind, source)) |errno| return errno;
         }
         const made: Mount = .{
@@ -1245,7 +1253,8 @@ pub const World = struct {
         // The new root must be a mount point, the tree must not propagate, and the old root goes
         // at or below the new one.
         const index = table.find(root.slice()) orelse return errno_inval;
-        if (table.mounts[index].kind != .bind_tree) return errno_inval;
+        const root_kind = table.mounts[index].kind;
+        if (root_kind != .bind_tree and root_kind != .overlay) return errno_inval;
         if (!table.private) return errno_inval;
         if (!old.under(root.slice())) return errno_inval;
         process.root = root;

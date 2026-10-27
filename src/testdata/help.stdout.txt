@@ -3,7 +3,7 @@ zbx - rootless container runtime
 usage: zbx [options] <command>
 
 commands:
-  run             run a command in a container whose root is a directory (see below)
+  run             run a command in a container whose root is a tree or a directory (see below)
   bundle          collect a redacted diagnostic bundle for a run (see below)
   doctor          check that this host can run zbx (a diagnostic per failing check)
   ps              list the containers (--all: the ones that ended too)
@@ -15,13 +15,16 @@ commands:
   --version       print the version
 
 run:
+  zbx run <digest> [--name <name>] -- <command> [args...]
   zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
-  --rootfs <dir>  the directory to use as the container's root (required)
+  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
+                  an overlay: its writes go to the container's own layer, never the store
+  --rootfs <dir>  or a directory to use as the container's root, read and written in place
   --name <name>   the container's name and hostname (default: zbx- and six hex digits)
   --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
   --pids <n>      limit on processes and threads, as in 64
   --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
-  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
+  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)

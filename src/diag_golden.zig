@@ -225,6 +225,72 @@ fn prepare_namespaces_refused(sim: *HostSim) void {
 /// The store's file system for the store cases: a user with a home, and a source tree to import.
 var golden_files: SimFs = undefined;
 
+var golden_import: @import("store/import.zig").Workspace = undefined;
+var golden_store: @import("store/layout.zig").Store = undefined;
+
+/// A user's store that holds the sample tree, imported; the host can run containers.
+fn prepare_store_with_tree(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    support.make_user_store(&golden_files, ".{\n    .format = 1,\n}\n");
+    support.make_source(&golden_files, 0);
+    // A second file with the bytes and attributes of one in the tree: one object, two names.
+    golden_files.put_file("/src/bin/ls2", 0o755, "#!shell\n");
+    golden_store.at(sim.interface(), support.user_store);
+    var result: @import("store/import.zig").Result = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    const options: @import("store/import.zig").Options = .{ .squash_owner = false, .warn = null };
+    @import(
+        "store/import.zig",
+    ).import(&golden_store, &golden_import, "/src", options, &result, &diag) catch
+        unreachable; // The sample tree imports.
+}
+
+const golden_state = "/home/alice/.local/state/zbx/containers";
+
+/// The container's merged directory and a shell in the container model, as the overlay would
+/// show the tree.
+fn prepare_overlay_dirs(sim: *HostSim) void {
+    sim.world.add_node(golden_state ++ "/web-1/merged", .dir);
+    inline for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        sim.world.add_node(golden_state ++ "/web-1/merged" ++ suffix, .dir);
+    }
+    sim.world.add_node(golden_state ++ "/web-1/merged/bin/sh", .file);
+}
+
+fn prepare_link_limit(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    golden_files.faults.link_max = 2; // The object and one name: the second shell is one too many.
+}
+
+fn prepare_overlay_refused(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    prepare_overlay_dirs(sim);
+    sim.world.overlay_refused = true;
+}
+
+/// Records over the limit, one of them a run whose container directory cannot be removed.
+fn prepare_layers_stay(sim: *HostSim) void {
+    prepare_records_unreadable(sim);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    const parents = [_][]const u8{
+        "/home",
+        "/home/alice",
+        "/home/alice/.local",
+        "/home/alice/.local/state",
+        "/home/alice/.local/state/zbx",
+        "/home/alice/.local/state/zbx/containers",
+        golden_state ++ "/damaged",
+    };
+    for (parents) |parent| golden_files.put_dir(parent, 0o755);
+    golden_files.put_file(golden_state ++ "/damaged/left", 0o644, "x");
+    golden_files.faults.fail_mutation = 0;
+    golden_files.faults.fail_errno = 13;
+}
+
 fn prepare_store_host(sim: *HostSim) void {
     sim_run.init(sim, 1);
     golden_files.init(1);
@@ -518,6 +584,25 @@ const base_cases = [_]Case{
         .args = &.{ "store", "import", "/src" },
         .prepare = prepare_store_unmapped,
         .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .E0424,
+        .args = &.{ "run", "4ccf5b88ec09", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_link_limit,
+        .exit = 125,
+    },
+    .{
+        .code = .E0425,
+        .args = &.{ "run", "4ccf5b88ec09", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_overlay_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .W0413,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_layers_stay,
         .warning = true,
         .exit = 0,
     },

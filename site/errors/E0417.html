@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0417</h1>
 <p class="summary">can't write the store</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The kernel refused a write to the store directory (permissions, a read-only file system, an I/O error). Nothing partial is left under a digest: a failed write leaves at most a temporary file in the store's tmp directory, which &quot;zbx store gc&quot; removes.</p>
 <p>The cause names the path and the kernel's reason. The store is in $XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.</p>

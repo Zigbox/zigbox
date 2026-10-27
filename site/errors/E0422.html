@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0422</h1>
 <p class="summary">a tree in the store is missing or damaged</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx followed a tree down through its subtrees and found one that is not in the store, does not hash to its name, or cannot be decoded. A tree object is a file named by the hash of its bytes, so this means the store was changed or damaged outside zbx (a disk error, a file removed by hand), or an earlier zbx wrote it wrongly.</p>
 <p>The cause names the tree. Nothing was changed. Importing the directory again writes the trees it needs; objects that are already stored are reused.</p>

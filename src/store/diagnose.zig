@@ -360,6 +360,102 @@ pub fn tree_damaged(diag: *Diag, where: Digest, kind: []const u8) void {
     );
 }
 
+/// ZBX-E0701: nowhere to keep a container's layers.
+pub fn no_state_directory(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.E0701);
+    diag.while_("finding the directory for the container's layers", .{});
+    diag.cause("neither XDG_STATE_HOME nor HOME names an absolute directory to keep them in", .{});
+    diag.fix(.{ .sentence = "name one:", .command = "export XDG_STATE_HOME=$HOME/.local/state" });
+}
+
+/// ZBX-E0425: a layer's path holds a character the overlay's mount data can't carry.
+pub fn overlay_path(diag: *Diag, path: []const u8, byte: u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, path);
+    diag.raise(.E0425);
+    diag.while_("preparing the container's overlay", .{});
+    if (byte == 0) {
+        diag.cause("the path '{s}' is too long for the container's directory", .{echo});
+    } else {
+        diag.cause(
+            "the path '{s}' contains '{c}', which the overlay's mount data can't carry",
+            .{ echo, byte },
+        );
+    }
+    diag.context("path", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "use a data and state directory without commas, colons and backslashes: " ++
+            "set XDG_DATA_HOME and XDG_STATE_HOME",
+    });
+}
+
+/// ZBX-W0413: a container's directory stayed.
+pub fn container_not_removed(diag: *Diag, failure: *const @import("remove.zig").Failure) void {
+    assert(diag.code == null);
+    diag.raise(.W0413);
+    diag.while_("removing a container's layers", .{});
+    if (failure.too_deep) {
+        diag.cause("'{s}' is nested deeper than {d} directories", .{
+            failure.path_text(),
+            constants.store_depth_max,
+        });
+    } else {
+        errors.cause_host_error(diag, "removing a file or directory", failure.err, failure.errno);
+        diag.cause("it stopped at '{s}'", .{failure.path_text()});
+    }
+    diag.context("path", "{s}", .{failure.path_text()});
+    diag.fix(
+        .{
+            .sentence = "remove the container's directory by hand (zbx explain W0413)",
+        },
+    );
+}
+
+pub fn container_not_removed_unknown(diag: *Diag, path: []const u8) void {
+    assert(diag.code == null);
+    diag.raise(.W0413);
+    diag.while_("removing a container's layers", .{});
+    diag.cause("the worker that removes them ended without saying why", .{});
+    diag.context("path", "{s}", .{path});
+    diag.fix(
+        .{
+            .sentence = "remove the container's directory by hand (zbx explain W0413)",
+        },
+    );
+}
+
+/// ZBX-E0424: the file system's limit on names for one inode.
+pub fn link_limit(diag: *Diag, store: *const layout.Store) void {
+    assert(diag.code == null);
+    diag.raise(.E0424);
+    diag.while_("building the directory a container runs on", .{});
+    diag.cause(
+        "the file system refused another hard link to an object: too many links (EMLINK)",
+        .{},
+    );
+    diag.context("path", "{s}", .{store.root_text()});
+    diag.fix(.{
+        .sentence = "keep fewer copies of that file in use, or move the store to a file system " ++
+            "with a higher limit",
+    });
+}
+
+/// ZBX-E0422: an object a tree names is not in the store.
+pub fn object_missing(diag: *Diag, object: Digest) void {
+    assert(diag.code == null);
+    diag.raise(.E0422);
+    diag.while_("building the directory a container runs on", .{});
+    diag.cause("object {s} is missing from the store", .{object.text()});
+    diag.context("digest", "{s}", .{object.text()});
+    diag.fix(
+        .{
+            .sentence = "import the directory again to write what is missing, or restore a backup",
+        },
+    );
+}
+
 /// ZBX-W0410: something that is not a file, a directory or a symlink.
 pub fn skipped_file(diag: *Diag, path: []const u8, kind: []const u8) void {
     assert(path.len > 0);

@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0416</h1>
 <p class="summary">the disk is full while writing the store</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The file system that holds the store has no room left. Everything zbx wrote before is complete and stays: every write is a temporary file that is renamed into place only when it is whole, so there is no half file under any digest. The message says how much was written.</p>
 <p>Free space (or point XDG_DATA_HOME at a bigger disk) and run the same command again: objects already stored are skipped, so it carries on.</p>

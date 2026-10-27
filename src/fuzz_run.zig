@@ -186,6 +186,8 @@ const Scenario = struct {
     inherited: Inherited,
     /// `--read-only`: the rootfs is read-only with tmpfs at /tmp and /run.
     read_only: bool,
+    /// The root is a tree of the store, run on an overlay, instead of a directory.
+    image: bool,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -318,6 +320,15 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
         scenario.helper_fails == null;
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
+    // A fifth of the good roots are trees of the store. The name is then a valid one: the
+    // container's directory is made under it.
+    scenario.image = scenario.rootfs == .good and scenario.name != .invalid and
+        random.uintLessThan(u8, 5) == 0;
+    if (scenario.image) scenario.home = true; // The store and the layers live under it.
+    if (scenario.image and scenario.name == .none) {
+        scenario.name = .valid;
+        scenario.name_text = valid_names[random.uintLessThan(usize, valid_names.len)];
+    }
     scenario.removal = .lazily;
     scenario.stop_fault = .none;
     scenario.inherited = .none;
@@ -343,7 +354,13 @@ fn exit_for(code: codes.Code, command_missing: bool) u8 {
 }
 
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
-    sim_run.sample_plan_ro(plan, scenario.full, scenario.scoped(), scenario.read_only);
+    sim_run.sample_plan_image(
+        plan,
+        scenario.full,
+        scenario.scoped(),
+        scenario.read_only,
+        scenario.image,
+    );
 }
 
 /// The kind of step a plan has at `index`.
@@ -408,6 +425,10 @@ fn verdict_of(scenario: *const Scenario) Verdict {
         var verdict = refusal(.E0307, null, false);
         verdict.refused.reached_ids = true;
         return verdict;
+    }
+    // A tree is prepared in the store's worker before the plan, and its helper is refused too.
+    if (scenario.image and scenario.full and scenario.helper_fails != null) {
+        return refusal(.E0419, null, false);
     }
     const fault = fault_at(scenario);
     if (early_verdict(scenario, fault)) |event| return event;
@@ -519,6 +540,7 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .restrict_capabilities, .clear_ambient => return .E0207,
         .set_no_new_privs, .install_seccomp => return .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
+        .mount_overlay => return .E0425,
         .mount_pts => return null, // The one step that may fail: skipped with a note.
         .exec => {
             // A shell looks on: a missing or unrunnable first candidate is not the end while
@@ -625,6 +647,58 @@ fn preload(sim: *HostSim, scenario: *const Scenario) void {
     }
 }
 
+// ---- A run of a tree from the store ----
+
+const store_fs = @import("store/fs_sim.zig");
+const store_import = @import("store/import.zig");
+const store_layout = @import("store/layout.zig");
+const store_support = @import("store/test_support.zig");
+
+var image_files: store_fs.SimFs = undefined;
+var image_store: store_layout.Store = undefined;
+var image_workspace: store_import.Workspace = undefined;
+var image_prefix: [12:0]u8 = undefined;
+const containers = "/home/alice/.local/state/zbx/containers";
+
+fn image_argument() [:0]const u8 {
+    return &image_prefix;
+}
+
+fn merged_path(buffer: *[constants.sim_path_bytes_max]u8, name: []const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, containers ++ "/{s}/merged", .{name}) catch
+        unreachable; // The name is at most 63 bytes.
+}
+
+/// A store that holds a small tree, and the container model's view of the merged directory.
+fn prepare_image(sim: *HostSim, scenario: *const Scenario) void {
+    image_files.init(1);
+    sim.store_fs = &image_files;
+    store_support.make_user_store(&image_files, ".{\n    .format = 1,\n}\n");
+    image_files.put_dir("/src", 0o755);
+    image_files.put_file("/src/hello", 0o644, "hello\n");
+    image_store.at(sim.interface(), store_support.user_store);
+    var result: store_import.Result = undefined;
+    var diag: @import("diag/diag.zig").Diag = undefined;
+    diag.reset();
+    const options: store_import.Options = .{ .squash_owner = false, .warn = null };
+    store_import.import(&image_store, &image_workspace, "/src", options, &result, &diag) catch
+        unreachable; // A tiny tree imports.
+    const text = result.digest.text();
+    @memcpy(image_prefix[0..12], text[3..15]);
+    var buffer: [constants.sim_path_bytes_max]u8 = undefined;
+    const merged = merged_path(&buffer, scenario.name_text);
+    sim.world.add_node(merged, .dir);
+    var inner: [constants.sim_path_bytes_max]u8 = undefined;
+    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        sim.world.add_node(std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch
+            unreachable, .dir); // Short.
+    }
+    for ([_][]const u8{ "/bin/sh", "/bin/sleep" }) |suffix| {
+        sim.world.add_node(std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch
+            unreachable, .file); // Short.
+    }
+}
+
 /// One run: set the simulator up, run the command line, and check everything.
 pub fn fuzz_run(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
@@ -657,6 +731,7 @@ pub fn fuzz_run(seed: u64) void {
     sim.environment_variables = environment.fill(&scenario);
     set_bus(&sim, &scenario);
     preload(&sim, &scenario);
+    if (scenario.image) prepare_image(&sim, &scenario);
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
@@ -723,7 +798,9 @@ fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
-    if (scenario.rootfs == .empty) {
+    if (scenario.image) {
+        push(args, &count, image_argument());
+    } else if (scenario.rootfs == .empty) {
         push(args, &count, "--rootfs=");
     } else {
         push(args, &count, "--rootfs");
@@ -906,17 +983,21 @@ fn check_started(
         assert(std.mem.startsWith(u8, name, constants.container_name_prefix));
     }
     const devpts = !devpts_skipped(scenario);
+    var merged_storage: [constants.sim_path_bytes_max]u8 = undefined;
     const container: sim_run.Started = .{
         .name = name,
         .devpts = devpts,
         .full = scenario.full,
         .read_only = scenario.read_only,
+        .merged = if (scenario.image) merged_path(&merged_storage, name) else null,
     };
     assert(sim_run.started(sim, container) == null);
     var received_storage: [8]u8 = undefined;
     const received = expected_received(scenario, &received_storage);
     assert(std.mem.eql(u8, sim.world.received[0..sim.world.received_count], received));
-    assert(sim.world.helper_runs == if (scenario.full) @as(u32, 2) else 0);
+    // A run of a tree has the store's worker map its ids first: the helpers run twice.
+    const helper_runs: u32 = if (scenario.full) (if (scenario.image) 4 else 2) else 0;
+    assert(sim.world.helper_runs == helper_runs);
     check_scope(sim, scenario, name);
     check_started_output(sim, scenario, status);
     check_record(sim, scenario, &.{ .started = status });
@@ -1018,7 +1099,8 @@ fn check_refused(
     assert(exit <= 127);
     if (step == null) {
         // Refused before anything was created.
-        assert(sim.world.processes[1].state == .unused);
+        // (A tree's worker is a process too; it was reaped, and leak() checks that.)
+        if (!scenario.image) assert(sim.world.processes[1].state == .unused);
         return;
     }
     // The diagnostic names the step in the output a person (or a script) can read. The default

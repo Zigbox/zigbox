@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0419</h1>
 <p class="summary">can't run the store worker</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>Store work runs in a short-lived child process inside your user namespace. This one could not be created or set up (the same causes as a container that will not start: see &quot;zbx doctor&quot;), or it was killed by a signal before it finished. Nothing partial is left under a digest.</p>
 <p>The cause says which. Run the command again once it is fixed.</p>

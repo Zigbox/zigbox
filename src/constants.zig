@@ -333,9 +333,9 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 3;
+pub const record_version: u32 = 4;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 32 * 1024;
+pub const record_bytes_max: u32 = 40 * 1024;
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
 pub const label_key_bytes_max: u32 = 32;
@@ -348,6 +348,9 @@ pub const dir_listing_bytes_max: u32 = dir_entries_max * (dir_name_bytes_max + 1
 /// The state directory path: $XDG_STATE_HOME or $HOME/.local/state, then /zbx/runs/<name>.zon.
 pub const state_path_bytes_max: u32 = 512;
 pub const record_suffix = ".zon";
+/// A container's directory under the state directory: `<state>/zbx/containers/<name>`, and the
+/// longest path inside it (`/upper`, `/merged`).
+pub const containers_path_bytes_max: u32 = 640;
 /// Seconds since the epoch; a record's times are these.
 pub const record_time_unknown: u64 = 0;
 
@@ -376,6 +379,8 @@ pub const secret_value_bytes_max: u32 = 256;
 /// The diagnostic kept in a run record, as the JSON line zbx printed. Bigger is replaced by a
 /// short object that names the code.
 pub const diag_json_bytes_max: u32 = 3072;
+/// A diagnostic carried through a pipe from the store's worker to its caller (`Diag.encode`).
+pub const diag_carry_bytes_max: u32 = 6 * 1024;
 /// "[redacted:private-key]" and its siblings fit this.
 pub const redaction_bytes_max: u32 = 32;
 /// The words of a bundle name, "2026-10-23T22-41-07Z".
@@ -575,6 +580,12 @@ comptime {
     const json_bytes_max = 2 * json_free_text + docs_url_bytes_max + 1024;
     assert(json_bytes_max <= diag_wire_bytes_max);
     assert(diag_wire_bytes_max == output_bytes_max);
+    // A diagnostic carried through a pipe: every item at its bound, the longest line framing.
+    const carry_items = diag_causes_count_max + diag_whiles_count_max;
+    const carry_text = carry_items * (diag_field_bytes_max + 3) +
+        diag_context_count_max * (diag_key_bytes_max + diag_field_bytes_max + 4) +
+        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 4) + 16;
+    assert(carry_text <= diag_carry_bytes_max);
     assert(diag_skip_depth_max > 0);
     assert(diag_skip_depth_max <= 16); // The skipper's stack is this many bytes.
     assert(diag_skip_bytes_max > 0);

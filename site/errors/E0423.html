@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0423</h1>
 <p class="summary">can't read the store</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The kernel refused to read something in the store directory, or the store has more entries in one place than zbx can count at once. The store is in $XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.</p>
 <p>The cause names the step and the kernel's reason. Check that the directory belongs to you, and that the disk is healthy.</p>

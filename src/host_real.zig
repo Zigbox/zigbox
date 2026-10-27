@@ -424,6 +424,13 @@ pub const HostReal = struct {
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
             .remount_readonly => return remount_readonly(request.target),
+            .overlay => linux.mount(
+                "overlay",
+                target,
+                "overlay",
+                0,
+                @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
+            ),
             .proc, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);

@@ -83,6 +83,7 @@ fn add_test_step(
         "src/testing/vm/main.zig",
         "src/testing/vm/main_m1.zig",
         "src/testing/vm/main_m2.zig",
+        "src/testing/vm/main_m3.zig",
         "src/main.zig",
         "src/zigbox.zig",
         "src/tidy.zig",
@@ -220,6 +221,11 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             .step = "demo-m2",
             .root = "src/testing/vm/main_m2.zig",
             .help = "Run the M2 demo: limits, hardening, lifecycle, in the VM (docs/demos/m2.md)",
+        },
+        .{
+            .step = "demo-m3",
+            .root = "src/testing/vm/main_m3.zig",
+            .help = "Run the M3 demo, as far as it is built: the store and running by digest",
         },
     };
     for (demos) |demo| {

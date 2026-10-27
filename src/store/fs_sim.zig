@@ -16,10 +16,10 @@
 //!   - Faults without a crash: a call fails with an errno (`fail_mutation`), interrupted calls,
 //!     short reads and writes, a read error, a disk that holds only so many bytes (ENOSPC).
 //!
-//! What it does not model: permissions (an `unreadable` flag stands for EACCES), time, hard
-//! links, and directory entries that are lost in a crash (an entry is durable when its call
-//! returned; the store flushes directories anyway, and a test of that would need a model of the
-//! file system's journal).
+//! What it does not model: permissions (an `unreadable` flag stands for EACCES), time, and
+//! directory entries that are lost in a crash (an entry is durable when its call returned; the
+//! store flushes directories anyway, and a test of that would need a model of the file
+//! system's journal).
 //!
 //! No allocation: every table is a fixed array, and the struct is large, so it is initialised in
 //! place and kept in static storage by the tests.
@@ -47,6 +47,7 @@ pub const errno_nospc: u16 = 28;
 pub const errno_loop: u16 = 40;
 pub const errno_inval: u16 = 22;
 pub const errno_nodata: u16 = 61;
+pub const errno_mlink: u16 = 31;
 
 pub const Faults = struct {
     /// The call at this write point (zero-based) fails with `fail_errno`, and is not applied.
@@ -63,6 +64,8 @@ pub const Faults = struct {
     /// A writer appends a byte to every file right after it is opened for reading: what a file
     /// that is being written to looks like to a program that read its size a moment before.
     grow_on_open: bool = false,
+    /// The most names one inode may have; a `link` past it is `EMLINK` (ext4 allows 65000).
+    link_max: ?u32 = null,
 };
 
 const Node = struct {
@@ -155,6 +158,10 @@ pub const SimFs = struct {
         .make_directory = make_directory,
         .remove_directory = remove_directory,
         .sync_directory = sync_directory,
+        .link = link,
+        .symlink = symlink,
+        .set_path_attributes = set_path_attributes,
+        .set_path_xattr = set_path_xattr,
         .last_errno = last_errno,
     };
 
@@ -226,8 +233,19 @@ pub const SimFs = struct {
             .gid = node.gid,
             .size = if (node.kind == .dir) 0 else node.data_len,
             .inode = node.inode,
-            .links = 1,
+            .links = sim.links_of(node.inode),
         };
+    }
+
+    /// How many live names the inode has. A `link` makes a second node with the same inode and
+    /// the same bytes; an object is never written after it is made, so the two cannot diverge.
+    fn links_of(sim: *const SimFs, inode: u64) u32 {
+        var count: u32 = 0;
+        for (sim.nodes[0..sim.count]) |*node| {
+            if (node.alive and node.inode == inode) count += 1;
+        }
+        assert(count > 0);
+        return count;
     }
 
     /// Adds a node without a fault, creating nothing above it (the parent must exist). Panics on
@@ -286,6 +304,11 @@ pub const SimFs = struct {
 
     pub fn remove_xattrs_of(sim: *SimFs, path: []const u8) void {
         sim.nodes[sim.find(path).?].xattr_len = 0;
+    }
+
+    /// Removes a node outright, as a test breaks the store on purpose.
+    pub fn remove_path(sim: *SimFs, path: []const u8) void {
+        sim.kill(sim.find(path).?);
     }
 
     pub fn set_mode_of(sim: *SimFs, path: []const u8, mode: u16) void {
@@ -687,7 +710,7 @@ pub const SimFs = struct {
         const index = sim.find(from) orelse return sim.fail(errno_noent);
         if (!sim.parent_exists(to)) return sim.fail(errno_noent);
         if (to.len > constants.sim_fs_path_bytes_max) return sim.fail(36);
-        if (sim.nodes[index].kind == .dir) return sim.fail(errno_inval); // Not needed by the store.
+        if (sim.nodes[index].kind == .dir) return try sim.rename_directory(index, to);
         if (sim.find(to)) |target| {
             if (sim.nodes[target].kind == .dir) return sim.fail(errno_isdir);
             sim.kill(target);
@@ -697,11 +720,45 @@ pub const SimFs = struct {
         node.path_len = @intCast(to.len);
     }
 
+    /// A directory moves with everything below it. The target must not exist: `rename(2)` would
+    /// replace an empty directory, which the store never asks for.
+    fn rename_directory(sim: *SimFs, index: u32, to: []const u8) Error!void {
+        const from = sim.nodes[index].text();
+        var old_path: [constants.sim_fs_path_bytes_max]u8 = undefined;
+        @memcpy(old_path[0..from.len], from);
+        const old = old_path[0..from.len];
+        if (sim.find(to) != null) return sim.fail(errno_exist);
+        if (std.mem.startsWith(u8, to, old) and to.len > old.len and to[old.len] == '/') {
+            return sim.fail(errno_inval); // Into itself.
+        }
+        for (sim.nodes[0..sim.count]) |*node| {
+            if (!node.alive) continue;
+            if (!deeper(node.text(), old) and !std.mem.eql(u8, node.text(), old)) continue;
+            const suffix = node.text()[old.len..];
+            if (to.len + suffix.len > constants.sim_fs_path_bytes_max) return sim.fail(36);
+            var moved: [constants.sim_fs_path_bytes_max]u8 = undefined;
+            @memcpy(moved[0..to.len], to);
+            @memcpy(moved[to.len..][0..suffix.len], suffix);
+            @memcpy(node.path[0 .. to.len + suffix.len], moved[0 .. to.len + suffix.len]);
+            node.path_len = @intCast(to.len + suffix.len);
+        }
+    }
+
+    fn deeper(path: []const u8, directory: []const u8) bool {
+        return path.len > directory.len and std.mem.startsWith(u8, path, directory) and
+            path[directory.len] == '/';
+    }
+
     fn kill(sim: *SimFs, index: u32) void {
         const node = &sim.nodes[index];
         assert(node.alive);
         node.alive = false;
-        sim.bytes_live -= node.data_len;
+        // The bytes go with the last name of the inode.
+        var shared = false;
+        for (sim.nodes[0..sim.count]) |*other| {
+            if (other.alive and other.inode == node.inode) shared = true;
+        }
+        if (!shared) sim.bytes_live -= node.data_len;
     }
 
     fn unlink(context: *anyopaque, path: [:0]const u8) Error!void {
@@ -737,6 +794,74 @@ pub const SimFs = struct {
             }
         }
         sim.kill(index);
+    }
+
+    fn link(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void {
+        const sim = from_context(context);
+        try sim.begin_mutation();
+        const index = sim.find(from) orelse return sim.fail(errno_noent);
+        const is_dir = sim.nodes[index].kind == .dir;
+        if (is_dir) return sim.fail(1); // EPERM: no hard link to a directory.
+        if (sim.find(to) != null) return sim.fail(errno_exist);
+        if (!sim.parent_exists(to)) return sim.fail(errno_noent);
+        if (to.len > constants.sim_fs_path_bytes_max) return sim.fail(36);
+        if (sim.faults.link_max) |limit| {
+            if (sim.links_of(sim.nodes[index].inode) >= limit) return sim.fail(errno_mlink);
+        }
+        const source = sim.nodes[index];
+        const made = sim.allocate_node(to);
+        const node = &sim.nodes[made];
+        const path_len = node.path_len;
+        var path: [constants.sim_fs_path_bytes_max]u8 = undefined;
+        @memcpy(path[0..path_len], node.path[0..path_len]);
+        node.* = source; // The same inode, bytes, owner, mode and attributes.
+        @memcpy(node.path[0..path_len], path[0..path_len]);
+        node.path_len = path_len;
+    }
+
+    fn symlink(context: *anyopaque, target: [:0]const u8, path: [:0]const u8) Error!void {
+        const sim = from_context(context);
+        try sim.begin_mutation();
+        if (sim.find(path) != null) return sim.fail(errno_exist);
+        if (!sim.parent_exists(path)) return sim.fail(errno_noent);
+        if (path.len > constants.sim_fs_path_bytes_max) return sim.fail(36);
+        const index = sim.allocate_node(path);
+        const node = &sim.nodes[index];
+        node.kind = .symlink;
+        node.mode = 0o777;
+        sim.append(node, target);
+        node.synced_len = node.data_len;
+    }
+
+    fn set_path_attributes(
+        context: *anyopaque,
+        path: [:0]const u8,
+        attributes: fs_mod.PathAttributes,
+    ) Error!void {
+        const sim = from_context(context);
+        try sim.begin_mutation();
+        const index = sim.find(path) orelse return sim.fail(errno_noent);
+        const inode = sim.nodes[index].inode;
+        // Every name of the inode shows the change, as in a real file system.
+        for (sim.nodes[0..sim.count]) |*node| {
+            if (!node.alive or node.inode != inode) continue;
+            node.uid = attributes.uid;
+            node.gid = attributes.gid;
+            if (attributes.mode) |mode| node.mode = mode;
+            node.mtime = attributes.mtime;
+        }
+    }
+
+    fn set_path_xattr(
+        context: *anyopaque,
+        path: [:0]const u8,
+        name: [:0]const u8,
+        value: []const u8,
+    ) Error!void {
+        const sim = from_context(context);
+        try sim.begin_mutation();
+        const index = sim.find(path) orelse return sim.fail(errno_noent);
+        try sim.store_xattr(index, name, value);
     }
 
     fn sync_directory(context: *anyopaque, path: [:0]const u8) Error!void {

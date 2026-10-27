@@ -1,0 +1,6 @@
+error[ZBX-E0424]: a file name in the store has too many links
+  cause  the file system refused another hard link to an object: too many links
+         (EMLINK)
+  fix    keep fewer copies of that file in use, or move the store to a file system with a higher limit
+  more   zbx explain E0424 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0424.html

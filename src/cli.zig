@@ -20,6 +20,7 @@ const explain = @import("diag/explain.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
+const image_mod = @import("runtime/image.zig");
 const runtime = @import("runtime/run.zig");
 const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -36,7 +37,7 @@ const help_text =
     \\usage: zbx [options] <command>
     \\
     \\commands:
-    \\  run             run a command in a container whose root is a directory (see below)
+    \\  run             run a command in a container whose root is a tree or a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
     \\  doctor          check that this host can run zbx (a diagnostic per failing check)
     \\  ps              list the containers (--all: the ones that ended too)
@@ -48,13 +49,16 @@ const help_text =
     \\  --version       print the version
     \\
     \\run:
+    \\  zbx run <digest> [--name <name>] -- <command> [args...]
     \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
-    \\  --rootfs <dir>  the directory to use as the container's root (required)
+    \\  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
+    \\                  an overlay: its writes go to the container's own layer, never the store
+    \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
     \\  --name <name>   the container's name and hostname (default: zbx- and six hex digits)
     \\  --memory <size> memory limit, binary units: 128m, 1g (needs the systemd user manager)
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
-    \\  --read-only     mount the rootfs read-only, with a tmpfs at /tmp and /run
+    \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -440,7 +444,7 @@ pub fn parse(
     invocation.run = run_args;
     invocation.bundle = bundle_args;
     try resolve(args, operands[0..count], invocation, diag);
-    if (invocation.command == .run) try check_run_args(diag, &invocation.run);
+    if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
@@ -489,13 +493,16 @@ fn take_run_option(
 }
 
 /// `run` needs a rootfs and a command: the two things a user is most likely to forget.
-fn check_run_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
-    if (run_args.rootfs == null) return missing_argument(diag, .run, .rootfs);
+    if (run_args.rootfs == null and digest == null) {
+        return missing_argument(diag, .run, .rootfs);
+    }
+    if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     if (run_args.command.len == 0) return missing_argument(diag, .run, .command);
     // `-- ""` names no program either.
     if (run_args.command[0].len == 0) return missing_argument(diag, .run, .command);
-    assert(run_args.rootfs != null);
+    assert((run_args.rootfs != null) != (digest != null));
     assert(run_args.command.len > 0);
 }
 
@@ -524,10 +531,11 @@ fn resolve(
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
     if (command == .store) return resolve_store(operands, invocation, diag);
     // `bundle` takes at most one operand (a run's name) and checks the rest itself.
-    const wanted = if (command == .bundle) 1 else operands_count(command);
+    // `run` takes at most one: the digest of the tree to run (or `--rootfs`, checked below).
+    const wanted = if (command == .bundle or command == .run) 1 else operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
-    if (given < wanted and command != .bundle) {
+    if (given < wanted and command != .bundle and command != .run) {
         const what: Missing = switch (command) {
             .stop => .container,
             .schema => .topic,
@@ -654,6 +662,22 @@ fn unknown_command(diag: *Diag, argument: []const u8) ParseError {
     return error.UnknownCommand;
 }
 
+/// `run` was given a digest and a --rootfs: one root, not two.
+fn both_roots(diag: *Diag, digest: []const u8) ParseError {
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, digest);
+    assert(diag.code == null);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    diag.cause("'run' was given the tree '{s}' and --rootfs; it runs one root filesystem", .{echo});
+    diag.context("cmd", "run", .{});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(
+        .{ .sentence = "give one of them:", .command = "zbx run --rootfs ./alpine -- /bin/sh" },
+    );
+    return error.UnexpectedArgument;
+}
+
 fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) ParseError {
     var storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const echo = echo_of(&storage, argument);
@@ -718,9 +742,16 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             });
         },
         .rootfs => {
-            diag.cause("'run' needs --rootfs <dir>, the directory to use as the root", .{});
+            diag.cause(
+                "'run' needs the digest of a tree, or --rootfs <dir>, to use as the root",
+                .{},
+            );
             diag.fix(.{
-                .sentence = "name the root filesystem directory:",
+                .sentence = "name a tree of the store (they are listed by zbx store ls):",
+                .command = "zbx run b3:2f9c4a1d7e03 -- /bin/sh",
+            });
+            diag.fix(.{
+                .sentence = "or a root filesystem directory:",
                 .command = "zbx run --rootfs ./alpine -- /bin/sh",
             });
         },
@@ -855,6 +886,8 @@ pub const Storage = struct {
     workspace: bundle.Workspace,
     /// The store commands' memory: names, entries and trees of the directories being read.
     store: store_commands.Workspace,
+    /// A run of a tree from the store prepares it here (`runtime/image.zig`).
+    image: image_mod.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
 };
@@ -914,7 +947,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop => true,
+        .explain, .bundle, .schema, .stop, .run => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1057,7 +1090,8 @@ fn run_container(
     const given = invocation.run;
     const times = try times_of(&given, diag);
     const container: runtime_spec.Spec = .{
-        .rootfs = given.rootfs.?, // check_run_args refused a missing one.
+        .rootfs = given.rootfs orelse "", // check_run_args refused neither or both.
+        .image = invocation.operand,
         .name = given.name,
         .command = given.command,
         .limits = try limits_of(&given, diag),
@@ -1069,6 +1103,7 @@ fn run_container(
         .warn = .{ .context = &reporter, .call = report_warning },
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
+        .image_workspace = &storage.image,
     };
     const handle = &storage.handle;
     runtime.start(host, &container, options, handle, diag) catch {
@@ -1224,6 +1259,7 @@ fn supervise(
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
         .detached = true,
+        .image_workspace = &storage.image,
     };
     var diag: Diag = undefined;
     diag.reset();
@@ -2341,4 +2377,40 @@ test "a detached run stopped for its time reads as timed out in the record and i
     const one = parsed.value.object.get("containers").?.array.items[0].object;
     try testing.expect(one.get("timed_out").?.bool);
     try testing.expectEqualStrings("signal", one.get("reason").?.string);
+}
+
+test "parse: run takes a tree digest or --rootfs, one of them" {
+    // Goal: `zbx run <digest> -- cmd` is the same command as `--rootfs`, with the tree as the
+    // operand. Method: each form parses to the fields the dispatcher reads; neither and both
+    // are refused with the codes that name the mistake; a second operand is refused.
+    var invocation: Invocation = undefined;
+    try testing.expect(
+        try parse_case(&.{ "run", "b3:2f9c4a1d7e03", "--", "sh" }, &invocation) == null,
+    );
+    try testing.expectEqualStrings("b3:2f9c4a1d7e03", invocation.operand.?);
+    try testing.expect(invocation.run.rootfs == null);
+    try testing.expect(
+        try parse_case(
+            &.{ "run", "--read-only", "2f9c4a1d7e03", "--name", "a", "--", "sh" },
+            &invocation,
+        ) == null,
+    );
+    try testing.expect(invocation.run.read_only);
+    try testing.expectEqualStrings("2f9c4a1d7e03", invocation.operand.?);
+    try testing.expect(
+        try parse_case(&.{ "run", "--rootfs", "alpine", "--", "sh" }, &invocation) == null,
+    );
+    try testing.expect(invocation.operand == null);
+    try testing.expectEqual(
+        @as(?codes.Code, .E0006),
+        try parse_case(&.{ "run", "--", "sh" }, &invocation),
+    );
+    try testing.expectEqual(
+        @as(?codes.Code, .E0003),
+        try parse_case(&.{ "run", "2f9c4a1d7e03", "--rootfs", "alpine", "--", "sh" }, &invocation),
+    );
+    try testing.expectEqual(
+        @as(?codes.Code, .E0003),
+        try parse_case(&.{ "run", "2f9c4a1d7e03", "another", "--", "sh" }, &invocation),
+    );
 }

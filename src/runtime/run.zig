@@ -41,6 +41,7 @@ const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
+const image_mod = @import("image.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
@@ -53,6 +54,8 @@ const Plan = plan_mod.Plan;
 const Session = session_mod.Session;
 
 pub const Spec = spec_mod.Spec;
+/// The memory a run of a tree from the store prepares it in (`StartOptions.image_workspace`).
+pub const ImageWorkspace = image_mod.Workspace;
 pub const Label = spec_mod.Label;
 pub const Limits = spec_mod.Limits;
 
@@ -160,6 +163,9 @@ pub const StartOptions = struct {
     detached: bool = false,
     /// After SIGTERM, how long before SIGKILL (for the timeout and for `stop`'s default).
     grace_ms: u32 = constants.stop_grace_ms_default,
+    /// The memory a run of a tree from the store (`Spec.image`) prepares it in, about 17 MiB:
+    /// the caller's, in static or heap storage. Required exactly when `image` is set.
+    image_workspace: ?*image_mod.Workspace = null,
 };
 
 pub const Note = text_util.Bounded(160);
@@ -178,6 +184,11 @@ pub const Handle = struct {
     name_len: u8,
     rootfs: [constants.rootfs_bytes_max]u8,
     rootfs_len: u16,
+    /// A run of a tree from the store: the tree, the layers and whether it is read-only.
+    has_image: bool,
+    image: image_mod.Prepared,
+    /// Where a pruned run's layers are removed from; null if the caller gave none.
+    image_workspace: ?*image_mod.Workspace,
     command: []const []const u8,
     labels: []const Label,
     started: u64,
@@ -256,6 +267,7 @@ pub fn start(
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
+    handle.image_workspace = options.image_workspace;
     handle.detached = options.detached;
     handle.pid = 0;
     handle.wait_options = .{ .timeout_ms = options.timeout_ms, .grace_ms = options.grace_ms };
@@ -268,7 +280,7 @@ pub fn start(
     handle.labels = container.labels;
     try choose_name(host, container.name, handle, diag);
     try check_command(container, diag);
-    try check_rootfs(host, container.rootfs, handle, diag);
+    try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
 
     var choice: ids.Choice = undefined;
@@ -278,6 +290,7 @@ pub fn start(
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
+    if (container.image) |image| try prepare_image(handle, container, image, options, diag);
     const input: plan_mod.Input = .{
         .rootfs = handle.rootfs_slice(),
         .name = handle.name_slice(),
@@ -289,6 +302,7 @@ pub fn start(
         .scope = scope_input,
         .read_only = container.read_only,
         .env = container.env,
+        .overlay = if (handle.has_image) handle.image.overlay() else null,
     };
     handle.plan.build(&input);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
@@ -297,11 +311,7 @@ pub fn start(
     handle.started = host.time_now();
     begin_record(handle);
     handle.session.start(host, &handle.plan, &handle.facts);
-    const info: diagnose.RunInfo = .{
-        .name = handle.name_slice(),
-        .rootfs = handle.rootfs_slice(),
-    };
-    handle.session.execute(diag, info) catch |err| {
+    handle.session.execute(diag, run_info(handle)) catch |err| {
         handle.ended = failed_start(diag); // Asserts that the diagnostic has a code.
         handle.status = .stopped;
         save_record(handle, .{ .start_failed = diag.code.? }, host.time_now(), diag);
@@ -314,6 +324,30 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// What the diagnostics say about this run.
+fn run_info(handle: *const Handle) diagnose.RunInfo {
+    return .{
+        .name = handle.name_slice(),
+        .rootfs = handle.rootfs_slice(),
+        .tree = if (handle.has_image) handle.image.tree_text() else "",
+    };
+}
+
+/// A run's root is a directory (checked now) or a tree of the store (prepared later, once the
+/// ids and the scope are known).
+fn check_root(
+    host: Host,
+    container: *const Spec,
+    options: StartOptions,
+    handle: *Handle,
+    diag: *Diag,
+) Error!void {
+    handle.has_image = container.image != null;
+    if (container.image == null) return check_rootfs(host, container.rootfs, handle, diag);
+    assert(container.rootfs.len == 0); // A directory or a tree, not both.
+    assert(options.image_workspace != null);
 }
 
 /// Waits for the container to end, forwarding the signals this process receives. Call it once.
@@ -332,10 +366,7 @@ pub fn wait(handle: *Handle) ExitReason {
         };
         handle.session.abandon();
         handle.lost_diag.reset();
-        const info: diagnose.RunInfo = .{
-            .name = handle.name_slice(),
-            .rootfs = handle.rootfs_slice(),
-        };
+        const info = run_info(handle);
         diagnose.step_failed(host, &handle.lost_diag, &handle.plan, info, failure, .{
             .facts = &handle.facts,
         });
@@ -453,6 +484,38 @@ fn choose_name(host: Host, given: ?[]const u8, handle: *Handle, diag: *Diag) Err
     const length = prefix.len + constants.container_name_hex_digits;
     handle.name_len = @intCast(length);
     assert(spec_mod.name_problem(handle.name_slice()) == null);
+}
+
+/// Resolves the tree, materializes it and makes the container's directory (`image.zig`); the
+/// merged directory is then the rootfs. Anything that goes wrong is the run's start failing.
+fn prepare_image(
+    handle: *Handle,
+    container: *const Spec,
+    image: []const u8,
+    options: StartOptions,
+    diag: *Diag,
+) Error!void {
+    assert(handle.has_image);
+    const workspace = options.image_workspace.?;
+    // The container's own id map warns about a one-id host; the store's child would say it twice.
+    image_mod.prepare(
+        handle.host,
+        &handle.facts,
+        workspace,
+        image,
+        handle.name_slice(),
+        container.read_only,
+        null,
+        &handle.image,
+        diag,
+    ) catch return error.StartFailed;
+    const merged = handle.image.merged.text();
+    if (merged.len > constants.rootfs_bytes_max) {
+        diagnose.rootfs_unusable(diag, merged, .{ .problem = .too_long });
+        return error.StartFailed;
+    }
+    @memcpy(handle.rootfs[0..merged.len], merged);
+    handle.rootfs_len = @intCast(merged.len);
 }
 
 fn check_command(container: *const Spec, diag: *Diag) Error!void {
@@ -591,12 +654,34 @@ fn begin_record(handle: *Handle) void {
     save_record(handle, .running, null, null);
     if (handle.record_dir == null) return;
     var skipped: records.Skipped = undefined;
-    records.prune(handle.host, &dir, handle.name_slice(), &skipped) catch return;
+    var pruned: records.Pruned = undefined;
+    records.prune(handle.host, &dir, handle.name_slice(), &skipped, &pruned) catch return;
+    reclaim_layers(handle, &pruned);
     if (skipped.count == 0) return;
     var warning: Diag = undefined;
     warning.reset();
     diagnose.records_skipped(&warning, dir.text(), &skipped);
     handle.report(&warning);
+}
+
+/// A record that was pruned no longer needs the layers kept for it: they go, from inside the
+/// store's namespace. A layer that cannot be removed is a warning, never a failed run.
+fn reclaim_layers(handle: *Handle, pruned: *const records.Pruned) void {
+    const workspace = handle.image_workspace orelse return;
+    for (0..pruned.count) |index| {
+        var diag: Diag = undefined;
+        diag.reset();
+        image_mod.remove_container(
+            handle.host,
+            &handle.facts,
+            workspace,
+            pruned.name(@intCast(index)),
+            &diag,
+        ) catch {
+            if (diag.code == null) continue;
+            handle.report(&diag);
+        };
+    }
 }
 
 /// The diagnostic as the JSON line `--output json` prints, for the record. One too big to keep
@@ -619,6 +704,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
     assert(handle.name_len > 0);
     if (exit == .running) assert(ended == null);
     var json: [constants.diag_json_bytes_max]u8 = undefined;
+    const writable_layers = handle.has_image and !handle.image.read_only;
     const view: records.View = .{
         .name = handle.name_slice(),
         .rootfs = handle.rootfs_slice(),
@@ -635,6 +721,8 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .timed_out = handle.session.timed_out,
         .pid = handle.pid,
         .supervisor = handle.host.own_pid(),
+        .tree = if (handle.has_image) handle.image.tree_text() else "",
+        .upper = if (writable_layers) handle.image.upper.text() else "",
         .zbx_version = build_options.version,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };

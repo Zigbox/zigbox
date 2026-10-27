@@ -81,9 +81,12 @@ pub const Code = enum(u8) {
     E0421,
     E0422,
     E0423,
+    E0424,
+    E0425,
     W0410,
     W0411,
     W0412,
+    W0413,
     E0701,
     E0702,
     E0703,
@@ -999,6 +1002,45 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0424,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file name in the store has too many links",
+        .explanation =
+        \\Building the directory a container runs on makes a hard link from every
+        \\file of the tree to its object. The file system refused one because the
+        \\object already has as many names as the file system allows (ext4: about
+        \\65,000). A file that appears under many names in one tree, or in many
+        \\trees that are all in use, can reach it.
+        \\
+        \\Nothing was changed: the half-built directory was removed. The usual
+        \\ways out are to import a tree in which that file is not repeated so
+        \\often, or to move the store to a file system with a higher limit (xfs
+        \\and btrfs allow far more).
+        ,
+    },
+    .{
+        .code = .E0425,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "overlayfs can't be mounted for this container",
+        .explanation =
+        \\A container started from a tree digest runs on an overlayfs mount: the
+        \\tree is the read-only lower layer and the container's own writes go to
+        \\an upper layer under the state directory. The kernel refused to mount
+        \\it in the container's user and mount namespaces.
+        \\
+        \\Unprivileged overlayfs needs Linux 5.11 or newer with the overlay
+        \\module, and an upper layer on a file system that keeps user.* extended
+        \\attributes. A security policy can also deny the mount. "zbx doctor"
+        \\runs the same mount in a scratch directory and says which of these it
+        \\is. A path that contains a comma, a colon or a backslash can not be
+        \\given to the mount and is refused with this code too.
+        \\
+        \\A container can still run on a plain directory: "zbx run --rootfs".
+        ,
+    },
+    .{
         .code = .W0410,
         .severity = .warning,
         .blame = .user,
@@ -1050,15 +1092,36 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W0413,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "a container's upper layer could not be removed",
+        .explanation =
+        \\Every container started from a tree digest has an upper layer under
+        \\$XDG_STATE_HOME/zbx/containers/<name>, which is kept as long as its run
+        \\record is. When the record is dropped (zbx keeps the newest 32), or a
+        \\new run takes the name, the layer is removed, from inside the user's
+        \\namespace because it holds files owned by subordinate ids. This one
+        \\could not be removed, and the message names the path and the reason.
+        \\
+        \\Nothing else is affected. After checking that no container uses it,
+        \\remove the directory by hand from inside a user namespace that maps
+        \\your subordinate id range, the one zbx itself uses: its files belong to
+        \\those ids, and the next zbx run with the same container name tries
+        \\again.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
         .summary = "no state directory to keep bundles and run records in",
         .explanation =
         \\zbx keeps run records and diagnostic bundles under $XDG_STATE_HOME/zbx,
-        \\or ~/.local/state/zbx when that is not set. Neither variable names an
-        \\absolute directory here, so there is nowhere to read a run record from or
-        \\to write a bundle to.
+        \\or ~/.local/state/zbx when that is not set, and the layers of a container
+        \\started from a tree digest under its containers directory. Neither
+        \\variable names an absolute directory here, so there is nowhere to read a
+        \\run record from, to write a bundle to or to put a container.
         \\
         \\Set HOME, or point XDG_STATE_HOME at a directory you can write to.
         ,
@@ -1260,10 +1323,10 @@ pub fn can_end_run(code: Code) bool {
     return switch (code) {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
-        .E0701, .E0702, .E0703, .E0704 => false,
+        .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
-        .E0411, .E0412, .E0413, .E0414, .E0415, .E0416, .E0417, .E0418 => false,
-        .E0419, .E0420, .E0421, .E0422, .E0423, .W0410, .W0411, .W0412 => false,
+        .E0414, .E0418, .E0420 => false,
+        .W0410, .W0411, .W0412, .W0413 => false,
         else => true,
     };
 }

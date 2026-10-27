@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0415</h1>
 <p class="summary">the directory tree is bigger than an import limit</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx holds a bounded amount in memory while it imports: at most 16384 entries in one directory, names up to 255 bytes, 64 levels of nesting, a symlink target up to 4095 bytes, files up to 4 GiB, and 16 MiB for the names and entries of all the directories being read at once.</p>
 <p>The cause names the limit and the path where it was passed. Split the directory, or leave out what is not part of the root filesystem.</p>

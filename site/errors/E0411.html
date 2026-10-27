@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0411</h1>
 <p class="summary">that digest prefix matches more than one tree</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>A digest may be shortened to a prefix of at least 12 hex digits, but only while the prefix names one tree. zbx never picks one of several: a wrong guess here could delete or run the wrong tree.</p>
 <p>The message names the first two matches. Give more digits, or the whole digest from &quot;zbx store ls&quot;.</p>

@@ -43,6 +43,10 @@ const vtable: fs.VTable = .{
     .make_directory = make_directory,
     .remove_directory = remove_directory,
     .sync_directory = sync_directory,
+    .link = link,
+    .symlink = symlink,
+    .set_path_attributes = set_path_attributes,
+    .set_path_xattr = set_path_xattr,
     .last_errno = last_errno,
 };
 
@@ -307,6 +311,52 @@ fn remove_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
     _ = from_context(context);
     assert(path.len > 0);
     try check(linux.rmdir(path.ptr));
+}
+
+fn link(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) host.Error!void {
+    _ = from_context(context);
+    assert(from.len > 0);
+    assert(to.len > 0);
+    try check(linux.link(from.ptr, to.ptr));
+}
+
+fn symlink(context: *anyopaque, target: [:0]const u8, path: [:0]const u8) host.Error!void {
+    _ = from_context(context);
+    assert(target.len > 0);
+    assert(path.len > 0);
+    try check(linux.symlink(target.ptr, path.ptr));
+}
+
+fn set_path_attributes(
+    context: *anyopaque,
+    path: [:0]const u8,
+    attributes: fs.PathAttributes,
+) host.Error!void {
+    _ = from_context(context);
+    assert(path.len > 0);
+    assert(attributes.mtime < 1 << 40);
+    try check(linux.lchown(path.ptr, attributes.uid, attributes.gid));
+    // A change of owner clears the setuid and setgid bits, so the mode is set after it.
+    if (attributes.mode) |mode| {
+        assert(mode <= 0o7777);
+        try check(linux.chmod(path.ptr, mode));
+    }
+    const stamp: linux.timespec = .{ .sec = @intCast(attributes.mtime), .nsec = 0 };
+    const times = [2]linux.timespec{ stamp, stamp };
+    try check(linux.utimensat(linux.AT.FDCWD, path.ptr, &times, linux.AT.SYMLINK_NOFOLLOW));
+}
+
+fn set_path_xattr(
+    context: *anyopaque,
+    path: [:0]const u8,
+    name: [:0]const u8,
+    value: []const u8,
+) host.Error!void {
+    _ = from_context(context);
+    assert(path.len > 0);
+    assert(name.len > 0);
+    assert(value.len <= constants.store_xattr_value_bytes_max);
+    try check(linux.lsetxattr(path.ptr, name.ptr, value.ptr, value.len, 0));
 }
 
 fn sync_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {

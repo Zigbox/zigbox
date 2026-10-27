@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0421</h1>
 <p class="summary">no data directory to keep the store in</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx keeps its store under $XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store when that is not set. Neither variable names an absolute directory here, so there is nowhere to put the store.</p>
 <p>Set HOME, or point XDG_DATA_HOME at a directory you can write to.</p>
