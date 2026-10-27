@@ -311,7 +311,8 @@ fn record_in_lock(
         image.platform_text(),
         image.tree,
     ) catch |err| {
-        failure = if (err == error.Full) .full else .{ .write = .{ .err = error.FileTooLarge, .errno = 0 } };
+        const too_long: fs_mod.Failure = .{ .err = error.FileTooLarge, .errno = 0 };
+        failure = if (err == error.Full) .full else .{ .write = too_long };
         image_diagnose.lock_failure(diag, locking.located.text(), failure);
         return error.Failed;
     };
@@ -391,7 +392,10 @@ fn write_json(
 }
 
 /// The image's settings as the member "image": what it runs by default.
-fn write_settings(writer: *std.Io.Writer, settings: *const images.Settings) std.Io.Writer.Error!void {
+fn write_settings(
+    writer: *std.Io.Writer,
+    settings: *const images.Settings,
+) std.Io.Writer.Error!void {
     assert(settings.used <= settings.bytes.len);
     const json = @import("bundle.zig").write_json_string;
     try writer.writeAll("\"image\":{");

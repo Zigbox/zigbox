@@ -25,9 +25,20 @@ pub const Error = error{ Unreadable, Damaged, TooMany };
 
 /// Calls `visitor.visit(image)` for each record, in the order of the manifest digests. A record
 /// that is damaged or newer is `Damaged`: a scan that skipped it would answer wrongly.
-pub fn scan(store: *const Store, memory: *Memory, image: *images.Image, visitor: anytype) Error!void {
+pub fn scan(
+    store: *const Store,
+    memory: *Memory,
+    image: *images.Image,
+    visitor: anytype,
+) Error!void {
     assert(store.root_len > 1);
-    const found = shards.read(store, &memory.names, &memory.offsets, images.directory_name, null) catch {
+    const found = shards.read(
+        store,
+        &memory.names,
+        &memory.offsets,
+        images.directory_name,
+        null,
+    ) catch {
         return error.Unreadable;
     };
     if (found.list.too_many or found.list.too_long) return error.TooMany;

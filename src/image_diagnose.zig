@@ -5,6 +5,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
+const errors = @import("diag/errors.zig");
 const fs_mod = @import("store/fs.zig");
 const lock_file = @import("lock_file.zig");
 const text_util = @import("text.zig");
@@ -206,9 +207,11 @@ pub fn lock_not_written(diag: *Diag, path: []const u8, failure: *const fs_mod.Fa
     assert(path.len > 0);
     diag.raise(.E0525);
     diag.while_("writing the lock file", .{});
-    diag.cause("writing '{s}' failed: {s} (errno {d})", .{
-        path, @errorName(failure.err), failure.errno,
-    });
+    var operation: [echo_bytes_max + 16]u8 = undefined;
+    var shown: [echo_bytes_max]u8 = undefined;
+    const words = std.fmt.bufPrint(&operation, "writing '{s}'", .{echo_of(&shown, path)}) catch
+        "writing the lock file"; // The path is cut to fit.
+    errors.cause_host_error(diag, words, failure.err, failure.errno);
     diag.context("path", "{s}", .{path});
     diag.fix(.{ .sentence = "make the directory writable, then run the command again" });
 }

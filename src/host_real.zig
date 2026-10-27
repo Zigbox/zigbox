@@ -738,7 +738,8 @@ pub const HostReal = struct {
         const result = linux.getcwd(buffer.ptr, buffer.len);
         try check(result);
         // The kernel writes the path and its NUL; the result is the length with the NUL.
-        const length = std.mem.indexOfScalar(u8, buffer[0..buffer.len], 0) orelse return error.IoFailed;
+        const nul = std.mem.indexOfScalar(u8, buffer, 0);
+        const length = nul orelse return error.IoFailed;
         // A directory that was removed under us has a path that does not start with a slash.
         if (length == 0 or buffer[0] != '/') return error.NotFound;
         return buffer[0..length];

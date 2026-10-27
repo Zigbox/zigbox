@@ -243,7 +243,13 @@ fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *D
         return workspace.record.tree;
     }
     image_find.scan(store, &workspace.find, &workspace.record, &wanted) catch {
-        diagnose.cannot_read(diag, store, "looking through the images", error.IoFailed, store.fs.last_errno());
+        diagnose.cannot_read(
+            diag,
+            store,
+            "looking through the images",
+            error.IoFailed,
+            store.fs.last_errno(),
+        );
         return error.Failed;
     };
     if (!wanted.found) {

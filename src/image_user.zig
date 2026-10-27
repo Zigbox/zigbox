@@ -294,10 +294,16 @@ test "an unknown name is refused, naming the file; a number never is" {
     // Goal: E0521 for a user, for a group, and for a missing file; numbers need no file.
     var diag: Diag = undefined;
     diag.reset();
-    try testing.expectError(error.Failed, resolve_text("ghost", sample_passwd, sample_group, &diag));
+    try testing.expectError(
+        error.Failed,
+        resolve_text("ghost", sample_passwd, sample_group, &diag),
+    );
     try testing.expectEqual(@as(?@import("diag/codes.zig").Code, .E0521), diag.code);
     diag.reset();
-    try testing.expectError(error.Failed, resolve_text("app:nogroup", sample_passwd, sample_group, &diag));
+    try testing.expectError(
+        error.Failed,
+        resolve_text("app:nogroup", sample_passwd, sample_group, &diag),
+    );
     try testing.expectEqual(@as(?@import("diag/codes.zig").Code, .E0521), diag.code);
     diag.reset();
     try testing.expectError(error.Failed, resolve_text("app", null, null, &diag));

@@ -91,7 +91,8 @@ pub const Lock = struct {
         tree: Digest,
     ) PutError!void {
         assert(lock.count <= constants.lock_entries_max);
-        assert(platform.len > 0 and platform.len <= 16);
+        assert(platform.len > 0);
+        assert(platform.len <= 16);
         if (written.len == 0 or written.len > constants.reference_bytes_max) {
             return error.BadReference;
         }
@@ -118,7 +119,11 @@ pub const Lock = struct {
         };
         @memcpy(entry.platform[0..platform.len], platform);
         var place: u32 = lock.count;
-        while (place > 0 and std.mem.order(u8, lock.reference(&lock.entries[place - 1]), written) == .gt) {
+        while (place > 0 and std.mem.order(
+            u8,
+            lock.reference(&lock.entries[place - 1]),
+            written,
+        ) == .gt) {
             lock.entries[place] = lock.entries[place - 1];
             place -= 1;
         }
@@ -152,13 +157,23 @@ pub fn render(lock: *const Lock, buffer: []u8) []const u8 {
     // Cannot fail: 256 entries of a reference (1024 bytes at the most, 64 KiB together; escaped
     // four bytes a byte at the worst, 256 KiB: the pool bounds it below) and 300 bytes of fixed
     // text each; the constants assert the sum.
-    writer.print(".{{\n    .version = {d},\n    .images = .{{\n", .{version}) catch unreachable;
+    const head = ".{{\n    .version = {d},\n    .images = .{{\n";
+    writer.print(head, .{version}) catch unreachable; // Sized above.
     for (lock.entries[0..lock.count]) |*entry| {
         writer.writeAll("        .{\n            .reference = ") catch unreachable; // Same bound.
         put_text(&writer, lock.reference(entry));
-        writer.print(",\n            .manifest = \"{s}\",\n", .{&entry.manifest.text()}) catch unreachable;
-        writer.print("            .platform = \"{s}\",\n", .{entry.platform_text()}) catch unreachable;
-        writer.print("            .tree = \"{s}\",\n        }},\n", .{entry.tree.text()}) catch unreachable;
+        writer.print(
+            ",\n            .manifest = \"{s}\",\n",
+            .{&entry.manifest.text()},
+        ) catch unreachable; // Sized above.
+        writer.print(
+            "            .platform = \"{s}\",\n",
+            .{entry.platform_text()},
+        ) catch unreachable; // Sized above.
+        writer.print(
+            "            .tree = \"{s}\",\n        }},\n",
+            .{entry.tree.text()},
+        ) catch unreachable; // Sized above.
     }
     writer.writeAll("    },\n}\n") catch unreachable; // Same bound.
     return writer.buffered();
@@ -173,7 +188,9 @@ fn put_text(writer: *std.Io.Writer, text: []const u8) void {
         switch (byte) {
             '"' => inner.writeAll("\\\"") catch unreachable, // Sized: four bytes a byte.
             '\\' => inner.writeAll("\\\\") catch unreachable, // Same.
-            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => inner.writeByte(byte) catch unreachable, // Same.
+            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => {
+                inner.writeByte(byte) catch unreachable; // Same.
+            },
             else => inner.print("\\x{x:0>2}", .{byte}) catch unreachable, // Same.
         }
     }
@@ -331,7 +348,11 @@ fn finish_entry(lock: *Lock, open: *?Entry, fields: Fields, number: u32) ?Proble
         }
     }
     var place: u32 = lock.count;
-    while (place > 0 and std.mem.order(u8, lock.reference(&lock.entries[place - 1]), written) == .gt) {
+    while (place > 0 and std.mem.order(
+        u8,
+        lock.reference(&lock.entries[place - 1]),
+        written,
+    ) == .gt) {
         lock.entries[place] = lock.entries[place - 1];
         place -= 1;
     }
@@ -411,7 +432,10 @@ pub fn read(fs: Fs, located: *const Located, buffer: []u8, lock: *Lock) ReadErro
         lock.clear();
         return null;
     }
-    const text = fs.read_whole(located.text(), buffer[0..constants.lock_file_bytes_max]) catch |err| {
+    const text = fs.read_whole(
+        located.text(),
+        buffer[0..constants.lock_file_bytes_max],
+    ) catch |err| {
         return if (err == error.FileTooLarge) error.TooBig else error.Unreadable;
     };
     return parse(text, lock);
@@ -560,14 +584,16 @@ test "a lock that is not one is refused, with the line" {
     const ok = entry_text(&good_manifest, &good_tree);
     try testing.expectEqual(@as(?Problem, null), problem_of(std.mem.sliceTo(&ok, 0)));
     const bad_tree = entry_text(&good_manifest, "b3:12");
-    try testing.expectEqual(ProblemKind.bad_value, problem_of(std.mem.sliceTo(&bad_tree, 0)).?.kind);
+    const bad = problem_of(std.mem.sliceTo(&bad_tree, 0)).?;
+    try testing.expectEqual(ProblemKind.bad_value, bad.kind);
     try testing.expectEqual(@as(u32, 8), problem_of(std.mem.sliceTo(&bad_tree, 0)).?.line);
     const wrong = entry_text("sha256:abc", &good_tree);
     try testing.expectEqual(@as(u32, 6), problem_of(std.mem.sliceTo(&wrong, 0)).?.line);
     try testing.expectEqual(ProblemKind.no_version, problem_of("").?.kind);
     try testing.expectEqual(ProblemKind.newer, problem_of(".{\n    .version = 2,\n}\n").?.kind);
     try testing.expectEqual(ProblemKind.unknown_line, problem_of(".{\n    hello\n}\n").?.kind);
-    const cut = ".{\n    .version = 1,\n    .images = .{\n        .{\n            .reference = \"a:1\",\n";
+    const cut = ".{\n    .version = 1,\n    .images = .{\n        .{\n" ++
+        "            .reference = \"a:1\",\n";
     try testing.expectEqual(ProblemKind.incomplete_entry, problem_of(cut).?.kind);
     const twice = std.mem.sliceTo(&ok, 0)[0..std.mem.indexOf(u8, &ok, "    },\n}").?];
     var double_buffer: [1200]u8 = undefined;
@@ -584,7 +610,8 @@ test "an edit by hand with other spacing still reads" {
     var buffer: [600]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, ".{{\r\n\t.version = 1,\r\n\t.images = .{{\r\n" ++
         "\t\t.{{ \r\n\t\t\t.reference = \"a:1\",\r\n\t\t\t.tree = \"{s}\",\r\n" ++
-        "\t\t\t.manifest = \"{s}\",\r\n\t\t\t.platform = \"linux/amd64\"\r\n\t\t}},\r\n\t}},\r\n}}\r\n", .{
+        "\t\t\t.manifest = \"{s}\",\r\n\t\t\t.platform = \"linux/amd64\"\r\n" ++
+        "\t\t}},\r\n\t}},\r\n}}\r\n", .{
         &good_tree, &good_manifest,
     });
     var lock = filled();
@@ -600,7 +627,8 @@ test "the lock is full at its bounds" {
         const text = try std.fmt.bufPrint(&name, "img{d:0>4}:1", .{index});
         try lock.put(text, digest_of("x"), "linux/amd64", Digest.of("y"));
     }
-    try testing.expectError(error.Full, lock.put("one-more:1", digest_of("x"), "linux/amd64", Digest.of("y")));
+    const more = lock.put("one-more:1", digest_of("x"), "linux/amd64", Digest.of("y"));
+    try testing.expectError(error.Full, more);
     var buffer: [constants.lock_file_bytes_max]u8 = undefined;
     const text = render(&lock, &buffer);
     var back = filled();

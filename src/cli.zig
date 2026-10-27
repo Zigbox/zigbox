@@ -502,12 +502,7 @@ pub fn parse(
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
-            .by_image => {
-                const is_du = count >= 2 and command_named(operands[0]) == .store and
-                    std.mem.eql(u8, operands[1], "du");
-                if (!is_du) return unknown_option(diag, argument);
-                gc_args.by_image = true;
-            },
+            .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -571,6 +566,20 @@ const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false, by_ima
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
         std.mem.eql(u8, operands[1], "gc");
+}
+
+/// `--by-image`, which only `store du` takes.
+fn take_by_image(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .by_image);
+    const is_du = operands.len >= 2 and command_named(operands[0]) == .store and
+        std.mem.eql(u8, operands[1], "du");
+    if (!is_du) return unknown_option(diag, argument);
+    gc_args.by_image = true;
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
@@ -672,7 +681,7 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
         return missing_argument(diag, .run, .command);
     }
     assert((run_args.rootfs != null) != (digest != null));
-    assert(run_args.command.len > 0 or has_default);
+    if (!has_default) assert(run_args.command.len > 0);
 }
 
 /// True if `operand` names a tree of the store (`b3:` and hex, or 12 hex digits or more); any
@@ -1380,7 +1389,14 @@ fn prepare_image(
         },
         .warn = .{ .context = &reporter, .call = report_warning },
     };
-    run_image.prepare(&services, &storage.run_image, operand, invocation.run.command, prepared, diag) catch |err| switch (err) {
+    run_image.prepare(
+        &services,
+        &storage.run_image,
+        operand,
+        invocation.run.command,
+        prepared,
+        diag,
+    ) catch |err| switch (err) {
         error.Failed => return error.StartFailed,
         error.PullFailed => return error.PullFailed,
     };

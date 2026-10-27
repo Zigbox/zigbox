@@ -1,0 +1,6 @@
+error[ZBX-E0522]: no image of that name is locked or in the store
+  cause  '/home/alice/project/zbx.lock' has no entry for
+         'registry.test/fixture/open:3.20'
+  fix    pull it (this also records it in zbx.lock):   zbx pull 'registry.test/fixture/open:3.20'
+  more   zbx explain E0522 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0522.html

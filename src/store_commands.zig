@@ -349,7 +349,9 @@ const LsImages = struct {
             if (self.count > 0) writer.writeByte(',') catch unreachable; // Same bound.
             writer.writeAll("{\"reference\":") catch unreachable; // Same bound.
             json_string(&writer, image.reference_text()) catch unreachable; // Same bound.
-            writer.print(",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\",\"time\":{d}}}", .{
+            const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
+                "\"time\":{d}}}";
+            writer.print(fields, .{
                 &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
             }) catch unreachable; // Same bound.
         } else {
@@ -374,11 +376,17 @@ const LsImages = struct {
     }
 };
 
+/// The refusal for a scan of the image records that failed.
+fn images_unreadable(diag: *Diag, store: *const Store) Error {
+    const step = "looking through the images";
+    diagnose.cannot_read(diag, store, step, error.IoFailed, store.fs.last_errno());
+    return error.Failed;
+}
+
 fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void {
     var visitor: LsImages = .{ .job = job, .diag = diag, .json = json };
     image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
-        diagnose.cannot_read(diag, store, "looking through the images", error.IoFailed, store.fs.last_errno());
-        return error.Failed;
+        return images_unreadable(diag, store);
     };
     if (visitor.failed) return error.Failed;
 }
@@ -403,7 +411,13 @@ fn ls_row(root: *const roots.Root, buffer: *[constants.output_bytes_max]u8) []co
     }) catch unreachable; // Same bound.
 }
 
-fn ls_json(job: *Job, store: *const Store, exists: bool, found: []const roots.Root, diag: *Diag) Error!void {
+fn ls_json(
+    job: *Job,
+    store: *const Store,
+    exists: bool,
+    found: []const roots.Root,
+    diag: *Diag,
+) Error!void {
     assert(found.len <= constants.store_roots_max);
     assert(diag.code == null);
     try put(job, "{\"schema\":\"zbx.store.ls/1\",\"roots\":[", diag);
@@ -523,6 +537,9 @@ const DuImages = struct {
     }
 };
 
+const du_image_row = "{s: <34} {d: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n";
+const du_image_head = "{s: <34} {s: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n";
+
 fn du_image_text(
     buffer: *[constants.output_bytes_max]u8,
     image: *const images.Image,
@@ -533,7 +550,7 @@ fn du_image_text(
     var safe: [constants.store_source_bytes_max]u8 = undefined;
     const reference = text_util.sanitise(&safe, image.reference_text());
     // Cannot fail: a reference of at most 1024 bytes and fixed columns.
-    return std.fmt.bufPrint(buffer, "{s: <34} {d: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n", .{
+    return std.fmt.bufPrint(buffer, du_image_row, .{
         reference,
         result.files,
         size_words(&sizes[0], result.logical_bytes),
@@ -578,7 +595,7 @@ fn du_by_image(job: *Job, store: *const Store, exists: bool, diag: *Diag) Error!
         try put(job, "{\"schema\":\"zbx.store.du/1\",\"images\":[", diag);
     } else {
         var head: [constants.output_bytes_max]u8 = undefined;
-        const line = std.fmt.bufPrint(&head, "{s: <34} {s: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n", .{
+        const line = std.fmt.bufPrint(&head, du_image_head, .{
             "IMAGE", "FILES", "LOGICAL", "COMPRESSED", "STORED", "SHARED", "TREE",
         }) catch unreachable; // A short fixed line.
         try put(job, line, diag);
@@ -591,8 +608,7 @@ fn du_by_image(job: *Job, store: *const Store, exists: bool, diag: *Diag) Error!
     };
     if (exists) {
         image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
-            diagnose.cannot_read(diag, store, "looking through the images", error.IoFailed, store.fs.last_errno());
-            return error.Failed;
+            return images_unreadable(diag, store);
         };
     }
     if (visitor.output_failed) return error.Failed;
@@ -718,8 +734,7 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
     var errno: u16 = 0;
     var by_tree: image_find.ByTree = .{ .tree = digest };
     image_find.scan(&store, &job.workspace.image_memory, &job.workspace.image, &by_tree) catch {
-        diagnose.cannot_read(diag, &store, "looking through the images", error.IoFailed, store.fs.last_errno());
-        return error.Failed;
+        return images_unreadable(diag, &store);
     };
     const is_root = if (roots.load(&store, digest, &root, &errno)) |_| true else |err| blk: {
         if (err == error.NotFound and by_tree.count > 0) break :blk false;
@@ -748,13 +763,15 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
     // so removing only the root would have freed nothing.
     for (by_tree.manifests[0..@min(by_tree.count, image_find.ByTree.kept_max)]) |manifest| {
         images.remove(&store, manifest) catch |err| {
-            diagnose.write_failed(diag, &store, "removing an image record", err, store.fs.last_errno());
+            const failed_errno = store.fs.last_errno();
+            diagnose.write_failed(diag, &store, "removing an image record", err, failed_errno);
             return error.Failed;
         };
     }
     if (is_root) {
         roots.remove(&store, digest) catch |err| {
-            diagnose.write_failed(diag, &store, "removing the root record", err, store.fs.last_errno());
+            const failed_errno = store.fs.last_errno();
+            diagnose.write_failed(diag, &store, "removing the root record", err, failed_errno);
             return error.Failed;
         };
     }
@@ -767,7 +784,9 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
             .{ digest.text(), by_tree.count },
         )
     else if (by_tree.count > 0)
-        std.fmt.bufPrint(&buffer, "removed {s} and {d} image record(s); zbx.lock is not changed\n", .{ digest.text(), by_tree.count })
+        std.fmt.bufPrint(&buffer, "removed {s} and {d} image record(s)\n", .{
+            digest.text(), by_tree.count,
+        })
     else
         std.fmt.bufPrint(&buffer, "removed {s}\n", .{digest.text()});
     // Cannot fail: one short line.

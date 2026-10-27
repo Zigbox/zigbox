@@ -554,7 +554,7 @@ fn prepare_store_unmapped(sim: *HostSim) void {
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = base_cases ++ bundle_cases ++ registry_cases;
+const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1067,6 +1067,191 @@ const registry_cases = [_]Case{
     whole_pull_case(.W0502, test_registry.TestRegistry.reference(.open), true),
 };
 
+// ---- Images, locks and running by name ---------------------------------------------------------
+
+const image_project = "/home/alice/project";
+const image_lock = image_project ++ "/zbx.lock";
+const open_reference = test_registry.TestRegistry.reference(.open);
+
+/// The host of a pull, a project directory to work in, and the roots of the containers a run
+/// of these cases starts (the child's mounts are modelled, so the nodes must exist).
+fn prepare_image_world(sim: *HostSim) void {
+    prepare_pull(sim);
+    golden_files.put_dir(image_project, 0o755);
+    _ = sim.world.processes[0].cwd.set(image_project);
+    sim.world.add_node("/sys", .dir);
+    var path: [200]u8 = undefined;
+    var inner: [220]u8 = undefined;
+    const base = "/home/alice/.local/state/zbx/containers/web-1/merged";
+    @memcpy(path[0..base.len], base);
+    sim.world.add_node(path[0..base.len], .dir);
+    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        const text = join(&inner, base, suffix);
+        sim.world.add_node(text, .dir);
+    }
+    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/svc" }) |program| {
+        const text = join(&inner, base, program);
+        sim.world.add_node(text, .file);
+    }
+}
+
+/// Runs a command line of the setup, and forgets what it printed.
+fn setup_command(sim: *HostSim, words: []const [:0]const u8) void {
+    var items: [8][:0]const u8 = undefined;
+    items[0] = "zbx";
+    for (words, 1..) |word, index| items[index] = word;
+    var iterator: SliceIterator = .{ .items = items[0 .. words.len + 1] };
+    const code = cli.run_from_iterator(sim.interface(), &iterator);
+    assert(code == 0); // The setup of a case must work.
+    sim.stdout_len = 0;
+    sim.stderr_len = 0;
+}
+
+fn join(buffer: *[220]u8, base: []const u8, suffix: []const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ base, suffix }) catch unreachable; // Short.
+}
+
+fn overwrite_golden(path: []const u8, text: []const u8) void {
+    var copy: [256]u8 = undefined; // The path may be the model's own storage.
+    @memcpy(copy[0..path.len], path);
+    const own = copy[0..path.len];
+    if (golden_files.kind_of(own) != null) golden_files.remove_path(own);
+    golden_files.put_file(own, 0o644, text);
+}
+
+fn prepare_pulled(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", open_reference });
+}
+
+fn prepare_bad_lock(sim: *HostSim) void {
+    prepare_image_world(sim);
+    overwrite_golden(image_lock, ".{\n    .version = 1,\n    nonsense\n}\n");
+}
+
+/// The lock with `from` replaced by `to`.
+fn change_lock(from: []const u8, to: []const u8) void {
+    const original = golden_files.content_of(image_lock).?;
+    var edited: [constants.lock_file_bytes_max]u8 = undefined;
+    const size = std.mem.replacementSize(u8, original, from, to);
+    assert(size <= edited.len);
+    _ = std.mem.replace(u8, original, from, to, &edited);
+    overwrite_golden(image_lock, edited[0..size]);
+}
+
+fn prepare_lock_wrong_tree(sim: *HostSim) void {
+    prepare_pulled(sim);
+    const tree_text = golden_registry_tree();
+    change_lock(tree_text, "b3:" ++ test_util.repeat('0', 64));
+}
+
+fn prepare_lock_wrong_manifest(sim: *HostSim) void {
+    prepare_pulled(sim);
+    change_lock(&golden_registry.fixture.oci.amd64.digest, "sha256:" ++ test_util.repeat('1', 64));
+}
+
+/// The tree digest the lock records, read back from it.
+fn golden_registry_tree() []const u8 {
+    const text = golden_files.content_of(image_lock).?;
+    const at = std.mem.indexOf(u8, text, "b3:").?;
+    return text[at..][0..67];
+}
+
+fn prepare_other_locked(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", test_registry.TestRegistry.reference(.docker) });
+}
+
+fn prepare_ghost(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", test_registry.TestRegistry.reference(.ghost) });
+}
+
+fn prepare_service_single(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", test_registry.TestRegistry.reference(.service) });
+    const environment = sim.environment_variables;
+    sim_run.init_single(sim, 2);
+    sim.wire = &golden_wire;
+    sim.store_fs = &golden_files;
+    sim.environment_variables = environment;
+    _ = sim.world.processes[0].cwd.set(image_project);
+    sim.world.add_node("/sys", .dir);
+    const base = "/home/alice/.local/state/zbx/containers/web-1/merged";
+    var inner: [220]u8 = undefined;
+    sim.world.add_node(base, .dir);
+    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        const text = join(&inner, base, suffix);
+        sim.world.add_node(text, .dir);
+    }
+    sim.world.add_node(base ++ "/bin/svc", .file);
+}
+
+fn prepare_no_command(sim: *HostSim) void {
+    prepare_pulled(sim);
+    var index: u32 = 0;
+    while (golden_files.alive_path(index)) |path| : (index += 1) {
+        if (std.mem.indexOf(u8, path, "/store/images/") == null) continue;
+        const record = golden_files.content_of(path) orelse continue;
+        var kept: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&kept);
+        var lines = std.mem.splitScalar(u8, record, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " ");
+            const drop = std.mem.startsWith(u8, trimmed, ".entrypoint") or
+                std.mem.startsWith(u8, trimmed, ".cmd");
+            if (!drop) writer.print("{s}\n", .{line}) catch unreachable; // Sized.
+        }
+        overwrite_golden(path, std.mem.trimEnd(u8, writer.buffered(), "\n"));
+    }
+}
+
+fn prepare_lock_unwritable(sim: *HostSim) void {
+    prepare_image_world(sim);
+    _ = sim.world.processes[0].cwd.set("/home/alice/gone"); // A directory that is not there.
+}
+
+const run_open = [_][:0]const u8{ "run", "--name", "web-1", open_reference };
+
+const image_cases = [_]Case{
+    whole_pull_case(.E0517, test_registry.TestRegistry.reference(.badconfig), false),
+    .{
+        .code = .E0518,
+        .args = &.{ "pull", open_reference },
+        .prepare = prepare_bad_lock,
+        .exit = 1,
+    },
+    .{ .code = .E0519, .args = &run_open, .prepare = prepare_lock_wrong_tree, .exit = 125 },
+    .{ .code = .E0520, .args = &run_open, .prepare = prepare_lock_wrong_manifest, .exit = 125 },
+    .{
+        .code = .E0521,
+        .args = &.{ "run", "--name", "web-1", test_registry.TestRegistry.reference(.ghost) },
+        .prepare = prepare_ghost,
+        .exit = 125,
+    },
+    .{ .code = .E0522, .args = &run_open, .prepare = prepare_other_locked, .exit = 125 },
+    .{
+        .code = .E0523,
+        .args = &.{ "run", "--name", "web-1", test_registry.TestRegistry.reference(.service) },
+        .prepare = prepare_service_single,
+        .exit = 125,
+    },
+    .{ .code = .E0524, .args = &run_open, .prepare = prepare_no_command, .exit = 125 },
+    .{
+        .code = .E0525,
+        .args = &.{ "pull", open_reference },
+        .prepare = prepare_lock_unwritable,
+        .exit = 2,
+    },
+    .{
+        .code = .W0503,
+        .args = &run_open,
+        .prepare = prepare_image_world,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
 const Style = enum { default, verbose, json };
 
 /// Runs `case` with the global options for `style` placed before its arguments.
@@ -1152,6 +1337,7 @@ test "golden: every code in default, verbose and JSON output" {
     // code's block of it, byte for byte; the exit code is the blame's, and the code in the
     // header is the case's. A command line code leaves stdout empty; a doctor code leaves the
     // report there, with the code on its FAIL line.
+    @setEvalBranchQuota(100_000);
     var sim: HostSim = undefined;
     inline for (cases) |case| {
         const name = @tagName(case.code);

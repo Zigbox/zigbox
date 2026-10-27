@@ -1,0 +1,7 @@
+error[ZBX-E0524]: the image has no command to run
+  while  choosing what 'registry.test/fixture/open:3.20' runs
+  cause  the image sets no entrypoint and no command, and none was given
+  image  registry.test/fixture/open:3.20
+  fix    say what to run:   zbx run 'registry.test/fixture/open:3.20' -- <command> [arguments]
+  more   zbx explain E0524
+  docs   https://zigbox.github.io/zigbox/errors/E0524.html

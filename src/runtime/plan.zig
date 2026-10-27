@@ -1155,7 +1155,10 @@ test "a working directory and a user add one step each, after the root is entere
     try testing.expectEqual(plain + 1, plan.count);
     try testing.expect(index_of(&plan, .set_user) == null);
     try testing.expect(index_of(&plan, .enter_new_root).? < index_of(&plan, .enter_workdir).?);
-    try testing.expectEqualStrings("/srv/app", plan.text(plan.steps[index_of(&plan, .enter_workdir).?].target));
+    try testing.expectEqualStrings(
+        "/srv/app",
+        plan.text(plan.steps[index_of(&plan, .enter_workdir).?].target),
+    );
     input.user = .{ .uid = 33, .gid = 44 };
     plan.build(&input);
     try testing.expectEqual(plain + 2, plan.count);

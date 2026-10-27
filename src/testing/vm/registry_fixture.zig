@@ -43,6 +43,10 @@
 //!   unsafe      a single manifest whose layer has an entry with an absolute path
 //!   damaged     a single manifest whose layer is a tar with a wrong header checksum
 //!   special     a single manifest whose layer has only devices, and one file
+//!   badconfig   a single manifest whose configuration blob is not JSON
+//!   service     a single manifest: an image that runs /bin/svc as "app:staff" in /var/lib/app,
+//!               with an /etc/passwd and /etc/group that have them
+//!   ghost       the same, but its user is "ghost", who is in neither file
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -75,6 +79,9 @@ pub const Scenario = enum {
     unsafe,
     damaged,
     special,
+    badconfig,
+    service,
+    ghost,
 };
 
 /// What a client asked for.
@@ -182,6 +189,15 @@ pub const Image = struct {
     amd64_unsafe: Item = .{},
     amd64_damaged: Item = .{},
     amd64_special: Item = .{},
+    /// The configurations of `badconfig`, `service` and `ghost`, the layer of the last two, and
+    /// the manifests that name them.
+    config_bad: Item = .{},
+    config_service: Item = .{},
+    config_ghost: Item = .{},
+    layer_service: Item = .{},
+    amd64_badconfig: Item = .{},
+    amd64_service: Item = .{},
+    amd64_ghost: Item = .{},
     families: Family,
 };
 
@@ -286,6 +302,40 @@ fn build_one_layer(image: *Image, item: *Item, layer: *const Item) void {
     });
 }
 
+fn build_service(image: *Image) void {
+    image.config_bad.set_bytes("this is not JSON, it is a sentence");
+    image.config_service.set_bytes(
+        \\{"architecture":"amd64","os":"linux","config":{"Cmd":["/bin/svc"],
+        \\"User":"app:staff","WorkingDir":"/var/lib/app"}}
+    );
+    image.config_ghost.set_bytes(
+        \\{"architecture":"amd64","os":"linux","config":{"Cmd":["/bin/svc"],"User":"ghost"}}
+    );
+    var storage: [8192]u8 = undefined;
+    var tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "etc/", .kind = .directory, .mode = 0o755 });
+    const passwd = "root:x:0:0:root:/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n";
+    tar.add(.{ .name = "etc/passwd", .data = passwd, .mode = 0o644 });
+    const group = "root:x:0:\nstaff:x:50:app\napp:x:1000:\n";
+    tar.add(.{ .name = "etc/group", .data = group, .mode = 0o644 });
+    tar.add(.{ .name = "bin/", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "bin/svc", .data = "#!/bin/svc\n", .mode = 0o755 });
+    tar.finish();
+    var gz: [16384]u8 = undefined;
+    image.layer_service.set_bytes(layers.gzip(&gz, tar.bytes()));
+    build_with_config(image, &image.amd64_badconfig, &image.config_bad, &image.layer_special);
+    build_with_config(image, &image.amd64_service, &image.config_service, &image.layer_service);
+    build_with_config(image, &image.amd64_ghost, &image.config_ghost, &image.layer_service);
+}
+
+fn build_with_config(image: *Image, item: *Item, config: *const Item, layer: *const Item) void {
+    const family = image.families;
+    item.set(one_layer_format, .{
+        family.manifest,   family.config, &config.digest, config.len,
+        family.layer_gzip, &layer.digest, layer.len,
+    });
+}
+
 /// The first layer: a root file system's worth of every kind of entry.
 fn build_layer_one(item: *Item) void {
     var storage: [12 * 1024]u8 = undefined;
@@ -346,6 +396,7 @@ fn build_variant_layers(image: *Image) void {
     build_one_layer(image, &image.amd64_unsafe, &image.layer_unsafe);
     build_one_layer(image, &image.amd64_damaged, &image.layer_damaged);
     build_one_layer(image, &image.amd64_special, &image.layer_special);
+    build_service(image);
 }
 
 fn build_image(image: *Image, family: Family) void {
@@ -446,6 +497,9 @@ pub const Fixture = struct {
             .unsafe => &used.amd64_unsafe,
             .damaged => &used.amd64_damaged,
             .special => &used.amd64_special,
+            .badconfig => &used.amd64_badconfig,
+            .service => &used.amd64_service,
+            .ghost => &used.amd64_ghost,
             else => &used.amd64,
         };
     }
@@ -453,7 +507,7 @@ pub const Fixture = struct {
     pub fn layers_of(fixture: *const Fixture, scenario: Scenario) u32 {
         _ = fixture;
         return switch (scenario) {
-            .unsafe, .damaged, .special => 1,
+            .unsafe, .damaged, .special, .badconfig, .service, .ghost => 1,
             else => 2,
         };
     }
@@ -554,8 +608,10 @@ pub const Fixture = struct {
     /// The blob a digest names in the image of a scenario; null for one nobody serves.
     fn blob_item(image_used: *const Image, name: []const u8) ?*const Item {
         const candidates = [_]*const Item{
-            &image_used.config,       &image_used.layer_gzip,    &image_used.layer_zstd,
-            &image_used.layer_unsafe, &image_used.layer_damaged, &image_used.layer_special,
+            &image_used.config,        &image_used.layer_gzip,     &image_used.layer_zstd,
+            &image_used.layer_unsafe,  &image_used.layer_damaged,  &image_used.layer_special,
+            &image_used.config_bad,    &image_used.config_service, &image_used.config_ghost,
+            &image_used.layer_service,
         };
         for (candidates) |item| {
             if (std.mem.eql(u8, name, &item.digest)) return item;
@@ -671,10 +727,11 @@ fn is_digest(name: []const u8) bool {
 fn pick(image: *const Image, scenario: Scenario, name: []const u8) ?*const Item {
     if (!is_digest(name)) return tag_item(image, scenario);
     const candidates = [_]*const Item{
-        &image.index,            &image.amd64,         &image.arm64,
-        &image.index_media,      &image.index_nomatch, &image.amd64_layermedia,
-        &image.index_layermedia, &image.amd64_unsafe,  &image.amd64_damaged,
-        &image.amd64_special,
+        &image.index,            &image.amd64,           &image.arm64,
+        &image.index_media,      &image.index_nomatch,   &image.amd64_layermedia,
+        &image.index_layermedia, &image.amd64_unsafe,    &image.amd64_damaged,
+        &image.amd64_special,    &image.amd64_badconfig, &image.amd64_service,
+        &image.amd64_ghost,
     };
     for (candidates) |item| {
         if (std.mem.eql(u8, name, &item.digest)) return item;
@@ -688,6 +745,9 @@ fn tag_item(image: *const Image, scenario: Scenario) *const Item {
         .unsafe => &image.amd64_unsafe,
         .damaged => &image.amd64_damaged,
         .special => &image.amd64_special,
+        .badconfig => &image.amd64_badconfig,
+        .service => &image.amd64_service,
+        .ghost => &image.amd64_ghost,
         .media => &image.index_media,
         .nomatch => &image.index_nomatch,
         .layermedia => &image.index_layermedia,

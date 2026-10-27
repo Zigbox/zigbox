@@ -408,33 +408,25 @@ fn project_world(world: *World, seed: u64, name: []const u8) void {
     store_files.put_dir(project, 0o755);
     _ = world.sim.world.processes[0].cwd.set(project);
     world.sim.world.add_node("/sys", .dir);
-    var path: [200]u8 = undefined;
-    var inner: [220]u8 = undefined;
-    const merged = std.fmt.bufPrint(&path, containers ++ "/{s}/merged", .{name}) catch unreachable;
-    world.sim.world.add_node(merged, .dir);
-    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
-        world.sim.world.add_node(text, .dir);
-    }
-    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/other" }) |program| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, program }) catch unreachable;
-        world.sim.world.add_node(text, .file);
-    }
+    second_container(world, name);
 }
 
-/// The root of a second container, as `project_world` makes the first.
+fn joined(buffer: *[220]u8, base: []const u8, suffix: []const u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ base, suffix }) catch unreachable; // Short.
+}
+
+/// The root of a container, as the run makes it when the overlay is mounted.
 fn second_container(world: *World, name: []const u8) void {
     var path: [200]u8 = undefined;
     var inner: [220]u8 = undefined;
-    const merged = std.fmt.bufPrint(&path, containers ++ "/{s}/merged", .{name}) catch unreachable;
+    const format = containers ++ "/{s}/merged";
+    const merged = std.fmt.bufPrint(&path, format, .{name}) catch unreachable; // Short.
     world.sim.world.add_node(merged, .dir);
     for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
-        world.sim.world.add_node(text, .dir);
+        world.sim.world.add_node(joined(&inner, merged, suffix), .dir);
     }
-    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/other" }) |program| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, program }) catch unreachable;
-        world.sim.world.add_node(text, .file);
+    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/other", "/bin/svc" }) |program| {
+        world.sim.world.add_node(joined(&inner, merged, program), .file);
     }
 }
 
@@ -474,7 +466,10 @@ test "a pull writes zbx.lock: the reference as written, sorted, and never the mi
     const image = made.value.object.get("image").?.object;
     try testing.expectEqualStrings("/bin/hello", image.get("entrypoint").?.array.items[0].string);
     try testing.expectEqualStrings("/srv/app", image.get("workdir").?.string);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", first }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", first }),
+    );
     const again = try parse_json(world.sim.stdout());
     defer again.deinit();
     try testing.expect(!again.value.object.get("lock").?.object.get("created").?.bool);
@@ -490,8 +485,16 @@ test "a pull writes zbx.lock: the reference as written, sorted, and never the mi
     const before = try testing.allocator.dupe(u8, text);
     defer testing.allocator.free(before);
     var pinned: [200]u8 = undefined;
-    const by_digest = try std.fmt.bufPrintSentinel(&pinned, "registry.test/fixture/open@{s}", .{&world.registry.fixture.oci.amd64.digest}, 0);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", by_digest }));
+    const by_digest = try std.fmt.bufPrintSentinel(
+        &pinned,
+        "registry.test/fixture/open@{s}",
+        .{&world.registry.fixture.oci.amd64.digest},
+        0,
+    );
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", by_digest }),
+    );
     const pulled = try parse_json(world.sim.stdout());
     defer pulled.deinit();
     try testing.expect(pulled.value.object.get("lock").? == .null);
@@ -512,7 +515,10 @@ test "a run by tag starts the locked image with its entrypoint, command, env and
     const code = run_text(&world, &.{ "zbx", "pull", reference });
     if (code != 0) std.debug.print("PULL: {s}\n", .{world.sim.stderr()});
     try testing.expectEqual(@as(u8, 0), code);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }),
+    );
     try testing.expectEqualStrings("/bin/hello\nworld\n", started_argv(&world));
     const child = &world.sim.world.processes[1];
     const envp = child.exec_envp[0..child.exec_envp_len];
@@ -523,12 +529,16 @@ test "a run by tag starts the locked image with its entrypoint, command, env and
     try testing.expect(child.user_set == null);
     // /sys is bound read-only from the host.
     var found_sys = false;
-    for (world.sim.world.tables[child.table].mounts[0..world.sim.world.tables[child.table].count]) |mount| {
+    const table = &world.sim.world.tables[child.table];
+    for (table.mounts[0..table.count]) |mount| {
         if (std.mem.endsWith(u8, mount.target.slice(), "/sys")) found_sys = true;
     }
     try testing.expect(found_sys);
     second_container(&world, "web-2");
-    const second_code = run_text(&world, &.{ "zbx", "run", "--name", "web-2", reference, "--", "one", "two" });
+    const second_code = run_text(
+        &world,
+        &.{ "zbx", "run", "--name", "web-2", reference, "--", "one", "two" },
+    );
     if (second_code != 0) std.debug.print("RUN2: {s}\n", .{world.sim.stderr()});
     try testing.expectEqual(@as(u8, 0), second_code);
     try testing.expectEqualStrings("/bin/hello\none\ntwo\n", started_argv(&world));
@@ -540,7 +550,10 @@ test "a run by tag refuses when the lock and the store disagree, naming both dig
     var world: World = undefined;
     project_world(&world, 33, "web-1");
     const reference = test_registry.TestRegistry.reference(.open);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }),
+    );
     const pulled = try parse_json(world.sim.stdout());
     defer pulled.deinit();
     const tree = try testing.allocator.dupe(u8, json_field(&pulled, "tree"));
@@ -551,7 +564,10 @@ test "a run by tag refuses when the lock and the store disagree, naming both dig
     const edited = try std.mem.replaceOwned(u8, testing.allocator, original, tree, wrong_tree);
     defer testing.allocator.free(edited);
     overwrite(lock_path, edited);
-    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expectEqual(
+        @as(u8, 125),
+        run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }),
+    );
     const refusal = world.sim.stderr();
     try testing.expect(std.mem.indexOf(u8, refusal, "ZBX-E0519") != null);
     try testing.expect(std.mem.indexOf(u8, refusal, tree) != null);
@@ -559,13 +575,24 @@ test "a run by tag refuses when the lock and the store disagree, naming both dig
 
     const manifest = &world.registry.fixture.oci.amd64.digest;
     const wrong_manifest = "sha256:" ++ test_util.repeat('1', 64);
-    const moved = try std.mem.replaceOwned(u8, testing.allocator, original, manifest, wrong_manifest);
+    const moved = try std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        original,
+        manifest,
+        wrong_manifest,
+    );
     defer testing.allocator.free(moved);
     overwrite(lock_path, moved);
-    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expectEqual(
+        @as(u8, 125),
+        run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }),
+    );
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0520") != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), wrong_manifest) != null);
-    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), manifest) != null); // What the store has.
+    try testing.expect(
+        std.mem.indexOf(u8, world.sim.stderr(), manifest) != null,
+    ); // What the store has.
 
     overwrite(lock_path, original);
     const other = test_registry.TestRegistry.reference(.docker);
@@ -578,7 +605,9 @@ test "a run by tag refuses when the lock and the store disagree, naming both dig
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0518") != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "line 3") != null);
     // None of the refusals pulled or started anything.
-    try testing.expect(world.sim.world.processes[1].state == .unused or !world.sim.world.processes[1].execd);
+    try testing.expect(
+        world.sim.world.processes[1].state == .unused or !world.sim.world.processes[1].execd,
+    );
 }
 
 test "a run by tag with no lock pulls, writes one, and says so in one warning" {
@@ -592,12 +621,18 @@ test "a run by tag with no lock pulls, writes one, and says so in one warning" {
     if (code != 0) std.debug.print("RUN: {s}\n", .{world.sim.stderr()});
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expectEqual(@as(usize, 0), world.sim.stdout().len);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.sim.stderr(), "warning[ZBX-W0503]"));
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, world.sim.stderr(), "warning[ZBX-W0503]"),
+    );
     try testing.expect(std.mem.indexOf(u8, lock_text(), reference) != null);
     try testing.expectEqualStrings("/bin/hello\nworld\n", started_argv(&world));
     // The second run has a lock and says nothing.
     second_container(&world, "web-2");
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-2", reference }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "run", "--name", "web-2", reference }),
+    );
     try testing.expectEqual(@as(usize, 0), world.sim.stderr().len);
 }
 
@@ -616,14 +651,19 @@ test "an image with no command and none given is refused" {
         var lines = std.mem.splitScalar(u8, record, '\n');
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " ");
-            if (std.mem.startsWith(u8, trimmed, ".entrypoint") or std.mem.startsWith(u8, trimmed, ".cmd")) continue;
+            const drop = std.mem.startsWith(u8, trimmed, ".entrypoint") or
+                std.mem.startsWith(u8, trimmed, ".cmd");
+            if (drop) continue;
             try writer.print("{s}\n", .{line});
         }
         overwrite(path, std.mem.trimEnd(u8, writer.buffered(), "\n"));
     }
     try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", reference }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0524") != null);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "/bin/other" }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "/bin/other" }),
+    );
     try testing.expectEqualStrings("/bin/other\n", started_argv(&world));
 }
 
@@ -647,8 +687,15 @@ test "the library starts an image by its tag, from the store's records" {
     try testing.expectEqual(lib.Status.running, lib.inspect(&library_handle));
     _ = lib.wait(&library_handle);
     diag.reset();
-    const unknown: lib.Spec = .{ .image = "registry.test/fixture/never:1", .name = "lib-2", .command = &.{"/bin/sh"} };
-    try testing.expectError(error.StartFailed, lib.start(world.sim.interface(), &unknown, options, &library_handle, &diag));
+    const unknown: lib.Spec = .{
+        .image = "registry.test/fixture/never:1",
+        .name = "lib-2",
+        .command = &.{"/bin/sh"},
+    };
+    try testing.expectError(
+        error.StartFailed,
+        lib.start(world.sim.interface(), &unknown, options, &library_handle, &diag),
+    );
     try testing.expectEqual(@as(?codes.Code, .E0522), diag.code);
 }
 
@@ -659,18 +706,26 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     var world: World = undefined;
     project_world(&world, 37, "web-1");
     const reference = test_registry.TestRegistry.reference(.open);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }),
+    );
     const pulled = try parse_json(world.sim.stdout());
     defer pulled.deinit();
-    const tree = try testing.allocator.dupe(u8, json_field(&pulled, "tree"));
+    const tree = try testing.allocator.dupeSentinel(u8, json_field(&pulled, "tree"), 0);
     defer testing.allocator.free(tree);
     var layer_bytes: i64 = 0;
-    for (pulled.value.object.get("layers").?.array.items) |layer| layer_bytes += layer.object.get("size").?.integer;
+    for (pulled.value.object.get("layers").?.array.items) |layer| {
+        layer_bytes += layer.object.get("size").?.integer;
+    }
 
     try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "\nIMAGE ") != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), reference) != null);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "ls" }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "ls" }),
+    );
     try testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, world.sim.stdout(), "\n")));
     const listed = try parse_json(world.sim.stdout());
     defer listed.deinit();
@@ -679,7 +734,10 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     try testing.expectEqualStrings(tree, images[0].object.get("tree").?.string);
     try testing.expectEqualStrings(reference, images[0].object.get("reference").?.string);
 
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "du", "--by-image" }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "du", "--by-image" }),
+    );
     const sized = try parse_json(world.sim.stdout());
     defer sized.deinit();
     const row = sized.value.object.get("images").?.array.items[0].object;
@@ -690,17 +748,99 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     try testing.expectEqual(@as(i64, 0), row.get("shared_bytes").?.integer);
     try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "du", "--by-image" }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "COMPRESSED") != null);
-    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "store", "du", "--by-image", tree }));
+    try testing.expectEqual(
+        @as(u8, 1),
+        run_text(&world, &.{ "zbx", "store", "du", "--by-image", tree }),
+    );
     try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "store", "ls", "--by-image" }));
+}
 
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "rm", tree }));
+test "rm of a pulled tree takes its image record with it, and gc then plans the blobs" {
+    // Goal: the tree is kept by its image record as well as its root, so rm drops both.
+    var world: World = undefined;
+    project_world(&world, 43, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }),
+    );
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    const tree = try testing.allocator.dupeSentinel(u8, json_field(&pulled, "tree"), 0);
+    defer testing.allocator.free(tree);
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "rm", tree }),
+    );
     const removed = try parse_json(world.sim.stdout());
     defer removed.deinit();
     try testing.expectEqual(@as(i64, 1), removed.value.object.get("images").?.integer);
     try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "IMAGE") == null);
-    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "store", "gc" }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "gc" }),
+    );
     const plan = try parse_json(world.sim.stdout());
     defer plan.deinit();
-    try testing.expectEqual(@as(i64, 3), plan.value.object.get("blobs").?.integer); // Config and two layers.
+    try testing.expectEqual(
+        @as(i64, 3),
+        plan.value.object.get("blobs").?.integer,
+    ); // Config and two layers.
+}
+
+test "an image's user is resolved against its own files and set before the command" {
+    // Goal: User "app:staff", the working directory and HOME, end to end. Method: pull an image
+    // whose passwd and group have them; the child is started as 1000:50 in /var/lib/app with HOME
+    // from passwd. The same image with the single-id map is E0523, a user the files lack is
+    // E0521, and a configuration that is not JSON is E0517 with nothing recorded.
+    const service = test_registry.TestRegistry.reference(.service);
+    var world: World = undefined;
+    project_world(&world, 38, "svc-1");
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", service }));
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "run", "--name", "svc-1", service }),
+    );
+    const child = &world.sim.world.processes[1];
+    try testing.expectEqual(@as(?[2]u32, .{ 1000, 50 }), child.user_set);
+    try testing.expect(std.mem.endsWith(u8, child.cwd.slice(), "/var/lib/app"));
+    try testing.expect(
+        std.mem.indexOf(u8, child.exec_envp[0..child.exec_envp_len], "HOME=/home/app\n") != null,
+    );
+    try testing.expectEqualStrings("/bin/svc\n", started_argv(&world));
+
+    // The same store and project, a host that can map only root.
+    const saved_home = world.sim.environment_variables;
+    sim_run.init_single(&world.sim, 39);
+    world.sim.wire = &world.wire;
+    world.sim.store_fs = &store_files;
+    world.sim.environment_variables = saved_home;
+    _ = world.sim.world.processes[0].cwd.set(project);
+    world.sim.world.add_node("/sys", .dir);
+    second_container(&world, "svc-2");
+    try testing.expectEqual(
+        @as(u8, 125),
+        run_text(&world, &.{ "zbx", "run", "--name", "svc-2", service }),
+    );
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0523") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "user 1000, group 50") != null);
+
+    project_world(&world, 41, "ghost-1");
+    const ghost = test_registry.TestRegistry.reference(.ghost);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", ghost }));
+    try testing.expectEqual(
+        @as(u8, 125),
+        run_text(&world, &.{ "zbx", "run", "--name", "ghost-1", ghost }),
+    );
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0521") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "/etc/passwd") != null);
+
+    project_world(&world, 42, "bad-1");
+    const bad = test_registry.TestRegistry.reference(.badconfig);
+    try testing.expectEqual(@as(u8, 3), run_text(&world, &.{ "zbx", "pull", bad }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0517") != null);
+    try testing.expect(store_files.kind_of(lock_path) == null);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "IMAGE") == null);
 }

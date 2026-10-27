@@ -7,7 +7,7 @@ error[ZBX-E0207]: can't restrict the container's capabilities
          cannot be changed
   name   web-1
   rootfs /srv/alpine
-  step   restrict_capabilities (43 of 49)
+  step   restrict_capabilities (46 of 52)
   fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
          check what this host allows:          zbx doctor
   more   zbx explain E0207

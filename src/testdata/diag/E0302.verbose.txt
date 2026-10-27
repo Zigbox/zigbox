@@ -8,7 +8,7 @@ error[ZBX-E0302]: the user bus refused to authenticate this user
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (6 of 49)
+  step   start_scope (6 of 52)
   fix    see which bus this process uses:   echo $DBUS_SESSION_BUS_ADDRESS
          or log in again through a systemd session
   more   zbx explain E0302

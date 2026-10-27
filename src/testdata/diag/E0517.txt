@@ -1,0 +1,7 @@
+error[ZBX-E0517]: an image's configuration can't be used
+  cause  the configuration
+         sha256:ca74e5808c7a2e2d22d9041aafe97043cb60673392ee70438a786f5a92866b8d
+         is not the JSON of an image configuration
+  fix    try another tag of the image, or tell its publisher
+  more   zbx explain E0517 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0517.html

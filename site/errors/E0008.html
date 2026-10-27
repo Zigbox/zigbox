@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">command line exceeds the supported limits</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx accepts at most 64 arguments of at most 4096 bytes each, and refuses more instead of cutting them, so that a command is never silently misread. The command after &quot;run --&quot; has its own limits: 48 words of at most 4000 bytes, 32 KiB with the environment.</p>
+<p>zbx accepts at most 64 arguments of at most 4096 bytes each, and refuses more instead of cutting them, so that a command is never silently misread. The command after &quot;run --&quot; has its own limits: 48 words of at most 4000 bytes, 32 KiB with the environment. A working directory is an absolute path without &quot;..&quot;.</p>
 <p>Pass fewer or shorter arguments. For long lists, use a file when the command supports one.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

@@ -6,7 +6,7 @@ error[ZBX-E0425]: overlayfs can't be mounted for this container
          upper layer on a file system that keeps user.* extended attributes
   name   web-1
   rootfs /home/alice/.local/state/zbx/containers/web-1/merged
-  step   mount_overlay (12 of 49)
+  step   mount_overlay (12 of 52)
   fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
          see what this host allows:            zbx doctor
          or run a directory instead:           zbx run --rootfs ./alpine -- sh

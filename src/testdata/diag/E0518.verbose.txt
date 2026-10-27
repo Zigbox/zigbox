@@ -1,0 +1,8 @@
+error[ZBX-E0518]: zbx.lock can't be read
+  while  reading the lock file
+  cause  '/home/alice/project/zbx.lock' line 3 is not a line of a lock file
+  line   3
+  path   /home/alice/project/zbx.lock
+  fix    remove the lock and pull again to write a new one:   rm '/home/alice/project/zbx.lock'
+  more   zbx explain E0518
+  docs   https://zigbox.github.io/zigbox/errors/E0518.html

@@ -76,7 +76,13 @@ pub const Prepared = struct {
 
 const Record = enum { ok, absent, unreadable };
 
-fn load_record(store: *const Store, present: bool, manifest: Sha256, ws: *Workspace, diag: *Diag) Error!Record {
+fn load_record(
+    store: *const Store,
+    present: bool,
+    manifest: Sha256,
+    ws: *Workspace,
+    diag: *Diag,
+) Error!Record {
     if (!present) return .absent;
     var errno: u16 = 0;
     images.load(store, manifest, &ws.image, &errno) catch |err| switch (err) {
@@ -100,7 +106,8 @@ pub fn prepare(
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
-    assert(operand.len > 0 and operand.len <= constants.arg_bytes_max);
+    assert(operand.len > 0);
+    assert(operand.len <= constants.arg_bytes_max);
     var store: Store = undefined;
     if (!store.locate(services.host)) {
         store_diagnose.no_data_directory(diag);
@@ -189,7 +196,14 @@ fn report_absent(
     const by_digest = std.fmt.bufPrint(&pull_text, "{s}/{s}@{s}", .{
         reference.registry(), reference.repository(), &wanted.text(),
     }) catch operand;
-    image_diagnose.locked_absent(diag, operand, path, wanted, if (by.found) by.manifest else null, by_digest);
+    image_diagnose.locked_absent(
+        diag,
+        operand,
+        path,
+        wanted,
+        if (by.found) by.manifest else null,
+        by_digest,
+    );
 }
 
 fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag) Error!void {
@@ -218,7 +232,13 @@ fn warn_created(services: *const Services, operand: []const u8, path: []const u8
 
 // ---- What the image runs -------------------------------------------------------------------
 
-fn compose(store: *const Store, ws: *Workspace, given: []const []const u8, out: *Prepared, diag: *Diag) Error!void {
+fn compose(
+    store: *const Store,
+    ws: *Workspace,
+    given: []const []const u8,
+    out: *Prepared,
+    diag: *Diag,
+) Error!void {
     const image = &ws.image;
     const settings = &image.settings;
     ws.tree = image.tree.text();
@@ -249,14 +269,24 @@ fn compose(store: *const Store, ws: *Workspace, given: []const []const u8, out: 
     out.command = ws.words[0..count];
     const workdir = settings.get(.workdir);
     if (spec.workdir_problem(workdir) or (workdir.len > 0 and workdir[0] != '/')) {
-        image_diagnose.config_refused(diag, image.config, "has a working directory that is not an absolute path");
+        image_diagnose.config_refused(
+            diag,
+            image.config,
+            "has a working directory that is not an absolute path",
+        );
         return error.Failed;
     }
     out.workdir = workdir;
     out.user = null;
     var home: ?[]const u8 = null;
     if (settings.get(.user).len > 0) {
-        const resolved = try image_user.resolve(store, &ws.user, image.tree, settings.get(.user), diag);
+        const resolved = try image_user.resolve(
+            store,
+            &ws.user,
+            image.tree,
+            settings.get(.user),
+            diag,
+        );
         if (resolved.user.uid != 0 or resolved.user.gid != 0) {
             out.user = resolved.user;
             const copy = resolved.home_text();
@@ -269,7 +299,11 @@ fn compose(store: *const Store, ws: *Workspace, given: []const []const u8, out: 
 
 fn too_many_words(image: *const images.Image, diag: *Diag) Error {
     assert(diag.code == null);
-    image_diagnose.config_refused(diag, image.config, "gives a command of more words than a container can be started with");
+    image_diagnose.config_refused(
+        diag,
+        image.config,
+        "gives a command of more words than a container can be started with",
+    );
     return error.Failed;
 }
 
@@ -281,11 +315,19 @@ fn environment(ws: *Workspace, home: ?[]const u8, out: *Prepared, diag: *Diag) E
     for (0..settings.count(.env)) |index| {
         const variable = settings.word(.env, @intCast(index));
         const equals = std.mem.indexOfScalar(u8, variable, '=') orelse {
-            image_diagnose.config_refused(diag, ws.image.config, "has an environment entry that is not NAME=value");
+            image_diagnose.config_refused(
+                diag,
+                ws.image.config,
+                "has an environment entry that is not NAME=value",
+            );
             return error.Failed;
         };
         if (count == ws.env.len) {
-            image_diagnose.config_refused(diag, ws.image.config, "has more environment variables than a container can be started with");
+            image_diagnose.config_refused(
+                diag,
+                ws.image.config,
+                "has more environment variables than a container can be started with",
+            );
             return error.Failed;
         }
         ws.env[count] = .{ .key = variable[0..equals], .value = variable[equals + 1 ..] };

@@ -45,7 +45,12 @@ pub fn parse(arena: []u8, body: []const u8, settings: *Settings) Problem!void {
     settings.clear();
     var fixed = std.heap.FixedBufferAllocator.init(arena);
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
-    const document = std.json.parseFromSliceLeaky(Document, fixed.allocator(), body, options) catch |err| {
+    const document = std.json.parseFromSliceLeaky(
+        Document,
+        fixed.allocator(),
+        body,
+        options,
+    ) catch |err| {
         return switch (err) {
             error.OutOfMemory => error.too_complex,
             else => error.malformed,
@@ -115,8 +120,14 @@ test "no config member is an image with nothing set; bad documents are refused" 
     try testing.expectError(error.malformed, parsed("[1,2]", &settings));
     try testing.expectError(error.malformed, parsed("", &settings));
     try testing.expectError(error.malformed, parsed("{\"config\":{\"Cmd\":\"sh\"}}", &settings));
-    try testing.expectError(error.bad_variable, parsed("{\"config\":{\"Env\":[\"NOEQUALS\"]}}", &settings));
-    try testing.expectError(error.bad_variable, parsed("{\"config\":{\"Env\":[\"=x\"]}}", &settings));
+    try testing.expectError(
+        error.bad_variable,
+        parsed("{\"config\":{\"Env\":[\"NOEQUALS\"]}}", &settings),
+    );
+    try testing.expectError(
+        error.bad_variable,
+        parsed("{\"config\":{\"Env\":[\"=x\"]}}", &settings),
+    );
     var small: [64]u8 = undefined;
     const body = "{\"config\":{\"Cmd\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\"]}}";
     try testing.expectError(error.too_complex, parse(&small, body, &settings));

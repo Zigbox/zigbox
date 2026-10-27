@@ -78,12 +78,6 @@ test {
     _ = @import("runtime/child.zig");
     _ = @import("runtime/diagnose.zig");
     _ = @import("zigbox.zig");
-    _ = @import("registry/config.zig");
-    _ = @import("lock_file.zig");
-    _ = @import("run_image.zig");
-    _ = @import("image_user.zig");
-    _ = @import("store/image_find.zig");
-    _ = @import("image_diagnose.zig");
     _ = @import("redact.zig");
     _ = @import("bundle.zig");
     _ = @import("bundle_tests.zig");
@@ -150,4 +144,14 @@ test {
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");
     _ = @import("testing/vm/registry_fixture.zig");
+}
+
+test {
+    // The images: settings, the lock, running by name.
+    _ = @import("registry/config.zig");
+    _ = @import("lock_file.zig");
+    _ = @import("image_user.zig");
+    _ = @import("run_image.zig");
+    _ = @import("image_diagnose.zig");
+    _ = @import("store/image_find.zig");
 }
