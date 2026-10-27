@@ -83,6 +83,7 @@ fn load_record(
     ws: *Workspace,
     diag: *Diag,
 ) Error!Record {
+    assert(diag.code == null);
     if (!present) return .absent;
     var errno: u16 = 0;
     images.load(store, manifest, &ws.image, &errno) catch |err| switch (err) {
@@ -176,6 +177,7 @@ fn via_lock(
 }
 
 fn located_path(locking: *const lock_file.Workspace) []const u8 {
+    assert(locking.located.len <= constants.path_bytes_max);
     if (locking.located.len == 0) return lock_file.file_name;
     return locking.located.text();
 }
@@ -190,6 +192,7 @@ fn report_absent(
     reference: *const reference_mod.Reference,
     diag: *Diag,
 ) Error!void {
+    assert(operand.len > 0);
     var by: image_find.ByReference = .{ .text = operand };
     image_find.scan(store, &ws.memory, &ws.image, &by) catch {};
     var pull_text: [constants.reference_bytes_max + 80]u8 = undefined;
@@ -207,6 +210,7 @@ fn report_absent(
 }
 
 fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag) Error!void {
+    assert(operand.len > 0);
     var quiet = services.output;
     quiet.quiet = true;
     const args: pull_commands.Args = .{ .reference = operand, .json = false };
@@ -223,6 +227,7 @@ fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag
 }
 
 fn warn_created(services: *const Services, operand: []const u8, path: []const u8) void {
+    assert(path.len > 0);
     const warn = services.warn orelse return;
     var warning: Diag = undefined;
     warning.reset();
@@ -239,6 +244,7 @@ fn compose(
     out: *Prepared,
     diag: *Diag,
 ) Error!void {
+    assert(diag.code == null);
     const image = &ws.image;
     const settings = &image.settings;
     ws.tree = image.tree.text();
@@ -309,6 +315,7 @@ fn too_many_words(image: *const images.Image, diag: *Diag) Error {
 
 /// The image's variables as labels, with HOME of the user the image runs as, unless it sets one.
 fn environment(ws: *Workspace, home: ?[]const u8, out: *Prepared, diag: *Diag) Error!void {
+    assert(ws.image.settings.used <= ws.image.settings.bytes.len);
     const settings = &ws.image.settings;
     var count: usize = 0;
     var has_home = false;

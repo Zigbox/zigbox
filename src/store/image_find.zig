@@ -31,6 +31,7 @@ pub fn scan(
     image: *images.Image,
     visitor: anytype,
 ) Error!void {
+    assert(memory.offsets.len == constants.images_max);
     assert(store.root_len > 1);
     const found = shards.read(
         store,
@@ -62,6 +63,7 @@ pub const ByReference = struct {
     tree: Digest = undefined,
 
     pub fn visit(self: *ByReference, image: *const images.Image) void {
+        assert(self.text.len > 0);
         assert(self.text.len > 0);
         if (!lock_file.same_reference(image.reference_text(), self.text)) return;
         if (self.found and image.time < self.time) return;

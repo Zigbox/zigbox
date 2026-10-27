@@ -1381,6 +1381,7 @@ pub const World = struct {
 
     /// Becoming a user needs the ids to be mapped: the single map has only root.
     pub fn set_user(world: *World, uid: u32, gid: u32) ?u16 {
+        assert(uid != std.math.maxInt(u32));
         assert(world.current < world.processes.len);
         const process = &world.processes[world.current];
         process.user_set = .{ uid, gid };

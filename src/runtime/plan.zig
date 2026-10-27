@@ -635,6 +635,7 @@ pub const Plan = struct {
 
     /// The PATH a program is looked for in: the image's if the caller set one, else the default.
     fn search_path_of(env: []const spec.Label) []const u8 {
+        assert(env.len <= constants.env_vars_count_max);
         for (env) |variable| {
             if (std.mem.eql(u8, variable.key, "PATH") and variable.value.len > 0) {
                 return variable.value;

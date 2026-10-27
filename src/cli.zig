@@ -1375,6 +1375,7 @@ fn prepare_image(
     prepared: *run_image.Prepared,
     diag: *Diag,
 ) RunError!void {
+    assert(operand.len > 0);
     const mode = invocation.options.mode();
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const services: run_image.Services = .{

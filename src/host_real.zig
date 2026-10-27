@@ -577,6 +577,8 @@ pub const HostReal = struct {
     }
 
     fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+        assert(user_id != std.math.maxInt(u32));
+        assert(group_id != std.math.maxInt(u32));
         _ = from_context(context);
         // No supplementary groups, then the group before the user: a process that has become
         // the user may no longer set its group.

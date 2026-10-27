@@ -295,6 +295,8 @@ fn record_in_lock(
     image: *const images.Image,
     diag: *Diag,
 ) Error!?bool {
+    assert(job.written.len > 0);
+    assert(store.root_len > 1);
     assert(image.layer_count > 0);
     if (job.reference.digest != null) return null;
     const locking = &job.workspace.locking;
@@ -396,6 +398,7 @@ fn write_settings(
     writer: *std.Io.Writer,
     settings: *const images.Settings,
 ) std.Io.Writer.Error!void {
+    assert(settings.count(.env) <= constants.env_vars_count_max);
     assert(settings.used <= settings.bytes.len);
     const json = @import("bundle.zig").write_json_string;
     try writer.writeAll("\"image\":{");

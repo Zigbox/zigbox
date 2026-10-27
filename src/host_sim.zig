@@ -854,6 +854,7 @@ pub const HostSim = struct {
     }
 
     fn working_directory(context: *anyopaque, buffer: []u8) host.Error![]const u8 {
+        assert(buffer.len > 1);
         const world = &from_context(context).world;
         const path = world.processes[world.current].cwd.slice();
         if (path.len > buffer.len) return error.FileTooLarge;

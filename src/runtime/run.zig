@@ -556,6 +556,7 @@ fn check_command(container: *const Spec, diag: *Diag) Error!void {
 /// The id map this host gives the container, with the warning if it is the single one, and the
 /// refusal if the image's user needs more.
 fn choose_ids(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) Error!ids.Choice {
+    assert(diag.code == null);
     var choice: ids.Choice = undefined;
     ids.choose(host, &handle.facts, &choice);
     if (choice.warned) handle.report(&choice.warning);
@@ -566,6 +567,7 @@ fn choose_ids(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
 
 /// An image that runs as a user needs the ids mapped; the single-id map has only root.
 fn check_user(container: *const Spec, single: bool, diag: *Diag) Error!void {
+    assert(diag.code == null);
     const user = container.user orelse return;
     if (single and (user.uid != 0 or user.gid != 0)) {
         image_diagnose.needs_id_map(diag, user.uid, user.gid);

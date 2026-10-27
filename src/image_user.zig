@@ -62,6 +62,7 @@ pub const Resolved = struct {
     }
 
     fn with_home(user: spec.User, text: []const u8) Resolved {
+        assert(text.len <= file_bytes_max);
         var result: Resolved = .{ .user = user, .home = undefined, .home_len = 1 };
         const usable = text.len > 0 and text.len <= home_bytes_max and text[0] == '/';
         if (!usable) {
@@ -98,6 +99,7 @@ fn parse_line(text: []const u8, is_passwd: bool) ?Line {
 
 /// The first line of `file` for `name`.
 fn find_name(file: []const u8, name: []const u8, is_passwd: bool) ?Line {
+    assert(name.len > 0);
     var lines = std.mem.splitScalar(u8, file, '\n');
     while (lines.next()) |text| {
         const line = parse_line(text, is_passwd) orelse continue;
@@ -108,6 +110,7 @@ fn find_name(file: []const u8, name: []const u8, is_passwd: bool) ?Line {
 
 /// The first line of passwd for `uid`.
 fn find_uid(file: []const u8, uid: u32) ?Line {
+    assert(file.len <= file_bytes_max);
     var lines = std.mem.splitScalar(u8, file, '\n');
     while (lines.next()) |text| {
         const line = parse_line(text, true) orelse continue;
@@ -117,6 +120,7 @@ fn find_uid(file: []const u8, uid: u32) ?Line {
 }
 
 fn is_number(text: []const u8) ?u32 {
+    assert(text.len <= constants.image_settings_bytes_max);
     if (text.len == 0 or text.len > 10) return null;
     for (text) |byte| {
         if (byte < '0' or byte > '9') return null;
@@ -181,6 +185,7 @@ fn child_of(
     name: []const u8,
     want_dir: bool,
 ) ?Digest {
+    assert(name.len > 0);
     var errno: u16 = 0;
     const bytes = trees.load(store, digest, buffer, &errno) catch return null;
     var decoder: tree.Decoder = undefined;
@@ -204,6 +209,8 @@ fn file_of(
     directory: []const u8,
     name: []const u8,
 ) ?[]const u8 {
+    assert(directory.len > 0);
+    assert(name.len > 0);
     const subtree = child_of(store, &workspace.tree, root, directory, true) orelse return null;
     const object = child_of(store, &workspace.tree, subtree, name, false) orelse return null;
     var path: @import("store/fs.zig").PathBuf = undefined;

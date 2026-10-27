@@ -59,6 +59,7 @@ pub const Settings = struct {
     user: Span,
 
     pub fn clear(settings: *Settings) void {
+        assert(settings.bytes.len == constants.image_settings_bytes_max);
         settings.used = 0;
         settings.entrypoint_count = 0;
         settings.cmd_count = 0;
@@ -89,6 +90,7 @@ pub const Settings = struct {
 
     /// Appends a word; null if the list or the block is full.
     pub fn add(settings: *Settings, list: List, text: []const u8) ?void {
+        assert(text.len <= constants.image_settings_bytes_max);
         const found = settings.spans(list);
         if (found[1].* == found[0].len) return null;
         const span = settings.store(text) orelse return null;
@@ -98,6 +100,7 @@ pub const Settings = struct {
 
     /// Sets the working directory or the user; null if the block is full.
     pub fn set(settings: *Settings, which: Single, text: []const u8) ?void {
+        assert(settings.used <= settings.bytes.len);
         const span = settings.store(text) orelse return null;
         switch (which) {
             .workdir => settings.workdir = span,
@@ -106,6 +109,7 @@ pub const Settings = struct {
     }
 
     pub fn count(settings: *const Settings, list: List) u32 {
+        assert(settings.used <= settings.bytes.len);
         return switch (list) {
             .entrypoint => settings.entrypoint_count,
             .cmd => settings.cmd_count,
@@ -128,6 +132,7 @@ pub const Settings = struct {
     }
 
     pub fn get(settings: *const Settings, which: Single) []const u8 {
+        assert(settings.used <= settings.bytes.len);
         return switch (which) {
             .workdir => settings.view(settings.workdir),
             .user => settings.view(settings.user),

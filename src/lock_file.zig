@@ -61,6 +61,8 @@ pub const Lock = struct {
     pool_len: u32,
 
     pub fn clear(lock: *Lock) void {
+        assert(lock.pool.len == constants.lock_pool_bytes);
+        assert(lock.entries.len == constants.lock_entries_max);
         lock.count = 0;
         lock.pool_len = 0;
     }
@@ -335,6 +337,7 @@ fn set_field(entry: *Entry, fields: *Fields, key: []const u8, value: []const u8)
 
 /// Adds the entry being read, if there is one: it must have its four fields and be new.
 fn finish_entry(lock: *Lock, open: *?Entry, fields: Fields, number: u32) ?Problem {
+    assert(number > 0);
     const entry = open.* orelse return null;
     open.* = null;
     if (!fields.complete()) return .{ .kind = .incomplete_entry, .line = number };
@@ -384,6 +387,7 @@ pub const Located = struct {
     }
 
     fn set(located: *Located, directory_text: []const u8) bool {
+        assert(directory_text.len < constants.path_bytes_max);
         // The root's directory is "": the path is "/zbx.lock".
         const trimmed = std.mem.trimEnd(u8, directory_text, "/");
         const total = trimmed.len + 1 + file_name.len;
@@ -403,6 +407,7 @@ pub const LocateError = error{ NoDirectory, TooLong };
 /// The lock of the project: the nearest `zbx.lock` from the working directory up, else the
 /// place for one in the working directory.
 pub fn locate(host: Host, fs: Fs, located: *Located) LocateError!void {
+    assert(located.path.len > constants.path_bytes_max);
     var cwd_storage: [constants.path_bytes_max]u8 = undefined;
     const cwd = host.working_directory(&cwd_storage) catch return error.NoDirectory;
     var directory: []const u8 = cwd;
@@ -486,6 +491,7 @@ pub const Error = error{Failed};
 
 /// Finds the project's lock and reads it into `workspace.lock` (empty if there is none).
 pub fn open_project(host: Host, fs: Fs, workspace: *Workspace, failure: *Failure) Error!void {
+    assert(workspace.text.len == constants.lock_file_bytes_max);
     locate(host, fs, &workspace.located) catch {
         failure.* = .no_directory;
         return error.Failed;

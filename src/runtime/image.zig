@@ -222,6 +222,7 @@ fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag)
 /// library caller that wants the project's lock to decide uses the cli's way (`run_image.zig`);
 /// this is the store's own answer, for a caller that has pulled and only names.
 fn resolve_name(store: *Store, workspace: *Workspace, name: []const u8, diag: *Diag) Error!Digest {
+    assert(name.len > 0);
     assert(diag.code == null);
     var reference: reference_mod.Reference = undefined;
     reference_mod.parse(name, &reference) catch {

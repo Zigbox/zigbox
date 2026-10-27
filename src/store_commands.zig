@@ -339,6 +339,8 @@ const LsImages = struct {
     failed: bool = false,
 
     pub fn visit(self: *LsImages, image: *const images.Image) void {
+        assert(image.layer_count <= constants.registry_layers_max);
+        assert(image.reference_len <= constants.reference_bytes_max);
         if (self.failed) return;
         var buffer: [constants.output_bytes_max]u8 = undefined;
         var when: [19]u8 = undefined;
@@ -378,12 +380,14 @@ const LsImages = struct {
 
 /// The refusal for a scan of the image records that failed.
 fn images_unreadable(diag: *Diag, store: *const Store) Error {
+    assert(diag.code == null);
     const step = "looking through the images";
     diagnose.cannot_read(diag, store, step, error.IoFailed, store.fs.last_errno());
     return error.Failed;
 }
 
 fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void {
+    assert(diag.code == null);
     var visitor: LsImages = .{ .job = job, .diag = diag, .json = json };
     image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
         return images_unreadable(diag, store);
@@ -504,6 +508,8 @@ const DuImages = struct {
     output_failed: bool = false,
 
     pub fn visit(self: *DuImages, image: *const images.Image) void {
+        assert(image.layer_count <= constants.registry_layers_max);
+        assert(self.count < constants.images_max);
         if (self.failure != null or self.output_failed) return;
         var result: usage.TreeUsage = undefined;
         var failure: usage.Failure = undefined;
@@ -525,6 +531,7 @@ const DuImages = struct {
 
     /// The layers' sizes as they are in the blob cache; a blob that was removed counts as none.
     fn compressed_bytes(self: *const DuImages, image: *const images.Image) u64 {
+        assert(image.layer_count <= constants.registry_layers_max);
         var total: u64 = 0;
         for (image.layers[0..image.layer_count]) |layer| {
             var path: fs_path_buffer = undefined;
@@ -546,6 +553,7 @@ fn du_image_text(
     result: *const usage.TreeUsage,
     compressed: u64,
 ) []const u8 {
+    assert(image.layer_count <= constants.registry_layers_max);
     var sizes: [4][32]u8 = undefined;
     var safe: [constants.store_source_bytes_max]u8 = undefined;
     const reference = text_util.sanitise(&safe, image.reference_text());
@@ -568,6 +576,7 @@ fn du_image_json(
     compressed: u64,
     index: u32,
 ) []const u8 {
+    assert(image.layer_count <= constants.registry_layers_max);
     var writer = std.Io.Writer.fixed(buffer);
     // Cannot fail: one object, the reference escaped being the bulk.
     if (index > 0) writer.writeByte(',') catch unreachable; // Same bound.

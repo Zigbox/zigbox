@@ -162,6 +162,7 @@ const Reporter = struct {
 /// Reads zbx.lock before any work, if the pull is going to record in it (a digest reference
 /// needs no lock): a lock that can not be read ends the pull now.
 fn check_lock(host: Host, store: *const Store, workspace: *Workspace, diag: *Diag) Error!void {
+    assert(workspace.reference.registry_len > 0);
     assert(diag.code == null);
     if (workspace.reference.digest != null) return;
     const locking = &workspace.unpack.locking;
@@ -176,6 +177,7 @@ fn check_lock(host: Host, store: *const Store, workspace: *Workspace, diag: *Dia
 /// Reads the image's configuration blob (checked by its digest when it arrived) into
 /// `workspace.settings`.
 fn read_settings(workspace: *Workspace, store: *const Store, diag: *Diag) Error!void {
+    assert(workspace.resolved.layer_count > 0);
     assert(diag.code == null);
     const config = workspace.resolved.config_digest;
     const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
