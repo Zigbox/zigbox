@@ -1,0 +1,50 @@
+# The top-20 check (docs/demos/m4.md): pull and run the twenty most-pulled official Docker Hub
+# images (src/testing/vm/top20.zon) in the test VM. Weekly and on demand, never on a pull
+# request. It uses the real Docker Hub, not the mirror the PR demos use, so it can meet the
+# anonymous pull limit; a 429 shows as that image's reason. One line per image goes to the job
+# summary; the job fails if an image fails without a documented reason.
+name: top20
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  top20:
+    name: top20 (Ubuntu 24.04 VM, KVM, real Docker Hub)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm
+          key: vm-image-${{ hashFiles('src/testing/vm/image.zon') }}
+      - name: Pull and run the twenty images
+        run: zig build top20 -Daccel=kvm 2>&1 | tee top20.log
+        shell: bash
+      - name: Results
+        if: always()
+        run: |
+          {
+            echo '### Top 20 official images'
+            echo
+            echo '```'
+            grep '^top20-result: ' top20.log | sort -u | sed 's/^top20-result: //'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -36,10 +36,10 @@ pub const Result = struct {
     reason: []const u8,
 };
 
-/// `zbx run --timeout` ended the container: exit 143 and the report says so.
-pub fn stopped_by_timeout(status: u8, stderr: []const u8) bool {
-    if (status != 143) return false;
-    return std.mem.indexOf(u8, stderr, "timed out after") != null;
+/// `zbx run --timeout` ended the container: the report says so. The exit code is the program's
+/// answer to SIGTERM, which varies (redis 0, mongo 143, registry 2), so it is not asked.
+pub fn stopped_by_timeout(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "zbx: stopped: timed out after") != null;
 }
 
 /// zbx failed before the command started (125) or could not start it (126, 127 from zbx).
@@ -50,7 +50,7 @@ pub fn command_started(status: u8) bool {
 pub fn judge(observed: Observed, known: []const u8) Verdict {
     if (!observed.pulled) return if (known.len > 0) .known else .fail;
     if (observed.status == 0) return .pass;
-    if (stopped_by_timeout(observed.status, observed.stderr)) return .pass;
+    if (stopped_by_timeout(observed.stderr)) return .pass;
     return if (known.len > 0) .known else .fail;
 }
 
@@ -143,6 +143,13 @@ test "a run passes on exit 0 or on the harness's own timeout, and on nothing els
         .stderr = "zbx: stopped: timed out after 20000 ms\n",
     };
     try testing.expectEqual(Verdict.pass, judge(timed, ""));
+    // The program's answer to SIGTERM may be any code.
+    const answered: Observed = .{
+        .pulled = true,
+        .status = 2,
+        .stderr = "zbx: stopped: timed out after 30000 ms\n",
+    };
+    try testing.expectEqual(Verdict.pass, judge(answered, ""));
     // 143 without the report is the container's own SIGTERM exit, not our timeout.
     const termed: Observed = .{ .pulled = true, .status = 143, .stderr = "" };
     try testing.expectEqual(Verdict.fail, judge(termed, ""));

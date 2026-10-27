@@ -7,30 +7,32 @@
 // then has run. An entry with a `known` reason is an image that cannot run its default command
 // as a rootless, unconfigured container: the run records that reason instead of a failure, and
 // the harness still runs it, so a note that is no longer true shows as a pass with a warning.
+// openjdk is deprecated on the Hub: it has no `latest` tag, only early-access ones, so this is the
+// newest slim JDK tag; if the Hub drops it the run says so (E0508) and the entry is replaced.
 // An empty `known` means the image must pass. A failure without a reason fails the whole run.
 .{
     .date = "2026-10-27",
     .source = "Docker Hub official images, ordered by pull count",
     .images = .{
-        .{ .ref = "nginx:latest", .known = "" },
+        .{ .ref = "nginx:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network" },
         .{ .ref = "memcached:latest", .known = "" },
         .{ .ref = "busybox:latest", .known = "" },
         .{ .ref = "alpine:latest", .known = "" },
-        .{ .ref = "postgres:latest", .known = "" },
+        .{ .ref = "postgres:latest", .known = "its entrypoint exits 1 without a root password (POSTGRES_PASSWORD); zbx run sets no environment variable yet" },
         .{ .ref = "redis:latest", .known = "" },
         .{ .ref = "ubuntu:latest", .known = "" },
         .{ .ref = "python:latest", .known = "" },
         .{ .ref = "node:latest", .known = "" },
-        .{ .ref = "mysql:latest", .known = "" },
+        .{ .ref = "mysql:latest", .known = "its entrypoint exits 1 without a root password (MYSQL_ROOT_PASSWORD); zbx run sets no environment variable yet" },
         .{ .ref = "mongo:latest", .known = "" },
-        .{ .ref = "httpd:latest", .known = "" },
+        .{ .ref = "httpd:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network" },
         .{ .ref = "rabbitmq:latest", .known = "" },
-        .{ .ref = "docker:latest", .known = "" },
-        .{ .ref = "traefik:latest", .known = "" },
+        .{ .ref = "docker:latest", .known = "its entrypoint starts dockerd, which mounts filesystems and opens raw sockets: mount is refused by the seccomp profile and the user namespace holds no CAP_SYS_ADMIN of the host, so a daemon cannot run in a rootless container" },
+        .{ .ref = "traefik:latest", .known = "its web entry point listens on port 80, which is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network" },
         .{ .ref = "hello-world:latest", .known = "" },
-        .{ .ref = "mariadb:latest", .known = "" },
+        .{ .ref = "mariadb:latest", .known = "its entrypoint exits 1 without a root password (MARIADB_ROOT_PASSWORD); zbx run sets no environment variable yet" },
         .{ .ref = "golang:latest", .known = "" },
-        .{ .ref = "openjdk:latest", .known = "" },
+        .{ .ref = "openjdk:28-ea-jdk-slim", .known = "" },
         .{ .ref = "registry:latest", .known = "" },
     },
 }

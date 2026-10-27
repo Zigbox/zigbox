@@ -1,7 +1,7 @@
 //! The top-20 check (docs/demos/m4.md, "The top-20 check"): pull each of the twenty images in
 //! `top20.zon` and run its default command in the harness's Ubuntu 24.04 VM, rootless, with a
 //! timeout. One line per image says whether it pulled, whether it ran, the exit code, a verdict
-//! and the reason. A seccomp refusal is told apart: after a failure the image runs again under
+//! and the reason. A seccomp refusal is told apart: the image runs again under
 //! `strace`, and every syscall that returned EPERM and is not on the allowlist is named in the
 //! `seccomp=` field. The weekly workflow runs this against the real Docker Hub; locally, name a
 //! mirror with `-Dmirror=mirror.gcr.io`. `zig build top20 -Daccel=tcg` for software emulation.
@@ -114,6 +114,7 @@ fn check(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try H.install_binary(&session, out, &timer);
     try write_wrapper(&session, out, options.mirror, ca_file.len > 0);
+    try make_output_files(&session);
     const traced = try install_strace(&session, out);
     const failures = try run_all(&session, out, arena, traced);
     try session.shutdown();
@@ -175,6 +176,9 @@ fn run_all(session: *Session, out: *Io.Writer, arena: std.mem.Allocator, traced:
         const line = try checks_top20.format_line(&buffer, result);
         lines[index] = try arena.dupe(u8, line);
         try out.print("\ntop20-result: {s}\n", .{lines[index]});
+        if (result.seccomp.len > 0 and result.verdict == .fail) {
+            try out.print("top20: SECCOMP: {s} was refused {s}\n", .{ entry.ref, result.seccomp });
+        }
         switch (result.verdict) {
             .pass => {},
             .known => known += 1,
@@ -189,10 +193,30 @@ fn run_all(session: *Session, out: *Io.Writer, arena: std.mem.Allocator, traced:
     return failures;
 }
 
-/// Runs `command` with stderr kept apart and the longer timeout of an image.
+/// The two files the container's output goes to. They are the demo user's, as a terminal or a
+/// pipe the user opened would be: an image that logs to /dev/stdout opens it again through
+/// /proc, and the kernel refuses that for a file whose owner is not mapped in the container
+/// (a root-owned console or pipe), so root's own redirects would fail such images for a reason
+/// that is the harness's.
+const out_file = "/tmp/top20-out";
+const err_file = "/tmp/top20-err";
+
+fn make_output_files(session: *Session) !void {
+    const made = try session.run(
+        "install -o demo -g demo -m 600 /dev/null " ++ out_file ++
+            " && install -o demo -g demo -m 600 /dev/null " ++ err_file,
+        limits.command_timeout_kvm_s,
+    );
+    if (made.status != 0) return error.PrepareFailed;
+}
+
+/// Runs `command` with stdout and stderr in the demo user's files, then prints the end of the
+/// first, the marker (checks.zig) and the second, so `split_streams` cuts them apart.
 fn split_long(session: *Session, command: []const u8) !H.SplitResult {
     var buffer: [limits.command_bytes_max]u8 = undefined;
-    const typed = try checks.split_command(&buffer, command);
+    const format = "{s} >" ++ out_file ++ " 2>" ++ err_file ++ "; ZBX_S=$?; tail -c 8192 " ++
+        out_file ++ "; echo ZBX-STDERR\"\"-FOLLOWS; tail -c 8192 " ++ err_file ++ "; exit $ZBX_S";
+    const typed = try std.fmt.bufPrint(&buffer, format, .{command});
     const result = try session.run(typed, image_timeout_s);
     const streams = try checks.split_streams(result.output);
     return .{ .streams = streams, .status = result.status };
@@ -240,8 +264,9 @@ fn try_image(
     result.status = ran.status;
     result.ran = checks_top20.command_started(ran.status);
     result.verdict = checks_top20.judge(observed, entry.known);
-    result.reason = reason_of(entry, result.verdict, stderr, "");
-    if (result.verdict != .pass) result.seccomp = try find_seccomp(session, out, entry, traced);
+    const refused = !checks_top20.command_started(ran.status);
+    result.reason = reason_of(entry, result.verdict, stderr, if (refused) "error[" else "");
+    result.seccomp = try find_seccomp(session, out, entry, traced);
     return result;
 }
 
@@ -259,7 +284,7 @@ fn reason_of(
     return checks_top20.last_line(stderr);
 }
 
-/// Runs the failed image again under strace and returns the syscalls that were refused with
+/// Runs the image again under strace and returns the syscalls that were refused with
 /// EPERM and are not on the allowlist: the filter's own refusals. "unchecked" without strace.
 fn find_seccomp(session: *Session, out: *Io.Writer, entry: Entry, traced: bool) ![]const u8 {
     if (!traced) return "unchecked";

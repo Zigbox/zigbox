@@ -8,11 +8,18 @@
 // profile gates calls behind (policy/capabilities.zon keeps twelve). So what is missing is what
 // those capabilities would have opened: mount and umount, unshare and setns, pivot_root, reboot,
 // kexec, module loading, bpf, perf_event_open, keyctl, userfaultfd, process_vm_readv, the
-// clock setters, swapon and the NUMA calls. Differences from Docker, all deliberate:
+// clock setters, swapon and the NUMA calls that change a policy. Differences from Docker, all
+// deliberate:
 //   - 64-bit syscalls only: the 32-bit variants (socketcall, ipc, *64 and *32 names) have no
 //     entry because the filter refuses the 32-bit architecture altogether.
 //   - io_uring is absent, as in current Docker profiles.
 //   - mknod is listed, as in Docker, and the kernel refuses devices without CAP_MKNOD.
+//
+// The list grows from real failures: the weekly top-20 run (docs/demos/m4.md) runs the twenty
+// most-pulled images and names every syscall a image was refused. What it found so far is
+// get_mempolicy (mongo) and fchmodat2 (the JDK image), both added with a reason in their group;
+// io_uring_setup (redis, node) stays refused because both fall back, and mount (docker, which
+// wants to mount inside its own container) stays refused because that is the point of the profile.
 //
 // A name that exists on neither architecture is a build error, so a typo cannot silently drop
 // a syscall; a name one architecture lacks (the legacy calls on aarch64) is skipped there.
@@ -43,11 +50,11 @@
         },
         .{
             .name = "memory",
-            .why = "Address space management: what every program, and every libc's allocator, does.",
+            .why = "Address space management: what every program, and every libc's allocator, does. get_mempolicy only reads the NUMA policy of the process's own memory, and mongod and some allocators ask at startup (found by the top-20 run); set_mempolicy, mbind and the other calls that change it stay out, as in Docker, for want of CAP_SYS_NICE.",
             .syscalls = .{
-                "brk",          "mmap",       "mprotect",  "munmap",        "mremap",    "madvise",          "mincore",    "mlock",
-                "mlock2",       "munlock",    "mlockall",  "munlockall",    "msync",     "remap_file_pages", "membarrier", "memfd_create",
-                "memfd_secret", "pkey_alloc", "pkey_free", "pkey_mprotect", "readahead", "modify_ldt",
+                "brk",          "mmap",       "mprotect",  "munmap",        "mremap",    "madvise",          "mincore",       "mlock",
+                "mlock2",       "munlock",    "mlockall",  "munlockall",    "msync",     "remap_file_pages", "membarrier",    "memfd_create",
+                "memfd_secret", "pkey_alloc", "pkey_free", "pkey_mprotect", "readahead", "modify_ldt",       "get_mempolicy",
             },
         },
         .{
@@ -63,16 +70,16 @@
         },
         .{
             .name = "files_metadata",
-            .why = "Looking at and changing the file tree: stat, directories, links, modes, owners, times, extended attributes and change notification. mknod is allowed because it makes fifos and files; without CAP_MKNOD the kernel refuses device nodes. chroot works because CAP_SYS_CHROOT is kept.",
+            .why = "Looking at and changing the file tree: stat, directories, links, modes, owners, times, extended attributes and change notification. mknod is allowed because it makes fifos and files; without CAP_MKNOD the kernel refuses device nodes. chroot works because CAP_SYS_CHROOT is kept. fchmodat2 is fchmodat with the flags argument that newer glibc (2.39 and later) uses for chmod on a symlink; a JVM asked for it (found by the top-20 run).",
             .syscalls = .{
-                "stat",         "fstat",         "lstat",             "newfstatat",       "statx",         "statfs",      "fstatfs",      "access",
-                "faccessat",    "faccessat2",    "readlink",          "readlinkat",       "getdents",      "getdents64",  "getcwd",       "chdir",
-                "fchdir",       "chroot",        "chmod",             "fchmod",           "fchmodat",      "chown",       "fchown",       "lchown",
-                "fchownat",     "mkdir",         "mkdirat",           "rmdir",            "rename",        "renameat",    "renameat2",    "link",
-                "linkat",       "symlink",       "symlinkat",         "unlink",           "unlinkat",      "mknod",       "mknodat",      "utime",
-                "utimes",       "utimensat",     "futimesat",         "umask",            "getxattr",      "lgetxattr",   "fgetxattr",    "setxattr",
-                "lsetxattr",    "fsetxattr",     "listxattr",         "llistxattr",       "flistxattr",    "removexattr", "lremovexattr", "fremovexattr",
-                "inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch", "fanotify_mark",
+                "stat",         "fstat",        "lstat",         "newfstatat",        "statx",            "statfs",        "fstatfs",     "access",
+                "faccessat",    "faccessat2",   "readlink",      "readlinkat",        "getdents",         "getdents64",    "getcwd",      "chdir",
+                "fchdir",       "chroot",       "chmod",         "fchmod",            "fchmodat",         "fchmodat2",     "chown",       "fchown",
+                "lchown",       "fchownat",     "mkdir",         "mkdirat",           "rmdir",            "rename",        "renameat",    "renameat2",
+                "link",         "linkat",       "symlink",       "symlinkat",         "unlink",           "unlinkat",      "mknod",       "mknodat",
+                "utime",        "utimes",       "utimensat",     "futimesat",         "umask",            "getxattr",      "lgetxattr",   "fgetxattr",
+                "setxattr",     "lsetxattr",    "fsetxattr",     "listxattr",         "llistxattr",       "flistxattr",    "removexattr", "lremovexattr",
+                "fremovexattr", "inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch", "fanotify_mark",
             },
         },
         .{
