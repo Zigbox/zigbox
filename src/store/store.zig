@@ -96,6 +96,7 @@ test {
     _ = @import("names.zig");
     _ = @import("sets.zig");
     _ = @import("import_tests.zig");
+    _ = @import("commit_tests.zig");
     _ = @import("usage_tests.zig");
     _ = @import("test_support.zig");
 }
