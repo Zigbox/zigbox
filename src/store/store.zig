@@ -13,9 +13,11 @@
 //!     objects/ab/<62 hex>.chunks      the chunk hashes of an object longer than one chunk
 //!     trees/ab/<62 hex>               a tree object: the canonical encoding of one directory
 //!     roots/<64 hex>                  a root record: why a tree is kept
-//!     cache/                          materialized trees, hardlink farms of objects (slice 2)
-//!     trash/<gc id>/                  what gc removed, until it expires (slice 4)
-//!     tmp/<pid>-<n>                   files being written; a crash leaves them here
+//!     cache/<64 hex>                  materialized trees, hardlink farms of objects
+//!     generation                      the counter every write to the store raises
+//!     trash/<gc id>/                  what gc moved: meta.zon, objects/ab/, trees/ab/, cache/
+//!     partial/<64 hex>/<n>            chunks of an object being written by `put_chunk`
+//!     tmp/<pid>-<n>                   files being written; a gc deletes a dead process's
 //!
 //! `ab` is the first byte of the id in hex. Ids and digests are BLAKE3 (std, unkeyed), shown as
 //! `b3:` and 64 lowercase hex digits; a prefix of 12 digits or more may be given and is never
@@ -40,6 +42,15 @@
 //! and nothing under an id that is not whole. The tests crash the simulated file system at every
 //! write point (`fs_sim.zig`) and check that the store holds only whole objects, trees and
 //! roots (`test_support.zig`), and that the same command, repeated, finishes the work.
+//!
+//! ## Verify, gc and restore
+//!
+//! `verify.zig` rehashes everything and names, for each damaged thing, the paths in the trees of
+//! the roots that reach it. `gc.zig` plans what no root and no running container reaches, applies
+//! a plan by its hash into `trash/<gc id>/` (never deleting), empties trash after
+//! `store_trash_seconds`, and `restore`s a trash. A killed gc or restore leaves a store that
+//! verifies clean: an object is moved before its chunk list and moved back after it, and a list
+//! with no object is a leftover, not damage. `chunks.zig` writes one object a chunk at a time.
 //!
 //! ## For Zigcube
 //!

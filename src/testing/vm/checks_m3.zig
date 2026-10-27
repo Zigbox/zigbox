@@ -176,6 +176,173 @@ pub fn check_changed(streams: Streams, status: u8, parent: []const u8) Error![]c
     return digest;
 }
 
+// ---- Slice 4: verify, gc, restore ------------------------------------------------------------
+
+/// The text after `key` in `text` up to the next `"`, or null.
+fn json_text(text: []const u8, key: []const u8) ?[]const u8 {
+    var needle: [64]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&needle, "\"{s}\":\"", .{key}) catch return null;
+    const at = std.mem.indexOf(u8, text, quoted) orelse return null;
+    const rest = text[at + quoted.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return rest[0..end];
+}
+
+/// The number after `key` in `text`.
+fn json_number(text: []const u8, key: []const u8) ?u64 {
+    var needle: [64]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&needle, "\"{s}\":", .{key}) catch return null;
+    const at = std.mem.indexOf(u8, text, quoted) orelse return null;
+    const rest = text[at + quoted.len ..];
+    var end: usize = 0;
+    while (end < rest.len and rest[end] >= '0' and rest[end] <= '9') end += 1;
+    if (end == 0) return null;
+    return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
+}
+
+/// The path `CORRUPTED:objects/ab/<62 hex>` the corrupting script printed, as the object's id
+/// text (`b3:` and 64 digits) in `buffer`.
+pub fn corrupted_id(output: []const u8, buffer: *[67]u8) Error![]const u8 {
+    const marker = "CORRUPTED:objects/";
+    const at = std.mem.indexOf(u8, output, marker) orelse return error.LineMissing;
+    const rest = output[at + marker.len ..];
+    if (rest.len < 2 + 1 + 62) return error.LineMissing;
+    if (rest[2] != '/') return error.LineMissing;
+    const text = std.fmt.bufPrint(buffer, "b3:{s}{s}", .{ rest[0..2], rest[3..65] }) catch {
+        return error.LineMissing;
+    };
+    if (!is_digest(text)) return error.DigestWrong;
+    return text;
+}
+
+/// `verify` of a whole store: exit 0, one line on stdout saying so, nothing on stderr.
+pub fn check_verify_clean(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!contains(streams.stdout, ": no damage")) return error.LineMissing;
+}
+
+/// `verify` of a store with one object damaged by hand: exit 2, one E0429 naming the object,
+/// the summary E0430, and the damage counted on stdout.
+pub fn check_verify_damaged(streams: Streams, status: u8, id: []const u8) Error!void {
+    if (status != 2) return error.ExitCodeWrong;
+    if (std.mem.count(u8, streams.stderr, "error[ZBX-E0429]") != 1) return error.ReportWrong;
+    if (std.mem.count(u8, streams.stderr, "error[ZBX-E0430]") != 1) return error.ReportWrong;
+    if (!contains(streams.stderr, id)) return error.ReportWrong;
+    if (!contains(streams.stderr, "/etc/passwd")) return error.ReportWrong;
+    if (!contains(streams.stdout, "1 damaged")) return error.LineMissing;
+}
+
+/// The same in JSON: the damaged thing, its id, and the path `/etc/passwd` in at least `roots`
+/// root trees (each a `"root"` and `"path"` pair).
+pub fn check_verify_json(streams: Streams, status: u8, id: []const u8, roots: u32) Error!void {
+    if (status != 2) return error.ExitCodeWrong;
+    if (!contains(streams.stdout, "\"schema\":\"zbx.store.verify/1\"")) return error.ReportWrong;
+    if (!contains(streams.stdout, "\"ok\":false")) return error.ReportWrong;
+    if (json_number(streams.stdout, "damaged") != 1) return error.ReportWrong;
+    if (!contains(streams.stdout, id)) return error.ReportWrong;
+    if (!contains(streams.stdout, "\"kind\":\"content\"")) return error.ReportWrong;
+    const reached = json_number(streams.stdout, "reached") orelse return error.ReportWrong;
+    if (reached < roots) return error.ReportWrong;
+    const paths = std.mem.count(u8, streams.stdout, "\"path\":\"/etc/passwd\"");
+    if (paths < roots) return error.ReportWrong;
+}
+
+/// A gc plan in JSON: not applied, with at least `bytes` bytes, one chunk list at least and
+/// `tmp` leftovers; returns the hash to confirm with.
+pub fn check_plan(streams: Streams, status: u8, bytes: u64, tmp: u64) Error![]const u8 {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!contains(streams.stdout, "\"applied\":false")) return error.ReportWrong;
+    if ((json_number(streams.stdout, "bytes") orelse 0) < bytes) return error.ReportWrong;
+    if ((json_number(streams.stdout, "lists") orelse 0) == 0) return error.ReportWrong;
+    if ((json_number(streams.stdout, "objects") orelse 0) == 0) return error.ReportWrong;
+    if ((json_number(streams.stdout, "tmp") orelse 0) != tmp) return error.ReportWrong;
+    const hash = json_text(streams.stdout, "plan") orelse return error.LineMissing;
+    if (!is_digest(hash)) return error.DigestWrong;
+    return hash;
+}
+
+/// A confirmation with a hash that is not the plan: E0431, exit 1, nothing on stdout, and the
+/// plan as it is now (`fresh`, null to take any) in the message.
+pub fn check_stale(streams: Streams, status: u8, fresh: ?[]const u8) Error!void {
+    if (status != 1) return error.ExitCodeWrong;
+    if (!contains(streams.stderr, "error[ZBX-E0431]")) return error.ReportWrong;
+    if (streams.stdout.len != 0) return error.ReportWrong;
+    if (fresh) |hash| {
+        if (!contains(streams.stderr, hash)) return error.ReportWrong;
+    }
+}
+
+/// The new plan hash a stale refusal gave, from its fix `zbx store gc --confirm <hash>`.
+pub fn stale_hash(stderr: []const u8) Error![]const u8 {
+    const marker = "zbx store gc --confirm ";
+    const at = std.mem.indexOf(u8, stderr, marker) orelse return error.LineMissing;
+    const rest = stderr[at + marker.len ..];
+    if (rest.len < 67) return error.LineMissing;
+    if (!is_digest(rest[0..67])) return error.DigestWrong;
+    return rest[0..67];
+}
+
+/// A confirmed gc in JSON: applied, with the plan's hash, a gc id of 12 digits, and what was
+/// moved (at least `bytes` bytes, `tmp` leftovers deleted); returns the gc id.
+pub fn check_applied(
+    streams: Streams,
+    status: u8,
+    plan: []const u8,
+    bytes: u64,
+    tmp: u64,
+) Error![]const u8 {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!contains(streams.stdout, "\"applied\":true")) return error.ReportWrong;
+    if (!std.mem.eql(
+        u8,
+        json_text(streams.stdout, "plan") orelse "",
+        plan,
+    )) return error.ReportWrong;
+    if ((json_number(streams.stdout, "bytes") orelse 0) < bytes) return error.ReportWrong;
+    if ((json_number(streams.stdout, "tmp") orelse 0) != tmp) return error.ReportWrong;
+    const id = json_text(streams.stdout, "gc") orelse return error.LineMissing;
+    if (id.len != 12) return error.DigestWrong;
+    if (!std.mem.startsWith(u8, plan[3..], id)) return error.DigestWrong; // The id is the plan's.
+    return id;
+}
+
+/// The store's total bytes in `zbx --output json store du`.
+pub fn store_total_bytes(stdout: []const u8) Error!u64 {
+    const at = std.mem.indexOf(u8, stdout, "\"store\":{") orelse return error.LineMissing;
+    return json_number(stdout[at..], "bytes") orelse error.LineMissing;
+}
+
+/// The store shrank by at least `drop` bytes between two `du` outputs.
+pub fn check_shrank(before: u64, after: u64, drop: u64) Error!void {
+    if (after >= before) return error.StoreChanged;
+    if (before - after < drop) return error.StoreChanged;
+}
+
+/// `gc --trash` lists the gc id as complete.
+pub fn check_trash_listed(streams: Streams, status: u8, id: []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!contains(streams.stdout, id)) return error.LineMissing;
+    if (!contains(streams.stdout, "complete")) return error.LineMissing;
+}
+
+/// A restore: exit 0 and the counts of what came back.
+pub fn check_restored(streams: Streams, status: u8, id: []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!contains(streams.stdout, "restored")) return error.LineMissing;
+    if (!contains(streams.stdout, id)) return error.LineMissing;
+}
+
+/// A restore of a trash that is not there: E0433, exit 1.
+pub fn check_no_trash(streams: Streams, status: u8) Error!void {
+    if (status != 1) return error.ExitCodeWrong;
+    if (!contains(streams.stderr, "error[ZBX-E0433]")) return error.ReportWrong;
+    if (streams.stdout.len != 0) return error.ReportWrong;
+}
+
 const testing = std.testing;
 
 fn repeat(comptime byte: u8, comptime count: usize) [count]u8 {
@@ -315,4 +482,174 @@ test "a commit prints the parent's digest only if nothing changed" {
     try testing.expectEqualStrings(child, printed);
     try testing.expectError(error.DigestWrong, check_changed(same, 0, parent));
     try testing.expectError(error.ExitCodeWrong, check_changed(other, 1, parent));
+}
+
+test "the corrupted object's id is read from the script's line" {
+    var buffer: [67]u8 = undefined;
+    const line = "CORRUPTED:objects/ab/" ++ repeat('c', 62) ++ "\n";
+    try testing.expectEqualStrings("b3:ab" ++ repeat('c', 62), try corrupted_id(line, &buffer));
+    try testing.expectError(error.LineMissing, corrupted_id("nothing\n", &buffer));
+    try testing.expectError(error.LineMissing, corrupted_id("CORRUPTED:objects/ab/c\n", &buffer));
+    const bad = "CORRUPTED:objects/ab/" ++ repeat('G', 62);
+    try testing.expectError(error.DigestWrong, corrupted_id(bad, &buffer));
+}
+
+test "verify: clean needs exit 0 and a quiet stderr; damage needs exit 2 and the report" {
+    const clean = out_err("checked 3 objects (1 B), 2 trees, 1 roots: no damage\n", "");
+    try check_verify_clean(clean, 0);
+    try testing.expectError(error.ExitCodeWrong, check_verify_clean(clean, 2));
+    try testing.expectError(
+        error.StderrNotEmpty,
+        check_verify_clean(out_err(clean.stdout, "w"), 0),
+    );
+    try testing.expectError(error.LineMissing, check_verify_clean(out_err("hi\n", ""), 0));
+    const id = "b3:" ++ repeat('a', 64);
+    const damaged = out_err(
+        "checked 3 objects (1 B), 2 trees, 1 roots: 1 damaged\n",
+        "error[ZBX-E0429]: x\n  cause  object " ++ id ++ " reached by /etc/passwd\n" ++
+            "error[ZBX-E0430]: y\n",
+    );
+    try check_verify_damaged(damaged, 2, id);
+    try testing.expectError(error.ExitCodeWrong, check_verify_damaged(damaged, 1, id));
+    try testing.expectError(
+        error.ReportWrong,
+        check_verify_damaged(damaged, 2, "b3:" ++ repeat('b', 64)),
+    );
+    try testing.expectError(
+        error.ReportWrong,
+        check_verify_damaged(out_err(damaged.stdout, "error[ZBX-E0429] " ++ id), 2, id),
+    );
+    try testing.expectError(
+        error.LineMissing,
+        check_verify_damaged(out_err("ok\n", damaged.stderr), 2, id),
+    );
+}
+
+test "verify in JSON: the id, the kind, the count and the path in each root" {
+    const id = "b3:" ++ repeat('a', 64);
+    const root = "b3:" ++ repeat('r', 64);
+    const head = "{\"schema\":\"zbx.store.verify/1\",\"ok\":false,\"damaged\":1,";
+    const one = "{\"root\":\"" ++ root ++ "\",\"path\":\"/etc/passwd\"}";
+    const json = head ++ "\"things\":[{\"id\":\"" ++ id ++ "\",\"kind\":\"content\"," ++
+        "\"reached\":2,\"paths\":[" ++ one ++ "," ++ one ++ "]}]}";
+    try check_verify_json(out_err(json, ""), 2, id, 2);
+    try testing.expectError(error.ReportWrong, check_verify_json(out_err(json, ""), 2, id, 3));
+    try testing.expectError(error.ExitCodeWrong, check_verify_json(out_err(json, ""), 0, id, 2));
+    const other = std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        json,
+        "content",
+        "chunk_list",
+    ) catch unreachable; // Cannot fail: a small test string.
+    defer testing.allocator.free(other);
+    try testing.expectError(error.ReportWrong, check_verify_json(out_err(other, ""), 2, id, 2));
+}
+
+const plan_head = "{\"schema\":\"zbx.store.gc/1\",\"applied\":false,\"plan\":\"b3:";
+const plan_tail = "\",\"generation\":9,\"objects\":2,\"lists\":1,\"trees\":3,\"farms\":0," ++
+    "\"tmp\":1,\"bytes\":8000100}";
+const plan_json = plan_head ++ repeat('1', 64) ++ plan_tail;
+
+test "a plan: not applied, big enough, with a hash, and the leftovers it was told of" {
+    const hash = try check_plan(out_err(plan_json, ""), 0, 8_000_000, 1);
+    try testing.expectEqualStrings("b3:" ++ repeat('1', 64), hash);
+    try testing.expectError(error.ReportWrong, check_plan(out_err(plan_json, ""), 0, 9_000_000, 1));
+    try testing.expectError(error.ReportWrong, check_plan(out_err(plan_json, ""), 0, 8_000_000, 0));
+    try testing.expectError(error.ExitCodeWrong, check_plan(out_err(plan_json, ""), 1, 0, 1));
+    try testing.expectError(error.StderrNotEmpty, check_plan(out_err(plan_json, "w"), 0, 0, 1));
+    const applied = std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        plan_json,
+        "false",
+        "true",
+    ) catch unreachable; // Cannot fail: a small test string.
+    defer testing.allocator.free(applied);
+    try testing.expectError(error.ReportWrong, check_plan(out_err(applied, ""), 0, 0, 1));
+}
+
+test "a stale confirmation is E0431 and exit 1, with the fresh hash; the fix gives it back" {
+    const fresh = "b3:" ++ repeat('2', 64);
+    const fix = "  fix    read the plan again:   zbx store gc --confirm ";
+    const text = out_err("", "error[ZBX-E0431]: the store changed\n" ++ fix ++ fresh ++ "\n");
+    try check_stale(text, 1, fresh);
+    try check_stale(text, 1, null);
+    try testing.expectError(error.ExitCodeWrong, check_stale(text, 0, fresh));
+    try testing.expectError(error.ReportWrong, check_stale(text, 1, "b3:" ++ repeat('3', 64)));
+    try testing.expectError(error.ReportWrong, check_stale(out_err("x", text.stderr), 1, fresh));
+    try testing.expectEqualStrings(fresh, try stale_hash(text.stderr));
+    try testing.expectError(error.LineMissing, stale_hash("nothing"));
+}
+
+test "an applied gc: the plan's hash, the id that is the hash's start, and what it moved" {
+    const plan = "b3:" ++ repeat('4', 64);
+    const json = "{\"schema\":\"zbx.store.gc/1\",\"applied\":true,\"plan\":\"" ++ plan ++
+        "\",\"gc\":\"444444444444\",\"objects\":2,\"tmp\":1,\"bytes\":8000100}";
+    try testing.expectEqualStrings(
+        "444444444444",
+        try check_applied(out_err(json, ""), 0, plan, 8_000_000, 1),
+    );
+    try testing.expectError(
+        error.ReportWrong,
+        check_applied(out_err(json, ""), 0, "b3:" ++ repeat('5', 64), 0, 1),
+    );
+    try testing.expectError(
+        error.ReportWrong,
+        check_applied(out_err(json, ""), 0, plan, 9_000_000, 1),
+    );
+    try testing.expectError(error.ReportWrong, check_applied(out_err(json, ""), 0, plan, 0, 2));
+    try testing.expectError(error.ExitCodeWrong, check_applied(out_err(json, ""), 2, plan, 0, 1));
+    const odd = std.mem.replaceOwned(
+        u8,
+        testing.allocator,
+        json,
+        "\"gc\":\"444444444444",
+        "\"gc\":\"555555555555",
+    ) catch unreachable; // Cannot fail: a small test string.
+    defer testing.allocator.free(odd);
+    try testing.expectError(error.DigestWrong, check_applied(out_err(odd, ""), 0, plan, 0, 1));
+}
+
+test "the store's bytes shrink by the freed file, and the trash is listed and restored" {
+    const big = "{\"schema\":\"zbx.store.du/1\",\"store\":{\"bytes\":15000000,\"objects\":5}}";
+    const small = "{\"store\":{\"bytes\":6999900,\"objects\":4,\"trees\":1}}";
+    const before = try store_total_bytes(big);
+    const after = try store_total_bytes(small);
+    try testing.expectEqual(@as(u64, 15000000), before);
+    try check_shrank(before, after, 8_000_000);
+    try testing.expectError(error.StoreChanged, check_shrank(before, after, 8_100_000));
+    try testing.expectError(error.StoreChanged, check_shrank(after, before, 1));
+    try testing.expectError(error.LineMissing, store_total_bytes("{}"));
+    try check_trash_listed(out_err("GC  x\n444444444444 ... complete\n", ""), 0, "444444444444");
+    try testing.expectError(
+        error.LineMissing,
+        check_trash_listed(out_err("GC\n", ""), 0, "444444444444"),
+    );
+    try testing.expectError(
+        error.LineMissing,
+        check_trash_listed(out_err("444444444444 incomplete?\n", ""), 0, "555555555555"),
+    );
+    try check_restored(
+        out_err("restored 2 objects from the trash 444444444444\n", ""),
+        0,
+        "444444444444",
+    );
+    try testing.expectError(
+        error.LineMissing,
+        check_restored(out_err("nothing\n", ""), 0, "444444444444"),
+    );
+    try testing.expectError(
+        error.ExitCodeWrong,
+        check_restored(out_err("restored 444444444444", ""), 1, "444444444444"),
+    );
+    try check_no_trash(out_err("", "error[ZBX-E0433]: no trash\n"), 1);
+    try testing.expectError(
+        error.ReportWrong,
+        check_no_trash(out_err("", "error[ZBX-E0432]\n"), 1),
+    );
+    try testing.expectError(
+        error.ExitCodeWrong,
+        check_no_trash(out_err("", "error[ZBX-E0433]\n"), 2),
+    );
 }

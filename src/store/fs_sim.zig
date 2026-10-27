@@ -186,6 +186,8 @@ pub const SimFs = struct {
     }
 
     fn find(sim: *const SimFs, path: []const u8) ?u32 {
+        // A path is a C string: a NUL inside one is a buffer reused while a slice of it was kept.
+        assert(std.mem.indexOfScalar(u8, path, 0) == null);
         for (sim.nodes[0..sim.count], 0..) |*node, index| {
             if (node.alive and std.mem.eql(u8, node.text(), path)) return @intCast(index);
         }

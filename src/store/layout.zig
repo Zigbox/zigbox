@@ -7,8 +7,10 @@
 //!   <root>/objects/ab/<62 hex>.chunks the hashes of its chunks, only for a file longer than one
 //!   <root>/trees/ab/<62 hex>          a tree object (the encoding of `tree.zig`)
 //!   <root>/roots/<64 hex>             a root record: why the tree is kept
-//!   <root>/cache/                     materialized trees (slice 2)
-//!   <root>/trash/                     what gc removed, until it expires (slice 4)
+//!   <root>/cache/                     materialized trees
+//!   <root>/generation                 the counter every write to the store raises
+//!   <root>/trash/<gc id>/             what gc moved, until it expires
+//!   <root>/partial/<id>/<n>           chunks of an object being written chunk by chunk
 //!   <root>/tmp/<pid>-<n>              files being written; a crash leaves them here
 //!
 //! The root is `$XDG_DATA_HOME/zbx/store`, or `~/.local/share/zbx/store`. `ab` is the first byte

@@ -18,6 +18,14 @@
 //!   7. A commit of a running container is ZBX-E0427; of a run on a directory ZBX-E0426; of a
 //!      container that changed nothing it prints the parent's digest. (There is no network in
 //!      the guest's containers yet, so `apk add` is not part of the demo: file operations are.)
+//!   8. Corrupt the object of `/etc/passwd` by hand: `zbx store verify` exits 2 and names the
+//!      object, its file and the paths (`/etc/passwd`) in the root trees that reach it, in text
+//!      and in JSON; deleting the file and importing again makes it clean.
+//!   9. gc: drop two roots; a plan (with a dead leftover in `tmp/`) names what they free; a
+//!      wrong hash, and then the right hash after a write to the store, are refused with the
+//!      new hash; the fresh hash is applied and the store shrinks by the big file; the trash is
+//!      listed and verify is clean; restore puts it back (the store is as large as before and
+//!      the materialized directory is back) and a second restore is refused.
 //! `zig build demo-m3` (KVM) or `zig build demo-m3 -Daccel=tcg`. See docs/demos/m3.md.
 
 const std = @import("std");
@@ -97,8 +105,10 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try step_read_only(&session, out, &timer, digest);
     try step_root_mode(&session, out, &timer);
     try step_refusals(&session, out, &timer, digest);
-    try step_commit(&session, out, &timer);
+    const big = try step_commit(&session, out, &timer);
     try step_commit_refusals(&session, out, &timer, digest);
+    try step_verify(&session, out, &timer);
+    try step_gc(&session, out, &timer, big);
     try session.shutdown();
     return 0;
 }
@@ -368,7 +378,10 @@ const ops_diff =
     "M /etc/passwd  mode\n" ++
     "D /etc/shadow\n";
 
-fn step_commit(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+/// The two trees step 6 made: the one with the 8 MB file, and the commit without it.
+const BigTrees = struct { parent: []const u8, child: []const u8 };
+
+fn step_commit(session: *Session, out: *Io.Writer, timer: *H.Timer) !BigTrees {
     try out.print("\ndemo-m3: STEP 6: commit what a container changed, and diff\n", .{});
     const arena = session.scratch_allocator();
     const big_dir = "/home/demo/alpine-big";
@@ -406,6 +419,7 @@ fn step_commit(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const child_copy = try arena.dupe(u8, child);
     try step_diff(session, out, parent_copy, child_copy);
     try timer.lap(out, "commit and diff");
+    return .{ .parent = parent_copy, .child = child_copy };
 }
 
 fn step_diff(session: *Session, out: *Io.Writer, parent: []const u8, child: []const u8) !void {
@@ -497,6 +511,240 @@ fn step_commit_refusals(
         return fail_step(out, "STEP 7", "expected the parent's digest back", err);
     };
     try timer.lap(out, "commit refusals");
+}
+
+/// Finds the object `/etc/passwd` became, changes its first byte, and prints where it was.
+const corrupt_script =
+    "set -e\n" ++
+    "cd " ++ store_dir ++ "\n" ++
+    "for f in $(find objects -type f ! -name '*.chunks'); do\n" ++
+    "  if cmp -s $f " ++ rootfs_dir ++ "/etc/passwd; then\n" ++
+    "    printf X | dd of=$f bs=1 seek=0 conv=notrunc 2>/dev/null\n" ++
+    "    echo CORRUPTED:$f\n" ++
+    "    break\n" ++
+    "  fi\n" ++
+    "done\n";
+
+fn step_verify(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m3: STEP 8: verify names a damaged object and where it matters\n", .{});
+    const arena = session.scratch_allocator();
+    try put(session, "/tmp/corrupt.sh", corrupt_script);
+    const clean = zbx ++ " store verify";
+    const before = try H.run_split(session, clean);
+    try H.show_split(out, clean, before);
+    checks_m3.check_verify_clean(before.streams, before.status) catch |err| {
+        return fail_step(out, "STEP 8", "expected a clean store before the damage", err);
+    };
+    const corrupt = H.as_demo ++ "sh /tmp/corrupt.sh";
+    const done = try H.run_split(session, corrupt);
+    try H.show_split(out, corrupt, done);
+    var id_buffer: [67]u8 = undefined;
+    const found = checks_m3.corrupted_id(done.streams.stdout, &id_buffer) catch |err| {
+        return fail_step(out, "STEP 8", "expected the script to damage an object", err);
+    };
+    const id = try arena.dupe(u8, found);
+    const damaged = try H.run_split(session, clean);
+    try H.show_split(out, clean, damaged);
+    checks_m3.check_verify_damaged(damaged.streams, damaged.status, id) catch |err| {
+        return fail_step(out, "STEP 8", "expected exit 2 and the object, file and path named", err);
+    };
+    const json_command = zbx ++ " --output json store verify";
+    const json = try H.run_split(session, json_command);
+    try H.show_split(out, json_command, json);
+    checks_m3.check_verify_json(json.streams, json.status, id, 3) catch |err| {
+        return fail_step(out, "STEP 8", "expected /etc/passwd under at least three roots", err);
+    };
+    const remove = try std.fmt.allocPrint(
+        arena,
+        "{s}rm -f {s}/objects/{s}/{s}",
+        .{ H.as_demo, store_dir, id[3..5], id[5..] },
+    );
+    const removed = try H.run_split(session, remove);
+    try H.show_split(out, remove, removed);
+    if (removed.status != 0) return fail_step(out, "STEP 8", "the repair", error.RunFailed);
+    const import = zbx ++ " store import " ++ rootfs_dir;
+    const repaired = try H.run_split(session, import);
+    try H.show_split(out, import, repaired);
+    if (repaired.status != 0) return fail_step(out, "STEP 8", "the repair", error.RunFailed);
+    const again = try H.run_split(session, clean);
+    try H.show_split(out, clean, again);
+    checks_m3.check_verify_clean(again.streams, again.status) catch |err| {
+        return fail_step(out, "STEP 8", "expected a clean store after the repair", err);
+    };
+    try timer.lap(out, "verify");
+}
+
+/// `zbx --output json store du`, the store's total bytes.
+fn store_bytes(session: *Session, out: *Io.Writer) !u64 {
+    const command = zbx ++ " --output json store du";
+    const result = try H.run_split(session, command);
+    try H.show_split(out, command, result);
+    if (result.status != 0) return error.RunFailed;
+    return try checks_m3.store_total_bytes(result.streams.stdout);
+}
+
+fn step_gc(session: *Session, out: *Io.Writer, timer: *H.Timer, big: BigTrees) !void {
+    try out.print(
+        "\ndemo-m3: STEP 9: gc plans, refuses a stale hash, applies, and restores\n",
+        .{},
+    );
+    const arena = session.scratch_allocator();
+    const total_before = try store_bytes(session, out);
+    const leftover = H.as_demo ++ "touch " ++ store_dir ++ "/tmp/99999-0";
+    _ = try H.run_split(session, leftover);
+    for ([_][]const u8{ big.parent, big.child }) |digest| {
+        const command = try std.fmt.allocPrint(arena, "{s} store rm {s}", .{ zbx, digest[3..15] });
+        const dropped = try H.run_split(session, command);
+        try H.show_split(out, command, dropped);
+        if (dropped.status != 0) return fail_step(
+            out,
+            "STEP 9",
+            "dropping a root",
+            error.RunFailed,
+        );
+    }
+    const plan_command = zbx ++ " --output json store gc";
+    const planned = try H.run_split(session, plan_command);
+    try H.show_split(out, plan_command, planned);
+    const first = checks_m3.check_plan(planned.streams, planned.status, 8_000_000, 1) catch |err| {
+        return fail_step(out, "STEP 9", "expected a plan of at least 8 MB and one leftover", err);
+    };
+    const hash = try arena.dupe(u8, first);
+    try step_gc_stale(session, out, hash);
+    const fresh = try step_gc_fresh(session, out, hash);
+    const apply = try std.fmt.allocPrint(
+        arena,
+        "{s} --output json store gc --confirm {s}",
+        .{ zbx, fresh },
+    );
+    const applied = try H.run_split(session, apply);
+    try H.show_split(out, apply, applied);
+    const found = checks_m3.check_applied(
+        applied.streams,
+        applied.status,
+        fresh,
+        8_000_000,
+        1,
+    ) catch |err| {
+        return fail_step(out, "STEP 9", "expected the fresh plan applied", err);
+    };
+    const id = try arena.dupe(u8, found);
+    try step_gc_after(session, out, big, id, total_before);
+    try timer.lap(out, "gc");
+}
+
+/// A hash that is not the plan, and then the plan's own hash after a write to the store, are
+/// refused. Returns nothing: the fresh hash is read again by the caller from a new plan.
+fn step_gc_stale(session: *Session, out: *Io.Writer, hash: []const u8) !void {
+    const arena = session.scratch_allocator();
+    const zeros = "0000000000000000000000000000000000000000000000000000000000000000";
+    const wrong = zbx ++ " store gc --confirm b3:" ++ zeros;
+    const refused = try H.run_split(session, wrong);
+    try H.show_split(out, wrong, refused);
+    checks_m3.check_stale(refused.streams, refused.status, hash) catch |err| {
+        return fail_step(out, "STEP 9", "expected E0431 for a wrong hash", err);
+    };
+    // A write to the store: importing the rootfs again raises the generation.
+    const write = zbx ++ " store import " ++ rootfs_dir;
+    const wrote = try H.run_split(session, write);
+    try H.show_split(out, write, wrote);
+    const late = try std.fmt.allocPrint(arena, "{s} store gc --confirm {s}", .{ zbx, hash });
+    const stale = try H.run_split(session, late);
+    try H.show_split(out, late, stale);
+    checks_m3.check_stale(stale.streams, stale.status, null) catch |err| {
+        return fail_step(out, "STEP 9", "expected the old hash refused after a write", err);
+    };
+}
+
+/// The plan as the store is now: its hash differs from the old one and is what the refusal said.
+fn step_gc_fresh(session: *Session, out: *Io.Writer, old: []const u8) ![]const u8 {
+    const arena = session.scratch_allocator();
+    const late = try std.fmt.allocPrint(arena, "{s} store gc --confirm {s}", .{ zbx, old });
+    const stale = try H.run_split(session, late);
+    const said = try arena.dupe(u8, try checks_m3.stale_hash(stale.streams.stderr));
+    const plan_command = zbx ++ " --output json store gc";
+    const planned = try H.run_split(session, plan_command);
+    try H.show_split(out, plan_command, planned);
+    const again = checks_m3.check_plan(planned.streams, planned.status, 8_000_000, 1) catch |err| {
+        return fail_step(out, "STEP 9", "expected a plan again", err);
+    };
+    if (std.mem.eql(u8, again, old) or !std.mem.eql(u8, again, said)) {
+        return fail_step(
+            out,
+            "STEP 9",
+            "expected the refusal's hash to be the new plan",
+            error.DigestWrong,
+        );
+    }
+    return said;
+}
+
+fn step_gc_after(
+    session: *Session,
+    out: *Io.Writer,
+    big: BigTrees,
+    id: []const u8,
+    total_before: u64,
+) !void {
+    const arena = session.scratch_allocator();
+    const farm = try std.fmt.allocPrint(
+        arena,
+        "test -e {s}/cache/{s} && echo FARM-THERE || echo FARM-GONE",
+        .{ store_dir, big.parent[3..] },
+    );
+    const gone = try session.run(farm, limits.command_timeout_kvm_s);
+    try H.show(out, "the materialized directory of the dropped tree", gone);
+    if (std.mem.indexOf(u8, gone.output, "FARM-GONE") == null) {
+        return fail_step(
+            out,
+            "STEP 9",
+            "expected the dead materialized directory moved",
+            error.NotFresh,
+        );
+    }
+    const total_after = try store_bytes(session, out);
+    checks_m3.check_shrank(total_before, total_after, 8_000_000) catch |err| {
+        return fail_step(out, "STEP 9", "expected the store to shrink by the big file", err);
+    };
+    const trash = zbx ++ " store gc --trash";
+    const listed = try H.run_split(session, trash);
+    try H.show_split(out, trash, listed);
+    checks_m3.check_trash_listed(listed.streams, listed.status, id) catch |err| {
+        return fail_step(out, "STEP 9", "expected the trash listed as complete", err);
+    };
+    const clean = zbx ++ " store verify";
+    const verified = try H.run_split(session, clean);
+    try H.show_split(out, clean, verified);
+    checks_m3.check_verify_clean(verified.streams, verified.status) catch |err| {
+        return fail_step(out, "STEP 9", "expected a clean store after the gc", err);
+    };
+    const restore = try std.fmt.allocPrint(arena, "{s} store restore {s}", .{ zbx, id });
+    const restored = try H.run_split(session, restore);
+    try H.show_split(out, restore, restored);
+    checks_m3.check_restored(restored.streams, restored.status, id) catch |err| {
+        return fail_step(out, "STEP 9", "expected the trash restored", err);
+    };
+    const back = try session.run(farm, limits.command_timeout_kvm_s);
+    if (std.mem.indexOf(u8, back.output, "FARM-THERE") == null) {
+        return fail_step(out, "STEP 9", "expected the materialized directory back", error.NotFresh);
+    }
+    if (try store_bytes(session, out) != total_before) {
+        return fail_step(
+            out,
+            "STEP 9",
+            "expected the store as large as before",
+            error.StoreChanged,
+        );
+    }
+    const final = try H.run_split(session, clean);
+    checks_m3.check_verify_clean(final.streams, final.status) catch |err| {
+        return fail_step(out, "STEP 9", "expected a clean store after the restore", err);
+    };
+    const again = try H.run_split(session, restore);
+    try H.show_split(out, restore, again);
+    checks_m3.check_no_trash(again.streams, again.status) catch |err| {
+        return fail_step(out, "STEP 9", "expected E0433 for the restored trash", err);
+    };
 }
 
 test {

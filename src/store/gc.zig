@@ -326,6 +326,14 @@ const Run = struct {
         return error.Failed;
     }
 
+    /// Like `io`, for a call that kept the errno it failed with (`write_atomic` cleans up after
+    /// itself, which overwrites the file system's last errno).
+    fn io_noted(run: *Run, step: []const u8, noted: *const fs_mod.Failure) Error {
+        assert(step.len > 0);
+        run.failure.* = .{ .io = .{ .err = noted.err, .errno = noted.errno, .step = step } };
+        return error.Failed;
+    }
+
     pub fn entry(run: *Run, found: *const tree.Entry) void {
         assert(@intFromPtr(found) != 0);
         assert(run.objects.slots.len > 0);
@@ -750,18 +758,13 @@ fn create_trash(run: *Run, gc: Id, meta: *const Meta) Error!void {
     var temporary_storage: PathBuf = undefined;
     const temporary = run.store.tmp_path(&temporary_storage);
     var failure: fs_mod.Failure = undefined;
-    var scratch_storage: PathBuf = undefined;
+    var staged_storage: PathBuf = undefined;
+    var tmp_storage: PathBuf = undefined;
     // The file is first written in tmp/, where nothing reads it as a trash.
-    const staged = run.store.path(&scratch_storage, &.{ "/tmp/gc-", &gc });
-    fs.write_atomic(
-        temporary,
-        staged,
-        run.store.directory_path(&scratch_storage, "tmp"),
-        bytes,
-        0o644,
-        &failure,
-    ) catch |err| {
-        return run.io("writing the trash's metadata", err);
+    const staged = run.store.path(&staged_storage, &.{ "/tmp/gc-", &gc });
+    const tmp_directory = run.store.directory_path(&tmp_storage, "tmp");
+    fs.write_atomic(temporary, staged, tmp_directory, bytes, 0o644, &failure) catch {
+        return run.io_noted("writing the trash's metadata", &failure);
     };
     var directory_storage: PathBuf = undefined;
     const directory = trash_directory(run.store, &directory_storage, gc);
@@ -791,8 +794,8 @@ fn write_meta(run: *Run, gc: Id, meta: *const Meta) Error!void {
     const final = run.store.path(&final_storage, &.{ "/trash/", &gc, "/", meta_file });
     const directory = trash_directory(run.store, &directory_storage, gc);
     var failure: fs_mod.Failure = undefined;
-    run.store.fs.write_atomic(temporary, final, directory, bytes, 0o644, &failure) catch |err| {
-        return run.io("writing the trash's metadata", err);
+    run.store.fs.write_atomic(temporary, final, directory, bytes, 0o644, &failure) catch {
+        return run.io_noted("writing the trash's metadata", &failure);
     };
 }
 
@@ -1198,7 +1201,7 @@ fn ensure_list(run: *Run, from: [:0]const u8, id: Digest) Error!void {
     var failure: fs_mod.Failure = undefined;
     const shard = run.store.shard_path(&directory, "objects", id);
     const staged = run.store.tmp_path(&temporary);
-    fs.write_atomic(staged, list_path, shard, ws.io[0..total], 0o644, &failure) catch |err| {
-        return run.io("writing a chunk list", err);
+    fs.write_atomic(staged, list_path, shard, ws.io[0..total], 0o644, &failure) catch {
+        return run.io_noted("writing a chunk list", &failure);
     };
 }
