@@ -192,6 +192,8 @@ pub const Process = struct {
     capabilities: ?u64,
     ambient_cleared: bool,
     no_new_privs: bool,
+    /// The user and group the process became (`set_user`), if it did.
+    user_set: ?[2]u32,
     /// A seccomp filter is installed (`install_seccomp`), and it answered ALLOW for the calls the
     /// process still has to make: write, close and exit_group (to report a failure), and execve.
     seccomp: bool,
@@ -435,6 +437,7 @@ pub const World = struct {
             const text = std.fmt.bufPrint(&path, "/dev/{s}", .{name}) catch unreachable; // Short.
             world.add_node(text, .file);
         }
+        world.add_node("/sys", .dir);
         world.add_node(rootfs, .dir);
         var buffer: [constants.sim_path_bytes_max]u8 = undefined;
         for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
@@ -1272,7 +1275,7 @@ pub const World = struct {
             table.private = true;
             return null;
         }
-        if (request.kind == .remount_readonly) {
+        if (request.kind == .remount_readonly or request.kind == .remount_readonly_tree) {
             // Only a mount point can be remounted; the rootfs bind is one.
             const index = table.find(target.slice()) orelse return errno_inval;
             table.mounts[index].read_only = true;
@@ -1376,6 +1379,14 @@ pub const World = struct {
         world.processes[world.current].ambient_cleared = true;
     }
 
+    /// Becoming a user needs the ids to be mapped: the single map has only root.
+    pub fn set_user(world: *World, uid: u32, gid: u32) ?u16 {
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        process.user_set = .{ uid, gid };
+        return null;
+    }
+
     pub fn no_new_privs(world: *World) void {
         assert(world.current < world.processes.len);
         world.processes[world.current].no_new_privs = true;
@@ -1451,6 +1462,7 @@ fn unused_process() Process {
         .capabilities = null,
         .ambient_cleared = false,
         .no_new_privs = false,
+        .user_set = null,
         .seccomp = false,
         .sealed = false,
         .ends_at_ms = 0,

@@ -114,8 +114,18 @@ pub const Code = enum(u8) {
     E0514,
     E0515,
     E0516,
+    E0517,
+    E0518,
+    E0519,
+    E0520,
+    E0521,
+    E0522,
+    E0523,
+    E0524,
+    E0525,
     W0501,
     W0502,
+    W0503,
     E0701,
     E0702,
     E0703,
@@ -237,7 +247,8 @@ pub const registry = [_]Entry{
         \\zbx accepts at most 64 arguments of at most 4096 bytes each, and refuses
         \\more instead of cutting them, so that a command is never silently
         \\misread. The command after "run --" has its own limits: 48 words of at
-        \\most 4000 bytes, 32 KiB with the environment.
+        \\most 4000 bytes, 32 KiB with the environment. A working directory is an
+        \\absolute path without "..".
         \\
         \\Pass fewer or shorter arguments. For long lists, use a file when the
         \\command supports one.
@@ -1596,6 +1607,144 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0517,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "an image's configuration can't be used",
+        .explanation =
+        \\The configuration of an image (the JSON blob its manifest names) says what
+        \\it runs by default: the entrypoint, the command, the environment, the
+        \\working directory and the user. This one is not JSON of that shape, or has
+        \\more words or more bytes than zbx keeps (48 words in a list, 64 variables,
+        \\1024 bytes in a word, 6 KiB in all), or an environment entry without a
+        \\name or a "=".
+        \\
+        \\The blob was checked against its digest, so the image is at fault. Nothing
+        \\from the image was recorded. Try another tag of the image.
+        ,
+    },
+    .{
+        .code = .E0518,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "zbx.lock can't be read",
+        .explanation =
+        \\zbx.lock is ZON, one field a line, and zbx reads it line by line. The
+        \\message names the line and what is wrong with it: a line that belongs
+        \\nowhere, a digest or platform that is not one, an entry missing a field,
+        \\two entries for one image, a version newer than this zbx reads, or more
+        \\than 256 entries.
+        \\
+        \\Fix the line, or remove the file and run zbx pull again to write a new
+        \\one: the lock only records what each reference resolved to, and a pull
+        \\makes it again. Do not edit a lock to point at digests you have not
+        \\checked.
+        ,
+    },
+    .{
+        .code = .E0519,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "zbx.lock and the store disagree about an image",
+        .explanation =
+        \\zbx.lock says the reference means one tree, and the store's record of the
+        \\image with the lock's manifest digest says another. A run starts from
+        \\neither: it would be running something nobody chose.
+        \\
+        \\The message names both tree digests. Either the lock was changed by hand
+        \\(or by a merge), or the store's record was made by a different pull. To
+        \\take the store's tree as the truth, remove the entry or the file and pull
+        \\again; to keep the lock's, restore the store from it with the pull the
+        \\message shows.
+        ,
+    },
+    .{
+        .code = .E0520,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image zbx.lock names is not in the store",
+        .explanation =
+        \\zbx.lock names a manifest digest for the reference, and the store has no
+        \\image with that digest. The store may be new, the image may have been
+        \\removed (zbx store rm), or the lock may name a digest that was never
+        \\pulled. A run never fetches by itself, because the lock is what says what
+        \\to trust.
+        \\
+        \\The message names the digest the lock wants and, if the store has some
+        \\other image under the same reference, that one. Pull the locked digest to
+        \\fill the store from the lock:  zbx pull <repository>@sha256:<digest>
+        ,
+    },
+    .{
+        .code = .E0521,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the image's user is not in the image",
+        .explanation =
+        \\The image's configuration says it runs as a user (or group) by name, and the
+        \\image's own /etc/passwd or /etc/group has no such name. A number needs no
+        \\lookup and is used as it is; a name does. The message names what was looked
+        \\for and where.
+        \\
+        \\The image is at fault. Nothing was started.
+        ,
+    },
+    .{
+        .code = .E0522,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no image of that name is locked or in the store",
+        .explanation =
+        \\zbx run was given a name that is not a tree digest, and neither zbx.lock nor
+        \\the store knows an image by it. A run starts only what a lock has recorded
+        \\(or what is in the store when a library caller names it): it does not pull
+        \\by itself once a zbx.lock exists. Run zbx pull with the name to fetch the
+        \\image and record it.
+        ,
+    },
+    .{
+        .code = .E0523,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the image's user needs more ids than this run maps",
+        .explanation =
+        \\The image runs as a user other than root. That user's id exists in the
+        \\container only when the container maps a whole range of ids, which needs
+        \\the setuid helpers newuidmap and newgidmap and a range of subordinate ids
+        \\for your account. Without them the container maps only root, to your own
+        \\id (the warning ZBX-W0201 says so), and the image's user cannot be set.
+        \\
+        \\Give your account the ranges (zbx doctor shows how), or use an image that
+        \\runs as root.
+        ,
+    },
+    .{
+        .code = .E0524,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image has no command to run",
+        .explanation =
+        \\The image sets neither an entrypoint nor a command, and none was given after
+        \\"--". Docker would fail the same way. Give the command to run:
+        \\
+        \\    zbx run <image> -- <command> [arguments]
+        ,
+    },
+    .{
+        .code = .E0525,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "zbx.lock can't be written",
+        .explanation =
+        \\zbx writes zbx.lock to the nearest directory up from the working directory
+        \\that has one, or else the working directory, through a temporary file in
+        \\the same directory that it renames over the lock. That failed: the disk is
+        \\full, the directory is not writable, or it is read-only. The message gives
+        \\the path and the reason. The image itself was pulled and is in the store;
+        \\run the command again once the directory can be written.
+        ,
+    },
+    .{
         .code = .W0501,
         .severity = .warning,
         .blame = .external,
@@ -1623,6 +1772,19 @@ pub const registry = [_]Entry{
         \\The tree's digest does not cover them. Nothing to do unless the image
         \\relies on file capabilities that were refused: then the program may
         \\need a different capability setup.
+        ,
+    },
+    .{
+        .code = .W0503,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "no zbx.lock was found, so one was written",
+        .explanation =
+        \\zbx run was given an image name and there is no zbx.lock in the working
+        \\directory or any directory above it. It pulled the image and wrote zbx.lock
+        \\in the working directory, recording which manifest and tree the name meant
+        \\today. Commit the file to keep every machine on the same image. The next run
+        \\checks the store against it and refuses if they differ.
         ,
     },
     .{
@@ -1844,7 +2006,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .W0501, .W0502 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502 => false,
         else => true,
     };
 }

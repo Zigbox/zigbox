@@ -13,6 +13,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const blobs_mod = @import("registry/blobs.zig");
+const config_mod = @import("registry/config.zig");
+const image_diagnose = @import("image_diagnose.zig");
+const images = @import("store/images.zig");
+const lock_file = @import("lock_file.zig");
 const client_mod = @import("registry/client.zig");
 const constants = @import("constants.zig");
 const diagnose = @import("registry/diagnose.zig");
@@ -28,6 +32,7 @@ const open = @import("store/open.zig");
 const render_diag = @import("diag/render.zig");
 const store_diagnose = @import("store/diagnose.zig");
 const unpack = @import("pull_unpack.zig");
+const fs_mod = @import("store/fs.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const Store = @import("store/layout.zig").Store;
 
@@ -45,6 +50,8 @@ pub const Workspace = struct {
     download: blobs_mod.Download,
     unpack: unpack.Workspace,
     reference: reference_mod.Reference,
+    /// What the image runs by default, read from its configuration blob.
+    settings: images.Settings,
 };
 
 pub const Args = struct {
@@ -126,7 +133,10 @@ pub fn run_pull(
         return error.Failed;
     };
     defer lock.release(&store);
+    // A lock that is damaged is found now, not after the layers are unpacked.
+    try check_lock(host, &store, workspace, diag);
     try fetch_all(&client, workspace, &store, diag);
+    try read_settings(workspace, &store, diag);
     var job: unpack.Job = .{
         .host = host,
         .output = output,
@@ -136,6 +146,7 @@ pub fn run_pull(
         .fetched = &workspace.fetched,
         .workspace = &workspace.unpack,
         .import_workspace = import_workspace,
+        .settings = &workspace.settings,
     };
     var reporter: Reporter = .{ .host = host, .output = output };
     const work: namespace.Work = .{ .context = &job, .call = unpack.work_call };
@@ -147,6 +158,44 @@ const Reporter = struct {
     host: Host,
     output: Output,
 };
+
+/// Reads zbx.lock before any work, if the pull is going to record in it (a digest reference
+/// needs no lock): a lock that can not be read ends the pull now.
+fn check_lock(host: Host, store: *const Store, workspace: *Workspace, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    if (workspace.reference.digest != null) return;
+    const locking = &workspace.unpack.locking;
+    var failure: lock_file.Failure = undefined;
+    lock_file.open_project(host, store.fs, locking, &failure) catch {
+        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
+        image_diagnose.lock_failure(diag, path, failure);
+        return error.Failed;
+    };
+}
+
+/// Reads the image's configuration blob (checked by its digest when it arrived) into
+/// `workspace.settings`.
+fn read_settings(workspace: *Workspace, store: *const Store, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const config = workspace.resolved.config_digest;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var path: fs_mod.PathBuf = undefined;
+    const where = blobs.final_path(&path, config);
+    const body = store.fs.read_whole(where, &workspace.client.body) catch {
+        image_diagnose.config_refused(diag, config, "could not be read back from the blob cache");
+        return error.Failed;
+    };
+    config_mod.parse(&workspace.client.arena, body, &workspace.settings) catch |problem| {
+        const words = switch (problem) {
+            error.malformed => "is not the JSON of an image configuration",
+            error.too_complex => "is more complex than zbx reads",
+            error.too_big => "has more words or bytes than zbx keeps",
+            error.bad_variable => "has an environment entry that is not NAME=value",
+        };
+        image_diagnose.config_refused(diag, config, words);
+        return error.Failed;
+    };
+}
 
 fn report_warning(context: *anyopaque, diag: *const Diag) void {
     const reporter: *const Reporter = @ptrCast(@alignCast(context));

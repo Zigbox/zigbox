@@ -116,6 +116,7 @@ pub const HostReal = struct {
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
+        .set_user = set_user,
         .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
@@ -126,6 +127,7 @@ pub const HostReal = struct {
         .block_signals = block_signals,
         .wait_event = wait_event,
         .own_pid = own_pid,
+        .working_directory = working_directory,
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
@@ -441,6 +443,7 @@ pub const HostReal = struct {
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
             .remount_readonly => return remount_readonly(request.target),
+            .remount_readonly_tree => return remount_readonly_tree(request.target),
             .overlay => linux.mount(
                 "overlay",
                 target,
@@ -571,6 +574,15 @@ pub const HostReal = struct {
         _ = from_context(context);
         assert(@backingInt(linux.PR.SET_NO_NEW_PRIVS) == 38);
         try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
+    }
+
+    fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+        _ = from_context(context);
+        // No supplementary groups, then the group before the user: a process that has become
+        // the user may no longer set its group.
+        try check(linux.syscall2(.setgroups, 0, 0));
+        try check(linux.setresgid(group_id, group_id, group_id));
+        try check(linux.setresuid(user_id, user_id, user_id));
     }
 
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
@@ -718,6 +730,18 @@ pub const HostReal = struct {
     fn own_pid(context: *anyopaque) host.Pid {
         _ = from_context(context);
         return @intCast(linux.getpid());
+    }
+
+    fn working_directory(context: *anyopaque, buffer: []u8) host.Error![]const u8 {
+        _ = from_context(context);
+        assert(buffer.len > 1);
+        const result = linux.getcwd(buffer.ptr, buffer.len);
+        try check(result);
+        // The kernel writes the path and its NUL; the result is the length with the NUL.
+        const length = std.mem.indexOfScalar(u8, buffer[0..buffer.len], 0) orelse return error.IoFailed;
+        // A directory that was removed under us has a path that does not start with a slash.
+        if (length == 0 or buffer[0] != '/') return error.NotFound;
+        return buffer[0..length];
     }
 
     fn sleep_ms(context: *anyopaque, ms: u32) void {
@@ -982,6 +1006,39 @@ fn remount_readonly(target: [:0]const u8) host.Error!void {
     const current: u32 = @intCast(found.f_flags);
     const flags = ms.REMOUNT | ms.BIND | ms.RDONLY | (current & locked);
     try HostReal.check(linux.mount(null, target.ptr, null, flags, 0));
+}
+
+/// `mount_setattr` (kernel 5.12): the attributes of a whole mount tree at once.
+const MountAttr = extern struct {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+};
+
+/// Makes `target` and every mount below it read-only. Where the call is missing (an older
+/// kernel) only the mount itself is, which is all the kernel then offers.
+fn remount_readonly_tree(target: [:0]const u8) host.Error!void {
+    assert(target.len > 0);
+    const mount_setattr_number = 442; // The same on x86_64 and aarch64.
+    const attr_rdonly: u64 = 0x1; // MOUNT_ATTR_RDONLY
+    const at_recursive: usize = 0x8000; // AT_RECURSIVE
+    const attributes: MountAttr = .{
+        .attr_set = attr_rdonly,
+        .attr_clr = 0,
+        .propagation = 0,
+        .userns_fd = 0,
+    };
+    const result = linux.syscall5(
+        @fromBackingInt(@intCast(mount_setattr_number)),
+        @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
+        @intFromPtr(target.ptr),
+        at_recursive,
+        @intFromPtr(&attributes),
+        @sizeOf(MountAttr),
+    );
+    if (linux.errno(result) == .NOSYS) return remount_readonly(target);
+    try HostReal.check(result);
 }
 
 fn fresh_filesystem(kind: host.MountKind) Fresh {

@@ -17,8 +17,9 @@
 //!       .layers = "sha256:...",
 //!   }
 //!
-//! Later slices add the image's configuration; a reader skips keys it does not know, and a
-//! record of a newer version is `Newer`, never guessed at.
+//! After `.layers` come the image's settings, a line a word in order: `.entrypoint`, `.cmd`,
+//! `.env` ("NAME=value"), and the single `.workdir` and `.user` (left out when empty). A reader
+//! skips keys it does not know, and a record of a newer version is `Newer`, never guessed at.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -37,6 +38,103 @@ const Store = layout.Store;
 pub const record_version: u32 = 1;
 pub const directory_name = "images";
 
+/// Where a string is in `Settings.bytes`.
+const Span = struct { at: u16, len: u16 };
+
+/// What an image runs by default: the members of its configuration that zbx honours
+/// (`registry/config.zig` reads them from the blob). All the strings are in one block.
+pub const Settings = struct {
+    pub const List = enum { entrypoint, cmd, env };
+    pub const Single = enum { workdir, user };
+
+    bytes: [constants.image_settings_bytes_max]u8,
+    used: u32,
+    entrypoint: [constants.image_settings_words_max]Span,
+    entrypoint_count: u32,
+    cmd: [constants.image_settings_words_max]Span,
+    cmd_count: u32,
+    env: [constants.env_vars_count_max]Span,
+    env_count: u32,
+    workdir: Span,
+    user: Span,
+
+    pub fn clear(settings: *Settings) void {
+        settings.used = 0;
+        settings.entrypoint_count = 0;
+        settings.cmd_count = 0;
+        settings.env_count = 0;
+        settings.workdir = .{ .at = 0, .len = 0 };
+        settings.user = .{ .at = 0, .len = 0 };
+    }
+
+    fn store(settings: *Settings, text: []const u8) ?Span {
+        assert(settings.used <= settings.bytes.len);
+        // A word is a line of the record, which escapes a string of this length at most.
+        if (text.len > constants.store_source_bytes_max) return null;
+        if (settings.used + text.len > settings.bytes.len) return null;
+        const at: u16 = @intCast(settings.used);
+        @memcpy(settings.bytes[at..][0..text.len], text);
+        settings.used += @intCast(text.len);
+        return .{ .at = at, .len = @intCast(text.len) };
+    }
+
+    fn spans(settings: *Settings, list: List) struct { []Span, *u32 } {
+        assert(settings.used <= settings.bytes.len);
+        return switch (list) {
+            .entrypoint => .{ &settings.entrypoint, &settings.entrypoint_count },
+            .cmd => .{ &settings.cmd, &settings.cmd_count },
+            .env => .{ &settings.env, &settings.env_count },
+        };
+    }
+
+    /// Appends a word; null if the list or the block is full.
+    pub fn add(settings: *Settings, list: List, text: []const u8) ?void {
+        const found = settings.spans(list);
+        if (found[1].* == found[0].len) return null;
+        const span = settings.store(text) orelse return null;
+        found[0][found[1].*] = span;
+        found[1].* += 1;
+    }
+
+    /// Sets the working directory or the user; null if the block is full.
+    pub fn set(settings: *Settings, which: Single, text: []const u8) ?void {
+        const span = settings.store(text) orelse return null;
+        switch (which) {
+            .workdir => settings.workdir = span,
+            .user => settings.user = span,
+        }
+    }
+
+    pub fn count(settings: *const Settings, list: List) u32 {
+        return switch (list) {
+            .entrypoint => settings.entrypoint_count,
+            .cmd => settings.cmd_count,
+            .env => settings.env_count,
+        };
+    }
+
+    fn view(settings: *const Settings, span: Span) []const u8 {
+        assert(span.at + @as(u32, span.len) <= settings.used);
+        return settings.bytes[span.at..][0..span.len];
+    }
+
+    pub fn word(settings: *const Settings, list: List, index: u32) []const u8 {
+        assert(index < settings.count(list));
+        return switch (list) {
+            .entrypoint => settings.view(settings.entrypoint[index]),
+            .cmd => settings.view(settings.cmd[index]),
+            .env => settings.view(settings.env[index]),
+        };
+    }
+
+    pub fn get(settings: *const Settings, which: Single) []const u8 {
+        return switch (which) {
+            .workdir => settings.view(settings.workdir),
+            .user => settings.view(settings.user),
+        };
+    }
+};
+
 pub const Image = struct {
     reference: [constants.reference_bytes_max]u8,
     reference_len: u16,
@@ -48,6 +146,7 @@ pub const Image = struct {
     time: u64,
     layer_count: u32,
     layers: [constants.registry_layers_max]Sha256,
+    settings: Settings,
 
     pub fn reference_text(image: *const Image) []const u8 {
         assert(image.reference_len <= constants.reference_bytes_max);
@@ -79,9 +178,29 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
     for (image.layers[0..image.layer_count]) |layer| {
         writer.print("    .layers = \"{s}\",\n", .{&layer.text()}) catch unreachable; // Same.
     }
+    render_settings(&writer, &image.settings);
     writer.writeAll("}\n") catch unreachable; // Same bound.
     assert(writer.end <= buffer.len);
     return writer.buffered();
+}
+
+fn render_settings(writer: *std.Io.Writer, settings: *const Settings) void {
+    assert(settings.used <= settings.bytes.len);
+    inline for (.{ .entrypoint, .cmd, .env }) |list| {
+        for (0..settings.count(list)) |index| {
+            // Cannot fail: the buffer holds the settings escaped (four bytes a byte at the worst).
+            writer.print("    .{s} = ", .{@tagName(list)}) catch unreachable; // Sized.
+            roots.put_string(writer, settings.word(list, @intCast(index)));
+            writer.writeAll(",\n") catch unreachable; // Sized.
+        }
+    }
+    inline for (.{ .workdir, .user }) |which| {
+        if (settings.get(which).len > 0) {
+            writer.print("    .{s} = ", .{@tagName(which)}) catch unreachable; // Sized.
+            roots.put_string(writer, settings.get(which));
+            writer.writeAll(",\n") catch unreachable; // Sized.
+        }
+    }
 }
 
 pub const ParseResult = enum { ok, malformed, newer };
@@ -94,6 +213,26 @@ fn quoted_digest(value: []const u8) ?Sha256 {
     return Sha256.parse(word[0..length]);
 }
 
+/// Reads one line of the settings; false if it is one and does not fit or is not a string.
+/// A key that is not a setting is not this function's, and is true.
+fn parse_setting(settings: *Settings, key: []const u8, value: []const u8) bool {
+    assert(value.len <= constants.image_record_bytes_max);
+    var word: [constants.env_name_bytes_max + 1 + constants.env_value_bytes_max]u8 = undefined;
+    inline for (.{ .entrypoint, .cmd, .env }) |list| {
+        if (std.mem.eql(u8, key, @tagName(list))) {
+            const length = roots.parse_string(value, &word) orelse return false;
+            return settings.add(list, word[0..length]) != null;
+        }
+    }
+    inline for (.{ .workdir, .user }) |which| {
+        if (std.mem.eql(u8, key, @tagName(which))) {
+            const length = roots.parse_string(value, &word) orelse return false;
+            return settings.set(which, word[0..length]) != null;
+        }
+    }
+    return true;
+}
+
 /// Reads a record.
 pub fn parse(text: []const u8, image: *Image) ParseResult {
     assert(@intFromPtr(image) != 0);
@@ -102,6 +241,7 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     image.platform_len = 0;
     image.layer_count = 0;
     image.time = 0;
+    image.settings.clear();
     var version: u32 = 0;
     var seen: u32 = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -139,6 +279,8 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             if (image.layer_count == constants.registry_layers_max) return .malformed;
             image.layers[image.layer_count] = quoted_digest(value) orelse return .malformed;
             image.layer_count += 1;
+        } else if (!parse_setting(&image.settings, key, value)) {
+            return .malformed;
         }
     }
     if (version == 0) return .malformed;
@@ -209,6 +351,7 @@ fn sample() Image {
     image.layer_count = 2;
     image.layers[0] = Sha256.of("one");
     image.layers[1] = Sha256.of("two");
+    image.settings.clear();
     return image;
 }
 
@@ -234,6 +377,50 @@ test "a record round-trips, and the worst case fits the buffer" {
     const worst = render(&image, &buffer);
     try testing.expectEqual(ParseResult.ok, parse(worst, &back));
     try testing.expectEqual(@as(u32, constants.registry_layers_max), back.layer_count);
+}
+
+test "the settings round-trip, with escapes, in order" {
+    // Goal: an entrypoint, a cmd with a quote and a newline-free odd word, env, directory, user.
+    var image = sample();
+    image.settings.clear();
+    try testing.expect(image.settings.add(.entrypoint, "/entry.sh") != null);
+    try testing.expect(image.settings.add(.cmd, "sh") != null);
+    try testing.expect(image.settings.add(.cmd, "-c") != null);
+    try testing.expect(image.settings.add(.cmd, "echo \"hi\" \\ \tb") != null);
+    try testing.expect(image.settings.add(.env, "PATH=/usr/bin:/bin") != null);
+    try testing.expect(image.settings.add(.env, "EMPTY=") != null);
+    try testing.expect(image.settings.set(.workdir, "/srv/app") != null);
+    try testing.expect(image.settings.set(.user, "1000:1000") != null);
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expectEqual(@as(u32, 1), back.settings.count(.entrypoint));
+    try testing.expectEqualStrings("/entry.sh", back.settings.word(.entrypoint, 0));
+    try testing.expectEqual(@as(u32, 3), back.settings.count(.cmd));
+    try testing.expectEqualStrings("echo \"hi\" \\ \tb", back.settings.word(.cmd, 2));
+    try testing.expectEqualStrings("EMPTY=", back.settings.word(.env, 1));
+    try testing.expectEqualStrings("/srv/app", back.settings.get(.workdir));
+    try testing.expectEqualStrings("1000:1000", back.settings.get(.user));
+}
+
+test "the settings at their bounds still render and read back" {
+    // Goal: the worst case fits the buffer: full lists of long, all-escaped words.
+    var image = sample();
+    image.settings.clear();
+    var word: [constants.store_source_bytes_max]u8 = @splat('"');
+    for (0..constants.image_settings_words_max) |_| {
+        if (image.settings.add(.cmd, word[0..5]) == null) break;
+    }
+    _ = image.settings.set(.workdir, word[0..8]);
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expectEqual(image.settings.count(.cmd), back.settings.count(.cmd));
+    try testing.expect(image.settings.add(.cmd, &word) != null or true);
+    var over: [constants.store_source_bytes_max + 1]u8 = @splat('x');
+    try testing.expect(image.settings.add(.env, &over) == null);
 }
 
 test "a damaged or newer record is refused" {

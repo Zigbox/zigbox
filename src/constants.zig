@@ -205,12 +205,14 @@ pub const term_bytes_max: u32 = 64;
 pub const environment_count_max: u32 = 4;
 /// Variables a caller may add (`Spec.env`), each with a bounded name and value. They count
 /// against `exec_strings_bytes_max` with the command.
-pub const env_vars_count_max: u32 = 32;
+pub const env_vars_count_max: u32 = 64;
 pub const env_name_bytes_max: u32 = 64;
 pub const env_value_bytes_max: u32 = 4096;
 /// The container's PATH, in the order a shell searches it. Counted for the exec candidates.
 pub const container_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub const container_path_dirs_count: u32 = 6;
+/// Directories of an image's own PATH that a command is looked for in (the rest are ignored).
+pub const candidates_max: u32 = 16;
 /// The devices bind-mounted from the host into the container's `/dev`.
 pub const container_devices_count: u32 = 6;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
@@ -538,9 +540,19 @@ pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
 pub const registry_mirrors_max: u32 = 4;
 pub const registry_mirrors_bytes_max: u32 = 1024;
-/// An image record (`store/images.zig`): its fixed fields, the reference and 128 layer digests.
-pub const image_record_bytes_max: u32 = 24 * 1024;
+/// An image record (`store/images.zig`): its fixed fields, the reference, 128 layer digests and
+/// the image's settings.
+pub const image_record_bytes_max: u32 = 48 * 1024;
+/// The settings an image carries (entrypoint, cmd, env, working directory, user): the bytes of
+/// all their strings together, and the words of each list. An image with more is refused.
+pub const image_settings_bytes_max: u32 = 6 * 1024;
+pub const image_settings_words_max: u32 = 48;
 pub const images_max: u32 = 4096;
+/// `zbx.lock` (`lock_file.zig`): the entries it holds, the bytes of their references together,
+/// and the largest file read or written.
+pub const lock_entries_max: u32 = 256;
+pub const lock_pool_bytes: u32 = 64 * 1024;
+pub const lock_file_bytes_max: u32 = 160 * 1024;
 /// The buffer a blob is hashed and copied through.
 pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.

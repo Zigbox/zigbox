@@ -250,6 +250,7 @@ pub const HostSim = struct {
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
+        .set_user = set_user,
         .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
@@ -260,6 +261,7 @@ pub const HostSim = struct {
         .block_signals = block_signals,
         .wait_event = wait_event,
         .own_pid = own_pid,
+        .working_directory = working_directory,
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
@@ -768,6 +770,12 @@ pub const HostSim = struct {
         sim.world.no_new_privs();
     }
 
+    fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.set_user(user_id, group_id)) |errno| return sim.model_error(errno);
+    }
+
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
@@ -843,6 +851,14 @@ pub const HostSim = struct {
     fn own_pid(context: *anyopaque) host.Pid {
         const world = &from_context(context).world;
         return world.processes[world.current].pid;
+    }
+
+    fn working_directory(context: *anyopaque, buffer: []u8) host.Error![]const u8 {
+        const world = &from_context(context).world;
+        const path = world.processes[world.current].cwd.slice();
+        if (path.len > buffer.len) return error.FileTooLarge;
+        @memcpy(buffer[0..path.len], path);
+        return buffer[0..path.len];
     }
 
     fn sleep_ms(context: *anyopaque, ms: u32) void {

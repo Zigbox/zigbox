@@ -27,6 +27,8 @@ const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const digest_prefix = @import("store/digest.zig");
+const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
 const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
@@ -267,6 +269,8 @@ pub const RunError = error{
     OutputFailed,
     /// The container could not be started; the reason is in the diagnostic.
     StartFailed,
+    /// A pull the run began failed, and its child has written the diagnostic.
+    PullFailed,
     /// The bundle could not be written; the reason is in the diagnostic.
     BundleFailed,
     /// `ps`, `stop` or `schema` failed; the reason is in the diagnostic.
@@ -641,11 +645,25 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
         return missing_argument(diag, .run, .rootfs);
     }
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
-    if (run_args.command.len == 0) return missing_argument(diag, .run, .command);
+    // An image named by a tag has a command of its own, so the words after `--` are optional;
+    // a rootfs and a tree digest have none.
+    const has_default = digest != null and !is_tree_operand(digest.?);
+    if (run_args.command.len == 0 and !has_default) {
+        return missing_argument(diag, .run, .command);
+    }
     // `-- ""` names no program either.
-    if (run_args.command[0].len == 0) return missing_argument(diag, .run, .command);
+    if (run_args.command.len > 0 and run_args.command[0].len == 0) {
+        return missing_argument(diag, .run, .command);
+    }
     assert((run_args.rootfs != null) != (digest != null));
-    assert(run_args.command.len > 0);
+    assert(run_args.command.len > 0 or has_default);
+}
+
+/// True if `operand` names a tree of the store (`b3:` and hex, or 12 hex digits or more); any
+/// other operand of `run` is the name of an image.
+fn is_tree_operand(operand: []const u8) bool {
+    assert(operand.len <= constants.arg_bytes_max);
+    return digest_prefix.Prefix.parse(operand) != null;
 }
 
 /// `bundle` needs exactly one of `--last` and a run's name.
@@ -1076,6 +1094,8 @@ pub const Storage = struct {
     image: image_mod.Workspace,
     /// A pull resolves a reference here (`pull_commands.zig`).
     pull: pull_commands.Workspace,
+    /// `run` by an image's name: the lookup and the settings (`run_image.zig`).
+    run_image: run_image.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
@@ -1320,6 +1340,35 @@ comptime {
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
 /// plus the signal that killed it. A container that could not be started is a diagnostic; so is
 /// one whose end could not be waited for.
+/// An image named by a tag or a digest reference: finds it, pulls it if the project has no lock.
+fn prepare_image(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    operand: []const u8,
+    prepared: *run_image.Prepared,
+    diag: *Diag,
+) RunError!void {
+    const mode = invocation.options.mode();
+    var reporter: Reporter = .{ .host = host, .options = invocation.options };
+    const services: run_image.Services = .{
+        .host = host,
+        .facts = &storage.handle.facts,
+        .pull = &storage.pull,
+        .import_workspace = &storage.store.import,
+        .output = .{
+            .mode = mode,
+            .color = mode != .json and host.color_enabled(.stderr),
+            .json = false,
+        },
+        .warn = .{ .context = &reporter, .call = report_warning },
+    };
+    run_image.prepare(&services, &storage.run_image, operand, invocation.run.command, prepared, diag) catch |err| switch (err) {
+        error.Failed => return error.StartFailed,
+        error.PullFailed => return error.PullFailed,
+    };
+}
+
 fn run_container(
     host: Host,
     invocation: *const Invocation,
@@ -1330,13 +1379,32 @@ fn run_container(
     assert(invocation.command == .run);
     const given = invocation.run;
     const times = try times_of(&given, diag);
+    var prepared: run_image.Prepared = .{
+        .tree = invocation.operand orelse "",
+        .command = given.command,
+        .env = &.{},
+        .workdir = "",
+        .user = null,
+    };
+    if (invocation.operand) |operand| {
+        if (!is_tree_operand(operand)) {
+            prepare_image(host, invocation, storage, operand, &prepared, diag) catch |err| {
+                // A pull the run began has written its own diagnostic: only the exit code is left.
+                if (err == error.PullFailed) return constants.exit_run_failed;
+                return err;
+            };
+        }
+    }
     const container: runtime_spec.Spec = .{
         .rootfs = given.rootfs orelse "", // check_run_args refused neither or both.
-        .image = invocation.operand,
+        .image = if (invocation.operand != null) prepared.tree else null,
         .name = given.name,
-        .command = given.command,
+        .command = prepared.command,
         .limits = try limits_of(&given, diag),
         .read_only = given.read_only,
+        .env = prepared.env,
+        .workdir = prepared.workdir,
+        .user = prepared.user,
     };
     if (given.detach) return run_detached(host, invocation, &container, times, storage, diag);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };

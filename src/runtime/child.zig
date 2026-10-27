@@ -115,6 +115,11 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_no_new_privs => try host.no_new_privs(),
         .install_seccomp => try host.install_seccomp(&seccomp.program),
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
+        .make_sys_dir => try host.make_directory(target, true),
+        .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .remount_sys => try mount(host, .remount_readonly_tree, target, null),
+        .enter_workdir => try enter_workdir(host, target),
+        .set_user => try host.set_user(plan.user_uid, plan.user_gid),
         .create_device_file => try host.create_file(target),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
@@ -126,6 +131,25 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
     }
+}
+
+/// Makes the directory and the ones above it that are missing, then goes there. The prefixes
+/// are cut from the path in a buffer on the stack: the child formats nothing and allocates
+/// nothing.
+fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
+    assert(path.len > 0);
+    assert(path[0] == '/');
+    var prefix: [constants.path_bytes_max + 1]u8 = undefined;
+    if (path.len >= prefix.len) return error.PathTooLong;
+    var at: usize = 1;
+    while (at <= path.len) : (at += 1) {
+        const end = at == path.len or path[at] == '/';
+        if (!end) continue;
+        @memcpy(prefix[0..at], path[0..at]);
+        prefix[at] = 0;
+        if (at > 1) try host.make_directory(prefix[0..at :0], true);
+    }
+    try host.change_directory(path);
 }
 
 fn mount(

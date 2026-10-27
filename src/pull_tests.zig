@@ -395,3 +395,212 @@ fn staging_left() u32 {
     }
     return count;
 }
+
+// ---- The lock, and running by name ----------------------------------------------------------
+
+const project = "/home/alice/project";
+const lock_path = project ++ "/zbx.lock";
+const containers = "/home/alice/.local/state/zbx/containers";
+
+/// A project directory to work in, with the host's /sys and a container root for `name`.
+fn project_world(world: *World, seed: u64, name: []const u8) void {
+    pull_world(world, seed);
+    store_files.put_dir(project, 0o755);
+    _ = world.sim.world.processes[0].cwd.set(project);
+    world.sim.world.add_node("/sys", .dir);
+    var path: [200]u8 = undefined;
+    var inner: [220]u8 = undefined;
+    const merged = std.fmt.bufPrint(&path, containers ++ "/{s}/merged", .{name}) catch unreachable;
+    world.sim.world.add_node(merged, .dir);
+    for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
+        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
+        world.sim.world.add_node(text, .dir);
+    }
+    for ([_][]const u8{ "/bin/sh", "/bin/hello", "/bin/other" }) |program| {
+        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, program }) catch unreachable;
+        world.sim.world.add_node(text, .file);
+    }
+}
+
+/// Replaces a file of the store disk (or makes it).
+fn overwrite(path: []const u8, text: []const u8) void {
+    if (store_files.kind_of(path) != null) store_files.remove_path(path);
+    store_files.put_file(path, 0o644, text);
+}
+
+fn lock_text() []const u8 {
+    return store_files.content_of(lock_path) orelse "";
+}
+
+test "a pull writes zbx.lock: the reference as written, sorted, and never the mirror" {
+    // Goal: the lock records what the name meant, in the project directory. Method: two pulls
+    // with a mirror named; the lock has both references in order, the manifest, platform and
+    // tree of each, the JSON says it made the file once, and no mirror host appears in it.
+    var world: World = undefined;
+    project_world(&world, 31, "web-1");
+    const mirrors = [_]host_sim.EnvironmentVariable{
+        .{ .name = "HOME", .value = "/home/alice" },
+        .{ .name = "ZBX_REGISTRY_MIRRORS", .value = "mirror.example" },
+    };
+    world.sim.environment_variables = &mirrors;
+    const second = test_registry.TestRegistry.reference(.docker);
+    const first = test_registry.TestRegistry.reference(.open);
+    const code = run_text(&world, &.{ "zbx", "--output", "json", "pull", second });
+    if (code != 0) std.debug.print("PULL2: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    const made = try parse_json(world.sim.stdout());
+    defer made.deinit();
+    const lock = made.value.object.get("lock").?.object;
+    try testing.expectEqualStrings(lock_path, lock.get("path").?.string);
+    try testing.expect(lock.get("created").?.bool);
+    const image = made.value.object.get("image").?.object;
+    try testing.expectEqualStrings("/bin/hello", image.get("entrypoint").?.array.items[0].string);
+    try testing.expectEqualStrings("/srv/app", image.get("workdir").?.string);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", first }));
+    const again = try parse_json(world.sim.stdout());
+    defer again.deinit();
+    try testing.expect(!again.value.object.get("lock").?.object.get("created").?.bool);
+    const text = lock_text();
+    const at_first = std.mem.indexOf(u8, text, first).?;
+    const at_second = std.mem.indexOf(u8, text, second).?;
+    try testing.expect(at_second < at_first or std.mem.order(u8, second, first) == .lt);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, ".reference = "));
+    try testing.expect(std.mem.indexOf(u8, text, "mirror") == null);
+    try testing.expect(std.mem.indexOf(u8, text, &world.registry.fixture.oci.amd64.digest) != null);
+    try testing.expect(std.mem.indexOf(u8, text, json_field(&again, "tree")) != null);
+    // A digest reference needs no lock and leaves it alone.
+    const before = try testing.allocator.dupe(u8, text);
+    defer testing.allocator.free(before);
+    var pinned: [200]u8 = undefined;
+    const by_digest = try std.fmt.bufPrintSentinel(&pinned, "registry.test/fixture/open@{s}", .{&world.registry.fixture.oci.amd64.digest}, 0);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", by_digest }));
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    try testing.expect(pulled.value.object.get("lock").? == .null);
+    try testing.expectEqualStrings(before, lock_text());
+}
+
+fn started_argv(world: *const World) []const u8 {
+    return world.sim.world.processes[1].exec_argv[0..world.sim.world.processes[1].exec_argv_len];
+}
+
+test "a run by tag starts the locked image with its entrypoint, command, env and directory" {
+    // Goal: Docker's way of combining the image's settings, and the lock in force. Method: pull,
+    // then run the tag with no command (entrypoint and cmd), with words after -- (the cmd is
+    // replaced, the entrypoint stays) and read what the child was started with.
+    var world: World = undefined;
+    project_world(&world, 32, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    const code = run_text(&world, &.{ "zbx", "pull", reference });
+    if (code != 0) std.debug.print("PULL: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expectEqualStrings("/bin/hello\nworld\n", started_argv(&world));
+    const child = &world.sim.world.processes[1];
+    const envp = child.exec_envp[0..child.exec_envp_len];
+    try testing.expect(std.mem.indexOf(u8, envp, "PATH=/bin:/usr/bin\n") != null);
+    try testing.expect(std.mem.indexOf(u8, envp, "LANG=C\n") != null);
+    try testing.expect(std.mem.indexOf(u8, envp, "/sbin") == null); // The image's PATH, not ours.
+    try testing.expect(std.mem.endsWith(u8, child.cwd.slice(), "/srv/app"));
+    try testing.expect(child.user_set == null);
+    // /sys is bound read-only from the host.
+    var found_sys = false;
+    for (world.sim.world.tables[child.table].mounts[0..world.sim.world.tables[child.table].count]) |mount| {
+        if (std.mem.endsWith(u8, mount.target.slice(), "/sys")) found_sys = true;
+    }
+    try testing.expect(found_sys);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "one", "two" }));
+    try testing.expectEqualStrings("/bin/hello\none\ntwo\n", started_argv(&world));
+}
+
+test "a run by tag refuses when the lock and the store disagree, naming both digests" {
+    // Goal: step 5 of the demo, and its relatives. Method: edit the lock's tree, then its
+    // manifest, then ask for a name it lacks; E0519, E0520, E0522, and a damaged lock E0518.
+    var world: World = undefined;
+    project_world(&world, 33, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }));
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    const tree = try testing.allocator.dupe(u8, json_field(&pulled, "tree"));
+    defer testing.allocator.free(tree);
+    const original = try testing.allocator.dupe(u8, lock_text());
+    defer testing.allocator.free(original);
+    const wrong_tree = "b3:" ++ test_util.repeat('0', 64);
+    const edited = try std.mem.replaceOwned(u8, testing.allocator, original, tree, wrong_tree);
+    defer testing.allocator.free(edited);
+    overwrite(lock_path, edited);
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    const refusal = world.sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, refusal, "ZBX-E0519") != null);
+    try testing.expect(std.mem.indexOf(u8, refusal, tree) != null);
+    try testing.expect(std.mem.indexOf(u8, refusal, wrong_tree) != null);
+
+    const manifest = &world.registry.fixture.oci.amd64.digest;
+    const wrong_manifest = "sha256:" ++ test_util.repeat('1', 64);
+    const moved = try std.mem.replaceOwned(u8, testing.allocator, original, manifest, wrong_manifest);
+    defer testing.allocator.free(moved);
+    overwrite(lock_path, moved);
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0520") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), wrong_manifest) != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), manifest) != null); // What the store has.
+
+    overwrite(lock_path, original);
+    const other = test_registry.TestRegistry.reference(.docker);
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", other }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0522") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "zbx pull") != null);
+
+    overwrite(lock_path, ".{\n    .version = 1,\n    nonsense\n}\n");
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", reference }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0518") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "line 3") != null);
+    // None of the refusals pulled or started anything.
+    try testing.expect(world.sim.world.processes[1].state == .unused or !world.sim.world.processes[1].execd);
+}
+
+test "a run by tag with no lock pulls, writes one, and says so in one warning" {
+    // Goal: the first run of a project. Method: nothing pulled, no lock; the run pulls quietly
+    // (stdout is the container's, not the pull's), writes zbx.lock and warns W0503.
+    var world: World = undefined;
+    project_world(&world, 34, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expect(store_files.kind_of(lock_path) == null);
+    const code = run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference });
+    if (code != 0) std.debug.print("RUN: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expectEqual(@as(usize, 0), world.sim.stdout().len);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.sim.stderr(), "warning[ZBX-W0503]"));
+    try testing.expect(std.mem.indexOf(u8, lock_text(), reference) != null);
+    try testing.expectEqualStrings("/bin/hello\nworld\n", started_argv(&world));
+    // The second run has a lock and says nothing.
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference }));
+    try testing.expectEqual(@as(usize, 0), world.sim.stderr().len);
+}
+
+test "an image with no command and none given is refused" {
+    // Goal: E0524. The fixture has a command, so the record is rewritten without one.
+    var world: World = undefined;
+    project_world(&world, 35, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", reference }));
+    var index: u32 = 0;
+    while (store_files.alive_path(index)) |path| : (index += 1) {
+        if (std.mem.indexOf(u8, path, "/store/images/") == null) continue;
+        const record = store_files.content_of(path) orelse continue;
+        var kept: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&kept);
+        var lines = std.mem.splitScalar(u8, record, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " ");
+            if (std.mem.startsWith(u8, trimmed, ".entrypoint") or std.mem.startsWith(u8, trimmed, ".cmd")) continue;
+            try writer.print("{s}\n", .{line});
+        }
+        store_files.put_file(path, 0o644, std.mem.trimEnd(u8, writer.buffered(), "\n"));
+    }
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", reference }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0524") != null);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "run", "--name", "web-1", reference, "--", "/bin/other" }));
+    try testing.expectEqualStrings("/bin/other\n", started_argv(&world));
+}

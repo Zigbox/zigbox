@@ -350,7 +350,11 @@ fn build_variant_layers(image: *Image) void {
 
 fn build_image(image: *Image, family: Family) void {
     image.families = family;
-    image.config.set_bytes("{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"Cmd\":[]}}");
+    image.config.set_bytes(
+        \\{"architecture":"amd64","os":"linux","config":{"Entrypoint":["/bin/hello"],
+        \\"Cmd":["world"],"Env":["PATH=/bin:/usr/bin","LANG=C"],"WorkingDir":"/srv/app",
+        \\"User":""}}
+    );
     build_layer_one(&image.layer_gzip);
     build_layer_two(&image.layer_zstd);
     build_variant_layers(image);

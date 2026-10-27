@@ -58,6 +58,15 @@ pub const Kind = enum {
     make_pts_dir,
     mount_pts,
     link_dev,
+    /// The host's /sys bound read-only (the M4 decision, until M5's network namespace gives the
+    /// container a sysfs of its own). Tolerant: a host that will not bind it gives a container
+    /// without /sys, with a note.
+    make_sys_dir,
+    bind_sys,
+    remount_sys,
+    /// Only in a plan with a working directory: makes it (and its parents) if the image lacks
+    /// it, and goes there. After the new root is entered.
+    enter_workdir,
     /// Only in a read-only plan: scratch space on tmpfs, then the rootfs itself read-only.
     make_tmp_dir,
     mount_tmp,
@@ -74,6 +83,10 @@ pub const Kind = enum {
     /// gone), and the filter last, so that it is the last thing the child does but `execve`.
     restrict_capabilities,
     clear_ambient,
+    /// Only in a plan for an image that runs as a user: becomes that user and group, after the
+    /// capabilities are restricted (so the bounding set is already as it will stay) and before
+    /// the filter.
+    set_user,
     set_no_new_privs,
     install_seccomp,
     exec,
@@ -110,9 +123,10 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// The child's steps: twenty-three that happen once (four of them the hardening), and two per
-/// device and one per link. A read-only plan has `read_only_steps_count` more.
-pub const child_steps_count: u32 = 23 + 2 * constants.container_devices_count +
+/// The child's steps: twenty-six that happen once (four of them the hardening, three the /sys),
+/// and two per device and one per link. A read-only plan has `read_only_steps_count` more, one
+/// with a working directory, one with a user.
+pub const child_steps_count: u32 = 26 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
@@ -172,6 +186,8 @@ pub const ScopeInput = struct {
     limits: spec.Limits,
 };
 
+pub const User = spec.User;
+
 pub const Input = struct {
     rootfs: []const u8,
     name: []const u8,
@@ -187,6 +203,10 @@ pub const Input = struct {
     read_only: bool = false,
     /// Added to the container's environment, replacing a default of the same name.
     env: []const spec.Label = &.{},
+    /// The directory the command starts in; made if the image lacks it. Empty: the root.
+    workdir: []const u8 = "",
+    /// The user and group the command runs as; null (or 0 and 0) leaves it root.
+    user: ?User = null,
     /// Set for a run of a tree from the store: `rootfs` is then the empty directory the overlay
     /// is mounted on, and the layers are these.
     overlay: ?Overlay = null,
@@ -215,6 +235,12 @@ pub const Plan = struct {
     read_only: bool,
     /// Whether the rootfs is an overlay of a tree from the store.
     overlay: bool,
+    /// Whether the command starts in a working directory, and whether it runs as a user.
+    has_workdir: bool,
+    workdir: Text,
+    has_user: bool,
+    user_uid: u32,
+    user_gid: u32,
     /// Whether the plan has a `start_scope` step, and what it is made with.
     scoped: bool,
     scope_name: Text,
@@ -226,7 +252,7 @@ pub const Plan = struct {
     name: Text,
     /// Where the command is looked for: its own path if it has a slash, else one path per
     /// directory of the container's PATH.
-    candidates: [constants.container_path_dirs_count]Text,
+    candidates: [constants.candidates_max]Text,
     candidates_count: u32,
     strings: [constants.exec_strings_bytes_max]u8,
     strings_len: u32,
@@ -244,12 +270,17 @@ pub const Plan = struct {
         plan.scoped = input.scope != null;
         plan.read_only = input.read_only;
         plan.overlay = input.overlay != null;
+        plan.has_workdir = input.workdir.len > 0;
+        plan.has_user = if (input.user) |user| user.uid != 0 or user.gid != 0 else false;
+        plan.user_uid = if (input.user) |user| user.uid else 0;
+        plan.user_gid = if (input.user) |user| user.gid else 0;
         plan.paths_len = 0;
         plan.strings_len = 0;
         plan.candidates_count = 0;
         // Offset 0 is the empty text, so a step with nothing to say has a valid reference.
         assert(plan.add_text(&.{""}).offset == 0);
         plan.name = plan.add_text(&.{input.name});
+        plan.workdir = plan.add_text(&.{input.workdir});
         plan.build_scope(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
@@ -290,7 +321,8 @@ pub const Plan = struct {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
-        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only;
+        const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) + @intFromBool(plan.has_user);
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -364,7 +396,7 @@ pub const Plan = struct {
             .target = target,
             .source = source,
             .index = index,
-            .tolerant = kind == .mount_pts,
+            .tolerant = kind == .mount_pts or kind == .bind_sys or kind == .remount_sys,
         };
         plan.count += 1;
     }
@@ -452,15 +484,18 @@ pub const Plan = struct {
         plan.push_devices(rootfs_text);
         plan.push_dev_mounts(rootfs_text);
         plan.push_links(rootfs_text);
+        plan.push_sys(rootfs_text);
         if (plan.read_only) plan.push_read_only(rootfs, rootfs_text);
         const here = plan.add_text(&.{"."});
         plan.push(.enter_rootfs, rootfs, empty_text, 0);
         plan.push(.pivot_root, here, here, 0);
         plan.push(.detach_old_root, here, empty_text, 0);
         plan.push(.enter_new_root, plan.add_text(&.{"/"}), empty_text, 0);
+        if (plan.has_workdir) plan.push(.enter_workdir, plan.workdir, empty_text, 0);
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
         plan.push(.restrict_capabilities, empty_text, empty_text, 0);
         plan.push(.clear_ambient, empty_text, empty_text, 0);
+        if (plan.has_user) plan.push(.set_user, empty_text, empty_text, 0);
         plan.push(.set_no_new_privs, empty_text, empty_text, 0);
         plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
@@ -525,6 +560,16 @@ pub const Plan = struct {
         plan.push(.mount_pts, pts, empty_text, 0);
     }
 
+    /// The host's /sys, bound recursively and made read-only.
+    fn push_sys(plan: *Plan, rootfs: []const u8) void {
+        const start = plan.count;
+        defer assert(plan.count == start + 3);
+        const inside = plan.add_text(&.{ rootfs, "/sys" });
+        plan.push(.make_sys_dir, inside, empty_text, 0);
+        plan.push(.bind_sys, inside, plan.add_text(&.{"/sys"}), 0);
+        plan.push(.remount_sys, inside, empty_text, 0);
+    }
+
     fn push_links(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
         defer assert(plan.count == start + constants.container_links_count);
@@ -585,7 +630,17 @@ pub const Plan = struct {
         }
         plan.envp[count] = null;
         assert(count <= constants.environment_count_max + constants.env_vars_count_max);
-        plan.build_candidates(input.command[0]);
+        plan.build_candidates(input.command[0], search_path_of(input.env));
+    }
+
+    /// The PATH a program is looked for in: the image's if the caller set one, else the default.
+    fn search_path_of(env: []const spec.Label) []const u8 {
+        for (env) |variable| {
+            if (std.mem.eql(u8, variable.key, "PATH") and variable.value.len > 0) {
+                return variable.value;
+            }
+        }
+        return constants.container_path;
     }
 
     fn overridden(env: []const spec.Label, name: []const u8) bool {
@@ -598,19 +653,27 @@ pub const Plan = struct {
 
     /// A program with a slash in its name is run as named; any other is looked up in the
     /// container's PATH, in order, as a shell does.
-    fn build_candidates(plan: *Plan, program: []const u8) void {
+    fn build_candidates(plan: *Plan, program: []const u8, search_path: []const u8) void {
         assert(program.len > 0);
         if (std.mem.indexOfScalar(u8, program, '/') != null) {
             plan.candidates[0] = plan.add_text(&.{program});
             plan.candidates_count = 1;
             return;
         }
-        var directories = std.mem.splitScalar(u8, constants.container_path, ':');
+        var directories = std.mem.splitScalar(u8, search_path, ':');
         while (directories.next()) |directory| {
+            if (directory.len == 0 or directory[0] != '/') continue;
+            if (plan.candidates_count == constants.candidates_max) break;
+            // The image's own PATH may be long and the words long: the room is checked.
+            const room = plan.paths.len - plan.paths_len;
+            if (directory.len + 1 + program.len + 1 + 1024 > room) break;
             plan.candidates[plan.candidates_count] = plan.add_text(&.{ directory, "/", program });
             plan.candidates_count += 1;
         }
-        assert(plan.candidates_count == constants.container_path_dirs_count);
+        assert(plan.candidates_count > 0);
+        if (search_path.ptr == constants.container_path.ptr) {
+            assert(plan.candidates_count == constants.container_path_dirs_count);
+        }
     }
 };
 
@@ -652,6 +715,11 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .mount_shm => "mounting a tmpfs on /dev/shm",
         .make_pts_dir => "creating /dev/pts",
         .mount_pts => "mounting devpts on /dev/pts",
+        .make_sys_dir => "creating /sys in the rootfs",
+        .bind_sys => "binding the host's /sys",
+        .remount_sys => "making /sys read-only",
+        .enter_workdir => "entering the image's working directory",
+        .set_user => "becoming the image's user",
         .enter_rootfs => "entering the rootfs directory",
         .pivot_root => "pivot_root into the rootfs",
         .detach_old_root => "unmounting the old root",
@@ -714,7 +782,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
-    try testing.expectEqual(@as(u32, 47), plan.count);
+    try testing.expectEqual(@as(u32, 50), plan.count);
     try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
     try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
@@ -733,24 +801,26 @@ test "with the helpers the parent has one step per map, and the words are the ra
 test "the plan has the steps in order, parent and child interleaved, and all within bounds" {
     // Goal: the shape every other module relies on. Method: build once and walk it; each step
     // belongs to the side the order says, the device and link steps repeat per device and link,
-    // and only the devpts mount is tolerant.
+    // and only the devpts mount and the two of /sys are tolerant.
     var plan: Plan = undefined;
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
     try testing.expectEqual(steps_count_single, plan.count);
-    try testing.expectEqual(@as(u32, 48), plan.count);
+    try testing.expectEqual(@as(u32, 51), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
     var links_seen: u32 = 0;
     for (plan.steps[0..plan.count]) |step| {
         if (step.tolerant) {
             tolerant += 1;
-            try testing.expectEqual(Kind.mount_pts, step.kind);
+            const allowed = step.kind == .mount_pts or step.kind == .bind_sys or
+                step.kind == .remount_sys;
+            try testing.expect(allowed);
         }
         if (step.kind == .bind_device) devices_seen += 1;
         if (step.kind == .link_dev) links_seen += 1;
     }
-    try testing.expectEqual(@as(u32, 1), tolerant);
+    try testing.expectEqual(@as(u32, 3), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
     // The mounts come in the order the kernel needs: private, bind, proc, dev, ... pivot, exec.
@@ -1044,4 +1114,68 @@ test "a path the kernel would split is not a layer" {
     try testing.expectEqual(@as(?u8, ':'), spec.overlay_path_problem("/a:b"));
     try testing.expectEqual(@as(?u8, '\\'), spec.overlay_path_problem("/a\\b"));
     try testing.expectEqual(@as(?u8, null), spec.overlay_path_problem("/home/alice/.local/state"));
+}
+
+fn index_of(plan: *const Plan, kind: Kind) ?usize {
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return index;
+    }
+    return null;
+}
+
+test "/sys is bound read-only from the host, in every plan, before the pivot" {
+    // Goal: the M4 decision. Method: the three steps are there, in order, with the host's /sys
+    // as the source and the rootfs's as the target, whether or not the rootfs is read-only.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    const made = index_of(&plan, .make_sys_dir).?;
+    try testing.expectEqual(Kind.bind_sys, plan.steps[made + 1].kind);
+    try testing.expectEqual(Kind.remount_sys, plan.steps[made + 2].kind);
+    try testing.expectEqualStrings("/srv/alpine/sys", plan.text(plan.steps[made + 1].target));
+    try testing.expectEqualStrings("/sys", plan.text(plan.steps[made + 1].source));
+    try testing.expect(made + 2 < index_of(&plan, .pivot_root).?);
+    input.read_only = true;
+    plan.build(&input);
+    try testing.expect(index_of(&plan, .remount_sys).? < index_of(&plan, .remount_readonly).?);
+}
+
+test "a working directory and a user add one step each, after the root is entered" {
+    // Goal: the image's config at run. Method: the steps exist only when asked for, the user
+    // comes after the capabilities and before no_new_privs, root alone adds nothing.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    const plain = plan.count;
+    try testing.expect(index_of(&plan, .enter_workdir) == null);
+    try testing.expect(index_of(&plan, .set_user) == null);
+    input.workdir = "/srv/app";
+    input.user = .{ .uid = 0, .gid = 0 };
+    plan.build(&input);
+    try testing.expectEqual(plain + 1, plan.count);
+    try testing.expect(index_of(&plan, .set_user) == null);
+    try testing.expect(index_of(&plan, .enter_new_root).? < index_of(&plan, .enter_workdir).?);
+    try testing.expectEqualStrings("/srv/app", plan.text(plan.steps[index_of(&plan, .enter_workdir).?].target));
+    input.user = .{ .uid = 33, .gid = 44 };
+    plan.build(&input);
+    try testing.expectEqual(plain + 2, plan.count);
+    try testing.expectEqual(@as(u32, 33), plan.user_uid);
+    try testing.expectEqual(@as(u32, 44), plan.user_gid);
+    try testing.expect(index_of(&plan, .clear_ambient).? < index_of(&plan, .set_user).?);
+    try testing.expect(index_of(&plan, .set_user).? < index_of(&plan, .set_no_new_privs).?);
+    plan.check();
+}
+
+test "an image's PATH decides where a bare command is looked for" {
+    // Goal: python:3.12-slim's PATH starts with /usr/local/bin and has seven directories.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"python"});
+    const path = "/opt/py/bin:/usr/local/bin:relative:/usr/bin::/bin";
+    const env = [_]spec.Label{.{ .key = "PATH", .value = path }};
+    input.env = &env;
+    plan.build(&input);
+    try testing.expectEqual(@as(u32, 4), plan.candidates_count);
+    try testing.expectEqualStrings("/opt/py/bin/python", plan.text(plan.candidates[0]));
+    try testing.expectEqualStrings("/bin/python", plan.text(plan.candidates[3]));
+    plan.check();
 }

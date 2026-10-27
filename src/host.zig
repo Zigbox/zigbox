@@ -190,6 +190,10 @@ pub const MountKind = enum {
     /// flags the mount already has (nosuid, nodev, noexec, atime) to be kept, so the host reads
     /// them first.
     remount_readonly,
+    /// `target` (a mount, with the mounts below it) becomes read-only throughout: the whole
+    /// tree at once (`mount_setattr` with `AT_RECURSIVE`), which a user namespace may do because
+    /// it only adds a restriction.
+    remount_readonly_tree,
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
     overlay,
@@ -363,6 +367,9 @@ pub const VTable = struct {
     clear_ambient: *const fn (context: *anyopaque) Error!void,
     /// Sets `no_new_privs` (`PR_SET_NO_NEW_PRIVS`), which stays for the process and its children.
     no_new_privs: *const fn (context: *anyopaque) Error!void,
+    /// Becomes the user and group: no supplementary groups, then the group, then the user (all
+    /// three ids of each), so that nothing of root is left. Needs CAP_SETUID and CAP_SETGID.
+    set_user: *const fn (context: *anyopaque, uid: u32, gid: u32) Error!void,
     /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
     install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
@@ -390,6 +397,8 @@ pub const VTable = struct {
     wait_event: *const fn (context: *anyopaque, pid: Pid, timeout_ms: u32) Error!Event,
     /// This process's id.
     own_pid: *const fn (context: *anyopaque) Pid,
+    /// The current working directory, as an absolute path, written into `buffer`.
+    working_directory: *const fn (context: *anyopaque, buffer: []u8) Error![]const u8,
     /// Sleeps at least `ms` milliseconds (the library's polls and graces use it).
     sleep_ms: *const fn (context: *anyopaque, ms: u32) void,
     /// A clock that only goes forward, in milliseconds, for measuring waits.
@@ -831,6 +840,13 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
+    pub fn set_user(host: Host, user_id: u32, group_id: u32) Error!void {
+        assert(user_id != std.math.maxInt(u32)); // (uid_t)-1 means "no change", never a real id.
+        assert(group_id != std.math.maxInt(u32));
+        try host.vtable.set_user(host.context, user_id, group_id);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
     pub fn no_new_privs(host: Host) Error!void {
         assert(@intFromPtr(host.vtable) != 0);
         assert(@intFromPtr(host.context) != 0);
@@ -929,6 +945,15 @@ pub const Host = struct {
         const pid = host.vtable.own_pid(host.context);
         assert(pid > 0);
         return pid;
+    }
+
+    /// The current working directory (absolute, no trailing slash except for the root).
+    pub fn working_directory(host: Host, buffer: []u8) Error![]const u8 {
+        assert(buffer.len > 1);
+        const path = try host.vtable.working_directory(host.context, buffer);
+        assert(path.len > 0);
+        assert(path[0] == '/');
+        return path;
     }
 
     pub fn sleep_ms(host: Host, ms: u32) void {

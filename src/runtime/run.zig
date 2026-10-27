@@ -48,6 +48,7 @@ const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
+const image_diagnose = @import("../image_diagnose.zig");
 const image_mod = @import("image.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
@@ -294,6 +295,12 @@ pub fn start(
     ids.choose(host, &handle.facts, &choice);
     if (choice.warned) handle.report(&choice.warning);
     handle.mapping = if (choice.warned) .single else .full;
+    if (container.user) |user| {
+        if (choice.warned and (user.uid != 0 or user.gid != 0)) {
+            image_diagnose.needs_id_map(diag, user.uid, user.gid);
+            return error.StartFailed;
+        }
+    }
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
@@ -309,6 +316,8 @@ pub fn start(
         .scope = scope_input,
         .read_only = container.read_only,
         .env = container.env,
+        .workdir = container.workdir,
+        .user = container.user,
         .overlay = if (handle.has_image) handle.image.overlay() else null,
     };
     handle.plan.build(&input);
@@ -545,6 +554,10 @@ fn check_command(container: *const Spec, diag: *Diag) Error!void {
     }
     if (spec_mod.env_problem(container.env, command)) |index| {
         diagnose.env_too_big(diag, index);
+        return error.StartFailed;
+    }
+    if (spec_mod.workdir_problem(container.workdir)) {
+        diagnose.workdir_unusable(diag);
         return error.StartFailed;
     }
 }

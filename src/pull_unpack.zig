@@ -22,6 +22,8 @@ const import = @import("store/import.zig");
 const images = @import("store/images.zig");
 const layer_diagnose = @import("layer/diagnose.zig");
 const layout = @import("store/layout.zig");
+const lock_file = @import("lock_file.zig");
+const image_diagnose = @import("image_diagnose.zig");
 const manifest = @import("registry/manifest.zig");
 const open = @import("store/open.zig");
 const reader_mod = @import("layer/reader.zig");
@@ -44,6 +46,8 @@ pub const Output = struct {
     mode: render.Mode,
     color: bool,
     json: bool,
+    /// The pull is a step of something else (a run that has no lock): its result is not printed.
+    quiet: bool = false,
 };
 
 /// The caller's memory for unpacking, about 14 MiB: keep it in static storage.
@@ -51,6 +55,8 @@ pub const Workspace = struct {
     applier: apply.Applier,
     layer: reader_mod.Layer,
     output: [constants.pull_output_bytes_max]u8,
+    /// The project's zbx.lock, read by the parent before the work and updated by the child.
+    locking: lock_file.Workspace,
 };
 
 /// What the parent did before the child started: how each blob came, for the result.
@@ -69,6 +75,7 @@ pub const Job = struct {
     fetched: *const Fetched,
     workspace: *Workspace,
     import_workspace: *import.Workspace,
+    settings: *const images.Settings,
 };
 
 pub fn work_call(context: *anyopaque, squash_owner: bool) u8 {
@@ -264,20 +271,63 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
     for (resolved.layers[0..resolved.layer_count], 0..) |blob, index| {
         image.layers[index] = blob.digest;
     }
+    image.settings = job.settings.*;
     var failure: fs_mod.Failure = undefined;
     images.save(store, &image, &failure) catch {
         const step = "writing the image record";
         store_diagnose.write_failed(diag, store, step, failure.err, failure.errno);
         return error.Failed;
     };
-    const text = render_result(job, result, &platform_buffer);
+    const locked = try record_in_lock(job, store, &image, diag);
+    if (job.output.quiet) return;
+    const text = render_result(job, result, &platform_buffer, locked);
     job.host.write_all(.stdout, text) catch |err| {
         @import("diag/errors.zig").output_failed(diag, .stdout, err, job.host.last_errno());
         return error.Failed;
     };
 }
 
-fn render_result(job: *Job, result: *const import.Result, platform: []const u8) []const u8 {
+/// Adds the image to zbx.lock (unless the reference was a digest, which needs none). The path
+/// of the lock and whether this made it, or null if it was not touched.
+fn record_in_lock(
+    job: *Job,
+    store: *const Store,
+    image: *const images.Image,
+    diag: *Diag,
+) Error!?bool {
+    assert(image.layer_count > 0);
+    if (job.reference.digest != null) return null;
+    const locking = &job.workspace.locking;
+    var failure: lock_file.Failure = undefined;
+    lock_file.open_project(job.host, store.fs, locking, &failure) catch {
+        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
+        image_diagnose.lock_failure(diag, path, failure);
+        return error.Failed;
+    };
+    const existed = locking.located.exists;
+    locking.lock.put(
+        job.written,
+        image.manifest,
+        image.platform_text(),
+        image.tree,
+    ) catch |err| {
+        failure = if (err == error.Full) .full else .{ .write = .{ .err = error.FileTooLarge, .errno = 0 } };
+        image_diagnose.lock_failure(diag, locking.located.text(), failure);
+        return error.Failed;
+    };
+    lock_file.save(job.host, store.fs, locking, &failure) catch {
+        image_diagnose.lock_failure(diag, locking.located.text(), failure);
+        return error.Failed;
+    };
+    return !existed;
+}
+
+fn render_result(
+    job: *Job,
+    result: *const import.Result,
+    platform: []const u8,
+    locked: ?bool,
+) []const u8 {
     assert(job.workspace.output.len == constants.pull_output_bytes_max);
     assert(platform.len > 0);
     const buffer = &job.workspace.output;
@@ -288,7 +338,7 @@ fn render_result(job: *Job, result: *const import.Result, platform: []const u8) 
         writer.print("{s}\n", .{&resolved.manifest_digest.text()}) catch unreachable; // Sized.
         return writer.buffered();
     }
-    write_json(&writer, job, result) catch unreachable; // Same bound.
+    write_json(&writer, job, result, locked) catch unreachable; // Same bound.
     return writer.buffered();
 }
 
@@ -296,6 +346,7 @@ fn write_json(
     writer: *std.Io.Writer,
     job: *const Job,
     result: *const import.Result,
+    locked: ?bool,
 ) std.Io.Writer.Error!void {
     assert(job.resolved.layer_count <= constants.registry_layers_max);
     assert(result.directories > 0);
@@ -323,7 +374,43 @@ fn write_json(
     try writer.print("],\"files\":{d},\"directories\":{d},\"symlinks\":{d},\"bytes\":{d},", .{
         result.files, result.directories, result.symlinks, result.bytes,
     });
-    try writer.print("\"special_skipped\":{d},\"xattrs_skipped\":{d}}}\n", .{
+    try writer.print("\"special_skipped\":{d},\"xattrs_skipped\":{d},", .{
         counts.special_skipped, counts.xattrs_skipped,
     });
+    try write_settings(writer, job.settings);
+    try writer.writeAll(",\"lock\":");
+    if (locked) |created| {
+        const located = &job.workspace.locking.located;
+        try writer.writeAll("{\"path\":");
+        try @import("bundle.zig").write_json_string(writer, located.text());
+        try writer.print(",\"created\":{}}}", .{created});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}\n");
+}
+
+/// The image's settings as the member "image": what it runs by default.
+fn write_settings(writer: *std.Io.Writer, settings: *const images.Settings) std.Io.Writer.Error!void {
+    assert(settings.used <= settings.bytes.len);
+    const json = @import("bundle.zig").write_json_string;
+    try writer.writeAll("\"image\":{");
+    inline for (.{ .entrypoint, .cmd }) |list| {
+        try writer.print("\"{s}\":[", .{@tagName(list)});
+        for (0..settings.count(list)) |index| {
+            if (index > 0) try writer.writeAll(",");
+            try json(writer, settings.word(list, @intCast(index)));
+        }
+        try writer.writeAll("],");
+    }
+    try writer.writeAll("\"env\":[");
+    for (0..settings.count(.env)) |index| {
+        if (index > 0) try writer.writeAll(",");
+        try json(writer, settings.word(.env, @intCast(index)));
+    }
+    try writer.writeAll("],\"workdir\":");
+    try json(writer, settings.get(.workdir));
+    try writer.writeAll(",\"user\":");
+    try json(writer, settings.get(.user));
+    try writer.writeAll("}");
 }
