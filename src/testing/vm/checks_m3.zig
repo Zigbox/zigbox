@@ -828,7 +828,7 @@ test "growth must be about the new file, not a second rootfs" {
 }
 
 test "the apk diff lists additions, and changes only apk's own files" {
-    const good = "A /usr/bin/tree\nA /lib/apk/db/lock\nM /etc/apk/world  content\n" ++
+    const good = "A /usr/bin/dtach\nA /lib/apk/db/lock\nM /etc/apk/world  content\n" ++
         "M /lib/apk/db/installed  content\n";
     try check_apk_diff(out_err(good, ""), 0, "/usr/bin/dtach");
     try testing.expectError(
