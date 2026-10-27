@@ -39,6 +39,8 @@ pub const Stat = struct {
     /// overlay's upper layer records a deletion.
     rdev_major: u32 = 0,
     rdev_minor: u32 = 0,
+    /// When the bytes last changed, in seconds since the epoch.
+    mtime: u64 = 0,
 };
 
 /// Called once per name in a directory, "." and ".." excluded, in the order the file system

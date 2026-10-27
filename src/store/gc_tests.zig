@@ -850,9 +850,11 @@ fn caller_plan(caller: *Caller) void {
     var index: u32 = 0;
     while (index < caller.extra) : (index += 1) {
         var name: [32]u8 = undefined;
-        const path = std.fmt.bufPrint(&name, "/src/etc/more-{d}", .{index}) catch unreachable;
+        const format = "/src/etc/more-{d}";
+        const path = std.fmt.bufPrint(&name, format, .{index}) catch unreachable; // Short.
         var content: [24]u8 = undefined;
-        const text = std.fmt.bufPrint(&content, "file number {d} here", .{index}) catch unreachable;
+        const words = "file number {d} here";
+        const text = std.fmt.bufPrint(&content, words, .{index}) catch unreachable; // Short.
         caller.files.put_file(path, 0o644, text);
     }
     var result: import.Result = undefined;
@@ -897,4 +899,52 @@ test "two callers with two regions plan gc independently, also at once" {
         try testing.expect(got.hash.eql(want.hash));
         try testing.expectEqual(want.counts.objects, got.counts.objects);
     }
+}
+
+fn put_partial(text: []const u8, mtime: u64, buffer: *[160]u8) []const u8 {
+    if (files.kind_of(root_path ++ "/blobs") == null) {
+        files.put_dir(root_path ++ "/blobs", 0o755);
+        files.put_dir(root_path ++ "/blobs/sha256", 0o755);
+        files.put_dir(root_path ++ "/blobs/partial", 0o755);
+    }
+    const format = root_path ++ "/blobs/partial/{s}";
+    const hex = Sha256.of(text).hex();
+    const where = std.fmt.bufPrint(buffer, format, .{&hex}) catch unreachable; // Short.
+    files.put_file(where, 0o644, text);
+    files.set_mtime_of(where, mtime);
+    return where;
+}
+
+test "abandoned cut downloads are planned, trashed and restored; recent ones stay" {
+    // Goal: a cut download nobody has written to for a day is gc's, as its own class; one a pull
+    // may be writing is not. Method: two partial files, one touched a minute ago and one two days
+    // ago; the cycle plan, apply, restore moves exactly the old one, and a restore refuses when
+    // a new download of the same blob has begun.
+    _ = two_trees();
+    const now = sim.world.now;
+    var recent_buffer: [160]u8 = undefined;
+    var old_buffer: [160]u8 = undefined;
+    const recent = put_partial("a pull writes this", now - 60, &recent_buffer);
+    const two_days = 2 * constants.store_partial_seconds;
+    const old = put_partial("a pull gave this up", now - two_days, &old_buffer);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.partials);
+    try testing.expectEqual(@as(u64, 0), planned.counts.blobs);
+    try testing.expectEqual(@as(u64, "a pull gave this up".len), planned.counts.bytes);
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.partials);
+    try testing.expect(files.kind_of(old) == null);
+    try testing.expect(files.kind_of(recent) != null);
+    try testing.expectEqual(@as(u64, 0), (try make_plan(&.{})).counts.total());
+    // The same blob is being downloaded again: the restore would overwrite it, so it refuses.
+    var again_buffer: [160]u8 = undefined;
+    _ = put_partial("a pull gave this up", now, &again_buffer);
+    try testing.expectError(error.Conflict, do_restore(applied.gc));
+    files.remove_path(old);
+    const restored = try do_restore(applied.gc);
+    try testing.expectEqual(@as(u64, 1), restored.counts.partials);
+    try testing.expectEqualStrings("a pull gave this up", files.content_of(old).?);
+    // It is old again, so it is planned again.
+    try testing.expectEqual(@as(u64, 1), (try make_plan(&.{})).counts.partials);
+    try support.check_whole(&files, root_path, store.chunk_bytes);
 }

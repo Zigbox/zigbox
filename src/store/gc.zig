@@ -10,7 +10,9 @@
 //!   - materialized directories (`cache/<digest>`) of a tree that is neither a root nor live;
 //!   - downloaded blobs (`blobs/sha256/<digest>`) that no image record names. An image record
 //!     (`images/`, `images.zig`) keeps its tree, its config blob and its layer blobs. Cut
-//!     downloads (`blobs/partial/`) are not touched: they are a pull's to resume.
+//!     downloads (`blobs/partial/`) are a pull's to resume, so only those older than
+//!     `constants.store_partial_seconds` are planned, as their own class: no pull is
+//!     writing one that old, and an apply holds the lock a pull holds shared.
 //!   - leftovers in `tmp/` whose `<pid>-<n>` names a process that is gone (a killed import).
 //!
 //! The plan hash is the BLAKE3 of `"zbx-gc-plan" 0x01`, the store's generation counter
@@ -67,6 +69,8 @@ pub const Counts = struct {
     farms: u64 = 0,
     /// Downloaded blobs no image names.
     blobs: u64 = 0,
+    /// Cut downloads nobody has written to for `store_partial_seconds`.
+    partials: u64 = 0,
     /// Leftovers of dead processes in `tmp/`; deleted, not trashed, and not in the hash.
     tmp: u64 = 0,
     /// Bytes of the objects, lists and trees.
@@ -75,7 +79,8 @@ pub const Counts = struct {
     pub fn total(counts: *const Counts) u64 {
         assert(counts.objects < 1 << 40);
         assert(counts.trees < 1 << 40);
-        return counts.objects + counts.lists + counts.trees + counts.farms + counts.blobs;
+        return counts.objects + counts.lists + counts.trees + counts.farms + counts.blobs +
+            counts.partials;
     }
 };
 
@@ -206,6 +211,7 @@ pub const Meta = struct {
     trees: u64,
     farms: u64,
     blobs: u64 = 0,
+    partials: u64 = 0,
     bytes: u64,
     /// False while the move is going on, and for ever if it was killed.
     complete: bool,
@@ -218,10 +224,11 @@ pub fn render_meta(meta: *const Meta, out: *[meta_bytes_max]u8) []const u8 {
     // Cannot fail: eight short fields fit 512 bytes.
     writer.print(".{{\n    .version = 1,\n    .time = {d},\n    .expires = {d},\n" ++
         "    .objects = {d},\n    .lists = {d},\n    .trees = {d},\n    .farms = {d},\n" ++
-        "    .blobs = {d},\n    .bytes = {d},\n    .complete = {},\n}}\n", .{
-        meta.time,     meta.expires, meta.objects, meta.lists,
-        meta.trees,    meta.farms,   meta.blobs,   meta.bytes,
-        meta.complete,
+        "    .blobs = {d},\n    .partials = {d},\n    .bytes = {d},\n" ++
+        "    .complete = {},\n}}\n", .{
+        meta.time,  meta.expires,  meta.objects, meta.lists,
+        meta.trees, meta.farms,    meta.blobs,   meta.partials,
+        meta.bytes, meta.complete,
     }) catch unreachable; // Cannot fail: the buffer holds the longest one.
     return writer.buffered();
 }
@@ -244,6 +251,11 @@ pub fn parse_meta(text: []const u8) ?Meta {
         if (std.mem.eql(u8, key, "blobs")) {
             // Absent in a trash made before blobs were kept: then there are none.
             meta.blobs = std.fmt.parseInt(u64, value, 10) catch continue;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "partials")) {
+            // Absent in a trash made before partial downloads were collected.
+            meta.partials = std.fmt.parseInt(u64, value, 10) catch continue;
             continue;
         }
         if (std.mem.eql(u8, key, "complete")) {
@@ -289,6 +301,7 @@ pub const Class = enum {
     tree,
     farm,
     blob,
+    partial,
 
     fn directory(class: Class) []const u8 {
         assert(@tagName(class).len > 0);
@@ -298,6 +311,7 @@ pub const Class = enum {
             .tree => "trees",
             .farm => "cache",
             .blob => "blobs/sha256",
+            .partial => "blobs/partial",
         };
     }
 
@@ -310,6 +324,7 @@ pub const Class = enum {
             .tree => 't',
             .farm => 'f',
             .blob => 'b',
+            .partial => 'p',
         };
     }
 };
@@ -332,11 +347,15 @@ fn locate(
         .store => {
             if (class == .farm) return store.path(buffer, &.{ "/cache/", &hex });
             if (class == .blob) return store.path(buffer, &.{ "/blobs/sha256/", &hex });
+            if (class == .partial) return store.path(buffer, &.{ "/blobs/partial/", &hex });
             return store.id_path(buffer, class.directory(), id, suffix);
         },
         .trash => |gc| {
             if (class == .farm) return store.path(buffer, &.{ "/trash/", &gc, "/cache/", &hex });
             if (class == .blob) return store.path(buffer, &.{ "/trash/", &gc, "/blobs/", &hex });
+            if (class == .partial) {
+                return store.path(buffer, &.{ "/trash/", &gc, "/partial/", &hex });
+            }
             return store.path(buffer, &.{
                 "/trash/", &gc, "/", class.directory(), "/", hex[0..2], "/", hex[2..], suffix,
             });
@@ -607,6 +626,7 @@ const Pass = struct {
             .tree => pass.counts.trees += 1,
             .farm => pass.counts.farms += 1,
             .blob => pass.counts.blobs += 1,
+            .partial => pass.counts.partials += 1,
         }
     }
 };
@@ -627,7 +647,7 @@ fn move_to_trash(run: *Run, pass: *const Pass, class: Class, id: Digest) Error!v
     var to_storage: PathBuf = undefined;
     const from = locate(run.store, &from_storage, .store, class, id);
     const to = locate(run.store, &to_storage, .{ .trash = pass.gc }, class, id);
-    if (class != .farm and class != .blob) {
+    if (class != .farm and class != .blob and class != .partial) {
         var directory_storage: PathBuf = undefined;
         const directory = trash_shard(run.store, &directory_storage, pass.gc, class, id);
         try ensure_chain(run, pass.gc, class, directory);
@@ -757,6 +777,45 @@ fn enumerate_blobs(run: *Run, pass: *Pass) Error!void {
     }
 }
 
+/// The cut downloads nobody has written to for `store_partial_seconds`. A pull holds the shared
+/// lock while it writes one, and an apply holds the lock exclusive, so what an apply moves is no
+/// pull's; the age keeps a plan from naming what a pull is writing now.
+fn enumerate_partials(run: *Run, pass: *Pass) Error!void {
+    assert(run.names.len > 0);
+    assert(pass.counts.partials == 0);
+    const listed = shards.read(run.store, run.names, run.offsets, "blobs/partial", null);
+    const found = listed catch |err| return run.io("listing the cut downloads", err);
+    const now = run.store.host.time_now();
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const id = Digest.from_hex(found.name(index)) orelse continue;
+        var path: PathBuf = undefined;
+        const where = locate(run.store, &path, .store, .partial, id);
+        const stat = run.store.fs.lstat(where) catch |err| {
+            return run.io("sizing a cut download", err);
+        };
+        if (stat.kind != .file) continue;
+        if (stat.mtime + constants.store_partial_seconds > now) continue; // Recent: a pull's.
+        pass.counts.bytes += stat.size;
+        pass.note(.partial, id);
+        if (pass.mode == .apply) {
+            try ensure_trash_partial(run, pass.gc);
+            try move_to_trash(run, pass, .partial, id);
+        }
+    }
+}
+
+fn ensure_trash_partial(run: *Run, gc: Id) Error!void {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    assert(run.store.root_len > 1);
+    var storage: PathBuf = undefined;
+    const path = run.store.path(&storage, &.{ "/trash/", &gc, "/partial" });
+    run.store.fs.make_directory(
+        path,
+        true,
+    ) catch |err| return run.io("making a trash directory", err);
+}
+
 fn ensure_trash_blobs(run: *Run, gc: Id) Error!void {
     assert(gc.len == constants.store_gc_id_hex_bytes);
     assert(run.store.root_len > 1);
@@ -839,6 +898,7 @@ fn make_plan(run: *Run, pass: *Pass, generation_now: u64) Error!Plan {
     try enumerate_shards(run, pass, .tree);
     try enumerate_farms(run, pass);
     try enumerate_blobs(run, pass);
+    try enumerate_partials(run, pass);
     return .{ .counts = pass.counts, .hash = pass.hasher.final(), .generation = generation_now };
 }
 
@@ -952,6 +1012,7 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
         .trees = result.counts.trees,
         .farms = result.counts.farms,
         .blobs = result.counts.blobs,
+        .partials = result.counts.partials,
         .bytes = result.counts.bytes,
         .complete = false,
     };
@@ -969,6 +1030,7 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
     meta.trees = again.counts.trees;
     meta.farms = again.counts.farms;
     meta.blobs = again.counts.blobs;
+    meta.partials = again.counts.partials;
     meta.bytes = again.counts.bytes;
     meta.complete = true;
     try write_meta(run, result.gc, &meta);
@@ -1225,9 +1287,10 @@ pub fn restore(
         .trees = meta.trees,
         .farms = meta.farms,
         .blobs = meta.blobs,
+        .partials = meta.partials,
     };
     const short = found.objects < meta.objects or found.trees < meta.trees or
-        found.farms < meta.farms or found.blobs < meta.blobs;
+        found.farms < meta.farms or found.blobs < meta.blobs or found.partials < meta.partials;
     if (meta.complete and short) {
         return error.Incomplete;
     }
@@ -1321,6 +1384,19 @@ fn restore_pass(
         const id = Digest.from_hex(names.name(index)) orelse continue;
         try restore_one(run, gc, mode, .farm, id, counts, result);
     }
+    try restore_downloads(run, gc, mode, counts, result);
+}
+
+/// The blobs and the cut downloads of a trash.
+fn restore_downloads(
+    run: *Run,
+    gc: Id,
+    mode: RestoreMode,
+    counts: *Counts,
+    result: *Restored,
+) RestoreError!void {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    assert(run.names.len > 0);
     var blob_directory: [96]u8 = undefined;
     // Cannot fail: "trash/", twelve digits and "/blobs" fit 96 bytes.
     const blobs_format = "trash/{s}/blobs";
@@ -1330,11 +1406,27 @@ fn restore_pass(
     const blob_names = names_of catch |err| {
         return run.io("listing the trash's blobs", err);
     };
-    index = 0;
+    var index: u32 = 0;
     while (index < blob_names.count()) : (index += 1) {
         const id = Digest.from_hex(blob_names.name(index)) orelse continue;
         try restore_one(run, gc, mode, .blob, id, counts, result);
     }
+    const cut_where = partials_where(gc, &blob_directory);
+    const partial_names = shards.read(run.store, run.names, run.offsets, cut_where, null);
+    const cut_names = partial_names catch |err| {
+        return run.io("listing the trash's cut downloads", err);
+    };
+    index = 0;
+    while (index < cut_names.count()) : (index += 1) {
+        const id = Digest.from_hex(cut_names.name(index)) orelse continue;
+        try restore_one(run, gc, mode, .partial, id, counts, result);
+    }
+}
+
+fn partials_where(gc: Id, buffer: *[96]u8) []const u8 {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    // Cannot fail: "trash/", twelve digits and "/partial" fit 96 bytes.
+    return std.fmt.bufPrint(buffer, "trash/{s}/partial", .{gc}) catch unreachable;
 }
 
 fn restore_name(
@@ -1388,6 +1480,7 @@ fn restore_one(
         .tree => counts.trees += 1,
         .farm => counts.farms += 1,
         .blob => counts.blobs += 1,
+        .partial => counts.partials += 1,
     }
     if (mode == .check) {
         // Identical content by name; replaced if it is there. A blob that was downloaded again
@@ -1404,7 +1497,7 @@ fn restore_one(
         }
         return;
     }
-    if (class != .farm and class != .blob) {
+    if (class != .farm and class != .blob and class != .partial) {
         var shard_storage: PathBuf = undefined;
         const shard = run.store.shard_path(&shard_storage, class.directory(), id);
         fs.make_directory(shard, true) catch |err| return run.io("making a shard directory", err);

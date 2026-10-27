@@ -258,6 +258,7 @@ const store_gc_schema =
     \\"objects":{"type":"integer"},"lists":{"type":"integer","description":"chunk lists"},
     \\"trees":{"type":"integer"},"farms":{"type":"integer","description":"materialized dirs"},
     \\"blobs":{"type":"integer","description":"downloaded blobs no image names"},
+    \\"partials":{"type":"integer","description":"cut downloads untouched for 24 hours"},
     \\"tmp":{"type":"integer","description":"leftovers of dead processes in tmp/"},
     \\"bytes":{"type":"integer"}}}
 ;
@@ -273,7 +274,8 @@ const store_trash_schema =
     \\"properties":{"gc":{"type":"string"},"readable":{"type":"boolean"},
     \\"time":{"type":"integer"},"expires":{"type":"integer"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
-    \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"bytes":{"type":"integer"},
+    \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"},
+    \\"bytes":{"type":"integer"},
     \\"complete":{"type":"boolean","description":"false if a gc or restore was interrupted"}}}}}}
 ;
 
@@ -285,7 +287,7 @@ const store_restore_schema =
     \\"type":"object","required":["schema","gc","objects","lists","trees","farms"],
     \\"properties":{"schema":{"const":"zbx.store.restore/1"},"gc":{"type":"string"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
-    \\"farms":{"type":"integer"},"blobs":{"type":"integer"}}}
+    \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"}}}
 ;
 
 const pull_resolve_schema =

@@ -90,6 +90,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .GID = true,
         .INO = true,
         .SIZE = true,
+        .MTIME = true,
     };
     var buffer: linux.Statx = undefined;
     try check(linux.statx(linux.AT.FDCWD, path.ptr, linux.AT.SYMLINK_NOFOLLOW, mask, &buffer));
@@ -107,6 +108,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .links = buffer.nlink,
         .rdev_major = buffer.rdev_major,
         .rdev_minor = buffer.rdev_minor,
+        .mtime = if (buffer.mask.MTIME and buffer.mtime.sec > 0) @intCast(buffer.mtime.sec) else 0,
     };
 }
 

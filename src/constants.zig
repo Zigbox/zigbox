@@ -461,6 +461,10 @@ pub const store_data_base_bytes_max: u32 = 400;
 pub const store_io_retries_max: u32 = 16;
 /// How long what gc moved stays in `trash/<gc id>/` before the next gc empties it: 7 days.
 pub const store_trash_seconds: u64 = 7 * 24 * 60 * 60;
+
+/// A cut download (`blobs/partial/`) that nobody has written to for this long is abandoned: gc
+/// plans it. A pull that is resumed later starts again from nothing.
+pub const store_partial_seconds: u64 = 24 * 60 * 60;
 /// A gc id is this many hex digits of the plan hash it ran with.
 pub const store_gc_id_hex_bytes: u32 = 12;
 /// The most bytes a store lock's holder record takes: "<pid> <command>", padded with NUL.

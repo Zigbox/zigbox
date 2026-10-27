@@ -138,6 +138,8 @@ pub const SimFs = struct {
     mutations: u32,
     crashed: bool,
     errno_last: u16,
+    /// The time the model stamps on what is created or written, for the tests that age things.
+    clock: u64,
     next_inode: u64,
     /// Bytes held by live files now.
     bytes_live: u64,
@@ -147,6 +149,7 @@ pub const SimFs = struct {
     /// Initialises in place. The tree is empty (the root exists and cannot be removed).
     pub fn init(sim: *SimFs, seed: u64) void {
         sim.count = 0;
+        sim.clock = 0;
         sim.pool_len = 0;
         sim.opens = @splat(closed_slot);
         sim.prng = std.Random.Xoshiro256.init(seed);
@@ -279,6 +282,7 @@ pub const SimFs = struct {
             .links = sim.links_of(node.inode),
             .rdev_major = node.rdev_major,
             .rdev_minor = node.rdev_minor,
+            .mtime = node.mtime,
         };
     }
 
@@ -404,7 +408,7 @@ pub const SimFs = struct {
         node.path_len = @intCast(path.len);
         node.xattr_at = 0;
         node.xattr_len = 0;
-        node.mtime = 0;
+        node.mtime = sim.clock;
         node.unreadable = false;
         node.rdev_major = 0;
         node.rdev_minor = 0;
@@ -779,6 +783,7 @@ pub const SimFs = struct {
         }
         if (sim.pool_len + node.data_len + length > sim.pool.len) return sim.fail(errno_nospc);
         sim.append(node, bytes[0..length]);
+        node.mtime = sim.clock;
         return @intCast(length);
     }
 
