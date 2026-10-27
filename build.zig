@@ -146,11 +146,12 @@ fn add_fuzz_step(
     step.dependOn(&run.step);
 }
 
-/// The spec's release criterion: a static binary under 2 MiB.
-const release_size_limit_bytes = 2 * 1024 * 1024;
+/// The spec's release criterion: a static binary under 4 MiB (2 MiB until M4's TLS client and
+/// decoders; live doc rev 54).
+const release_size_limit_bytes = 4 * 1024 * 1024;
 
 fn add_release_step(b: *std.Build, options: *std.Build.Step.Options) void {
-    const description = "Cross-compile static ReleaseSafe binaries, stripped, under 2 MiB";
+    const description = "Cross-compile static ReleaseSafe binaries, stripped, under 4 MiB";
     const step = b.step("release", description);
     // Release binaries are stripped by default so that they meet the size limit; ReleaseSafe
     // stays, so assertions still fire, only without symbolised stack traces. -Dstrip=false builds

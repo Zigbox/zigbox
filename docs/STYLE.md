@@ -21,7 +21,7 @@ Design goals, in order: **safety, performance, developer experience.**
 - Assert the **positive space and the negative space**: what must hold and what must not.
 - Split compound assertions: `assert(a); assert(b);`, not `assert(a and b)`. Use `if (a) assert(b);` for implications.
 - **`comptime` assert the relationships between constants** in `constants.zig`.
-- Assertions stay on in release builds. Zigbox ships `ReleaseSafe`, not `ReleaseSmall`. The M0 size limit (under 2 MB) is checked against the `ReleaseSafe` binary. If it cannot be met, report that to the owner; do not switch build modes quietly.
+- Assertions stay on in release builds. Zigbox ships `ReleaseSafe`, not `ReleaseSmall`. The release size limit (under 4 MB since M4; 2 MB before) is checked against the `ReleaseSafe` binary. If it cannot be met, report that to the owner; do not switch build modes quietly.
 
 ### Memory
 

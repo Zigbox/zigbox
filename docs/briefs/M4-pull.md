@@ -42,6 +42,7 @@ Acceptance criteria:
   - Every request has a timeout and a byte bound.
   - Network work runs in the parent, never in the namespace child (AGENTS.md).
 - **Anonymous auth.** On a 401, parse the `WWW-Authenticate: Bearer realm=...,service=...,scope=...` header, fetch a token from the realm and retry once. Do not hard-code Docker Hub; GHCR uses the same flow. A 429 is a coded diagnostic that names the rate limit and when to retry. It is never retried in a loop.
+- **A registry mirror (decided after slice 1).** A setting (an environment variable `ZBX_REGISTRY_MIRRORS`, a comma-separated list of hosts, plus the same in a small config file if one exists by then; choose and document) names mirrors for `docker.io`. A pull tries each mirror in order, then Docker Hub. A mirror's answer is verified by digest like any other, so a mirror can make a pull fail but never change what is pulled. The lockfile records the reference as written, never the mirror. PR CI sets it to `mirror.gcr.io` for `demo-m4`; the weekly top-20 run does not.
 - **Manifests.** Accept the OCI image index and manifest, and the Docker v2 manifest list and manifest.
   - Pick the platform `linux/amd64` or `linux/arm64` (variant `v8`) for the host. If there is no match, refuse and list the platforms the image offers.
   - Verify every fetched manifest and blob by its digest before use.
@@ -139,7 +140,7 @@ Acceptance criteria:
    - Real checks in the VM: `alpine:3.20` and `python:3.12-slim` run.
 4. **The top-20 workflow and seccomp.** `top20.zon`, the workflow and the result table. Grow the seccomp allowlist from real failures. Run it once under TCG locally for as many images as is practical, and report the results.
 5. **VM, CI and the agent test.**
-   - `zig build demo-m4`: the spec's five steps exactly, every assertion a unit-tested function, with blobs cached between CI runs (`actions/cache` keyed by `zbx.lock`).
+   - `zig build demo-m4`: the spec's five steps exactly, every assertion a unit-tested function, with blobs cached between CI runs (`actions/cache` keyed by `zbx.lock`) and docker.io reached through the mirror (`mirror.gcr.io`).
    - The acceptance checks, including a pull killed halfway that then resumes.
    - The agent test: a Zig program in the harness that drives the demo using only `--output json` and `zbx explain`.
    - The upgrade test against M3.

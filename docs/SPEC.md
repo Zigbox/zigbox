@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 53; doc date 2026-10-27), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 54; doc date 2026-10-27), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -58,7 +58,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Acceptance criteria:**
 
-- [ ] Static binary under 2 MB for x86_64 and aarch64, cross-compiled from one machine.
+- [ ] Static binary under 4 MB for x86_64 and aarch64, cross-compiled from one machine. (Under 2 MB until M4, whose TLS client, gzip, zstd and tar pushed one `ReleaseSafe` binary past it; assertions stay on rather than shipping a smaller build mode.)
 - [ ] Each failing check names the fix (sysctl key, package, or kernel version).
 - [ ] CI boots the VM and runs `demo-m0`.
 
