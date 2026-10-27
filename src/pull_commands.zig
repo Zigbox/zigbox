@@ -1,12 +1,18 @@
-//! `zbx pull`. In this slice of M4 the command resolves: `zbx pull --resolve-only <reference>`
-//! asks the registry what the reference names for this machine's platform and prints the digest
-//! of that image's manifest (the digest a lock file records), without fetching any layer. Text is
-//! the digest on a line; `--output json` is one object (`zbx schema pull-resolve`).
+//! `zbx pull`. `zbx pull --resolve-only <reference>` asks the registry what the reference names
+//! for this machine's platform and prints the digest of that image's manifest (the digest a lock
+//! file records), without fetching any layer. Text is the digest on a line; `--output json` is
+//! one object (`zbx schema pull-resolve`).
+//!
+//! `zbx pull <reference>` goes on: it downloads the config and the layers into the store's blob
+//! cache (a cut download resumes), then the store's child (`pull_unpack.zig`) unpacks the layers
+//! into one tree, imports it, and records the image. It prints the manifest digest (the same
+//! line as the resolve), or with `--output json` the object `zbx.pull/1`.
 //!
 //! The network work runs here, in the parent, before and outside any namespace child.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const blobs_mod = @import("registry/blobs.zig");
 const client_mod = @import("registry/client.zig");
 const constants = @import("constants.zig");
 const diagnose = @import("registry/diagnose.zig");
@@ -14,17 +20,31 @@ const errors = @import("diag/errors.zig");
 const host_mod = @import("host.zig");
 const manifest = @import("registry/manifest.zig");
 const reference_mod = @import("registry/reference.zig");
+const doctor = @import("doctor.zig");
+const import = @import("store/import.zig");
+const lock = @import("store/lock.zig");
+const namespace = @import("store/namespace.zig");
+const open = @import("store/open.zig");
+const render_diag = @import("diag/render.zig");
+const store_diagnose = @import("store/diagnose.zig");
+const unpack = @import("pull_unpack.zig");
 const Diag = @import("diag/diag.zig").Diag;
+const Store = @import("store/layout.zig").Store;
 
 const Host = host_mod.Host;
 
 pub const Error = error{ Failed, OutputFailed };
 
-/// What resolving works in: the client's memory, the result, and the text of the JSON result.
+/// What a pull works in: the client's memory, the result, the text of the JSON result, the
+/// blob being downloaded, and what the child unpacks in.
 pub const Workspace = struct {
     client: client_mod.Workspace,
     resolved: manifest.Resolved,
     output: [constants.pull_output_bytes_max]u8,
+    fetched: unpack.Fetched,
+    download: blobs_mod.Download,
+    unpack: unpack.Workspace,
+    reference: reference_mod.Reference,
 };
 
 pub const Args = struct {
@@ -32,13 +52,18 @@ pub const Args = struct {
     json: bool,
 };
 
-pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) Error!void {
+/// Parses the reference and resolves it for this machine into `workspace.resolved`.
+fn resolve_reference(
+    host: Host,
+    text: []const u8,
+    workspace: *Workspace,
+    client: *client_mod.Client,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
-    assert(args.reference.len <= constants.arg_bytes_max);
-    assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
-    var reference: reference_mod.Reference = undefined;
-    reference_mod.parse(args.reference, &reference) catch |err| {
-        diagnose.bad_reference(diag, args.reference, err);
+    assert(text.len <= constants.arg_bytes_max);
+    reference_mod.parse(text, &workspace.reference) catch |err| {
+        diagnose.bad_reference(diag, text, err);
         return error.Failed;
     };
     // A host that cannot say its machine type gets an empty one, which has no image platform:
@@ -48,17 +73,127 @@ pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) E
         .machine = host_mod.Text.from_slice(""),
     };
     var machine = uname.machine;
-    var client = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
+    client.* = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
     const mirrors = host.environment("ZBX_REGISTRY_MIRRORS", constants.registry_mirrors_bytes_max);
     client.mirrors = mirrors orelse "";
-    client_mod.resolve(&client, &reference, &workspace.resolved, diag) catch return error.Failed;
+    client_mod.resolve(client, &workspace.reference, &workspace.resolved, diag) catch {
+        return error.Failed;
+    };
     assert(diag.code == null);
     assert(workspace.resolved.layer_count <= constants.registry_layers_max);
-    const text = render(args.json, &reference, &workspace.resolved, &workspace.output);
+}
+
+pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(args.reference.len <= constants.arg_bytes_max);
+    assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
+    var client: client_mod.Client = undefined;
+    try resolve_reference(host, args.reference, workspace, &client, diag);
+    const text = render(args.json, &workspace.reference, &workspace.resolved, &workspace.output);
     host.write_all(.stdout, text) catch |err| {
         errors.output_failed(diag, .stdout, err, host.last_errno());
         return error.OutputFailed;
     };
+}
+
+/// How the child's output is written, and the one thing the parent needs to say about the map.
+pub const Output = unpack.Output;
+
+/// `zbx pull <reference>`: resolve, download what the cache lacks, and have the store's child
+/// unpack, import and record. The result is the exit code (the child's).
+pub fn run_pull(
+    host: Host,
+    args: Args,
+    output: Output,
+    facts: *doctor.Facts,
+    workspace: *Workspace,
+    import_workspace: *import.Workspace,
+    diag: *Diag,
+) Error!u8 {
+    assert(diag.code == null);
+    assert(args.reference.len <= constants.arg_bytes_max);
+    var client: client_mod.Client = undefined;
+    try resolve_reference(host, args.reference, workspace, &client, diag);
+    var store: Store = undefined;
+    if (!store.locate(host)) {
+        store_diagnose.no_data_directory(diag);
+        return error.Failed;
+    }
+    _ = open.check(&store, .create, diag) catch return error.Failed;
+    // The blobs are in the cache from the first byte to the record of the image that names them,
+    // and a gc in that time would take them: hold the lock for the whole pull.
+    store_diagnose.hold(diag, &store, .shared, "pull", "pulling an image") catch {
+        return error.Failed;
+    };
+    defer lock.release(&store);
+    try fetch_all(&client, workspace, &store, diag);
+    var job: unpack.Job = .{
+        .host = host,
+        .output = output,
+        .written = args.reference,
+        .reference = &workspace.reference,
+        .resolved = &workspace.resolved,
+        .fetched = &workspace.fetched,
+        .workspace = &workspace.unpack,
+        .import_workspace = import_workspace,
+    };
+    var reporter: Reporter = .{ .host = host, .output = output };
+    const work: namespace.Work = .{ .context = &job, .call = unpack.work_call };
+    const warn: namespace.Warn = .{ .context = &reporter, .call = report_warning };
+    return namespace.run(host, facts, work, warn, diag) catch return error.Failed;
+}
+
+const Reporter = struct {
+    host: Host,
+    output: Output,
+};
+
+fn report_warning(context: *anyopaque, diag: *const Diag) void {
+    const reporter: *const Reporter = @ptrCast(@alignCast(context));
+    assert(diag.code != null);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    const text = render_diag.render(diag, reporter.output.mode, reporter.output.color, &buffer);
+    // A warning that cannot be written is lost, and the pull goes on: it is only a warning.
+    reporter.host.write_all(.stderr, text) catch return;
+}
+
+/// Downloads the config and every layer the cache lacks, in manifest order.
+fn fetch_all(
+    client: *client_mod.Client,
+    workspace: *Workspace,
+    store: *const Store,
+    diag: *Diag,
+) Error!void {
+    const resolved = &workspace.resolved;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    var failure: blobs_mod.Failure = undefined;
+    blobs.ensure_directories(&failure) catch {
+        diagnose.cache_failed(diag, blobs.root, &failure);
+        return error.Failed;
+    };
+    const reference = &workspace.reference;
+    const download = &workspace.download;
+    const config = resolved.config_digest;
+    workspace.fetched.config = client_mod.fetch_blob(
+        client,
+        reference,
+        config,
+        resolved.config_size,
+        blobs,
+        download,
+        diag,
+    ) catch return error.Failed;
+    for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
+        workspace.fetched.layers[index] = client_mod.fetch_blob(
+            client,
+            reference,
+            layer.digest,
+            layer.size,
+            blobs,
+            download,
+            diag,
+        ) catch return error.Failed;
+    }
 }
 
 fn render(

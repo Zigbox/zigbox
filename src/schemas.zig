@@ -310,6 +310,31 @@ const pull_resolve_schema =
     \\"size":{"type":"integer"},"kind":{"enum":["tar","tar_gzip","tar_zstd"]}}}}}}
 ;
 
+const pull_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/pull/1","version":1,
+    \\"title":"zbx pull --output json",
+    \\"description":"stdout: the image pulled and the tree it became. A failure is on stderr.",
+    \\"type":"object","required":["schema","reference","registry","repository","manifest_digest",
+    \\"platform","tree","config","layers","files","directories","symlinks","bytes",
+    \\"special_skipped","xattrs_skipped"],
+    \\"properties":{"schema":{"const":"zbx.pull/1"},
+    \\"reference":{"type":"string","description":"as the user wrote it"},
+    \\"registry":{"type":"string"},"repository":{"type":"string"},
+    \\"manifest_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"platform":{"enum":["linux/amd64","linux/arm64"]},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the store's identity of the image: the digest of its flattened tree"},
+    \\"config":{"type":"object","required":["digest","cache"],
+    \\"properties":{"digest":{"type":"string"},"cache":{"enum":["cached","downloaded","resumed"]}}},
+    \\"layers":{"type":"array","items":{"type":"object","required":["digest","size","cache"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"size":{"type":"integer"},"cache":{"enum":["cached","downloaded","resumed"]}}}},
+    \\"files":{"type":"integer"},"directories":{"type":"integer"},"symlinks":{"type":"integer"},
+    \\"bytes":{"type":"integer"},"special_skipped":{"type":"integer"},
+    \\"xattrs_skipped":{"type":"integer"}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -329,12 +354,13 @@ const table = [_]Entry{
     .{ .command = "store-trash", .text = store_trash_schema },
     .{ .command = "store-restore", .text = store_restore_schema },
     .{ .command = "pull-resolve", .text = pull_resolve_schema },
+    .{ .command = "pull", .text = pull_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 16);
+    assert(table.len == 17);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -363,5 +389,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 16), table.len);
+    try testing.expectEqual(@as(usize, 17), table.len);
 }

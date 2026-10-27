@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0511 · Zigbox</title>
-<meta name="description" content="a manifest does not match its digest">
+<meta name="description" content="downloaded bytes do not match their digest">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0511.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,11 +73,11 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0511</h1>
-<p class="summary">a manifest does not match its digest</p>
+<p class="summary">downloaded bytes do not match their digest</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
-<p>Every manifest is named by the SHA-256 of its bytes, and zbx hashes what the registry sends before using it. These bytes hash to something else than the digest that named them (or than the Docker-Content-Digest header). The message shows both digests.</p>
-<p>The bytes were damaged on the way, or the registry or a proxy in between is serving something it should not. Nothing from this answer was kept. Try again; if it repeats, the source is not to be trusted.</p>
+<p>Every manifest and every layer is named by the SHA-256 of its bytes, and zbx hashes what arrives before using it. These bytes hash to something else than the digest that named them (or than the Docker-Content-Digest header), or a layer in the blob cache has changed on the disk since it was downloaded. The message shows both digests.</p>
+<p>The bytes were damaged on the way, or the registry, a mirror or a proxy in between is serving something it should not. Nothing from this answer was kept. Try again; if it repeats, the source is not to be trusted. For a damaged cache the message gives the file to remove.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0511</pre>

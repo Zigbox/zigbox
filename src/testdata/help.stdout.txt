@@ -10,7 +10,7 @@ commands:
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
-  pull <ref>      find an image in a registry (so far: --resolve-only, see below)
+  pull <ref>      pull an image from a registry into the store (see below)
   schema <cmd>    print the JSON schema of a command's output
   explain <code>  explain a diagnostic code offline, for example E0001
   help            show this text
@@ -50,7 +50,7 @@ store:
   a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
 
 pull:
-  zbx pull --resolve-only <reference>
+  zbx pull [--resolve-only] <reference>
   <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
                   or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
   --resolve-only  print the digest of the image manifest for this machine's platform,

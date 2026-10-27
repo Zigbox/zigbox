@@ -30,10 +30,24 @@
 //!   huge        a manifest that declares two mebibytes
 //!   redirect    307 to the open repository, with a relative Location
 //!   redirectfar 307 to another host, which must not get the token
+//!
+//! The blobs of an image are served too, at `/v2/fixture/<scenario>/blobs/<digest>`, honouring
+//! `Range`. The layers are real archives: the first a gzip tar with a directory tree, a hard
+//! link and a symlink, the second a zstd tar with whiteouts, an opaque directory and extended
+//! attributes (one the store keeps, one it does not). Scenarios for blobs:
+//!
+//!   norange     a single manifest (as `single`), and the blobs ignore Range (always 200)
+//!   cdn         a single manifest; a blob request is answered 307 to /cdn/<digest> on the other
+//!               host, which serves it without a token
+//!   badblob     a single manifest; the first layer is served with one byte changed
+//!   unsafe      a single manifest whose layer has an entry with an absolute path
+//!   damaged     a single manifest whose layer is a tar with a wrong header checksum
+//!   special     a single manifest whose layer has only devices, and one file
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const layers = @import("layer_fixture.zig");
 
 pub const Scenario = enum {
     open,
@@ -55,6 +69,12 @@ pub const Scenario = enum {
     huge,
     redirect,
     redirectfar,
+    norange,
+    cdn,
+    badblob,
+    unsafe,
+    damaged,
+    special,
 };
 
 /// What a client asked for.
@@ -65,6 +85,8 @@ pub const Query = struct {
     target: []const u8,
     /// The bearer token the client presented; empty for none.
     bearer: []const u8,
+    /// The offset of a `Range: bytes=N-` request; zero for none.
+    range_from: u64 = 0,
 };
 
 /// What the registry says. All slices are borrowed from the fixture.
@@ -76,6 +98,7 @@ pub const Answer = struct {
     retry_after: []const u8 = "",
     content_digest: []const u8 = "",
     location: []const u8 = "",
+    content_range: []const u8 = "",
     body: []const u8 = "",
     /// Body bytes that arrive before the connection drops; null for all.
     deliver: ?u64 = null,
@@ -92,7 +115,7 @@ pub const media_docker_config = "application/vnd.docker.container.image.v1+json"
 pub const media_docker_layer = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 pub const media_unknown = "application/vnd.example.unknown.v9+json";
 
-const body_bytes_max = 4096;
+const body_bytes_max = 16384;
 const challenge_format = "Bearer realm=\"{s}\",service=\"fixture.registry\"," ++
     "scope=\"repository:fixture/{s}:pull\"{s}";
 pub const token_text =
@@ -151,6 +174,14 @@ pub const Image = struct {
     /// The manifest the arm/v7 and ppc64le entries name, and the attestation's; never served.
     other: Item = .{},
     nothing: Item = .{},
+    /// The layers of the scenarios `unsafe`, `damaged` and `special`, and the manifests that
+    /// name each as the image's only layer.
+    layer_unsafe: Item = .{},
+    layer_damaged: Item = .{},
+    layer_special: Item = .{},
+    amd64_unsafe: Item = .{},
+    amd64_damaged: Item = .{},
+    amd64_special: Item = .{},
     families: Family,
 };
 
@@ -240,11 +271,89 @@ const variant_v7 = ",\"variant\":\"v7\"";
 const variant_v8 = ",\"variant\":\"v8\"";
 const attestation = ",\"annotations\":{\"vnd.docker.reference.type\":\"attestation-manifest\"}";
 
+/// A manifest with the config and one layer.
+const one_layer_format =
+    \\{{"schemaVersion":2,"mediaType":"{s}",
+    \\"config":{{"mediaType":"{s}","digest":"{s}","size":{d}}},
+    \\"layers":[{{"mediaType":"{s}","digest":"{s}","size":{d}}}]}}
+;
+
+fn build_one_layer(image: *Image, item: *Item, layer: *const Item) void {
+    const family = image.families;
+    item.set(one_layer_format, .{
+        family.manifest,   family.config, &image.config.digest, image.config.len,
+        family.layer_gzip, &layer.digest, layer.len,
+    });
+}
+
+/// The first layer: a root file system's worth of every kind of entry.
+fn build_layer_one(item: *Item) void {
+    var storage: [12 * 1024]u8 = undefined;
+    var tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "./", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "etc/", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "etc/os-release", .data = "NAME=Fixture\n", .mode = 0o644 });
+    tar.add(.{ .name = "bin/", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "bin/hello", .data = "#!/bin/hello\n", .mode = 0o755 });
+    tar.add(.{ .name = "bin/hi", .kind = .hardlink, .link = "bin/hello" });
+    tar.add(.{ .name = "lib/", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "lib/libx.so.1", .data = "ELF libx", .mode = 0o644 });
+    tar.add(.{ .name = "lib/libx.so", .kind = .symlink, .link = "libx.so.1", .mode = 0o777 });
+    tar.add(.{ .name = "tmp/", .kind = .directory, .mode = 0o1777 });
+    tar.add(.{ .name = "tmp/gone", .data = "to be removed", .mode = 0o644 });
+    tar.add(.{ .name = "usr/old/", .kind = .directory, .mode = 0o755 });
+    tar.add(.{ .name = "usr/old/a", .data = "a", .mode = 0o644 });
+    tar.add(.{ .name = "home/user/", .kind = .directory, .mode = 0o700, .uid = 1000, .gid = 1000 });
+    tar.finish();
+    var gz: [16 * 1024]u8 = undefined;
+    item.set_bytes(layers.gzip(&gz, tar.bytes()));
+}
+
+/// The second layer: replaces, removes, empties a directory, and has attributes to keep and drop.
+fn build_layer_two(item: *Item) void {
+    var storage: [8 * 1024]u8 = undefined;
+    var tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "etc/os-release", .data = "NAME=Fixture 2\n", .mode = 0o644 });
+    tar.add(.{ .name = "tmp/.wh.gone", .data = "" });
+    tar.add(.{ .name = "usr/old/.wh..wh..opq", .data = "" });
+    tar.add(.{ .name = "usr/old/new", .data = "new", .mode = 0o644 });
+    tar.add(.{ .name = "bin/ping", .data = "ping", .mode = 0o755, .xattrs = &.{
+        .{ .name = "user.note", .value = "kept" },
+        .{ .name = "trusted.private", .value = "dropped" },
+    } });
+    tar.finish();
+    var raw: [16 * 1024]u8 = undefined;
+    item.set_bytes(layers.zstd(&raw, tar.bytes()));
+}
+
+fn build_variant_layers(image: *Image) void {
+    var storage: [4096]u8 = undefined;
+    var tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "/etc/passwd", .data = "evil" });
+    tar.finish();
+    var gz: [8192]u8 = undefined;
+    image.layer_unsafe.set_bytes(layers.gzip(&gz, tar.bytes()));
+    tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "ok", .data = "fine", .bad_checksum = true });
+    tar.finish();
+    image.layer_damaged.set_bytes(layers.gzip(&gz, tar.bytes()));
+    tar = layers.Tar.init(&storage);
+    tar.add(.{ .name = "dev/tty", .kind = .char_device, .mode = 0o666 });
+    tar.add(.{ .name = "run/fifo", .kind = .fifo, .mode = 0o600 });
+    tar.add(.{ .name = "only", .data = "file" });
+    tar.finish();
+    image.layer_special.set_bytes(layers.gzip(&gz, tar.bytes()));
+    build_one_layer(image, &image.amd64_unsafe, &image.layer_unsafe);
+    build_one_layer(image, &image.amd64_damaged, &image.layer_damaged);
+    build_one_layer(image, &image.amd64_special, &image.layer_special);
+}
+
 fn build_image(image: *Image, family: Family) void {
     image.families = family;
     image.config.set_bytes("{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"Cmd\":[]}}");
-    image.layer_gzip.set_bytes("layer one: not really a gzip stream, but bytes with a digest");
-    image.layer_zstd.set_bytes("layer two: not really a zstd stream either, but bytes too");
+    build_layer_one(&image.layer_gzip);
+    build_layer_two(&image.layer_zstd);
+    build_variant_layers(image);
     image.other.set_bytes("a manifest nobody serves");
     image.nothing.set_bytes("an attestation nobody serves");
     build_manifest(image, &image.amd64, "amd64", family.layer_gzip);
@@ -293,6 +402,7 @@ pub const Fixture = struct {
     realm: [128]u8,
     realm_len: u8,
     scratch: [512]u8,
+    range_text: [96]u8,
     corrupted: Item,
 
     /// Builds the images. `base` is the registry's own URL ("http://127.0.0.1:5000"); `other_base`
@@ -325,17 +435,37 @@ pub const Fixture = struct {
         return if (scenario == .docker) &fixture.docker else &fixture.oci;
     }
 
+    /// The platform manifest a resolve of the scenario ends at, and how many layers it names.
+    pub fn manifest_of(fixture: *const Fixture, scenario: Scenario) *const Item {
+        const used = fixture.image(scenario);
+        return switch (scenario) {
+            .unsafe => &used.amd64_unsafe,
+            .damaged => &used.amd64_damaged,
+            .special => &used.amd64_special,
+            else => &used.amd64,
+        };
+    }
+
+    pub fn layers_of(fixture: *const Fixture, scenario: Scenario) u32 {
+        _ = fixture;
+        return switch (scenario) {
+            .unsafe, .damaged, .special => 1,
+            else => 2,
+        };
+    }
+
     /// What the registry answers for `query`.
     pub fn answer(fixture: *Fixture, query: Query, out: *Answer) void {
         out.* = .{};
         if (std.mem.startsWith(u8, query.target, "/token")) return fixture.answer_token(query, out);
+        if (std.mem.startsWith(u8, query.target, "/cdn/")) return fixture.serve_cdn(query, out);
         const route = parse_route(query.target) orelse return not_found(out);
         if (route.scenario == .tokenlimited or route.scenario == .denied) {
             // These two repositories hand out no usable token; the manifest asks for one.
             return fixture.challenge(route, query, out);
         }
         const needs_token = switch (route.scenario) {
-            .bearer, .limited, .private, .redirectfar => true,
+            .bearer, .limited, .private, .redirectfar, .cdn => true,
             else => false,
         };
         if (needs_token and !std.mem.eql(u8, query.bearer, token_text)) {
@@ -343,6 +473,7 @@ pub const Fixture = struct {
         }
         if (route.scenario == .private) return fixture.challenge(route, query, out);
         if (route.scenario == .limited) return limited(out);
+        if (route.blob) return fixture.serve_blob(route, query, out);
         fixture.serve_manifest(route, out);
     }
 
@@ -416,6 +547,73 @@ pub const Fixture = struct {
         }
     }
 
+    /// The blob a digest names in the image of a scenario; null for one nobody serves.
+    fn blob_item(image_used: *const Image, name: []const u8) ?*const Item {
+        const candidates = [_]*const Item{
+            &image_used.config,       &image_used.layer_gzip,    &image_used.layer_zstd,
+            &image_used.layer_unsafe, &image_used.layer_damaged, &image_used.layer_special,
+        };
+        for (candidates) |item| {
+            if (std.mem.eql(u8, name, &item.digest)) return item;
+        }
+        return null;
+    }
+
+    fn serve_blob(fixture: *Fixture, route: Route, query: Query, out: *Answer) void {
+        const scenario = route.scenario;
+        const image_used = fixture.image(scenario);
+        const item = blob_item(image_used, route.manifest) orelse return missing_blob(out);
+        if (scenario == .cdn) {
+            const far = fixture.other_base[0..fixture.other_base_len];
+            const format = "{s}/cdn/{s}";
+            const text = std.fmt.bufPrint(&fixture.scratch, format, .{ far, route.manifest });
+            out.status = 307;
+            out.location = text catch unreachable; // Bounded: a base and a digest.
+            return;
+        }
+        fixture.send_blob(item, scenario, query, out);
+    }
+
+    /// The content delivery host: a blob by digest, with no token.
+    fn serve_cdn(fixture: *Fixture, query: Query, out: *Answer) void {
+        const name = query.target["/cdn/".len..];
+        const item = blob_item(&fixture.oci, name) orelse return missing_blob(out);
+        fixture.send_blob(item, .cdn, query, out);
+    }
+
+    fn send_blob(
+        fixture: *Fixture,
+        item: *const Item,
+        scenario: Scenario,
+        query: Query,
+        out: *Answer,
+    ) void {
+        out.content_type = "application/octet-stream";
+        out.content_digest = &item.digest;
+        var body = item.slice();
+        const first_layer = std.mem.eql(u8, &item.digest, &fixture.oci.layer_gzip.digest);
+        if (scenario == .badblob and first_layer) {
+            fixture.corrupted = item.*;
+            fixture.corrupted.bytes[item.len / 2] ^= 0x01;
+            body = fixture.corrupted.slice();
+        }
+        const from = query.range_from;
+        if (from == 0 or scenario == .norange) {
+            out.body = body;
+            return;
+        }
+        if (from >= body.len) {
+            out.status = 416;
+            out.body = "";
+            return;
+        }
+        out.status = 206;
+        out.body = body[@intCast(from)..];
+        out.content_range = std.fmt.bufPrint(&fixture.range_text, "bytes {d}-{d}/{d}", .{
+            from, body.len - 1, body.len,
+        }) catch unreachable; // Bounded: three numbers.
+    }
+
     fn redirect(fixture: *Fixture, route: Route, out: *Answer) void {
         const far = fixture.other_base[0..fixture.other_base_len];
         const base: []const u8 = if (route.scenario == .redirectfar) far else "";
@@ -430,6 +628,8 @@ pub const Fixture = struct {
 };
 
 const Route = struct {
+    /// A blob (the name is its digest) rather than a manifest.
+    blob: bool,
     scenario: Scenario,
     /// The scenario's name as written, for a scope.
     name: []const u8,
@@ -446,8 +646,17 @@ fn parse_route(target: []const u8) ?Route {
     const scenario = std.meta.stringToEnum(Scenario, name) orelse return null;
     const tail = rest[slash..];
     const manifests = "/manifests/";
+    const blobs = "/blobs/";
+    if (std.mem.startsWith(u8, tail, blobs)) {
+        return .{ .blob = true, .scenario = scenario, .name = name, .manifest = tail[blobs.len..] };
+    }
     if (!std.mem.startsWith(u8, tail, manifests)) return null;
-    return .{ .scenario = scenario, .name = name, .manifest = tail[manifests.len..] };
+    return .{
+        .blob = false,
+        .scenario = scenario,
+        .name = name,
+        .manifest = tail[manifests.len..],
+    };
 }
 
 fn is_digest(name: []const u8) bool {
@@ -460,7 +669,8 @@ fn pick(image: *const Image, scenario: Scenario, name: []const u8) ?*const Item 
     const candidates = [_]*const Item{
         &image.index,            &image.amd64,         &image.arm64,
         &image.index_media,      &image.index_nomatch, &image.amd64_layermedia,
-        &image.index_layermedia,
+        &image.index_layermedia, &image.amd64_unsafe,  &image.amd64_damaged,
+        &image.amd64_special,
     };
     for (candidates) |item| {
         if (std.mem.eql(u8, name, &item.digest)) return item;
@@ -470,7 +680,10 @@ fn pick(image: *const Image, scenario: Scenario, name: []const u8) ?*const Item 
 
 fn tag_item(image: *const Image, scenario: Scenario) *const Item {
     return switch (scenario) {
-        .single => &image.amd64,
+        .single, .norange, .cdn, .badblob => &image.amd64,
+        .unsafe => &image.amd64_unsafe,
+        .damaged => &image.amd64_damaged,
+        .special => &image.amd64_special,
         .media => &image.index_media,
         .nomatch => &image.index_nomatch,
         .layermedia => &image.index_layermedia,
@@ -490,6 +703,12 @@ fn content_type_of(image: *const Image, scenario: Scenario, name: []const u8) []
 fn not_found(out: *Answer) void {
     out.status = 404;
     out.body = "404 page not found";
+}
+
+fn missing_blob(out: *Answer) void {
+    out.status = 404;
+    out.content_type = "application/json";
+    out.body = "{\"errors\":[{\"code\":\"BLOB_UNKNOWN\",\"message\":\"blob unknown\"}]}";
 }
 
 fn missing(out: *Answer) void {

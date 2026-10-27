@@ -74,7 +74,7 @@ pub const Root = struct {
 
 // ---- Writing -------------------------------------------------------------------------------
 
-fn put_string(writer: *std.Io.Writer, text: []const u8) void {
+pub fn put_string(writer: *std.Io.Writer, text: []const u8) void {
     assert(writer.buffer.len >= constants.store_root_record_bytes_max);
     assert(text.len <= constants.store_source_bytes_max);
     writer.writeAll(
@@ -132,7 +132,7 @@ fn hex_value(byte: u8) ?u8 {
 }
 
 /// Reads a quoted string with the escapes `put_string` writes into `out`; the length, or null.
-fn parse_string(literal: []const u8, out: []u8) ?usize {
+pub fn parse_string(literal: []const u8, out: []u8) ?usize {
     assert(out.len > 0);
     assert(literal.len <= constants.file_bytes_max);
     if (literal.len < 2) return null;

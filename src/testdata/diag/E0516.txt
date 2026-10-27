@@ -1,0 +1,5 @@
+error[ZBX-E0516]: a layer can't be unpacked
+  cause  layer 1 can't be unpacked: a header checksum is wrong
+  fix    the image is damaged or unusual; try another tag or build
+  more   zbx explain E0516 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0516.html

@@ -41,6 +41,7 @@ fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Ser
         .host = request.host,
         .target = request.target,
         .bearer = request.bearer,
+        .range_from = request.range_from,
     }, &out);
     served.* = .{
         .status = out.status,
@@ -50,6 +51,7 @@ fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Ser
         .content_type = out.content_type,
         .content_digest = out.content_digest,
         .location = out.location,
+        .content_range = out.content_range,
         .body = out.body,
         .deliver = out.deliver,
     };

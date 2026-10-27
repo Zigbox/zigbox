@@ -116,9 +116,12 @@ test {
 test {
     _ = @import("registry/digest.zig");
     _ = @import("registry/blobs.zig");
+    _ = @import("store/images.zig");
+    _ = @import("pull_unpack.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");
+    _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
     _ = @import("registry/net_sim.zig");

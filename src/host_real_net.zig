@@ -793,7 +793,7 @@ const Loopback = struct {
 
 test "over TCP every scenario gives the result it gives in the simulator" {
     // Goal: the real sockets, the head parser and the client agree with the simulator on all
-    // nineteen scenarios, in normal and in chunked framing.
+    // every scenario, in normal and in chunked framing.
     var loopback: Loopback = undefined;
     var diag: Diag = undefined;
     for ([_]registry_server.Mode{ .normal, .chunked }) |mode| {
@@ -806,10 +806,11 @@ test "over TCP every scenario gives the result it gives in the simulator" {
                 try testing.expectEqual(@as(?@TypeOf(code), code), diag.code);
             } else {
                 const resolved = try result;
-                const image = loopback.fixture.image(expectation.scenario);
+                const item = loopback.fixture.manifest_of(expectation.scenario);
                 const digest = resolved.manifest_digest.text();
-                try testing.expectEqualStrings(&image.amd64.digest, &digest);
-                try testing.expectEqual(@as(u32, 2), resolved.layer_count);
+                try testing.expectEqualStrings(&item.digest, &digest);
+                const layers = loopback.fixture.layers_of(expectation.scenario);
+                try testing.expectEqual(layers, resolved.layer_count);
             }
         }
     }

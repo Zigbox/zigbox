@@ -112,6 +112,10 @@ pub const Code = enum(u8) {
     E0512,
     E0513,
     E0514,
+    E0515,
+    E0516,
+    W0501,
+    W0502,
     E0701,
     E0702,
     E0703,
@@ -1493,16 +1497,18 @@ pub const registry = [_]Entry{
         .code = .E0511,
         .severity = .@"error",
         .blame = .external,
-        .summary = "a manifest does not match its digest",
+        .summary = "downloaded bytes do not match their digest",
         .explanation =
-        \\Every manifest is named by the SHA-256 of its bytes, and zbx hashes what
-        \\the registry sends before using it. These bytes hash to something else
-        \\than the digest that named them (or than the Docker-Content-Digest
-        \\header). The message shows both digests.
+        \\Every manifest and every layer is named by the SHA-256 of its bytes, and
+        \\zbx hashes what arrives before using it. These bytes hash to something
+        \\else than the digest that named them (or than the Docker-Content-Digest
+        \\header), or a layer in the blob cache has changed on the disk since it
+        \\was downloaded. The message shows both digests.
         \\
-        \\The bytes were damaged on the way, or the registry or a proxy in
-        \\between is serving something it should not. Nothing from this answer
-        \\was kept. Try again; if it repeats, the source is not to be trusted.
+        \\The bytes were damaged on the way, or the registry, a mirror or a proxy
+        \\in between is serving something it should not. Nothing from this
+        \\answer was kept. Try again; if it repeats, the source is not to be
+        \\trusted. For a damaged cache the message gives the file to remove.
         ,
     },
     .{
@@ -1552,6 +1558,70 @@ pub const registry = [_]Entry{
         \\A mirror only changes where bytes come from: every answer is checked by
         \\digest, so a mirror can make a pull fail but never change what is
         \\pulled. The lock file records the reference as written, not the mirror.
+        ,
+    },
+    .{
+        .code = .E0515,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a layer entry would leave the image's root",
+        .explanation =
+        \\A layer of the image holds an entry that could write outside the
+        \\directory the image is unpacked into, and zbx refused the whole layer:
+        \\an absolute path, a path with "..", a path that goes through a symlink
+        \\(the layer or an earlier one made it), or a hard link to a path outside
+        \\the image. An honest image has none; the message names the entry.
+        \\
+        \\Nothing from the image was kept in the store as a tree. The blobs that
+        \\were downloaded stay, so the layer is not fetched again. Do not run an
+        \\image you did not build or trust.
+        ,
+    },
+    .{
+        .code = .E0516,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a layer can't be unpacked",
+        .explanation =
+        \\A layer of the image is damaged or uses something zbx does not read:
+        \\a compressed stream that is cut or corrupt, a tar header with a wrong
+        \\checksum, a sparse file, a name over 4095 bytes, a hard link to a file
+        \\that is not there, an owner the user namespace does not map, or more
+        \\than 64 GiB in one layer. The message says which, and names the entry.
+        \\
+        \\The blob was checked against its digest when it arrived, so the image
+        \\itself is at fault (or the disk is, if the digest check also fails).
+        \\Nothing from the image was kept in the store as a tree.
+        ,
+    },
+    .{
+        .code = .W0501,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "device nodes in a layer were left out",
+        .explanation =
+        \\A layer holds device nodes, FIFOs or sockets. The store keeps regular
+        \\files, directories and symlinks only, and a rootless container cannot
+        \\make device nodes, so they were skipped. The message names the first
+        \\and says how many there were.
+        \\
+        \\A container gets its own /dev, so a root filesystem does not miss them.
+        ,
+    },
+    .{
+        .code = .W0502,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "extended attributes in a layer were left out",
+        .explanation =
+        \\The store keeps the user.* attributes and security.capability. A layer
+        \\carried others (trusted.*, system.*, security.selinux), too many on one
+        \\file or too large, or this file system would not take them, so they
+        \\were skipped. The message names the first file and says how many.
+        \\
+        \\The tree's digest does not cover them. Nothing to do unless the image
+        \\relies on file capabilities that were refused: then the program may
+        \\need a different capability setup.
         ,
     },
     .{
@@ -1773,6 +1843,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
+        .E0515, .E0516, .W0501, .W0502 => false,
         else => true,
     };
 }

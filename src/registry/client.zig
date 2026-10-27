@@ -776,7 +776,8 @@ fn request_blob(
     for (0..2) |attempt| {
         const receiver: Receiver = .{
             .sink = download.sink(),
-            .body_bytes_max = download.size - download.offset,
+            // A registry may answer a range with the whole blob; the sink keeps the bound.
+            .body_bytes_max = download.size,
             .range_from = download.range_from(),
             .total_timeout_ms = 0, // A blob is bounded by progress, not by time.
         };

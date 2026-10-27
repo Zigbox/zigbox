@@ -1008,6 +1008,30 @@ fn prepare_bad_mirror(sim: *HostSim) void {
     sim.environment_variables = &bad_mirror_environment;
 }
 
+fn prepare_pull(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    prepare_registry(sim);
+    golden_files.init(1);
+    golden_files.put_dir("/home", 0o755);
+    golden_files.put_dir("/home/alice", 0o755);
+    sim.store_fs = &golden_files;
+}
+
+fn whole_pull_case(
+    comptime code: codes.Code,
+    comptime reference: [:0]const u8,
+    comptime warning: bool,
+) Case {
+    return .{
+        .code = code,
+        .args = &[_][:0]const u8{ "pull", reference },
+        .prepare = prepare_pull,
+        .prints = warning,
+        .warning = warning,
+        .exit = if (warning) 0 else 3,
+    };
+}
+
 fn pull_case(
     comptime code: codes.Code,
     comptime reference: [:0]const u8,
@@ -1037,6 +1061,10 @@ const registry_cases = [_]Case{
     pull_case(.E0512, test_registry.TestRegistry.reference(.huge), prepare_registry, 3),
     pull_case(.E0513, test_registry.TestRegistry.reference(.cut), prepare_cut, 3),
     pull_case(.E0514, test_registry.TestRegistry.reference(.open), prepare_bad_mirror, 1),
+    whole_pull_case(.E0515, test_registry.TestRegistry.reference(.unsafe), false),
+    whole_pull_case(.E0516, test_registry.TestRegistry.reference(.damaged), false),
+    whole_pull_case(.W0501, test_registry.TestRegistry.reference(.special), true),
+    whole_pull_case(.W0502, test_registry.TestRegistry.reference(.open), true),
 };
 
 const Style = enum { default, verbose, json };

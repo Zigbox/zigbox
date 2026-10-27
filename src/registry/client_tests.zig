@@ -86,6 +86,12 @@ pub const expectations = [_]Expectation{
     .{ .scenario = .bearer, .code = null },
     .{ .scenario = .redirect, .code = null },
     .{ .scenario = .redirectfar, .code = null },
+    .{ .scenario = .norange, .code = null },
+    .{ .scenario = .cdn, .code = null },
+    .{ .scenario = .badblob, .code = null },
+    .{ .scenario = .unsafe, .code = null },
+    .{ .scenario = .damaged, .code = null },
+    .{ .scenario = .special, .code = null },
     .{ .scenario = .limited, .code = .E0506 },
     .{ .scenario = .tokenlimited, .code = .E0506 },
     .{ .scenario = .denied, .code = .E0507 },
@@ -451,4 +457,159 @@ test "a mirror list that is not hosts is refused, and a mirror is for Docker Hub
     try client_mod.resolve(&subject, &parsed, &env.resolved, &env.diag);
     try testing.expectEqual(@as(u32, 0), subject.winner);
     try testing.expectEqualStrings("registry.test", env.sim.logged(0).?.host_text());
+}
+
+// ---- Blobs ---------------------------------------------------------------------------------
+
+const blobs_mod = @import("blobs.zig");
+const fs_sim = @import("../store/fs_sim.zig");
+const fs_mod = @import("../store/fs.zig");
+
+var blob_fs: fs_sim.SimFs = undefined;
+var blob_download: blobs_mod.Download = undefined;
+
+fn parsed_reference(scenario: Scenario) reference_mod.Reference {
+    var text: [96]u8 = undefined;
+    const format = "registry.test/fixture/{s}:3.20";
+    const name = std.fmt.bufPrint(&text, format, .{@tagName(scenario)}) catch unreachable; // Short.
+    var parsed: reference_mod.Reference = undefined;
+    reference_mod.parse(name, &parsed) catch unreachable; // Good text.
+    return parsed;
+}
+
+/// A resolved image, a client that can fetch its blobs, and a cache on the simulated disk.
+const BlobWorld = struct {
+    env: Env,
+    client: client_mod.Client,
+    blobs: blobs_mod.Blobs,
+
+    fn setup(world: *BlobWorld, seed: u64, scenario: Scenario) !void {
+        world.env.setup(seed);
+        blob_fs.init(seed);
+        blob_fs.put_dir("/s", 0o755);
+        world.blobs = .{ .fs = blob_fs.interface(), .root = "/s" };
+        var failure: blobs_mod.Failure = undefined;
+        try world.blobs.ensure_directories(&failure);
+        var parsed = parsed_reference(scenario);
+        world.client = client_mod.Client.init(world.env.sim.interface(), &workspace, "x86_64");
+        try client_mod.resolve(&world.client, &parsed, &world.env.resolved, &world.env.diag);
+        world.env.sim.requests = 0;
+    }
+
+    /// Fetches layer `index` (the config if `index` is past the layers).
+    fn fetch(
+        world: *BlobWorld,
+        scenario: Scenario,
+        index: u32,
+    ) client_mod.Error!client_mod.BlobOutcome {
+        var parsed = parsed_reference(scenario);
+        const resolved = &world.env.resolved;
+        const is_layer = index < resolved.layer_count;
+        const digest = if (is_layer) resolved.layers[index].digest else resolved.config_digest;
+        const size = if (is_layer) resolved.layers[index].size else resolved.config_size;
+        const diag = &world.env.diag;
+        const client = &world.client;
+        const blobs = world.blobs;
+        return client_mod.fetch_blob(client, &parsed, digest, size, blobs, &blob_download, diag);
+    }
+
+    fn in_cache(world: *BlobWorld, index: u32) bool {
+        const layer = world.env.resolved.layers[index];
+        return world.blobs.has(layer.digest, layer.size);
+    }
+};
+
+test "a blob is downloaded once and then found in the cache" {
+    // Goal: the first fetch is a download of the verified bytes, the second asks nobody.
+    var world: BlobWorld = undefined;
+    try world.setup(50, .open);
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.open, 0));
+    try testing.expect(world.in_cache(0));
+    try testing.expectEqual(@as(u32, 1), world.env.sim.requests);
+    try testing.expectEqual(client_mod.BlobOutcome.cached, try world.fetch(.open, 0));
+    try testing.expectEqual(@as(u32, 1), world.env.sim.requests);
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.open, 1));
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.open, 2));
+    try testing.expect(world.in_cache(1));
+}
+
+test "a cut download keeps its bytes and the next try asks for the rest with Range" {
+    // Goal: E0513 leaves a partial file; the retry resumes at its length and the result verifies.
+    var world: BlobWorld = undefined;
+    try world.setup(51, .open);
+    world.env.sim.faults.cut_per_mille = 1000;
+    try testing.expectError(error.Failed, world.fetch(.open, 0));
+    try world.env.expect_code(.E0513);
+    try testing.expect(!world.in_cache(0));
+    const layer = world.env.resolved.layers[0];
+    var path: fs_mod.PathBuf = undefined;
+    const kept = blob_fs.content_of(world.blobs.partial_path(&path, layer.digest)).?.len;
+    world.env.sim.faults.cut_per_mille = 0;
+    world.env.diag.reset();
+    world.env.sim.requests = 0;
+    try testing.expectEqual(client_mod.BlobOutcome.resumed, try world.fetch(.open, 0));
+    try testing.expectEqual(@as(u64, kept), world.env.sim.logged(0).?.range_from);
+    try testing.expect(world.in_cache(0));
+}
+
+test "a registry that ignores Range sends the whole blob and the download starts again" {
+    // Goal: 200 to a ranged request is not an error; the result is still the verified blob.
+    var world: BlobWorld = undefined;
+    try world.setup(52, .norange);
+    world.env.sim.faults.cut_per_mille = 1000;
+    try testing.expectError(error.Failed, world.fetch(.norange, 0));
+    world.env.sim.faults.cut_per_mille = 0;
+    world.env.diag.reset();
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.norange, 0));
+    try testing.expect(world.in_cache(0));
+}
+
+test "a blob behind a redirect to another host is fetched without the token" {
+    // Goal: the registry's 307 to a content host; the token goes to the registry only.
+    var world: BlobWorld = undefined;
+    try world.setup(53, .cdn);
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.cdn, 0));
+    const first = world.env.sim.logged(0).?;
+    try testing.expectEqual(@as(u16, 307), first.status);
+    try testing.expect(first.bearer_len > 0);
+    const second = world.env.sim.logged(1).?;
+    try testing.expectEqualStrings("other.test", second.host_text());
+    try testing.expectEqual(@as(u32, 0), second.bearer_len);
+    try testing.expect(world.in_cache(0));
+}
+
+test "a blob with a changed byte is refused and not kept" {
+    // Goal: E0511 naming both digests; no partial and no blob left behind.
+    var world: BlobWorld = undefined;
+    try world.setup(54, .badblob);
+    try testing.expectError(error.Failed, world.fetch(.badblob, 0));
+    try world.env.expect_code(.E0511);
+    const layer = world.env.resolved.layers[0];
+    try testing.expect(std.mem.indexOf(u8, world.env.last_cause(), &layer.digest.text()) != null);
+    try testing.expect(!world.in_cache(0));
+    var path: fs_mod.PathBuf = undefined;
+    try testing.expect(blob_fs.kind_of(world.blobs.partial_path(&path, layer.digest)) == null);
+}
+
+test "a token that expired during a long pull is replaced once" {
+    // Goal: a 401 for a blob asks for a fresh token and repeats; the pull goes on.
+    var world: BlobWorld = undefined;
+    try world.setup(55, .bearer);
+    @memcpy(workspace.token[0..5], "stale");
+    world.client.token_len = 5;
+    try testing.expectEqual(client_mod.BlobOutcome.downloaded, try world.fetch(.bearer, 0));
+    try testing.expectEqual(@as(u32, 3), world.env.sim.requests); // 401, token, blob.
+    try testing.expectEqual(@as(u16, 401), world.env.sim.logged(0).?.status);
+}
+
+test "a full disk while downloading is a coded refusal and the partial bytes stay" {
+    // Goal: E0416 from the cache, naming the store, and a resume later has something to resume.
+    var world: BlobWorld = undefined;
+    try world.setup(56, .open);
+    blob_fs.faults.bytes_max = 100;
+    try testing.expectError(error.Failed, world.fetch(.open, 0));
+    try world.env.expect_code(.E0416);
+    blob_fs.faults.bytes_max = null;
+    world.env.diag.reset();
+    try testing.expectEqual(client_mod.BlobOutcome.resumed, try world.fetch(.open, 0));
 }

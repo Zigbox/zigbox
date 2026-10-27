@@ -531,6 +531,9 @@ pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
 pub const registry_mirrors_max: u32 = 4;
 pub const registry_mirrors_bytes_max: u32 = 1024;
+/// An image record (`store/images.zig`): its fixed fields, the reference and 128 layer digests.
+pub const image_record_bytes_max: u32 = 24 * 1024;
+pub const images_max: u32 = 4096;
 /// The buffer a blob is hashed and copied through.
 pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.

@@ -1,0 +1,8 @@
+warning[ZBX-W0502]: extended attributes in a layer were left out
+  while  unpacking the layers
+  cause  1 extended attributes were left out; the first is on 'bin/ping'
+  count  1
+  path   bin/ping
+  fix    nothing to do unless the image relies on file capabilities
+  more   zbx explain W0502
+  docs   https://zigbox.github.io/zigbox/errors/W0502.html

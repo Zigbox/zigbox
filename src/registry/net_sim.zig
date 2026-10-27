@@ -61,6 +61,8 @@ pub const Logged = struct {
     bearer: [96]u8,
     bearer_len: u32,
     status: u16,
+    /// The offset a resumed download asked for; zero for none.
+    range_from: u64,
 
     pub fn target_text(entry: *const Logged) []const u8 {
         return entry.target[0..entry.target_len];
@@ -138,6 +140,7 @@ pub const SimNet = struct {
         entry.port = request.port;
         entry.bearer_len = @intCast(request.bearer.len);
         entry.status = 0;
+        entry.range_from = request.range_from;
     }
 
     fn injected(sim: *SimNet, index: u32) ?net.Error {

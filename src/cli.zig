@@ -45,7 +45,7 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
-    \\  pull <ref>      find an image in a registry (so far: --resolve-only, see below)
+    \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
@@ -85,7 +85,7 @@ const help_text =
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
     \\
     \\pull:
-    \\  zbx pull --resolve-only <reference>
+    \\  zbx pull [--resolve-only] <reference>
     \\  <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
     \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
     \\  --resolve-only  print the digest of the image manifest for this machine's platform,
@@ -538,15 +538,6 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
-    if (invocation.command == .pull) try check_pull_args(diag, invocation);
-}
-
-/// `pull` fetches nothing yet: without `--resolve-only` it has nothing to do, and says so.
-fn check_pull_args(diag: *Diag, invocation: *const Invocation) ParseError!void {
-    assert(invocation.command == .pull);
-    assert(invocation.operand != null);
-    if (invocation.pull.resolve_only) return;
-    return missing_argument(diag, .pull, .resolve_only);
 }
 
 /// What `store gc` was given besides its words.
@@ -893,28 +884,14 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic, reference, resolve_only };
+const Missing = enum { code, rootfs, command, target, container, topic, reference };
 
-/// What `pull` lacks: its reference, or the flag that is all it can do so far.
+/// What `pull` lacks: its reference.
 fn missing_pull(diag: *Diag, missing: Missing) void {
     assert(diag.code != null);
-    switch (missing) {
-        .reference => {
-            diag.cause("'pull' needs the reference of the image to look for", .{});
-            diag.fix(.{
-                .sentence = "name an image:",
-                .command = "zbx pull --resolve-only alpine:3.20",
-            });
-        },
-        .resolve_only => {
-            diag.cause("'pull' only resolves so far: it needs --resolve-only", .{});
-            diag.fix(.{
-                .sentence = "print the digest the reference names:",
-                .command = "zbx pull --resolve-only alpine:3.20",
-            });
-        },
-        else => unreachable, // Only the two above are a pull's.
-    }
+    assert(missing == .reference);
+    diag.cause("'pull' needs the reference of the image to pull", .{});
+    diag.fix(.{ .sentence = "name an image:", .command = "zbx pull alpine:3.20" });
 }
 
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
@@ -972,7 +949,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.cause("'schema' needs the command whose output schema to print", .{});
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
-        .reference, .resolve_only => missing_pull(diag, missing),
+        .reference => missing_pull(diag, missing),
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
             diag.fix(.{
@@ -1176,7 +1153,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             return command_error(err);
         },
         .stop => return run_stop(host, invocation, diag),
-        .pull => try run_pull(host, invocation, storage, diag),
+        .pull => return run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
     }
@@ -1192,20 +1169,41 @@ fn command_error(err: commands.Error) RunError {
     };
 }
 
-/// `zbx pull --resolve-only <reference>`: the registry's answer for this machine's platform.
+/// `zbx pull [--resolve-only] <reference>`: the registry's answer for this machine's platform,
+/// and unless only that was asked for, the image in the store.
 fn run_pull(
     host: Host,
     invocation: *const Invocation,
     storage: *Storage,
     diag: *Diag,
-) RunError!void {
+) RunError!u8 {
     assert(invocation.command == .pull);
-    assert(invocation.pull.resolve_only);
     const args: pull_commands.Args = .{
         .reference = invocation.operand.?,
         .json = invocation.options.output == .json,
     };
-    pull_commands.run_resolve(host, args, &storage.pull, diag) catch |err| switch (err) {
+    if (invocation.pull.resolve_only) {
+        pull_commands.run_resolve(host, args, &storage.pull, diag) catch |err| switch (err) {
+            error.Failed => return error.CommandFailed,
+            error.OutputFailed => return error.OutputFailed,
+        };
+        return constants.exit_ok;
+    }
+    const mode = invocation.options.mode();
+    const output: pull_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = args.json,
+    };
+    return pull_commands.run_pull(
+        host,
+        args,
+        output,
+        &storage.handle.facts,
+        &storage.pull,
+        &storage.store.import,
+        diag,
+    ) catch |err| switch (err) {
         error.Failed => return error.CommandFailed,
         error.OutputFailed => return error.OutputFailed,
     };

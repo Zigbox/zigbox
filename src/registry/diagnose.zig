@@ -102,6 +102,23 @@ pub fn bad_mirror(diag: *Diag, entry: []const u8) void {
     assert(diag.code.? == .E0514);
 }
 
+/// ZBX-E0511: a blob in the cache no longer hashes to its name: the disk changed it.
+pub fn blob_damaged(diag: *Diag, root: []const u8, expected: Sha256, actual: Sha256) void {
+    assert(diag.code == null);
+    assert(!expected.eql(actual));
+    diag.raise(.E0511);
+    diag.cause("a downloaded layer in the blob cache has changed on the disk", .{});
+    diag.cause("expected {s} but got {s}", .{ &expected.text(), &actual.text() });
+    diag.context("expect", "{s}", .{&expected.text()});
+    diag.context("actual", "{s}", .{&actual.text()});
+    diag.context("path", "{s}/blobs/sha256/{s}", .{ root, &expected.hex() });
+    diag.fix_with(
+        "remove the damaged blob and pull again:",
+        "rm '{s}/blobs/sha256/{s}'",
+        .{ root, &expected.hex() },
+    );
+}
+
 /// ZBX-E0416 for a full disk and ZBX-E0417 for any other failure to write the blob cache.
 pub fn cache_failed(diag: *Diag, root: []const u8, failure: *const blobs.Failure) void {
     assert(diag.code == null);

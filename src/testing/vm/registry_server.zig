@@ -138,7 +138,13 @@ pub const Server = struct {
         if (bearer) |value| {
             if (std.mem.startsWith(u8, value, "Bearer ")) token = value["Bearer ".len..];
         }
-        server.fixture.answer(.{ .host = "127.0.0.1", .target = target, .bearer = token }, &answer);
+        const query: fixture_mod.Query = .{
+            .host = "127.0.0.1",
+            .target = target,
+            .bearer = token,
+            .range_from = range_start(header_value(text, "range")),
+        };
+        server.fixture.answer(query, &answer);
         server.respond(client, &answer);
     }
 
@@ -174,6 +180,7 @@ fn write_head(
         .{ .name = "Retry-After", .value = answer.retry_after },
         .{ .name = "Docker-Content-Digest", .value = answer.content_digest },
         .{ .name = "Location", .value = answer.location },
+        .{ .name = "Content-Range", .value = answer.content_range },
     };
     for (optional) |header| {
         if (header.value.len > 0) try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
@@ -205,6 +212,15 @@ fn write_chunked(client: i32, body: []const u8, complete: bool) void {
     if (complete) write_all(client, "0\r\n\r\n");
 }
 
+/// The offset of a `Range: bytes=N-` header; zero for none or for anything else.
+fn range_start(value: ?[]const u8) u64 {
+    const text = value orelse return 0;
+    const prefix = "bytes=";
+    if (!std.mem.startsWith(u8, text, prefix)) return 0;
+    const rest = std.mem.trimEnd(u8, text[prefix.len..], "- ");
+    return std.fmt.parseInt(u64, rest, 10) catch 0;
+}
+
 fn status_only(status: u16) []const u8 {
     assert(status == 400);
     return "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -213,6 +229,8 @@ fn status_only(status: u16) []const u8 {
 fn reason(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
+        206 => "Partial Content",
+        416 => "Range Not Satisfiable",
         307 => "Temporary Redirect",
         401 => "Unauthorized",
         404 => "Not Found",

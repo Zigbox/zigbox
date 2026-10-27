@@ -1,8 +1,8 @@
-error[ZBX-E0511]: a manifest does not match its digest
+error[ZBX-E0511]: downloaded bytes do not match their digest
   cause  expected
-         sha256:5b20386579c9ece88c866394ca906fd19c12975b30464c40dd36c8681051dcc9
+         sha256:150343a34c472e86306b5adbbdd621a5d32d7f0214ee2d84cda332fb69002e58
          but got
-         sha256:6aaa2df43ab32671640fc352a0c4173e588c0f2eeae2263b9c23ca87fa1fce41
+         sha256:37fa96ff7dcac29c7e4e1b1720a6b853f27da1b5588041691731ba1c7a34f505
   fix    run the command again; if it repeats, do not trust this source
   more   zbx explain E0511 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0511.html
