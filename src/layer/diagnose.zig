@@ -21,6 +21,7 @@ const fix_damaged = "the blob may be damaged on disk: remove it and pull again";
 const fix_unusual = "the image is damaged or unusual; try another tag or build";
 
 fn shown(storage: *[shown_bytes_max]u8, text: []const u8) []const u8 {
+    assert(storage.len == shown_bytes_max);
     assert(text.len <= apply.path_show_bytes);
     return text_util.sanitise(storage, text);
 }
@@ -92,6 +93,8 @@ pub fn layer_refused(
 }
 
 fn unreadable_entry(diag: *Diag, failure: *const apply.Failure, path: []const u8, layer: u32) void {
+    assert(layer >= 1);
+    assert(failure.detail.len < 128);
     if (path.len > 0) {
         diag.cause("layer {d}: '{s}' can't be unpacked: {s}", .{ layer, path, failure.detail });
     } else {
@@ -100,6 +103,8 @@ fn unreadable_entry(diag: *Diag, failure: *const apply.Failure, path: []const u8
 }
 
 fn unreadable_stream(diag: *Diag, layer: *const reader_mod.Layer, number: u32) void {
+    assert(number >= 1);
+    assert(number <= constants.registry_layers_max);
     switch (layer.fault) {
         .corrupt => |word| diag.cause(
             "layer {d}'s compressed stream is damaged ({s})",
@@ -112,6 +117,8 @@ fn unreadable_stream(diag: *Diag, layer: *const reader_mod.Layer, number: u32) v
 }
 
 fn fixes(diag: *Diag, reason: apply.Reason) void {
+    assert(@tagName(reason).len > 0);
+    assert(diag.code != null);
     if (reason.unsafe()) {
         diag.fix(.{ .sentence = fix_untrusted });
         diag.fix(.{ .sentence = fix_kept });
@@ -133,6 +140,8 @@ fn write_failed(
     layer: *const reader_mod.Layer,
     place: Place,
 ) void {
+    assert(place.layer >= 1);
+    assert(place.root.len > 0);
     var err = failure.err;
     var errno = failure.errno;
     var step: []const u8 = failure.step;

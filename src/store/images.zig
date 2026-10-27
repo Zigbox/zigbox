@@ -55,6 +55,7 @@ pub const Image = struct {
     }
 
     pub fn platform_text(image: *const Image) []const u8 {
+        assert(image.platform_len > 0);
         assert(image.platform_len <= image.platform.len);
         return image.platform[0..image.platform_len];
     }
@@ -86,6 +87,8 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
 pub const ParseResult = enum { ok, malformed, newer };
 
 fn quoted_digest(value: []const u8) ?Sha256 {
+    assert(value.len <= constants.image_record_bytes_max);
+    assert(value.len < 1 << 16);
     var word: [constants.oci_digest_text_bytes]u8 = undefined;
     const length = roots.parse_string(value, &word) orelse return null;
     return Sha256.parse(word[0..length]);
@@ -93,6 +96,7 @@ fn quoted_digest(value: []const u8) ?Sha256 {
 
 /// Reads a record.
 pub fn parse(text: []const u8, image: *Image) ParseResult {
+    assert(@intFromPtr(image) != 0);
     assert(text.len <= constants.image_record_bytes_max);
     image.reference_len = 0;
     image.platform_len = 0;
@@ -144,6 +148,7 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
 }
 
 fn record_path(store: *const Store, buffer: *PathBuf, manifest: Sha256) [:0]const u8 {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
     assert(store.root_len > 1);
     const hex = manifest.hex();
     return store.path(buffer, &.{ "/", directory_name, "/", &hex });
@@ -168,6 +173,7 @@ pub fn save(store: *Store, image: *const Image, failure: *fs_mod.Failure) host_m
 pub const LoadError = error{ NotFound, Unreadable, Damaged, Newer };
 
 pub fn load(store: *const Store, manifest: Sha256, image: *Image, errno: *u16) LoadError!void {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
     assert(@intFromPtr(image) != 0);
     var path: PathBuf = undefined;
     var bytes: [constants.image_record_bytes_max]u8 = undefined;

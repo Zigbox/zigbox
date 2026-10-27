@@ -88,6 +88,7 @@ pub fn work_call(context: *anyopaque, squash_owner: bool) u8 {
 }
 
 fn write_diag(job: *const Job, diag: *const Diag) void {
+    assert(@intFromPtr(job) != 0);
     assert(diag.code != null);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const text = render.render(diag, job.output.mode, job.output.color, &buffer);
@@ -96,11 +97,14 @@ fn write_diag(job: *const Job, diag: *const Diag) void {
 }
 
 fn report_warning(context: *anyopaque, diag: *const Diag) void {
+    assert(diag.code != null);
+    assert(@intFromPtr(context) != 0);
     const job: *const Job = @ptrCast(@alignCast(context));
     write_diag(job, diag);
 }
 
 fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
+    assert(job.resolved.layer_count <= constants.registry_layers_max);
     assert(diag.code == null);
     var store: Store = undefined;
     _ = open.open(job.host, &store, .create, diag) catch return error.Failed;
@@ -121,6 +125,8 @@ fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
 /// Removes the staging directory. If that fails it stays in `tmp/`, which gc empties of the
 /// leftovers of dead processes; the pull itself has succeeded or failed already.
 fn cleanup(job: *Job, stage: [:0]const u8, store: *const Store) void {
+    assert(stage.len > 0);
+    assert(store.root_len > 1);
     const applier = &job.workspace.applier;
     var failure: remove.Failure = undefined;
     remove.tree(store.fs, &applier.removal, &applier.removal_arena, stage, &failure) catch return;
@@ -134,6 +140,8 @@ fn unpack(
     result: *import.Result,
     diag: *Diag,
 ) Error!void {
+    assert(stage.len > store.root_len);
+    assert(job.resolved.layer_count > 0);
     const workspace = job.workspace;
     workspace.applier.start(store.fs, stage, squash_owner);
     const resolved = job.resolved;
@@ -161,6 +169,8 @@ fn unpack(
 const Reporter = struct { job: *const Job };
 
 fn reporter_call(context: *anyopaque, diag: *const Diag) void {
+    assert(diag.code != null);
+    assert(@intFromPtr(context) != 0);
     const reporter: *const Reporter = @ptrCast(@alignCast(context));
     report_warning(@constCast(reporter.job), diag);
 }
@@ -172,6 +182,8 @@ fn unpack_layer(
     place: layer_diagnose.Place,
     diag: *Diag,
 ) Error!void {
+    assert(place.layer >= 1);
+    assert(place.layer <= place.layers);
     var path: PathBuf = undefined;
     const blob_path = blobs.final_path(&path, digest);
     const layer = &workspace.layer;
@@ -200,6 +212,8 @@ fn unpack_layer(
 }
 
 fn report_skipped(job: *const Job, applier: *const apply.Applier) void {
+    assert(applier.root_len > 1);
+    assert(applier.counts.layers <= constants.registry_layers_max);
     const counts = applier.counts;
     if (counts.special_skipped > 0) {
         var warning: Diag = undefined;
@@ -218,6 +232,7 @@ fn report_skipped(job: *const Job, applier: *const apply.Applier) void {
 
 /// The image's record, then the result on stdout.
 fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) Error!void {
+    assert(result.directories > 0);
     assert(diag.code == null);
     const resolved = job.resolved;
     var image: images.Image = undefined;
@@ -252,6 +267,8 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
 }
 
 fn render_result(job: *Job, result: *const import.Result, platform: []const u8) []const u8 {
+    assert(job.workspace.output.len == constants.pull_output_bytes_max);
+    assert(platform.len > 0);
     const buffer = &job.workspace.output;
     var writer = std.Io.Writer.fixed(buffer);
     const resolved = job.resolved;
@@ -260,7 +277,6 @@ fn render_result(job: *Job, result: *const import.Result, platform: []const u8) 
         writer.print("{s}\n", .{&resolved.manifest_digest.text()}) catch unreachable; // Sized.
         return writer.buffered();
     }
-    _ = platform;
     write_json(&writer, job, result) catch unreachable; // Same bound.
     return writer.buffered();
 }
@@ -270,6 +286,8 @@ fn write_json(
     job: *const Job,
     result: *const import.Result,
 ) std.Io.Writer.Error!void {
+    assert(job.resolved.layer_count <= constants.registry_layers_max);
+    assert(result.directories > 0);
     const resolved = job.resolved;
     const reference = job.reference;
     try writer.writeAll("{\"schema\":\"zbx.pull/1\",\"reference\":");

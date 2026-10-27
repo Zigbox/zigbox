@@ -66,6 +66,10 @@ pub const Faults = struct {
     grow_on_open: bool = false,
     /// The most names one inode may have; a `link` past it is `EMLINK` (ext4 allows 65000).
     link_max: ?u32 = null,
+    /// A path with a symlink above its last part is a bug of the caller, as a real file system
+    /// would follow the link: the model has no links to follow, so it panics instead. The layer
+    /// fuzzer sets it.
+    forbid_link_above: bool = false,
 };
 
 const Node = struct {
@@ -212,10 +216,21 @@ pub const SimFs = struct {
     fn find(sim: *const SimFs, path: []const u8) ?u32 {
         // A path is a C string: a NUL inside one is a buffer reused while a slice of it was kept.
         assert(std.mem.indexOfScalar(u8, path, 0) == null);
+        if (sim.faults.forbid_link_above) sim.assert_no_link_above(path);
         for (sim.nodes[0..sim.count], 0..) |*node, index| {
             if (node.alive and std.mem.eql(u8, node.text(), path)) return @intCast(index);
         }
         return null;
+    }
+
+    fn assert_no_link_above(sim: *const SimFs, path: []const u8) void {
+        var from: usize = 1;
+        while (std.mem.indexOfScalarPos(u8, path, from, '/')) |slash| : (from = slash + 1) {
+            for (sim.nodes[0..sim.count]) |*node| {
+                if (!node.alive or !std.mem.eql(u8, node.text(), path[0..slash])) continue;
+                assert(node.kind != .symlink);
+            }
+        }
     }
 
     /// The path of the node in slot `index`, or null if the slot is empty or dead. Tests walk the

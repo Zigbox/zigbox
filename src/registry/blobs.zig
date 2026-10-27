@@ -51,6 +51,7 @@ pub const Blobs = struct {
     root: []const u8,
 
     pub fn final_path(blobs: Blobs, buffer: *PathBuf, digest: Sha256) [:0]const u8 {
+        assert(blobs.root[0] == '/');
         assert(blobs.root.len > 1);
         const hex = digest.hex();
         buffer.set(&.{ blobs.root, final_directory, "/", &hex }) catch unreachable; // Short.
@@ -58,6 +59,7 @@ pub const Blobs = struct {
     }
 
     pub fn partial_path(blobs: Blobs, buffer: *PathBuf, digest: Sha256) [:0]const u8 {
+        assert(blobs.root[0] == '/');
         assert(blobs.root.len > 1);
         const hex = digest.hex();
         buffer.set(&.{ blobs.root, partial_directory, "/", &hex }) catch unreachable; // Short.
@@ -66,6 +68,7 @@ pub const Blobs = struct {
 
     /// Makes `blobs/`, `blobs/sha256/` and `blobs/partial/` (a store made before M4 has none).
     pub fn ensure_directories(blobs: Blobs, failure: *Failure) fs_mod.Error!void {
+        assert(blobs.root[0] == '/');
         assert(blobs.root.len > 1);
         const names = [_][]const u8{ blobs_directory, final_directory, partial_directory };
         for (names) |name| {
@@ -84,6 +87,8 @@ pub const Blobs = struct {
 
     /// True if the verified blob is in the cache with this length.
     pub fn has(blobs: Blobs, digest: Sha256, size: u64) bool {
+        assert(size > 0);
+        assert(blobs.root.len > 1);
         var path: PathBuf = undefined;
         const found = blobs.fs.lstat(blobs.final_path(&path, digest)) catch return false;
         return found.kind == .file and found.size == size;
@@ -150,6 +155,8 @@ pub const Download = struct {
     }
 
     fn record(download: *Download, step: []const u8, err: fs_mod.Error) void {
+        assert(step.len > 0);
+        assert(@errorName(err).len > 0);
         download.failure = .{
             .step = step,
             .err = err,
@@ -158,12 +165,16 @@ pub const Download = struct {
     }
 
     fn note(download: *Download, step: []const u8, err: fs_mod.Error) fs_mod.Error {
+        assert(step.len > 0);
+        assert(@errorName(err).len > 0);
         download.record(step, err);
         return err;
     }
 
     /// A file in `sha256/` of another length is not that blob: it goes.
     fn drop_wrong_final(download: *Download) fs_mod.Error!void {
+        assert(download.fd == null);
+        assert(download.size > 0);
         var path: PathBuf = undefined;
         const text = download.blobs.final_path(&path, download.digest);
         _ = download.blobs.fs.lstat(text) catch |err| switch (err) {
@@ -197,6 +208,7 @@ pub const Download = struct {
     }
 
     fn create_partial(download: *Download, text: [:0]const u8) fs_mod.Error!void {
+        assert(text.len > 0);
         assert(download.fd == null);
         download.hasher = digest_mod.Hasher.init();
         download.offset = 0;
@@ -230,21 +242,26 @@ pub const Download = struct {
 
     /// The offset to ask the registry for; the whole blob if zero.
     pub fn range_from(download: *const Download) u64 {
+        assert(download.size > 0);
         assert(download.offset <= download.size);
         return download.offset;
     }
 
     /// True if every byte is already here (a complete partial file): no request is needed.
     pub fn complete(download: *const Download) bool {
+        assert(download.size > 0);
         assert(download.offset <= download.size);
         return download.offset == download.size;
     }
 
     pub fn sink(download: *Download) net.Sink {
+        assert(download.fd != null);
+        assert(download.offset <= download.size);
         return .{ .context = download, .write = write };
     }
 
     fn write(context: *anyopaque, bytes: []const u8) error{SinkFull}!void {
+        assert(@intFromPtr(context) != 0);
         const download: *Download = @ptrCast(@alignCast(context));
         assert(download.fd != null);
         const status = download.head.status;
@@ -267,6 +284,8 @@ pub const Download = struct {
     /// The first body byte of the answer that is the blob: a 200 starts the file again, a 206
     /// must continue it.
     fn first_bytes(download: *Download, status: u16) error{SinkFull}!void {
+        assert(status >= 200);
+        assert(status <= 206);
         assert(!download.started);
         download.started = true;
         if (status == 200) {
@@ -289,6 +308,8 @@ pub const Download = struct {
 
     /// The registry sent the whole blob though a range was asked: drop the old bytes.
     fn restart(download: *Download) fs_mod.Error!void {
+        assert(download.fd != null);
+        assert(download.offset > 0);
         const fs = download.blobs.fs;
         var path: PathBuf = undefined;
         const text = download.blobs.partial_path(&path, download.digest);
@@ -301,6 +322,7 @@ pub const Download = struct {
 
     /// Ends the download: close the file, then check what it holds.
     pub fn finish(download: *Download) fs_mod.Error!Finish {
+        assert(download.offset <= download.size);
         const fs = download.blobs.fs;
         const fd = download.fd orelse unreachable; // `begin` opened it and `abandon` clears it.
         download.fd = null;
@@ -337,17 +359,23 @@ pub const Download = struct {
 
     /// Closes the file of a download that is given up; the partial file stays.
     pub fn abandon(download: *Download) void {
+        assert(download.size > 0);
+        assert(download.offset <= download.size);
         if (download.fd) |fd| download.blobs.fs.close(fd);
         download.fd = null;
     }
 
     /// True if the download began from a partial file.
     pub fn was_resumed(download: *const Download) bool {
+        assert(download.started_at <= download.size);
+        assert(download.started_at <= download.offset);
         return download.started_at > 0;
     }
 
     /// Removes the partial file (a resumed download whose bytes turned out wrong).
     pub fn discard(download: *Download) fs_mod.Error!void {
+        assert(download.fd == null);
+        assert(download.size > 0);
         var path: PathBuf = undefined;
         const text = download.blobs.partial_path(&path, download.digest);
         download.blobs.fs.unlink(text) catch |err| switch (err) {
@@ -359,6 +387,7 @@ pub const Download = struct {
 
 /// The first byte of "bytes first-last/total"; maxInt if the text is not that.
 pub fn range_start(text: []const u8) u64 {
+    assert(text.len < 1 << 16);
     assert(text.len <= constants.registry_header_bytes_max);
     const prefix = "bytes ";
     if (!std.mem.startsWith(u8, text, prefix)) return std.math.maxInt(u64);

@@ -439,6 +439,9 @@ pub const store_arena_bytes_max: u32 = 16 * 1024 * 1024;
 pub const store_io_buffer_bytes: u32 = 256 * 1024;
 /// A root's record, and the most roots `ls` lists.
 pub const store_root_record_bytes_max: u32 = 8192;
+/// The room gc has for the sets of what it keeps: untouched memory until a plan sizes them to
+/// the store, then 16 bytes a slot at three quarters full. About 1.5 million objects fit.
+pub const store_gc_tables_bytes: u32 = 64 * 1024 * 1024;
 pub const store_roots_max: u32 = 1024;
 pub const store_source_bytes_max: u32 = 1024;
 /// The shard directories (the first byte of a digest).

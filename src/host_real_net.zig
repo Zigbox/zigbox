@@ -978,3 +978,78 @@ test "the proxy comes from the environment and NO_PROXY bypasses it" {
     sim.environment_variables = &.{.{ .name = "HTTPS_PROXY", .value = "socks5://proxy:1080" }};
     try testing.expectError(error.ProxyFailed, proxy_for(sim.interface(), &request, &storage));
 }
+
+const blobs_mod = @import("registry/blobs.zig");
+const fs_sim = @import("store/fs_sim.zig");
+const fs_mod = @import("store/fs.zig");
+
+var blob_fs: fs_sim.SimFs = undefined;
+var blob_download: blobs_mod.Download = undefined;
+
+/// Fetches the first layer of `scenario` through the real sockets into a simulated cache. If
+/// `seed` is set, that many bytes of the layer are already in the cache's partial file.
+fn fetch_first_layer(
+    loopback: *Loopback,
+    scenario: fixture_mod.Scenario,
+    seed: usize,
+    diag: *Diag,
+) !client_mod.BlobOutcome {
+    var text: [96]u8 = undefined;
+    const port = loopback.server.port;
+    const format = "127.0.0.1:{d}/fixture/{s}:3.20";
+    const written = try std.fmt.bufPrint(&text, format, .{ port, @tagName(scenario) });
+    var reference: reference_mod.Reference = undefined;
+    try reference_mod.parse(written, &reference);
+    var real: HostReal = .{};
+    var client = client_mod.Client.init(interface(&real), &test_workspace, "x86_64");
+    var resolved: manifest.Resolved = undefined;
+    diag.reset();
+    try client_mod.resolve(&client, &reference, &resolved, diag);
+    blob_fs.init(1);
+    blob_fs.put_dir("/s", 0o755);
+    const blobs: blobs_mod.Blobs = .{ .fs = blob_fs.interface(), .root = "/s" };
+    var failure: blobs_mod.Failure = undefined;
+    try blobs.ensure_directories(&failure);
+    const layer = resolved.layers[0];
+    const image = loopback.fixture.image(scenario);
+    if (seed > 0) {
+        var path: fs_mod.PathBuf = undefined;
+        const partial = blobs.partial_path(&path, layer.digest);
+        blob_fs.put_file(partial, 0o644, image.layer_gzip.slice()[0..seed]);
+    }
+    const fetched = client_mod.fetch_blob(
+        &client,
+        &reference,
+        layer.digest,
+        layer.size,
+        blobs,
+        &blob_download,
+        diag,
+    );
+    const outcome = try fetched;
+    var final: fs_mod.PathBuf = undefined;
+    const kept = blob_fs.content_of(blobs.final_path(&final, layer.digest)).?;
+    try testing.expectEqualSlices(u8, image.layer_gzip.slice(), kept);
+    return outcome;
+}
+
+test "over TCP a blob arrives whole, resumes with Range, and follows a redirect to another host" {
+    // Goal: the real head parser, 206 and Content-Range, chunked framing and a redirect to
+    // another host name all work for a blob, as they do in the simulator.
+    var loopback: Loopback = undefined;
+    var diag: Diag = undefined;
+    for ([_]registry_server.Mode{ .normal, .chunked }) |mode| {
+        try loopback.start(mode);
+        defer loopback.stop();
+        const whole = try fetch_first_layer(&loopback, .open, 0, &diag);
+        try testing.expectEqual(client_mod.BlobOutcome.downloaded, whole);
+        const resumed = try fetch_first_layer(&loopback, .open, 300, &diag);
+        try testing.expectEqual(client_mod.BlobOutcome.resumed, resumed);
+        const ignored = try fetch_first_layer(&loopback, .norange, 300, &diag);
+        try testing.expectEqual(client_mod.BlobOutcome.downloaded, ignored);
+        const redirected = try fetch_first_layer(&loopback, .cdn, 0, &diag);
+        try testing.expectEqual(client_mod.BlobOutcome.downloaded, redirected);
+        try testing.expectError(error.Failed, fetch_first_layer(&loopback, .badblob, 0, &diag));
+        try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0511), diag.code);
+    }
+}

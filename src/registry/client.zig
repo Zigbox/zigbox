@@ -141,6 +141,8 @@ pub fn candidates(
 }
 
 fn bad_mirror(diag: *Diag, entry: []const u8) Error {
+    assert(entry.len <= constants.arg_bytes_max);
+    assert(diag.code == null);
     diagnose.bad_mirror(diag, entry);
     return error.Failed;
 }
@@ -149,6 +151,7 @@ fn bad_mirror(diag: *Diag, entry: []const u8) Error {
 /// or the like. What a mirror must not be able to do is change the answer, so a wrong digest, a
 /// document that cannot be used, and a platform that is missing end the resolve.
 fn falls_through(code: codes.Code) bool {
+    assert(@tagName(code).len == 5);
     return switch (code) {
         .E0502, .E0503, .E0504, .E0505, .E0506, .E0507, .E0508, .E0513 => true,
         else => false,
@@ -692,11 +695,15 @@ pub fn fetch_blob(
 
 /// The `attempt`th place to ask: the winner first, then the others in their order.
 fn place_at(winner: u32, attempt: u32) u32 {
+    assert(winner < constants.registry_mirrors_max + 1);
+    assert(attempt <= constants.registry_mirrors_max);
     if (attempt == 0) return winner;
     return if (attempt - 1 < winner) attempt - 1 else attempt;
 }
 
 fn cache_error(blobs: blobs_mod.Blobs, download: *const blobs_mod.Download, diag: *Diag) Error {
+    assert(diag.code == null);
+    assert(download.failure.step.len > 0);
     diagnose.cache_failed(diag, blobs.root, &download.failure);
     return error.Failed;
 }
@@ -803,6 +810,8 @@ const wrong_range = "a partial answer for another range";
 
 /// A request that failed: if the sink refused the body, say why instead of the wire's error.
 fn blob_sink_failed(download: *const blobs_mod.Download, diag: *Diag, err: Error) Error {
+    assert(download.fd == null);
+    assert(@errorName(err).len > 0);
     if (download.problem == .none) return err;
     diag.reset();
     switch (download.problem) {

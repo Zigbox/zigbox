@@ -178,6 +178,8 @@ pub fn network_failed(diag: *Diag, err: net.Error, target: Target, errno: u16) v
 }
 
 fn unknown_host(diag: *Diag, host: []const u8) void {
+    assert(host.len > 0);
+    assert(diag.code == null);
     diag.raise(.E0502);
     diag.cause("no address was found for '{s}'", .{host});
     diag.fix(.{ .sentence = "check the registry's name in the reference" });
@@ -188,6 +190,8 @@ fn unknown_host(diag: *Diag, host: []const u8) void {
 }
 
 fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void {
+    assert(host.len > 0);
+    assert(port != 0);
     diag.raise(.E0503);
     switch (err) {
         error.TimedOut => diag.cause("{s}:{d} did not answer within {d} seconds", .{
@@ -206,6 +210,8 @@ fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void
 }
 
 fn tls_failed(diag: *Diag, err: net.Error, host: []const u8) void {
+    assert(host.len > 0);
+    assert(diag.code == null);
     diag.raise(.E0504);
     switch (err) {
         error.TlsUntrusted => diag.cause(
@@ -224,6 +230,8 @@ fn tls_failed(diag: *Diag, err: net.Error, host: []const u8) void {
 }
 
 fn no_certificates(diag: *Diag) void {
+    assert(diag.code == null);
+    assert(constants.arg_bytes_max > 0);
     diag.raise(.E0504);
     diag.cause("no CA certificates could be loaded, so no HTTPS peer can be verified", .{});
     diag.fix(.{ .sentence = "install the system's CA certificates (the ca-certificates package)" });
@@ -231,6 +239,8 @@ fn no_certificates(diag: *Diag) void {
 }
 
 fn unusable_wire(diag: *Diag, err: net.Error, host: []const u8) void {
+    assert(host.len > 0);
+    assert(diag.code == null);
     diag.raise(.E0512);
     switch (err) {
         error.TooLarge => diag.cause("{s} sent more than zbx accepts in one answer", .{host}),

@@ -61,6 +61,8 @@ pub const Reason = enum {
     io,
 
     pub fn unsafe(reason: Reason) bool {
+        assert(@tagName(reason).len > 0);
+        assert(@tagName(reason).len < 32);
         return switch (reason) {
             .absolute, .escapes, .through_symlink, .link_target => true,
             else => false,
@@ -80,6 +82,7 @@ pub const Failure = struct {
     step: []const u8,
 
     pub fn path_text(failure: *const Failure) []const u8 {
+        assert(failure.path_len <= path_show_bytes);
         assert(failure.path_len <= failure.path.len);
         return failure.path[0..failure.path_len];
     }
@@ -159,6 +162,8 @@ pub const Applier = struct {
     // ---- Failures ---------------------------------------------------------------------------
 
     fn fail(applier: *Applier, reason: Reason, name: []const u8, detail: []const u8) Error {
+        assert(name.len <= constants.path_bytes_max);
+        assert(detail.len < 128);
         const shown = name[0..@min(name.len, path_show_bytes)];
         @memcpy(applier.failure.path[0..shown.len], shown);
         applier.failure.path_len = @intCast(shown.len);
@@ -171,6 +176,8 @@ pub const Applier = struct {
     }
 
     fn fail_io(applier: *Applier, step: []const u8, name: []const u8, err: fs_mod.Error) Error {
+        assert(step.len > 0);
+        assert(applier.fs.last_errno() < 4096);
         return applier.fail_errno(step, name, err, applier.fs.last_errno());
     }
 
@@ -181,6 +188,8 @@ pub const Applier = struct {
         err: fs_mod.Error,
         errno: u16,
     ) Error {
+        assert(step.len > 0);
+        assert(errno < 4096);
         _ = applier.fail(.io, name, "") catch {};
         applier.failure.err = err;
         applier.failure.errno = errno;
@@ -189,6 +198,8 @@ pub const Applier = struct {
     }
 
     fn fail_tar(applier: *Applier, layer: *reader_mod.Layer, err: tar.Error) Error {
+        assert(@errorName(err).len > 0);
+        assert(layer.open);
         switch (err) {
             error.ReadFailed => {
                 layer.explain(error.ReadFailed);
@@ -209,6 +220,7 @@ pub const Applier = struct {
     /// The entry's name as a clean relative path in `applier.rel`: no leading or trailing slash,
     /// no `.` or empty part. Empty means the root.
     fn clean(applier: *Applier, name: []const u8) Error![]const u8 {
+        assert(name.len <= constants.path_bytes_max);
         if (name.len > 0 and name[0] == '/') return applier.fail(.absolute, name, "");
         if (std.mem.indexOfScalar(u8, name, 0) != null) {
             return applier.fail(.damaged, name, "a name has a NUL byte");
@@ -244,6 +256,7 @@ pub const Applier = struct {
         buffer: *[constants.path_bytes_max + 1]u8,
         relative: []const u8,
     ) [:0]const u8 {
+        assert(relative.len < constants.path_bytes_max);
         assert(applier.root_len + 1 + relative.len < buffer.len);
         @memcpy(buffer[0..applier.root_len], applier.root[0..applier.root_len]);
         var length: usize = applier.root_len;
@@ -259,6 +272,8 @@ pub const Applier = struct {
 
     /// True if the directory `parent` is the verified one or lies above it.
     fn covered(applier: *const Applier, parent: []const u8) bool {
+        assert(parent.len <= constants.path_bytes_max);
+        assert(applier.verified_len <= constants.path_bytes_max);
         const kept = applier.verified[0..applier.verified_len];
         if (parent.len > kept.len) return false;
         if (!std.mem.startsWith(u8, kept, parent)) return false;
@@ -274,6 +289,8 @@ pub const Applier = struct {
         entry_name: []const u8,
         create: bool,
     ) Error!bool {
+        assert(parent.len <= constants.path_bytes_max);
+        assert(entry_name.len <= constants.path_bytes_max);
         if (parent.len == 0) return true;
         if (applier.covered(parent)) return true;
         const kept = applier.verified[0..applier.verified_len];
@@ -297,6 +314,8 @@ pub const Applier = struct {
         name: []const u8,
         create: bool,
     ) Error!bool {
+        assert(path.len > applier.root_len);
+        assert(path.len <= constants.path_bytes_max);
         const found = applier.fs.lstat(path) catch |err| switch (err) {
             error.NotFound => {
                 if (!create) return false;
@@ -316,6 +335,8 @@ pub const Applier = struct {
 
     /// Removes whatever is at `path` (a file, a link, or a directory with all it holds).
     fn remove_existing(applier: *Applier, path: [:0]const u8, name: []const u8) Error!void {
+        assert(path.len > applier.root_len);
+        assert(std.mem.startsWith(u8, path, applier.root[0..applier.root_len]));
         applier.verified_len = 0;
         const arena = &applier.removal_arena;
         remove.tree(applier.fs, &applier.removal, arena, path, &applier.removal_failure) catch {
@@ -347,6 +368,8 @@ pub const Applier = struct {
         layer: *reader_mod.Layer,
         entry: *const tar.Entry,
     ) Error!void {
+        assert(layer.open);
+        assert(entry.name.len <= constants.path_bytes_max);
         const name = entry.name;
         const rel = try applier.clean(name);
         if (rel.len == 0) {
@@ -373,6 +396,7 @@ pub const Applier = struct {
     }
 
     fn skip_special(applier: *Applier, name: []const u8) void {
+        assert(applier.first_special_len <= path_show_bytes);
         assert(name.len > 0);
         if (applier.counts.special_skipped == 0) {
             const shown = name[0..@min(name.len, path_show_bytes)];
@@ -383,6 +407,7 @@ pub const Applier = struct {
     }
 
     pub fn first_special_path(applier: *const Applier) []const u8 {
+        assert(applier.counts.special_skipped > 0);
         assert(applier.first_special_len <= path_show_bytes);
         return applier.first_special[0..applier.first_special_len];
     }
@@ -393,6 +418,8 @@ pub const Applier = struct {
     }
 
     fn skipped_xattr(applier: *Applier, name: []const u8) void {
+        assert(name.len > 0);
+        assert(applier.counts.xattrs_skipped < 1 << 62);
         if (applier.counts.xattrs_skipped == 0) {
             const shown = name[0..@min(name.len, path_show_bytes)];
             @memcpy(applier.first_xattr[0..shown.len], shown);
@@ -409,6 +436,7 @@ pub const Applier = struct {
         base: []const u8,
         name: []const u8,
     ) Error!void {
+        assert(parent.len <= constants.path_bytes_max);
         assert(std.mem.startsWith(u8, base, whiteout_prefix));
         const target = base[whiteout_prefix.len..];
         if (std.mem.eql(u8, base, opaque_name)) return applier.make_opaque(parent, name);
@@ -436,6 +464,8 @@ pub const Applier = struct {
 
     /// `.wh..wh..opq` in `directory`: what is there now was put by lower layers, and goes.
     fn make_opaque(applier: *Applier, directory: []const u8, name: []const u8) Error!void {
+        assert(directory.len <= constants.path_bytes_max);
+        assert(name.len > 0);
         // The directory is made if the layer has not yet (its own entry may come later).
         _ = try applier.parents(directory, name, true);
         try applier.empty_directory(directory, name);
@@ -474,6 +504,8 @@ pub const Applier = struct {
         child: []const u8,
         name: []const u8,
     ) Error!void {
+        assert(child.len > 0);
+        assert(std.mem.indexOfScalar(u8, child, '/') == null);
         var joined: [constants.path_bytes_max + 1]u8 = undefined;
         const length = directory.len + @intFromBool(directory.len > 0) + child.len;
         if (length > constants.path_bytes_max - applier.root_len - 2) {
@@ -489,6 +521,8 @@ pub const Applier = struct {
     // ---- Files, directories and links -------------------------------------------------------
 
     fn exists_error(applier: *const Applier) bool {
+        assert(applier.root_len > 1);
+        assert(applier.fs.last_errno() < 4096);
         return applier.fs.last_errno() == errno_exist;
     }
 
@@ -498,6 +532,8 @@ pub const Applier = struct {
         entry: *const tar.Entry,
         rel: []const u8,
     ) Error!void {
+        assert(rel.len > 0);
+        assert(entry.kind == .file);
         const path = applier.join(&applier.full, rel);
         const fs = applier.fs;
         const fd = fs.create(path, entry.mode & 0o777) catch |err| blk: {
@@ -528,6 +564,7 @@ pub const Applier = struct {
         fd: fs_mod.Fd,
         entry: *const tar.Entry,
     ) Error!void {
+        assert(entry.kind == .file);
         var left = entry.size;
         while (left > 0) {
             const count = applier.reader.read_body(&applier.io) catch |err| {
@@ -543,6 +580,8 @@ pub const Applier = struct {
     }
 
     fn owner_of_fd(applier: *Applier, fd: fs_mod.Fd, entry: *const tar.Entry) Error!void {
+        assert(entry.uid != std.math.maxInt(u32));
+        assert(fd < std.math.maxInt(i32));
         if (applier.squash_owner) return;
         applier.fs.set_owner(fd, entry.uid, entry.gid) catch |err| {
             return applier.owner_failed(entry, err);
@@ -551,6 +590,8 @@ pub const Applier = struct {
 
     /// A chown the namespace refuses: the id is not one it maps.
     fn owner_failed(applier: *Applier, entry: *const tar.Entry, err: fs_mod.Error) Error {
+        assert(entry.name.len > 0);
+        assert(@errorName(err).len > 0);
         const errno = applier.fs.last_errno();
         if (errno == errno_inval or errno == errno_perm) {
             return applier.fail(.unmapped_owner, entry.name, "");
@@ -559,6 +600,8 @@ pub const Applier = struct {
     }
 
     fn xattrs_of_fd(applier: *Applier, fd: fs_mod.Fd, entry: *const tar.Entry) Error!void {
+        assert(entry.xattrs.len <= tar.xattrs_max);
+        assert(fd < std.math.maxInt(i32));
         applier.counts.xattrs_skipped += entry.xattrs_dropped;
         for (entry.xattrs) |attribute| {
             const name = applier.xattr_z(attribute) orelse {
@@ -574,6 +617,8 @@ pub const Applier = struct {
     }
 
     fn xattrs_of_path(applier: *Applier, path: [:0]const u8, entry: *const tar.Entry) Error!void {
+        assert(entry.xattrs.len <= tar.xattrs_max);
+        assert(path.len > 0);
         applier.counts.xattrs_skipped += entry.xattrs_dropped;
         for (entry.xattrs) |attribute| {
             const name = applier.xattr_z(attribute) orelse {
@@ -590,6 +635,8 @@ pub const Applier = struct {
 
     /// The attribute's name as C text if the store keeps it and it fits; null to skip it.
     fn xattr_z(applier: *Applier, attribute: tar.Xattr) ?[:0]const u8 {
+        assert(attribute.name.len > 0);
+        assert(applier.xattr_name.len > constants.store_xattr_name_bytes_max);
         const name = attribute.name;
         if (name.len > constants.store_xattr_name_bytes_max) return null;
         if (attribute.value.len > constants.store_xattr_value_bytes_max) return null;
@@ -602,6 +649,8 @@ pub const Applier = struct {
     /// A file system that has no such attribute, or that the namespace may not set one on, is
     /// counted and skipped; anything else is a failure.
     fn xattr_refused(applier: *Applier, entry: *const tar.Entry, err: fs_mod.Error) Error!void {
+        assert(entry.name.len > 0);
+        assert(@errorName(err).len > 0);
         const errno = applier.fs.last_errno();
         const skip = errno == errno_perm or errno == errno_inval or errno == errno_notsup;
         if (!skip) return applier.fail_errno("setting an attribute", entry.name, err, errno);
@@ -609,6 +658,8 @@ pub const Applier = struct {
     }
 
     fn put_directory(applier: *Applier, entry: *const tar.Entry, rel: []const u8) Error!void {
+        assert(entry.kind == .directory);
+        assert(rel.len > 0);
         const path = applier.join(&applier.full, rel);
         applier.fs.make_directory(path, true) catch |err| {
             return applier.fail_io("making a directory", entry.name, err);
@@ -633,6 +684,9 @@ pub const Applier = struct {
         entry: *const tar.Entry,
         name: []const u8,
     ) Error!void {
+        assert(name.len > 0);
+        assert(path.len > 0);
+        assert(entry.mode <= 0o7777);
         const uid: u32 = if (applier.squash_owner) 0 else entry.uid;
         const gid: u32 = if (applier.squash_owner) 0 else entry.gid;
         applier.fs.set_path_attributes(path, .{
@@ -640,21 +694,13 @@ pub const Applier = struct {
             .uid = uid,
             .gid = gid,
             .mtime = @min(entry.mtime, max_mtime),
-        }) catch |err| return applier.owner_failed_or_io(entry, name, err);
+        }) catch |err| return applier.owner_failed(entry, err);
         try applier.xattrs_of_path(path, entry);
     }
 
-    fn owner_failed_or_io(
-        applier: *Applier,
-        entry: *const tar.Entry,
-        name: []const u8,
-        err: fs_mod.Error,
-    ) Error {
-        _ = name;
-        return applier.owner_failed(entry, err);
-    }
-
     fn put_symlink(applier: *Applier, entry: *const tar.Entry, rel: []const u8) Error!void {
+        assert(entry.kind == .symlink);
+        assert(rel.len > 0);
         const text = entry.link;
         if (text.len == 0) return applier.fail(.damaged, entry.name, "a symlink with no target");
         if (text.len > constants.store_symlink_target_bytes_max) {
@@ -685,6 +731,8 @@ pub const Applier = struct {
     }
 
     fn put_hardlink(applier: *Applier, entry: *const tar.Entry, rel: []const u8) Error!void {
+        assert(entry.kind == .hardlink);
+        assert(rel.len > 0);
         const target_rel = try applier.link_target(entry);
         if (std.mem.eql(u8, target_rel, rel)) {
             return applier.fail(.damaged, entry.name, "a hard link to itself");
@@ -716,6 +764,8 @@ pub const Applier = struct {
     /// The link's target as a clean relative path in `applier.link`. A link names a path in the
     /// layer's root, so it may not be absolute or go up.
     fn link_target(applier: *Applier, entry: *const tar.Entry) Error![]const u8 {
+        assert(entry.kind == .hardlink);
+        assert(applier.link.len > constants.store_name_bytes_max);
         const text = entry.link;
         const unsafe = text.len > 0 and text[0] == '/';
         if (unsafe) return applier.fail(.link_target, entry.name, "");
@@ -1007,4 +1057,52 @@ test "shared_components finds where the next directory to check starts" {
     try testing.expectEqual(@as(usize, 3), shared_components("a/b", "a/b"));
     try testing.expectEqual(@as(usize, 4), shared_components("a/b/c", "a/b"));
     try testing.expectEqual(@as(usize, 0), shared_components("x", "y"));
+}
+
+fn expect_sample_layer() !void {
+    // The text file is generated by the same formula the sample was made with.
+    var expected: [400 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&expected);
+    for (0..9000) |index| try writer.print("line {d} of a compressible text file\n", .{index});
+    const words = test_fs.content_of("/stage/usr/share/words.txt").?;
+    try testing.expectEqualSlices(u8, writer.buffered(), words);
+    const hard_content = test_fs.content_of("/stage/usr/share/hard").?;
+    try testing.expectEqualSlices(u8, writer.buffered(), hard_content);
+    const noise = test_fs.content_of("/stage/usr/share/noise.bin").?;
+    try testing.expectEqual(@as(usize, 20000), noise.len);
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(noise, &sum, .{});
+    const hex = std.fmt.bytesToHex(sum, .lower);
+    const expected_sum = "a23a346a52bea99a81333db1a0288acfd6fc88f6beff3c65c1a5a6c0214d2839";
+    try testing.expectEqualStrings(expected_sum, &hex);
+    const stat = test_fs.stat_of("/stage/usr/share/noise.bin").?;
+    try testing.expectEqual(@as(u32, 1000), stat.uid);
+    try testing.expectEqual(@as(u16, 0o600), stat.mode);
+    try testing.expectEqual(fs_mod.FileKind.symlink, test_fs.kind_of("/stage/usr/share/link").?);
+    const deep = "/stage/usr/share/deeply-nested-directory-name/deeply-nested-directory-name/" ++
+        "deeply-nested-directory-name/deeply-nested-directory-name/" ++
+        "deeply-nested-directory-name/file.txt";
+    try testing.expectEqualStrings("long path\n", test_fs.content_of(deep).?);
+    try testing.expectEqual(@as(u64, 1), test_applier.counts.xattrs_set);
+    try testing.expectEqual(@as(u64, 1), test_applier.counts.xattrs_skipped);
+}
+
+test "layers compressed by real tools are read: gzip level 9 and zstd level 19" {
+    // Goal: the standard library's decoders on data a real compressor made (the fixture's own
+    // containers store without compressing): many blocks, a long text, noise, and pax records.
+    const archives = [_]struct { name: []const u8, bytes: []const u8 }{
+        .{ .name = "gzip", .bytes = @embedFile("../testdata/layers/sample.tar.gz") },
+        .{ .name = "zstd", .bytes = @embedFile("../testdata/layers/sample.tar.zst") },
+    };
+    for (archives) |archive| {
+        world();
+        if (test_fs.kind_of("/layer") != null) test_fs.remove_path("/layer");
+        test_fs.put_file("/layer", 0o644, archive.bytes);
+        try test_layer.start(test_fs.interface(), "/layer");
+        defer test_layer.close();
+        try test_applier.apply_layer(&test_layer);
+        const digest = try test_layer.finish();
+        try testing.expect(digest.eql(@import("../registry/digest.zig").Sha256.of(archive.bytes)));
+        try expect_sample_layer();
+    }
 }

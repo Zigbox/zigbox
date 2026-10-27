@@ -1127,10 +1127,21 @@ fn counts_words(counts: *const gc.Counts, buffer: *[constants.output_bytes_max]u
     assert(counts.total() < 1 << 40);
     assert(buffer.len == constants.output_bytes_max);
     var size: [32]u8 = undefined;
-    // Cannot fail: one short line.
+    var blobs: [48]u8 = undefined;
+    // Cannot fail: a short fixed line, and one for the blobs.
+    const more = if (counts.blobs > 0) std.fmt.bufPrint(
+        &blobs,
+        "{d} downloaded blobs, ",
+        .{counts.blobs},
+    ) catch unreachable else blobs[0..0]; // Short.
     return std.fmt.bufPrint(buffer, "{d} objects, {d} chunk lists, {d} trees, {d} materialized " ++
-        "directories, {s}", .{
-        counts.objects, counts.lists, counts.trees, counts.farms, size_words(&size, counts.bytes),
+        "directories, {s}{s}", .{
+        counts.objects,
+        counts.lists,
+        counts.trees,
+        counts.farms,
+        more,
+        size_words(&size, counts.bytes),
     }) catch unreachable; // Same bound.
 }
 
@@ -1143,13 +1154,14 @@ fn put_plan(job: *const Job, planned: *const gc.Plan, diag: *Diag) Error!void {
         const text = std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.gc/1\"," ++
             "\"applied\":false," ++
             "\"plan\":\"{s}\",\"generation\":{d},\"objects\":{d},\"lists\":{d},\"trees\":{d}," ++
-            "\"farms\":{d},\"tmp\":{d},\"bytes\":{d}}}\n", .{
+            "\"farms\":{d},\"blobs\":{d},\"tmp\":{d},\"bytes\":{d}}}\n", .{
             planned.hash.text(),
             planned.generation,
             counts.objects,
             counts.lists,
             counts.trees,
             counts.farms,
+            counts.blobs,
             counts.tmp,
             counts.bytes,
         }) catch unreachable; // One short object.
@@ -1187,7 +1199,8 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
         const text = std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.gc/1\"," ++
             "\"applied\":true," ++
             "\"plan\":\"{s}\",\"gc\":\"{s}\",\"expires\":{d},\"objects\":{d},\"lists\":{d}," ++
-            "\"trees\":{d},\"farms\":{d},\"tmp\":{d},\"bytes\":{d},\"expired\":{d}}}\n", .{
+            "\"trees\":{d},\"farms\":{d},\"blobs\":{d},\"tmp\":{d},\"bytes\":{d}," ++
+            "\"expired\":{d}}}\n", .{
             job.confirm.text(),
             applied.gc,
             applied.expires,
@@ -1195,6 +1208,7 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
             counts.lists,
             counts.trees,
             counts.farms,
+            counts.blobs,
             counts.tmp,
             counts.bytes,
             applied.expired,
@@ -1318,10 +1332,11 @@ fn trash_json(
     // Cannot fail: a short fixed object.
     return std.fmt.bufPrint(buffer, "{s}{{\"gc\":\"{s}\",\"readable\":true,\"time\":{d}," ++
         "\"expires\":{d}," ++
-        "\"objects\":{d},\"lists\":{d},\"trees\":{d},\"farms\":{d},\"bytes\":{d}," ++
-        "\"complete\":{}}}", .{
-        comma,      entry.id,   meta.time,  meta.expires, meta.objects,
-        meta.lists, meta.trees, meta.farms, meta.bytes,   meta.complete,
+        "\"objects\":{d},\"lists\":{d},\"trees\":{d},\"farms\":{d},\"blobs\":{d}," ++
+        "\"bytes\":{d},\"complete\":{}}}", .{
+        comma,         entry.id,   meta.time,  meta.expires, meta.objects,
+        meta.lists,    meta.trees, meta.farms, meta.blobs,   meta.bytes,
+        meta.complete,
     }) catch unreachable; // Cannot fail: the buffer holds the longest one.
 }
 
@@ -1364,8 +1379,8 @@ fn do_restore(job: *Job, diag: *Diag) Error!void {
     const out = if (job.output.json)
         std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.restore/1\",\"gc\":\"{s}\"," ++
             "\"objects\":{d}," ++
-            "\"lists\":{d},\"trees\":{d},\"farms\":{d}}}\n", .{
-            id, counts.objects, counts.lists, counts.trees, counts.farms,
+            "\"lists\":{d},\"trees\":{d},\"farms\":{d},\"blobs\":{d}}}\n", .{
+            id, counts.objects, counts.lists, counts.trees, counts.farms, counts.blobs,
         })
     else
         std.fmt.bufPrint(&buffer, "restored {d} objects, {d} chunk lists, {d} trees and {d} " ++

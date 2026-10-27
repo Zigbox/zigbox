@@ -3,7 +3,8 @@
 //! how `du` counts, and how `verify`, `diff` and `gc` will find what a root reaches.
 //!
 //! The walk is iterative: a stack of subtree digests the caller gives memory for, and a table of
-//! the trees already visited if the caller wants each tree once. Without the table a tree that
+//! the trees already visited if the caller wants each tree once (a `sets.DigestMap` or
+//! `sets.KeySet`, or null). Without the table a tree that
 //! occurs in many places is visited in each, which is what a total of logical sizes needs; the
 //! number of entries seen is bounded (`store_walk_entries_max`) so that a store built by hand
 //! cannot make a walk last for ever.
@@ -13,7 +14,6 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const digest_mod = @import("digest.zig");
 const layout = @import("layout.zig");
-const sets = @import("sets.zig");
 const tree = @import("tree.zig");
 const trees = @import("trees.zig");
 
@@ -35,7 +35,7 @@ pub fn walk(
     store: *const Store,
     buffer: []u8,
     stack: []Digest,
-    visited: ?*sets.DigestMap,
+    visited: anytype,
     root: Digest,
     visitor: anytype,
     failure: *Failure,
@@ -50,9 +50,7 @@ pub fn walk(
     while (top > 0) {
         top -= 1;
         const digest = stack[top];
-        if (visited) |map| {
-            if (map.put(digest, 0) == .present) continue;
-        }
+        if (seen_before(visited, digest)) continue;
         var errno: u16 = 0;
         const bytes = trees.load(store, digest, buffer, &errno) catch |err| {
             const kind: @TypeOf(failure.kind) = switch (err) {
@@ -82,6 +80,17 @@ pub fn walk(
             top += 1;
         }
     }
+}
+
+/// True if the table of visited trees has `digest`; it is added if not.
+fn seen_before(visited: anytype, digest: Digest) bool {
+    const Type = @TypeOf(visited);
+    if (Type == @TypeOf(null)) return false;
+    if (@typeInfo(Type) == .optional) {
+        const table = visited orelse return false;
+        return table.put(digest, 0) == .present;
+    }
+    return visited.put(digest, 0) == .present;
 }
 
 fn damaged(failure: *Failure, digest: Digest) Error {

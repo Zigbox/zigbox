@@ -94,6 +94,7 @@ pub const Reader = struct {
     ended: bool,
 
     pub fn init(reader: *Reader, source: *Io.Reader, bytes_max: u64) void {
+        assert(@intFromPtr(source) != 0);
         assert(bytes_max > 0);
         reader.source = source;
         reader.body_left = 0;
@@ -109,6 +110,8 @@ pub const Reader = struct {
 
     /// Reads one header block. False at a clean end (no bytes at all).
     fn take_block(reader: *Reader) Error!bool {
+        assert(reader.body_left == 0);
+        assert(reader.padding_left == 0);
         const count = reader.source.readSliceShort(&reader.block) catch return error.ReadFailed;
         if (count == 0) return false;
         if (count < block_bytes) return error.Truncated;
@@ -117,6 +120,8 @@ pub const Reader = struct {
 
     /// Discards what is left of the current entry: its body and the padding.
     fn finish_entry(reader: *Reader) Error!void {
+        assert(reader.body_left <= reader.bytes_max);
+        assert(reader.padding_left < block_bytes);
         const left = reader.body_left + reader.padding_left;
         reader.body_left = 0;
         reader.padding_left = 0;
@@ -126,6 +131,7 @@ pub const Reader = struct {
 
     /// Reads up to `buffer.len` bytes of the current body; zero when it is all read.
     pub fn read_body(reader: *Reader, buffer: []u8) Error!usize {
+        assert(reader.body_left <= reader.bytes_max);
         assert(buffer.len > 0);
         const want: usize = @intCast(@min(reader.body_left, buffer.len));
         if (want == 0) return 0;
@@ -138,6 +144,8 @@ pub const Reader = struct {
     /// The next entry, or null at the end of the archive. What is left of the previous entry's
     /// body is skipped.
     pub fn next(reader: *Reader) Error!?Entry {
+        assert(reader.bytes_total <= reader.bytes_max);
+        assert(reader.xattr_count <= xattrs_max);
         try reader.finish_entry();
         if (reader.ended) return null;
         var pax_len: ?usize = null;
@@ -171,11 +179,15 @@ pub const Reader = struct {
     }
 
     fn end_archive(reader: *Reader) ?Entry {
+        assert(!reader.ended);
+        assert(reader.body_left == 0);
         reader.ended = true;
         return null;
     }
 
     fn read_record(reader: *Reader, size: u64, into: []u8) Error!usize {
+        assert(into.len > 0);
+        assert(into.len <= pax_bytes_max);
         if (size > into.len) return error.TooLong;
         const length: usize = @intCast(size);
         reader.source.readSliceAll(into[0..length]) catch |err| return map_read(err);
@@ -185,6 +197,8 @@ pub const Reader = struct {
 
     /// A GNU long name or link: its text, NUL-terminated in `into`.
     fn read_text(reader: *Reader, size: u64, into: *[constants.path_bytes_max + 1]u8) Error!void {
+        assert(into.len == constants.path_bytes_max + 1);
+        assert(size < 1 << 40);
         if (size >= into.len) return error.TooLong;
         const length: usize = @intCast(size);
         reader.source.readSliceAll(into[0..length]) catch |err| return map_read(err);
@@ -193,6 +207,8 @@ pub const Reader = struct {
     }
 
     fn skip_record(reader: *Reader, count: u64) Error!void {
+        assert(@intFromPtr(reader.source) != 0);
+        assert(count < 1 << 40);
         reader.source.discardAll64(count) catch |err| return map_read(err);
     }
 
@@ -204,6 +220,9 @@ pub const Reader = struct {
         has_name: bool,
         has_link: bool,
     ) Error!Entry {
+        assert(header_size < 1 << 62);
+        assert(flag != 'x');
+        assert(flag != 'g');
         const block = &reader.block;
         const kind: Kind = switch (flag) {
             0, '0', '7' => .file,
@@ -248,6 +267,8 @@ pub const Reader = struct {
     /// The path and link of the header: the long records win over the fields, and a pax
     /// record (applied after) wins over both.
     fn header_names(reader: *Reader, has_name: bool, has_link: bool) void {
+        assert(reader.block.len == block_bytes);
+        assert(reader.long_name.len == constants.path_bytes_max + 1);
         const block = &reader.block;
         const ustar = std.mem.eql(u8, block[257..263], "ustar\x00");
         const field = std.mem.sliceTo(block[0..100], 0);
@@ -276,6 +297,8 @@ pub const Reader = struct {
         uid: *u64,
         gid: *u64,
     ) Error!void {
+        assert(records.len <= pax_bytes_max);
+        assert(reader.xattr_count == 0);
         var at: usize = 0;
         var count: u32 = 0;
         while (at < records.len) {
@@ -303,6 +326,8 @@ pub const Reader = struct {
         uid: *u64,
         gid: *u64,
     ) Error!void {
+        assert(key.len > 0);
+        assert(reader.xattr_count <= xattrs_max);
         const xattr_prefix = "SCHILY.xattr.";
         if (std.mem.eql(u8, key, "path")) {
             if (value.len == 0 or value.len > constants.path_bytes_max) return error.TooLong;
@@ -330,6 +355,7 @@ pub const Reader = struct {
 };
 
 fn copy_text(into: *[constants.path_bytes_max + 1]u8, text: []const u8) u32 {
+    assert(into.len == constants.path_bytes_max + 1);
     assert(text.len <= constants.path_bytes_max);
     @memcpy(into[0..text.len], text);
     into[text.len] = 0;
@@ -337,15 +363,20 @@ fn copy_text(into: *[constants.path_bytes_max + 1]u8, text: []const u8) u32 {
 }
 
 fn is_zero(block: *const [block_bytes]u8) bool {
+    assert(block.len == block_bytes);
+    assert(@intFromPtr(block) != 0);
     for (block) |byte| if (byte != 0) return false;
     return true;
 }
 
 fn padding_of(size: u64) u64 {
+    assert(size < 1 << 63);
     return (block_bytes - size % block_bytes) % block_bytes;
 }
 
 fn map_read(err: Io.Reader.Error) Error {
+    assert(@errorName(err).len < 32);
+    assert(@errorName(err).len > 0);
     return switch (err) {
         error.EndOfStream => error.Truncated,
         error.ReadFailed => error.ReadFailed,
@@ -384,6 +415,8 @@ pub fn number(field: []const u8) Error!u64 {
 }
 
 fn verify_checksum(block: *const [block_bytes]u8) Error!void {
+    assert(block.len == block_bytes);
+    assert(@intFromPtr(block) != 0);
     const stored = number(block[148..156]) catch return error.BadChecksum;
     var unsigned: u64 = 0;
     var signed: i64 = 0;

@@ -111,6 +111,7 @@ test {
     _ = @import("dbus/client_tests.zig");
     _ = @import("sim_bus.zig");
     _ = @import("fuzz_dbus.zig");
+    _ = @import("fuzz_layer.zig");
 }
 
 test {

@@ -54,7 +54,7 @@ pub const Layer = struct {
     /// Opens `path` and finds the container by the first bytes. The reader of tar bytes is
     /// `tar_reader()`. `Fault.empty` or `.io` is in `fault` on failure.
     pub fn start(layer: *Layer, fs: Fs, path: [:0]const u8) error{Failed}!void {
-        layer.* = undefined;
+        assert(path.len > 0);
         layer.fs = fs;
         layer.fault = .none;
         layer.open = false;
@@ -90,12 +90,15 @@ pub const Layer = struct {
     }
 
     pub fn close(layer: *Layer) void {
+        assert(layer.fd < std.math.maxInt(i32));
+        assert(@backingInt(layer.compression) <= 2);
         if (layer.open) layer.fs.close(layer.fd);
         layer.open = false;
     }
 
     /// The reader of the tar bytes.
     pub fn tar_reader(layer: *Layer) *Io.Reader {
+        assert(layer.file.buffer.len == constants.blob_io_bytes);
         assert(layer.open);
         return switch (layer.compression) {
             .none => &layer.file,
@@ -106,10 +109,14 @@ pub const Layer = struct {
 
     /// A read through `tar_reader()` failed with `err`: set `fault` to say why.
     pub fn explain(layer: *Layer, err: Io.Reader.Error) void {
+        assert(layer.open);
+        assert(@errorName(err).len > 0);
         layer.file_failed(err, false) catch {}; // It sets `fault`, which is the answer.
     }
 
     fn file_failed(layer: *Layer, err: Io.Reader.Error, at_start: bool) error{Failed} {
+        assert(layer.open);
+        assert(@errorName(err).len > 0);
         if (layer.fault != .none) return error.Failed;
         switch (layer.compression) {
             .gzip => if (layer.gzip.err) |inner| {

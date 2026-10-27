@@ -164,6 +164,8 @@ fn fetch_all(
     store: *const Store,
     diag: *Diag,
 ) Error!void {
+    assert(diag.code == null);
+    assert(workspace.resolved.layer_count > 0);
     const resolved = &workspace.resolved;
     const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
     var failure: blobs_mod.Failure = undefined;

@@ -721,3 +721,100 @@ test "a restore killed or failed at any write leaves the store whole, and can be
         try testing.expect(point > 10);
     }
 }
+
+// ---- gc: downloaded blobs and image records --------------------------------------------------
+
+const images = @import("images.zig");
+const KeyType = @import("sets.zig").KeySet.Key;
+const Sha256 = @import("../registry/digest.zig").Sha256;
+
+/// A blob of the cache, named by the digest of `text` (gc does not hash blobs).
+fn put_blob(text: []const u8) Sha256 {
+    const digest = Sha256.of(text);
+    if (files.kind_of(root_path ++ "/blobs") == null) {
+        files.put_dir(root_path ++ "/blobs", 0o755);
+        files.put_dir(root_path ++ "/blobs/sha256", 0o755);
+        files.put_dir(root_path ++ "/blobs/partial", 0o755);
+    }
+    var path: [160]u8 = undefined;
+    const format = root_path ++ "/blobs/sha256/{s}";
+    const where = std.fmt.bufPrint(&path, format, .{&digest.hex()}) catch unreachable; // Short.
+    files.put_file(where, 0o644, text);
+    return digest;
+}
+
+/// An image record for `tree` that names `config` and `layer`.
+fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
+    var image: images.Image = undefined;
+    const written = "docker.io/library/fixture:1";
+    @memcpy(image.reference[0..written.len], written);
+    image.reference_len = written.len;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = config;
+    image.tree = tree;
+    image.time = 1_800_000_000;
+    image.layer_count = 1;
+    image.layers[0] = layer;
+    var failure: @import("fs.zig").Failure = undefined;
+    images.save(&store, &image, &failure) catch unreachable; // The simulated store writes.
+}
+
+test "blobs no image names are planned, trashed and restored; the others and cut downloads stay" {
+    // Goal: the blob cache is in gc's live set. Method: one image names two blobs; a third and
+    // a cut download are not named; the cycle plan, apply, restore moves exactly the third.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    const orphan = put_blob("an abandoned layer");
+    files.put_file(root_path ++ "/blobs/partial/cut", 0o644, "half");
+    record_image(trees_[0], config, layer);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.blobs);
+    try testing.expectEqual(@as(u64, 1), planned.counts.total());
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.blobs);
+    var path: [160]u8 = undefined;
+    const gone = try std.fmt.bufPrint(&path, root_path ++ "/blobs/sha256/{s}", .{&orphan.hex()});
+    try testing.expect(files.kind_of(gone) == null);
+    var kept: [160]u8 = undefined;
+    const format = root_path ++ "/blobs/sha256/{s}";
+    const layer_path = try std.fmt.bufPrint(&kept, format, .{&layer.hex()});
+    try testing.expect(files.kind_of(layer_path) != null);
+    try testing.expect(files.kind_of(root_path ++ "/blobs/partial/cut") != null);
+    const again = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), again.counts.total());
+    const restored = try do_restore(applied.gc);
+    try testing.expectEqual(@as(u64, 1), restored.counts.blobs);
+    try testing.expectEqualStrings("an abandoned layer", files.content_of(gone).?);
+}
+
+test "an image record keeps its tree and blobs when its root is gone" {
+    // Goal: the record is a root of its own. Method: drop the tree's root record; with an image
+    // record the plan is empty, without it the tree's own objects are planned.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    drop_root(trees_[1]);
+    const without = try make_plan(&.{});
+    try testing.expect(without.counts.objects + without.counts.trees > 0);
+    try testing.expectEqual(@as(u64, 2), without.counts.blobs);
+    record_image(trees_[1], config, layer);
+    const with = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), with.counts.total());
+}
+
+test "the sets are sized to the store, and a store beyond the room is refused with the limit" {
+    // Goal: the old limit of about 49,000 objects is gone: tables for 100,000 and a million fit
+    // the room; the smallest that does not fit is refused, not cut.
+    const room = @as(u64, constants.store_gc_tables_bytes) - (4 * 1024 * 1024 + 7 * 1024 * 1024);
+    try testing.expect(gc.plan_tables(100_000, 10_000, room) != null);
+    const million = gc.plan_tables(1_000_000, 100_000, room).?;
+    const slot = @sizeOf(KeyType);
+    try testing.expect(million.objects_bytes * 3 >= 1_000_000 * 4 * slot);
+    try testing.expect(gc.plan_tables(100_000_000, 10, room) == null);
+    try testing.expectEqual(@as(u64, 16 * @sizeOf(KeyType)), gc.table_bytes(0));
+    try testing.expectEqual(@as(u64, 32 * @sizeOf(KeyType)), gc.table_bytes(24));
+    try testing.expectEqual(@as(u64, 64 * @sizeOf(KeyType)), gc.table_bytes(25));
+}
