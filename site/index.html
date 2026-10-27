@@ -167,7 +167,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 const SITE = {
   updated: "2026-10-24",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M3 in progress",
+  stage: "Pre-alpha · M3 shipped",
   stageStatus: "wip",
 };
 // status: "done" | "wip" | "plan"
@@ -187,8 +187,9 @@ const MILESTONES = [
   {id:"M2", name:"Limits", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40392815962", date:"2026-10-26"}, goal:"A misbehaving container cannot take down the host or regain privilege.",
    demo:[["$","zbx run --rootfs ./alpine --pids 64 --name bomb1 -- sh -c 'b(){ b|b& }; b; wait; sleep 3'"],["","zbx: stopped: process limit reached (limit 64)"],["","(the host answered 5 of 5 probes meanwhile)"],["$","zbx run --rootfs ./alpine-stress --memory 128m --name oom1 -- stress-ng --vm 1 --vm-bytes 512m --oomable"],["","zbx: killed: out of memory (limit 128 MiB)"],["","(exit 137)"],["$","zbx run --rootfs ./alpine --name mount1 -- mount -t tmpfs none /mnt"],["","mount: permission denied (are you root?)"],["$","zbx run --rootfs ./alpine --read-only --name ro1 -- touch /x"],["","touch: /x: Read-only file system"],["$","zbx run --rootfs ./alpine -d --name det1 -- sleep 1000"],["","det1"],["$","zbx stop det1 --output json"],["","{\"schema\":\"zbx.stop/1\",\"name\":\"det1\",\"result\":\"killed\",\"reason\":\"signal\",\"exit_code\":137}"],["$","zbx run --rootfs ./alpine --timeout 3000 --name fg1 -- sleep 1000"],["","zbx: the container was killed by signal 15 (SIGTERM)"],["","zbx: stopped: timed out after 3000 ms"]]},
-  {id:"M3", name:"Store", status:"wip", slices:{green:4, total:5, note:"slices green in CI; the M3 demo next"}, goal:"Root filesystems live in a deduplicated, verifiable store and run by digest.",
-   demo:[["$","zbx store import ./alpine"],["","tree b3:7f1c…a02e  1,342 files  8.1 MB"],["$","zbx store import ./alpine-plus-10mb"],["","tree b3:c93d…11f8  +1 file  +10.0 MB stored"],["$","zbx store verify"],["","damaged: /usr/lib/libz.so.1 (chunk b3:4e0a…)"],["","  referenced by 2 trees"]]},
+  {id:"M3", name:"Store", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40480046060", date:"2026-10-27"}, goal:"Root filesystems live in a deduplicated, verifiable store and run by digest.",
+   demo:[["$", "zbx store import ./alpine"], ["", "b3:418d183a516cd74f078f1a50b44cefe5b1e0b167154835079dc5aebeb0ab7417"], ["$", "zbx store import ./alpine-big   (the same rootfs plus one 10 MB file)"], ["", "(store du: 7,815,125 → 17,816,683 bytes)"], ["$", "zbx run 418d183a516c --name apk1 -- sh   (apk add --no-cache dtach; exit)"], ["", "(1/1) Installing dtach (0.9-r5)"], ["$", "zbx commit apk1"], ["", "b3:17e62c5ad89f35b19d1c0404160419d78956400c822538f1849b4c31a34d3d78"], ["$", "zbx store diff 418d183a516c 17e62c5ad89f"], ["", "M /etc/apk/world  content"], ["", "M /lib/apk/db/installed  content"], ["", "M /lib/apk/db/scripts.tar  content"], ["", "A /usr/bin/dtach"], ["$", "zbx store verify   (after damaging one object by hand)"], ["", "error[ZBX-E0429]: a file in the store is damaged"], ["", "  … reached by /etc/passwd in root 0baa9e23114b and 2 more   (exit 2)"], ["$", "zbx store diff 0baa9e23114b 24e1bb184cee   (a commit that deleted /big.bin)"], ["", "D /big.bin"], ["", "(store du of each tree: 17,787,433 → 7,787,187 bytes stored)"]]},
   {id:"M4", name:"Pull", status:"plan", goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
    demo:[["$","zbx pull python:3.12-slim"],["","resolved sha256:9a1f…  stored 41 MB"],["$","zbx pull python:3.13-slim"],["","resolved sha256:2c7e…  stored 9 MB (31 MB already present)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"]]},
   {id:"M5", name:"Network", status:"plan", goal:"No network unless granted; a granted service is reachable from the host.",
