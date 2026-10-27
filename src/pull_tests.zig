@@ -854,8 +854,10 @@ test "an empty name or a name that is no reference is a usage or reference error
     // with uppercase letters and a space.
     var world: World = undefined;
     project_world(&world, 44, "web-1");
-    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "run", "" }));
-    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0"));
+    // A usage error on a run command line exits 125 (the cli snapshot test above), because
+    // run's own exit codes belong to the command; the empty word is E0006, never a lookup.
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "" }));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0006"));
     try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "Not A Name" }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0501") != null);
     try testing.expectEqual(@as(usize, 0), world.sim.stdout().len);
