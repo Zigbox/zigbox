@@ -364,6 +364,124 @@ pub fn check_no_trash(streams: Streams, status: u8) Error!void {
     if (streams.stdout.len != 0) return error.ReportWrong;
 }
 
+// ---- Slice 5: the spec's steps, the acceptance criteria, the upgrade ------------------------
+
+/// Spec step 2: the store grew by about the new file, not by a second rootfs. `at_most` is the
+/// file plus slack for the tree objects that changed; a second copy of the rootfs is far past it.
+pub fn check_growth(before: u64, after: u64, at_least: u64, at_most: u64) Error!void {
+    if (after < before) return error.StoreChanged;
+    const grew = after - before;
+    if (grew < at_least or grew > at_most) return error.StoreChanged;
+}
+
+/// Spec step 3: the diff after `apk add` lists additions, and changes only to the files apk
+/// itself keeps (its database and the list of what was asked for). `must_add` is a path the
+/// package puts there. A deletion is never expected, and a change to any other path is not.
+pub fn check_apk_diff(streams: Streams, status: u8, must_add: []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    const changeable = [_][]const u8{
+        "/etc/apk/world",
+        "/lib/apk/db/installed",
+        "/lib/apk/db/triggers",
+        "/lib/apk/db/scripts.tar",
+    };
+    var added: u32 = 0;
+    var found = false;
+    var lines = std.mem.splitScalar(u8, streams.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (line.len < 3 or line[1] != ' ') return error.ReportWrong;
+        const rest = line[2..];
+        switch (line[0]) {
+            'A' => {
+                added += 1;
+                if (std.mem.eql(u8, rest, must_add)) found = true;
+            },
+            'M' => {
+                const path = rest[0 .. std.mem.indexOf(u8, rest, "  ") orelse rest.len];
+                var allowed = false;
+                for (changeable) |name| {
+                    if (std.mem.eql(u8, path, name)) allowed = true;
+                }
+                if (!allowed) return error.ReportWrong;
+            },
+            else => return error.ReportWrong,
+        }
+    }
+    if (!found or added < 1) return error.ReportWrong;
+}
+
+/// The run of `apk add` on stdin printed apk's own lines and ended 0.
+pub fn check_apk_run(streams: Streams, status: u8, package: []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    var wanted: [96]u8 = undefined;
+    // Cannot fail: a package name fits 96 bytes.
+    const text = std.fmt.bufPrint(&wanted, "Installing {s} (", .{package}) catch unreachable;
+    if (!contains(streams.stdout, text)) return error.LineMissing;
+}
+
+/// Two imports of one tree (the second with other mtimes, in a copy made afterwards) give one
+/// digest.
+pub fn check_same_digest(first: []const u8, second: []const u8) Error!void {
+    if (!is_digest(first) or !is_digest(second)) return error.DigestWrong;
+    if (!std.mem.eql(u8, first, second)) return error.DigestWrong;
+}
+
+/// What a container sees of a tree that was imported: the lines `stat -c 'RT:%n %a %u:%g %F'`
+/// and `readlink` print, for the modes, owners, kinds and links the tree was made with.
+pub const round_trip_lines = [_][]const u8{
+    "RT:/rt/suid 4755 0:0 regular file",
+    "RT:/rt/private 600 0:0 regular file",
+    "RT:/rt/readonly 444 0:0 regular file",
+    "RT:/rt/dir700 700 0:0 directory",
+    "RT:/rt/link 777 0:0 symbolic link",
+    "RT:/rt/dangling 777 0:0 symbolic link",
+    "LINK:/rt/link suid",
+    "LINK:/rt/dangling /nowhere",
+};
+
+/// The owners the container itself gave, committed, and seen again in a run of the new tree.
+pub const owner_lines = [_][]const u8{
+    "RT:/rt/owned 2750 5:6 regular empty file",
+    "RT:/rt/olink 777 5:6 symbolic link",
+    "LINK:/rt/olink owned",
+};
+
+pub fn check_lines(output: []const u8, wanted: []const []const u8) Error!void {
+    for (wanted) |line| {
+        if (!has_line(output, line)) return error.LineMissing;
+    }
+}
+
+/// The extended attribute is on the file the container's lower directory is made of.
+pub fn check_xattr(output: []const u8, name: []const u8, value: []const u8) Error!void {
+    var wanted: [128]u8 = undefined;
+    // Cannot fail: a name and a value fit 128 bytes.
+    const line = std.fmt.bufPrint(&wanted, "XATTR:{s}={s}", .{ name, value }) catch unreachable;
+    if (!has_line(output, line)) return error.LineMissing;
+}
+
+/// `ps --output json --all` lists every container named.
+pub fn check_ps_lists(streams: Streams, status: u8, names: []const []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!contains(streams.stdout, "\"schema\":\"zbx.ps/1\"")) return error.ReportWrong;
+    for (names) |name| {
+        var wanted: [96]u8 = undefined;
+        // Cannot fail: a container name fits 96 bytes.
+        const text = std.fmt.bufPrint(&wanted, "\"name\":\"{s}\"", .{name}) catch unreachable;
+        if (!contains(streams.stdout, text)) return error.LineMissing;
+    }
+}
+
+/// A run record file has the version line `.version = <n>,`.
+pub fn check_record_version(output: []const u8, version: u32) Error!void {
+    var wanted: [32]u8 = undefined;
+    // Cannot fail: a small number fits 32 bytes.
+    const line = std.fmt.bufPrint(&wanted, ".version = {d},", .{version}) catch unreachable;
+    if (!has_line(output, line)) return error.LineMissing;
+}
+
 const testing = std.testing;
 
 fn repeat(comptime byte: u8, comptime count: usize) [count]u8 {
@@ -694,4 +812,103 @@ test "a plan that spares a held tree is small and has no chunk list" {
     try testing.expectError(error.ReportWrong, check_plan_holds(out_err(plan_json, ""), 0, limit));
     try testing.expectError(error.ExitCodeWrong, check_plan_holds(out_err(small, ""), 1, limit));
     try testing.expectError(error.StderrNotEmpty, check_plan_holds(out_err(small, "w"), 0, limit));
+}
+
+test "growth must be about the new file, not a second rootfs" {
+    try check_growth(7_700_000, 17_750_000, 10_000_000, 10_500_000);
+    try testing.expectError(
+        error.StoreChanged,
+        check_growth(7_700_000, 25_500_000, 10_000_000, 10_500_000),
+    );
+    try testing.expectError(
+        error.StoreChanged,
+        check_growth(7_700_000, 9_000_000, 10_000_000, 10_500_000),
+    );
+    try testing.expectError(error.StoreChanged, check_growth(7_700_000, 7_000_000, 0, 10));
+}
+
+test "the apk diff lists additions, and changes only apk's own files" {
+    const good = "A /usr/bin/tree\nA /lib/apk/db/lock\nM /etc/apk/world  content\n" ++
+        "M /lib/apk/db/installed  content\n";
+    try check_apk_diff(out_err(good, ""), 0, "/usr/bin/dtach");
+    try testing.expectError(
+        error.ReportWrong,
+        check_apk_diff(out_err(good, ""), 0, "/usr/bin/other"),
+    );
+    try testing.expectError(
+        error.ExitCodeWrong,
+        check_apk_diff(out_err(good, ""), 1, "/usr/bin/dtach"),
+    );
+    try testing.expectError(
+        error.StderrNotEmpty,
+        check_apk_diff(out_err(good, "w"), 0, "/usr/bin/dtach"),
+    );
+    const deleted = good ++ "D /etc/shadow\n";
+    try testing.expectError(
+        error.ReportWrong,
+        check_apk_diff(out_err(deleted, ""), 0, "/usr/bin/dtach"),
+    );
+    const touched = good ++ "M /etc/passwd  content\n";
+    try testing.expectError(
+        error.ReportWrong,
+        check_apk_diff(out_err(touched, ""), 0, "/usr/bin/dtach"),
+    );
+    try testing.expectError(
+        error.ReportWrong,
+        check_apk_diff(out_err("M /etc/apk/world  content\n", ""), 0, "/usr/bin/dtach"),
+    );
+    try testing.expectError(error.ReportWrong, check_apk_diff(out_err("garbage\n", ""), 0, "/x"));
+}
+
+test "apk's run says what it installed and exits 0" {
+    const text = "fetch http://x\n(1/1) Installing dtach (0.9-r5)\nOK: 8 MiB in 16 packages\n";
+    try check_apk_run(out_err(text, ""), 0, "dtach");
+    try testing.expectError(error.LineMissing, check_apk_run(out_err(text, ""), 0, "jq"));
+    try testing.expectError(error.ExitCodeWrong, check_apk_run(out_err(text, ""), 1, "dtach"));
+}
+
+test "two imports must give one digest" {
+    const a = "b3:" ++ repeat('a', 64);
+    try check_same_digest(a, a);
+    try testing.expectError(error.DigestWrong, check_same_digest(a, "b3:" ++ repeat('b', 64)));
+    try testing.expectError(error.DigestWrong, check_same_digest(a, "b3:short"));
+}
+
+test "the round trip needs every mode, owner, kind and link line" {
+    const all = "RT:/rt/suid 4755 0:0 regular file\nRT:/rt/private 600 0:0 regular file\n" ++
+        "RT:/rt/readonly 444 0:0 regular file\nRT:/rt/dir700 700 0:0 directory\n" ++
+        "RT:/rt/link 777 0:0 symbolic link\nRT:/rt/dangling 777 0:0 symbolic link\n" ++
+        "LINK:/rt/link suid\nLINK:/rt/dangling /nowhere\n";
+    try check_lines(all, &round_trip_lines);
+    const wrong = "RT:/rt/suid 755 0:0 regular file\n";
+    try testing.expectError(error.LineMissing, check_lines(wrong, &round_trip_lines));
+    try testing.expectError(error.LineMissing, check_lines("", &owner_lines));
+    try check_lines("RT:/rt/owned 2750 5:6 regular empty file\nRT:/rt/olink 777 5:6 symbolic link\n" ++
+        "LINK:/rt/olink owned\n", &owner_lines);
+}
+
+test "the extended attribute must be on the lower file, with its value" {
+    try check_xattr("noise\nXATTR:user.zbx=hello\n", "user.zbx", "hello");
+    try testing.expectError(
+        error.LineMissing,
+        check_xattr("XATTR:user.zbx=other\n", "user.zbx", "hello"),
+    );
+    try testing.expectError(error.LineMissing, check_xattr("", "user.zbx", "hello"));
+}
+
+test "ps lists every container the old binary left, and a record has its version" {
+    const json = "{\"schema\":\"zbx.ps/1\",\"containers\":[{\"name\":\"old1\"}," ++
+        "{\"name\":\"old2\"}]}";
+    try check_ps_lists(out_err(json, ""), 0, &.{ "old1", "old2" });
+    try testing.expectError(
+        error.LineMissing,
+        check_ps_lists(out_err(json, ""), 0, &.{ "old1", "old3" }),
+    );
+    try testing.expectError(error.ExitCodeWrong, check_ps_lists(out_err(json, ""), 2, &.{"old1"}));
+    try testing.expectError(error.ReportWrong, check_ps_lists(out_err("{}", ""), 0, &.{"old1"}));
+    try check_record_version(".{\n    .version = 3,\n    .name = \"x\",\n}\n", 3);
+    try testing.expectError(
+        error.LineMissing,
+        check_record_version(".{\n    .version = 3,\n}\n", 4),
+    );
 }

@@ -217,3 +217,47 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M2 demo
         run: zig build demo-m2 -Daccel=kvm
+
+  # Sibling of demo-m2: the same VM and rootfs. First the upgrade test (the M2 binary, built from a
+  # worktree of the pinned commit, leaves version 3 run records that this build reads), then the
+  # five steps of the M3 spec (import and du, a 10 MB copy, apk add and commit and diff, a damaged
+  # object found by verify, a deleted file that shrinks the stored size), the acceptance criteria
+  # (the same digest, modes, owners, xattrs and links round-trip, a running container never
+  # writes the store) and gc's plan, confirm, lock, trash and restore. apk runs inside a zbx run,
+  # over the VM's network. See docs/demos/m3.md.
+  demo-m3:
+    name: demo-m3 (Ubuntu 24.04 VM, KVM, Alpine rootfs, store)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # The whole history: the upgrade test builds the M2 commit (src/testing/vm/old_release.zon)
+      # in a git worktree, and a shallow clone does not have it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # The same cache entry as demo-m0 (same path, same key), so the base image is downloaded
+      # once for both jobs.
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm
+          key: vm-image-${{ hashFiles('src/testing/vm/image.zon') }}
+      # The Alpine minirootfs (3.5 MB), keyed by src/testing/vm/alpine.zon, which holds its
+      # SHA-256. The harness re-verifies the hash on every run, cached or downloaded.
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      - name: Run the M3 demo
+        run: zig build demo-m3 -Daccel=kvm

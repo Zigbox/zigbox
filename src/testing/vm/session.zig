@@ -29,6 +29,8 @@ pub const Files = struct {
     /// A rootfs tarball for the guest to unpack (the M1 demo), served at /rootfs.tar.gz; empty
     /// for none.
     rootfs: []const u8 = "",
+    /// An older `zbx` for the upgrade test, served at /zbx-old; empty for none.
+    old_binary: []const u8 = "",
 };
 
 pub const Session = struct {
@@ -79,6 +81,7 @@ pub const Session = struct {
         session.server.add_route("/meta-data", cloud_init.meta_data);
         session.server.add_route("/vendor-data", "");
         session.server.add_route("/zbx", files.binary);
+        if (files.old_binary.len > 0) session.server.add_route("/zbx-old", files.old_binary);
         if (files.rootfs.len > 0) session.server.add_route("/rootfs.tar.gz", files.rootfs);
         const argv = try qemu_argv(arena, overlay, accel, session.server.port);
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{

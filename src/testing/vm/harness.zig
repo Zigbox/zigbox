@@ -44,6 +44,8 @@ pub const Options = struct {
     accel: []const u8 = "auto",
     zbx_x86_64: []const u8 = "",
     zbx_aarch64: []const u8 = "",
+    /// demo-m3 only: the older `zbx` of the upgrade test (x86_64).
+    old_zbx: []const u8 = "",
     cache_dir: []const u8 = ".zig-cache/zbx-vm",
     delegate_dropin: bool = false,
     /// Development aids: keep the overlay after the run, and boot an existing, already
@@ -77,6 +79,8 @@ pub fn parse_options(init: std.process.Init) !Options {
             options.zbx_x86_64 = value;
         } else if (std.mem.eql(u8, name, "--zbx-aarch64")) {
             options.zbx_aarch64 = value;
+        } else if (std.mem.eql(u8, name, "--old-zbx")) {
+            options.old_zbx = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             options.cache_dir = value;
         } else {

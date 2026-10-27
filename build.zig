@@ -241,6 +241,13 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
+        if (std.mem.eql(u8, demo.step, "demo-m3")) {
+            // The upgrade test's older zbx, built from a worktree of the pinned commit.
+            const old = b.addSystemCommand(&.{ "sh", "scripts/build_old_zbx.sh" });
+            old.addArg(@import("src/testing/vm/old_release.zon").commit);
+            run.addArg("--old-zbx");
+            run.addFileArg(old.addOutputFileArg("zbx-old"));
+        }
         if (keep) run.addArg("--keep-overlay");
         if (reuse) run.addArg("--reuse-overlay");
         const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
