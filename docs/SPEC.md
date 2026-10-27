@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 52; doc date 2026-10-26), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 53; doc date 2026-10-27), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -127,7 +127,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** pull a public OCI image and run it, with the store doing the deduplication across images.
 
-**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock`. Deferred: push, private registries.
+**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock` in the project directory (the nearest one up from the working directory, as with `Cargo.lock`); `zbx pull` writes it, and `zbx run <tag>` runs the locked digest. Until containers get their own network namespace (M5), `/sys` is the host's, bound read-only. Deferred: push, private registries.
 
 **Demo script:**
 
