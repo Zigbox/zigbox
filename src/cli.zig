@@ -27,6 +27,7 @@ const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const gc = @import("store/gc.zig");
 const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 
@@ -1077,23 +1078,29 @@ pub const Storage = struct {
     pull: pull_commands.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
+    /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
+    /// `gc.tables_bytes_min`. `zbx` gives it a static region of `store_gc_tables_bytes`.
+    gc_tables: []align(8) u8,
 };
 
 /// One shared `Storage` for callers that run one command line at a time (the tests, the
 /// fuzzers). Two at once is a bug in the caller, and the assertion says so; a caller that wants
 /// concurrency owns a `Storage` and uses `run_with`.
 var shared_storage: Storage = undefined;
+var shared_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
 var shared_busy = std.atomic.Value(bool).init(false);
 
 pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
     assert(!shared_busy.swap(true, .acquire));
     defer assert(shared_busy.swap(false, .release));
+    shared_storage.gc_tables = &shared_tables;
     return run_with(host, iterator, &shared_storage);
 }
 
 pub fn run(host: Host, args: []const []const u8) u8 {
     assert(!shared_busy.swap(true, .acquire));
     defer assert(shared_busy.swap(false, .release));
+    shared_storage.gc_tables = &shared_tables;
     return run_slice(host, args, &shared_storage);
 }
 
@@ -1237,6 +1244,8 @@ fn run_store(
 ) RunError!u8 {
     if (invocation.command != .store) assert(invocation.command == .commit);
     assert(diag.code == null);
+    assert(storage.gc_tables.len >= gc.tables_bytes_min); // The caller gave gc its room.
+    storage.store.gc.tables = storage.gc_tables;
     const mode = invocation.options.mode();
     const output: store_commands.Output = .{
         .mode = mode,
@@ -2316,8 +2325,10 @@ test "parse: every way a run command line is wrong has its code" {
 const sim_run = @import("runtime/sim_run.zig");
 
 var test_storage: Storage = undefined;
+var test_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
 
 fn command_line(sim: *HostSim, args: []const []const u8) u8 {
+    test_storage.gc_tables = &test_tables;
     return run_slice(sim.interface(), args, &test_storage);
 }
 

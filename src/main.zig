@@ -35,9 +35,15 @@ fn panic_handler(message: []const u8, first_trace_addr: ?usize) noreturn {
 /// runs per process.
 var storage: cli.Storage = undefined;
 
+/// The room gc keeps its sets in: static and zero, so it is in bss and costs nothing in the
+/// program's file or in memory until a gc sizes the sets to its store. About 1.5 million
+/// objects fit.
+var gc_tables: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
+    storage.gc_tables = &gc_tables;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;

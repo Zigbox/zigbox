@@ -33,9 +33,11 @@ var store: Store = undefined;
 var workspace: import.Workspace = undefined;
 var verify_workspace: verify.Workspace = undefined;
 var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
 var diag: Diag = undefined;
 
 fn start() void {
+    gc_workspace.tables = &gc_tables;
     sim.init(1, &.{});
     files.init(1);
     sim.store_fs = &files;
@@ -817,4 +819,82 @@ test "the sets are sized to the store, and a store beyond the room is refused wi
     try testing.expectEqual(@as(u64, 16 * @sizeOf(KeyType)), gc.table_bytes(0));
     try testing.expectEqual(@as(u64, 32 * @sizeOf(KeyType)), gc.table_bytes(24));
     try testing.expectEqual(@as(u64, 64 * @sizeOf(KeyType)), gc.table_bytes(25));
+}
+
+/// A library user's whole world: a store of its own and a region of its own for gc.
+const Caller = struct {
+    sim: HostSim,
+    files: SimFs,
+    store: Store,
+    workspace: import.Workspace,
+    gc_workspace: gc.Workspace,
+    tables: [16 * 1024 * 1024]u8 align(8),
+    planned: ?gc.Plan,
+    extra: u32,
+};
+
+var callers: [2]Caller = undefined;
+
+/// Makes a store with `extra` more files than the smallest, drops its only root, and plans.
+fn caller_plan(caller: *Caller) void {
+    caller.sim.init(1, &.{});
+    caller.files.init(1);
+    caller.sim.store_fs = &caller.files;
+    caller.files.put_dir("/data", 0o755);
+    support.make_store_directories(&caller.files, root_path);
+    caller.store.at(caller.sim.interface(), root_path);
+    caller.store.chunk_bytes = 8;
+    caller.sim.world.now = 1_800_000_000;
+    caller.gc_workspace.tables = &caller.tables;
+    support.make_source(&caller.files, 0);
+    var index: u32 = 0;
+    while (index < caller.extra) : (index += 1) {
+        var name: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&name, "/src/etc/more-{d}", .{index}) catch unreachable;
+        var content: [24]u8 = undefined;
+        const text = std.fmt.bufPrint(&content, "file number {d} here", .{index}) catch unreachable;
+        caller.files.put_file(path, 0o644, text);
+    }
+    var result: import.Result = undefined;
+    var local_diag: Diag = undefined;
+    local_diag.reset();
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    import.import(&caller.store, &caller.workspace, "/src", options, &result, &local_diag) catch {
+        unreachable; // The sample tree imports.
+    };
+    roots.remove(&caller.store, result.digest) catch unreachable; // The root is there.
+    var plan: gc.Plan = undefined;
+    var failure: gc.Failure = undefined;
+    const arena = &caller.workspace.arena;
+    gc.plan(&caller.store, &caller.gc_workspace, arena, &.{}, &plan, &failure) catch return;
+    caller.planned = plan;
+}
+
+test "two callers with two regions plan gc independently, also at once" {
+    // Goal: the library keeps no module-level state for gc: its sets live in the caller's
+    // region. Method: two worlds with different stores, planned one after the other for the
+    // expected plans, then planned again on two threads at once, each with its own region; the
+    // plans are the same.
+    callers[0].extra = 0;
+    callers[1].extra = 9;
+    for (&callers) |*caller| {
+        caller.planned = null;
+        caller_plan(caller);
+    }
+    const expected = [2]gc.Plan{ callers[0].planned.?, callers[1].planned.? };
+    try testing.expect(expected[0].counts.objects != expected[1].counts.objects);
+    try testing.expect(!expected[0].hash.eql(expected[1].hash));
+    // Each region was used by its own owner: the sets leave their keys in it.
+    for (&callers) |*caller| try testing.expect(!std.mem.allEqual(u8, &caller.tables, 0));
+    var threads: [2]std.Thread = undefined;
+    for (&callers) |*caller| caller.planned = null;
+    for (&threads, 0..) |*thread, at| {
+        thread.* = try std.Thread.spawn(.{}, caller_plan, .{&callers[at]});
+    }
+    for (&threads) |thread| thread.join();
+    for (&callers, expected) |*caller, want| {
+        const got = caller.planned.?;
+        try testing.expect(got.hash.eql(want.hash));
+        try testing.expectEqual(want.counts.objects, got.counts.objects);
+    }
 }

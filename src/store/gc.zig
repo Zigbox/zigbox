@@ -133,15 +133,14 @@ pub const Workspace = struct {
     /// A restore that has to make a chunk list reads the object into these.
     io: [constants.store_io_buffer_bytes]u8,
     chunks: [constants.store_chunks_max]Digest,
+    /// The room for the sets of what is kept (see `Layout`), the caller's: at least
+    /// `tables_bytes_min`, and `constants.store_gc_tables_bytes` for a store of about a million
+    /// objects. The caller keeps it zeroed or not as it likes (the sets clear what they use), but
+    /// a region of zero pages from the program's bss costs nothing until a plan uses it, which is
+    /// why `zbx` keeps a static one and a debug-built test does not put it in a `Workspace`.
+    /// Two callers with two regions plan independently; one region is for one gc at a time.
+    tables: []align(8) u8,
 };
-
-/// The room for the sets of what is kept (see `Layout`), sized for the store at hand up to this
-/// bound. It is the one static of the store code, and it is zero-initialised on purpose: it
-/// takes no space in the program's file and none in memory until a plan sizes the sets, so a
-/// small store costs a few KiB. A `Workspace` cannot hold it: the callers keep theirs as
-/// `undefined`, which a debug build writes out byte by byte. A gc runs in the store's one
-/// single-threaded child, and the tests run one at a time.
-var tables_storage: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
 
 pub const meta_bytes_max = 512;
 
@@ -161,9 +160,12 @@ const tops_bytes: u32 = 1024 * 1024;
 const blobs_bytes: u32 = 2 * 1024 * 1024;
 const fixed_bytes: u32 = removal_bytes + tops_bytes + blobs_bytes;
 
+/// The least a region can be: the fixed parts and room for a small store's sets.
+pub const tables_bytes_min: u32 = fixed_bytes + 64 * 1024;
+
 comptime {
     assert(arena_bytes <= constants.store_arena_bytes_max);
-    assert(fixed_bytes < constants.store_gc_tables_bytes);
+    assert(tables_bytes_min < constants.store_gc_tables_bytes);
 }
 
 /// How much of the tables the sets of objects and of trees take.
@@ -404,8 +406,8 @@ const Run = struct {
     /// The memory a removal borrows: the front of the tables.
     fn removal_memory(run: *const Run) []u8 {
         assert(run.ws.removal.path.len > 0);
-        assert(tables_storage.len > removal_bytes);
-        return tables_storage[0..removal_bytes];
+        assert(run.ws.tables.len >= tables_bytes_min);
+        return run.ws.tables[0..removal_bytes];
     }
 
     pub fn entry(run: *Run, found: *const tree.Entry) void {
@@ -489,13 +491,14 @@ fn size_tables(run: *Run) Error!void {
     assert(run.objects.slots.len == 0);
     const objects = try count_shards(run, "objects");
     const trees = try count_shards(run, "trees");
-    const available = tables_storage.len - fixed_bytes;
+    assert(run.ws.tables.len >= tables_bytes_min);
+    const available = run.ws.tables.len - fixed_bytes;
     const found = plan_tables(objects, trees, available) orelse {
         run.failure.* = .{ .too_big = "the objects and trees of the store (the gc tables)" };
         return error.Failed;
     };
     var at: usize = removal_bytes;
-    const tables = tables_storage[0..];
+    const tables = run.ws.tables;
     run.tops = sets.KeySet.init(@alignCast(tables[at..][0..tops_bytes]));
     at += tops_bytes;
     run.blobs_live = sets.KeySet.init(@alignCast(tables[at..][0..blobs_bytes]));

@@ -39,6 +39,7 @@ var reference_files: fs_sim.SimFs = undefined;
 var store: layout.Store = undefined;
 var workspace: import.Workspace = undefined;
 var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
 var verify_workspace: verify.Workspace = undefined;
 var diag: Diag = undefined;
 
@@ -169,6 +170,7 @@ fn end_fault(fault: Fault) void {
 }
 
 pub fn fuzz_gc(seed: u64) void {
+    gc_workspace.tables = &gc_tables;
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
     const tree_seed = random.int(u64);
