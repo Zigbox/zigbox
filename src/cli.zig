@@ -468,12 +468,7 @@ pub fn parse(
                 if (!is_run and !is_stop) return unknown_option(diag, argument);
                 try take_run_option(diag, &run_args, args, &index, is_run);
             },
-            .all => {
-                if (count == 0 or command_named(operands[0]) != .ps) {
-                    return unknown_option(diag, argument);
-                }
-                run_args.all = true;
-            },
+            .all => try take_all_option(diag, &run_args, operands[0..count], argument),
             .separator => {
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
@@ -492,11 +487,7 @@ pub fn parse(
                 bundle_args.last = bundle_args.last or classify(argument) == .last;
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
-            .resolve_only => {
-                const is_pull = count > 0 and command_named(operands[0]) == .pull;
-                if (!is_pull) return unknown_option(diag, argument);
-                pull_args.resolve_only = true;
-            },
+            .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -511,6 +502,32 @@ pub fn parse(
     invocation.pull = pull_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+}
+
+/// `--all`, which only `ps` takes.
+fn take_all_option(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .all);
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .ps) return unknown_option(diag, argument);
+    run_args.all = true;
+}
+
+/// `--resolve-only`, which only `pull` takes.
+fn take_pull_option(
+    diag: *Diag,
+    pull_args: *PullArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .resolve_only);
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .pull) return unknown_option(diag, argument);
+    pull_args.resolve_only = true;
 }
 
 /// The checks that need the command resolved: what `store gc`, `run` and `bundle` were given.
@@ -878,6 +895,28 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
 
 const Missing = enum { code, rootfs, command, target, container, topic, reference, resolve_only };
 
+/// What `pull` lacks: its reference, or the flag that is all it can do so far.
+fn missing_pull(diag: *Diag, missing: Missing) void {
+    assert(diag.code != null);
+    switch (missing) {
+        .reference => {
+            diag.cause("'pull' needs the reference of the image to look for", .{});
+            diag.fix(.{
+                .sentence = "name an image:",
+                .command = "zbx pull --resolve-only alpine:3.20",
+            });
+        },
+        .resolve_only => {
+            diag.cause("'pull' only resolves so far: it needs --resolve-only", .{});
+            diag.fix(.{
+                .sentence = "print the digest the reference names:",
+                .command = "zbx pull --resolve-only alpine:3.20",
+            });
+        },
+        else => unreachable, // Only the two above are a pull's.
+    }
+}
+
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
     if (command == .run) assert(missing != .code);
@@ -885,7 +924,8 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .bundle) assert(missing == .target);
     if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
-    if (command == .pull) assert(missing == .reference or missing == .resolve_only);
+    if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
+
     assert(command != .doctor);
     assert(command != .ps);
     assert(command != .help);
@@ -932,23 +972,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.cause("'schema' needs the command whose output schema to print", .{});
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
-        .reference => {
-            diag.cause("'pull' needs the reference of the image to look for", .{});
-            diag.fix(.{
-                .sentence = "name an image:",
-                .command = "zbx pull --resolve-only alpine:3.20",
-            });
-        },
-        .resolve_only => {
-            diag.cause(
-                "'pull' only resolves so far: it needs --resolve-only, as fetching layers is not built",
-                .{},
-            );
-            diag.fix(.{
-                .sentence = "print the digest the reference names:",
-                .command = "zbx pull --resolve-only alpine:3.20",
-            });
-        },
+        .reference, .resolve_only => missing_pull(diag, missing),
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
             diag.fix(.{
@@ -1169,7 +1193,12 @@ fn command_error(err: commands.Error) RunError {
 }
 
 /// `zbx pull --resolve-only <reference>`: the registry's answer for this machine's platform.
-fn run_pull(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!void {
+fn run_pull(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
     assert(invocation.command == .pull);
     assert(invocation.pull.resolve_only);
     const args: pull_commands.Args = .{

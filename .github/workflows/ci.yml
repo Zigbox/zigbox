@@ -84,6 +84,7 @@ jobs:
           - commit
           - gc
           - reference
+          - registry
           - parse_sysctl
           - parse_kernel
           - parse_controllers

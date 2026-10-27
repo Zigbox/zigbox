@@ -1,7 +1,7 @@
 error[ZBX-E0504]: the registry's certificate can't be trusted
   cause  the certificate of registry.test does not lead to a root this machine
          trusts
-  fix    behind a proxy that inspects traffic, trust its certificate authority
+  fix    behind a proxy that inspects traffic, trust its CA certificate
          in the system store, or in a file that SSL_CERT_FILE names
   more   zbx explain E0504 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0504.html

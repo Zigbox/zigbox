@@ -17,6 +17,8 @@ const Sha256 = @import("digest.zig").Sha256;
 
 const echo_bytes_max = 96;
 
+const fix_again = "run the command again; if it repeats, the registry or a proxy is at fault";
+
 fn echo_of(storage: *[echo_bytes_max]u8, text: []const u8) []const u8 {
     assert(text.len <= constants.arg_bytes_max * 4);
     return text_util.sanitise(storage, text);
@@ -119,7 +121,10 @@ fn unknown_host(diag: *Diag, host: []const u8) void {
     diag.raise(.E0502);
     diag.cause("no address was found for '{s}'", .{host});
     diag.fix(.{ .sentence = "check the registry's name in the reference" });
-    diag.fix(.{ .sentence = "and that this machine resolves names:", .command = "getent hosts docker.io" });
+    diag.fix(.{
+        .sentence = "and that this machine resolves names:",
+        .command = "getent hosts docker.io",
+    });
 }
 
 fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void {
@@ -136,7 +141,7 @@ fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void
         ),
         else => diag.cause("the connection to {s}:{d} failed", .{ host, port }),
     }
-    diag.fix(.{ .sentence = "check that the network is up and, if HTTPS_PROXY is set, that it works" });
+    diag.fix(.{ .sentence = "check that the network is up and that HTTPS_PROXY, if set, works" });
     diag.fix(.{ .sentence = "then run the command again" });
 }
 
@@ -154,7 +159,7 @@ fn tls_failed(diag: *Diag, err: net.Error, host: []const u8) void {
         error.TlsHostMismatch => diag.cause("the certificate is not for the host {s}", .{host}),
         else => diag.cause("the TLS handshake with {s} failed", .{host}),
     }
-    diag.fix(.{ .sentence = "behind a proxy that inspects traffic, trust its certificate authority" });
+    diag.fix(.{ .sentence = "behind a proxy that inspects traffic, trust its CA certificate" });
     diag.fix(.{ .sentence = "in the system store, or in a file that SSL_CERT_FILE names" });
 }
 
@@ -169,11 +174,12 @@ fn unusable_wire(diag: *Diag, err: net.Error, host: []const u8) void {
     diag.raise(.E0512);
     switch (err) {
         error.TooLarge => diag.cause("{s} sent more than zbx accepts in one answer", .{host}),
-        error.BadResponse => diag.cause("{s} did not answer in HTTP, or sent a head zbx can't use", .{host}),
-        error.Unsupported => diag.cause("this request is not supported: {s}", .{host}),
+        error.BadResponse => diag.cause("{s} did not answer in usable HTTP", .{host}),
+
+        error.Unsupported => diag.cause("the request to {s} is too large to send", .{host}),
         else => diag.cause("reading the answer of {s} failed", .{host}),
     }
-    diag.fix(.{ .sentence = "run the command again; if it repeats, the registry or a proxy is at fault" });
+    diag.fix(.{ .sentence = fix_again });
 }
 
 /// ZBX-E0505: a status zbx has no code for, or a redirect it can't follow.
@@ -234,17 +240,25 @@ pub const AuthStep = enum {
 };
 
 /// ZBX-E0507: anonymous access did not work.
-pub fn auth_refused(diag: *Diag, step: AuthStep, registry: []const u8, repository: []const u8) void {
+pub fn auth_refused(
+    diag: *Diag,
+    step: AuthStep,
+    registry: []const u8,
+    repository: []const u8,
+) void {
     assert(diag.code == null);
     var storage: [echo_bytes_max]u8 = undefined;
     const shown = echo_of(&storage, registry);
     diag.raise(.E0507);
     switch (step) {
-        .no_bearer => diag.cause("{s} asks for credentials (not a token), and zbx pulls anonymously", .{shown}),
-        .bad_challenge => diag.cause("{s} sent a WWW-Authenticate challenge zbx can't read", .{shown}),
-        .token_refused => diag.cause("the token service of {s} refused an anonymous token for {s}", .{ shown, repository }),
+        .no_bearer => diag.cause("{s} asks for credentials, and zbx pulls anonymously", .{shown}),
+        .bad_challenge => diag.cause("{s} sent a challenge zbx can't read", .{shown}),
+        .token_refused => diag.cause(
+            "the token service of {s} refused an anonymous token for {s}",
+            .{ shown, repository },
+        ),
         .token_unusable => diag.cause("the token service of {s} sent no usable token", .{shown}),
-        .token_rejected => diag.cause("{s} still answered 401 after it was given a token", .{shown}),
+        .token_rejected => diag.cause("{s} still answered 401 after a token", .{shown}),
         .bad_realm => diag.cause("the token service {s} named is not a URL zbx will ask", .{shown}),
     }
     diag.context("host", "{s}", .{shown});
@@ -293,7 +307,8 @@ pub fn no_platform(
     if (offered.listed == 0) {
         diag.cause("no linux/{s} build: the image offers no platform at all", .{name});
     } else if (more > 0) {
-        diag.cause("no linux/{s} build: the image offers {s} and {d} more", .{ name, writer.buffered(), more });
+        const list = writer.buffered();
+        diag.cause("no linux/{s} build: the image offers {s} and {d} more", .{ name, list, more });
     } else {
         diag.cause("no linux/{s} build: the image offers {s}", .{ name, writer.buffered() });
     }
@@ -312,24 +327,33 @@ pub fn unusable_document(diag: *Diag, err: manifest.ParseError, detail: []const 
         error.UnknownMediaType => {
             diag.raise(.E0510);
             diag.cause("the media type '{s}' is not one zbx reads", .{detail});
-            diag.fix(.{ .sentence = "zbx reads OCI and Docker v2 images with tar, gzip or zstd layers" });
+            diag.fix(.{ .sentence = "zbx reads OCI and Docker v2 images (tar, gzip, zstd)" });
         },
         error.MediaTypeMismatch => {
             diag.raise(.E0510);
-            diag.cause("the document and the registry's Content-Type name different types ({s})", .{detail});
-            diag.fix(.{ .sentence = "this is the registry's fault; zbx does not guess which is right" });
+            diag.cause("the document and its Content-Type name different types ({s})", .{detail});
+            diag.fix(.{ .sentence = "this is the registry's fault; zbx does not guess" });
         },
         else => {
             diag.raise(.E0512);
             switch (err) {
                 error.Malformed => diag.cause("the manifest is not a valid document", .{}),
-                error.TooComplex => diag.cause("the manifest is too complex to read in the memory zbx allows", .{}),
-                error.TooManyEntries => diag.cause("the index has more than {d} entries", .{constants.registry_index_entries_max}),
-                error.TooManyLayers => diag.cause("the image has more than {d} layers ({s})", .{ constants.registry_layers_max, detail }),
-                error.BadDescriptor => diag.cause("a descriptor has a digest or a size zbx can't use ({s})", .{detail}),
+                error.TooComplex => diag.cause("the manifest is too complex to read", .{}),
+                error.TooManyEntries => diag.cause(
+                    "the index has more than {d} entries",
+                    .{constants.registry_index_entries_max},
+                ),
+                error.TooManyLayers => diag.cause(
+                    "the image has more than {d} layers ({s})",
+                    .{ constants.registry_layers_max, detail },
+                ),
+                error.BadDescriptor => diag.cause(
+                    "a descriptor has a digest or a size zbx can't use ({s})",
+                    .{detail},
+                ),
                 else => unreachable, // The two media type errors were handled above.
             }
-            diag.fix(.{ .sentence = "run the command again; if it repeats, the registry or a proxy is at fault" });
+            diag.fix(.{ .sentence = fix_again });
         },
     }
     assert(diag.code != null);

@@ -291,7 +291,7 @@ const pull_resolve_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
     \\"title":"zbx pull --resolve-only --output json",
-    \\"description":"stdout: what a reference names for this machine's platform. A failure is a diagnostic on stderr.",
+    \\"description":"stdout: what a reference names for this platform. A failure is on stderr.",
     \\"type":"object","required":["schema","reference","registry","repository","index_digest",
     \\"manifest_digest","manifest_size","platform","config_digest","config_size","layers"],
     \\"properties":{"schema":{"const":"zbx.pull.resolve/1"},

@@ -83,8 +83,9 @@ test "the JSON result has every key its schema requires, and its schema is regis
     const object = parsed.value.object;
     const schema = schemas.of("pull-resolve").?;
     const required = [_][]const u8{
-        "schema",        "reference", "registry",      "repository",  "index_digest", "manifest_digest",
-        "manifest_size", "platform",  "config_digest", "config_size", "layers",
+        "schema",        "reference",       "registry",      "repository",
+        "index_digest",  "manifest_digest", "manifest_size", "platform",
+        "config_digest", "config_size",     "layers",
     };
     for (required) |key| {
         try testing.expect(object.get(key) != null);
@@ -93,10 +94,9 @@ test "the JSON result has every key its schema requires, and its schema is regis
         try testing.expect(std.mem.indexOf(u8, schema, text) != null);
     }
     try testing.expectEqualStrings("zbx.pull.resolve/1", object.get("schema").?.string);
-    try testing.expectEqualStrings(
-        "registry.test/fixture/open:3.20",
-        std.mem.trimStart(u8, object.get("reference").?.string, "x"),
-    );
+    const shown = object.get("reference").?.string;
+    try testing.expectEqualStrings("registry.test/fixture/open:3.20", shown);
+
     try testing.expectEqual(@as(usize, 2), object.get("layers").?.array.items.len);
     const layer = object.get("layers").?.array.items[0].object;
     try testing.expectEqualStrings("tar_gzip", layer.get("kind").?.string);
@@ -151,7 +151,8 @@ test "a registry token is in no output, in any mode, on success or on any failur
                 items[count] = word;
                 count += 1;
             }
-            const tail = [_][:0]const u8{ "pull", "--resolve-only", reference_of(expectation.scenario) };
+            const reference = reference_of(expectation.scenario);
+            const tail = [_][:0]const u8{ "pull", "--resolve-only", reference };
             for (tail) |word| {
                 items[count] = word;
                 count += 1;

@@ -116,8 +116,8 @@ fn store_param(found: *Challenge, name: []const u8, value: []const u8) void {
 /// Writes `text` percent-encoded (everything but letters, digits and `-._~`).
 fn encode_into(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     for (text) |byte| {
-        const plain = std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null;
-        if (plain) {
+        const unreserved = std.mem.indexOfScalar(u8, "-._~", byte) != null;
+        if (std.ascii.isAlphanumeric(byte) or unreserved) {
             try writer.writeByte(byte);
         } else {
             try writer.print("%{X:0>2}", .{byte});
@@ -199,7 +199,9 @@ test "the challenges of Docker Hub and GHCR" {
     try testing.expectEqualStrings("registry.docker.io", found.service.?);
     try testing.expectEqualStrings("repository:library/alpine:pull", found.scope.?);
     try testing.expect(found.error_code == null);
-    const ghcr = "Bearer realm=\"https://ghcr.io/token\",service=\"ghcr.io\",scope=\"repository:o/i:pull\"";
+    const ghcr = "Bearer realm=\"https://ghcr.io/token\",service=\"ghcr.io\"," ++
+        "scope=\"repository:o/i:pull\"";
+
     const second = try parse_challenge(ghcr);
     try testing.expectEqualStrings("https://ghcr.io/token", second.realm);
 }
@@ -241,15 +243,12 @@ test "the token URL encodes service and scope, and defaults the scope" {
         .scope = "repository:library/alpine:pull",
         .error_code = null,
     };
-    try testing.expectEqualStrings(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository%3Alibrary%2Falpine%3Apull",
-        try token_url(&challenge, "library/alpine", &buffer),
-    );
+    const hub = "https://auth.docker.io/token?service=registry.docker.io" ++
+        "&scope=repository%3Alibrary%2Falpine%3Apull";
+    try testing.expectEqualStrings(hub, try token_url(&challenge, "library/alpine", &buffer));
     challenge.scope = null;
-    try testing.expectEqualStrings(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository%3Alibrary%2Falpine%3Apull",
-        try token_url(&challenge, "library/alpine", &buffer),
-    );
+    try testing.expectEqualStrings(hub, try token_url(&challenge, "library/alpine", &buffer));
+
     challenge.service = null;
     challenge.realm = "https://a/t?x=1";
     try testing.expectEqualStrings(

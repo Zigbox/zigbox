@@ -93,7 +93,10 @@ pub const media_docker_layer = "application/vnd.docker.image.rootfs.diff.tar.gzi
 pub const media_unknown = "application/vnd.example.unknown.v9+json";
 
 const body_bytes_max = 4096;
-pub const token_text = "FAKEtoken.eyJzdWIiOiJmaXh0dXJlIn0.FAKEsignature0123456789";
+const challenge_format = "Bearer realm=\"{s}\",service=\"fixture.registry\"," ++
+    "scope=\"repository:fixture/{s}:pull\"{s}";
+pub const token_text =
+    "FAKEtoken.eyJzdWIiOiJmaXh0dXJlIn0.FAKEsignature0123456789";
 const huge_declared_bytes: u64 = 2 * 1024 * 1024;
 
 /// One blob or manifest: its bytes and its digest, in text.
@@ -145,8 +148,9 @@ pub const Image = struct {
     index_layermedia: Item = .{},
     /// The index with an unknown media type.
     index_media: Item = .{},
-    /// The manifest the arm/v7 and ppc64le entries name; never served.
+    /// The manifest the arm/v7 and ppc64le entries name, and the attestation's; never served.
     other: Item = .{},
+    nothing: Item = .{},
     families: Family,
 };
 
@@ -174,35 +178,57 @@ const docker_family: Family = .{
     .layer_zstd = media_docker_layer,
 };
 
-fn build_manifest(image: *Image, item: *Item, architecture: []const u8, layer_media: []const u8) void {
+const manifest_format =
+    \\{{"schemaVersion":2,"mediaType":"{s}",
+    \\"config":{{"mediaType":"{s}","digest":"{s}","size":{d}}},
+    \\"layers":[{{"mediaType":"{s}","digest":"{s}","size":{d}}},
+    \\{{"mediaType":"{s}","digest":"{s}","size":{d}}}],"annotations":{{"arch":"{s}"}}}}
+;
+
+fn build_manifest(
+    image: *Image,
+    item: *Item,
+    architecture: []const u8,
+    layer_media: []const u8,
+) void {
     const family = image.families;
-    const format =
-        \\{{"schemaVersion":2,"mediaType":"{s}","config":{{"mediaType":"{s}","digest":"{s}","size":{d}}},
-    ++
-        \\"layers":[{{"mediaType":"{s}","digest":"{s}","size":{d}}},
-    ++
-        \\{{"mediaType":"{s}","digest":"{s}","size":{d}}}],"annotations":{{"arch":"{s}"}}}}
-    ;
-    item.set(format, .{
-        family.manifest,      family.config,     &image.config.digest,
-        image.config.len,     layer_media,       &image.layer_gzip.digest,
-        image.layer_gzip.len, family.layer_zstd, &image.layer_zstd.digest,
-        image.layer_zstd.len, architecture,
+    const config = &image.config;
+    const gzip = &image.layer_gzip;
+    const zstd = &image.layer_zstd;
+    item.set(manifest_format, .{
+        family.manifest, family.config, &config.digest, config.len,
+        layer_media,     &gzip.digest,  gzip.len,       family.layer_zstd,
+        &zstd.digest,    zstd.len,      architecture,
     });
 }
 
+/// One entry of an index.
+const Entry = struct {
+    item: *const Item,
+    architecture: []const u8,
+    os: []const u8,
+    /// `,"variant":"v8"` or empty.
+    variant: []const u8 = "",
+    /// Members a reader must ignore, as the attestation entry of a buildx image has.
+    extra: []const u8 = "",
+};
+
+const entry_format =
+    \\{{"mediaType":"{s}","digest":"{s}","size":{d},
+    \\"platform":{{"architecture":"{s}","os":"{s}"{s}}}{s}}}
+;
+
 fn build_index(image: *Image, item: *Item, media: []const u8, entries: []const Entry) void {
     var writer = std.Io.Writer.fixed(&item.bytes);
-    // Cannot fail: the buffer holds the largest index (five entries of about 400 bytes).
-    writer.print("{{\"schemaVersion\":2,\"mediaType\":\"{s}\",\"manifests\":[", .{media}) catch unreachable;
+    const open = "{{\"schemaVersion\":2,\"mediaType\":\"{s}\",\"manifests\":[";
+    // Cannot fail: the buffer holds the largest index (four entries of about 300 bytes).
+    writer.print(open, .{media}) catch unreachable;
     for (entries, 0..) |entry, at| {
         if (at > 0) writer.writeAll(",") catch unreachable; // The same bound.
-        const form =
-            \\{{"mediaType":"{s}","digest":"{s}","size":{d},"platform":{{"architecture":"{s}","os":"{s}"{s}}}{s}}}
-        ;
-        writer.print(form, .{
-            image.families.manifest, entry.digest, entry.size, entry.architecture, entry.os,
-            entry.variant,           entry.extra,
+        const kept = entry.item;
+        writer.print(entry_format, .{
+            image.families.manifest, &kept.digest,  kept.len,    entry.architecture,
+            entry.os,                entry.variant, entry.extra,
         }) catch unreachable; // The same bound.
     }
     writer.writeAll("]}") catch unreachable; // The same bound.
@@ -210,46 +236,49 @@ fn build_index(image: *Image, item: *Item, media: []const u8, entries: []const E
     item.seal();
 }
 
-const Entry = struct {
-    digest: []const u8,
-    size: u32,
-    architecture: []const u8,
-    os: []const u8,
-    /// `,"variant":"v8"` or empty.
-    variant: []const u8 = "",
-    /// Further members of the entry, for fields a reader must ignore.
-    extra: []const u8 = "",
-};
-
-const attestation_extra = ",\"annotations\":{\"vnd.docker.reference.type\":\"attestation-manifest\"}";
+const variant_v7 = ",\"variant\":\"v7\"";
+const variant_v8 = ",\"variant\":\"v8\"";
+const attestation = ",\"annotations\":{\"vnd.docker.reference.type\":\"attestation-manifest\"}";
 
 fn build_image(image: *Image, family: Family) void {
     image.families = family;
-    image.config.set_bytes("{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"Cmd\":[\"/bin/sh\"]}}");
+    image.config.set_bytes("{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"Cmd\":[]}}");
     image.layer_gzip.set_bytes("layer one: not really a gzip stream, but bytes with a digest");
     image.layer_zstd.set_bytes("layer two: not really a zstd stream either, but bytes too");
     image.other.set_bytes("a manifest nobody serves");
+    image.nothing.set_bytes("an attestation nobody serves");
     build_manifest(image, &image.amd64, "amd64", family.layer_gzip);
     build_manifest(image, &image.arm64, "arm64", family.layer_gzip);
     build_manifest(image, &image.amd64_layermedia, "amd64", media_unknown);
-    const unknown_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-    const entries = [_]Entry{
-        .{ .digest = &image.arm64.digest, .size = image.arm64.len, .architecture = "arm64", .os = "linux", .variant = ",\"variant\":\"v8\"" },
-        .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "arm", .os = "linux", .variant = ",\"variant\":\"v7\"" },
-        .{ .digest = &image.amd64.digest, .size = image.amd64.len, .architecture = "amd64", .os = "linux" },
-        .{ .digest = unknown_digest, .size = 566, .architecture = "unknown", .os = "unknown", .extra = attestation_extra },
+    const arm64: Entry = .{
+        .item = &image.arm64,
+        .architecture = "arm64",
+        .os = "linux",
+        .variant = variant_v8,
     };
-    build_index(image, &image.index, family.index, &entries);
-    build_index(image, &image.index_media, media_unknown, &entries);
-    const layermedia_entries = [_]Entry{
-        .{ .digest = &image.amd64_layermedia.digest, .size = image.amd64_layermedia.len, .architecture = "amd64", .os = "linux" },
+    const arm: Entry = .{
+        .item = &image.other,
+        .architecture = "arm",
+        .os = "linux",
+        .variant = variant_v7,
     };
-    build_index(image, &image.index_layermedia, family.index, &layermedia_entries);
-    const nomatch_entries = [_]Entry{
-        .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "arm", .os = "linux", .variant = ",\"variant\":\"v7\"" },
-        .{ .digest = &image.other.digest, .size = image.other.len, .architecture = "ppc64le", .os = "linux" },
+    const amd64: Entry = .{ .item = &image.amd64, .architecture = "amd64", .os = "linux" };
+    const ppc64: Entry = .{ .item = &image.other, .architecture = "ppc64le", .os = "linux" };
+    const buildx: Entry = .{
+        .item = &image.nothing,
+        .architecture = "unknown",
+        .os = "unknown",
+        .extra = attestation,
     };
-    build_index(image, &image.index_nomatch, family.index, &nomatch_entries);
+    const bad_layer: Entry = .{
+        .item = &image.amd64_layermedia,
+        .architecture = "amd64",
+        .os = "linux",
+    };
+    build_index(image, &image.index, family.index, &.{ arm64, arm, amd64, buildx });
+    build_index(image, &image.index_media, media_unknown, &.{ arm64, arm, amd64, buildx });
+    build_index(image, &image.index_layermedia, family.index, &.{bad_layer});
+    build_index(image, &image.index_nomatch, family.index, &.{ arm, ppc64 });
 }
 
 pub const Fixture = struct {
@@ -278,7 +307,8 @@ pub const Fixture = struct {
         fixture.base_len = @intCast(base.len);
         @memcpy(fixture.other_base[0..other_base.len], other_base);
         fixture.other_base_len = @intCast(other_base.len);
-        const realm = std.fmt.bufPrint(&fixture.realm, "{s}/token", .{base}) catch unreachable; // Short.
+        // Cannot fail: the realm buffer holds a base of at most 96 bytes.
+        const realm = std.fmt.bufPrint(&fixture.realm, "{s}/token", .{base}) catch unreachable;
         fixture.realm_len = @intCast(realm.len);
     }
 
@@ -320,21 +350,21 @@ pub const Fixture = struct {
         const invalid: []const u8 = if (query.bearer.len > 0) ",error=\"invalid_token\"" else "";
         const text = std.fmt.bufPrint(
             &fixture.scratch,
-            "Bearer realm=\"{s}\",service=\"fixture.registry\",scope=\"repository:fixture/{s}:pull\"{s}",
+            challenge_format,
             .{ fixture.realm_text(), route.name, invalid },
         ) catch unreachable; // Bounded: the realm is at most 128 bytes.
         out.status = 401;
         out.www_authenticate = text;
-        out.body = "{\"errors\":[{\"code\":\"UNAUTHORIZED\",\"message\":\"authentication required\"}]}";
+        out.body = "{\"errors\":[{\"code\":\"UNAUTHORIZED\"}]}";
         out.content_type = "application/json";
     }
 
     fn answer_token(fixture: *Fixture, query: Query, out: *Answer) void {
         _ = fixture;
         out.content_type = "application/json";
-        const scope = "scope=repository%3Afixture%2F";
-        const at = std.mem.indexOf(u8, query.target, scope) orelse std.mem.indexOf(u8, query.target, "scope=repository:fixture/");
-        const found = at orelse return not_found(out);
+        const encoded = std.mem.indexOf(u8, query.target, "scope=repository%3Afixture%2F");
+        const plain = std.mem.indexOf(u8, query.target, "scope=repository:fixture/");
+        const found = encoded orelse plain orelse return not_found(out);
         const rest = query.target[found..];
         if (std.mem.indexOf(u8, rest, "tokenlimited") != null) {
             out.status = 429;
@@ -387,7 +417,8 @@ pub const Fixture = struct {
     }
 
     fn redirect(fixture: *Fixture, route: Route, out: *Answer) void {
-        const base: []const u8 = if (route.scenario == .redirectfar) fixture.other_base[0..fixture.other_base_len] else "";
+        const far = fixture.other_base[0..fixture.other_base_len];
+        const base: []const u8 = if (route.scenario == .redirectfar) far else "";
         const text = std.fmt.bufPrint(
             &fixture.scratch,
             "{s}/v2/fixture/open/manifests/{s}",
@@ -506,7 +537,8 @@ test "the open repository answers an index, and the manifests by digest" {
     try testing.expectEqualStrings(out.content_digest[7..], &hex);
 
     var target: [128]u8 = undefined;
-    const by_digest = try std.fmt.bufPrint(&target, "/v2/fixture/open/manifests/{s}", .{&fixture.oci.amd64.digest});
+    const amd64 = &fixture.oci.amd64.digest;
+    const by_digest = try std.fmt.bufPrint(&target, "/v2/fixture/open/manifests/{s}", .{amd64});
     ask(&fixture, by_digest, "", &out);
     try testing.expectEqualStrings(media_oci_manifest, out.content_type);
     try testing.expectEqualStrings(fixture.oci.amd64.slice(), out.body);
@@ -522,7 +554,8 @@ test "the token flow: a challenge, a token, then the manifest" {
     var out: Answer = .{};
     ask(&fixture, "/v2/fixture/bearer/manifests/1", "", &out);
     try testing.expectEqual(@as(u16, 401), out.status);
-    try testing.expect(std.mem.startsWith(u8, out.www_authenticate, "Bearer realm=\"http://registry.test/token\""));
+    const realm = "Bearer realm=\"http://registry.test/token\"";
+    try testing.expect(std.mem.startsWith(u8, out.www_authenticate, realm));
     try testing.expect(std.mem.indexOf(u8, out.www_authenticate, "invalid_token") == null);
     ask(&fixture, "/v2/fixture/bearer/manifests/1", "wrong", &out);
     try testing.expect(std.mem.indexOf(u8, out.www_authenticate, "invalid_token") != null);
@@ -546,7 +579,8 @@ test "the faults: wrong digest, cut body, huge, redirects, missing" {
     fixture.init("http://registry.test", "http://other.test");
     var out: Answer = .{};
     var target: [160]u8 = undefined;
-    const by_digest = try std.fmt.bufPrint(&target, "/v2/fixture/badsum/manifests/{s}", .{&fixture.oci.amd64.digest});
+    const amd64 = &fixture.oci.amd64.digest;
+    const by_digest = try std.fmt.bufPrint(&target, "/v2/fixture/badsum/manifests/{s}", .{amd64});
     ask(&fixture, by_digest, "", &out);
     try testing.expect(!std.mem.eql(u8, out.body, fixture.oci.amd64.slice()));
     try testing.expectEqual(fixture.oci.amd64.len, out.body.len);

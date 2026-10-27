@@ -41,7 +41,10 @@ pub const MediaType = enum {
     docker_manifest,
 
     pub fn is_index(media: MediaType) bool {
-        return media == .oci_index or media == .docker_list;
+        const result = media == .oci_index or media == .docker_list;
+        if (result) assert(@tagName(media).len > 0);
+        assert(@backingInt(media) <= @backingInt(MediaType.docker_manifest));
+        return result;
     }
 };
 
@@ -50,6 +53,7 @@ pub fn media_type_of(text: []const u8) ?MediaType {
     assert(text.len <= constants.registry_header_bytes_max * 4);
     const semicolon = std.mem.indexOfScalar(u8, text, ';');
     const bare = std.mem.trim(u8, if (semicolon) |at| text[0..at] else text, " \t");
+    assert(bare.len <= text.len);
     if (std.ascii.eqlIgnoreCase(bare, media_oci_index)) return .oci_index;
     if (std.ascii.eqlIgnoreCase(bare, media_oci_manifest)) return .oci_manifest;
     if (std.ascii.eqlIgnoreCase(bare, media_docker_list)) return .docker_list;
@@ -62,13 +66,17 @@ pub const Architecture = enum {
     arm64,
 
     pub fn name(architecture: Architecture) []const u8 {
-        return @tagName(architecture);
+        const text = @tagName(architecture);
+        assert(text.len > 0);
+        assert(text.len < 8);
+        return text;
     }
 };
 
 /// The platform of a machine as `uname` names it; null for one this build does not run on.
 pub fn architecture_of_machine(machine: []const u8) ?Architecture {
     assert(machine.len < constants.uname_field_bytes);
+    assert(std.mem.indexOfScalar(u8, machine, 0) == null);
     if (std.mem.eql(u8, machine, "x86_64")) return .amd64;
     if (std.mem.eql(u8, machine, "aarch64")) return .arm64;
     if (std.mem.eql(u8, machine, "arm64")) return .arm64;
@@ -149,6 +157,7 @@ pub const Document = struct {
 
 fn parse_json(arena: std.mem.Allocator, body: []const u8) ParseError!DocumentJson {
     assert(body.len <= constants.registry_manifest_bytes_max);
+    assert(@intFromPtr(arena.vtable) != 0);
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     return std.json.parseFromSliceLeaky(DocumentJson, arena, body, options) catch |err| {
         return switch (err) {
@@ -167,6 +176,7 @@ pub fn parse_document(
     problem: *Problem,
 ) ParseError!Document {
     assert(body.len <= constants.registry_manifest_bytes_max);
+    problem.* = .{}; // An entry point: whatever an earlier call said is not this call's.
     const json = try parse_json(arena, body);
     const media = try decide_media(json.mediaType, content_type, problem);
     if (json.schemaVersion) |version| {
@@ -181,6 +191,7 @@ pub fn parse_document(
     } else {
         if (json.config == null) return error.Malformed;
     }
+    assert(problem.text.len == 0);
     return .{ .media = media, .json = json };
 }
 
@@ -188,6 +199,7 @@ fn name_media(problem: *Problem, text: ?[]const u8) void {
     assert(problem.text.len == 0);
     const shown = text orelse "(none)";
     problem.text.append_sanitised(shown, 100);
+    assert(problem.text.len > 0);
 }
 
 fn decide_media(
@@ -195,6 +207,7 @@ fn decide_media(
     content_type: ?[]const u8,
     problem: *Problem,
 ) ParseError!MediaType {
+    assert(problem.text.len == 0);
     const from_header: ?MediaType = if (content_type) |text| media_type_of(text) else null;
     if (declared) |text| {
         const from_body = media_type_of(text) orelse {
@@ -229,10 +242,13 @@ pub const Offered = struct {
 
     pub fn label(offered: *const Offered, index: u32) []const u8 {
         assert(index < offered.listed);
+        assert(offered.listed <= offered.total);
         return offered.labels[index][0..offered.label_lens[index]];
     }
 
     fn add(offered: *Offered, os: []const u8, architecture: []const u8, variant: ?[]const u8) void {
+        assert(offered.listed <= offered.labels.len);
+        assert(offered.total < std.math.maxInt(u32));
         offered.total += 1;
         if (offered.listed == offered.labels.len) return;
         var storage: [32]u8 = undefined;
@@ -249,7 +265,9 @@ pub const Offered = struct {
 };
 
 fn platform_matches(wanted: Architecture, entry: DescriptorJson) bool {
+    assert(wanted.name().len > 0);
     const platform = entry.platform orelse return false;
+
     const os = platform.os orelse return false;
     const architecture = platform.architecture orelse return false;
     if (!std.mem.eql(u8, os, "linux")) return false;
@@ -271,7 +289,9 @@ pub fn select_platform(
     problem: *Problem,
 ) ParseError!?Selected {
     assert(document.media.is_index());
+    problem.* = .{};
     const entries = document.json.manifests.?;
+    assert(entries.len <= constants.registry_index_entries_max);
     var found: ?Selected = null;
     for (entries) |entry| {
         const platform = entry.platform orelse continue;
@@ -298,10 +318,13 @@ pub fn select_platform(
         }
         found = .{ .digest = digest, .size = size };
     }
+    assert(offered.listed <= offered.total);
+    if (found) |selected| assert(selected.size > 0);
     return found;
 }
 
 fn descriptor_digest(descriptor: DescriptorJson, problem: *Problem) ParseError!Sha256 {
+    assert(problem.text.len == 0);
     const text = descriptor.digest orelse {
         problem.text.print("a descriptor has no digest", .{});
         return error.BadDescriptor;
@@ -313,6 +336,8 @@ fn descriptor_digest(descriptor: DescriptorJson, problem: *Problem) ParseError!S
 }
 
 fn layer_kind_of(text: []const u8) ?LayerKind {
+    assert(text.len <= constants.registry_header_bytes_max * 4);
+    assert(media_docker_layer.len > media_oci_layer_tar.len);
     if (std.mem.eql(u8, text, media_oci_layer_tar)) return .tar;
     if (std.mem.eql(u8, text, media_oci_layer_gzip)) return .tar_gzip;
     if (std.mem.eql(u8, text, media_docker_layer)) return .tar_gzip;
@@ -321,6 +346,8 @@ fn layer_kind_of(text: []const u8) ?LayerKind {
 }
 
 fn is_config_type(text: []const u8) bool {
+    assert(text.len <= constants.registry_header_bytes_max * 4);
+    assert(!std.mem.eql(u8, media_oci_config, media_docker_config));
     return std.mem.eql(u8, text, media_oci_config) or std.mem.eql(u8, text, media_docker_config);
 }
 
@@ -333,7 +360,9 @@ pub fn read_manifest(
     problem: *Problem,
 ) ParseError!void {
     assert(!document.media.is_index());
+    problem.* = .{};
     const config = document.json.config.?;
+
     const config_media = config.mediaType orelse "(none)";
     if (!is_config_type(config_media)) {
         name_media(problem, config_media);
@@ -369,16 +398,46 @@ pub fn read_manifest(
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;
+const repeat = @import("../test_util.zig").repeat;
+const comptime_print = std.fmt.comptimePrint;
 
-const zero = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-const one = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const zero = "sha256:" ++ repeat('0', 64);
+const one = "sha256:" ++ repeat('1', 64);
 
+/// `{"mediaType":..,"digest":..,"size":..}`, the shape of a config, a layer and an index entry.
+fn describe(
+    comptime media: []const u8,
+    comptime digest: []const u8,
+    comptime size: u64,
+) []const u8 {
+    const format = "{{\"mediaType\":\"{s}\",\"digest\":\"{s}\",\"size\":{d}";
+    return comptime_print(format, .{ media, digest, size });
+}
+
+/// An index entry: a manifest descriptor with a platform.
+fn entry_of(
+    comptime digest: []const u8,
+    comptime size: u64,
+    comptime architecture: []const u8,
+    comptime os: []const u8,
+    comptime variant: []const u8,
+) []const u8 {
+    const platform = comptime_print(
+        ",\"platform\":{{\"architecture\":\"{s}\",\"os\":\"{s}\"{s}}}}}",
+        .{ architecture, os, variant },
+    );
+    return describe(media_oci_manifest, digest, size) ++ platform;
+}
+
+const variant_v7 = ",\"variant\":\"v7\"";
+const variant_v8 = ",\"variant\":\"v8\"";
+
+const index_prefix = "{\"schemaVersion\":2,\"manifests\":[";
+
+/// Parses; the arena goes away with the call, so a test reads only the verdict and the type.
 fn parse_with(body: []const u8, content_type: ?[]const u8, problem: *Problem) !Document {
     var storage: [constants.registry_json_arena_bytes]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    // The arena dies with this function; tests read the document through `Document.json`
-    // slices that point into `body`, and the entries into the arena, so each test below copies
-    // what it needs before returning. This helper therefore only checks the verdict.
     return parse_document(fixed.allocator(), body, content_type, problem);
 }
 
@@ -388,22 +447,26 @@ test "media types are matched exactly, with parameters cut" {
     try testing.expectEqual(MediaType.docker_list, media_type_of(media_docker_list).?);
     const with_parameter = media_oci_manifest ++ "; charset=utf-8";
     try testing.expectEqual(MediaType.oci_manifest, media_type_of(with_parameter).?);
-    try testing.expectEqual(MediaType.docker_manifest, media_type_of(" " ++ media_docker_manifest).?);
+    const padded = " " ++ media_docker_manifest;
+    try testing.expectEqual(MediaType.docker_manifest, media_type_of(padded).?);
+    const schema_one = "application/vnd.docker.distribution.manifest.v1+prettyjws";
     try testing.expect(media_type_of("application/json") == null);
     try testing.expect(media_type_of(media_oci_index ++ "x") == null);
-    try testing.expect(media_type_of("application/vnd.docker.distribution.manifest.v1+prettyjws") == null);
+    try testing.expect(media_type_of(schema_one) == null);
     try testing.expect(media_type_of("") == null);
 }
 
 test "the declared type and the header must agree, and one must exist" {
     // Goal: each way to decide the type, and the refusals with their problem text.
     var problem: Problem = .{};
-    const index_body = "{\"schemaVersion\":2,\"mediaType\":\"" ++ media_oci_index ++ "\",\"manifests\":[]}";
+    const typed = "{\"schemaVersion\":2,\"mediaType\":\"" ++ media_oci_index ++ "\",";
+    const index_body = typed ++ "\"manifests\":[]}";
     const document = try parse_with(index_body, null, &problem);
     try testing.expectEqual(MediaType.oci_index, document.media);
     _ = try parse_with(index_body, media_oci_index, &problem);
     _ = try parse_with(index_body, "application/json", &problem);
-    try testing.expectError(error.MediaTypeMismatch, parse_with(index_body, media_docker_list, &problem));
+    const clash = parse_with(index_body, media_docker_list, &problem);
+    try testing.expectError(error.MediaTypeMismatch, clash);
 
     const bare = "{\"schemaVersion\":2,\"manifests\":[]}";
     _ = try parse_with(bare, media_oci_index, &problem);
@@ -415,24 +478,28 @@ test "the declared type and the header must agree, and one must exist" {
     try testing.expectEqualStrings("(none)", problem.text.slice());
     problem = .{};
     const unknown = "{\"mediaType\":\"application/vnd.example+json\",\"manifests\":[]}";
-    try testing.expectError(error.UnknownMediaType, parse_with(unknown, media_oci_index, &problem));
+    const refused = parse_with(unknown, media_oci_index, &problem);
+    try testing.expectError(error.UnknownMediaType, refused);
     try testing.expectEqualStrings("application/vnd.example+json", problem.text.slice());
     problem = .{};
-    const schema_one = "{\"schemaVersion\":1,\"mediaType\":\"" ++ media_docker_manifest ++ "\",\"config\":{}}";
-    try testing.expectError(error.UnknownMediaType, parse_with(schema_one, null, &problem));
+    const old_head = "{\"schemaVersion\":1,\"mediaType\":\"" ++ media_docker_manifest;
+    const old = old_head ++ "\",\"config\":{}}";
+    try testing.expectError(error.UnknownMediaType, parse_with(old, null, &problem));
     try testing.expectEqualStrings("schemaVersion 1", problem.text.slice());
 }
 
 test "bodies that are not documents" {
-    // Goal: JSON of the wrong shape, duplicate keys, a document of the wrong kind, and nesting
-    // beyond the arena are all refused with a reason, not a crash.
+    // Goal: JSON of the wrong shape, duplicate keys, a document of the wrong kind, and more
+    // entries than the arena holds are refused with a reason, not a crash.
     var problem: Problem = .{};
-    try testing.expectError(error.Malformed, parse_with("not json", media_oci_index, &problem));
-    try testing.expectError(error.Malformed, parse_with("[]", media_oci_index, &problem));
-    try testing.expectError(error.Malformed, parse_with("{\"manifests\":5}", media_oci_index, &problem));
-    try testing.expectError(error.Malformed, parse_with("{\"manifests\":[],\"manifests\":[]}", media_oci_index, &problem));
-    try testing.expectError(error.Malformed, parse_with("{}", media_oci_index, &problem));
-    try testing.expectError(error.Malformed, parse_with("{\"layers\":[]}", media_oci_manifest, &problem));
+    const kinds = [_][]const u8{ "not json", "[]", "{\"manifests\":5}", "{}" };
+    for (kinds) |body| {
+        try testing.expectError(error.Malformed, parse_with(body, media_oci_index, &problem));
+    }
+    const twice = "{\"manifests\":[],\"manifests\":[]}";
+    try testing.expectError(error.Malformed, parse_with(twice, media_oci_index, &problem));
+    const layers_only = "{\"layers\":[]}";
+    try testing.expectError(error.Malformed, parse_with(layers_only, media_oci_manifest, &problem));
     // Many small entries need more memory than the arena has: refused as too complex.
     var many: [100_000]u8 = undefined;
     var writer = std.Io.Writer.fixed(&many);
@@ -443,7 +510,6 @@ test "bodies that are not documents" {
     try testing.expectError(error.TooComplex, crowded);
     // Deep nesting inside a member the reader ignores costs one bit a level: it is read through.
     var nested: [200_000]u8 = undefined;
-    @memset(&nested, '[');
     var deep = std.Io.Writer.fixed(&nested);
     try deep.writeAll("{\"x\":");
     for (0..60_000) |_| try deep.writeAll("[");
@@ -460,26 +526,20 @@ fn select_in(body: []const u8, wanted: Architecture, offered: *Offered) !?Select
     return select_platform(&document, wanted, offered, &problem);
 }
 
-const index_prefix = "{\"schemaVersion\":2,\"manifests\":[";
+const arm_entry = entry_of(zero, 10, "arm", "linux", variant_v7);
+const select_entries = arm_entry ++ "," ++
+    entry_of(one, 20, "arm64", "linux", variant_v8) ++ "," ++
+    entry_of(zero, 30, "amd64", "linux", "") ++ "," ++
+    entry_of(zero, 40, "unknown", "unknown", "");
 
 test "platform selection: the host's entry, variants, attestations and the offer list" {
-    // Goal: amd64 and arm64 (variant v8 or none) select; arm v7, s390x and unknown/unknown never
-    // do; the offer lists the real platforms, not the attestations.
-    const arm_entry =
-        "{\"mediaType\":\"" ++ media_oci_manifest ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":10," ++
-        "\"platform\":{\"architecture\":\"arm\",\"os\":\"linux\",\"variant\":\"v7\"}}";
-    const entries = arm_entry ++ "," ++
-        "{\"mediaType\":\"" ++ media_oci_manifest ++ "\",\"digest\":\"" ++ one ++ "\",\"size\":20," ++
-        "\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\",\"variant\":\"v8\"}}," ++
-        "{\"mediaType\":\"" ++ media_oci_manifest ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":30," ++
-        "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}," ++
-        "{\"mediaType\":\"" ++ media_oci_manifest ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":40," ++
-        "\"platform\":{\"architecture\":\"unknown\",\"os\":\"unknown\"}}";
-    const body = index_prefix ++ entries ++ "]}";
+    // Goal: amd64 and arm64 (variant v8 or none) select; arm v7 and unknown/unknown never do; the
+    // offer lists the real platforms, not the attestations.
+    const body = index_prefix ++ select_entries ++ "]}";
     var offered: Offered = .{};
-    const arm = (try select_in(body, .arm64, &offered)).?;
-    try testing.expectEqual(@as(u64, 20), arm.size);
-    try testing.expectEqualStrings(one, &arm.digest.text());
+    const picked = (try select_in(body, .arm64, &offered)).?;
+    try testing.expectEqual(@as(u64, 20), picked.size);
+    try testing.expectEqualStrings(one, &picked.digest.text());
     try testing.expectEqual(@as(u32, 3), offered.total);
     try testing.expectEqualStrings("linux/arm/v7", offered.label(0));
     try testing.expectEqualStrings("linux/arm64/v8", offered.label(1));
@@ -488,29 +548,37 @@ test "platform selection: the host's entry, variants, attestations and the offer
     const amd = (try select_in(body, .amd64, &offered)).?;
     try testing.expectEqual(@as(u64, 30), amd.size);
 
-    const only_arm = index_prefix ++ arm_entry ++ "]}";
     offered = .{};
+    const only_arm = index_prefix ++ arm_entry ++ "]}";
     try testing.expect((try select_in(only_arm, .amd64, &offered)) == null);
     try testing.expectEqual(@as(u32, 1), offered.total);
 }
 
+const amd_platform = ",\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}";
+
+const Unusable = struct { descriptor: []const u8, expected: ParseError };
+
+const unusable_entries = [_]Unusable{
+    .{ .descriptor = describe("x/y", zero, 5), .expected = error.UnknownMediaType },
+    .{ .descriptor = describe(media_oci_index, zero, 5), .expected = error.UnknownMediaType },
+    .{ .descriptor = describe(media_oci_manifest, "sha512:a", 5), .expected = error.BadDescriptor },
+
+    .{ .descriptor = describe(media_oci_manifest, zero, 0), .expected = error.BadDescriptor },
+    .{ .descriptor = describe(media_oci_manifest, zero, 2000000), .expected = error.BadDescriptor },
+};
+
 test "a matching entry that cannot be used is refused, not skipped" {
-    // Goal: an unknown media type, a bad digest and a zero or huge size on the chosen entry.
-    const platform = "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}";
+    // Goal: an unknown media type, a nested index, a bad digest and a zero or huge size on the
+    // chosen entry, and a missing size.
+    inline for (unusable_entries) |case| {
+        var offered: Offered = .{};
+        const body = index_prefix ++ case.descriptor ++ amd_platform ++ "]}";
+        try testing.expectError(case.expected, select_in(body, .amd64, &offered));
+    }
+    const no_size = index_prefix ++ "{\"mediaType\":\"" ++ media_oci_manifest ++
+        "\",\"digest\":\"" ++ zero ++ "\"" ++ amd_platform ++ "]}";
     var offered: Offered = .{};
-    const unknown = index_prefix ++ "{\"mediaType\":\"x/y\",\"digest\":\"" ++ zero ++ "\",\"size\":5," ++ platform ++ "}]}";
-    try testing.expectError(error.UnknownMediaType, select_in(unknown, .amd64, &offered));
-    const nested = index_prefix ++ "{\"mediaType\":\"" ++ media_oci_index ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":5," ++ platform ++ "}]}";
-    try testing.expectError(error.UnknownMediaType, select_in(nested, .amd64, &offered));
-    const media = "{\"mediaType\":\"" ++ media_oci_manifest ++ "\",";
-    const bad_digest = index_prefix ++ media ++ "\"digest\":\"sha512:ab\",\"size\":5," ++ platform ++ "}]}";
-    try testing.expectError(error.BadDescriptor, select_in(bad_digest, .amd64, &offered));
-    const no_size = index_prefix ++ media ++ "\"digest\":\"" ++ zero ++ "\"," ++ platform ++ "}]}";
     try testing.expectError(error.BadDescriptor, select_in(no_size, .amd64, &offered));
-    const zero_size = index_prefix ++ media ++ "\"digest\":\"" ++ zero ++ "\",\"size\":0," ++ platform ++ "}]}";
-    try testing.expectError(error.BadDescriptor, select_in(zero_size, .amd64, &offered));
-    const huge = index_prefix ++ media ++ "\"digest\":\"" ++ zero ++ "\",\"size\":2000000," ++ platform ++ "}]}";
-    try testing.expectError(error.BadDescriptor, select_in(huge, .amd64, &offered));
 }
 
 fn read_in(body: []const u8, resolved: *Resolved, problem: *Problem) !void {
@@ -520,14 +588,15 @@ fn read_in(body: []const u8, resolved: *Resolved, problem: *Problem) !void {
     return read_manifest(&document, resolved, problem);
 }
 
+const config_member = "\"config\":" ++ describe(media_oci_config, zero, 7) ++ "}";
+
 test "a manifest gives its config and layers, with their kinds" {
     // Goal: OCI and Docker layer types map to kinds; the config is read; counts are exact.
-    const body =
-        "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"" ++ media_oci_config ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":7}," ++
-        "\"layers\":[{\"mediaType\":\"" ++ media_oci_layer_gzip ++ "\",\"digest\":\"" ++ one ++ "\",\"size\":11}," ++
-        "{\"mediaType\":\"" ++ media_oci_layer_zstd ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":12}," ++
-        "{\"mediaType\":\"" ++ media_docker_layer ++ "\",\"digest\":\"" ++ one ++ "\",\"size\":13}," ++
-        "{\"mediaType\":\"" ++ media_oci_layer_tar ++ "\",\"digest\":\"" ++ one ++ "\",\"size\":14}]}";
+    const body = comptime "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[" ++
+        describe(media_oci_layer_gzip, one, 11) ++ "}," ++
+        describe(media_oci_layer_zstd, zero, 12) ++ "}," ++
+        describe(media_docker_layer, one, 13) ++ "}," ++
+        describe(media_oci_layer_tar, one, 14) ++ "}]}";
     var resolved: Resolved = undefined;
     var problem: Problem = .{};
     try read_in(body, &resolved, &problem);
@@ -543,30 +612,31 @@ test "a manifest gives its config and layers, with their kinds" {
 test "a manifest with a type, digest or size it cannot use is refused" {
     // Goal: unknown config and layer types are named; bad digests, zero sizes and too many layers
     // are refused.
-    const config = "\"config\":{\"mediaType\":\"" ++ media_oci_config ++ "\",\"digest\":\"" ++ zero ++ "\",\"size\":7}";
     var resolved: Resolved = undefined;
     var problem: Problem = .{};
-    const bad_config = "{\"config\":{\"mediaType\":\"application/vnd.cncf.helm.config.v1+json\",\"digest\":\"" ++ zero ++ "\",\"size\":7}}";
+    const helm = "application/vnd.cncf.helm.config.v1+json";
+    const bad_config = comptime "{\"config\":" ++ describe(helm, zero, 7) ++ "}}";
     try testing.expectError(error.UnknownMediaType, read_in(bad_config, &resolved, &problem));
-    try testing.expectEqualStrings("application/vnd.cncf.helm.config.v1+json", problem.text.slice());
+    try testing.expectEqualStrings(helm, problem.text.slice());
     problem = .{};
-    const foreign = "{" ++ config ++ ",\"layers\":[{\"mediaType\":\"application/vnd.docker.image.rootfs.foreign.diff.tar.gzip\",\"digest\":\"" ++ one ++ "\",\"size\":9}]}";
+    const foreign_type = "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip";
+    const foreign_layer = comptime describe(foreign_type, one, 9);
+    const foreign = comptime "{" ++ config_member ++ ",\"layers\":[" ++ foreign_layer ++ "}]}";
+
     try testing.expectError(error.UnknownMediaType, read_in(foreign, &resolved, &problem));
-    const layer_head = "{\"mediaType\":\"" ++ media_oci_layer_gzip ++ "\",";
-    const bad_digest = "{" ++ config ++ ",\"layers\":[" ++ layer_head ++ "\"digest\":\"sha256:xyz\",\"size\":9}]}";
+    const layers = comptime "{" ++ config_member ++ ",\"layers\":[";
+    const bad_digest = comptime layers ++ describe(media_oci_layer_gzip, "sha256:xyz", 9) ++ "}]}";
     try testing.expectError(error.BadDescriptor, read_in(bad_digest, &resolved, &problem));
-    const empty = "{" ++ config ++ ",\"layers\":[" ++ layer_head ++ "\"digest\":\"" ++ one ++ "\",\"size\":0}]}";
+    const empty = comptime layers ++ describe(media_oci_layer_gzip, one, 0) ++ "}]}";
     try testing.expectError(error.BadDescriptor, read_in(empty, &resolved, &problem));
-    const none = "{" ++ config ++ "}";
-    try read_in(none, &resolved, &problem);
+    try read_in("{" ++ config_member ++ "}", &resolved, &problem);
     try testing.expectEqual(@as(u32, 0), resolved.layer_count);
 
-    var many: [constants.registry_layers_max + 1][]const u8 = undefined;
-    @memset(&many, layer_head ++ "\"digest\":\"" ++ one ++ "\",\"size\":9}");
+    const layer = comptime describe(media_oci_layer_gzip, one, 9) ++ "}";
     var text: [64 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&text);
-    try writer.print("{{{s},\"layers\":[", .{config});
-    for (many, 0..) |layer, index| {
+    try writer.writeAll(layers);
+    for (0..constants.registry_layers_max + 1) |index| {
         if (index > 0) try writer.writeAll(",");
         try writer.writeAll(layer);
     }

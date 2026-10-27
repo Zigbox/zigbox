@@ -25,6 +25,7 @@ const store_fuzz = @import("fuzz_store.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
 const reference_fuzz = @import("fuzz_reference.zig");
+const registry_fuzz = @import("fuzz_registry.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -56,6 +57,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "commit", .run_iteration = commit_fuzz.fuzz_commit },
     .{ .name = "gc", .run_iteration = gc_fuzz.fuzz_gc },
     .{ .name = "reference", .run_iteration = reference_fuzz.fuzz_reference },
+    .{ .name = "registry", .run_iteration = registry_fuzz.fuzz_registry },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },

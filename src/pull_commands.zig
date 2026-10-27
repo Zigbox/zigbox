@@ -35,6 +35,7 @@ pub const Args = struct {
 pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(args.reference.len <= constants.arg_bytes_max);
+    assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
     var reference: reference_mod.Reference = undefined;
     reference_mod.parse(args.reference, &reference) catch |err| {
         diagnose.bad_reference(diag, args.reference, err);
@@ -49,6 +50,8 @@ pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) E
     var machine = uname.machine;
     var client = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
     client_mod.resolve(&client, &reference, &workspace.resolved, diag) catch return error.Failed;
+    assert(diag.code == null);
+    assert(workspace.resolved.layer_count <= constants.registry_layers_max);
     const text = render(args.json, &reference, &workspace.resolved, &workspace.output);
     host.write_all(.stdout, text) catch |err| {
         errors.output_failed(diag, .stdout, err, host.last_errno());
@@ -62,6 +65,8 @@ fn render(
     resolved: *const manifest.Resolved,
     buffer: *[constants.pull_output_bytes_max]u8,
 ) []const u8 {
+    assert(resolved.layer_count <= constants.registry_layers_max);
+    assert(buffer.len == constants.pull_output_bytes_max);
     var writer = std.Io.Writer.fixed(buffer);
     // Cannot fail: the buffer holds the largest result (128 layers, the constants assert it).
     if (json) write_json(&writer, reference, resolved) catch unreachable else {
@@ -78,21 +83,33 @@ fn write_json(
     reference: *const reference_mod.Reference,
     resolved: *const manifest.Resolved,
 ) std.Io.Writer.Error!void {
+    assert(resolved.manifest_size > 0);
+    assert(resolved.layer_count <= constants.registry_layers_max);
     var formatted: reference_mod.Formatted = undefined;
-    try writer.print("{{\"schema\":\"zbx.pull.resolve/1\",\"reference\":\"{s}\",", .{reference.format(&formatted)});
-    try writer.print("\"registry\":\"{s}\",\"repository\":\"{s}\",", .{ reference.registry(), reference.repository() });
+
+    const shown = reference.format(&formatted);
+    try writer.print("{{\"schema\":\"zbx.pull.resolve/1\",\"reference\":\"{s}\",", .{shown});
+    try writer.print("\"registry\":\"{s}\",", .{reference.registry()});
+    try writer.print("\"repository\":\"{s}\",", .{reference.repository()});
     try writer.writeAll("\"index_digest\":");
     if (resolved.index_digest) |digest| {
         try writer.print("\"{s}\",", .{&digest.text()});
     } else {
         try writer.writeAll("null,");
     }
-    try writer.print("\"manifest_digest\":\"{s}\",\"manifest_size\":{d},", .{ &resolved.manifest_digest.text(), resolved.manifest_size });
+    const manifest_text = resolved.manifest_digest.text();
+    try writer.print("\"manifest_digest\":\"{s}\",", .{&manifest_text});
+    try writer.print("\"manifest_size\":{d},", .{resolved.manifest_size});
     try writer.print("\"platform\":\"linux/{s}\",", .{resolved.architecture.name()});
-    try writer.print("\"config_digest\":\"{s}\",\"config_size\":{d},\"layers\":[", .{ &resolved.config_digest.text(), resolved.config_size });
+    const config_text = resolved.config_digest.text();
+    try writer.print("\"config_digest\":\"{s}\",", .{&config_text});
+    try writer.print("\"config_size\":{d},\"layers\":[", .{resolved.config_size});
     for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
         if (index > 0) try writer.writeAll(",");
-        try writer.print("{{\"digest\":\"{s}\",\"size\":{d},\"kind\":\"{s}\"}}", .{ &layer.digest.text(), layer.size, @tagName(layer.kind) });
+        const digest_text = layer.digest.text();
+        const kind = @tagName(layer.kind);
+        try writer.print("{{\"digest\":\"{s}\",\"size\":{d},", .{ &digest_text, layer.size });
+        try writer.print("\"kind\":\"{s}\"}}", .{kind});
     }
     try writer.writeAll("]}\n");
 }

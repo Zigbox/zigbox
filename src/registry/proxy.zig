@@ -28,6 +28,7 @@ pub fn parse_proxy(text: []const u8) ParseError!Proxy {
         if (!std.ascii.eqlIgnoreCase(text[0..at], "http")) return error.UnsupportedProxy;
         rest = text[at + 3 ..];
     }
+    assert(rest.len <= text.len);
     const slash = std.mem.indexOfScalar(u8, rest, '/');
     var authority = if (slash) |at| rest[0..at] else rest;
     if (slash) |at| {
@@ -51,6 +52,8 @@ pub fn parse_proxy(text: []const u8) ParseError!Proxy {
         const ok = std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '-' or byte == '_';
         if (!ok) return error.UnsupportedProxy; // IPv6 literals, spaces, control bytes.
     }
+    assert(host.len > 0);
+    assert(port != 0);
     return .{ .host = host, .port = port, .userinfo = userinfo };
 }
 
@@ -58,6 +61,7 @@ pub fn parse_proxy(text: []const u8) ParseError!Proxy {
 pub fn bypasses(list: []const u8, host: []const u8, port: u16) bool {
     assert(list.len <= constants.net_no_proxy_bytes_max);
     assert(host.len > 0);
+    assert(list.len == std.mem.trim(u8, list, "\x00").len);
     var entries = std.mem.splitScalar(u8, list, ',');
     while (entries.next()) |raw| {
         const entry = std.mem.trim(u8, raw, " \t");
@@ -68,6 +72,8 @@ pub fn bypasses(list: []const u8, host: []const u8, port: u16) bool {
 }
 
 fn matches(entry: []const u8, host: []const u8, port: u16) bool {
+    assert(entry.len > 0);
+    assert(host.len > 0);
     if (std.mem.eql(u8, entry, "*")) return true;
     var name = entry;
     if (std.mem.lastIndexOfScalar(u8, entry, ':')) |colon| {
@@ -92,6 +98,7 @@ fn matches(entry: []const u8, host: []const u8, port: u16) bool {
 }
 
 fn ipv4(text: []const u8) ?u32 {
+    assert(text.len <= constants.net_no_proxy_bytes_max);
     var value: u32 = 0;
     var parts: u32 = 0;
     var pieces = std.mem.splitScalar(u8, text, '.');
@@ -101,10 +108,13 @@ fn ipv4(text: []const u8) ?u32 {
         parts += 1;
     }
     if (parts != 4) return null;
+    assert(parts == 4);
     return value;
 }
 
 fn in_range(network: []const u8, bits_text: []const u8, host: []const u8) bool {
+    assert(network.len > 0);
+    assert(host.len > 0);
     const base = ipv4(network) orelse return false;
     const address = ipv4(host) orelse return false;
     const bits = std.fmt.parseInt(u8, bits_text, 10) catch return false;

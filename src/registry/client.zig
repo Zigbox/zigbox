@@ -45,6 +45,8 @@ const Origin = struct {
     port: u16,
 
     fn same(first: Origin, second: Origin) bool {
+        assert(first.host.len > 0);
+        assert(second.host.len > 0);
         if (first.scheme != second.scheme) return false;
         if (first.port != second.port) return false;
         return std.ascii.eqlIgnoreCase(first.host, second.host);
@@ -65,6 +67,7 @@ pub const Client = struct {
         machine: []const u8,
     ) Client {
         assert(machine.len < constants.uname_field_bytes);
+        assert(@intFromPtr(workspace) != 0);
         return .{
             .net = wire,
             .workspace = workspace,
@@ -76,6 +79,7 @@ pub const Client = struct {
 
     fn token(client: *const Client) []const u8 {
         assert(client.token_len <= constants.registry_token_bytes_max);
+        assert(client.workspace.token.len == constants.registry_token_bytes_max);
         return client.workspace.token[0..client.token_len];
     }
 };
@@ -88,6 +92,7 @@ pub fn resolve(
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
+    assert(client.workspace.body.len == constants.registry_manifest_bytes_max);
     client.token_len = 0; // A token is for one repository: never carried to the next resolve.
     var shown_storage: reference_mod.Formatted = undefined;
     const shown = reference.format(&shown_storage);
@@ -96,6 +101,8 @@ pub fn resolve(
         return err;
     };
     assert(resolved.layer_count <= constants.registry_layers_max);
+    assert(resolved.manifest_size > 0);
+    assert(resolved.config_size > 0);
 }
 
 fn resolve_inner(
@@ -104,13 +111,19 @@ fn resolve_inner(
     resolved: *manifest.Resolved,
     diag: *Diag,
 ) Error!void {
+    assert(diag.code == null);
+    assert(client.token_len == 0);
     const architecture = client.architecture orelse {
         const empty: manifest.Offered = .{};
         diagnose.no_platform(diag, null, client.machine, &empty);
         return error.Failed;
     };
     const endpoint = reference.endpoint();
-    const origin: Origin = .{ .scheme = endpoint.scheme, .host = endpoint.host, .port = endpoint.port };
+    const origin: Origin = .{
+        .scheme = endpoint.scheme,
+        .host = endpoint.host,
+        .port = endpoint.port,
+    };
     var name_storage: reference_mod.ManifestName = undefined;
     const name = reference.manifest_name(&name_storage);
     var head: net.Head = .{};
@@ -135,9 +148,8 @@ fn resolve_inner(
     }
     resolved.index_digest = top.digest;
     var offered: manifest.Offered = .{};
-    const chosen = manifest.select_platform(&document, architecture, &offered, &problem) catch |err| {
-        return unusable(diag, err, &problem);
-    };
+    const picked = manifest.select_platform(&document, architecture, &offered, &problem);
+    const chosen = picked catch |err| return unusable(diag, err, &problem);
     const selected = chosen orelse {
         diagnose.no_platform(diag, architecture, client.machine, &offered);
         return error.Failed;
@@ -146,7 +158,9 @@ fn resolve_inner(
 }
 
 fn unusable(diag: *Diag, err: manifest.ParseError, problem: *const manifest.Problem) Error {
+    assert(diag.code == null);
     diagnose.unusable_document(diag, err, problem.text.slice());
+    assert(diag.code != null);
     return error.Failed;
 }
 
@@ -166,6 +180,8 @@ fn fetch_platform_manifest(
     resolved: *manifest.Resolved,
     diag: *Diag,
 ) Error!void {
+    assert(selected.size > 0);
+    assert(selected.size <= constants.registry_manifest_bytes_max);
     var scratch: net.Head = .{};
     var wanted: Reference = reference.*;
     wanted.digest = selected.digest;
@@ -174,7 +190,10 @@ fn fetch_platform_manifest(
     const fetched = try fetch_manifest(client, &wanted, origin, &text, &scratch, diag);
     if (fetched.body_len != selected.size) {
         var detail: [64]u8 = undefined;
-        const sizes = std.fmt.bufPrint(&detail, "{d} bytes, the index says {d}", .{ fetched.body_len, selected.size }) catch unreachable; // 40 bytes at most.
+        const format = "{d} bytes, the index says {d}";
+        const numbers = .{ fetched.body_len, selected.size };
+        // Cannot fail: two numbers and the words are under 64 bytes.
+        const sizes = std.fmt.bufPrint(&detail, format, numbers) catch unreachable;
         diagnose.unusable_document(diag, error.BadDescriptor, sizes);
         return error.Failed;
     }
@@ -196,6 +215,7 @@ fn fetch_platform_manifest(
     manifest.read_manifest(&document, resolved, &problem) catch |err| {
         return unusable(diag, err, &problem);
     };
+    assert(resolved.manifest_digest.eql(selected.digest));
 }
 
 /// The most the request target of a manifest takes: "/v2/", a repository, "/manifests/", a name.
@@ -212,6 +232,8 @@ fn fetch_manifest(
     head: *net.Head,
     diag: *Diag,
 ) Error!Fetched {
+    assert(name.len > 0);
+    assert(origin.port != 0);
     var target_storage: [manifest_target_bytes_max]u8 = undefined;
     const target = std.fmt.bufPrint(
         &target_storage,
@@ -223,10 +245,11 @@ fn fetch_manifest(
     try request_following(client, origin, target, manifest.accept, true, &sink, head, diag);
     if (head.status == 401 and !had_token) {
         // The one repeat: with the token that was just given. A second 401 is a refusal.
-        try authenticate(client, reference, head, diag);
+        try authenticate(client, reference, origin, head, diag);
         try request_following(client, origin, target, manifest.accept, true, &sink, head, diag);
     }
     try check_status(reference, origin, target, head, diag);
+    assert(head.status == 200);
     return verify_manifest(reference, name, head, sink.bytes(), diag);
 }
 
@@ -242,7 +265,9 @@ fn verify_manifest(
     if (reference.digest) |expected| {
         if (!expected.eql(actual)) {
             var what_storage: [constants.diag_field_bytes_max]u8 = undefined;
-            const what = std.fmt.bufPrint(&what_storage, "the manifest {s}", .{name}) catch unreachable; // A digest is 71 bytes.
+            // A digest is 71 bytes and the storage holds 200: the fallback is for the compiler.
+            const what = std.fmt.bufPrint(&what_storage, "the manifest {s}", .{name}) catch
+                "the manifest";
             diagnose.digest_mismatch(diag, what, expected, actual);
             return error.Failed;
         }
@@ -250,11 +275,13 @@ fn verify_manifest(
     if (head.content_digest.slice()) |text| {
         if (Sha256.parse(text)) |claimed| {
             if (!claimed.eql(actual)) {
-                diagnose.digest_mismatch(diag, "the manifest, against the registry's own digest header", claimed, actual);
+                const what = "the manifest, against the registry's own digest header";
+                diagnose.digest_mismatch(diag, what, claimed, actual);
                 return error.Failed;
             }
         }
     }
+    if (reference.digest) |expected| assert(expected.eql(actual));
     return .{ .digest = actual, .body_len = @intCast(body.len) };
 }
 
@@ -266,11 +293,16 @@ fn check_status(
     head: *const net.Head,
     diag: *Diag,
 ) Error!void {
+    assert(target.len > 0);
+    assert(diag.code == null);
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
     const url = url_of(&url_storage, origin, target);
     switch (head.status) {
         200 => return,
-        401 => diagnose.auth_refused(diag, .token_rejected, reference.registry(), reference.repository()),
+        401 => {
+            const registry = reference.registry();
+            diagnose.auth_refused(diag, .token_rejected, registry, reference.repository());
+        },
         404 => {
             const name = target[std.mem.lastIndexOf(u8, target, "/").? + 1 ..];
             diagnose.not_found(diag, reference.registry(), reference.repository(), name);
@@ -285,6 +317,7 @@ fn check_status(
 fn authenticate(
     client: *Client,
     reference: *const Reference,
+    origin: Origin,
     head: *const net.Head,
     diag: *Diag,
 ) Error!void {
@@ -310,20 +343,29 @@ fn authenticate(
         diagnose.auth_refused(diag, .bad_realm, registry, repository);
         return error.Failed;
     };
-    // A token is asked for over HTTPS; plain HTTP only where the registry itself is on loopback.
-    const secure = parsed.scheme == .https or reference_mod.is_loopback(parsed.host);
+    // A token is asked for over HTTPS. Plain HTTP only when the registry itself is spoken to in
+    // plain HTTP (a loopback registry) and the realm is on loopback too: a registry elsewhere
+    // cannot send zbx to a service on this machine.
+    const plain_ok = origin.scheme == .http and reference_mod.is_loopback(parsed.host);
+    const secure = parsed.scheme == .https or plain_ok;
+
     if (!secure) {
         diagnose.auth_refused(diag, .bad_realm, registry, repository);
         return error.Failed;
     }
     try fetch_token(client, reference, parsed, diag);
+    assert(client.token_len > 0);
+    assert(diag.code == null);
 }
 
 fn fetch_token(client: *Client, reference: *const Reference, url: net.Url, diag: *Diag) Error!void {
+    assert(url.target[0] == '/');
+    assert(client.token_len == 0);
     const origin: Origin = .{ .scheme = url.scheme, .host = url.host, .port = url.port };
     var head: net.Head = .{};
     var sink: net.BufferSink = .{ .buffer = &client.workspace.token_body };
-    try request_following(client, origin, url.target, "application/json", false, &sink, &head, diag);
+    const target = url.target;
+    try request_following(client, origin, target, "application/json", false, &sink, &head, diag);
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
     const shown = url_of(&url_storage, origin, url.target);
     const registry = reference.registry();
@@ -344,7 +386,8 @@ fn fetch_token(client: *Client, reference: *const Reference, url: net.Url, diag:
         },
     }
     var arena = std.heap.FixedBufferAllocator.init(&client.workspace.arena);
-    const found = auth.parse_token(sink.bytes(), arena.allocator(), &client.workspace.token) orelse {
+    const body = sink.bytes();
+    const found = auth.parse_token(body, arena.allocator(), &client.workspace.token) orelse {
         diagnose.auth_refused(diag, .token_unusable, registry, repository);
         return error.Failed;
     };
@@ -353,7 +396,13 @@ fn fetch_token(client: *Client, reference: *const Reference, url: net.Url, diag:
 }
 
 /// "https://host:port/path" without the query, for a message.
-fn url_of(storage: *[constants.registry_url_bytes_max]u8, origin: Origin, target: []const u8) []const u8 {
+fn url_of(
+    storage: *[constants.registry_url_bytes_max]u8,
+    origin: Origin,
+    target: []const u8,
+) []const u8 {
+    assert(origin.host.len > 0);
+    assert(target.len > 0);
     const scheme: []const u8 = if (origin.scheme == .https) "https" else "http";
     const default_port: u16 = if (origin.scheme == .https) 443 else 80;
     const path = net.without_query(target);
@@ -361,10 +410,14 @@ fn url_of(storage: *[constants.registry_url_bytes_max]u8, origin: Origin, target
         std.fmt.bufPrint(storage, "{s}://{s}{s}", .{ scheme, origin.host, path })
     else
         std.fmt.bufPrint(storage, "{s}://{s}:{d}{s}", .{ scheme, origin.host, origin.port, path });
-    return result catch storage[0..0];
+    const text = result catch storage[0..0];
+    assert(text.len <= storage.len);
+    return text;
 }
 
 fn is_redirect(status: u16) bool {
+    assert(status >= 100);
+    assert(status <= 599);
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
 
@@ -382,6 +435,8 @@ fn request_following(
 ) Error!void {
     assert(target.len > 0);
     assert(target[0] == '/');
+    assert(sink.buffer.len > 0);
+    assert(origin.port != 0);
     var host_storage: [256]u8 = undefined;
     var target_storage: [constants.registry_url_bytes_max]u8 = undefined;
     var current = origin;
@@ -401,7 +456,12 @@ fn request_following(
             .total_timeout_ms = constants.net_request_timeout_ms,
         };
         client.net.get(&request, head, sink.sink()) catch |err| {
-            const target_info: diagnose.Target = .{ .host = current.host, .port = current.port, .scheme = current.scheme };
+            const target_info: diagnose.Target = .{
+                .host = current.host,
+                .port = current.port,
+                .scheme = current.scheme,
+            };
+
             diagnose.network_failed(diag, err, target_info, client.net.last_errno());
             return error.Failed;
         };
@@ -420,6 +480,8 @@ fn request_following(
             diagnose.http_error(diag, head.status, here, "a redirect zbx will not follow");
             return error.Failed;
         };
+        assert(next.target.len > 0);
+        assert(next.target[0] == '/');
         current = next.origin;
         current_target = next.target;
     }
@@ -438,11 +500,16 @@ fn follow(
     target_storage: *[constants.registry_url_bytes_max]u8,
 ) ?Next {
     assert(location.len <= constants.registry_url_bytes_max);
+    assert(current.host.len > 0);
     if (location.len > 0 and location[0] == '/') {
+        // Not a protocol-relative URL ("//host"): that would name another host.
+        if (location.len > 1 and location[1] == '/') return null;
+        // The target goes into a request line as it is, so nothing that could end or split it.
+        for (location) |byte| {
+            if (byte <= 0x20 or byte >= 0x7f or byte == '#') return null;
+        }
         @memcpy(target_storage[0..location.len], location);
         const target = target_storage[0..location.len];
-        // Cannot be a protocol-relative URL ("//host"): that would name another host.
-        if (location.len > 1 and location[1] == '/') return null;
         return .{ .origin = current, .target = target };
     }
     const url = net.parse_url(location) catch return null;
@@ -454,5 +521,31 @@ fn follow(
         .host = host_storage[0..url.host.len],
         .port = url.port,
     };
+    assert(url.target[0] == '/');
+    assert(origin.host.len > 0);
     return .{ .origin = origin, .target = target_storage[0..url.target.len] };
+}
+
+test "a redirect target is followed only when it can go into a request line" {
+    // Goal: relative targets keep the origin and are checked byte by byte; absolute ones may not
+    // downgrade from https; protocol-relative ones are refused.
+    var host: [256]u8 = undefined;
+    var target: [constants.registry_url_bytes_max]u8 = undefined;
+    const secure: Origin = .{ .scheme = .https, .host = "registry.test", .port = 443 };
+    const relative = follow(secure, "/v2/x/blobs/sha256:ab?sig=1", &host, &target).?;
+    try std.testing.expectEqualStrings("/v2/x/blobs/sha256:ab?sig=1", relative.target);
+    try std.testing.expect(relative.origin.same(secure));
+    try std.testing.expect(follow(secure, "//evil.test/x", &host, &target) == null);
+    try std.testing.expect(follow(secure, "/a b", &host, &target) == null);
+    try std.testing.expect(follow(secure, "/a\x7f", &host, &target) == null);
+    try std.testing.expect(follow(secure, "/a#fragment", &host, &target) == null);
+    try std.testing.expect(follow(secure, "http://cdn.test/x", &host, &target) == null);
+    try std.testing.expect(follow(secure, "ftp://cdn.test/x", &host, &target) == null);
+    try std.testing.expect(follow(secure, "relative/path", &host, &target) == null);
+    const far = follow(secure, "https://cdn.test:8443/x?a=b", &host, &target).?;
+    try std.testing.expectEqualStrings("cdn.test", far.origin.host);
+    try std.testing.expectEqual(@as(u16, 8443), far.origin.port);
+    try std.testing.expect(!far.origin.same(secure));
+    const plain: Origin = .{ .scheme = .http, .host = "127.0.0.1", .port = 80 };
+    try std.testing.expect(follow(plain, "http://127.0.0.1:81/x", &host, &target) != null);
 }

@@ -89,7 +89,9 @@ pub const Server = struct {
 
     fn run(server: *Server) void {
         while (!server.stopping.load(.acquire)) {
-            var entries = [1]linux.pollfd{.{ .fd = server.listener, .events = linux.POLL.IN, .revents = 0 }};
+            var entries = [1]linux.pollfd{
+                .{ .fd = server.listener, .events = linux.POLL.IN, .revents = 0 },
+            };
             const ready = linux.poll(&entries, 1, 20);
             if (linux.errno(ready) != .SUCCESS or ready == 0) continue;
             const accepted = linux.accept4(server.listener, null, null, linux.SOCK.CLOEXEC);
@@ -149,26 +151,37 @@ pub const Server = struct {
     fn respond(server: *Server, client: i32, answer: *const fixture_mod.Answer) void {
         var head: [2048]u8 = undefined;
         var writer = std.Io.Writer.fixed(&head);
-        // Cannot fail: the buffer holds the longest header values the fixture produces.
-        writer.print("HTTP/1.1 {d} {s}\r\n", .{ answer.status, reason(answer.status) }) catch unreachable;
-        if (answer.content_type.len > 0) writer.print("Content-Type: {s}\r\n", .{answer.content_type}) catch unreachable;
-        if (answer.www_authenticate.len > 0) writer.print("WWW-Authenticate: {s}\r\n", .{answer.www_authenticate}) catch unreachable;
-        if (answer.retry_after.len > 0) writer.print("Retry-After: {s}\r\n", .{answer.retry_after}) catch unreachable;
-        if (answer.content_digest.len > 0) writer.print("Docker-Content-Digest: {s}\r\n", .{answer.content_digest}) catch unreachable;
-        if (answer.location.len > 0) writer.print("Location: {s}\r\n", .{answer.location}) catch unreachable;
+        write_head(&writer, answer, server.mode == .chunked) catch unreachable; // The buffer fits.
+        write_all(client, writer.buffered());
         const delivered = @min(answer.deliver orelse answer.body.len, answer.body.len);
         if (server.mode == .chunked) {
-            writer.writeAll("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n") catch unreachable;
-            write_all(client, writer.buffered());
             // A body that was cut ends without its last chunk, as a dropped connection does.
             return write_chunked(client, answer.body[0..delivered], delivered == answer.body.len);
         }
-        const declared = answer.content_length orelse answer.body.len;
-        writer.print("Content-Length: {d}\r\nConnection: close\r\n\r\n", .{declared}) catch unreachable;
-        write_all(client, writer.buffered());
         write_all(client, answer.body[0..delivered]);
     }
 };
+
+fn write_head(
+    writer: *std.Io.Writer,
+    answer: *const fixture_mod.Answer,
+    chunked: bool,
+) std.Io.Writer.Error!void {
+    try writer.print("HTTP/1.1 {d} {s}\r\n", .{ answer.status, reason(answer.status) });
+    const optional = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "Content-Type", .value = answer.content_type },
+        .{ .name = "WWW-Authenticate", .value = answer.www_authenticate },
+        .{ .name = "Retry-After", .value = answer.retry_after },
+        .{ .name = "Docker-Content-Digest", .value = answer.content_digest },
+        .{ .name = "Location", .value = answer.location },
+    };
+    for (optional) |header| {
+        if (header.value.len > 0) try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
+    }
+    if (chunked) return writer.writeAll("Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+    const declared = answer.content_length orelse answer.body.len;
+    try writer.print("Content-Length: {d}\r\nConnection: close\r\n\r\n", .{declared});
+}
 
 fn write_fat_head(client: i32) void {
     write_all(client, "HTTP/1.1 200 OK\r\nX-Fat: ");
@@ -193,7 +206,8 @@ fn write_chunked(client: i32, body: []const u8, complete: bool) void {
 }
 
 fn status_only(status: u16) []const u8 {
-    return if (status == 400) "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" else "";
+    assert(status == 400);
+    return "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 }
 
 fn reason(status: u16) []const u8 {
@@ -233,7 +247,8 @@ fn read_head(client: i32, buffer: []u8, stopping: *const std.atomic.Value(bool))
             if (waited >= read_timeout_ms) return null;
             continue;
         }
-        const got = linux.recvfrom(client, buffer[length..].ptr, buffer.len - length, 0, null, null);
+        const room = buffer[length..];
+        const got = linux.recvfrom(client, room.ptr, room.len, 0, null, null);
         if (linux.errno(got) != .SUCCESS or got == 0) return null;
         length += got;
         if (std.mem.indexOf(u8, buffer[0..length], "\r\n\r\n")) |end| return end + 4;
