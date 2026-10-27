@@ -321,6 +321,18 @@ test "ls shows a source path with no byte a terminal could act on, and JSON keep
     try testing.expectEqualStrings("/src/odd\x1b[2J\nname", source);
 }
 
+/// `store du <digest>`'s stored size of a tree.
+fn stored_bytes(digest_text: []const u8) !i64 {
+    var buffer: [80]u8 = undefined;
+    const args = [_][:0]const u8{
+        "--output", "json", "store", "du", term(&buffer, digest_text),
+    };
+    try testing.expectEqual(@as(u8, 0), try command(&args));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    return parsed.value.object.get("tree").?.object.get("stored_bytes").?.integer;
+}
+
 /// A stopped container "web-1" that ran the tree `digest` text; its upper layer is `/upper`.
 fn put_container(digest_text: []const u8) void {
     var view = sim_run.sample_view("web-1", 1000);
@@ -390,20 +402,8 @@ test "commit prints the new digest, records the root, and diff lists what change
         try testing.expect(std.mem.indexOf(u8, schemas.of("store-diff").?, key) != null);
     }
     // Deleting the large file: the child's stored size is smaller than the parent's by it.
-    const du_parent = [_][:0]const u8{
-        "--output", "json", "store", "du", term(&first, parent),
-    };
-    try testing.expectEqual(@as(u8, 0), try command(&du_parent));
-    parsed.deinit();
-    parsed = try parse_stdout();
-    const parent_stored = parsed.value.object.get("tree").?.object.get("stored_bytes").?.integer;
-    const du_child = [_][:0]const u8{
-        "--output", "json", "store", "du", term(&first, child),
-    };
-    try testing.expectEqual(@as(u8, 0), try command(&du_child));
-    parsed.deinit();
-    parsed = try parse_stdout();
-    const child_stored = parsed.value.object.get("tree").?.object.get("stored_bytes").?.integer;
+    const parent_stored = try stored_bytes(parent);
+    const child_stored = try stored_bytes(child);
     try testing.expect(child_stored < parent_stored);
 }
 
