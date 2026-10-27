@@ -320,3 +320,159 @@ test "ls shows a source path with no byte a terminal could act on, and JSON keep
     const source = parsed.value.object.get("roots").?.array.items[0].object.get("source").?.string;
     try testing.expectEqualStrings("/src/odd\x1b[2J\nname", source);
 }
+
+/// A stopped container "web-1" that ran the tree `digest` text; its upper layer is `/upper`.
+fn put_container(digest_text: []const u8) void {
+    var view = sim_run.sample_view("web-1", 1000);
+    view.tree = digest_text;
+    view.upper = "/upper";
+    sim_run.put_record(&sim, &view);
+    files.put_dir("/upper", 0o755);
+}
+
+test "commit prints the new digest, records the root, and diff lists what changed" {
+    // Goal: the demo's step 3 and 5 in miniature. Method: import, a container that added a
+    // file, changed one and deleted one; commit; the root lists its parent and container; diff
+    // lists those three paths; a tree without the deleted large file costs less.
+    start();
+    sim.world.now = 1_000;
+    var big: [5000]u8 = @splat('B');
+    files.put_file("/src/etc/big", 0o644, &big);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const parent = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(parent);
+    put_container(parent);
+    files.put_file("/upper/new", 0o644, "added\n");
+    files.put_dir("/upper/etc", 0o755);
+    files.put("/upper/etc/big", .char_device, 0o000, .{ 0, 0 }, "");
+    files.put_file("/upper/etc/passwd", 0o644, "root:x:0:0:changed\n");
+    sim.world.now = 5_000;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "commit", "web-1" }));
+    const child = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(child);
+    try testing.expect(!std.mem.eql(u8, parent, child));
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    // The root, with the container and the parent.
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    var parsed = try parse_stdout();
+    const listed = parsed.value.object.get("roots").?.array.items[0].object;
+    try testing.expectEqualStrings(child, listed.get("digest").?.string);
+    try testing.expectEqualStrings("web-1", listed.get("source").?.string);
+    try testing.expectEqualStrings(parent, listed.get("parent").?.string);
+    parsed.deinit();
+    // The diff, in text.
+    var first: [80]u8 = undefined;
+    var second: [80]u8 = undefined;
+    const args = [_][:0]const u8{ "store", "diff", term(&first, parent), term(&second, child) };
+    try testing.expectEqual(@as(u8, 0), try command(&args));
+    try testing.expectEqualStrings(
+        "D /etc/big\nM /etc/passwd  content\nA /new\n",
+        sim.stdout(),
+    );
+    // The diff, in JSON.
+    const json_args = [_][:0]const u8{
+        "--output", "json", "store", "diff", term(&first, parent), term(&second, child),
+    };
+    try testing.expectEqual(@as(u8, 0), try command(&json_args));
+    parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqualStrings("zbx.store.diff/1", object.get("schema").?.string);
+    try testing.expectEqualStrings(parent, object.get("from").?.string);
+    const changes = object.get("changes").?.array.items;
+    try testing.expectEqual(@as(usize, 3), changes.len);
+    try testing.expectEqualStrings("removed", changes[0].object.get("change").?.string);
+    try testing.expectEqualStrings("/etc/passwd", changes[1].object.get("path").?.string);
+    const attributes = changes[1].object.get("attributes").?.array.items;
+    try testing.expectEqualStrings("content", attributes[0].string);
+    try testing.expectEqual(@as(i64, 1), object.get("summary").?.object.get("added").?.integer);
+    for ([_][]const u8{ "schema", "from", "to", "changes", "summary" }) |key| {
+        try testing.expect(std.mem.indexOf(u8, schemas.of("store-diff").?, key) != null);
+    }
+    // Deleting the large file: the child's stored size is smaller than the parent's by it.
+    const du_parent = [_][:0]const u8{
+        "--output", "json", "store", "du", term(&first, parent),
+    };
+    try testing.expectEqual(@as(u8, 0), try command(&du_parent));
+    parsed.deinit();
+    parsed = try parse_stdout();
+    const parent_stored = parsed.value.object.get("tree").?.object.get("stored_bytes").?.integer;
+    const du_child = [_][:0]const u8{
+        "--output", "json", "store", "du", term(&first, child),
+    };
+    try testing.expectEqual(@as(u8, 0), try command(&du_child));
+    parsed.deinit();
+    parsed = try parse_stdout();
+    const child_stored = parsed.value.object.get("tree").?.object.get("stored_bytes").?.integer;
+    try testing.expect(child_stored < parent_stored);
+}
+
+test "commit --output json has the schema's keys, and an unchanged commit writes no root" {
+    // Goal: the machine-readable result and idempotence. Method: commit an empty upper layer.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const parent = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(parent);
+    put_container(parent);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "commit", "web-1" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    const schema = schemas.of("commit").?;
+    const required = [_][]const u8{
+        "schema", "digest",      "parent",    "container", "unchanged", "files",
+        "bytes",  "new_objects", "new_bytes", "new_trees", "deleted",
+    };
+    for (required) |key| {
+        try testing.expect(std.mem.indexOf(u8, schema, key) != null);
+        try testing.expect(object.get(key) != null);
+    }
+    try testing.expectEqualStrings("zbx.commit/1", object.get("schema").?.string);
+    try testing.expect(object.get("unchanged").?.bool);
+    try testing.expectEqualStrings(parent, object.get("digest").?.string);
+    try testing.expectEqual(@as(i64, 6), object.get("files").?.integer);
+    try testing.expectEqual(@as(i64, 0), object.get("new_objects").?.integer);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    const roots = try parse_stdout();
+    defer roots.deinit();
+    try testing.expectEqual(@as(usize, 1), roots.value.object.get("roots").?.array.items.len);
+}
+
+test "commit refuses what it can't commit with a coded line and leaves the store alone" {
+    // Goal: E0426 (a directory run), E0427 is in the goldens, and an unknown container is the
+    // lifecycle commands' own refusal. Method: one of each; stdout stays empty.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "commit", "nobody" }));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "nobody") != null);
+    sim_run.put_record(&sim, &sim_run.sample_view("web-1", 1000));
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "commit", "web-1" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0426") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    // A record whose upper layer has gone.
+    var view = sim_run.sample_view("web-2", 1000);
+    const text = "b3:0000000000000000000000000000000000000000000000000000000000000000";
+    view.tree = text;
+    view.upper = "/not-there";
+    sim_run.put_record(&sim, &view);
+    try testing.expect(try command(&.{ "commit", "web-2" }) != 0);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E04") != null);
+}
+
+test "diff of equal trees prints nothing, and usage errors are E0006" {
+    // Goal: no lines, exit 0 for equal trees; a missing operand is a usage error.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var first: [80]u8 = undefined;
+    const digest = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(digest);
+    const args = [_][:0]const u8{ "store", "diff", term(&first, digest), term(&first, digest) };
+    try testing.expectEqual(@as(u8, 0), try command(&args));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "diff", "b3:000000000000" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0006") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{"commit"}));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0006") != null);
+}
