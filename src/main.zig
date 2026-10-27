@@ -112,3 +112,8 @@ test {
     _ = @import("sim_bus.zig");
     _ = @import("fuzz_dbus.zig");
 }
+
+test {
+    _ = @import("registry/digest.zig");
+    _ = @import("registry/reference.zig");
+}

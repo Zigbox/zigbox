@@ -83,6 +83,7 @@ jobs:
           - store
           - commit
           - gc
+          - reference
           - parse_sysctl
           - parse_kernel
           - parse_controllers

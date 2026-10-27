@@ -480,6 +480,53 @@ pub const sim_fs_path_bytes_max: u32 = 192;
 pub const sim_fs_pool_bytes_max: u32 = 2 * 1024 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
+// Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
+// an external service, and what it sends is untrusted until its digest is checked.
+/// A whole reference as typed, and the parts of it (the registry of the OCI distribution spec is
+/// a DNS name of at most 253 bytes and a port; a repository at most 255).
+pub const reference_bytes_max: u32 = 1024;
+pub const reference_registry_bytes_max: u32 = 261;
+pub const reference_repository_bytes_max: u32 = 255;
+pub const reference_tag_bytes_max: u32 = 128;
+/// SHA-256 in an image: 32 bytes, "sha256:" and 64 hex digits.
+pub const oci_digest_bytes: u32 = 32;
+pub const oci_digest_hex_bytes: u32 = 64;
+pub const oci_digest_text_bytes: u32 = 71;
+/// The most a manifest or an index may weigh. The OCI distribution spec asks registries to stop
+/// at 4 MiB; real indexes are a few KiB (python's, with its attestations, about 10).
+pub const registry_manifest_bytes_max: u32 = 1024 * 1024;
+/// Entries of an index, and layers of an image. An overlay mount stops at 128 lower layers.
+pub const registry_index_entries_max: u32 = 256;
+pub const registry_layers_max: u32 = 128;
+/// The memory the JSON of a manifest is parsed in (slices of the body are not copied).
+pub const registry_json_arena_bytes: u32 = 512 * 1024;
+/// A token (a JWT is about 2 KiB) and the response it came in.
+pub const registry_token_bytes_max: u32 = 16 * 1024;
+pub const registry_token_response_bytes_max: u32 = 32 * 1024;
+/// A challenge, a request path with its query, a redirect target, and one response header.
+pub const registry_challenge_bytes_max: u32 = 1024;
+pub const registry_url_bytes_max: u32 = 2048;
+pub const registry_header_bytes_max: u32 = 128;
+/// The head of a response (status line and headers) and of a request.
+pub const registry_head_bytes_max: u32 = 16 * 1024;
+pub const registry_request_head_bytes_max: u32 = 24 * 1024;
+/// Redirects followed for one request; a blob normally has one (to a CDN).
+pub const registry_redirects_max: u32 = 4;
+/// How long a connect, a handshake, or any wait for the next bytes may take, and how long all of
+/// one small request (a token, a manifest) may take. A blob's total is not bounded: it is
+/// bounded by progress (each wait is `net_idle_timeout_ms`).
+pub const net_idle_timeout_ms: u32 = 30_000;
+pub const net_request_timeout_ms: u32 = 120_000;
+/// The platforms an image offers that a refusal lists; the rest are counted.
+pub const registry_platforms_listed_max: u32 = 8;
+/// A proxy URL from the environment, and a NO_PROXY list.
+pub const net_proxy_url_bytes_max: u32 = 512;
+pub const net_no_proxy_bytes_max: u32 = 2048;
+/// The CA certificates of the system, parsed once per process: the room for the bundle.
+pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
+/// How many hosts one name may resolve to that are tried.
+pub const net_addresses_max: u32 = 8;
+
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;
@@ -715,6 +762,23 @@ comptime {
     assert(store_warnings_shown_max > 0);
     assert(sim_fs_path_bytes_max > 100); // A store path: "/s/objects/ab/" and 62 digits.
     assert(sim_fs_handles_max >= 4);
+
+    assert(oci_digest_hex_bytes == oci_digest_bytes * 2);
+    assert(oci_digest_text_bytes == "sha256:".len + oci_digest_hex_bytes);
+    assert(reference_registry_bytes_max + 1 + reference_repository_bytes_max +
+        1 + reference_tag_bytes_max + 1 + oci_digest_text_bytes <= reference_bytes_max);
+    assert(reference_bytes_max <= arg_bytes_max);
+    assert(registry_token_bytes_max < registry_token_response_bytes_max);
+    assert(registry_challenge_bytes_max + 1024 < registry_head_bytes_max);
+    assert(registry_url_bytes_max < registry_head_bytes_max);
+    // A request head holds the longest path, a token as a bearer header, and the fixed headers.
+    assert(registry_url_bytes_max + registry_token_bytes_max + 1024 <=
+        registry_request_head_bytes_max);
+    assert(registry_manifest_bytes_max <= 4 * 1024 * 1024);
+    assert(registry_json_arena_bytes < registry_manifest_bytes_max);
+    assert(registry_redirects_max > 0);
+    assert(net_idle_timeout_ms < net_request_timeout_ms);
+    assert(net_addresses_max > 0);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

@@ -57,6 +57,8 @@ const shipped_files = [_][]const u8{
     "src/parse.zig",
     "src/redact.zig",
     "src/schemas.zig",
+    "src/registry/digest.zig",
+    "src/registry/reference.zig",
     "src/runtime/bpf.zig",
     "src/runtime/capabilities.zig",
     "src/runtime/child.zig",
