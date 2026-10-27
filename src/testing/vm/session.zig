@@ -31,6 +31,9 @@ pub const Files = struct {
     rootfs: []const u8 = "",
     /// An older `zbx` for the upgrade test, served at /zbx-old; empty for none.
     old_binary: []const u8 = "",
+    /// A CA certificate bundle for the guest to trust, served at /ca.crt; empty for none. A
+    /// development aid for a host whose network inspects TLS (the guest's `zbx` then says E0504).
+    ca_file: []const u8 = "",
 };
 
 pub const Session = struct {
@@ -82,6 +85,7 @@ pub const Session = struct {
         session.server.add_route("/vendor-data", "");
         session.server.add_route("/zbx", files.binary);
         if (files.old_binary.len > 0) session.server.add_route("/zbx-old", files.old_binary);
+        if (files.ca_file.len > 0) session.server.add_route("/ca.crt", files.ca_file);
         if (files.rootfs.len > 0) session.server.add_route("/rootfs.tar.gz", files.rootfs);
         const argv = try qemu_argv(arena, overlay, accel, session.server.port);
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{

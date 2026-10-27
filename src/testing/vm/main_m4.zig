@@ -64,16 +64,23 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     if (!options.reuse_overlay) try image.make_overlay(init, base, overlay);
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
+    const ca_file: []const u8 = if (options.ca_file.len == 0) "" else try Io.Dir.cwd().readFileAlloc(
+        io,
+        options.ca_file,
+        arena,
+        .limited(limits.http_body_bytes_max),
+    );
     var session: Session = undefined;
     try session.start(init, out, overlay, accel, .{
         .user_data = @import("cloud_init.zig").user_data,
         .binary = binary,
+        .ca_file = ca_file,
     });
     defer session.deinit();
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try H.install_binary(&session, out, &timer);
-    try write_wrapper(&session, out);
+    try write_wrapper(&session, out, ca_file.len > 0);
     try step_pull(&session, out, &timer);
     try step_run_alpine(&session, out, &timer);
     try step_run_python(&session, out, &timer);
@@ -95,18 +102,33 @@ const wrapper =
     "export ZBX_REGISTRY_MIRRORS=mirror.gcr.io\n" ++
     "exec /home/demo/zbx \"$@\"\n";
 
+const wrapper_with_ca =
+    "#!/bin/sh\n" ++
+    "cd " ++ project ++ " || exit 125\n" ++
+    "export ZBX_REGISTRY_MIRRORS=mirror.gcr.io SSL_CERT_FILE=/home/demo/ca.crt\n" ++
+    "exec /home/demo/zbx \"$@\"\n";
+
 fn fail_step(out: *Io.Writer, step: []const u8, what: []const u8, err: anyerror) anyerror {
     try out.print("demo-m4: {s} FAILED: {s} ({s})\n", .{ step, what, @errorName(err) });
     return err;
 }
 
-fn write_wrapper(session: *Session, out: *Io.Writer) !void {
+fn write_wrapper(session: *Session, out: *Io.Writer, with_ca: bool) !void {
     const made = try session.run(
         "runuser -u demo -- mkdir -p " ++ project,
         limits.command_timeout_kvm_s,
     );
     if (made.status != 0) return error.PrepareFailed;
-    try H.put_file(session, "/home/demo/z", wrapper);
+    try H.put_file(session, "/home/demo/z", if (with_ca) wrapper_with_ca else wrapper);
+    if (with_ca) {
+        const fetch = try std.fmt.allocPrint(
+            session.scratch_allocator(),
+            "curl -fsS -o /home/demo/ca.crt http://10.0.2.2:{d}/ca.crt",
+            .{session.server.port},
+        );
+        const fetched = try session.run(fetch, limits.command_timeout_kvm_s);
+        if (fetched.status != 0) return error.PrepareFailed;
+    }
     const owned = try session.run(
         "chown demo:demo /home/demo/z && ls -l /home/demo/z",
         limits.command_timeout_kvm_s,
@@ -176,8 +198,12 @@ fn step_lock_refusal(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
         "grep -A4 'alpine:3.20' " ++ project ++ "/zbx.lock | grep -o 'b3:[0-9a-f]*'",
         limits.command_timeout_kvm_s,
     );
-    const tree = std.mem.trim(u8, read.output, " \r\n");
-    if (tree.len != 67) return error.LockTreeNotFound;
+    const found = std.mem.trim(u8, read.output, " \r\n");
+    if (found.len != 67) return error.LockTreeNotFound;
+    // The session's buffer is reused by the next command: keep the digests here.
+    var tree_storage: [67]u8 = undefined;
+    @memcpy(&tree_storage, found);
+    const tree: []const u8 = &tree_storage;
     const wrong = "b3:00000000";
     const edit = try std.fmt.allocPrint(
         session.scratch_allocator(),
@@ -190,11 +216,8 @@ fn step_lock_refusal(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
     const command = z ++ " run alpine:3.20 -- true";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
-    const wrong_tree = try std.fmt.allocPrint(
-        session.scratch_allocator(),
-        "{s}{s}",
-        .{ wrong, tree[wrong.len..] },
-    );
+    var wrong_storage: [67]u8 = undefined;
+    const wrong_tree = try std.fmt.bufPrint(&wrong_storage, "{s}{s}", .{ wrong, tree[wrong.len..] });
     const digests = [_][]const u8{ tree, wrong_tree };
     checks_m4.check_refusal(result.streams, result.status, "ZBX-E0519", &digests) catch |err| {
         return fail_step(out, "SPEC 5", "expected E0519 naming both trees, exit 125", err);

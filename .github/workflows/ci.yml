@@ -86,6 +86,7 @@ jobs:
           - reference
           - registry
           - layer
+          - lock
           - parse_sysctl
           - parse_kernel
           - parse_controllers
