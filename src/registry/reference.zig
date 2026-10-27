@@ -104,20 +104,7 @@ pub const Reference = struct {
     /// Where to connect: Docker Hub at its API host, a loopback registry in plain HTTP, any
     /// other over HTTPS. The port is the one in the reference, else the scheme's.
     pub fn endpoint(reference: *const Reference) Endpoint {
-        const name = reference.registry();
-        if (std.mem.eql(u8, name, docker_hub)) {
-            return .{ .scheme = .https, .host = docker_hub_endpoint, .port = 443 };
-        }
-        var host = name;
-        var port: ?u16 = null;
-        if (std.mem.lastIndexOfScalar(u8, name, ':')) |colon| {
-            host = name[0..colon];
-            port = std.fmt.parseInt(u16, name[colon + 1 ..], 10) catch unreachable; // Validated.
-        }
-        const scheme: Scheme = if (is_loopback(host)) .http else .https;
-        const default_port: u16 = if (scheme == .http) 80 else 443;
-        assert(host.len > 0);
-        return .{ .scheme = scheme, .host = host, .port = port orelse default_port };
+        return endpoint_of(reference.registry());
     }
 
     /// The canonical text: registry, repository, tag if any, digest if any. Parsing it gives
@@ -141,6 +128,25 @@ pub const Reference = struct {
 pub const ManifestName = [constants.oci_digest_text_bytes]u8;
 /// The room `format` needs.
 pub const Formatted = [constants.reference_bytes_max]u8;
+
+/// Where to connect for a registry named `name` (valid, lowercase): see `Reference.endpoint`.
+pub fn endpoint_of(name: []const u8) Endpoint {
+    assert(name.len > 0);
+    assert(name.len <= constants.reference_registry_bytes_max);
+    if (std.mem.eql(u8, name, docker_hub)) {
+        return .{ .scheme = .https, .host = docker_hub_endpoint, .port = 443 };
+    }
+    var host = name;
+    var port: ?u16 = null;
+    if (std.mem.lastIndexOfScalar(u8, name, ':')) |colon| {
+        host = name[0..colon];
+        port = std.fmt.parseInt(u16, name[colon + 1 ..], 10) catch unreachable; // Validated.
+    }
+    const scheme: Scheme = if (is_loopback(host)) .http else .https;
+    const default_port: u16 = if (scheme == .http) 80 else 443;
+    assert(host.len > 0);
+    return .{ .scheme = scheme, .host = host, .port = port orelse default_port };
+}
 
 /// True for the hosts a registry may be spoken to over plain HTTP: `localhost` and 127.x.y.z.
 pub fn is_loopback(host: []const u8) bool {
@@ -279,7 +285,7 @@ fn names_registry(first: []const u8) bool {
 
 /// `host` or `host:port`, lowercase. A host is dot-separated labels of letters, digits and
 /// inner hyphens; IPv6 literals are refused.
-fn registry_valid(name: []const u8) Error!void {
+pub fn registry_valid(name: []const u8) Error!void {
     assert(name.len <= constants.reference_registry_bytes_max);
     assert(std.mem.indexOfScalar(u8, name, '/') == null);
     if (name.len == 0) return error.BadRegistry;

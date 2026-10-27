@@ -999,6 +999,15 @@ fn prepare_cut(sim: *HostSim) void {
 
 const pull = [_][:0]const u8{ "pull", "--resolve-only" };
 
+const bad_mirror_environment = [_]@import("host_sim.zig").EnvironmentVariable{
+    .{ .name = "ZBX_REGISTRY_MIRRORS", .value = "mirror.gcr.io, bad host" },
+};
+
+fn prepare_bad_mirror(sim: *HostSim) void {
+    prepare_registry(sim);
+    sim.environment_variables = &bad_mirror_environment;
+}
+
 fn pull_case(
     comptime code: codes.Code,
     comptime reference: [:0]const u8,
@@ -1027,6 +1036,7 @@ const registry_cases = [_]Case{
     pull_case(.E0511, test_registry.TestRegistry.reference(.badsum), prepare_registry, 3),
     pull_case(.E0512, test_registry.TestRegistry.reference(.huge), prepare_registry, 3),
     pull_case(.E0513, test_registry.TestRegistry.reference(.cut), prepare_cut, 3),
+    pull_case(.E0514, test_registry.TestRegistry.reference(.open), prepare_bad_mirror, 1),
 };
 
 const Style = enum { default, verbose, json };

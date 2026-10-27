@@ -16,6 +16,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const auth = @import("auth.zig");
 const constants = @import("../constants.zig");
+const codes = @import("../diag/codes.zig");
 const diagnose = @import("diagnose.zig");
 const digest_mod = @import("digest.zig");
 const manifest = @import("manifest.zig");
@@ -39,7 +40,7 @@ pub const Workspace = struct {
 /// The failure is in the `Diag`.
 pub const Error = error{Failed};
 
-const Origin = struct {
+pub const Origin = struct {
     scheme: net.Scheme,
     host: []const u8,
     port: u16,
@@ -60,6 +61,10 @@ pub const Client = struct {
     architecture: ?manifest.Architecture,
     machine: []const u8,
     token_len: u32,
+    /// The mirrors for docker.io, comma separated (`ZBX_REGISTRY_MIRRORS`); empty for none.
+    mirrors: []const u8,
+    /// Which candidate (see `Candidates`) answered the last resolve; blobs ask it first.
+    winner: u32,
 
     pub fn init(
         wire: net.Net,
@@ -74,6 +79,8 @@ pub const Client = struct {
             .architecture = manifest.architecture_of_machine(machine),
             .machine = machine,
             .token_len = 0,
+            .mirrors = "",
+            .winner = 0,
         };
     }
 
@@ -84,6 +91,66 @@ pub const Client = struct {
     }
 };
 
+/// The places an image may be asked for, in order: for a docker.io reference the mirrors, then
+/// Docker Hub; for any other registry only itself.
+pub const Candidates = struct {
+    origins: [constants.registry_mirrors_max + 1]Origin,
+    count: u32,
+    names: [constants.registry_mirrors_max][constants.reference_registry_bytes_max]u8,
+};
+
+/// Reads the mirror setting. A mirror that is not `host` or `host:port` is a refusal naming it
+/// (`E0514`), also for a reference that would not use it: a wrong setting is found at once.
+pub fn candidates(
+    client: *const Client,
+    reference: *const Reference,
+    list: *Candidates,
+    diag: *Diag,
+) Error!void {
+    assert(client.mirrors.len <= constants.registry_mirrors_bytes_max);
+    list.count = 0;
+    var mirrors_used: u32 = 0;
+    var entries = std.mem.splitScalar(u8, client.mirrors, ',');
+    while (entries.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t");
+        if (entry.len == 0) continue;
+        const usable = entry.len <= list.names[0].len and mirrors_used < list.names.len;
+        if (!usable) return bad_mirror(diag, entry);
+        const lowered = std.ascii.lowerString(&list.names[mirrors_used], entry);
+        reference_mod.registry_valid(lowered) catch return bad_mirror(diag, entry);
+        const endpoint = reference_mod.endpoint_of(lowered);
+        list.origins[mirrors_used] = .{
+            .scheme = endpoint.scheme,
+            .host = endpoint.host,
+            .port = endpoint.port,
+        };
+        mirrors_used += 1;
+    }
+    const own = reference.endpoint();
+    const is_hub = std.mem.eql(u8, reference.registry(), reference_mod.docker_hub);
+    // Mirrors are for Docker Hub only; Docker Hub itself is always the last candidate.
+    const used: u32 = if (is_hub) mirrors_used else 0;
+    list.origins[used] = .{ .scheme = own.scheme, .host = own.host, .port = own.port };
+    list.count = used + 1;
+    assert(list.count >= 1);
+    assert(list.count <= list.origins.len);
+}
+
+fn bad_mirror(diag: *Diag, entry: []const u8) Error {
+    diagnose.bad_mirror(diag, entry);
+    return error.Failed;
+}
+
+/// A refusal that another candidate might not make: the mirror was down, did not have the image,
+/// or the like. What a mirror must not be able to do is change the answer, so a wrong digest, a
+/// document that cannot be used, and a platform that is missing end the resolve.
+fn falls_through(code: codes.Code) bool {
+    return switch (code) {
+        .E0502, .E0503, .E0504, .E0505, .E0506, .E0507, .E0508, .E0513 => true,
+        else => false,
+    };
+}
+
 /// Resolves `reference` to the image manifest for this machine's platform.
 pub fn resolve(
     client: *Client,
@@ -93,21 +160,33 @@ pub fn resolve(
 ) Error!void {
     assert(diag.code == null);
     assert(client.workspace.body.len == constants.registry_manifest_bytes_max);
-    client.token_len = 0; // A token is for one repository: never carried to the next resolve.
+    var list: Candidates = undefined;
+    try candidates(client, reference, &list, diag);
     var shown_storage: reference_mod.Formatted = undefined;
     const shown = reference.format(&shown_storage);
-    resolve_inner(client, reference, resolved, diag) catch |err| {
-        diag.while_("resolving {s}", .{shown});
-        return err;
-    };
-    assert(resolved.layer_count <= constants.registry_layers_max);
-    assert(resolved.manifest_size > 0);
-    assert(resolved.config_size > 0);
+    for (list.origins[0..list.count], 0..) |origin, index| {
+        client.token_len = 0; // A token is for one repository, one registry.
+        if (index > 0) diag.reset(); // The earlier candidate's refusal was not the last word.
+        const outcome = resolve_inner(client, reference, origin, resolved, diag);
+        if (outcome) |_| {
+            client.winner = @intCast(index);
+            assert(resolved.layer_count <= constants.registry_layers_max);
+            assert(resolved.manifest_size > 0);
+            return;
+        } else |err| {
+            const last = index + 1 == list.count;
+            if (!last and falls_through(diag.code.?)) continue;
+            diag.while_("resolving {s}", .{shown});
+            return err;
+        }
+    }
+    unreachable; // The last candidate returns.
 }
 
 fn resolve_inner(
     client: *Client,
     reference: *const Reference,
+    origin: Origin,
     resolved: *manifest.Resolved,
     diag: *Diag,
 ) Error!void {
@@ -117,12 +196,6 @@ fn resolve_inner(
         const empty: manifest.Offered = .{};
         diagnose.no_platform(diag, null, client.machine, &empty);
         return error.Failed;
-    };
-    const endpoint = reference.endpoint();
-    const origin: Origin = .{
-        .scheme = endpoint.scheme,
-        .host = endpoint.host,
-        .port = endpoint.port,
     };
     var name_storage: reference_mod.ManifestName = undefined;
     const name = reference.manifest_name(&name_storage);

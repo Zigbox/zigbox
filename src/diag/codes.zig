@@ -111,6 +111,7 @@ pub const Code = enum(u8) {
     E0511,
     E0512,
     E0513,
+    E0514,
     E0701,
     E0702,
     E0703,
@@ -1534,6 +1535,26 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0514,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a registry mirror",
+        .explanation =
+        \\ZBX_REGISTRY_MIRRORS names registries to try before Docker Hub, as a
+        \\comma-separated list of host or host:port, for example
+        \\
+        \\    ZBX_REGISTRY_MIRRORS=mirror.gcr.io
+        \\
+        \\At most four are read, each a DNS name, with no scheme and no path. An
+        \\entry that is anything else is refused at once, also for a pull that
+        \\would not use it, so a typo is found before it matters.
+        \\
+        \\A mirror only changes where bytes come from: every answer is checked by
+        \\digest, so a mirror can make a pull fail but never change what is
+        \\pulled. The lock file records the reference as written, not the mirror.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -1751,7 +1772,7 @@ pub fn can_end_run(code: Code) bool {
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
-        .E0508, .E0509, .E0510, .E0511, .E0512, .E0513 => false,
+        .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         else => true,
     };
 }

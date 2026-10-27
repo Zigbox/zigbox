@@ -49,6 +49,8 @@ pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) E
     };
     var machine = uname.machine;
     var client = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
+    const mirrors = host.environment("ZBX_REGISTRY_MIRRORS", constants.registry_mirrors_bytes_max);
+    client.mirrors = mirrors orelse "";
     client_mod.resolve(&client, &reference, &workspace.resolved, diag) catch return error.Failed;
     assert(diag.code == null);
     assert(workspace.resolved.layer_count <= constants.registry_layers_max);

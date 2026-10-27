@@ -528,6 +528,9 @@ pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
 pub const pull_output_bytes_max: u32 = 32 * 1024;
 /// Calls one read or write loop makes before it gives up (each wait inside is time bounded).
 pub const net_io_calls_max: u32 = 1 << 20;
+/// Mirrors for docker.io that a setting may name, and the longest setting.
+pub const registry_mirrors_max: u32 = 4;
+pub const registry_mirrors_bytes_max: u32 = 1024;
 /// How many hosts one name may resolve to that are tried.
 pub const net_addresses_max: u32 = 8;
 

@@ -80,6 +80,26 @@ pub fn bad_reference(diag: *Diag, text: []const u8, err: reference_mod.Error) vo
     assert(diag.code.? == .E0501);
 }
 
+/// ZBX-E0514: an entry of `ZBX_REGISTRY_MIRRORS` is not a host or host:port.
+pub fn bad_mirror(diag: *Diag, entry: []const u8) void {
+    assert(diag.code == null);
+    var storage: [echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, entry);
+    diag.raise(.E0514);
+    diag.while_("reading ZBX_REGISTRY_MIRRORS", .{});
+    diag.cause(
+        "'{s}' is not a registry host (a DNS name, optionally with :port, no scheme or path), " ++
+            "or the list has more than {d} entries",
+        .{ echo, constants.registry_mirrors_max },
+    );
+    diag.context("mirror", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "write the list as host[:port],host[:port]:",
+        .command = "ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20",
+    });
+    assert(diag.code.? == .E0514);
+}
+
 /// What the client was doing, for the causes: the host and port of the failed request.
 pub const Target = struct {
     host: []const u8,

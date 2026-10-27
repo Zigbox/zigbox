@@ -1,0 +1,8 @@
+error[ZBX-E0514]: not a registry mirror
+  while  reading ZBX_REGISTRY_MIRRORS
+  cause  'bad host' is not a registry host (a DNS name, optionally with :port,
+         no scheme or path), or the list has more than 4 entries
+  mirror bad host
+  fix    write the list as host[:port],host[:port]:   ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20
+  more   zbx explain E0514
+  docs   https://zigbox.github.io/zigbox/errors/E0514.html

@@ -334,3 +334,121 @@ test "a registry elsewhere cannot send the client to a service on this machine" 
     try env.expect_code(.E0507);
     try testing.expectEqual(@as(u32, 1), env.sim.requests); // The 401 only.
 }
+
+/// A world with a mirror and Docker Hub in it: the mirror serves `mirror_scenario` where the
+/// reference says `open`, Docker Hub serves it as written. Both are the test registry.
+const MirrorWorld = struct {
+    registry: test_registry.TestRegistry,
+    sim: net_sim.SimNet,
+    diag: Diag,
+    resolved: manifest.Resolved,
+    mirror_scenario: Scenario,
+    target: [160]u8,
+
+    const mirror_host = "mirror.test";
+    const hub_host = "registry-1.docker.io";
+    const reference = "docker.io/fixture/open:3.20";
+
+    fn setup(world: *MirrorWorld, seed: u64, mirror_scenario: Scenario) void {
+        world.registry.init();
+        world.sim.init(seed, .{ .context = world, .answer = answer });
+        world.diag.reset();
+        world.resolved = undefined;
+        world.mirror_scenario = mirror_scenario;
+    }
+
+    fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Served) void {
+        const world: *MirrorWorld = @ptrCast(@alignCast(context));
+        const inner = world.registry.responder();
+        if (!std.mem.eql(u8, request.host, mirror_host)) {
+            return inner.answer(inner.context, request, served);
+        }
+        const name = "/fixture/open/";
+        const at = std.mem.indexOf(u8, request.target, name) orelse
+            return inner.answer(inner.context, request, served);
+        const swapped = std.fmt.bufPrint(&world.target, "{s}/fixture/{s}/{s}", .{
+            request.target[0..at],
+            @tagName(world.mirror_scenario),
+            request.target[at + name.len ..],
+        }) catch unreachable; // The targets of the tests are short.
+        var changed = request.*;
+        changed.target = swapped;
+        inner.answer(inner.context, &changed, served);
+    }
+
+    fn resolve(world: *MirrorWorld, mirrors: []const u8) client_mod.Error!client_mod.Client {
+        var parsed: reference_mod.Reference = undefined;
+        reference_mod.parse(reference, &parsed) catch unreachable; // Good text.
+        var subject = client_mod.Client.init(world.sim.interface(), &workspace, "x86_64");
+        subject.mirrors = mirrors;
+        try client_mod.resolve(&subject, &parsed, &world.resolved, &world.diag);
+        return subject;
+    }
+
+    /// How many requests went to `host`.
+    fn requests_to(world: *const MirrorWorld, host: []const u8) u32 {
+        var count: u32 = 0;
+        var index: u32 = 0;
+        while (world.sim.logged(index)) |entry| : (index += 1) {
+            if (std.mem.eql(u8, entry.host_text(), host)) count += 1;
+        }
+        return count;
+    }
+};
+
+test "a mirror that answers is the only one asked, and its answer is the image" {
+    // Goal: with a mirror listed the registry is never touched; the digest is the fixture's.
+    var world: MirrorWorld = undefined;
+    world.setup(40, .open);
+    const subject = try world.resolve(" mirror.test ,");
+    try testing.expectEqual(@as(u32, 0), subject.winner);
+    try testing.expectEqual(@as(u32, 2), world.requests_to(MirrorWorld.mirror_host));
+    try testing.expectEqual(@as(u32, 0), world.requests_to(MirrorWorld.hub_host));
+    const actual = world.resolved.manifest_digest.text();
+    try testing.expectEqualStrings(&world.registry.fixture.oci.amd64.digest, &actual);
+}
+
+test "a mirror that is down falls back to Docker Hub, and the answer is the same" {
+    // Goal: the first request fails on the wire; the second candidate gives the image and the
+    // earlier refusal leaves no mark.
+    var world: MirrorWorld = undefined;
+    world.setup(41, .open);
+    world.sim.faults.fail_request = 0;
+    const subject = try world.resolve("mirror.test");
+    try testing.expectEqual(@as(u32, 1), subject.winner);
+    try testing.expectEqual(@as(?codes.Code, null), world.diag.code);
+    try testing.expectEqual(@as(u32, 1), world.requests_to(MirrorWorld.mirror_host));
+    try testing.expectEqual(@as(u32, 2), world.requests_to(MirrorWorld.hub_host));
+    const actual = world.resolved.manifest_digest.text();
+    try testing.expectEqualStrings(&world.registry.fixture.oci.amd64.digest, &actual);
+}
+
+test "a mirror that serves a wrong digest is refused and Docker Hub is not asked" {
+    // Goal: a mirror can make a pull fail, never change what is pulled: E0511, no fall-through.
+    var world: MirrorWorld = undefined;
+    world.setup(42, .badsum);
+    try testing.expectError(error.Failed, world.resolve("mirror.test"));
+    try testing.expectEqual(@as(?codes.Code, .E0511), world.diag.code);
+    try testing.expectEqual(@as(u32, 0), world.requests_to(MirrorWorld.hub_host));
+}
+
+test "a mirror list that is not hosts is refused, and a mirror is for Docker Hub only" {
+    // Goal: E0514 names the entry; another registry's pull ignores a good list.
+    var world: MirrorWorld = undefined;
+    world.setup(43, .open);
+    try testing.expectError(error.Failed, world.resolve("mirror.test,bad host"));
+    try testing.expectEqual(@as(?codes.Code, .E0514), world.diag.code);
+    try testing.expect(std.mem.indexOf(u8, world.diag.last_cause().?, "bad host") != null);
+    try testing.expectEqual(@as(u32, 0), world.sim.requests);
+
+    var env: Env = undefined;
+    env.setup(44);
+    var parsed: reference_mod.Reference = undefined;
+    const text = test_registry.TestRegistry.reference(.open);
+    reference_mod.parse(text, &parsed) catch unreachable; // Good text.
+    var subject = client_mod.Client.init(env.sim.interface(), &workspace, "x86_64");
+    subject.mirrors = "mirror.test";
+    try client_mod.resolve(&subject, &parsed, &env.resolved, &env.diag);
+    try testing.expectEqual(@as(u32, 0), subject.winner);
+    try testing.expectEqualStrings("registry.test", env.sim.logged(0).?.host_text());
+}
