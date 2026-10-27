@@ -28,6 +28,7 @@ const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const generation = @import("generation.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 const object = @import("object.zig");
 
 const Digest = digest_mod.Digest;
@@ -66,6 +67,9 @@ pub const Error = error{
     /// Every chunk was accepted but together they are not the content (the chunk hashes were a
     /// lie); the chunks are discarded.
     ContentMismatch,
+    /// The store lock is held by a gc or a restore (`store.lock_holder` says which) for longer
+    /// than `store.lock_wait_ms`. Nothing was changed; try again.
+    Busy,
     StoreFailed,
 };
 
@@ -77,6 +81,19 @@ fn fail(fs: fs_mod.Fs, failure: *Failure, err: anyerror) Error {
     assert(@intFromPtr(failure) != 0);
     failure.* = .{ .err = @errorCast(err), .errno = fs.last_errno() };
     return error.StoreFailed;
+}
+
+/// The shared store lock for the length of one call. A caller that records the object in a tree
+/// or a root afterwards holds the lock itself (`lock.hold`) from the first chunk to the record,
+/// or a gc can move the finished object away in between.
+fn hold(store: *Store, failure: *Failure) Error!void {
+    lock.hold(store, .shared, "put_chunk") catch |err| switch (err) {
+        error.Busy => return error.Busy,
+        error.Failed => {
+            failure.* = .{ .err = store.lock_error, .errno = store.lock_errno };
+            return error.StoreFailed;
+        },
+    };
 }
 
 fn check_wanted(store: *const Store, wanted: *const Wanted) Error!void {
@@ -139,6 +156,8 @@ pub fn put_chunk(
     assert(io.len >= 4096);
     assert(@intFromPtr(failure) != 0);
     try check_wanted(store, wanted);
+    try hold(store, failure);
+    defer lock.release(store);
     if (index >= wanted.hashes.len) return error.IndexOutOfRange;
     if (bytes.len != chunk_length(store, wanted.size, index)) return error.WrongLength;
     if (!Digest.of(bytes).eql(wanted.hashes[index])) return error.HashMismatch;
@@ -166,6 +185,8 @@ pub fn finish(store: *Store, io: []u8, wanted: *const Wanted, failure: *Failure)
     assert(io.len >= 4096);
     assert(@intFromPtr(failure) != 0);
     try check_wanted(store, wanted);
+    try hold(store, failure);
+    defer lock.release(store);
     var final: PathBuf = undefined;
     if (try exists(store, store.object_path(&final, wanted.id))) {
         const total: u32 = @intCast(wanted.hashes.len);

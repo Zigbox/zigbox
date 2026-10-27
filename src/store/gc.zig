@@ -37,6 +37,7 @@ const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const generation = @import("generation.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 const object = @import("object.zig");
 const remove = @import("remove.zig");
 const roots = @import("roots.zig");
@@ -112,6 +113,8 @@ pub const Failure = union(enum) {
     changed,
     /// The trash has no metadata zbx can read.
     damaged_trash,
+    /// The store lock is held by someone else; the string says what was being done.
+    busy: []const u8,
 };
 
 pub const Error = error{Failed};
@@ -674,6 +677,25 @@ pub const Applied = struct {
     fresh: Plan,
 };
 
+/// The exclusive store lock for an apply or a restore; `Failed` with `failure` set if the lock
+/// is held or can not be used.
+fn hold_exclusive(store: *Store, failure: *Failure, operation: []const u8) error{Failed}!void {
+    assert(store.lock_depth == 0); // Not inside another hold: a shared one can not be raised.
+    assert(operation.len > 0);
+    const who = if (std.mem.startsWith(u8, operation, "applying")) "gc" else "restore";
+    lock.hold(store, .exclusive, who) catch |err| {
+        failure.* = switch (err) {
+            error.Busy => .{ .busy = operation },
+            error.Failed => .{ .io = .{
+                .err = store.lock_error,
+                .errno = store.lock_errno,
+                .step = "taking the store lock",
+            } },
+        };
+        return error.Failed;
+    };
+}
+
 pub const ApplyError = error{ Failed, Stale };
 
 /// Applies the plan whose hash is `expected`: makes the plan again, and if it hashes the same
@@ -691,6 +713,8 @@ pub fn apply(
     assert(live.len <= constants.store_roots_max);
     assert(expected.bytes.len == constants.store_digest_bytes);
     result.* = std.mem.zeroes(Applied);
+    try hold_exclusive(store, failure, "applying the gc plan");
+    defer lock.release(store);
     var run = init_run(store, ws, arena, live, failure);
     const now = generation.read(store) catch |err| return run.io("reading the generation", err);
     try reach(&run);
@@ -971,6 +995,8 @@ pub fn restore(
     assert(gc.len == constants.store_gc_id_hex_bytes);
     assert(arena.len >= arena_bytes);
     result.* = std.mem.zeroes(Restored);
+    try hold_exclusive(store, failure, "restoring a trash");
+    defer lock.release(store);
     var run = init_run(store, ws, arena, &.{}, failure);
     var directory_storage: PathBuf = undefined;
     const directory = trash_directory(store, &directory_storage, gc);

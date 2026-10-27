@@ -460,6 +460,12 @@ pub const store_io_retries_max: u32 = 16;
 pub const store_trash_seconds: u64 = 7 * 24 * 60 * 60;
 /// A gc id is this many hex digits of the plan hash it ran with.
 pub const store_gc_id_hex_bytes: u32 = 12;
+/// The most bytes a store lock's holder record takes: "<pid> <command>", padded with NUL.
+pub const store_lock_holder_bytes: u32 = 64;
+/// How long a command waits for the store lock before it gives up (`Busy`), and how long it
+/// sleeps between two tries. The wait is bounded: a store is never waited on for ever.
+pub const store_lock_wait_ms: u32 = 10_000;
+pub const store_lock_retry_ms: u32 = 20;
 /// `verify` reports this many damaged things in full (and counts the rest), and for each names at
 /// most `store_verify_paths_max` of the paths that reach it.
 pub const store_verify_damaged_max: u32 = 256;

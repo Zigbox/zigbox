@@ -14,6 +14,7 @@ const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const digest_mod = @import("digest.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 
 const Digest = digest_mod.Digest;
 
@@ -705,6 +706,57 @@ pub fn plan_stale(diag: *Diag, given: Digest, fresh: Digest) void {
     );
 }
 
+/// ZBX-E0436: the store lock is held by someone else. `holder` is the record the holder wrote
+/// (`<pid> <command>`), or empty when it holds the lock shared or the record is not known.
+pub fn store_busy(diag: *Diag, operation: []const u8, holder: []const u8) void {
+    assert(diag.code == null);
+    assert(operation.len > 0);
+    diag.raise(.E0436);
+    diag.while_("{s}", .{operation});
+    if (holder.len > 0) {
+        const space = std.mem.indexOfScalar(u8, holder, ' ') orelse holder.len;
+        const pid = holder[0..space];
+        const word = if (space < holder.len) holder[space + 1 ..] else "a command";
+        diag.cause("'zbx store {s}' (process {s}) holds the store lock; nothing was changed", .{
+            word,
+            pid,
+        });
+        diag.context("holder", "{s}", .{holder});
+    } else {
+        diag.cause(
+            "other zbx commands are writing to the store and it was not free in time; " ++
+                "nothing was changed",
+            .{},
+        );
+    }
+    diag.fix(.{ .sentence = "wait for the other command to finish, then run this one again" });
+}
+
+/// Takes the store lock for an operation that reports through a `Diag`; the refusal is raised
+/// as E0436 (busy) or as a write failure (the lock file can not be used).
+pub fn hold(
+    diag: *Diag,
+    store: *layout.Store,
+    mode: lock.Mode,
+    who: []const u8,
+    operation: []const u8,
+) error{Failed}!void {
+    assert(diag.code == null);
+    lock.hold(store, mode, who) catch |err| {
+        switch (err) {
+            error.Busy => store_busy(diag, operation, lock.holder(store)),
+            error.Failed => write_failed(
+                diag,
+                store,
+                "taking the store lock",
+                store.lock_error,
+                store.lock_errno,
+            ),
+        }
+        return error.Failed;
+    };
+}
+
 /// ZBX-E0432: something in the trash is in the store again.
 pub fn restore_conflict(
     diag: *Diag,
@@ -817,6 +869,7 @@ pub fn gc_failed(
             error.IoFailed,
             0,
         ),
+        .busy => |operation| store_busy(diag, operation, lock.holder(store)),
         .damaged_trash => cannot_read(
             diag,
             store,

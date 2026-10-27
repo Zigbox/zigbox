@@ -289,3 +289,22 @@ test "a crash or failure at any write leaves the store whole, and the chunks can
         try testing.expect(point > 10);
     }
 }
+
+test "put_chunk waits for a gc's exclusive lock, gives up with Busy, and then works" {
+    // Goal: a chunk write is a writer like an import. Method: another Store value holds the lock
+    // exclusively; the write is refused after its bounded wait and leaves nothing; once the
+    // holder lets go the same chunk is accepted.
+    start();
+    var gc_store: Store = undefined;
+    gc_store.at(sim.interface(), root_path);
+    try @import("lock.zig").hold(&gc_store, .exclusive, "gc");
+    store.lock_wait_ms = 40;
+    const content = "0123456789abcdefghij";
+    const wanted = wanted_for(content);
+    try testing.expectError(error.Busy, put(&wanted, content, 0));
+    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/partial"));
+    @import("lock.zig").release(&gc_store);
+    const progress = try put(&wanted, content, 0);
+    try testing.expectEqual(@as(u32, 1), progress.have);
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}

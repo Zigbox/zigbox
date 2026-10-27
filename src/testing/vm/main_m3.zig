@@ -21,9 +21,13 @@
 //!   8. Corrupt the object of `/etc/passwd` by hand: `zbx store verify` exits 2 and names the
 //!      object, its file and the paths (`/etc/passwd`) in the root trees that reach it, in text
 //!      and in JSON; deleting the file and importing again makes it clean.
-//!   9. gc: drop two roots; a plan (with a dead leftover in `tmp/`) names what they free; a
+//!   9. gc: drop two roots; the plan leaves the big tree alone while the container that ran on it
+//!      (layer kept) can still be committed, and takes it once the layer is deleted; that plan
+//!      (with a dead leftover in `tmp/`) names what they free; a
 //!      wrong hash, and then the right hash after a write to the store, are refused with the
-//!      new hash; the fresh hash is applied and the store shrinks by the big file; the trash is
+//!      new hash; a writer holding the store lock (`flock -s`) keeps the fresh hash's confirm out
+//!      with E0436 after its wait; then the fresh hash is applied and the store shrinks by the
+//!      big file; the trash is
 //!      listed and verify is clean; restore puts it back (the store is as large as before and
 //!      the materialized directory is back) and a second restore is refused.
 //! `zig build demo-m3` (KVM) or `zig build demo-m3 -Daccel=tcg`. See docs/demos/m3.md.
@@ -101,6 +105,11 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try unpack_rootfs(&session, out, &timer);
     try write_scripts(&session, out);
     const digest = try step_import(&session, out, &timer);
+    if (init.environ_map.get("ZBX_DEMO_LOOP_STEP7")) |count| {
+        try loop_step7(&session, out, digest, try std.fmt.parseInt(u32, count, 10));
+        try session.shutdown();
+        return 0;
+    }
     try step_store_untouched(&session, out, &timer, digest);
     try step_read_only(&session, out, &timer, digest);
     try step_root_mode(&session, out, &timer);
@@ -112,6 +121,52 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try session.shutdown();
     return 0;
 }
+
+/// A debugging aid, not a step: `ZBX_DEMO_LOOP_STEP7=<n> zig build demo-m3 ...` imports the
+/// rootfs and then runs the commands of step 7 `n` times in the foreground, as the demo does.
+/// A heartbeat started in the guest prints to the console every ten seconds (load, free memory,
+/// and what the `zbx` and `runuser` processes are waiting for), so that a command which never
+/// returns, or a console that goes quiet, shows what the guest was doing. It exists to look for
+/// a hang (docs/demos/m3.md, "The step 7 hang").
+fn loop_step7(session: *Session, out: *Io.Writer, digest: []const u8, count: u32) !void {
+    const arena = session.scratch_allocator();
+    try put(session, "/tmp/hb.sh", heartbeat_script);
+    _ = try session.run("nohup sh /tmp/hb.sh > /dev/null 2>&1 &", limits.command_timeout_kvm_s);
+    for (1..count + 1) |round| {
+        try out.print("\ndemo-m3: loop round {d}/{d}\n", .{ round, count });
+        const commands = [_][]const u8{
+            try std.fmt.allocPrint(arena, "{s} run {s} -d --name live{d} -- sleep 600", .{
+                zbx, digest[3..15], round,
+            }),
+            try std.fmt.allocPrint(arena, "{s} commit live{d}", .{ zbx, round }),
+            try std.fmt.allocPrint(arena, "{s} stop live{d}", .{ zbx, round }),
+            try std.fmt.allocPrint(arena, "{s} run --rootfs {s} --name dir{d} -- true", .{
+                zbx, rootfs_dir, round,
+            }),
+            try std.fmt.allocPrint(arena, "{s} commit dir{d}", .{ zbx, round }),
+        };
+        for (commands) |command| {
+            const began = session_mod.now_ms();
+            const result = try H.run_split(session, command);
+            try out.print("demo-m3: {d} ms, exit {d}: {s}\n", .{
+                session_mod.now_ms() - began,
+                result.status,
+                command[(std.mem.indexOf(u8, command, "/home/demo/zbx") orelse 0)..],
+            });
+        }
+    }
+}
+
+const heartbeat_script =
+    "while :; do\n" ++
+    "  sleep 10\n" ++
+    "  { echo \"HB $(cut -d' ' -f1-3 /proc/loadavg) avail=$(grep MemAvailable /proc/meminfo " ++
+    "| tr -s ' ' | cut -d' ' -f2)\"\n" ++
+    "    ps -eo pid,stat,wchan:18,etime,args | grep -E '/home/demo/zbx|runuser|systemd-run' " ++
+    "| grep -v grep | cut -c1-150\n" ++
+    "    ps -eo stat,pid,wchan:18,comm | grep '^D'\n" ++
+    "  } > /dev/console 2>&1\n" ++
+    "done\n";
 
 // The commands, as the user `demo` runs them, through `H.as_demo`.
 const zbx = H.as_demo ++ "/home/demo/zbx";
@@ -604,6 +659,19 @@ fn step_gc(session: *Session, out: *Io.Writer, timer: *H.Timer, big: BigTrees) !
         );
     }
     const plan_command = zbx ++ " --output json store gc";
+    // The container `ops1` ended with its layer kept, so it can still be committed and holds its
+    // parent tree, which is the one with the big file: the plan leaves that tree alone.
+    const held = try H.run_split(session, plan_command);
+    try H.show_split(out, plan_command, held);
+    checks_m3.check_plan_holds(held.streams, held.status, 1_000_000) catch |err| {
+        return fail_step(out, "STEP 9", "expected the committable container's tree kept", err);
+    };
+    // Its layer deleted (as root: the files belong to subordinate ids), nothing can be committed
+    // onto that tree, and it is a plan item.
+    const forget = "rm -rf " ++ state_dir ++ "/containers/ops1";
+    const forgotten = try session.run(forget, limits.command_timeout_kvm_s);
+    try H.show(out, forget, forgotten);
+    if (forgotten.status != 0) return fail_step(out, "STEP 9", "the layer", error.RunFailed);
     const planned = try H.run_split(session, plan_command);
     try H.show_split(out, plan_command, planned);
     const first = checks_m3.check_plan(planned.streams, planned.status, 8_000_000, 1) catch |err| {
@@ -612,6 +680,7 @@ fn step_gc(session: *Session, out: *Io.Writer, timer: *H.Timer, big: BigTrees) !
     const hash = try arena.dupe(u8, first);
     try step_gc_stale(session, out, hash);
     const fresh = try step_gc_fresh(session, out, hash);
+    try step_gc_busy(session, out, fresh);
     const apply = try std.fmt.allocPrint(
         arena,
         "{s} --output json store gc --confirm {s}",
@@ -631,6 +700,25 @@ fn step_gc(session: *Session, out: *Io.Writer, timer: *H.Timer, big: BigTrees) !
     const id = try arena.dupe(u8, found);
     try step_gc_after(session, out, big, id, total_before);
     try timer.lap(out, "gc");
+}
+
+/// A writer (`flock -s` on the store's lock file, as an importer would hold it) keeps the
+/// confirmed gc out: it waits its ten seconds and says so, changing nothing.
+fn step_gc_busy(session: *Session, out: *Io.Writer, fresh: []const u8) !void {
+    const arena = session.scratch_allocator();
+    const flock = "sh -c 'flock -s " ++ store_dir ++ "/lock sleep 41 >/dev/null 2>&1 &'";
+    const hold = H.as_demo ++ flock;
+    const started = try H.run_split(session, hold);
+    try H.show_split(out, "a writer holds the store lock (flock -s)", started);
+    if (started.status != 0) return fail_step(out, "STEP 9", "the writer", error.RunFailed);
+    const confirm = try std.fmt.allocPrint(arena, "{s} store gc --confirm {s}", .{ zbx, fresh });
+    const busy = try H.run_split(session, confirm);
+    try H.show_split(out, confirm, busy);
+    checks_m3.check_busy(busy.streams, busy.status, "are writing to the store") catch |err| {
+        return fail_step(out, "STEP 9", "expected E0436 while a writer holds the lock", err);
+    };
+    const release = "pkill -f 'sleep 41'; pkill -f 'flock -s'; true";
+    _ = try session.run(release, limits.command_timeout_kvm_s);
 }
 
 /// A hash that is not the plan, and then the plan's own hash after a write to the store, are

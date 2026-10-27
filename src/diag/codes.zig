@@ -93,6 +93,7 @@ pub const Code = enum(u8) {
     E0433,
     E0434,
     E0435,
+    E0436,
     W0410,
     W0411,
     W0412,
@@ -1212,6 +1213,28 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0436,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the store is in use by another zbx command",
+        .explanation =
+        \\A store has one lock file. Every command that writes to the store and may
+        \\reuse what is in it (an import, a commit, building a directory to run on,
+        \\writing an object chunk by chunk) holds it shared while it works. "zbx
+        \\store gc --confirm" and "zbx store restore", which move things out of
+        \\the store, hold it alone. Without that, a gc could move an object to the
+        \\trash in the very moment an import decided to reuse it, and the new tree
+        \\would name an object that is not there.
+        \\
+        \\The command waited ten seconds for the lock and gave up; nothing was
+        \\changed. The message names the command that holds the lock when it is a
+        \\gc or a restore, and says "writers" when it is shared importers that are
+        \\keeping a gc waiting. Run the command again when the other one is done. A
+        \\lock never outlives its process: if nothing else is running, it was held
+        \\for the last of those ten seconds only.
+        ,
+    },
+    .{
         .code = .W0410,
         .severity = .warning,
         .blame = .user,
@@ -1497,7 +1520,7 @@ pub fn can_end_run(code: Code) bool {
         .E0702, .E0703, .E0704 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
-        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435 => false,
+        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
         else => true,
     };

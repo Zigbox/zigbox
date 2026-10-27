@@ -14,6 +14,7 @@
 //!     trees/ab/<62 hex>               a tree object: the canonical encoding of one directory
 //!     roots/<64 hex>                  a root record: why a tree is kept
 //!     cache/<64 hex>                  materialized trees, hardlink farms of objects
+//!     lock                            flock: shared by writers, exclusive for gc apply, restore
 //!     generation                      the counter every write to the store raises
 //!     trash/<gc id>/                  what gc moved: meta.zon, objects/ab/, trees/ab/, cache/
 //!     partial/<64 hex>/<n>            chunks of an object being written by `put_chunk`
@@ -71,6 +72,7 @@ pub const object = @import("object.zig");
 pub const trees = @import("trees.zig");
 pub const roots = @import("roots.zig");
 pub const generation = @import("generation.zig");
+pub const lock = @import("lock.zig");
 pub const shards = @import("shards.zig");
 pub const verify = @import("verify.zig");
 pub const gc = @import("gc.zig");
@@ -107,6 +109,7 @@ test {
     _ = trees;
     _ = roots;
     _ = generation;
+    _ = lock;
     _ = shards;
     _ = verify;
     _ = gc;
@@ -122,6 +125,7 @@ test {
     _ = @import("import_tests.zig");
     _ = @import("commit_tests.zig");
     _ = @import("gc_tests.zig");
+    _ = @import("lock_tests.zig");
     _ = @import("chunks_tests.zig");
     _ = @import("usage_tests.zig");
     _ = @import("test_support.zig");

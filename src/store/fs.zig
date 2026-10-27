@@ -116,6 +116,16 @@ pub const VTable = struct {
         name: [:0]const u8,
         value: []const u8,
     ) Error!void,
+    /// Opens (and creates, mode 0600) the lock file and takes `flock` on it without waiting:
+    /// shared, or exclusive, in which case `holder` (at most `store_lock_holder_bytes`) is
+    /// written at offset 0 and padded with NUL to that size. `WouldBlock` if another open file
+    /// description holds a conflicting lock. The lock ends when the descriptor is closed.
+    lock: *const fn (
+        context: *anyopaque,
+        path: [:0]const u8,
+        exclusive: bool,
+        holder: []const u8,
+    ) Error!Fd,
     last_errno: *const fn (context: *anyopaque) u16,
 };
 
@@ -256,6 +266,19 @@ pub const Fs = struct {
         assert(mode <= 0o7777);
         for (0..constants.store_io_retries_max + 1) |_| {
             return fs.vtable.create(fs.context, path, mode) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+        }
+        return error.IoFailed;
+    }
+
+    /// One try at the lock file's lock (`VTable.lock`); the caller decides how long to wait.
+    pub fn lock(fs: Fs, path: [:0]const u8, exclusive: bool, holder: []const u8) Error!Fd {
+        assert(path.len > 0);
+        assert(holder.len <= constants.store_lock_holder_bytes);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            return fs.vtable.lock(fs.context, path, exclusive, holder) catch |err| switch (err) {
                 error.Interrupted => continue,
                 else => return err,
             };

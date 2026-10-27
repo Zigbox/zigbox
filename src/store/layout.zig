@@ -8,6 +8,7 @@
 //!   <root>/trees/ab/<62 hex>          a tree object (the encoding of `tree.zig`)
 //!   <root>/roots/<64 hex>             a root record: why the tree is kept
 //!   <root>/cache/                     materialized trees
+//!   <root>/lock                       flock: shared by writers, exclusive for gc apply, restore
 //!   <root>/generation                 the counter every write to the store raises
 //!   <root>/trash/<gc id>/             what gc moved, until it expires
 //!   <root>/partial/<id>/<n>           chunks of an object being written chunk by chunk
@@ -47,6 +48,18 @@ pub const Store = struct {
     /// a small one to have multi-chunk objects without megabytes.
     chunk_bytes: u32,
     tmp_counter: u32,
+    /// The store lock (`lock.zig`): the descriptor that holds it, how many nested holds there
+    /// are (0 when not held), whether it is exclusive, and how long `hold` waits for it.
+    lock_fd: fs_mod.Fd,
+    lock_depth: u32,
+    lock_exclusive: bool,
+    lock_wait_ms: u32,
+    /// Why the last `hold` failed: who holds the lock (the text the holder wrote, empty if not
+    /// known), or the error of the file system.
+    lock_holder: [constants.store_lock_holder_bytes]u8,
+    lock_holder_len: u32,
+    lock_error: host_mod.Error,
+    lock_errno: u16,
     /// What this process has written, for the message of a write that fails halfway.
     objects_written: u64,
     bytes_written: u64,
@@ -107,6 +120,13 @@ pub const Store = struct {
         store.fs = host.filesystem();
         store.chunk_bytes = constants.store_chunk_bytes;
         store.tmp_counter = 0;
+        store.lock_fd = 0;
+        store.lock_depth = 0;
+        store.lock_exclusive = false;
+        store.lock_wait_ms = constants.store_lock_wait_ms;
+        store.lock_holder_len = 0;
+        store.lock_error = error.IoFailed;
+        store.lock_errno = 0;
         store.objects_written = 0;
         store.bytes_written = 0;
         assert(store.root[store.root_len] == 0);

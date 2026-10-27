@@ -731,18 +731,98 @@ test "the trees of running containers, and only of those, are what gc is told to
     _ = try store_commands.prepare_gc(sim.interface(), args, &live_workspace, &diag);
     try testing.expectEqual(@as(u32, 1), live_workspace.live_count);
     try testing.expectEqualStrings(tree_text, &live_workspace.live[0].text());
-    // A container that ended names a tree too, and is not live.
+    // A container that ended without a layer to commit does not hold its tree; one that ended
+    // with its layer still on disk does (it can be committed), and one whose layer is gone not.
     const other = "b3:" ++ test_util.repeat('d', 64);
+    const kept = "b3:" ++ test_util.repeat('e', 64);
     var done = sim_run.sample_view("done-1", 1000);
     done.tree = other;
     sim_run.put_record(&sim, &done);
+    var ended = sim_run.sample_view("done-2", 1001);
+    ended.tree = kept;
+    ended.upper = "/upper-2";
+    files.put_dir("/upper-2", 0o755);
+    sim_run.put_record(&sim, &ended);
+    var gone = sim_run.sample_view("done-3", 1002);
+    gone.tree = "b3:" ++ test_util.repeat('f', 64);
+    gone.upper = "/upper-3";
+    sim_run.put_record(&sim, &gone);
     _ = try store_commands.prepare_gc(sim.interface(), args, &live_workspace, &diag);
-    try testing.expectEqual(@as(u32, 1), live_workspace.live_count);
-    try testing.expectEqualStrings(tree_text, &live_workspace.live[0].text());
+    try testing.expectEqual(@as(u32, 2), live_workspace.live_count);
+    var seen_running = false;
+    var seen_ended = false;
+    for (live_workspace.live[0..2]) |digest| {
+        if (std.mem.eql(u8, &digest.text(), tree_text)) seen_running = true;
+        if (std.mem.eql(u8, &digest.text(), kept)) seen_ended = true;
+    }
+    try testing.expect(seen_running and seen_ended);
     // `--trash` does not look at containers at all.
     const trash: store_commands.Args = .{ .action = .gc, .operand = null, .trash = true };
     _ = try store_commands.prepare_gc(sim.interface(), trash, &live_workspace, &diag);
     try testing.expectEqual(@as(u32, 0), live_workspace.live_count);
     live_handle.session.release_keeper();
     sim.world.command_runs_ms = 0;
+}
+
+test "a gc confirm and a restore are refused with E0436 while a writer holds the store" {
+    // Goal: the lock as the user meets it. Method: another program holds the lock shared (an
+    // import in progress); gc --confirm and restore wait their ten seconds and say the store is
+    // in use, changing nothing and printing nothing.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var writer: @import("store/layout.zig").Store = undefined;
+    writer.at(sim.interface(), support.user_store);
+    try @import("store/lock.zig").hold(&writer, .shared, "import");
+    defer @import("store/lock.zig").release(&writer);
+    const before = stored_files();
+    const cases = [_][]const [:0]const u8{
+        &.{ "store", "gc", "--confirm", zero_hash },
+        &.{ "store", "restore", "aaaaaaaaaaaa" },
+    };
+    for (cases) |args| {
+        const began = sim.world.now_ms;
+        try testing.expectEqual(@as(u8, 1), command_raw(args));
+        try testing.expect(sim.world.now_ms - began >= constants.store_lock_wait_ms);
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0436]") != null);
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "writing to the store") != null);
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    }
+    try testing.expectEqual(before, stored_files());
+}
+
+test "an ended container's tree survives gc, and commit still works" {
+    // Goal: gc must not strand `zbx commit`. Method: import, a container record with its upper
+    // layer, the root dropped. gc plans nothing to move, and commit works after a confirmed
+    // gc. With the layer gone (or the record pruned) the tree is a plan item.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const parent = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(parent);
+    put_container(parent);
+    files.put_file("/upper/new", 0o644, "added\n");
+    var argument: [80]u8 = undefined;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "rm", term(&argument, parent) }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "gc" }));
+    {
+        const parsed = try parse_stdout();
+        defer parsed.deinit();
+        try testing.expectEqual(@as(i64, 0), parsed.value.object.get("trees").?.integer);
+        try testing.expectEqual(@as(i64, 0), parsed.value.object.get("objects").?.integer);
+    }
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "gc" }));
+    var hash_storage: [80]u8 = undefined;
+    const hash = try printed_plan(&hash_storage);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "gc", "--confirm", hash }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "commit", "web-1" }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+    // The commit's root keeps the new tree; the parent is the container's, not a root, and is
+    // kept as long as the container's layer is.
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "verify" }));
+    // The layer is gone: nothing can be committed, so the parent tree is no longer held.
+    files.remove_path("/upper/new");
+    files.remove_path("/upper");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "gc" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("trees").?.integer > 0);
 }

@@ -48,6 +48,7 @@ const generation = @import("generation.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 const names_mod = @import("names.zig");
 const object = @import("object.zig");
 const roots = @import("roots.zig");
@@ -836,6 +837,8 @@ pub fn import(
     assert(diag.code == null);
     assert(source.len > 0);
     assert(options.parent == null);
+    try diagnose.hold(diag, store, .shared, "import", "importing a directory");
+    defer lock.release(store);
     var run = try walk(store, ws, source, options, result, diag);
     try run.save_root(source);
     assert(run.depth == 0);
@@ -855,6 +858,8 @@ pub fn commit(
     assert(diag.code == null);
     assert(upper.len > 0);
     assert(options.parent != null);
+    try diagnose.hold(diag, store, .shared, "commit", "committing a container's changes");
+    defer lock.release(store);
     const run = try walk(store, ws, upper, options, result, diag);
     assert(run.depth == 0);
 }

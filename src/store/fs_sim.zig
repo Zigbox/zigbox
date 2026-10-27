@@ -94,14 +94,35 @@ const Node = struct {
     }
 };
 
+const LockState = enum { none, shared, exclusive };
+
 const Open = struct {
     used: bool,
     node: u32,
     offset: u32,
     writable: bool,
+    lock: LockState = .none,
+};
+
+/// A test's way to make two programs overlap in a single thread: `call` runs once, just before
+/// the first `rename` whose destination contains `rename_to_contains`, as if another process
+/// had been scheduled at that moment. It may use the file system, through another `Store`.
+pub const Hook = struct {
+    rename_to_contains: []const u8,
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque) void,
+};
+
+const closed_slot: Open = .{
+    .used = false,
+    .node = 0,
+    .offset = 0,
+    .writable = false,
+    .lock = .none,
 };
 
 pub const SimFs = struct {
+    hook: ?Hook = null,
     nodes: [constants.sim_fs_nodes_max]Node,
     count: u32,
     pool: [constants.sim_fs_pool_bytes_max]u8,
@@ -123,9 +144,10 @@ pub const SimFs = struct {
     pub fn init(sim: *SimFs, seed: u64) void {
         sim.count = 0;
         sim.pool_len = 0;
-        sim.opens = @splat(.{ .used = false, .node = 0, .offset = 0, .writable = false });
+        sim.opens = @splat(closed_slot);
         sim.prng = std.Random.Xoshiro256.init(seed);
         sim.faults = .{};
+        sim.hook = null;
         sim.mutations = 0;
         sim.crashed = false;
         sim.errno_last = 0;
@@ -164,6 +186,7 @@ pub const SimFs = struct {
         .symlink = symlink,
         .set_path_attributes = set_path_attributes,
         .set_path_xattr = set_path_xattr,
+        .lock = lock,
         .last_errno = last_errno,
     };
 
@@ -481,7 +504,7 @@ pub const SimFs = struct {
     /// The process starts again on what the disk kept.
     pub fn restart(sim: *SimFs) void {
         sim.crashed = false;
-        sim.opens = @splat(.{ .used = false, .node = 0, .offset = 0, .writable = false });
+        sim.opens = @splat(closed_slot);
         sim.errno_last = 0;
         sim.mutations = 0;
         sim.faults.crash_mutation = null;
@@ -608,7 +631,13 @@ pub const SimFs = struct {
     fn take_slot(sim: *SimFs, node: u32, writable: bool) Error!Fd {
         for (&sim.opens, 0..) |*slot, index| {
             if (slot.used) continue;
-            slot.* = .{ .used = true, .node = node, .offset = 0, .writable = writable };
+            slot.* = .{
+                .used = true,
+                .node = node,
+                .offset = 0,
+                .writable = writable,
+                .lock = .none,
+            };
             return @intCast(index);
         }
         return sim.fail(24); // EMFILE: the test leaks descriptors.
@@ -663,6 +692,49 @@ pub const SimFs = struct {
             return err;
         };
     }
+
+    /// `flock` on a file of the tree: a conflict with the lock of any other open descriptor
+    /// (also in this process, as for the kernel) is `EAGAIN`. Not a write point: a lock leaves
+    /// nothing a crash could tear. The holder record is written in place.
+    fn lock(
+        context: *anyopaque,
+        path: [:0]const u8,
+        exclusive: bool,
+        holder: []const u8,
+    ) Error!Fd {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(holder.len <= constants.store_lock_holder_bytes);
+        const index = sim.find(path) orelse blk: {
+            if (!sim.parent_exists(path)) return sim.fail(errno_noent);
+            const made = sim.allocate_node(path);
+            sim.nodes[made].kind = .file;
+            sim.nodes[made].mode = 0o600;
+            break :blk made;
+        };
+        if (sim.nodes[index].kind != .file) return sim.fail(errno_isdir);
+        for (sim.opens) |other| {
+            if (!other.used or other.node != index or other.lock == .none) continue;
+            if (exclusive or other.lock == .exclusive) return sim.fail(errno_again);
+        }
+        const fd = try sim.take_slot(index, true);
+        sim.opens[fd].lock = if (exclusive) .exclusive else .shared;
+        if (exclusive) {
+            var record: [constants.store_lock_holder_bytes]u8 = @splat(0);
+            @memcpy(record[0..holder.len], holder);
+            const node = &sim.nodes[index];
+            if (node.data_len != record.len) {
+                node.data_len = 0;
+                sim.append(node, &record);
+            } else {
+                @memcpy(sim.pool[node.data_at..][0..record.len], &record);
+            }
+            node.synced_len = node.data_len;
+        }
+        return fd;
+    }
+
+    const errno_again: u16 = 11;
 
     fn write(context: *anyopaque, fd: Fd, bytes: []const u8) Error!u32 {
         const sim = from_context(context);
@@ -728,6 +800,12 @@ pub const SimFs = struct {
 
     fn rename(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void {
         const sim = from_context(context);
+        if (sim.hook) |hook| {
+            if (std.mem.indexOf(u8, to, hook.rename_to_contains) != null) {
+                sim.hook = null;
+                hook.call(hook.context);
+            }
+        }
         try sim.begin_mutation();
         const index = sim.find(from) orelse return sim.fail(errno_noent);
         if (!sim.parent_exists(to)) return sim.fail(errno_noent);

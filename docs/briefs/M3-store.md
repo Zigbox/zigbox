@@ -220,5 +220,6 @@ Acceptance criteria:
 
 ## Notes for later milestones (found during M3)
 
+- **gc's tables are fixed-size, and M4 must lift them.** `zbx store gc` keeps what the roots reach in tables of about 49,000 distinct objects, as many trees, and as many roots-and-live trees as fit 1 MiB; `verify` holds about 98,000 distinct objects while it walks (`store_arena_bytes_max`). A store past them is refused with a message that says what outgrew its memory, never cut. A few real images pass 49,000 files, and Zigcube will hold many images in one store. M4 should make the tables grow (a file-backed or sorted-run set), or size them from a first count, before the registry brings real images in.
 - **The container's umask is the caller's.** `zbx run` inherits the umask of whoever started it (`0002` under some login shells), so files a container creates get different modes on different hosts, and a `zbx commit` of the same steps can give different digests. Docker starts containers with `022`. Decide before M7, whose builds must be reproducible: set a fixed umask in the child, or record the caller's in the plan.
 - **The scope keeper ties `start` and `wait` to one thread** (`docs/demos/m2.md`). Zigcube's agent must start and wait for a container on the same thread, or the keeper ends early and the out-of-memory and process-limit reasons are read racily again.

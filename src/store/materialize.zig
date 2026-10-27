@@ -33,6 +33,7 @@ const digest_mod = @import("digest.zig");
 const generation = @import("generation.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 const remove = @import("remove.zig");
 const tree = @import("tree.zig");
 const trees = @import("trees.zig");
@@ -300,6 +301,8 @@ const errno_mlink: u16 = 31;
 pub fn ensure(store: *Store, ws: *Workspace, digest: Digest, diag: *Diag) Error!bool {
     assert(diag.code == null);
     assert(store.root_len > 1);
+    try diagnose.hold(diag, store, .shared, "run", "making a directory to run on");
+    defer lock.release(store);
     const fs = store.fs;
     var final_storage: PathBuf = undefined;
     const final = farm_path(store, &final_storage, digest);

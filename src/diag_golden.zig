@@ -405,6 +405,18 @@ fn prepare_root_unusable(sim: *HostSim) void {
     );
 }
 
+var golden_lock: ?@import("store/fs.zig").Fd = null;
+
+/// Another process is applying a gc: it holds the store lock exclusively.
+fn prepare_store_locked(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    const path = support.user_store ++ "/lock";
+    // The descriptor stays open for the whole case, as the other process would keep it.
+    golden_lock = golden_files.interface().lock(path, true, "4242 gc") catch {
+        unreachable; // The store directory is there and nothing else holds the lock.
+    };
+}
+
 fn prepare_overlay_refused(sim: *HostSim) void {
     prepare_store_with_tree(sim);
     prepare_overlay_dirs(sim);
@@ -807,6 +819,12 @@ const base_cases = [_]Case{
         .exit = 2,
     },
     .{
+        .code = .E0436,
+        .args = &.{ "store", "import", "/src" },
+        .prepare = prepare_store_locked,
+        .exit = 1,
+    },
+    .{
         .code = .W0413,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_layers_stay,
@@ -980,6 +998,10 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     if (golden_started) {
         golden_handle.session.release_keeper();
         golden_started = false;
+    }
+    if (golden_lock) |fd| {
+        golden_files.interface().close(fd);
+        golden_lock = null;
     }
     try testing.expectEqual(@as(u32, 0), sim.open_count());
     return code;

@@ -263,6 +263,18 @@ pub fn check_plan(streams: Streams, status: u8, bytes: u64, tmp: u64) Error![]co
     return hash;
 }
 
+/// A plan that leaves a big tree alone because a container that can still be committed holds
+/// it: not applied, under `bytes_max` bytes, and no chunk list (the big file's).
+pub fn check_plan_holds(streams: Streams, status: u8, bytes_max: u64) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (streams.stderr.len != 0) return error.StderrNotEmpty;
+    if (!contains(streams.stdout, "\"applied\":false")) return error.ReportWrong;
+    if ((json_number(streams.stdout, "bytes") orelse bytes_max) >= bytes_max) {
+        return error.ReportWrong;
+    }
+    if ((json_number(streams.stdout, "lists") orelse 1) != 0) return error.ReportWrong;
+}
+
 /// A confirmation with a hash that is not the plan: E0431, exit 1, nothing on stdout, and the
 /// plan as it is now (`fresh`, null to take any) in the message.
 pub fn check_stale(streams: Streams, status: u8, fresh: ?[]const u8) Error!void {
@@ -307,6 +319,15 @@ pub fn check_applied(
     if (id.len != 12) return error.DigestWrong;
     if (!std.mem.startsWith(u8, plan[3..], id)) return error.DigestWrong; // The id is the plan's.
     return id;
+}
+
+/// A command that waited for the store lock and gave up: E0436, exit 1, nothing on stdout, and
+/// the words for what held it (`"writers"` for shared holders, or a gc's command line).
+pub fn check_busy(streams: Streams, status: u8, holder_words: []const u8) Error!void {
+    if (status != 1) return error.ExitCodeWrong;
+    if (std.mem.count(u8, streams.stderr, "error[ZBX-E0436]") != 1) return error.ReportWrong;
+    if (!contains(streams.stderr, holder_words)) return error.ReportWrong;
+    if (streams.stdout.len != 0) return error.ReportWrong;
 }
 
 /// The store's total bytes in `zbx --output json store du`.
@@ -652,4 +673,25 @@ test "the store's bytes shrink by the freed file, and the trash is listed and re
         error.ExitCodeWrong,
         check_no_trash(out_err("", "error[ZBX-E0433]\n"), 2),
     );
+}
+
+test "a busy store is E0436 and exit 1 with the words for the holder and nothing on stdout" {
+    const text = "error[ZBX-E0436]: the store is in use\n  cause  other zbx commands are writing\n";
+    try check_busy(out_err("", text), 1, "are writing");
+    try testing.expectError(error.ExitCodeWrong, check_busy(out_err("", text), 2, "are writing"));
+    try testing.expectError(error.ReportWrong, check_busy(out_err("", text), 1, "process 4242"));
+    try testing.expectError(error.ReportWrong, check_busy(out_err("x", text), 1, "are writing"));
+    const other = out_err("", "error[ZBX-E0431]\n");
+    try testing.expectError(error.ReportWrong, check_busy(other, 1, ""));
+}
+
+test "a plan that spares a held tree is small and has no chunk list" {
+    const small = "{\"schema\":\"zbx.store.gc/1\",\"applied\":false,\"plan\":\"b3:" ++
+        repeat('1', 64) ++ "\",\"objects\":3,\"lists\":0,\"trees\":2,\"bytes\":4357}";
+    try check_plan_holds(out_err(small, ""), 0, 1_000_000);
+    try testing.expectError(error.ReportWrong, check_plan_holds(out_err(small, ""), 0, 4000));
+    const limit: u64 = 1_000_000;
+    try testing.expectError(error.ReportWrong, check_plan_holds(out_err(plan_json, ""), 0, limit));
+    try testing.expectError(error.ExitCodeWrong, check_plan_holds(out_err(small, ""), 1, limit));
+    try testing.expectError(error.StderrNotEmpty, check_plan_holds(out_err(small, "w"), 0, limit));
 }

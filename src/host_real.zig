@@ -662,11 +662,23 @@ pub const HostReal = struct {
         assert(pid > 0);
         const set = forwarded_set();
         var info: linux.siginfo_t = undefined;
+        var early_status: i32 = 0;
         // Zero waits for ever; a time is a limit on each wait for a signal, and a signal that is
         // not the child's end (a stop, say) is not a reason to start the time again: the
         // deadline is fixed once.
         var limit = timespec_of(timeout_ms);
         const started = monotonic_now_ms();
+        // A child that ended before the caller blocked the signals has had its SIGCHLD dropped
+        // (the default action ignores it, and a signal that is not blocked is not queued), so
+        // looking only at the queue would wait for ever for a child that is already a zombie. A
+        // child that ends after this look raises a SIGCHLD that waits in the queue: the caller
+        // has the signals blocked.
+        const early = linux.wait4(@intCast(pid), &early_status, linux.W.NOHANG, null);
+        try check(early);
+        if (early != 0) {
+            assert(early == pid);
+            return .{ .exited = try decode_status(early_status) };
+        }
         // Each pass takes one signal off the queue, so the loop ends when the child does; a
         // SIGCHLD for a child that is still running (a stop, say) is skipped.
         for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
@@ -1688,6 +1700,25 @@ fn descriptor_count(pid: host.Pid) ?u32 {
             at += length;
         }
     }
+}
+
+test "real wait_event sees a child that ended before the signals were blocked" {
+    // Goal: the hang of `zbx run ... -- true` that showed once in a few dozen runs in the VM: the
+    // container ended between the start of its command and the block of SIGCHLD, so the signal
+    // was dropped and the wait looked at an empty queue for ever. Method: a child that exits at
+    // once, a pause long enough for it to be a zombie and its SIGCHLD to be gone, then the
+    // block and the wait, which must answer with the child's status and not run out its time.
+    var real: HostReal = .{};
+    const subject = real.interface();
+    const forked = linux.fork();
+    try std.testing.expect(linux.errno(forked) == .SUCCESS);
+    if (forked == 0) linux.exit_group(7);
+    const pid: host.Pid = @intCast(forked);
+    subject.sleep_ms(200);
+    try subject.block_signals(true);
+    defer subject.block_signals(false) catch {};
+    const event = try subject.wait_event(pid, 5000);
+    try std.testing.expectEqual(host.Event{ .exited = .{ .exited = 7 } }, event);
 }
 
 test "real keeper holds one descriptor, lives until its pipe's writers are gone, and ends 0" {

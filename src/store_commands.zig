@@ -22,6 +22,7 @@ const diagnose = @import("store/diagnose.zig");
 const digest_mod = @import("store/digest.zig");
 const diff = @import("store/diff.zig");
 const generation = @import("store/generation.zig");
+const lock = @import("store/lock.zig");
 const import = @import("store/import.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const records = @import("runtime/records.zig");
@@ -540,6 +541,8 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
             return error.Failed;
         },
     };
+    try diagnose.hold(diag, &store, .shared, "rm", "dropping a root");
+    defer lock.release(&store);
     var raised: object_failure = undefined;
     generation.bump(&store, &raised) catch {
         diagnose.write_failed(diag, &store, "raising the generation", raised.err, raised.errno);
@@ -633,6 +636,10 @@ fn do_commit(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
         .parent = job.parent,
     };
     var result: import.Result = undefined;
+    // Held from the walk to the recording of the root: a gc between the two could move the new
+    // tree away before anything names it.
+    try diagnose.hold(diag, &store, .shared, "commit", "committing a container's changes");
+    defer lock.release(&store);
     import.commit(&store, &job.workspace.import, upper_path, options, &result, diag) catch {
         return error.Failed;
     };
@@ -1030,8 +1037,11 @@ fn damage_json(job: *const Job, index: u32, diag: *Diag) Error!void {
 
 // ---- gc and restore ------------------------------------------------------------------------
 
-/// In the parent: the trees the running containers use are kept by gc. A listing that does not
-/// fit is a refusal, never a shorter list.
+/// In the parent: the trees that containers use are kept by gc: those of the running ones, and
+/// those of ended ones whose upper layer is still there, because `zbx commit` of such a
+/// container applies its layer onto that tree. A container whose record was pruned (the newest
+/// 32 are kept) or whose layer is gone no longer holds its tree. A kept tree keeps its
+/// materialized directory too. A listing that does not fit is a refusal, never a shorter list.
 pub fn prepare_gc(host: Host, args: Args, ws: *Workspace, diag: *Diag) Error!Digest {
     assert(args.action == .gc);
     assert(diag.code == null);
@@ -1061,13 +1071,27 @@ pub fn prepare_gc(host: Host, args: Args, ws: *Workspace, diag: *Diag) Error!Dig
         const stem = records.name_of(listing.name(@intCast(at))) orelse continue;
         records.load(host, &dir, stem, &ws.record) catch continue;
         if (ws.record.tree_len == 0) continue;
-        if (lifecycle.state_of(host, &ws.record) != .running) continue;
+        if (lifecycle.state_of(host, &ws.record) != .running and !layer_kept(host, &ws.record)) {
+            continue;
+        }
         const digest = Digest.parse(ws.record.tree_slice()) orelse continue;
         if (ws.live_count == ws.live.len) continue;
         ws.live[ws.live_count] = digest;
         ws.live_count += 1;
     }
     return confirm;
+}
+
+/// An ended container can still be committed if its upper layer is on disk.
+fn layer_kept(host: Host, record: *const records.Parsed) bool {
+    assert(record.tree_len > 0);
+    const upper = record.upper_slice();
+    if (upper.len == 0) return false;
+    var path: [constants.containers_path_bytes_max + 1]u8 = undefined;
+    @memcpy(path[0..upper.len], upper);
+    path[upper.len] = 0;
+    _ = host.filesystem().lstat(path[0..upper.len :0]) catch return false;
+    return true;
 }
 
 fn do_gc(job: *Job, diag: *Diag) Error!void {

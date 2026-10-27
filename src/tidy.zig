@@ -86,6 +86,7 @@ const shipped_files = [_][]const u8{
     "src/store/generation.zig",
     "src/store/import.zig",
     "src/store/layout.zig",
+    "src/store/lock.zig",
     "src/store/names.zig",
     "src/store/namespace.zig",
     "src/store/object.zig",

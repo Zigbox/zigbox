@@ -47,6 +47,7 @@ const vtable: fs.VTable = .{
     .symlink = symlink,
     .set_path_attributes = set_path_attributes,
     .set_path_xattr = set_path_xattr,
+    .lock = lock,
     .last_errno = last_errno,
 };
 
@@ -219,6 +220,42 @@ fn create(context: *anyopaque, path: [:0]const u8, mode: u16) host.Error!fs.Fd {
     assert(result <= std.math.maxInt(i32));
     self.open_count += 1;
     return @intCast(result);
+}
+
+fn lock(
+    context: *anyopaque,
+    path: [:0]const u8,
+    exclusive: bool,
+    holder: []const u8,
+) host.Error!fs.Fd {
+    const self = from_context(context);
+    assert(path.len > 0);
+    assert(holder.len <= constants.store_lock_holder_bytes);
+    const flags: linux.O = .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true };
+    const opened = linux.open(path.ptr, flags, 0o600);
+    try check(opened);
+    assert(opened <= std.math.maxInt(i32));
+    self.open_count += 1;
+    const descriptor: i32 = @intCast(opened);
+    // flock(2): LOCK_SH 1, LOCK_EX 2, LOCK_NB 4.
+    const operation: i32 = (if (exclusive) @as(i32, 2) else @as(i32, 1)) | 4;
+    check(linux.flock(descriptor, operation)) catch |err| {
+        const errno = host_real.errno_last;
+        close(context, @intCast(descriptor));
+        host_real.errno_last = errno;
+        return err;
+    };
+    if (exclusive) {
+        var record: [constants.store_lock_holder_bytes]u8 = @splat(0);
+        @memcpy(record[0..holder.len], holder);
+        check(linux.pwrite(descriptor, &record, record.len, 0)) catch |err| {
+            const errno = host_real.errno_last;
+            close(context, @intCast(descriptor));
+            host_real.errno_last = errno;
+            return err;
+        };
+    }
+    return @intCast(descriptor);
 }
 
 fn write(context: *anyopaque, fd: fs.Fd, bytes: []const u8) host.Error!u32 {
