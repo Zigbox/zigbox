@@ -229,9 +229,10 @@ fn run_all(
 /// pipe the user opened would be: an image that logs to /dev/stdout opens it again through
 /// /proc, and the kernel refuses that for a file whose owner is not mapped in the container
 /// (a root-owned console or pipe), so root's own redirects would fail such images for a reason
-/// that is the harness's.
-const out_file = "/tmp/top20-out";
-const err_file = "/tmp/top20-err";
+/// that is the harness's. They are in the demo user's home, not in /tmp: root may not open
+/// another user's file in a sticky directory (fs.protected_regular).
+const out_file = "/home/demo/top20-out";
+const err_file = "/home/demo/top20-err";
 
 fn make_output_files(session: *Session) !void {
     const made = try session.run(
@@ -355,7 +356,8 @@ fn reason_of(
     if (prefix.len > 0) {
         if (checks_top20.first_line_with(stderr, prefix)) |line| return line;
     }
-    return checks_top20.last_line(stderr);
+    const last = checks_top20.last_line(stderr);
+    return if (std.mem.eql(u8, last, "-")) "failed with nothing on stderr" else last;
 }
 
 /// Runs the image again under strace and returns the syscalls that were refused with
