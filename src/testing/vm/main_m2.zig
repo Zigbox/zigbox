@@ -237,7 +237,7 @@ const apk_main = "http://dl-cdn.alpinelinux.org/alpine/v3.20/main";
 const apk_community = "http://dl-cdn.alpinelinux.org/alpine/v3.20/community";
 
 /// stress-ng goes into a copy of the rootfs, by `apk` run inside a zbx container (the VM has a
-/// network, and the container shares it in M2; 10.0.2.3 is the emulated resolver).
+/// network, and the container shares it with --net host; 10.0.2.3 is the emulated resolver).
 fn install_stress_ng(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m2: provisioning: stress-ng into a copy of the rootfs\n", .{});
     const copy = "runuser -u demo -- sh -c 'cp -a " ++ rootfs_dir ++ " " ++ stress_dir ++
@@ -246,7 +246,8 @@ fn install_stress_ng(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
         "/etc/apk/repositories'";
     const copied = try session.run(copy, limits.command_timeout_kvm_s);
     if (copied.status != 0) return fail_step(out, "provisioning", "copy", error.ProvisionFailed);
-    const apk = zbx ++ " run --rootfs " ++ stress_dir ++
+    // The container has no network unless granted (M5): apk needs the host's.
+    const apk = zbx ++ " run --net host --rootfs " ++ stress_dir ++
         " --name apk1 -- apk add --no-cache stress-ng";
     const result = try session.run(apk, 300);
     try H.show(out, "apk add stress-ng, inside zbx run", result);

@@ -501,9 +501,9 @@ pub const HostReal = struct {
         _ = from_context(context);
         assert(path.len > 0);
         // Without O_EXCL, creating a file that is there opens it and leaves it as it is: no
-        // O_TRUNC, and the descriptor is write-only but never written.
+        // O_TRUNC, and read-only, so a file the user may read but not write is fine.
         const flags: linux.O = .{
-            .ACCMODE = .WRONLY,
+            .ACCMODE = .RDONLY,
             .CREAT = true,
             .EXCL = !exist_ok,
             .CLOEXEC = true,

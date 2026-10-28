@@ -335,7 +335,9 @@ fn run_command(
     ref: []const u8,
     probe: ?checks_top20.ProbeSpec,
 ) ![]const u8 {
-    const plain = z ++ " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
+    // The probe asks on the guest's loopback, so the image runs on the host's network (M5 slice 3
+    // moves the servers to --publish).
+    const plain = z ++ " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
     const spec = probe orelse return std.fmt.allocPrint(arena, plain, .{ref});
     var text: std.ArrayList(u8) = .empty;
     try text.print(arena, "rm -f " ++ probe_file ++ "; {{ " ++ plain ++ " & ZP=$!; ZI=0; " ++
@@ -396,7 +398,7 @@ fn find_seccomp(session: *Session, out: *Io.Writer, entry: Entry, traced: bool) 
     const command = try std.fmt.allocPrint(
         arena,
         "strace -f -o " ++ strace_log ++ " -e status=failed " ++ z ++
-            " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null >/dev/null 2>&1; " ++
+            " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null >/dev/null 2>&1; " ++
             "grep -h ' = -1 EPERM' " ++ strace_log ++
             " | sed -E 's/^[0-9]+ +//; s/\\(.*//' | sort -u | tr '\\n' ' '",
         .{entry.ref},
