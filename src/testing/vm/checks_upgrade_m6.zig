@@ -126,3 +126,35 @@ test "the versions are the ones the formats have" {
     try up5.check_record_version("    .version = 6,\n", run_record_version);
     try up5.check_record_version(".version = 2,\n", image_record_version);
 }
+
+// Text captured from a real run of this demo in the KVM guest (vm run 40781853563, the M5 binary
+// built from fd48d38 and this one): not what the code above is believed to print.
+const real_m5_item = "{\"name\":\"m5up1\",\"state\":\"stopped\",\"pid\":2490," ++
+    "\"supervisor\":2484," ++
+    "\"scope\":\"zbx-m5up1.scope\",\"detached\":false,\"timed_out\":false," ++
+    "\"started\":1793227669," ++
+    "\"ended\":1793227669,\"reason\":\"exited\",\"exit_code\":0,\"command\":[\"sh\",\"-c\"," ++
+    "\"wget -qO /dev/null https://example.com && echo upgraded > /marker\"],\"labels\":[]," ++
+    "\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null},\"network\":null," ++
+    "\"published\":[],\"env\":[]}";
+const real_m6_item = "{\"name\":\"m6up2\",\"state\":\"stopped\",\"pid\":2610," ++
+    "\"supervisor\":2606," ++
+    "\"scope\":\"zbx-m6up2.scope\",\"detached\":false,\"timed_out\":false," ++
+    "\"started\":1793227705," ++
+    "\"ended\":1793227705,\"reason\":\"exited\",\"exit_code\":0,\"command\":[\"true\"]," ++
+    "\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null}," ++
+    "\"network\":\"none\",\"published\":[],\"env\":[]}";
+
+test "text the M5 binary's record and this one's produced in the guest passes the check" {
+    var state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const wants = [_]Want{
+        .{ .name = "m5up1", .network = null },
+        .{ .name = "m6up2", .network = "none" },
+    };
+    try check_ps_records(arena, doc(real_m6_item ++ "," ++ real_m5_item), 0, &wants);
+    const swapped = [_]Want{.{ .name = "m5up1", .network = "none" }};
+    const wrong = check_ps_records(arena, doc(real_m5_item), 0, &swapped);
+    try testing.expectError(error.RecordWrong, wrong);
+}

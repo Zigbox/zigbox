@@ -289,3 +289,33 @@ test "a removed volume is no longer listed" {
     try testing.expectError(error.JsonWrong, check_volume_absent(arena, "", "pgdata"));
     try testing.expectError(error.JsonWrong, check_volume_absent(arena, "{\"x\":1}", "pgdata"));
 }
+
+// Text captured from a real run of this demo in the KVM guest (vm run 40781853563): not what the
+// code above is believed to print. The ps document is cut after `command` (the members the check
+// reads come before it).
+const real_ls = "NAME                           SIZE  CREATED              LAST USED" ++
+    "            LAST CONTAINER       IN USE BY\n" ++
+    "pgdata                     38.5 MiB  2026-10-28 22:48:35  2026-10-28 22:48:38  " ++
+    "pg                   pg\n" ++
+    "upstate                    38.6 MiB  2026-10-28 22:48:25  2026-10-28 22:48:25  " ++
+    "m6pg                 -\n";
+const real_ps = "{\"schema\":\"zbx.ps/1\",\"containers\":[{\"name\":\"pg\"," ++
+    "\"state\":\"stopped\"," ++
+    "\"pid\":2777,\"supervisor\":2772,\"scope\":\"zbx-pg.scope\",\"detached\":true," ++
+    "\"timed_out\":false,\"started\":1793227715,\"ended\":1793227718,\"reason\":\"signal\"," ++
+    "\"exit_code\":137}]}\n";
+
+test "text the guest printed passes the checks, and the other volume's row is not this one's" {
+    var state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    try check_ls_text(real_ls, 0, "pgdata", "pg", 1 << 20);
+    try check_ls_text(real_ls, 0, "upstate", "m6pg", 1 << 20);
+    const mixed = check_ls_text(real_ls, 0, "upstate", "pg", 1 << 20);
+    try testing.expectError(error.TextWrong, mixed);
+    try check_killed_record(arena, real_ps, 0, "pg");
+    try check_data_gone(.{
+        .stdout = "",
+        .stderr = "ERROR:  relation \"t\" does not exist\nLINE 1: select v from t\n",
+    }, 1, "ephemeral-row");
+}
