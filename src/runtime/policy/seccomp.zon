@@ -14,9 +14,11 @@
 //     entry because the filter refuses the 32-bit architecture altogether.
 //   - io_uring is absent, as in current Docker profiles.
 //   - mknod is listed, as in Docker, and the kernel refuses devices without CAP_MKNOD.
+//   - get_mempolicy is allowed: Docker allows it only with CAP_SYS_NICE, but it only reads the
+//     process's own NUMA policy, and mongod asks for it at startup.
 //
 // The list grows from real failures: the weekly top-20 run (docs/demos/m4.md) runs the twenty
-// most-pulled images and names every syscall a image was refused. What it found so far is
+// most-pulled images and names every syscall an image was refused. What it found so far is
 // get_mempolicy (mongo) and fchmodat2 (the JDK image), both added with a reason in their group;
 // io_uring_setup (redis, node) stays refused because both fall back, and mount (docker, which
 // wants to mount inside its own container) stays refused because that is the point of the profile.
