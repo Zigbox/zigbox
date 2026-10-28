@@ -66,7 +66,22 @@ const StepFault = enum {
 
 /// When the manager removes a scope whose last process has gone (`sim_bus.Model.scope_removal`).
 const Removal = enum { lazily, promptly, never };
-const NetChoice = enum { default, none, host };
+const NetChoice = enum {
+    default,
+    none,
+    host,
+    /// `--net user`, and `--publish 8080:80` (which implies it): pasta starts for these.
+    user,
+    publish,
+
+    fn network(choice: NetChoice) @import("runtime/spec.zig").Network {
+        return switch (choice) {
+            .default, .none => .none,
+            .host => .host,
+            .user, .publish => .user,
+        };
+    }
+};
 
 /// What goes wrong when the scope that stays is stopped.
 const StopFault = enum { none, refused, canceled, stays };
@@ -193,7 +208,8 @@ const Scenario = struct {
     read_only: bool,
     /// The root is a tree of the store, run on an overlay, instead of a directory.
     image: bool,
-    /// `--net`: not given (none, with the hint when the command fails), none, or host.
+    /// `--net`: not given (none, with the hint when the command fails), none, host or user, or
+    /// `--publish` alone.
     net: NetChoice,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
@@ -374,7 +390,7 @@ fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
         scenario.scoped(),
         scenario.read_only,
         scenario.image,
-        if (scenario.net == .host) .host else .none,
+        scenario.net.network(),
     );
 }
 
@@ -557,6 +573,7 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => return .E0203,
         .run_newuidmap, .run_newgidmap => return .E0204,
         .start_scope => return .E0301, // Its first call is the connect to the bus.
+        .start_pasta, .await_pasta => return .E0603, // A pipe, or the read of pasta's line.
         .restrict_capabilities, .clear_ambient => return .E0207,
         .set_no_new_privs, .install_seccomp => return .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
@@ -875,6 +892,8 @@ fn command_line(scenario: *const Scenario, args: *[28][:0]const u8) usize {
         .default => {},
         .none => push_pair(args, &count, "--net", "none"),
         .host => push_pair(args, &count, "--net", "host"),
+        .user => push_pair(args, &count, "--net", "user"),
+        .publish => push_pair(args, &count, "--publish", "8080:80"),
     }
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
@@ -1078,7 +1097,7 @@ fn check_started(
         .full = scenario.full,
         .read_only = scenario.read_only,
         .merged = if (scenario.image) merged_path(&merged_storage, name) else null,
-        .network = if (scenario.net == .host) .host else .none,
+        .network = scenario.net.network(),
         .network_mounts = !net_steps_skipped(scenario),
     };
     assert(sim_run.started(sim, container) == null);
@@ -1086,7 +1105,10 @@ fn check_started(
     const received = expected_received(scenario, &received_storage);
     assert(std.mem.eql(u8, sim.world.received[0..sim.world.received_count], received));
     // A run of a tree has the store's worker map its ids first: the helpers run twice.
-    const helper_runs: u32 = if (scenario.full) (if (scenario.image) 4 else 2) else 0;
+    // A run through pasta asks it its version first (the check of its minimum).
+    const pasta_runs: u32 = @intFromBool(scenario.net.network() == .user);
+    const map_runs: u32 = if (scenario.full) (if (scenario.image) 4 else 2) else 0;
+    const helper_runs = map_runs + pasta_runs;
     assert(sim.world.helper_runs == helper_runs);
     check_scope(sim, scenario, name);
     check_started_output(sim, scenario, status);
@@ -1156,8 +1178,16 @@ fn check_started_output(
         // Cannot fail: a reason word in 48 bytes.
         const text = std.fmt.bufPrint(&needle, "\"reason\":\"{s}\"", .{reason}) catch unreachable;
         assert(std.mem.indexOf(u8, stderr, text) != null);
-        const word = if (scenario.net == .host) "\"network\":\"host\"" else "\"network\":\"none\"";
+        const word = switch (scenario.net.network()) {
+            .none => "\"network\":\"none\"",
+            .host => "\"network\":\"host\"",
+            .user => "\"network\":\"user\"",
+        };
         assert(std.mem.indexOf(u8, stderr, word) != null);
+        const forward = "\"published\":[{\"host\":8080,\"container\":80}]";
+        const forwarded = std.mem.indexOf(u8, stderr, forward) != null;
+        assert(forwarded == (scenario.net == .publish));
+        if (!forwarded) assert(std.mem.indexOf(u8, stderr, "\"published\":[]") != null);
         assert(std.mem.indexOf(u8, stderr, "grant with --net") == null); // Text mode's note.
         return;
     }

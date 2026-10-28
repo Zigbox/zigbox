@@ -741,7 +741,8 @@ pub const Host = struct {
     /// thread dies (`PR_SET_PDEATHSIG`, so a SIGKILL of zbx releases what it holds), its stdin
     /// is /dev/null, its stdout is `stdout` (a pipe's write end, which the caller then closes)
     /// and its stderr is the file `log`, created or emptied with mode 0600, or /dev/null when
-    /// `log` is empty. The caller waits for it (`wait_for`) and is the one who ends it.
+    /// `log` is empty or cannot be made. The caller waits for it (`wait_for`) and is the one who
+    /// ends it.
     pub fn start_program(
         host: Host,
         request: ExecRequest,

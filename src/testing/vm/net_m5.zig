@@ -8,6 +8,7 @@
 //!   server and sees the host's interfaces.
 //!   /etc/hosts and /etc/resolv.conf are generated and read-only; `run --output json` names the
 //!   network; a commit of a container does not hold either file.
+//!   Then slice 3's checks of `--net user` and `--publish` (net_user_m5.zig).
 //!
 //! Every assertion is a function of checks_m5.zig with a unit test.
 
@@ -19,6 +20,7 @@ const harness = @import("harness.zig");
 const limits = @import("limits.zig");
 const session_mod = @import("session.zig");
 const checks_m3 = @import("checks_m3.zig");
+const net_user = @import("net_user_m5.zig");
 
 const Session = session_mod.Session;
 const H = harness;
@@ -48,6 +50,7 @@ pub fn step_network(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try step_files(session, out);
     try step_json(session, out);
     try step_commit(session, out);
+    try net_user.step_user(session, out);
     try timer.lap(out, "network");
 }
 
@@ -132,4 +135,5 @@ fn step_commit(session: *Session, out: *Io.Writer) !void {
 
 test {
     _ = @import("checks_m5.zig");
+    _ = @import("net_user_m5.zig");
 }

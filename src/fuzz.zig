@@ -32,6 +32,7 @@ const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const text_util = @import("text.zig");
+const runtime_spec = @import("runtime/spec.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 const sim_file = @import("host_sim.zig").File;
 const Faults = @import("host_sim.zig").Faults;
@@ -46,6 +47,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "host_write", .run_iteration = fuzz_host_write },
     .{ .name = "cli", .run_iteration = fuzz_cli },
     .{ .name = "text", .run_iteration = fuzz_text },
+    .{ .name = "publish", .run_iteration = fuzz_publish },
     .{ .name = "doctor", .run_iteration = fuzz_doctor },
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
@@ -203,6 +205,11 @@ fn random_args(
         "web-1",   "store",    "import",        "ls",        "du",        "rm",        "b3:",
     };
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
+    // M5's network options, their good values and some that are not.
+    const net_words = [_][]const u8{
+        "--net",   "user",  "host", "none", "--publish",
+        "8080:80", "80:80", "8080", "0:1",  "--net=user",
+    };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
     args.items[0] = "zbx";
@@ -217,7 +224,10 @@ fn random_args(
         const kind = if (many) random.uintLessThan(u8, 6) else random.uintLessThan(u8, 8);
         const argument: []const u8 = switch (kind) {
             0...2 => words[random.uintLessThan(usize, words.len)],
-            3 => pull_words[random.uintLessThan(usize, pull_words.len)],
+            3 => if (random.boolean())
+                pull_words[random.uintLessThan(usize, pull_words.len)]
+            else
+                net_words[random.uintLessThan(usize, net_words.len)],
             4...5 => blk: {
                 random.bytes(&short[slot]);
                 for (&short[slot]) |*byte| byte.* |= @intFromBool(byte.* == 0); // No NUL.
@@ -418,6 +428,68 @@ fn fuzz_text(seed: u64) void {
     for (0..random.uintAtMost(u8, 6)) |_| bounded.append_sanitised(input[0..length], 12);
     assert(bounded.len <= 24);
     for (bounded.slice()) |byte| assert(is_printable_reference(byte));
+}
+
+/// Property of `--publish` parsing (runtime/spec.zig): a text parses exactly when an oracle
+/// written apart from the parser says it is two decimal ports without leading zeros, 1 to 65535,
+/// around one colon, and what parses renders back to the same text. The texts are random bytes
+/// over the characters that matter, and valid texts damaged by one change.
+fn fuzz_publish(seed: u64) void {
+    var prng = std.Random.Xoshiro256.init(seed);
+    const random = prng.random();
+    var buffer: [16]u8 = undefined;
+    var length: usize = 0;
+    if (random.boolean()) {
+        const alphabet = "0123456789:::/-+ x";
+        length = random.uintAtMost(usize, buffer.len);
+        for (buffer[0..length]) |*byte| byte.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+    } else {
+        const valid: runtime_spec.Publish = .{
+            .host = random.intRangeAtMost(u16, 1, 65535),
+            .container = random.intRangeAtMost(u16, 1, 65535),
+        };
+        var rendered: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+        const text = valid.text(&rendered);
+        @memcpy(buffer[0..text.len], text);
+        length = text.len;
+        if (random.boolean()) {
+            const at = random.uintLessThan(usize, length);
+            buffer[at] = "0123456789:a"[random.uintLessThan(usize, 12)];
+        }
+    }
+    const input = buffer[0..length];
+    const parsed = runtime_spec.parse_publish(input);
+    const expected = publish_reference(input);
+    switch (parsed) {
+        .ok => |publish| {
+            assert(expected != null);
+            assert(publish.host == expected.?.host);
+            assert(publish.container == expected.?.container);
+            var rendered: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+            assert(std.mem.eql(u8, publish.text(&rendered), input));
+        },
+        .problem => assert(expected == null),
+    }
+}
+
+/// The oracle: written with compound conditions on purpose (STYLE.md lets an oracle), so that it
+/// does not mirror the parser's structure.
+fn publish_reference(text: []const u8) ?runtime_spec.Publish {
+    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return null;
+    if (std.mem.lastIndexOfScalar(u8, text, ':').? != colon) return null;
+    const sides = [2][]const u8{ text[0..colon], text[colon + 1 ..] };
+    var ports: [2]u16 = undefined;
+    for (sides, 0..) |side, index| {
+        if (side.len == 0 or side.len > 5 or side[0] == '0') return null;
+        var value: u32 = 0;
+        for (side) |byte| {
+            if (byte < '0' or byte > '9') return null;
+            value = value * 10 + (byte - '0');
+        }
+        if (value == 0 or value > 65535) return null;
+        ports[index] = @intCast(value);
+    }
+    return .{ .host = ports[0], .container = ports[1] };
 }
 
 /// Errors a doctor fault may inject. NotFound is excluded because it is a legitimate answer

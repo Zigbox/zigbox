@@ -407,10 +407,12 @@ pub const HostReal = struct {
             .CLOEXEC = true,
         };
         const null_flags: linux.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
-        const output = if (log.len > 0)
-            linux.open(log.ptr, log_flags, 0o600)
-        else
-            linux.open("/dev/null", null_flags, 0);
+        // A log that cannot be made (a full disk, a directory gone) is not a reason to refuse the
+        // run: pasta's stderr then goes to /dev/null, as for a run with no state directory.
+        var output: usize = if (log.len > 0) linux.open(log.ptr, log_flags, 0o600) else 0;
+        if (log.len == 0 or linux.errno(output) != .SUCCESS) {
+            output = linux.open("/dev/null", null_flags, 0);
+        }
         check(output) catch |err| {
             const errno_open = errno_last;
             _ = linux.close(stdin_fd);

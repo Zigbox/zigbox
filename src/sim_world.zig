@@ -1217,9 +1217,8 @@ pub const World = struct {
         const end = end_index(stdout);
         assert(end % 2 == 1); // The write end.
         assert(world.processes[world.current].holds[end]);
-        if (log.len > 0) {
-            if (world.write_file(log, "")) |errno| return .{ .errno = errno };
-        }
+        // A log that cannot be made is not kept, and pasta still starts (as the real host does).
+        if (log.len > 0) _ = world.write_file(log, "");
         world.pasta_starts += 1;
         const pasta = &world.processes[slot];
         pasta.* = unused_process();

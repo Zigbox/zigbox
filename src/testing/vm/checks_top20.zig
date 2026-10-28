@@ -72,6 +72,18 @@ pub const ProbeSpec = struct {
     expect: []const u8,
 };
 
+/// The host port a server's probed port is published on (`--publish HOST:PORT`): 20000 above it,
+/// so that it is above net.ipv4.ip_unprivileged_port_start (1024) and clear of the ports the
+/// guest's own services use; a port too high for that keeps its number.
+pub fn published_port(port: u16) u16 {
+    std.debug.assert(port > 0);
+    const offset: u16 = 20000;
+    if (port > std.math.maxInt(u16) - offset) return port;
+    const result = port + offset;
+    std.debug.assert(result >= 1024);
+    return result;
+}
+
 pub fn parse_probe(text: []const u8) ?ProbeSpec {
     if (text.len == 0) return null;
     var parts = std.mem.splitScalar(u8, text, '|');
@@ -297,4 +309,14 @@ test "a result is one line with the fields in a fixed order" {
         "alpine:latest | pulled=no | ran=no | exit=- | fail | seccomp=none | probe=none | -",
         try format_line(&buffer, unpulled),
     );
+}
+
+test "a probed port is published 20000 above, and a high one as it is" {
+    // Goal: every probed port of top20.zon has a host port a user may bind. Method: the ports
+    // the list probes, the edge where 20000 more would not fit, and the highest.
+    try std.testing.expectEqual(@as(u16, 20080), published_port(80));
+    try std.testing.expectEqual(@as(u16, 47017), published_port(27017));
+    try std.testing.expectEqual(@as(u16, 65535), published_port(45535));
+    try std.testing.expectEqual(@as(u16, 45536), published_port(45536));
+    try std.testing.expectEqual(@as(u16, 65535), published_port(65535));
 }

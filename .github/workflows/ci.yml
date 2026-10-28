@@ -70,6 +70,7 @@ jobs:
           - host_read
           - host_write
           - cli
+          - publish
           - text
           - doctor
           - diag

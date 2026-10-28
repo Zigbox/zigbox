@@ -20,6 +20,11 @@ pub const Error = error{
     /// The commit's diff lists a generated file, or does not list what the container wrote.
     DiffWrong,
     JsonWrong,
+    /// A published port is not listened on by pasta as the user, or still is when it should
+    /// be free.
+    ListenerWrong,
+    /// The host's firewall rules changed.
+    RulesChanged,
 };
 
 pub const hint = "zbx: network: none (grant with --net)";
@@ -149,6 +154,64 @@ pub fn check_commit_diff(streams: Streams, status: u8, added: []const u8) Error!
     if (!found) return error.DiffWrong;
 }
 
+// ---- Slice 3: --net user and --publish through pasta ----
+
+pub const pasta_dns = "nameserver 169.254.1.1";
+
+/// `cat /etc/resolv.conf; wget -qO- https://example.com` with `--net user`: the resolv.conf
+/// names pasta's DNS address (and not the host's stub), and the page came, so DNS and the
+/// connection both went through pasta.
+pub fn check_user_fetch(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!contains(streams.stdout, pasta_dns)) return error.FileWrong;
+    if (contains(streams.stdout, "127.0.0.53")) return error.FileWrong;
+    if (!contains(streams.stdout, "Example Domain")) return error.PageWrong;
+    if (contains(streams.stderr, "grant with --net")) return error.HintWrong;
+}
+
+/// `curl localhost:PORT` on the guest answered with nginx's welcome page.
+pub fn check_nginx_page(text: []const u8, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!contains(text, "Welcome to nginx!")) return error.PageWrong;
+}
+
+/// The lines of `ss -tlnpe` (as root) that listen on the host's `port`: `count` of them and,
+/// when there are any, every one is pasta's, owned by uid 1000 (the demo user).
+pub fn check_listener(text: []const u8, port: u16, want: bool) Error!void {
+    var needle: [16]u8 = undefined;
+    const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
+    var found: u32 = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
+        // The local address is the fourth column; the peer's ("0.0.0.0:*") never ends ":PORT ".
+        if (!contains(line, local)) continue;
+        found += 1;
+        if (!contains(line, "((\"pasta\"")) return error.ListenerWrong;
+        if (!contains(line, " uid:1000 ")) return error.ListenerWrong;
+    }
+    if ((found > 0) != want) return error.ListenerWrong;
+}
+
+/// The host's rules (`iptables -S` and `ip6tables -S`, as root) are what they were.
+pub fn check_rules_same(before: []const u8, after: []const u8) Error!void {
+    if (before.len == 0) return error.RulesChanged; // Nothing was read: nothing is shown.
+    const left = std.mem.trim(u8, before, " \r\n");
+    const right = std.mem.trim(u8, after, " \r\n");
+    if (!std.mem.eql(u8, left, right)) return error.RulesChanged;
+}
+
+/// The JSON line of a run with one `--publish HOST:CONTAINER`: network user and the forward.
+pub fn check_json_published(streams: Streams, status: u8, host: u16, container: u16) Error!void {
+    try check_json_network(streams, status, "user");
+    var needle: [80]u8 = undefined;
+    const format = "\"published\":[{{\"host\":{d},\"container\":{d}}}]";
+    const wanted = std.fmt.bufPrint(&needle, format, .{ host, container }) catch {
+        return error.JsonWrong;
+    };
+    if (!contains(streams.stderr, wanted)) return error.JsonWrong;
+}
+
 const testing = std.testing;
 
 fn captured(stdout: []const u8, stderr: []const u8) Streams {
@@ -260,4 +323,64 @@ test "a commit's diff holds what the container wrote and neither generated file"
     );
     const other = captured("A /other\n", "");
     try testing.expectError(error.DiffWrong, check_commit_diff(other, 0, "/root/note"));
+}
+
+test "--net user fetched the page with pasta's DNS" {
+    // Goal: the check fails unless DNS went to pasta and the page came. Method: right; the host's
+    // stub; no page; a failed run.
+    const page = "<title>Example Domain</title>\n";
+    const right = "# zbx: DNS goes through pasta to the host's resolver (--net user).\n" ++
+        pasta_dns ++ "\n" ++ page;
+    try check_user_fetch(captured(right, ""), 0);
+    const stub = captured("nameserver 127.0.0.53\n" ++ pasta_dns ++ "\n" ++ page, "");
+    try testing.expectError(error.FileWrong, check_user_fetch(stub, 0));
+    const no_page = captured(pasta_dns ++ "\n", "wget: bad address 'example.com'\n");
+    try testing.expectError(error.PageWrong, check_user_fetch(no_page, 0));
+    try testing.expectError(error.ExitCodeWrong, check_user_fetch(captured(right, ""), 1));
+}
+
+test "nginx answers through the published port" {
+    // Goal: the page is nginx's. Method: right; another page; a failed curl.
+    try check_nginx_page("<h1>Welcome to nginx!</h1>\n", 0);
+    try testing.expectError(error.PageWrong, check_nginx_page("It works!\n", 0));
+    try testing.expectError(error.ExitCodeWrong, check_nginx_page("", 7));
+}
+
+test "the listener is pasta's, as the user, and gone when it should be" {
+    // Goal: the port check. Method: lines in the shape `ss -tlnpe` prints (docs/demos/m5.md has
+    // the recorded ones); another program's listener; root's; the port free; a port that is a
+    // prefix of another.
+    const pasta = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    " ++
+        "users:((\"pasta\",pid=1828,fd=7)) uid:1000 ino:21120 sk:1 cgroup:/user.slice <->\n";
+    try check_listener(pasta, 8080, true);
+    try testing.expectError(error.ListenerWrong, check_listener(pasta, 8080, false));
+    try check_listener(pasta, 80, false);
+    try check_listener("State Recv-Q Send-Q Local Address:Port\n", 8080, false);
+    const other = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:* users:((\"python3\",pid=9,fd=3)) uid:1000 x\n";
+    try testing.expectError(error.ListenerWrong, check_listener(other, 8080, true));
+    const root = "LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"pasta\",pid=9,fd=7)) ino:1 sk:2\n";
+    try testing.expectError(error.ListenerWrong, check_listener(root, 8080, true));
+    try check_listener(pasta, 808, false);
+}
+
+test "the host's rules are unchanged" {
+    // Goal: no firewall change. Method: the same text; a rule added; nothing read.
+    const rules = "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n";
+    try check_rules_same(rules, rules ++ "\n");
+    const added = rules ++ "-A FORWARD -j ACCEPT\n";
+    try testing.expectError(error.RulesChanged, check_rules_same(rules, added));
+    try testing.expectError(error.RulesChanged, check_rules_same("", ""));
+}
+
+test "the JSON line lists the forward" {
+    // Goal: `run --output json` says user and the port. Method: right; another port; mode none.
+    const line = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0,\"network\":\"user\"," ++
+        "\"published\":[{\"host\":18081,\"container\":80}]},\"ran\":{\"kind\":\"image\"}}\n";
+    try check_json_published(captured("", line), 0, 18081, 80);
+    const other = check_json_published(captured("", line), 0, 18082, 80);
+    try testing.expectError(error.JsonWrong, other);
+    const none = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0,\"network\":\"none\"," ++
+        "\"published\":[]}}\n";
+    const without = check_json_published(captured("", none), 0, 18081, 80);
+    try testing.expectError(error.JsonWrong, without);
 }
