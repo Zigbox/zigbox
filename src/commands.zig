@@ -245,7 +245,35 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
     try optional_number(writer, record.limits.pids);
     try writer.writeAll(",\"cpu_millis\":");
     try optional_number(writer, record.limits.cpu_millis);
-    try writer.writeAll("}}");
+    try writer.writeAll("}");
+    try network_json(writer, record);
+    try writer.writeAll("}");
+}
+
+/// The members M6 added to a container: `network` (null for a record of a zbx that did not keep
+/// it), `published` (the forwards, as `run --output json` writes them) and `env`, the names of
+/// the variables set with `-e`. A value is never in a record, so never here.
+fn network_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Writer.Error!void {
+    assert(record.publish_count <= constants.publish_count_max);
+    assert(record.env_names_count <= constants.run_env_count_max);
+    try writer.writeAll(",\"network\":");
+    if (record.network) |network| {
+        try writer.print("\"{s}\"", .{network.word()});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"published\":[");
+    for (record.publish_slice(), 0..) |forward, index| {
+        if (index > 0) try writer.writeByte(',');
+        const format = "{{\"host\":{d},\"container\":{d}}}";
+        try writer.print(format, .{ forward.host, forward.container });
+    }
+    try writer.writeAll("],\"env\":[");
+    for (0..record.env_names_count) |index| {
+        if (index > 0) try writer.writeByte(',');
+        try json_string(writer, record.env_name(@intCast(index)));
+    }
+    try writer.writeAll("]");
 }
 
 // ---- stop -----------------------------------------------------------------------------------

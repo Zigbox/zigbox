@@ -49,12 +49,27 @@ pub const Fix = struct {
     sentence: Text,
     /// Empty when the fix is not a command.
     command: Command,
+    /// The command needs administrator rights (JSON `needs_root`). `Diag.fix` also sets it for
+    /// any command that starts with `sudo`, so the flag cannot disagree with the text.
+    needs_root: bool,
+    /// The command is an example to adapt, not to run as written (JSON `template`).
+    template: bool,
 };
 
 pub const FixOptions = struct {
     sentence: []const u8,
     command: []const u8 = "",
+    needs_root: bool = false,
+    template: bool = false,
 };
+
+/// True if a command runs `sudo` at its start or after a pipe or `&&`.
+pub fn command_uses_sudo(command: []const u8) bool {
+    assert(command.len <= constants.diag_command_bytes_max * 4);
+    if (std.mem.startsWith(u8, command, "sudo ")) return true;
+    if (std.mem.indexOf(u8, command, "| sudo ") != null) return true;
+    return std.mem.indexOf(u8, command, "&& sudo ") != null;
+}
 
 /// Which end of a full list survives a new item.
 const Keep = enum { oldest, newest };
@@ -204,7 +219,12 @@ pub const Diag = struct {
         slot.command = .{};
         put(&slot.sentence, "{s}", .{options.sentence});
         if (options.command.len > 0) put(&slot.command, "{s}", .{options.command});
+        slot.needs_root = options.needs_root or command_uses_sudo(options.command);
+        slot.template = options.template;
         assert(slot.sentence.len > 0);
+        // A flag on a prose-only fix would describe a command that is not there.
+        if (slot.command.len == 0) assert(!slot.needs_root);
+        if (slot.command.len == 0) assert(!slot.template);
     }
 
     /// A fix whose command is built from run-time text, for example the name of the command that
@@ -221,7 +241,18 @@ pub const Diag = struct {
         slot.command = .{};
         put(&slot.sentence, "{s}", .{sentence});
         put(&slot.command, command_format, command_args);
+        slot.needs_root = command_uses_sudo(slot.command.slice());
+        slot.template = false;
         assert(slot.command.len > 0);
+    }
+
+    /// Marks the fix just added as an example to adapt (a `fix_with` command holds a placeholder).
+    pub fn mark_last_fix_template(diag: *Diag) void {
+        if (diag.fixes.count == 0) return;
+        if (diag.fixes.omitted > 0) return; // The fix just added was dropped.
+        const slot = &diag.fixes.items[diag.fixes.count - 1];
+        if (slot.command.len == 0) return;
+        slot.template = true;
     }
 
     /// The registry entry for the classified code. Asserts that `raise` was called.
@@ -267,8 +298,16 @@ pub const Diag = struct {
                 unreachable;
         }
         for (diag.fixes.slice()) |item| {
-            writer.print("f\t{s}\t{s}\n", .{ item.sentence.slice(), item.command.slice() }) catch
+            writer.print("f\t{s}\t{s}", .{ item.sentence.slice(), item.command.slice() }) catch
                 unreachable;
+            // The flags follow the command after a third tab, only when one is set.
+            if (item.needs_root or item.template) {
+                const flags: []const u8 = if (item.needs_root and item.template)
+                    "rt"
+                else if (item.needs_root) "r" else "t";
+                writer.print("\t{s}", .{flags}) catch unreachable; // Same bound.
+            }
+            writer.writeByte('\n') catch unreachable; // Same bound.
         }
         return writer.buffered();
     }
@@ -299,7 +338,21 @@ pub const Diag = struct {
                 'f' => {
                     const tab = std.mem.indexOfScalar(u8, rest, '\t') orelse return false;
                     if (tab == 0) return false;
-                    diag.fix(.{ .sentence = rest[0..tab], .command = rest[tab + 1 ..] });
+                    var command = rest[tab + 1 ..];
+                    var flags: []const u8 = "";
+                    if (std.mem.indexOfScalar(u8, command, '\t')) |second| {
+                        flags = command[second + 1 ..];
+                        command = command[0..second];
+                    }
+                    const known = std.mem.eql(u8, flags, "") or std.mem.eql(u8, flags, "r") or
+                        std.mem.eql(u8, flags, "t") or std.mem.eql(u8, flags, "rt");
+                    if (!known) return false;
+                    diag.fix(.{
+                        .sentence = rest[0..tab],
+                        .command = command,
+                        .needs_root = std.mem.indexOfScalar(u8, flags, 'r') != null,
+                        .template = std.mem.indexOfScalar(u8, flags, 't') != null,
+                    });
                 },
                 else => return false,
             }

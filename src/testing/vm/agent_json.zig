@@ -204,7 +204,14 @@ pub fn schema_names(arena: Allocator, schema_text: []const u8, schema_id: []cons
 
 // ---- Diagnostics and the exit line, on stderr ----------------------------------------------
 
-pub const Fix = struct { sentence: []const u8, command: ?[]const u8 = null };
+pub const Fix = struct {
+    sentence: []const u8,
+    command: ?[]const u8 = null,
+    /// M6: only present, and true, when the command needs root. A fix of an older zbx has neither.
+    needs_root: bool = false,
+    /// M6: only present, and true, when the command is an example to adapt, not to run.
+    template: bool = false,
+};
 
 pub const Diagnostic = struct {
     code: []const u8,

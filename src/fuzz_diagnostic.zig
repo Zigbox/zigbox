@@ -95,8 +95,16 @@ fn fill_collector(random: std.Random, diag: *Diag) void {
     }
     for (0..random.uintAtMost(u32, constants.diag_fixes_count_max + extra)) |_| {
         const sentence = random_text(random, &storage);
-        const command = if (random.boolean()) "sudo zbx doctor" else "";
-        diag.fix(.{ .sentence = if (sentence.len == 0) "fix" else sentence, .command = command });
+        const commands = [_][]const u8{ "", "sudo zbx doctor", "zbx run --net host alpine -- sh" };
+        const command = commands[random.uintLessThan(usize, commands.len)];
+        // The flags describe a command: a fix without one carries none (`Diag.fix` asserts it).
+        const flags = command.len > 0;
+        diag.fix(.{
+            .sentence = if (sentence.len == 0) "fix" else sentence,
+            .command = command,
+            .needs_root = flags and random.boolean(),
+            .template = flags and random.boolean(),
+        });
     }
     if (random.uintLessThan(u8, 4) == 0) diag.save_bundle("/state/zbx/bundles/b\"1\\");
 }

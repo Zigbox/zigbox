@@ -33,12 +33,16 @@ pub const Code = enum(u8) {
     E0007,
     E0008,
     E0009,
+    E0010,
+    E0011,
     E0101,
     E0102,
     E0103,
     E0104,
     E0105,
     E0106,
+    W0101,
+    W0102,
     E0201,
     E0202,
     E0203,
@@ -283,6 +287,42 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0010,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't use this -e option",
+        .explanation =
+        \\"zbx run -e NAME=VALUE" sets a variable in the container, and "-e NAME"
+        \\copies it from zbx's own environment. The option you gave is neither: the
+        \\name must be a letter or underscore followed by letters, digits and
+        \\underscores (at most 64 of them), a name may be set once, and a run takes
+        \\at most 16 of them. The image's own variables and yours together are at
+        \\most 64.
+        \\
+        \\zbx never prints or stores a value, so the message names the variable only.
+        \\The run record, "zbx ps" and a bundle list the names that -e set, never
+        \\what they were set to. Remember that your shell, and the process list of
+        \\this machine while zbx runs, can still show the command line: "-e NAME"
+        \\with the value in the environment keeps it off both.
+        ,
+    },
+    .{
+        .code = .E0011,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "-e names a variable that is not set",
+        .explanation =
+        \\"-e NAME", with no "=", copies the variable NAME from the environment of
+        \\the zbx command into the container. NAME is not set there (or its value is
+        \\longer than 4096 bytes, more than a container can take), so there is
+        \\nothing to copy and zbx did not start the container.
+        \\
+        \\Give the value on the command line ("-e NAME=VALUE"), or set the variable
+        \\for this one command: NAME=VALUE zbx run -e NAME ... A value is never
+        \\printed or stored by zbx.
+        ,
+    },
+    .{
         .code = .E0101,
         .severity = .@"error",
         .blame = .environment,
@@ -392,6 +432,40 @@ pub const registry = [_]Entry{
         \\Use a kernel with seccomp enabled; every mainstream distribution kernel has
         \\it. If the two answers disagree, run "zbx doctor" again, and report it if it
         \\repeats. If a file could not be read, the cause says so.
+        ,
+    },
+    .{
+        .code = .W0101,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "user namespaces work, but only for unconfined users",
+        .explanation =
+        \\zbx doctor created a user namespace, so zbx works for this process. The host
+        \\also sets kernel.apparmor_restrict_unprivileged_userns = 1, which refuses
+        \\the same call to processes that no AppArmor profile confines. The check
+        \\passed because this process runs under a profile that allows it.
+        \\
+        \\Run from a terminal or another service, zbx may meet the refusal as
+        \\ZBX-E0101. To allow user namespaces system-wide, set the sysctl to 0 as
+        \\root; "zbx doctor" shows the same host as a failure when this process is
+        \\not confined by a permissive profile.
+        ,
+    },
+    .{
+        .code = .W0102,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "--net user is not available",
+        .explanation =
+        \\--net user and --publish connect a container to the network through pasta
+        \\(from the passt project), and the net check of zbx doctor found it missing,
+        \\unable to report its version, or older than zbx can use. Nothing else
+        \\depends on it: --net none (the default) and --net host run without pasta,
+        \\so this is a warning and "zbx doctor" still exits 0.
+        \\
+        \\Install a current passt (Debian and Ubuntu: apt install passt; Fedora:
+        \\dnf install passt). A run that asks for --net user without it is refused
+        \\as ZBX-E0601 (missing) or ZBX-E0602 (too old) before anything starts.
         ,
     },
     .{

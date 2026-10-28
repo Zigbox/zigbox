@@ -202,6 +202,8 @@ pub const Handle = struct {
     image_workspace: ?*image_mod.Workspace,
     command: []const []const u8,
     labels: []const Label,
+    /// The names (never the values) of the `-e` variables, for the record.
+    env_names: []const []const u8,
     started: u64,
     mapping: records.IdsMode,
     /// Where the record goes; null if there is nowhere (a warning said so).
@@ -307,6 +309,7 @@ pub fn start(
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.command = container.command;
     handle.labels = container.labels;
+    handle.env_names = container.env_names;
     try choose_name(host, container.name, handle, diag);
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
@@ -620,6 +623,8 @@ fn check_command(container: *const Spec, diag: *Diag) Error!void {
         diagnose.env_too_big(diag, index);
         return error.StartFailed;
     }
+    // The caller (cli.zig) built `env_names` from the options it already checked.
+    assert(spec_mod.env_names_problem(container.env_names) == null);
     if (spec_mod.workdir_problem(container.workdir)) {
         diagnose.workdir_unusable(diag);
         return error.StartFailed;
@@ -927,6 +932,9 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .supervisor = handle.host.own_pid(),
         .tree = if (handle.has_image) handle.image.tree_text() else "",
         .upper = if (writable_layers) handle.image.upper.text() else "",
+        .network = handle.network,
+        .publish = handle.publish_slice(),
+        .env_names = handle.env_names,
         .zbx_version = build_options.version,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };

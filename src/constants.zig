@@ -213,6 +213,10 @@ pub const environment_count_max: u32 = 4;
 pub const env_vars_count_max: u32 = 64;
 pub const env_name_bytes_max: u32 = 64;
 pub const env_value_bytes_max: u32 = 4096;
+/// `-e` options of one run (M6). A value is never stored; the record keeps the names. Each takes
+/// two of the `args_count_max` arguments when typed `-e NAME=VALUE`, so the limit leaves room for
+/// the rest of a command line, and the image's own variables share `env_vars_count_max`.
+pub const run_env_count_max: u32 = 16;
 /// The container's PATH, in the order a shell searches it. Counted for the exec candidates.
 pub const container_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub const container_path_dirs_count: u32 = 6;
@@ -390,7 +394,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 4;
+pub const record_version: u32 = 5;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 40 * 1024;
 pub const record_command_bytes_max: u32 = 2048;
@@ -740,7 +744,7 @@ comptime {
     const carry_items = diag_causes_count_max + diag_whiles_count_max;
     const carry_text = carry_items * (diag_field_bytes_max + 3) +
         diag_context_count_max * (diag_key_bytes_max + diag_field_bytes_max + 4) +
-        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 4) + 16;
+        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 8) + 16;
     assert(carry_text <= diag_carry_bytes_max);
     assert(diag_skip_depth_max > 0);
     assert(diag_skip_depth_max <= 16); // The skipper's stack is this many bytes.
@@ -803,6 +807,10 @@ comptime {
     assert(sim_written_bytes_max > 1024);
 
     assert(publish_count_max > 0);
+    assert(run_env_count_max > 0);
+    assert(run_env_count_max <= env_vars_count_max / 2); // Room for the image's own variables.
+    assert(2 * run_env_count_max + 16 <= args_count_max);
+    assert(env_name_bytes_max < arg_bytes_max);
     assert(publish_count_max < 1024); // A forward per port number would be absurd, not useful.
     assert(pasta_argv_words_max >= 20 + 2 * publish_count_max + 1);
     // Eleven bytes per forward ("65535:65535"), a NUL and "-t" with its NUL.

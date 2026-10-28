@@ -191,6 +191,9 @@ pub const Spec = struct {
     /// there; one of these with the same name replaces it). Not kept in the run record: a value
     /// may be a secret.
     env: []const Label = &.{},
+    /// The names of the variables the caller set with `-e` (a subset of `env`'s keys): the run
+    /// record keeps these names and never a value. At most `run_env_count_max`.
+    env_names: []const []const u8 = &.{},
     /// The directory the command starts in, absolute; made if the root file system lacks it.
     /// Empty: the root.
     workdir: []const u8 = "",
@@ -366,6 +369,61 @@ pub fn env_problem(env: []const Label, command: []const []const u8) ?u32 {
 
 comptime {
     assert(environment_bytes_max < constants.exec_strings_bytes_max);
+}
+
+/// A POSIX variable name: a letter or underscore, then letters, digits and underscores, at most
+/// `env_name_bytes_max`. `-e` accepts these only (the image's own may be looser).
+pub fn env_name_valid(name: []const u8) bool {
+    assert(constants.env_name_bytes_max <= 255);
+    if (name.len == 0 or name.len > constants.env_name_bytes_max) return false;
+    for (name, 0..) |byte, index| {
+        const letter = std.ascii.isAlphabetic(byte) or byte == '_';
+        if (index == 0 and !letter) return false;
+        if (!letter and !std.ascii.isDigit(byte)) return false;
+    }
+    return true;
+}
+
+/// The index of the first name of `names` that `-e` could not have set (not a POSIX name, or
+/// one that came before), or `run_env_count_max` if there are too many; null if all are good.
+pub fn env_names_problem(names: []const []const u8) ?u32 {
+    if (names.len > constants.run_env_count_max) return constants.run_env_count_max;
+    for (names, 0..) |name, index| {
+        if (!env_name_valid(name)) return @intCast(index);
+        for (names[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier, name)) return @intCast(index);
+        }
+    }
+    return null;
+}
+
+test "env_name_valid: POSIX names, at the bound and one past it" {
+    // Goal: the one definition `-e` and the run record share. Method: good and bad shapes, and
+    // the length bound exactly.
+    try testing.expect(env_name_valid("A"));
+    try testing.expect(env_name_valid("_x9"));
+    try testing.expect(env_name_valid("POSTGRES_PASSWORD"));
+    try testing.expect(!env_name_valid(""));
+    try testing.expect(!env_name_valid("9a"));
+    try testing.expect(!env_name_valid("a-b"));
+    try testing.expect(!env_name_valid("a=b"));
+    try testing.expect(!env_name_valid("a b"));
+    try testing.expect(!env_name_valid("\xc3\xa9"));
+    const longest = repeat('n', constants.env_name_bytes_max);
+    try testing.expect(env_name_valid(longest));
+    try testing.expect(!env_name_valid(repeat('n', constants.env_name_bytes_max + 1)));
+}
+
+test "env_names_problem: a repeat, a bad name and one past the count" {
+    // Goal: the record's rules for the names of `-e`. Method: each problem at its index.
+    try testing.expect(env_names_problem(&.{}) == null);
+    try testing.expect(env_names_problem(&.{ "A", "B" }) == null);
+    try testing.expectEqual(@as(?u32, 1), env_names_problem(&.{ "A", "A" }));
+    try testing.expectEqual(@as(?u32, 1), env_names_problem(&.{ "A", "1" }));
+    const count = constants.run_env_count_max + 1;
+    const names: [count][]const u8 = @splat("A");
+    const expected: ?u32 = constants.run_env_count_max;
+    try testing.expectEqual(expected, env_names_problem(&names));
 }
 
 const testing = std.testing;

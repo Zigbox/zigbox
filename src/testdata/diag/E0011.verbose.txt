@@ -1,0 +1,9 @@
+error[ZBX-E0011]: -e names a variable that is not set
+  while  setting the container's environment
+  cause  -e UNSET_VARIABLE copies UNSET_VARIABLE from zbx's environment, and it
+         is not set there (or is longer than 4096 bytes)
+  name   UNSET_VARIABLE
+  fix    give it a value:                  zbx run -e NAME=VALUE ...
+         or set it for this one command:   NAME=VALUE zbx run -e NAME ...
+  more   zbx explain E0011
+  docs   https://zigbox.github.io/zigbox/errors/E0011.html

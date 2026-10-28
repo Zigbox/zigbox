@@ -59,11 +59,27 @@ pub fn code_of(id: CheckId) diag_codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
-        // The net check only ever warns (a missing pasta fails nothing), so it has no code.
+        // The net check only ever warns (a missing pasta fails nothing): its code is W0102.
         .net => unreachable, // `Check.problem` is never called for it.
     };
     assert(diag_codes.entry(code).blame == .environment);
     assert(diag_codes.entry(code).severity == .@"error");
+    return code;
+}
+
+/// The code of the warning a check can give (M6), or null for a check that never warns. A
+/// warning carries a diagnostic too, so `--output json` shows it with its code and fixes; the
+/// text report and the exit code are what they always were.
+pub fn warning_code_of(id: CheckId) ?diag_codes.Code {
+    const code: ?diag_codes.Code = switch (id) {
+        .userns => .W0101,
+        .net => .W0102,
+        .kernel, .cgroup, .overlay, .subid, .seccomp => null,
+    };
+    if (code) |found| {
+        assert(diag_codes.entry(found).severity == .warning);
+        assert(diag_codes.entry(found).blame == .environment);
+    }
     return code;
 }
 
@@ -78,7 +94,8 @@ pub const Check = struct {
     status: Status,
     /// The text of the stdout line. For a FAIL it is the symptom in one line.
     detail: Detail,
-    /// The diagnostic of a FAIL (stderr). Unclassified (`code == null`) for ok and warn.
+    /// The diagnostic of a FAIL (stderr), or of a warn (a `W` code, shown in JSON only).
+    /// Unclassified (`code == null`) for ok.
     diag: Diag,
     /// The FAIL is that the check could not look (a read or a probe failed), not that it looked
     /// and found a setting that forbids what zbx needs.
@@ -101,11 +118,17 @@ pub const Check = struct {
         assert(check.detail.len > 0);
     }
 
+    /// A warning: the line says what is wrong, and the check's `W` code carries it as a
+    /// diagnostic (the line as its cause). Follow with `fix`es.
     fn warning(check: *Check, comptime format: []const u8, args: anytype) void {
-        assert(check.diag.code == null); // A warning has nothing to fix.
+        assert(check.diag.code == null); // One warning per check.
         check.status = .warn;
         check.detail.print(format, args);
         assert(check.detail.len > 0);
+        check.diag.raise(warning_code_of(check.id).?);
+        check.diag.while_("running the {s} check of zbx doctor", .{@tagName(check.id)});
+        check.diag.cause("{s}", .{check.detail.slice()});
+        assert(check.diag.causes.count == 1);
     }
 
     /// Records the failure: the stdout line, this check's code, and what was being done. Follow
@@ -158,7 +181,7 @@ pub const Check = struct {
 
     /// A fix. `command` is runnable as written, or empty when the fix is prose only.
     fn fix(check: *Check, sentence: []const u8, command: []const u8) void {
-        assert(check.status == .fail);
+        assert(check.status != .ok);
         assert(sentence.len > 0);
         check.diag.fix(.{ .sentence = sentence, .command = command });
         assert(check.diag.fixes.count > 0);
@@ -198,10 +221,19 @@ pub const Report = struct {
             assert(@backingInt(check.id) == index);
             assert(check.detail.len > 0);
             switch (check.status) {
-                .ok, .warn => assert(check.diag.code == null),
+                .ok => assert(check.diag.code == null),
+                .warn => validate_warning(check),
                 .fail => validate_failure(check),
             }
         }
+    }
+
+    fn validate_warning(check: *const Check) void {
+        assert(check.status == .warn);
+        assert(check.diag.code.? == warning_code_of(check.id).?);
+        assert(check.diag.entry().severity == .warning);
+        assert(check.diag.causes.count > 0);
+        assert(check.diag.fixes.count > 0);
     }
 
     fn validate_failure(check: *const Check) void {
@@ -912,6 +944,10 @@ fn restricted_but_working(check: *Check, setting: []const u8) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
     check.warning("unshare works for this process, but {s} refuses unconfined users", .{setting});
+    check.diag.cause("this host restricts unprivileged user namespaces through AppArmor " ++
+        "(kernel.apparmor_restrict_unprivileged_userns = 1)", .{});
+    const setting_off = "kernel.apparmor_restrict_unprivileged_userns=0";
+    check.fix("allow them system-wide:", "sudo sysctl -w " ++ setting_off);
 }
 
 const dmesg_policy = "sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'";
@@ -1478,6 +1514,7 @@ fn evaluate_net(facts: *const Facts, check: *Check) void {
             "pasta not found: --net user and --publish need it ({s})",
             .{pasta_install},
         );
+        check.fix("install pasta (Debian, Ubuntu):", "sudo " ++ pasta_install);
         return;
     }
     var ended_well = false;
@@ -1488,6 +1525,7 @@ fn evaluate_net(facts: *const Facts, check: *Check) void {
         check.warning("pasta at {s} did not report its version: reinstall it ({s})", .{
             pasta.path.slice(), pasta_install,
         });
+        check.fix("reinstall pasta (Debian, Ubuntu):", "sudo apt install --reinstall passt");
         return;
     }
     if (pasta.version.len == 0) {
@@ -1505,6 +1543,7 @@ fn evaluate_net(facts: *const Facts, check: *Check) void {
                 constants.pasta_version_min,
                 pasta_install,
             });
+            check.fix("install a newer pasta (Debian, Ubuntu):", "sudo " ++ pasta_install);
             return;
         }
     }
@@ -1560,12 +1599,21 @@ fn render_line(writer: *std.Io.Writer, check: Check, color: bool) void {
 
 // ---- Entry point ---------------------------------------------------------------------------
 
+pub const Format = enum { text, json };
+
 /// Runs the doctor against `host`, fills `report`, and prints the stdout report: one line per
-/// check. A stdout that cannot be written is `ZBX-E0009` in `diag`. The diagnostic of each FAIL
-/// stays in `report` for the caller (cli.zig) to render on stderr, and the exit code is
-/// `report.exit_code()`.
-pub fn run(host: Host, facts: *Facts, report: *Report, diag: *Diag) error{OutputFailed}!void {
+/// check, or with `.json` the `zbx.doctor/1` document (`write_json`). A stdout that cannot be
+/// written is `ZBX-E0009` in `diag`. The diagnostic of each FAIL stays in `report` for the
+/// caller (cli.zig) to render on stderr, and the exit code is `report.exit_code()`.
+pub fn run(
+    host: Host,
+    facts: *Facts,
+    report: *Report,
+    format: Format,
+    diag: *Diag,
+) error{OutputFailed}!void {
     inspect(host, facts, report);
+    if (format == .json) return write_json(host, report, diag);
 
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const output = render(report, host.color_enabled(.stdout), &buffer);
@@ -1575,6 +1623,68 @@ pub fn run(host: Host, facts: *Facts, report: *Report, diag: *Diag) error{Output
         return error.OutputFailed;
     };
     assert(output.len <= buffer.len);
+}
+
+const render_diag = @import("diag/render.zig");
+const json_string = @import("bundle.zig").write_json_string;
+
+/// The report as one JSON document on stdout (`zbx.doctor/1`): every check with its id, status
+/// and the line the text report shows, and for a FAIL or a warn its code and its diagnostic, the
+/// same object `--output json` writes on stderr for a failure. Written in pieces, one check at
+/// a time, because the diagnostics together can be larger than one message.
+pub fn write_json(host: Host, report: *const Report, diag: *Diag) error{OutputFailed}!void {
+    report.validate();
+    var ok = true;
+    for (&report.checks) |*check| ok = ok and check.status != .fail;
+    var head: [64]u8 = undefined;
+    const format = "{{\"schema\":\"zbx.doctor/1\",\"ok\":{s},\"checks\":[";
+    const opening = std.fmt.bufPrint(&head, format, .{if (ok) "true" else "false"}) catch
+        unreachable; // A short fixed text in 64 bytes.
+    try write_piece(host, opening, diag);
+    for (&report.checks, 0..) |*check, index| {
+        try write_check_json(host, check, index > 0, diag);
+    }
+    try write_piece(host, "]}\n", diag);
+}
+
+fn write_piece(host: Host, text: []const u8, diag: *Diag) error{OutputFailed}!void {
+    assert(text.len > 0);
+    assert(text.len <= constants.output_bytes_max);
+    host.write_all(.stdout, text) catch |err| {
+        diag_errors.output_failed(diag, .stdout, err, host.last_errno());
+        return error.OutputFailed;
+    };
+}
+
+fn write_check_json(
+    host: Host,
+    check: *const Check,
+    comma: bool,
+    diag: *Diag,
+) error{OutputFailed}!void {
+    assert(check.detail.len > 0);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    // Cannot fail: a name, a status and a detail of at most 240 bytes (escaped, six times that)
+    // fit a message.
+    if (comma) writer.writeByte(',') catch unreachable;
+    writer.print("{{\"id\":\"{s}\",\"status\":\"{s}\",\"detail\":", .{
+        @tagName(check.id), @tagName(check.status),
+    }) catch unreachable; // Same bound.
+    json_string(&writer, check.detail.slice()) catch unreachable; // Same bound.
+    if (check.status == .ok) {
+        writer.writeAll("}") catch unreachable; // Same bound.
+        return write_piece(host, writer.buffered(), diag);
+    }
+    assert(check.diag.code != null);
+    writer.print(",\"code\":\"{s}\",\"diagnostic\":", .{
+        diag_codes.full_name(check.diag.code.?),
+    }) catch unreachable; // Same bound.
+    try write_piece(host, writer.buffered(), diag);
+    var rendered: [constants.output_bytes_max]u8 = undefined;
+    const line = render_diag.render(&check.diag, .json, false, &rendered);
+    try write_piece(host, std.mem.trimEnd(u8, line, "\n"), diag);
+    try write_piece(host, "}", diag);
 }
 
 /// The doctor's checks without any output: for a bundle, which keeps the report as JSON.
@@ -1602,7 +1712,12 @@ pub fn explain_userns(host: Host, facts: *Facts, diag: *Diag) void {
     if (check.diag.last_cause()) |cause| diag.cause("{s}", .{cause});
     const fixes = check.diag.fixes.slice();
     for (fixes[0..@min(fixes.len, 2)]) |fix| {
-        diag.fix(.{ .sentence = fix.sentence.slice(), .command = fix.command.slice() });
+        diag.fix(.{
+            .sentence = fix.sentence.slice(),
+            .command = fix.command.slice(),
+            .needs_root = fix.needs_root,
+            .template = fix.template,
+        });
     }
     assert(diag.causes.count > 0);
 }

@@ -83,6 +83,39 @@ const NetChoice = enum {
     }
 };
 
+/// The `-e` options of the run (M6). A value is a marker the oracle searches for in everything
+/// zbx writes: it may reach the container's environment and nowhere else.
+const EnvChoice = enum {
+    none,
+    /// `-e SECRET_ONE=<marker>`.
+    given,
+    /// `-e HOST_COPY`, which the host's environment has.
+    copied,
+    /// `-e TERM=dumb`: replaces the default TERM (the host's, when it has one).
+    term,
+    /// A given and a copied one, and a TERM.
+    all,
+    /// `-e UNSET_ONE`, which the host's environment lacks: refused before anything else.
+    unset,
+
+    fn names(choice: EnvChoice) []const []const u8 {
+        return switch (choice) {
+            .none, .unset => &.{},
+            .given => &.{"SECRET_ONE"},
+            .copied => &.{"HOST_COPY"},
+            .term => &.{"TERM"},
+            .all => &.{ "SECRET_ONE", "HOST_COPY", "TERM" },
+        };
+    }
+
+    fn copies(choice: EnvChoice) bool {
+        return choice == .copied or choice == .all;
+    }
+};
+
+const marker_given = "zbx-fuzz-secret-5d1";
+const marker_copied = "zbx-fuzz-copied-8e2";
+
 /// What goes wrong when the scope that stays is stopped.
 const StopFault = enum { none, refused, canceled, stays };
 
@@ -211,6 +244,7 @@ const Scenario = struct {
     /// `--net`: not given (none, with the hint when the command fails), none, host or user, or
     /// `--publish` alone.
     net: NetChoice,
+    env: EnvChoice,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -350,6 +384,7 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
         scenario.helper_fails == null;
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.net = random.enumValue(NetChoice);
+    scenario.env = if (random.boolean()) .none else random.enumValue(EnvChoice);
     // A fifth of the good roots are trees of the store. The name is then a valid one: the
     // container's directory is made under it.
     scenario.image = scenario.rootfs == .good and scenario.name != .invalid and
@@ -452,6 +487,8 @@ fn early_verdict(scenario: *const Scenario, fault: ?Fault) ?Verdict {
 
 /// What the run must do, decided from the scenario alone.
 fn verdict_of(scenario: *const Scenario) Verdict {
+    // An unset `-e NAME` is found before an image is looked up or a limit is read.
+    if (scenario.env == .unset) return early_refusal(.E0011);
     // The command line reads the limits first, then the library checks name and rootfs.
     if (scenario.limit_invalid()) return early_refusal(.E0306);
     if (scenario.name == .invalid) return early_refusal(.E0206);
@@ -828,7 +865,7 @@ pub fn fuzz_run(seed: u64) void {
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
-    var args: [28][:0]const u8 = undefined;
+    var args: [36][:0]const u8 = undefined;
     const count = command_line(&scenario, &args);
     const code = sim_run.run_cli(&sim, args[0..count]);
 
@@ -837,7 +874,7 @@ pub fn fuzz_run(seed: u64) void {
 
 /// The simulated process's environment: what the scenario says it has.
 const Environment = struct {
-    variables: [4]host_sim.EnvironmentVariable,
+    variables: [6]host_sim.EnvironmentVariable,
     count: u32,
     runtime_dir: [32]u8,
 
@@ -866,6 +903,9 @@ const Environment = struct {
                 .value = "unix:path=/run/user/4243/bus",
             }),
         }
+        if (scenario.env.copies()) {
+            environment.add(.{ .name = "HOST_COPY", .value = marker_copied });
+        }
         return environment.variables[0..environment.count];
     }
 
@@ -876,7 +916,7 @@ const Environment = struct {
 };
 
 /// The command line of the scenario, after the program name; returns how many words.
-fn command_line(scenario: *const Scenario, args: *[28][:0]const u8) usize {
+fn command_line(scenario: *const Scenario, args: *[36][:0]const u8) usize {
     var words_storage: [3][:0]const u8 = undefined;
     const words = command_words(scenario, &words_storage);
     var count: usize = 0;
@@ -895,6 +935,7 @@ fn command_line(scenario: *const Scenario, args: *[28][:0]const u8) usize {
         .user => push_pair(args, &count, "--net", "user"),
         .publish => push_pair(args, &count, "--publish", "8080:80"),
     }
+    push_env(args, &count, scenario.env);
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
@@ -915,7 +956,23 @@ fn command_line(scenario: *const Scenario, args: *[28][:0]const u8) usize {
     return count;
 }
 
-fn push_limit(args: *[28][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
+fn push_env(args: *[36][:0]const u8, count: *usize, choice: EnvChoice) void {
+    switch (choice) {
+        .none => {},
+        .given => push_pair(args, count, "-e", "SECRET_ONE=" ++ marker_given),
+        .copied => push_pair(args, count, "-e", "HOST_COPY"),
+        .term => push_pair(args, count, "--env", "TERM=dumb"),
+        .all => {
+            push_pair(args, count, "-e", "SECRET_ONE=" ++ marker_given);
+            push(args, count, "-e");
+            push(args, count, "HOST_COPY");
+            push(args, count, "--env=TERM=dumb");
+        },
+        .unset => push_pair(args, count, "-e", "UNSET_ONE"),
+    }
+}
+
+fn push_limit(args: *[36][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
     const given = item orelse return;
     push(args, count, flag);
     push(args, count, given.text);
@@ -976,12 +1033,12 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
 }
 
-fn push(args: *[28][:0]const u8, count: *usize, item: [:0]const u8) void {
+fn push(args: *[36][:0]const u8, count: *usize, item: [:0]const u8) void {
     args[count.*] = item;
     count.* += 1;
 }
 
-fn push_pair(args: *[28][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
+fn push_pair(args: *[36][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
     push(args, count, name);
     push(args, count, value);
 }
@@ -1007,6 +1064,7 @@ fn check(
     assert(found.unregistered == 0);
     const verdict = verdict_of(scenario);
     check_warnings(scenario, &verdict, found);
+    check_env(sim, scenario, &verdict);
     switch (verdict) {
         .started => |status| check_started(sim, scenario, status, code),
         .refused => |refusal_found| {
@@ -1014,6 +1072,31 @@ fn check(
             check_record(sim, scenario, &verdict);
         },
     }
+}
+
+/// The `-e` properties. No value is in anything zbx wrote: its output, or any file (the record,
+/// the logs, the pasta log). A command that started got exactly the variables: the defaults,
+/// then the image's (none here), then these, with `-e TERM` replacing the default TERM.
+fn check_env(sim: *const HostSim, scenario: *const Scenario, verdict: *const Verdict) void {
+    for ([_][]const u8{ marker_given, marker_copied }) |marker| {
+        assert(std.mem.indexOf(u8, sim.stderr(), marker) == null);
+        assert(std.mem.indexOf(u8, sim.stdout(), marker) == null);
+        for (sim.world.written[0..sim.world.written_count]) |*file| {
+            assert(std.mem.indexOf(u8, file.content[0..file.len], marker) == null);
+        }
+    }
+    if (verdict.* != .started) return;
+    const envp = sim.world.processes[1].envp();
+    const wants_given = scenario.env == .given or scenario.env == .all;
+    const given_line = "SECRET_ONE=" ++ marker_given ++ "\n";
+    assert(wants_given == (std.mem.indexOf(u8, envp, given_line) != null));
+    const copied = std.mem.indexOf(u8, envp, "HOST_COPY=" ++ marker_copied ++ "\n") != null;
+    assert(scenario.env.copies() == copied);
+    const terms = std.mem.count(u8, envp, "TERM=");
+    const dumb = std.mem.indexOf(u8, envp, "TERM=dumb\n") != null;
+    assert(dumb == (scenario.env == .term or scenario.env == .all));
+    // One TERM at most: the host's is the default, and a given one replaces it.
+    assert(terms == @intFromBool(dumb or scenario.term));
 }
 
 /// The warnings, in the order they are written, then the error if the run failed: the host that
@@ -1189,6 +1272,12 @@ fn check_started_output(
         assert(forwarded == (scenario.net == .publish));
         if (!forwarded) assert(std.mem.indexOf(u8, stderr, "\"published\":[]") != null);
         assert(std.mem.indexOf(u8, stderr, "grant with --net") == null); // Text mode's note.
+        // The hint is the same condition as the text note's, as a member of container_exit.
+        const own_exit = status == .exited and !scenario.counts_as_oom() and
+            !scenario.counts_as_pid_limit();
+        const failed = own_exit and final_code(scenario, status) != 0;
+        const hint = std.mem.count(u8, stderr, "\"hint\":\"network_none\"");
+        assert(hint == @intFromBool(failed and scenario.net == .default));
         return;
     }
     // The hint: a failed run that was not given --net, once, last.
@@ -1272,6 +1361,12 @@ fn check_record_v2(
     };
     assert(parsed.reason == reason);
     assert(!parsed.detached);
+    // Version 5: what the container could reach, and the names (never the values) of `-e`.
+    assert(parsed.network.? == scenario.net.network());
+    assert(parsed.publish_count == @intFromBool(scenario.net == .publish));
+    const names = scenario.env.names();
+    assert(parsed.env_names_count == names.len);
+    for (names, 0..) |name, at| assert(std.mem.eql(u8, parsed.env_name(@intCast(at)), name));
     const memory: ?u64 = if (scenario.memory) |item| item.value else null;
     assert(parsed.limits.memory_bytes == memory);
     const pids: ?u32 = if (scenario.pids) |item| @intCast(item.value.?) else null;

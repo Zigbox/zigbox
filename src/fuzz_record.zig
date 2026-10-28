@@ -82,6 +82,42 @@ fn damage(random: std.Random, text: []u8, length_in: usize) usize {
     return length;
 }
 
+/// A random set of M6's fields: the network, forwards (only with `user`, host ports distinct)
+/// and names of `-e` (POSIX, distinct), all in the caller's storage.
+const Reach = struct {
+    network: spec_mod.Network,
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    publish_count: u32,
+    names: [constants.run_env_count_max][]const u8,
+    names_count: u32,
+    storage: [constants.run_env_count_max][8]u8,
+};
+
+fn random_reach(random: std.Random, reach: *Reach) void {
+    reach.network = random.enumValue(spec_mod.Network);
+    reach.publish_count = 0;
+    if (reach.network == .user) {
+        const wanted = random.uintAtMost(u32, constants.publish_count_max);
+        while (reach.publish_count < wanted) {
+            const host = random.intRangeAtMost(u16, 1, 65535);
+            const taken = for (reach.publish[0..reach.publish_count]) |earlier| {
+                if (earlier.host == host) break true;
+            } else false;
+            if (taken) continue;
+            const container = random.intRangeAtMost(u16, 1, 65535);
+            reach.publish[reach.publish_count] = .{ .host = host, .container = container };
+            reach.publish_count += 1;
+        }
+    }
+    reach.names_count = random.uintAtMost(u32, constants.run_env_count_max);
+    for (0..reach.names_count) |at| {
+        // "V0" to "V15" and the letters of the alphabet: distinct, and valid.
+        const text = std.fmt.bufPrint(&reach.storage[at], "V{d}", .{at}) catch
+            unreachable; // "V" and at most two digits fit eight bytes.
+        reach.names[at] = text;
+    }
+}
+
 fn check_round_trip(random: std.Random) void {
     var rootfs_bytes: [constants.rootfs_bytes_max]u8 = undefined;
     const rootfs = random_text(random, &rootfs_bytes);
@@ -89,6 +125,8 @@ fn check_round_trip(random: std.Random) void {
     var words: [4][]const u8 = undefined;
     const count = random.intRangeAtMost(usize, 1, 4);
     for (words[0..count], 0..) |*word, at| word.* = random_text(random, &words_bytes[at]);
+    var reach: Reach = undefined;
+    random_reach(random, &reach);
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -108,6 +146,9 @@ fn check_round_trip(random: std.Random) void {
         .scope = if (random.boolean()) "zbx-web-1.scope" else "",
         .detached = random.boolean(),
         .timed_out = random.boolean(),
+        .network = reach.network,
+        .publish = reach.publish[0..reach.publish_count],
+        .env_names = reach.names[0..reach.names_count],
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -126,6 +167,13 @@ fn check_round_trip(random: std.Random) void {
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
     assert(parsed.timed_out == view.timed_out);
+    assert(parsed.network.? == view.network);
+    assert(parsed.publish_count == view.publish.len);
+    for (view.publish, parsed.publish_slice()) |wanted, found| assert(std.meta.eql(wanted, found));
+    assert(parsed.env_names_count == view.env_names.len);
+    for (view.env_names, 0..) |wanted, at| {
+        assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
+    }
     check_damaged(random, text);
 }
 
@@ -143,12 +191,26 @@ fn check_damaged(random: std.Random, text: []const u8) void {
     assert(parsed.name_len > 0);
     assert(spec_mod.name_problem(parsed.name_slice()) == null);
     assert(parsed.rootfs_len <= constants.rootfs_bytes_max);
+    check_reach_accepted(&parsed);
+}
+
+/// What `render` asserts about M6's fields, which `parse` must have refused to break.
+fn check_reach_accepted(parsed: *const records.Parsed) void {
+    assert(parsed.publish_count <= constants.publish_count_max);
+    assert(parsed.env_names_count <= constants.run_env_count_max);
+    if (parsed.publish_count > 0) assert(parsed.network.? == .user);
+    if (parsed.network) |network| {
+        assert(spec_mod.publish_problem(network, parsed.publish_slice()) == null);
+    }
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
+    assert(spec_mod.env_names_problem(words[0..parsed.env_names_count]) == null);
 }
 
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = "    .version = 4,\n";
+    const marker = "    .version = 5,\n";
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

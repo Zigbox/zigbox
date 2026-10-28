@@ -1,0 +1,8 @@
+error[ZBX-E0010]: can't use this -e option
+  while  reading the command line
+  cause  -e '1bad': the name is not a letter or underscore followed by letters,
+         digits and underscores
+  name   1bad
+  fix    give a name, and a value after =, or just the name to copy it:   zbx run -e POSTGRES_PASSWORD=demo postgres:16
+  more   zbx explain E0010
+  docs   https://zigbox.github.io/zigbox/errors/E0010.html

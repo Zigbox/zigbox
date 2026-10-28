@@ -5,7 +5,8 @@ usage: zbx [options] <command>
 commands:
   run             run a command in a container whose root is a tree or a directory (see below)
   bundle          collect a redacted diagnostic bundle for a run (see below)
-  doctor          check that this host can run zbx (a diagnostic per failing check)
+  doctor          check that this host can run zbx (a diagnostic per failing check;
+                  --output json: the report as a document, see zbx schema doctor)
   ps              list the containers (--all: the ones that ended too)
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
   commit <name>   turn what a stopped container changed into a new tree and print its digest
@@ -38,6 +39,9 @@ run:
                   or user (the network through pasta, as the user: apt install passt)
   --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
                   implies --net user)
+  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
+                  =<value> that value, without it zbx's own (an error if unset there).
+                  A value is never stored or printed; zbx ps and a bundle show the name
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)

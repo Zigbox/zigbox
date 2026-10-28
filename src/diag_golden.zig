@@ -20,6 +20,7 @@ const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const run = @import("runtime/run.zig");
+const doctor = @import("doctor.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const plan_mod = @import("runtime/plan.zig");
 const sim_run = @import("runtime/sim_run.zig");
@@ -49,6 +50,10 @@ const Case = struct {
     warning: bool = false,
     /// The exit code the case must end with.
     exit: u8,
+    /// A doctor warning: the text report never prints its block (a warning changes nothing for
+    /// the user of the text), so the golden is the diagnostic that the check holds, rendered in
+    /// each mode, and `--output json` shows it in the `zbx.doctor/1` document.
+    from_report: bool = false,
 };
 
 /// The index of the first step of `kind` in a plan for a host that maps a full range of ids.
@@ -630,6 +635,31 @@ const base_cases = [_]Case{
         .args = &publish_args("80:80"),
         .prepare = prepare_container,
         .exit = 125,
+    },
+    .{
+        .code = .E0010,
+        .args = &.{ "run", "-e", "1bad=marker-value-1", "--rootfs", "/srv/alpine", "--", "sh" },
+        .exit = 125,
+    },
+    .{
+        .code = .E0011,
+        .args = &.{ "run", "-e", "UNSET_VARIABLE", "--rootfs", "/srv/alpine", "--", "sh" },
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .W0101,
+        .args = &.{"doctor"},
+        .fixture = "restricted_but_working",
+        .exit = 0,
+        .from_report = true,
+    },
+    .{
+        .code = .W0102,
+        .args = &.{"doctor"},
+        .fixture = "pasta_missing",
+        .exit = 0,
+        .from_report = true,
     },
     .{ .code = .E0101, .args = &.{"doctor"}, .fixture = "ubuntu_2404_restricted", .exit = 2 },
     .{ .code = .E0102, .args = &.{"doctor"}, .fixture = "old_kernel", .exit = 2 },
@@ -1397,6 +1427,28 @@ fn block_of(stderr: []const u8, code: codes.Code, style: Style) []const u8 {
     unreachable; // The case's fixture is chosen to raise this code.
 }
 
+var golden_facts: doctor.Facts = undefined;
+
+/// The diagnostic of the warning `case` names, as the doctor's check holds it, rendered in
+/// the mode `style` stands for.
+fn warning_block(sim: *HostSim, case: *const Case, style: Style, buffer: []u8) []const u8 {
+    const fixture = fixtures.find(case.fixture.?).?;
+    sim.init(1, fixture.files);
+    fixture.apply(sim);
+    var report: doctor.Report = undefined;
+    doctor.inspect(sim.interface(), &golden_facts, &report);
+    const mode: render.Mode = switch (style) {
+        .default => .text,
+        .verbose => .verbose,
+        .json => .json,
+    };
+    for (&report.checks) |*check| {
+        if (check.status != .warn) continue;
+        if (check.diag.code.? == case.code) return render.render(&check.diag, mode, false, buffer);
+    }
+    unreachable; // The case's fixture is chosen to warn with this code.
+}
+
 test "golden: every code in default, verbose and JSON output" {
     // Goal: the text of each diagnostic is part of the product. Method: trigger each code
     // through run_from_iterator (the E01xx ones by a doctor fixture) and compare stderr, or the
@@ -1413,6 +1465,15 @@ test "golden: every code in default, verbose and JSON output" {
             @embedFile("testdata/diag/" ++ name ++ ".json.txt"),
         };
         for (std.enums.values(Style), expected) |style, golden| {
+            if (case.from_report) {
+                var storage: [constants.output_bytes_max]u8 = undefined;
+                const block = warning_block(&sim, &case, style, &storage);
+                testing.expectEqualStrings(golden, block) catch |err| {
+                    std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+                    return err;
+                };
+                continue;
+            }
             const code = try run_style(&sim, &case, style);
             const shown = if (case.fixture == null) sim.stderr() else block_of(
                 sim.stderr(),
@@ -1435,9 +1496,13 @@ test "golden: every code in default, verbose and JSON output" {
             } else if (case.fixture == null) {
                 try testing.expectEqual(@as(usize, 0), sim.stdout().len);
             } else {
-                var tag: [16]u8 = undefined;
-                const line_end = try std.fmt.bufPrint(&tag, "  [{s}]\n", .{full});
-                try testing.expect(std.mem.indexOf(u8, sim.stdout(), line_end) != null);
+                // Text: the code ends the FAIL line. JSON: the check carries it, in the document.
+                var tag: [40]u8 = undefined;
+                const mark = if (style == .json)
+                    try std.fmt.bufPrint(&tag, "\"code\":\"{s}\",\"diagnostic\"", .{full})
+                else
+                    try std.fmt.bufPrint(&tag, "  [{s}]\n", .{full});
+                try testing.expect(std.mem.indexOf(u8, sim.stdout(), mark) != null);
             }
             try testing.expect(std.mem.indexOf(u8, sim.stderr(), full) != null);
             if (style == .json) {

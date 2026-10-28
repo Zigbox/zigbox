@@ -139,6 +139,8 @@ fn item_equal(first: anytype, second: anytype) bool {
     }
     comptime assert(Item == diag_mod.Fix);
     if (!std.mem.eql(u8, first.sentence.slice(), second.sentence.slice())) return false;
+    if (first.needs_root != second.needs_root) return false;
+    if (first.template != second.template) return false;
     return std.mem.eql(u8, first.command.slice(), second.command.slice());
 }
 
@@ -263,6 +265,17 @@ fn write_fixes(writer: *Writer, diagnostic: *const Diagnostic) Writer.Error!void
             try write_string(writer, item.command.slice());
         } else {
             try writer.writeAll("null");
+        }
+        // Added in M6, only when true, so every older document is byte for byte what it was.
+        if (item.needs_root) {
+            try writer.writeByte(',');
+            try write_key(writer, "needs_root");
+            try writer.writeAll("true");
+        }
+        if (item.template) {
+            try writer.writeByte(',');
+            try write_key(writer, "template");
+            try writer.writeAll("true");
         }
         try writer.writeByte('}');
     }
@@ -638,11 +651,15 @@ fn all_seen(comptime Field: type, seen: u32) bool {
     return seen == (@as(u32, 1) << fields.len) - 1;
 }
 
-const FixField = enum(u5) { sentence, command };
+const FixField = enum(u5) { sentence, command, needs_root, template };
+/// The members every fix has; the last two appear only when true.
+const fix_required_mask: u32 = 0b11;
 
 fn parse_fix(cursor: *Cursor, item: *diag_mod.Fix) Malformed!void {
     item.sentence = .{};
     item.command = .{};
+    item.needs_root = false;
+    item.template = false;
     try cursor.take('{');
     var seen: u32 = 0;
     var ended = false; // Every pass reads a member, which consumes input or fails.
@@ -652,9 +669,18 @@ fn parse_fix(cursor: *Cursor, item: *diag_mod.Fix) Malformed!void {
         if (field == .command) {
             if (!cursor.accept_literal("null")) try read_text(cursor, &item.command);
         }
+        // Only `true` is read: `false` is never written, so it is not canonical.
+        if (field == .needs_root) try cursor.take_literal("true");
+        if (field == .template) try cursor.take_literal("true");
+        if (field == .needs_root) item.needs_root = true;
+        if (field == .template) item.template = true;
         ended = try object_ended(cursor);
     }
-    if (!all_seen(FixField, seen)) return error.Malformed;
+    if (seen & fix_required_mask != fix_required_mask) return error.Malformed;
+    // A flag describes a command, so a fix without one cannot carry it.
+    if (item.command.len == 0) {
+        if (item.needs_root or item.template) return error.Malformed;
+    }
     assert(item.sentence.len > 0);
     assert(item.command.len <= constants.diag_command_bytes_max);
 }
@@ -820,6 +846,97 @@ test "every registered code round-trips through write_json and parse_json" {
         try testing.expectEqualStrings(json, try json_of(&again, &parsed));
         try parse_json(&parsed, json[0 .. json.len - 1]);
         try testing.expect(original.equal(&parsed));
+    }
+}
+
+fn fill_flags(diag: *Diag, group: u32) void {
+    diag.reset();
+    diag.raise(.E0001);
+    diag.cause("c", .{});
+    switch (group) {
+        0 => {
+            diag.fix(.{ .sentence = "plain", .command = "zbx doctor" });
+            diag.fix(.{ .sentence = "root", .command = "sudo apt install passt" });
+            diag.fix(.{ .sentence = "piped", .command = "echo x | sudo tee /etc/y" });
+        },
+        1 => {
+            diag.fix(.{ .sentence = "example", .command = "zbx run x", .template = true });
+            diag.fix(.{ .sentence = "both", .command = "sudo sysctl a=1", .template = true });
+            diag.fix(.{ .sentence = "prose only" });
+        },
+        else => {
+            diag.fix_with("formatted", "sudo ls {s}", .{"/x"});
+            diag.fix_with("placeholder", "zbx run <{s}>", .{"command"});
+            diag.mark_last_fix_template();
+        },
+    }
+}
+
+test "a fix's needs_root and template are written only when true, and read back" {
+    // Goal: M6's two flags are additive: a fix without them writes what it always wrote, a
+    // sudo command is marked by itself, a template by its maker, and a damaged flag is refused.
+    const flagged = [3][]const []const u8{
+        &.{
+            "{\"sentence\":\"plain\",\"command\":\"zbx doctor\"}",
+            "\"command\":\"sudo apt install passt\",\"needs_root\":true}",
+            "\"command\":\"echo x | sudo tee /etc/y\",\"needs_root\":true}",
+        },
+        &.{
+            "\"command\":\"zbx run x\",\"template\":true}",
+            "\"command\":\"sudo sysctl a=1\",\"needs_root\":true,\"template\":true}",
+            "{\"sentence\":\"prose only\",\"command\":null}",
+        },
+        &.{
+            "\"command\":\"sudo ls /x\",\"needs_root\":true}",
+            "\"command\":\"zbx run <command>\",\"template\":true}",
+        },
+    };
+    var diag: Diag = undefined;
+    var original: Diagnostic = undefined;
+    var parsed: Diagnostic = undefined;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    for (flagged, 0..) |parts, group| {
+        fill_flags(&diag, @intCast(group));
+        from_diag(&original, &diag);
+        const json = try json_of(&buffer, &original);
+        for (parts) |part| try testing.expect(std.mem.indexOf(u8, json, part) != null);
+        try parse_json(&parsed, json);
+        try testing.expect(original.equal(&parsed));
+        // A flag a later zbx does not know is skipped, as every unknown member is.
+        var future: [constants.output_bytes_max]u8 = undefined;
+        const mark = std.mem.indexOf(u8, json, "\"fixes\":[{").?;
+        const extra = ",\"later\":[1]";
+        const close = std.mem.indexOfPos(u8, json, mark, "}").?;
+        @memcpy(future[0..close], json[0..close]);
+        @memcpy(future[close..][0..extra.len], extra);
+        @memcpy(future[close + extra.len ..][0 .. json.len - close], json[close..]);
+        try parse_json(&parsed, future[0 .. json.len + extra.len]);
+        try testing.expect(original.equal(&parsed));
+    }
+    fill_flags(&diag, 0);
+    from_diag(&original, &diag);
+    try testing.expect(original.fixes.items[1].needs_root);
+    try testing.expect(!original.fixes.items[1].template);
+    fill_flags(&diag, 1);
+    from_diag(&original, &diag);
+    try testing.expect(original.fixes.items[0].template);
+    const json = try json_of(&buffer, &original);
+
+    const damages = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = "\"needs_root\":true", .to = "\"needs_root\":false" }, // Not canonical.
+        .{ .from = "\"needs_root\":true", .to = "\"needs_root\":1" },
+        .{ .from = "\"needs_root\":true", .to = "\"needs_root\":true,\"needs_root\":true" },
+        .{ .from = "\"template\":true", .to = "\"template\":\"true\"" },
+        .{
+            .from = "\"sentence\":\"prose only\",\"command\":null",
+            .to = "\"sentence\":\"p\",\"command\":null,\"template\":true",
+        },
+    };
+    for (damages) |damage| {
+        var copy: [constants.output_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, json, damage.from, damage.to);
+        _ = std.mem.replace(u8, json, damage.from, damage.to, &copy);
+        try testing.expectError(error.Malformed, parse_json(&parsed, copy[0..size]));
     }
 }
 

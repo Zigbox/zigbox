@@ -55,7 +55,12 @@ fn describe_fallback(warning: *Diag, reason: *const Diag) void {
         "other ids will not exist inside it", .{});
     if (reason.last_cause()) |cause| warning.cause("{s}", .{cause});
     for (reason.fixes.slice()) |fix| {
-        warning.fix(.{ .sentence = fix.sentence.slice(), .command = fix.command.slice() });
+        warning.fix(.{
+            .sentence = fix.sentence.slice(),
+            .command = fix.command.slice(),
+            .needs_root = fix.needs_root,
+            .template = fix.template,
+        });
     }
     // The doctor always gives a fix; if that ever changed, the warning still points at it.
     if (warning.fixes.count == 0) {

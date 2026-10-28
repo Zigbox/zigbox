@@ -324,13 +324,13 @@ fn stage_doctor(ws: *Workspace, host: Host) void {
 
 fn write_check(writer: *std.Io.Writer, check: *const doctor.Check) std.Io.Writer.Error!void {
     assert(check.detail.len > 0);
-    assert((check.status == .fail) == (check.diag.code != null));
+    assert((check.status != .ok) == (check.diag.code != null));
     try writer.print("{{\"check\":\"{s}\",\"status\":\"{s}\",\"detail\":", .{
         @tagName(check.id), @tagName(check.status),
     });
     try write_json_string(writer, check.detail.slice());
     try writer.writeAll("}\n");
-    if (check.status != .fail) return;
+    if (check.status == .ok) return;
     var buffer: [constants.output_bytes_max]u8 = undefined;
     try writer.writeAll(render.render(&check.diag, .json, false, &buffer));
 }

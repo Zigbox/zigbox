@@ -5,9 +5,11 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 4 added the digest of the tree the container was started from
-//! and the path of its upper layer (both empty for a run of a plain `--rootfs` directory).
-//! Version 3 added the host pid of the container's PID 1 and of the
+//! skipped, never misread. Version 5 added what the run could reach (`network`, `publish`) and
+//! the names, never the values, of the variables set with `-e`; an older record reads with no
+//! network (unknown), no forwards and no names. Version 4 added the digest of the tree the
+//! container was started from and the path of its upper layer (both empty for a run of a plain
+//! `--rootfs` directory). Version 3 added the host pid of the container's PID 1 and of the
 //! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the
 //! scope's name, why the run ended (`EndReason`) and whether it was detached; a version 1
 //! record reads with no limits, no scope, not detached, and the reason its exit implies. Unknown
@@ -31,6 +33,7 @@ const Host = host_mod.Host;
 
 const labels_bytes_max = constants.labels_count_max *
     (constants.label_key_bytes_max + constants.label_value_bytes_max + 2);
+const env_names_bytes_max = constants.run_env_count_max * (constants.env_name_bytes_max + 1);
 
 pub const IdsMode = enum { single, full };
 
@@ -92,6 +95,11 @@ pub const View = struct {
     /// overlay; empty for a run of a directory.
     tree: []const u8 = "",
     upper: []const u8 = "",
+    /// Version 5: what the container could reach, the forwards of `--publish` (only with
+    /// `user`), and the names of the variables set with `-e`. A value is never in a record.
+    network: spec_mod.Network = .none,
+    publish: []const spec_mod.Publish = &.{},
+    env_names: []const []const u8 = &.{},
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -191,6 +199,29 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
     write_bytes(writer, ",\n    .upper = ");
     write_string(writer, view.upper);
     write_bytes(writer, ",\n");
+    write_network_fields(writer, view);
+}
+
+/// The fields version 5 added: the network, the forwards as the text typed, the `-e` names.
+fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
+    assert(spec_mod.publish_problem(view.network, view.publish) == null);
+    assert(spec_mod.env_names_problem(view.env_names) == null);
+    write_format(writer, "    .network = .{s},\n", .{@tagName(view.network)});
+    write_bytes(writer, "    .publish = .{");
+    for (view.publish, 0..) |forward, index| {
+        var storage: [spec_mod.publish_text_bytes_max]u8 = undefined;
+        write_bytes(writer, if (index == 0) " \"" else ", \"");
+        write_bytes(writer, forward.text(&storage));
+        write_bytes(writer, "\"");
+    }
+    // The names are one string, separated by spaces (a POSIX name has none): two strings in a row
+    // would read to the bundle's redactor as a secret name and its value.
+    write_bytes(writer, " },\n    .env_names = \"");
+    for (view.env_names, 0..) |name, index| {
+        if (index > 0) write_bytes(writer, " ");
+        write_bytes(writer, name);
+    }
+    write_bytes(writer, "\",\n");
 }
 
 fn write_limit(writer: *std.Io.Writer, name: []const u8, value: anytype) void {
@@ -266,7 +297,9 @@ comptime {
     const scope = 4 * constants.scope_name_bytes_max + 160; // The name and the version 2 lines.
     const store_strings = constants.store_digest_text_bytes + constants.containers_path_bytes_max;
     const store = 4 * store_strings + 64;
-    const total = strings + command + labels + diagnostic + scope + store + 512;
+    const network = constants.publish_count_max * 16 +
+        4 * constants.run_env_count_max * (constants.env_name_bytes_max + 4) + 128;
+    const total = strings + command + labels + diagnostic + scope + store + network + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -311,6 +344,30 @@ pub const Parsed = struct {
     labels: [labels_bytes_max]u8,
     labels_len: u16,
     labels_count: u8,
+    /// Version 5: null for an older record, which did not say what the container could reach.
+    network: ?spec_mod.Network,
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    publish_count: u8,
+    /// The names of the `-e` variables, each followed by a NUL. Never a value.
+    env_names: [env_names_bytes_max]u8,
+    env_names_len: u16,
+    env_names_count: u8,
+
+    pub fn publish_slice(parsed: *const Parsed) []const spec_mod.Publish {
+        assert(parsed.publish_count <= constants.publish_count_max);
+        return parsed.publish[0..parsed.publish_count];
+    }
+
+    /// The `index`th name of the `-e` variables.
+    pub fn env_name(parsed: *const Parsed, index: u32) []const u8 {
+        assert(index < parsed.env_names_count);
+        var parts = std.mem.splitScalar(u8, parsed.env_names[0..parsed.env_names_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |name| : (at += 1) {
+            if (at == index) return name;
+        }
+        unreachable; // The count says it is there.
+    }
 
     /// The `index`th word of the command.
     pub fn command_word(parsed: *const Parsed, index: u32) []const u8 {
@@ -466,6 +523,10 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.command_words = 0;
     out.labels_len = 0;
     out.labels_count = 0;
+    out.network = null;
+    out.publish_count = 0;
+    out.env_names_len = 0;
+    out.env_names_count = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -493,6 +554,25 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     if (!have_start) return error.Malformed;
     if (!has_reason) out.reason = reason_of(out.exit);
     if (spec_mod.name_problem(out.name_slice()) != null) return error.Malformed;
+    try check_network_fields(out);
+}
+
+/// What `render` asserts about the version 5 fields, so that a damaged file cannot read as valid
+/// and crash the next write: forwards only with `user`, none twice; names unique and POSIX.
+fn check_network_fields(out: *const Parsed) ParseError!void {
+    const network = out.network orelse {
+        // A record that does not say the network does not say forwards either.
+        if (out.publish_count > 0) return error.Malformed;
+        return;
+    };
+    // `publish_problem` asserts the implication, so a damaged file is refused before it.
+    if (out.publish_count > 0 and network != .user) return error.Malformed;
+    if (spec_mod.publish_problem(network, out.publish_slice()) != null) return error.Malformed;
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..out.env_names_count) |at| words[at] = out.env_name(@intCast(at));
+    if (spec_mod.env_names_problem(words[0..out.env_names_count]) != null) {
+        return error.Malformed;
+    }
 }
 
 fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!void {
@@ -578,6 +658,13 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         out.upper_len = @intCast(length);
         return true;
     }
+    if (std.mem.eql(u8, key, "network")) {
+        const name = std.mem.trimStart(u8, value, ".");
+        out.network = std.meta.stringToEnum(spec_mod.Network, name) orelse return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "publish")) return parse_publish_list(value, out);
+    if (std.mem.eql(u8, key, "env_names")) return parse_env_names(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
@@ -625,6 +712,44 @@ fn parse_command(value: []const u8, out: *Parsed) bool {
         out.command_len += @intCast(length + 1);
         out.command_words += 1;
         if (out.command_words == constants.command_words_count_max) break;
+    }
+    return true;
+}
+
+/// `.{ "8080:80", ... }`: the forwards, each as `--publish` typed it.
+fn parse_publish_list(value: []const u8, out: *Parsed) bool {
+    out.publish_count = 0; // A repeated field: the later one wins.
+    var at: usize = 0;
+    while (next_literal(value, at)) |found| : (at = found.next) {
+        if (out.publish_count == constants.publish_count_max) return false;
+        var text: [spec_mod.publish_text_bytes_max + 1]u8 = undefined;
+        const length = parse_string(found.literal, &text) orelse return false;
+        const forward = switch (spec_mod.parse_publish(text[0..length])) {
+            .ok => |parsed| parsed,
+            .problem => return false,
+        };
+        out.publish[out.publish_count] = forward;
+        out.publish_count += 1;
+    }
+    return true;
+}
+
+/// `"NAME NAME"`: the names of the `-e` variables, kept NUL-separated.
+fn parse_env_names(value: []const u8, out: *Parsed) bool {
+    out.env_names_len = 0; // A repeated field: the later one wins.
+    out.env_names_count = 0;
+    var text: [env_names_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var names_split = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (names_split.next()) |name| {
+        if (out.env_names_count == constants.run_env_count_max) return false;
+        const room = out.env_names[out.env_names_len..];
+        if (room.len < name.len + 1) return false;
+        @memcpy(room[0..name.len], name);
+        room[name.len] = 0;
+        out.env_names_len += @intCast(name.len + 1);
+        out.env_names_count += 1;
     }
     return true;
 }
@@ -1040,11 +1165,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 4,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 5,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(@as(u32, 4), parsed.version);
+        try testing.expectEqual(@as(u32, 5), parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -1082,7 +1207,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 5,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 6,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1267,7 +1392,7 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "    .tree = ")) continue;
         if (std.mem.startsWith(u8, line, "    .upper = ")) continue;
-        const fixed = if (std.mem.eql(u8, line, "    .version = 4,")) "    .version = 3," else line;
+        const fixed = if (std.mem.eql(u8, line, "    .version = 5,")) "    .version = 3," else line;
         @memcpy(old[length..][0..fixed.len], fixed);
         old[length + fixed.len] = '\n';
         length += fixed.len + 1;
@@ -1277,4 +1402,126 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     try testing.expectEqual(@as(usize, 0), parsed.tree_slice().len);
     try testing.expectEqual(@as(usize, 0), parsed.upper_slice().len);
     try testing.expectEqualStrings("web-1", parsed.name_slice());
+}
+
+/// A run record exactly as the M5 release wrote it (version 4), captured from that release's
+/// own writer (commit 1fb59e1, `records.render`), not from the code above.
+const record_written_by_m5 =
+    \\.{
+    \\    .version = 4,
+    \\    .name = "web-1",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh", "-c", "echo \\"hi\\"\\n" },
+    \\    .command_truncated = false,
+    \\    .labels = .{ .{ "app", "web" } },
+    \\    .started = 1760000000,
+    \\    .ended = 1760000042,
+    \\    .exit = .{ .exited = 3 },
+    \\    .ids = .full,
+    \\    .reason = .exited,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "b3:abababababababababababababababababababababababababababababababab",
+    \\    .upper = "",
+    \\    .zbx = "0.0.0",
+    \\}
+    \\
+;
+
+test "a version 4 record, as M5 wrote it, reads with no network, forwards or names" {
+    // Goal: the next release reads the last one's records (REVIEW.md). Method: the text M5's
+    // writer produced; the fields version 5 added are unknown, not zero.
+    var parsed: Parsed = undefined;
+    try parse(record_written_by_m5, &parsed);
+    try testing.expectEqual(@as(u32, 4), parsed.version);
+    try testing.expectEqualStrings("web-1", parsed.name_slice());
+    try testing.expect(parsed.network == null);
+    try testing.expectEqual(@as(usize, 0), parsed.publish_slice().len);
+    try testing.expectEqual(@as(u8, 0), parsed.env_names_count);
+    try testing.expectEqual(@as(usize, 1), @as(usize, parsed.labels_count));
+}
+
+test "version 5 keeps the network, the forwards and the names of -e, and never a value" {
+    // Goal: the new fields round-trip and nothing else about -e is in the text. Method: render
+    // with a forward and two names; parse back; search the text for a marker no field holds.
+    var view = sample_view();
+    const forward = [_]spec_mod.Publish{
+        .{ .host = 8080, .container = 80 },
+        .{ .host = 1, .container = 2 },
+    };
+    const variables = [_][]const u8{ "POSTGRES_PASSWORD", "_x9" };
+    view.network = .user;
+    view.publish = &forward;
+    view.env_names = &variables;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, "    .network = .user,\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, ".publish = .{ \"8080:80\", \"1:2\" },") != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(?spec_mod.Network, .user), parsed.network);
+    try testing.expectEqual(@as(usize, 2), parsed.publish_slice().len);
+    try testing.expectEqual(@as(u16, 8080), parsed.publish_slice()[0].host);
+    try testing.expectEqual(@as(u8, 2), parsed.env_names_count);
+    try testing.expectEqualStrings("POSTGRES_PASSWORD", parsed.env_name(0));
+    try testing.expectEqualStrings("_x9", parsed.env_name(1));
+    // The record of a run with none of them says so.
+    const bare = render(&sample_view(), &buffer);
+    try parse(bare, &parsed);
+    try testing.expectEqual(@as(?spec_mod.Network, .none), parsed.network);
+    try testing.expectEqual(@as(u8, 0), parsed.env_names_count);
+}
+
+test "version 5 fields that render never writes are Malformed, not a crash later" {
+    // Goal: parse accepts only what render can write (REVIEW.md). Method: each damage of the
+    // three fields on top of a good record.
+    var view = sample_view();
+    const forward = [_]spec_mod.Publish{.{ .host = 8080, .container = 80 }};
+    view.network = .user;
+    view.publish = &forward;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const good = render(&view, &buffer);
+    var parsed: Parsed = undefined;
+    try parse(good, &parsed);
+    const damages = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = ".network = .user", .to = ".network = .none" }, // A forward without `user`.
+        .{ .from = ".network = .user", .to = ".network = .other" },
+        .{ .from = "\"8080:80\"", .to = "\"8080:80\", \"8080:81\"" }, // A host port twice.
+        .{ .from = "\"8080:80\"", .to = "\"0:80\"" },
+        .{ .from = "\"8080:80\"", .to = "\"8080\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"A A\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"1x\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"a=b\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"A  B\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \" A\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = .{ \"A\" }" },
+    };
+    for (damages) |damage| {
+        var copy: [constants.record_bytes_max]u8 = undefined;
+        const length = std.mem.replacementSize(u8, good, damage.from, damage.to);
+        _ = std.mem.replace(u8, good, damage.from, damage.to, &copy);
+        try testing.expectError(error.Malformed, parse(copy[0..length], &parsed));
+    }
+    // Too many names: one past the bound.
+    var many: [constants.run_env_count_max + 1][]const u8 = undefined;
+    var storage: [constants.run_env_count_max + 1][4]u8 = undefined;
+    for (&many, &storage, 0..) |*word, *bytes, index| {
+        word.* = std.fmt.bufPrint(bytes, "V{d}", .{index}) catch unreachable; // Short.
+    }
+    var text: [constants.record_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    const head = ".{\n    .name = \"x\",\n    .started = 5,\n    .network = .none,\n" ++
+        "    .env_names = \"";
+    try writer.writeAll(head);
+    for (many, 0..) |word, index| {
+        try writer.print("{s}{s}", .{ if (index == 0) "" else " ", word });
+    }
+    try writer.writeAll("\",\n}\n");
+    try testing.expectError(error.Malformed, parse(writer.buffered(), &parsed));
 }
