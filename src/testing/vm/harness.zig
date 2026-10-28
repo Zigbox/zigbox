@@ -267,6 +267,10 @@ test "every demo command that runs zbx as the demo user goes through the session
         @embedFile("main_m1.zig"),
         @embedFile("main_m2.zig"),
         @embedFile("main_m3.zig"),
+        @embedFile("main_m4.zig"),
+        @embedFile("accept_m4.zig"),
+        @embedFile("agent_m4.zig"),
+        @embedFile("common_m4.zig"),
     };
     const allowed = [_][]const u8{ "H.as_demo", "H.demo_env", "no-bus-env:", "z=/home/demo/zbx" };
     for (sources) |source| {

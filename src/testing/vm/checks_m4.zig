@@ -103,7 +103,11 @@ pub const Blob = struct { digest: []const u8, cache: []const u8 };
 pub const Layer = struct { digest: []const u8, size: u64, cache: []const u8 };
 
 fn parse_json(comptime T: type, arena: Allocator, text: []const u8) Error!T {
-    const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    // Copies: the text is the session's scratch buffer, which the next command overwrites.
+    const options: std.json.ParseOptions = .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    };
     return std.json.parseFromSliceLeaky(T, arena, text, options) catch return error.JsonWrong;
 }
 
@@ -241,14 +245,16 @@ pub fn parse_blob_listing(arena: Allocator, text: []const u8) Error![]const Blob
         const kind = words.next() orelse return error.ResumeWrong;
         const hex = words.next() orelse return error.ResumeWrong;
         if (hex.len != 64) return error.ResumeWrong;
+        // Copied: the listing is the session's scratch buffer, which the next command overwrites.
+        const kept = arena.dupe(u8, hex) catch return error.ResumeWrong;
         if (std.mem.eql(u8, kind, "complete")) {
-            states.append(arena, .{ .hex = hex, .complete = true, .partial_bytes = 0 }) catch {
+            states.append(arena, .{ .hex = kept, .complete = true, .partial_bytes = 0 }) catch {
                 return error.ResumeWrong;
             };
         } else if (std.mem.eql(u8, kind, "partial")) {
             const size_text = words.next() orelse return error.ResumeWrong;
             const size = std.fmt.parseInt(u64, size_text, 10) catch return error.ResumeWrong;
-            states.append(arena, .{ .hex = hex, .complete = false, .partial_bytes = size }) catch {
+            states.append(arena, .{ .hex = kept, .complete = false, .partial_bytes = size }) catch {
                 return error.ResumeWrong;
             };
         } else return error.ResumeWrong;
@@ -377,6 +383,43 @@ pub fn check_verify_ok(
     if (doc.roots < roots_min) return error.StoreWrong;
 }
 
+/// `store du --by-image` in text: exit 0, and a row that names each of `references`. The numbers
+/// are read from the JSON (`check_dedup`), never from this table.
+pub fn check_table_lists(streams: Streams, status: u8, references: []const []const u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    for (references) |reference| {
+        if (!contains(streams.stdout, reference)) return error.LineMissing;
+    }
+}
+
+/// The script that kills a pull (accept_m4.zig) prints `killed` once it has seen bytes in
+/// `blobs/partial/` and sent SIGKILL. Any other word means the pull ended before it could be
+/// cut (`finished-before-kill`) or never began a download (`no-partial`).
+pub fn check_killed(output: []const u8, status: u8) Error!void {
+    if (status != 0) return error.ResumeWrong;
+    if (!std.mem.eql(u8, std.mem.trim(u8, output, " \r\n\t"), "killed")) return error.ResumeWrong;
+}
+
+/// The layers of `later` that `earlier` does not have: the blobs a pull of `later` has to fetch
+/// when `earlier` is stored, in the order of the manifest. At most `out.len` are returned.
+pub fn layers_only_in(
+    earlier: PullDoc,
+    later: PullDoc,
+    out: [][]const u8,
+) Error![]const []const u8 {
+    var count: usize = 0;
+    for (later.layers) |layer| {
+        var shared = false;
+        for (earlier.layers) |known| shared = shared or std.mem.eql(u8, known.digest, layer.digest);
+        if (shared) continue;
+        if (count == out.len) return error.ResumeWrong;
+        out[count] = layer.digest;
+        count += 1;
+    }
+    if (count == 0) return error.ResumeWrong;
+    return out[0..count];
+}
+
 const testing = std.testing;
 
 const hex_a: [64]u8 = @splat('a');
@@ -478,7 +521,7 @@ fn pull_json_layers(
 }
 
 const tree_a = "b3:" ++ hex_a;
-const reference_third = "python:3.13-slim";
+const image313 = "python:3.13-slim";
 
 fn only_stdout(text: []const u8) Streams {
     return .{ .stdout = text, .stderr = "" };
@@ -486,25 +529,25 @@ fn only_stdout(text: []const u8) Streams {
 
 test "the pull's JSON is read for its tree, and a wrong shape is refused" {
     // Goal: steps 1 and 3 through `--output json`. Right: a whole document. Wrong: a non-zero
-    // exit, another reference_third, a tree that is a manifest digest, a cache word nobody knows,
+    // exit, another image313, a tree that is a manifest digest, a cache word nobody knows,
     // and text.
     var state = std.heap.ArenaAllocator.init(testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
     const good = only_stdout(pull_json(tree_a, "downloaded"));
-    const doc = try check_pull_json(arena, good, 0, reference_third);
+    const doc = try check_pull_json(arena, good, 0, image313);
     try testing.expectEqualStrings(tree_a, doc.tree);
     try testing.expectEqual(@as(usize, 2), doc.layers.len);
-    try testing.expectError(error.ExitCodeWrong, check_pull_json(arena, good, 1, reference_third));
+    try testing.expectError(error.ExitCodeWrong, check_pull_json(arena, good, 1, image313));
     const other = check_pull_json(arena, good, 0, "python:3.12-slim");
     try testing.expectError(error.FieldWrong, other);
     const manifest_as_tree = only_stdout(pull_json("sha256:" ++ hex_a, "downloaded"));
-    const swapped = check_pull_json(arena, manifest_as_tree, 0, reference_third);
+    const swapped = check_pull_json(arena, manifest_as_tree, 0, image313);
     try testing.expectError(error.FieldWrong, swapped);
     const bad_word = only_stdout(pull_json(tree_a, "fetched"));
-    try testing.expectError(error.FieldWrong, check_pull_json(arena, bad_word, 0, reference_third));
+    try testing.expectError(error.FieldWrong, check_pull_json(arena, bad_word, 0, image313));
     const text = only_stdout("sha256:" ++ hex_a ++ "\n");
-    try testing.expectError(error.JsonWrong, check_pull_json(arena, text, 0, reference_third));
+    try testing.expectError(error.JsonWrong, check_pull_json(arena, text, 0, image313));
 }
 
 test "a tag and a digest name one tree; two trees or one spelling are refused" {
@@ -513,7 +556,7 @@ test "a tag and a digest name one tree; two trees or one spelling are refused" {
     defer state.deinit();
     const arena = state.allocator();
     const cached = only_stdout(pull_json(tree_a, "cached"));
-    const first = try check_pull_json(arena, cached, 0, reference_third);
+    const first = try check_pull_json(arena, cached, 0, image313);
     var second = first;
     second.reference = "python@sha256:" ++ hex_a;
     try check_alias(first, second);
@@ -548,23 +591,23 @@ test "the second image costs a share of its compressed size, by ratio" {
     const arena = state.allocator();
     const first = "python:3.12-slim";
     const real = only_stdout(du_json("114227815", "85862291"));
-    const facts = try check_dedup(arena, real, 0, first, reference_third);
+    const facts = try check_dedup(arena, real, 0, first, image313);
     try testing.expectEqual(@as(u64, 28365524), facts.unique_bytes);
-    try testing.expectError(error.ExitCodeWrong, check_dedup(arena, real, 2, first, reference_third));
+    try testing.expectError(error.ExitCodeWrong, check_dedup(arena, real, 2, first, image313));
     const alone = only_stdout(du_json("114227815", "0"));
-    try testing.expectError(error.DedupWrong, check_dedup(arena, alone, 0, first, reference_third));
+    try testing.expectError(error.DedupWrong, check_dedup(arena, alone, 0, first, image313));
     // 50 MB unique of 43.3 MB compressed is more than the image costs to download.
     const costly = only_stdout(du_json("150000000", "100000000"));
-    try testing.expectError(error.DedupWrong, check_dedup(arena, costly, 0, first, reference_third));
+    try testing.expectError(error.DedupWrong, check_dedup(arena, costly, 0, first, image313));
     // At the bound: 75 percent of 43,320,189 is 32,490,141.75, so 32,490,141 passes.
     const edge_in = only_stdout(du_json("132490141", "100000000"));
-    _ = try check_dedup(arena, edge_in, 0, first, reference_third);
+    _ = try check_dedup(arena, edge_in, 0, first, image313);
     const edge_out = only_stdout(du_json("132490143", "100000000"));
-    try testing.expectError(error.DedupWrong, check_dedup(arena, edge_out, 0, first, reference_third));
+    try testing.expectError(error.DedupWrong, check_dedup(arena, edge_out, 0, first, image313));
     const missing = check_dedup(arena, real, 0, first, "python:3.14-slim");
     try testing.expectError(error.DedupWrong, missing);
     const impossible = only_stdout(du_json("100", "200"));
-    try testing.expectError(error.DedupWrong, check_dedup(arena, impossible, 0, first, reference_third));
+    try testing.expectError(error.DedupWrong, check_dedup(arena, impossible, 0, first, image313));
 }
 
 test "a blob listing is read line by line, and nonsense is refused" {
@@ -598,19 +641,19 @@ test "a pull after a kill resumes the cut blob and downloads none that was compl
     const listing = "complete " ++ hex_0 ++ "\npartial " ++ hex_a ++ " 5029888\n";
     const states = try parse_blob_listing(arena, listing);
     const resumed = only_stdout(pull_json(tree_a, "resumed"));
-    const facts = try check_resume(arena, resumed, 0, reference_third, states);
+    const facts = try check_resume(arena, resumed, 0, image313, states);
     try testing.expectEqual(@as(u32, 1), facts.resumed);
     try testing.expectEqual(@as(u32, 2), facts.cached);
     const again = only_stdout(pull_json(tree_a, "downloaded"));
-    try testing.expectError(error.ResumeWrong, check_resume(arena, again, 0, reference_third, states));
+    try testing.expectError(error.ResumeWrong, check_resume(arena, again, 0, image313, states));
     const redone = only_stdout(pull_json_layers(tree_a, "downloaded", "resumed"));
-    try testing.expectError(error.ResumeWrong, check_resume(arena, redone, 0, reference_third, states));
+    try testing.expectError(error.ResumeWrong, check_resume(arena, redone, 0, image313, states));
     const nothing_cut = try parse_blob_listing(arena, "complete " ++ hex_0 ++ "\n");
     const cached = only_stdout(pull_json(tree_a, "cached"));
-    const idle = check_resume(arena, cached, 0, reference_third, nothing_cut);
+    const idle = check_resume(arena, cached, 0, image313, nothing_cut);
     try testing.expectError(error.ResumeWrong, idle);
     const empty_cut = try parse_blob_listing(arena, "partial " ++ hex_a ++ " 0\n");
-    const empty = check_resume(arena, resumed, 0, reference_third, empty_cut);
+    const empty = check_resume(arena, resumed, 0, image313, empty_cut);
     try testing.expectError(error.ResumeWrong, empty);
 }
 
@@ -628,7 +671,8 @@ test "the pull, the store and the lock name an image by one tree digest" {
     var state = std.heap.ArenaAllocator.init(testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    const pull = try check_pull_json(arena, only_stdout(pull_json(tree_a, "cached")), 0, reference_third);
+    const output = only_stdout(pull_json(tree_a, "cached"));
+    const pull = try check_pull_json(arena, output, 0, image313);
     const lock = ".{ .tree = \"" ++ tree_a ++ "\", .manifest = \"sha256:" ++ hex_a ++ "\" }";
     const other = "b3:" ++ hex_1;
     try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, pull, lock);
@@ -659,4 +703,51 @@ test "the roots an older zbx left are listed, and a store that verifies clean is
         "\"damaged\":1,\"roots\":2}");
     try testing.expectError(error.StoreWrong, check_verify_ok(arena, damaged, 0, 2));
     try testing.expectError(error.ExitCodeWrong, check_verify_ok(arena, clean, 2, 2));
+}
+
+test "the kill script must say it killed a pull that had bytes" {
+    // Goal: a pull that finished first, or never downloaded, proves nothing about resuming.
+    try check_killed("killed\n", 0);
+    try testing.expectError(error.ResumeWrong, check_killed("finished-before-kill\n", 3));
+    try testing.expectError(error.ResumeWrong, check_killed("no-partial", 4));
+    try testing.expectError(error.ResumeWrong, check_killed("finished-before-kill\n", 0));
+    try testing.expectError(error.ResumeWrong, check_killed("killed\n", 1));
+}
+
+test "the layers to cut are those the earlier image lacks" {
+    // Goal: only blobs that no stored image shares are deleted before the kill. Right: the
+    // second layer is the later image's own. Wrong: none of its own; more than the buffer.
+    var state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const output = only_stdout(pull_json(tree_a, "cached"));
+    const earlier = try check_pull_json(arena, output, 0, image313);
+    var later = earlier;
+    const own = [_]Layer{
+        earlier.layers[0],
+        .{ .digest = "sha256:" ++ hex_1, .size = 5, .cache = "cached" },
+    };
+    later.layers = &own;
+    var buffer: [4][]const u8 = undefined;
+    const only = try layers_only_in(earlier, later, &buffer);
+    try testing.expectEqual(@as(usize, 1), only.len);
+    try testing.expectEqualStrings("sha256:" ++ hex_1, only[0]);
+    try testing.expectError(error.ResumeWrong, layers_only_in(earlier, earlier, &buffer));
+    var none: [0][]const u8 = .{};
+    try testing.expectError(error.ResumeWrong, layers_only_in(earlier, later, &none));
+}
+
+test "the text table names each image" {
+    // Goal: step 3's table is shown and has a row per image; the numbers are the JSON's.
+    const table = "image   files\npython:3.12-slim 4413\npython:3.13-slim 4446\n";
+    const rows = [_][]const u8{ "python:3.12-slim", "python:3.13-slim" };
+    try check_table_lists(.{ .stdout = table, .stderr = "" }, 0, &rows);
+    try testing.expectError(
+        error.LineMissing,
+        check_table_lists(.{ .stdout = "python:3.12-slim\n", .stderr = "" }, 0, &rows),
+    );
+    try testing.expectError(
+        error.ExitCodeWrong,
+        check_table_lists(.{ .stdout = table, .stderr = "" }, 1, &rows),
+    );
 }

@@ -34,7 +34,8 @@ pub const Error = error{
 };
 
 fn parse_value(arena: Allocator, text: []const u8) Error!Value {
-    const options: std.json.ParseOptions = .{};
+    // Copies: the text is the session's scratch buffer, which the next command overwrites.
+    const options: std.json.ParseOptions = .{ .allocate = .alloc_always };
     return std.json.parseFromSliceLeaky(Value, arena, text, options) catch return error.JsonWrong;
 }
 
@@ -219,7 +220,10 @@ pub fn diagnostics(arena: Allocator, stderr: []const u8) Error![]const Diagnosti
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \r\t");
         if (!std.mem.startsWith(u8, line, "{\"code\":")) continue;
-        const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+        const options: std.json.ParseOptions = .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        };
         const one = std.json.parseFromSliceLeaky(Diagnostic, arena, line, options) catch {
             return error.JsonWrong;
         };
@@ -276,7 +280,10 @@ pub fn container_exit(arena: Allocator, stderr: []const u8) Error!Exit {
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \r\t");
         if (!std.mem.startsWith(u8, line, "{\"container_exit\":")) continue;
-        const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+        const options: std.json.ParseOptions = .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        };
         const parsed = std.json.parseFromSliceLeaky(ExitLine, arena, line, options) catch {
             return error.JsonWrong;
         };

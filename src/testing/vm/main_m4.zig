@@ -9,19 +9,32 @@
 //!   exit 125 and names the digest the lock expects and the store's.
 //! CONFIG. `memcached:alpine` runs as the user its configuration names (the full id map is on
 //!   in the guest, so the image's /etc/passwd is used); `/sys` is read-only in a container.
-//! Slice 5 adds step 3 (`store du --by-image`), the interrupted pull, the agent test, the
-//! upgrade test and the CI job. `zig build demo-m4 -Daccel=tcg` for software emulation.
+//! SPEC 3. `zbx pull python:3.12-slim` and then `python:3.13-slim`; `zbx store du --by-image`
+//!   shows the second costs a share of its compressed size (a ratio, never exact bytes).
+//! UPGRADE, IDENTITY, RESUME, BLOBS (accept_m4.zig): the merged M3 `zbx` leaves a store this one
+//!   reads; an image is its tree digest; a pull killed halfway resumes; the blobs are kept
+//!   between runs on a second disk.
+//! AGENT (agent_m4.zig): the demo again, driven by JSON only.
+//! `zig build demo-m4 -Daccel=tcg` for software emulation. See docs/demos/m4.md.
 
 const std = @import("std");
 const Io = std.Io;
+const accept = @import("accept_m4.zig");
+const agent = @import("agent_m4.zig");
 const checks_m4 = @import("checks_m4.zig");
+const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const image = @import("image.zig");
+const alpine_pin = @import("alpine.zon");
+const old_release = @import("old_release.zon");
 const limits = @import("limits.zig");
 const session_mod = @import("session.zig");
 
 const Session = session_mod.Session;
 const H = harness;
+const z = common.z;
+const project = common.project;
+const fail_step = common.fail_step;
 
 pub fn main(init: std.process.Init) !u8 {
     harness.demo_name = "demo-m4";
@@ -54,7 +67,27 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
         error.BadAccel => return error.BadAccel,
     };
     const binary = try H.check_binaries(init, out, options);
+    if (options.old_zbx.len == 0) {
+        try out.print("demo-m4: --old-zbx is missing: the upgrade test needs the M3 binary\n", .{});
+        return error.MissingBinary;
+    }
     const arena = init.arena.allocator();
+    const old_binary = try Io.Dir.cwd().readFileAlloc(
+        io,
+        options.old_zbx,
+        arena,
+        .limited(limits.elf_bytes_max),
+    );
+    try out.print("demo-m4: upgrade test from {s}: {s}, {d} bytes\n", .{
+        old_release.m4_commit, options.old_zbx, old_binary.len,
+    });
+    const rootfs_path = try image.ensure_pin(init, options.cache_dir, out, .{
+        .url = alpine_pin.url,
+        .sha256 = alpine_pin.sha256,
+        .file_name = alpine_pin.file_name,
+    });
+    const rootfs_limit: Io.Limit = .limited(limits.http_body_bytes_max);
+    const rootfs = try Io.Dir.cwd().readFileAlloc(io, rootfs_path, arena, rootfs_limit);
     const base = try image.ensure(init, options.cache_dir, out);
     const overlay = try std.fmt.allocPrint(
         arena,
@@ -63,6 +96,9 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     );
     if (!options.reuse_overlay) try image.make_overlay(init, base, overlay);
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
+    if (options.blob_cache.len > 0) {
+        try image.ensure_cache_disk(init, options.blob_cache, limits.blob_cache_size_text);
+    }
 
     var ca_file: []const u8 = "";
     if (options.ca_file.len > 0) {
@@ -73,67 +109,42 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try session.start(init, out, overlay, accel, .{
         .user_data = @import("cloud_init.zig").user_data,
         .binary = binary,
+        .old_binary = old_binary,
+        .rootfs = rootfs,
         .ca_file = ca_file,
+        .cache_disk = options.blob_cache,
     });
     defer session.deinit();
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try H.install_binary(&session, out, &timer);
-    try write_wrapper(&session, out, ca_file.len > 0);
-    try step_pull(&session, out, &timer);
-    try step_run_alpine(&session, out, &timer);
-    try step_run_python(&session, out, &timer);
-    try step_lock_refusal(&session, out, &timer);
-    try step_config(&session, out, &timer);
+    try steps(&session, out, &timer, ca_file.len > 0, options.blob_cache.len > 0);
     try session.shutdown();
     return 0;
 }
 
-/// `zbx` as the demo user, in the project directory, with the mirror named: the images come from
-/// `mirror.gcr.io` first, as in CI, so the anonymous Docker Hub allowance is not what the demo
-/// depends on.
-const z = H.as_demo ++ "/home/demo/z";
-const project = "/home/demo/project";
-
-const wrapper =
-    "#!/bin/sh\n" ++
-    "cd " ++ project ++ " || exit 125\n" ++
-    "export ZBX_REGISTRY_MIRRORS=mirror.gcr.io\n" ++
-    "exec /home/demo/zbx \"$@\"\n";
-
-const wrapper_with_ca =
-    "#!/bin/sh\n" ++
-    "cd " ++ project ++ " || exit 125\n" ++
-    "export ZBX_REGISTRY_MIRRORS=mirror.gcr.io SSL_CERT_FILE=/home/demo/ca.crt\n" ++
-    "exec /home/demo/zbx \"$@\"\n";
-
-fn fail_step(out: *Io.Writer, step: []const u8, what: []const u8, err: anyerror) anyerror {
-    try out.print("demo-m4: {s} FAILED: {s} ({s})\n", .{ step, what, @errorName(err) });
-    return err;
-}
-
-fn write_wrapper(session: *Session, out: *Io.Writer, with_ca: bool) !void {
-    const made = try session.run(
-        "runuser -u demo -- mkdir -p " ++ project,
-        limits.command_timeout_kvm_s,
-    );
-    if (made.status != 0) return error.PrepareFailed;
-    try H.put_file(session, "/home/demo/z", if (with_ca) wrapper_with_ca else wrapper);
-    if (with_ca) {
-        const fetch = try std.fmt.allocPrint(
-            session.scratch_allocator(),
-            "curl -fsS -o /home/demo/ca.crt http://10.0.2.2:{d}/ca.crt",
-            .{session.server.port},
-        );
-        const fetched = try session.run(fetch, limits.command_timeout_kvm_s);
-        if (fetched.status != 0) return error.PrepareFailed;
-    }
-    const owned = try session.run(
-        "chown demo:demo /home/demo/z && ls -l /home/demo/z",
-        limits.command_timeout_kvm_s,
-    );
-    try H.show(out, "the wrapper that runs zbx in the project directory", owned);
-    if (owned.status != 0) return error.PrepareFailed;
+fn steps(
+    session: *Session,
+    out: *Io.Writer,
+    timer: *H.Timer,
+    with_ca: bool,
+    with_cache: bool,
+) !void {
+    try accept.unpack_rootfs(session, out);
+    try accept.install_old(session, out);
+    try common.write_wrappers(session, out, with_ca);
+    try accept.step_upgrade(session, out, timer);
+    if (with_cache) try accept.cache_restore(session, out, timer);
+    try step_pull(session, out, timer);
+    try step_run_alpine(session, out, timer);
+    try step_dedup(session, out, timer);
+    try step_run_python(session, out, timer);
+    try step_lock_refusal(session, out, timer);
+    try step_config(session, out, timer);
+    try accept.step_identity(session, out, timer);
+    try accept.step_resume(session, out, timer);
+    try agent.run_agent(session, out, timer);
+    if (with_cache) try accept.cache_save(session, out, timer);
 }
 
 var alpine_manifest: [71]u8 = undefined;
@@ -169,14 +180,40 @@ fn step_run_alpine(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try timer.lap(out, "run alpine");
 }
 
-fn step_run_python(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    try out.print("\ndemo-m4: SPEC 4: pull python:3.12-slim and run python\n", .{});
-    const pulled = try H.run_split(session, z ++ " pull python:3.12-slim");
-    try H.show_split(out, "zbx pull python:3.12-slim", pulled);
-    _ = checks_m4.check_pull(pulled.streams, pulled.status) catch |err| {
-        return fail_step(out, "SPEC 4", "the pull of python:3.12-slim", err);
+fn step_dedup(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m4: SPEC 3: pull python:3.12-slim and python:3.13-slim, then du\n", .{});
+    const references = [_][]const u8{ "python:3.12-slim", "python:3.13-slim" };
+    for (references) |reference| {
+        const command = try common.format(session, "{s} pull {s}", .{ z, reference });
+        const pulled = try H.run_split(session, command);
+        try H.show_split(out, command, pulled);
+        _ = checks_m4.check_pull(pulled.streams, pulled.status) catch |err| {
+            return fail_step(out, "SPEC 3", "the pull of the digest", err);
+        };
+        try timer.lap(out, reference);
+    }
+    const table = try H.run_split(session, z ++ " store du --by-image");
+    try H.show_split(out, "zbx store du --by-image", table);
+    const rows = [_][]const u8{ "python:3.12-slim", "python:3.13-slim" };
+    checks_m4.check_table_lists(table.streams, table.status, &rows) catch |err| {
+        return fail_step(out, "SPEC 3", "expected a row for each image", err);
     };
-    try timer.lap(out, "pull python");
+    const json = try H.run_split(session, z ++ " --output json store du --by-image");
+    const arena = session.scratch_allocator();
+    const checked = checks_m4.check_dedup(arena, json.streams, json.status, rows[0], rows[1]);
+    const facts = checked catch |err| {
+        return fail_step(out, "SPEC 3", "expected the second image to cost far less", err);
+    };
+    try out.print(
+        "demo-m4: SPEC 3: python:3.13-slim costs {d} bytes of its {d} compressed " ++
+            "({d} of its {d} stored bytes are shared)\n",
+        .{ facts.unique_bytes, facts.compressed_bytes, facts.shared_bytes, facts.stored_bytes },
+    );
+    try timer.lap(out, "du");
+}
+
+fn step_run_python(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m4: SPEC 4: zbx run python:3.12-slim, 2**100 in Python\n", .{});
     const command = z ++ " run python:3.12-slim -- python -c 'print(2**100)'";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
@@ -255,4 +292,16 @@ fn step_config(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         return fail_step(out, "CONFIG", "expected /sys to be read-only", err);
     };
     try timer.lap(out, "config");
+}
+
+test {
+    // The files this demo is made of carry their own unit tests; a test root reaches them here.
+    _ = @import("accept_m4.zig");
+    _ = @import("agent_json.zig");
+    _ = @import("agent_m4.zig");
+    _ = @import("checks_m4.zig");
+    _ = @import("common_m4.zig");
+    _ = @import("harness.zig");
+    _ = @import("session.zig");
+    _ = @import("image.zig");
 }
