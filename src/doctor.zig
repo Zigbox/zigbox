@@ -46,7 +46,7 @@ const Host = host_mod.Host;
 
 pub const Status = enum { ok, fail, warn };
 
-pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp };
+pub const CheckId = enum { kernel, userns, cgroup, overlay, subid, seccomp, net };
 
 pub const Detail = text_util.Bounded(constants.detail_bytes_max);
 /// The diagnostic code of each check: one per check, so a FAIL line and its block name the same
@@ -59,6 +59,8 @@ pub fn code_of(id: CheckId) diag_codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
+        // The net check only ever warns (a missing pasta fails nothing), so it has no code.
+        .net => unreachable, // `Check.problem` is never called for it.
     };
     assert(diag_codes.entry(code).blame == .environment);
     assert(diag_codes.entry(code).severity == .@"error");
@@ -183,7 +185,7 @@ pub const Report = struct {
     pub fn exit_code(report: *const Report) u8 {
         // The checks are always in the fixed order the renderer and the fuzzers rely on.
         assert(report.checks[0].id == .kernel);
-        assert(report.checks[report.checks.len - 1].id == .seccomp);
+        assert(report.checks[report.checks.len - 1].id == .net);
         for (report.checks) |check| {
             if (check.status == .fail) return check.diag.exit_code();
         }
@@ -288,6 +290,18 @@ const StatFact = struct {
     attempted: bool = false,
 };
 
+/// What the look for `pasta` found: where it is on PATH, and what `pasta --version` said.
+pub const PastaFact = struct {
+    attempted: bool = false,
+    found: bool = false,
+    path: text_util.Bounded(constants.pasta_path_bytes_max) = .{},
+    /// `--version` was run; how it ended (null if it could not be run at all), and the first
+    /// line it wrote.
+    ran: bool = false,
+    status: ?host_mod.ExitStatus = null,
+    version: text_util.Bounded(constants.pasta_version_bytes_max) = .{},
+};
+
 /// A candidate location of newuidmap or newgidmap.
 const Binary = struct {
     stat: host_mod.Stat = .{ .mode = 0, .uid = 0 },
@@ -373,6 +387,9 @@ pub const Facts = struct {
     seccomp_err: ?host_mod.Error,
     seccomp_errno: u16,
 
+    /// `pasta`, which `--net user` and `--publish` need.
+    pasta: PastaFact,
+
     /// Clears every flag and result; the byte buffers are left as they are. Facts is large, so
     /// it is initialised in place rather than by assigning a struct value.
     pub fn reset(facts: *Facts) void {
@@ -397,6 +414,7 @@ pub const Facts = struct {
         facts.seccomp = null;
         facts.seccomp_err = null;
         facts.seccomp_errno = 0;
+        facts.pasta = .{};
     }
 };
 
@@ -419,6 +437,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .overlay => facts.probe_overlay.run(host, .overlay),
         .subid => gather_subid(host, facts),
         .seccomp => gather_seccomp(host, facts),
+        .net => gather_net(host, facts),
     }
     // Each id ran its own gather step, not a neighbour's.
     switch (id) {
@@ -428,6 +447,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .overlay => {}, // The probe fact holds either an outcome or an error; both are valid.
         .subid => assert(facts.subgid.attempted),
         .seccomp => assert(facts.status.attempted),
+        .net => assert(facts.pasta.attempted),
     }
 }
 
@@ -533,6 +553,57 @@ fn gather_seccomp(host: Host, facts: *Facts) void {
     assert(facts.seccomp_err == null);
 }
 
+/// Looks for `pasta` in the directories of PATH, as a shell would, and asks the first one for its
+/// version. Nothing here fails the doctor: the evaluation decides what a missing or broken
+/// pasta means.
+pub fn gather_net(host: Host, facts: *Facts) void {
+    facts.pasta = .{ .attempted = true };
+    const default_path = "/usr/local/bin:/usr/bin:/bin";
+    const search = host.environment("PATH", constants.path_bytes_max) orelse default_path;
+    var directories = std.mem.splitScalar(u8, search, ':');
+    var tried: u32 = 0;
+    while (directories.next()) |directory| {
+        if (directory.len == 0 or directory[0] != '/') continue;
+        tried += 1;
+        if (tried > constants.pasta_path_dirs_max) break;
+        var buffer: [constants.pasta_path_bytes_max + 1]u8 = undefined;
+        if (directory.len + "/pasta".len >= constants.pasta_path_bytes_max) continue;
+        const joined = std.fmt.bufPrintSentinel(&buffer, "{s}/pasta", .{directory}, 0);
+        const path = joined catch unreachable; // The length was checked against the buffer.
+        const found = host.stat(path) catch continue;
+        const is_file = found.mode & std.posix.S.IFMT == std.posix.S.IFREG;
+        if (!is_file or found.mode & 0o111 == 0) continue;
+        facts.pasta.found = true;
+        facts.pasta.path.print("{s}", .{path});
+        break;
+    }
+    if (facts.pasta.found) ask_pasta_version(host, facts);
+    assert(facts.pasta.attempted);
+    if (!facts.pasta.found) assert(!facts.pasta.ran);
+}
+
+fn ask_pasta_version(host: Host, facts: *Facts) void {
+    assert(facts.pasta.found);
+    assert(facts.pasta.path.len > 0);
+    var path_storage: [constants.pasta_path_bytes_max + 1]u8 = undefined;
+    @memcpy(path_storage[0..facts.pasta.path.len], facts.pasta.path.slice());
+    path_storage[facts.pasta.path.len] = 0;
+    const path: [:0]const u8 = path_storage[0..facts.pasta.path.len :0];
+    const argv = [_:null]?[*:0]const u8{ "pasta", "--version" };
+    const none = [_:null]?[*:0]const u8{};
+    var output: [constants.pasta_version_bytes_max]u8 = undefined;
+    const result = host.run_helper(.{
+        .path = path,
+        .argv = &argv,
+        .envp = &none,
+    }, &output) catch return;
+    facts.pasta.ran = true;
+    facts.pasta.status = result.status;
+    const text = output[0..result.output_len];
+    const line_end = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    facts.pasta.version.append_sanitised(std.mem.trim(u8, text[0..line_end], " \t\r"), 80);
+}
+
 // ---- Evaluate ------------------------------------------------------------------------------
 //
 // All policy lives here: what counts as ok, and for each failure the code's cause and fixes.
@@ -553,6 +624,7 @@ pub fn evaluate(facts: *const Facts, report: *Report) void {
             .overlay => evaluate_overlay(facts, check),
             .subid => evaluate_subid(facts, check),
             .seccomp => evaluate_seccomp(facts, check),
+            .net => evaluate_net(facts, check),
         }
         if (check.status == .fail) add_context(facts, check);
     }
@@ -570,7 +642,7 @@ fn add_context(facts: *const Facts, check: *Check) void {
     }
     switch (check.id) {
         .cgroup, .subid => check.diag.context("uid", "{d}", .{facts.uid}),
-        .kernel, .userns, .overlay, .seccomp => {},
+        .kernel, .userns, .overlay, .seccomp, .net => {},
     }
 }
 
@@ -1389,6 +1461,56 @@ fn evaluate_seccomp(facts: *const Facts, check: *Check) void {
     check.pass("seccomp is supported (current mode: {s})", .{mode});
 }
 
+// net
+
+const pasta_install = "apt install passt";
+const pasta_version = @import("runtime/pasta.zig");
+
+/// `--net none` and `--net host` need nothing from the host, so this check never fails: a pasta
+/// that is missing, or does not run, is a warning that says how to get one.
+fn evaluate_net(facts: *const Facts, check: *Check) void {
+    assert(check.detail.len == 0);
+    assert(check.status == .ok);
+    assert(facts.pasta.attempted); // gather_net ran.
+    const pasta = &facts.pasta;
+    if (!pasta.found) {
+        check.warning(
+            "pasta not found: --net user and --publish need it ({s})",
+            .{pasta_install},
+        );
+        return;
+    }
+    var ended_well = false;
+    if (pasta.status) |status| {
+        if (status == .exited) ended_well = status.exited == 0;
+    }
+    if (!pasta.ran or !ended_well) {
+        check.warning("pasta at {s} did not report its version: reinstall it ({s})", .{
+            pasta.path.slice(), pasta_install,
+        });
+        return;
+    }
+    if (pasta.version.len == 0) {
+        check.pass("pasta at {s}", .{pasta.path.slice()});
+        return;
+    }
+    // The run refuses a pasta older than the one that ends with its container (ZBX-E0602); a
+    // version with no date in it cannot be judged, and passes.
+    if (pasta_version.version_date(pasta.version.slice())) |date| {
+        if (date < constants.pasta_version_min_date) {
+            const format = "{s} at {s} is older than {s}: --net user needs a newer one ({s})";
+            check.warning(format, .{
+                pasta.version.slice(),
+                pasta.path.slice(),
+                constants.pasta_version_min,
+                pasta_install,
+            });
+            return;
+        }
+    }
+    check.pass("{s} at {s}", .{ pasta.version.slice(), pasta.path.slice() });
+}
+
 // ---- Render --------------------------------------------------------------------------------
 
 const Style = struct {
@@ -1608,7 +1730,8 @@ test "the healthy fixtures pass and warn does not change the exit code" {
     // Goal: pin which fixtures exit 0, so a changed policy cannot flip one unnoticed.
     const passing = [_][]const u8{
         "ubuntu_2404",                    "fedora_40",
-        "restricted_but_working",         "subid_by_uid",
+        "pasta_missing",                  "restricted_but_working",
+        "pasta_old",                      "subid_by_uid",
         "no_passwd_entry",                "kernel_exactly_minimum",
         "kernel_newer_major_lower_minor",
     };
@@ -1644,7 +1767,9 @@ test "uid 0 gets no free pass: root is judged like anyone else" {
             evaluate(&facts, &report);
             for (report.checks) |check| {
                 const listed = std.mem.indexOfScalar(CheckId, case.failing, check.id) != null;
-                try testing.expectEqual(if (listed) Status.fail else Status.ok, check.status);
+                // The net check never fails: these hosts have no pasta, so it warns.
+                const passing = if (check.id == .net) Status.warn else Status.ok;
+                try testing.expectEqual(if (listed) Status.fail else passing, check.status);
             }
         }
     }
@@ -1654,11 +1779,15 @@ test "every check has its own code, and a FAIL's diagnostic is blamed on the env
     // Goal: the mapping from check to code is total and distinct (one code per check, E0101 to
     // E0106), and a failing check carries a diagnostic with a cause, a fix and the exit code
     // of its blame. Method: the empty host fails every check.
+    // The net check only warns, so it has no code.
     var seen: [constants.doctor_checks_count]diag_codes.Code = undefined;
-    for (std.enums.values(CheckId), 0..) |id, index| {
+    var index: usize = 0;
+    for (std.enums.values(CheckId)) |id| {
+        if (id == .net) continue;
         seen[index] = code_of(id);
         for (seen[0..index]) |earlier| try testing.expect(earlier != seen[index]);
         try testing.expect(std.mem.startsWith(u8, @tagName(seen[index]), "E01"));
+        index += 1;
     }
     var target: HostSim = undefined;
     target.init(1, &.{});
@@ -1670,7 +1799,7 @@ test "every check has its own code, and a FAIL's diagnostic is blamed on the env
     var failures: u32 = 0;
     for (report.checks) |check| {
         // The simulator's defaults let the kernel and overlay checks pass; the rest read files.
-        const expected = check.id != .kernel and check.id != .overlay;
+        const expected = check.id != .kernel and check.id != .overlay and check.id != .net;
         try testing.expectEqual(expected, check.status == .fail);
         if (!expected) continue;
         failures += 1;
@@ -1734,6 +1863,16 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
     const fixture = fixtures.all[0];
     var target: HostSim = undefined;
     var calls_total: u32 = 0;
+    // The calls of the six checks that can fail; the net check after them only ever warns, so
+    // a fault in one of its calls leaves the exit code alone.
+    var facts: Facts = undefined;
+    target.init(3, fixture.files);
+    fixture.apply(&target);
+    facts.reset();
+    for (std.enums.values(CheckId)) |id| {
+        if (id != .net) gather_one(target.interface(), &facts, id);
+    }
+    const calls_before_net = target.call_count;
     for (kinds) |kind| {
         for (0..64) |index| {
             target.init(3, fixture.files);
@@ -1746,8 +1885,10 @@ test "a failed read at every step of the healthy host is a FAIL, never ok" {
             if (injected == 0) {
                 calls_total = @max(calls_total, @as(u32, @intCast(index)));
                 try testing.expectEqual(constants.exit_ok, code);
-            } else {
+            } else if (index < calls_before_net) {
                 try testing.expectEqual(constants.exit_environment, code);
+            } else {
+                try testing.expect(code == constants.exit_ok or code == constants.exit_environment);
             }
         }
     }

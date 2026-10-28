@@ -110,7 +110,9 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
 const zbx = H.as_demo ++ "/home/demo/zbx";
 const rootfs_dir = "/home/demo/alpine";
 const stress_dir = "/home/demo/alpine-stress";
-const run_prefix = zbx ++ " run --rootfs " ++ rootfs_dir;
+// `--net none` is the default; saying it keeps the zbx note about the network (which a failed run
+// without --net ends with) out of the lines these steps compare.
+const run_prefix = zbx ++ " run --net none --rootfs " ++ rootfs_dir;
 const app_slice = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice";
 
 fn fail_step(out: *Io.Writer, step: []const u8, what: []const u8, err: anyerror) anyerror {
@@ -237,7 +239,7 @@ const apk_main = "http://dl-cdn.alpinelinux.org/alpine/v3.20/main";
 const apk_community = "http://dl-cdn.alpinelinux.org/alpine/v3.20/community";
 
 /// stress-ng goes into a copy of the rootfs, by `apk` run inside a zbx container (the VM has a
-/// network, and the container shares it in M2; 10.0.2.3 is the emulated resolver).
+/// network, and the container shares it with --net host; 10.0.2.3 is the emulated resolver).
 fn install_stress_ng(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m2: provisioning: stress-ng into a copy of the rootfs\n", .{});
     const copy = "runuser -u demo -- sh -c 'cp -a " ++ rootfs_dir ++ " " ++ stress_dir ++
@@ -246,7 +248,8 @@ fn install_stress_ng(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
         "/etc/apk/repositories'";
     const copied = try session.run(copy, limits.command_timeout_kvm_s);
     if (copied.status != 0) return fail_step(out, "provisioning", "copy", error.ProvisionFailed);
-    const apk = zbx ++ " run --rootfs " ++ stress_dir ++
+    // The container has no network unless granted (M5): apk needs the host's.
+    const apk = zbx ++ " run --net host --rootfs " ++ stress_dir ++
         " --name apk1 -- apk add --no-cache stress-ng";
     const result = try session.run(apk, 300);
     try H.show(out, "apk add stress-ng, inside zbx run", result);
@@ -280,7 +283,7 @@ fn step_memory(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     // minutes under TCG, with 128 MiB touched per restart). --oomable is its own switch for
     // "the OOM killer's victim is the answer".
     try out.print("\ndemo-m2: STEP 2: --memory 128m, stress-ng --vm 1 --vm-bytes 512m\n", .{});
-    const command = "timeout 300 " ++ zbx ++ " run --rootfs " ++ stress_dir ++
+    const command = "timeout 300 " ++ zbx ++ " run --net none --rootfs " ++ stress_dir ++
         " --memory 128m --name oom1 -- stress-ng --vm 1 --vm-bytes 512m --oomable";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);

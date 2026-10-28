@@ -70,6 +70,7 @@ jobs:
           - host_read
           - host_write
           - cli
+          - publish
           - text
           - doctor
           - diag
@@ -317,3 +318,37 @@ jobs:
           key: vm-m4-blobs-${{ hashFiles('src/testing/vm/zbx.lock') }}
       - name: Run the M4 demo
         run: zig build demo-m4 -Daccel=kvm
+
+  # Sibling of demo-m4: the same VM. For now the upgrade test only: the merged M4 zbx (built from
+  # a worktree of the commit in old_release.zon) pulls alpine:3.20, runs it and commits, and this
+  # build reads its store, image record, run record and zbx.lock and runs the image with the
+  # default --net none. docker.io is reached through mirror.gcr.io, as for demo-m4. The image
+  # is small, so no blob cache disk.
+  demo-m5:
+    name: demo-m5 (Ubuntu 24.04 VM, KVM, upgrade from M4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+    steps:
+      # The whole history: the upgrade test builds the M4 commit in a git worktree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/image.zon') }}
+      - name: Run the M5 demo
+        run: zig build demo-m5 -Daccel=kvm

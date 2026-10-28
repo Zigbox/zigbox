@@ -51,7 +51,8 @@ test "a run gives the command the container the plan promises, and leaves the ho
         "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "/bin/sh", "-c", "exit 42",
     };
     try testing.expectEqual(@as(u8, 42), run(&sim, &args));
-    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    // Only the hint about the network: the default network was none and the command failed.
+    try testing.expectEqualStrings("zbx: network: none (grant with --net)\n", sim.stderr());
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
     try no_leak(&sim, &before);
     try started_ok(&sim, "web-1");
@@ -109,11 +110,19 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         sim.world.command_exit = case.status;
         const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "/bin/sh" };
         try testing.expectEqual(case.code, run(&sim, &args));
+        // A failed run with the default network ends with the one-line hint, after any note.
+        const hint = "zbx: network: none (grant with --net)\n";
         switch (case.status) {
-            .exited => try testing.expectEqual(@as(usize, 0), sim.stderr().len),
+            .exited => {
+                if (case.code == 0) {
+                    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+                } else {
+                    try testing.expectEqualStrings(hint, sim.stderr());
+                }
+            },
             .signaled => |number| {
                 try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
-                var expected: [80]u8 = undefined;
+                var expected: [160]u8 = undefined;
                 const name = std.enums.tagName(std.os.linux.SIG, @fromBackingInt(number)).?;
                 const note = try std.fmt.bufPrint(&expected, "zbx: the container was killed by " ++
                     "signal {d} (SIG{s})\n", .{ number, name });
@@ -129,9 +138,13 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         try testing.expectEqual(case.code, run(&sim, &json));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"container_exit\":{"));
-        var number_text: [16]u8 = undefined;
-        const code_text = try std.fmt.bufPrint(&number_text, "\"code\":{d}}}}}\n", .{case.code});
-        try testing.expect(std.mem.endsWith(u8, sim.stderr(), code_text));
+        var number_text: [64]u8 = undefined;
+        // The container_exit object ends with the code; the line goes on with what ran.
+        const format = "\"code\":{d},\"network\":\"none\",\"published\":[]}},\"ran\":{{";
+        const code_text = try std.fmt.bufPrint(&number_text, format, .{case.code});
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), code_text) != null);
+        const ran = "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n";
+        try testing.expect(std.mem.endsWith(u8, sim.stderr(), ran));
     }
 }
 
@@ -269,7 +282,9 @@ fn expected_code(kind: plan_mod.Kind) ?codes.Code {
         .run_newuidmap, .run_newgidmap => .E0204,
         .start_scope => .E0301, // The first call is the connect to the bus.
         .exec => .E0202,
-        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys => null,
+        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys, .mount_sysfs => null,
+        .make_etc_dir, .create_etc_file, .stage_etc_file => null,
+        .bind_etc_file, .remount_etc_file, .unstage_etc_file => null,
         .restrict_capabilities, .clear_ambient => .E0207,
         .set_no_new_privs, .install_seccomp => .E0208,
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => .E0209,
@@ -507,7 +522,9 @@ test "a signal PID 1 has no handler for ends the container as the signal would h
         const before = sim_run.baseline(&sim);
         sim.world.script[0] = case.number;
         sim.world.script_len = 1;
-        const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "sleep", "1000" };
+        const args = [_][:0]const u8{
+            "zbx", "run", "--net", "none", "--rootfs", rootfs, "--", "sleep", "1000",
+        };
         try testing.expectEqual(constants.exit_signal_offset + case.number, run(&sim, &args));
         try expect_signals(&sim, &.{constants.signal_kill});
         var note: [96]u8 = undefined;
@@ -530,7 +547,7 @@ test "a signal PID 1 handles or ignores is passed on as it is, and the container
     sim.world.command_caught = 1 << 1; // SIGINT.
     sim.world.command_ignored = 1 << 14; // SIGTERM.
     sim.world.command_exit = .{ .exited = 5 };
-    const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "sh" };
+    const args = [_][:0]const u8{ "zbx", "run", "--net", "none", "--rootfs", rootfs, "--", "sh" };
     try testing.expectEqual(@as(u8, 5), run(&sim, &args));
     try expect_signals(&sim, &.{ 2, 2, 15 });
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
@@ -817,4 +834,114 @@ test "run is in the help text, with its options and its exit codes" {
     for (words) |word| {
         try testing.expect(std.mem.indexOf(u8, sim.stdout(), word) != null);
     }
+}
+
+test "the default network is none: lo up, a sysfs of its own, the generated /etc files" {
+    // Goal: M5's container. Method: a run with no --net gets a network namespace of its own with
+    // `lo` brought up, a sysfs where M4 bound the host's /sys, and both generated files bound
+    // read-only; the staged copies in /dev are gone. `started` checks all of it in the model.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 20);
+    const before = sim_run.baseline(&sim);
+    const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "net-1", "--", "sh" };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &args));
+    try testing.expect(sim_run.started(&sim, .{ .name = "net-1", .devpts = true }) == null);
+    try testing.expect(sim.world.processes[1].new_net);
+    try testing.expect(sim.world.processes[1].loopback_up);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    for (sim.world.written[0..sim.world.written_count]) |file| {
+        try testing.expect(std.mem.indexOf(u8, file.path.slice(), ".zbx-") == null);
+    }
+    try no_leak(&sim, &before);
+}
+
+test "--net host shares the host's network: its /sys bound, no lo of its own" {
+    // Goal: `--net host` keeps today's behaviour. Method: no network namespace, no sysfs, the
+    // host's /sys bound read-only; the generated files are still there; a failing command gets
+    // no hint, and the JSON line says host.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 21);
+    sim.world.command_exit = .{ .exited = 3 };
+    const args = [_][:0]const u8{
+        "zbx", "run", "--net", "host", "--rootfs", rootfs, "--name", "net-2", "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 3), run(&sim, &args));
+    const problem = sim_run.started(&sim, .{ .name = "net-2", .devpts = true, .network = .host });
+    try testing.expect(problem == null);
+    try testing.expect(!sim.world.processes[1].new_net);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+
+    sim_run.init(&sim, 21);
+    sim.world.command_exit = .{ .exited = 3 };
+    const json = [_][:0]const u8{
+        "zbx", "--output", "json", "run", "--net", "host", "--rootfs", rootfs, "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 3), run(&sim, &json));
+    try testing.expectEqualStrings(
+        "{\"container_exit\":{\"reason\":\"exited\",\"code\":3,\"network\":\"host\"," ++
+            "\"published\":[]}," ++
+            "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n",
+        sim.stderr(),
+    );
+}
+
+test "the no-network hint: only for a failed run that was not given --net, and not in JSON" {
+    // Goal: the hint's three conditions. Method: default and failing gets it, last; explicit
+    // `--net none` and a success get none; JSON carries the mode instead.
+    var sim: HostSim = undefined;
+    const hint = "zbx: network: none (grant with --net)\n";
+    sim_run.init(&sim, 22);
+    sim.world.command_exit = .{ .exited = 1 };
+    const plain = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "sh" };
+    try testing.expectEqual(@as(u8, 1), run(&sim, &plain));
+    try testing.expectEqualStrings(hint, sim.stderr());
+
+    sim_run.init(&sim, 22);
+    sim.world.command_exit = .{ .exited = 1 };
+    const explicit = [_][:0]const u8{
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 1), run(&sim, &explicit));
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+
+    sim_run.init(&sim, 22);
+    const ok = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "sh" };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &ok));
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+
+    sim_run.init(&sim, 22);
+    sim.world.command_exit = .{ .exited = 1 };
+    const json = [_][:0]const u8{
+        "zbx", "--output", "json", "run", "--rootfs", rootfs, "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 1), run(&sim, &json));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"network\":\"none\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "grant with") == null);
+}
+
+test "a generated file that cannot be made is a note, and the run goes on" {
+    // Goal: the groups. Method: refuse the first /etc step; the run starts, the note names the
+    // file once, and the other file is unharmed.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 23);
+    var plan: plan_mod.Plan = undefined;
+    sim_run.sample_plan_ro(&plan, true, true, false);
+    var at: u32 = 0;
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == .stage_etc_file) {
+            at = @intCast(index);
+            break;
+        }
+    }
+    try testing.expect(at > 0);
+    sim.faults.fail_step = at;
+    sim.faults.fail_step_errno = 28; // ENOSPC
+    const args = [_][:0]const u8{ "zbx", "-v", "run", "--rootfs", rootfs, "--", "sh" };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &args));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "zbx: note: skipped"));
+    const named = std.mem.indexOf(u8, sim.stderr(), "writing the generated /etc/hosts");
+    try testing.expect(named != null);
+    const table = &sim.world.tables[sim.world.processes[1].table];
+    try testing.expect(!table.has(.bind_file, rootfs ++ "/etc/hosts"));
+    try testing.expect(table.has(.bind_file, rootfs ++ "/etc/resolv.conf"));
 }

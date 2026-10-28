@@ -21,21 +21,25 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
 
+    // LLVM in every mode, not Zig's own x86_64 backend in Debug: that backend writes each
+    // `undefined` global into .data as 0xaa bytes, which made a Debug zbx 335 MB and a test
+    // binary 1.4 GB, filling the build cache a build at a time. LLVM leaves them in .bss.
     const exe = b.addExecutable(.{
         .name = "zbx",
         .root_module = zbx_module(b, options, target, optimize, null),
+        .use_llvm = true,
     });
     b.installArtifact(exe);
     add_library_module(b, options, target, optimize);
 
     add_test_step(b, options, target, optimize);
     add_tidy_step(b);
-    add_fuzz_step(b, options, target);
+    const fuzz = add_fuzz_step(b, options, target);
     add_release_step(b, options);
     add_demo_step(b, options);
     add_errors_site_steps(b);
     add_dbus_live_step(b, options);
-    add_check_step(b);
+    add_check_step(b, fuzz);
 }
 
 /// The runtime as a module named `zigbox`, for Zigcube's agent to link: another build adds this
@@ -86,6 +90,7 @@ fn add_test_step(
         "src/testing/vm/main_m2.zig",
         "src/testing/vm/main_m3.zig",
         "src/testing/vm/main_m4.zig",
+        "src/testing/vm/main_m5.zig",
         "src/testing/vm/main_top20.zig",
         "src/main.zig",
         "src/zigbox.zig",
@@ -106,7 +111,9 @@ fn add_test_step(
         module.addAnonymousImport("seccomp_policy", .{
             .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
-        const unit_tests = b.addTest(.{ .root_module = module });
+        // LLVM, as for zbx above: Zig's own backend fills `undefined` globals with 0xaa in the
+        // binary, so a test could pass on that fill (gc_tests did) where a release would not.
+        const unit_tests = b.addTest(.{ .root_module = module, .use_llvm = true });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     }
 }
@@ -134,7 +141,7 @@ fn add_fuzz_step(
     b: *std.Build,
     options: *std.Build.Step.Options,
     target: std.Build.ResolvedTarget,
-) void {
+) *std.Build.Step.Compile {
     // Fuzzers keep assertions on regardless of the user's optimize flag: they exist to trip them.
     const fuzz = b.addExecutable(.{
         .name = "fuzz",
@@ -151,6 +158,7 @@ fn add_fuzz_step(
     const description = "Run one seeded fuzzer: zig build fuzz -- <fuzzer> [seed] [iterations]";
     const step = b.step("fuzz", description);
     step.dependOn(&run.step);
+    return fuzz;
 }
 
 /// The spec's release criterion: a static binary under 4 MiB (2 MiB until M4's TLS client and
@@ -227,6 +235,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M4 demo, as far as it is built: pull, the lock, run by name",
     },
     .{
+        .step = "demo-m5",
+        .root = "src/testing/vm/main_m5.zig",
+        .help = "Run the M5 demo, as far as it is built: the upgrade test against M4",
+    },
+    .{
         .step = "top20",
         .root = "src/testing/vm/main_top20.zig",
         .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
@@ -282,6 +295,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m4_commit);
             run.addArgs(&.{ "--blob-cache", ".zig-cache/zbx-vm/m4-blobs.img" });
         }
+        if (std.mem.eql(u8, demo.step, "demo-m5")) {
+            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m5_commit);
+        }
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
         if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
         if (ca_file) |path| {
@@ -313,8 +329,8 @@ fn add_release_binaries(
     }
 }
 
-/// The upgrade test of demo-m3 and demo-m4: the older zbx, built from a worktree of the pinned
-/// commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
+/// The upgrade test of demo-m3, demo-m4 and demo-m5: the older zbx, built from a worktree of the
+/// pinned commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
 fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run, commit: []const u8) void {
     const builder = b.addExecutable(.{
         .name = "build_old",
@@ -378,7 +394,8 @@ fn add_errors_site_steps(b: *std.Build) void {
 /// report quotes (`check: PASS <commit>`). Build, test, tidy, release and the error pages run
 /// first, as dependencies; then, as root, `zig build test` again as -Dcheck-user (default tester)
 /// in a scratch worktree, because CI runs as an ordinary user. -Dcheck-user=- skips that.
-fn add_check_step(b: *std.Build) void {
+/// `fuzz` is the fuzzers' binary: `check` runs every one of them with a fresh seed.
+fn add_check_step(b: *std.Build, fuzz: *std.Build.Step.Compile) void {
     const user = b.option([]const u8, "check-user", "User for the non-root test run, or -") orelse
         "tester";
     const tool = b.addExecutable(.{
@@ -392,6 +409,7 @@ fn add_check_step(b: *std.Build) void {
     const run = b.addRunArtifact(tool);
     run.setCwd(b.path("."));
     run.addArgs(&.{ b.graph.zig_exe, user });
+    run.addArtifactArg(fuzz);
     run.has_side_effects = true;
     const gates = [_][]const u8{ "install", "test", "tidy", "release", "errors-site-check" };
     for (gates) |name| {

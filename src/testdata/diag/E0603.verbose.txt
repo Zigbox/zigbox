@@ -1,0 +1,14 @@
+error[ZBX-E0603]: pasta failed to start
+  while  starting container web-1
+  while  connecting the container to the network (--net user)
+  cause  pasta exited with status 1 before it was ready
+  cause  pasta: Couldn't set up tap device in namespace
+  pasta  /usr/bin/pasta
+  log    /home/alice/.local/state/zbx/logs/web-1.pasta.log
+  name   web-1
+  rootfs /srv/alpine
+  step   await_pasta (6 of 65)
+  fix    read what pasta wrote:            cat /home/alice/.local/state/zbx/logs/web-1.pasta.log
+         or run with the host's network:   zbx run --net host alpine -- sh
+  more   zbx explain E0603
+  docs   https://zigbox.github.io/zigbox/errors/E0603.html

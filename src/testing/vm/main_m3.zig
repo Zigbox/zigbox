@@ -256,9 +256,13 @@ fn put(session: *Session, path: []const u8, text: []const u8) !void {
 const scribble_script =
     "set -e\n" ++
     "echo hi > /etc/motd\n" ++
-    "chmod -R go+w /etc /bin /lib /usr\n" ++
+    // /etc/hosts and /etc/resolv.conf are zbx's own, bound read-only (M5): they are left alone.
+    "skip='! ( -path /etc/hosts -o -path /etc/resolv.conf )'\n" ++
+    "find /etc $skip -exec chmod go+w {} \\;\n" ++
+    "chmod -R go+w /bin /lib /usr\n" ++
     "chmod 4755 /bin/busybox\n" ++
-    "chown -R 7:7 /etc /usr/share\n" ++
+    "find /etc $skip -exec chown 7:7 {} \\;\n" ++
+    "chown -R 7:7 /usr/share\n" ++
     "chown 5:5 /bin/busybox\n" ++
     "rm -rf /usr/share /lib/apk /var\n" ++
     "mkdir -p /newdir/deep\n" ++
@@ -277,7 +281,7 @@ fn write_scripts(session: *Session, out: *Io.Writer) !void {
     try put(session, rootfs_dir ++ "/scribble.sh", scribble_script);
     try put(session, "/tmp/snapshot.sh", snapshot_script);
     // The minirootfs has no CA certificates, so apk fetches over http (it checks the signatures
-    // itself); the emulated resolver is 10.0.2.3. As in demo-m2, a container shares the network.
+    // itself); the emulated resolver is 10.0.2.3. As in demo-m2, `--net host` shares the network.
     const network = H.as_demo ++ "sh -c 'printf \"%s\\n\" " ++ apk_main ++ " " ++ apk_community ++
         " > " ++ rootfs_dir ++ "/etc/apk/repositories && echo nameserver 10.0.2.3 > " ++
         rootfs_dir ++ "/etc/resolv.conf'";
@@ -456,7 +460,7 @@ fn step_apk(session: *Session, out: *Io.Writer, timer: *H.Timer, digest: []const
     const package = "dtach";
     const run = try std.fmt.allocPrint(
         arena,
-        "printf 'apk add --no-cache {s}\\nexit\\n' | {s} run {s} --name apk1 -- sh",
+        "printf 'apk add --no-cache {s}\\nexit\\n' | {s} run --net host {s} --name apk1 -- sh",
         .{ package, zbx, digest[3..15] },
     );
     const ran = try H.run_split(session, run);

@@ -32,6 +32,7 @@ const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const text_util = @import("text.zig");
+const runtime_spec = @import("runtime/spec.zig");
 const HostSim = @import("host_sim.zig").HostSim;
 const sim_file = @import("host_sim.zig").File;
 const Faults = @import("host_sim.zig").Faults;
@@ -46,6 +47,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "host_write", .run_iteration = fuzz_host_write },
     .{ .name = "cli", .run_iteration = fuzz_cli },
     .{ .name = "text", .run_iteration = fuzz_text },
+    .{ .name = "publish", .run_iteration = fuzz_publish },
     .{ .name = "doctor", .run_iteration = fuzz_doctor },
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
@@ -203,6 +205,11 @@ fn random_args(
         "web-1",   "store",    "import",        "ls",        "du",        "rm",        "b3:",
     };
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
+    // M5's network options, their good values and some that are not.
+    const net_words = [_][]const u8{
+        "--net",   "user",  "host", "none", "--publish",
+        "8080:80", "80:80", "8080", "0:1",  "--net=user",
+    };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
     args.items[0] = "zbx";
@@ -217,7 +224,10 @@ fn random_args(
         const kind = if (many) random.uintLessThan(u8, 6) else random.uintLessThan(u8, 8);
         const argument: []const u8 = switch (kind) {
             0...2 => words[random.uintLessThan(usize, words.len)],
-            3 => pull_words[random.uintLessThan(usize, pull_words.len)],
+            3 => if (random.boolean())
+                pull_words[random.uintLessThan(usize, pull_words.len)]
+            else
+                net_words[random.uintLessThan(usize, net_words.len)],
             4...5 => blk: {
                 random.bytes(&short[slot]);
                 for (&short[slot]) |*byte| byte.* |= @intFromBool(byte.* == 0); // No NUL.
@@ -420,6 +430,68 @@ fn fuzz_text(seed: u64) void {
     for (bounded.slice()) |byte| assert(is_printable_reference(byte));
 }
 
+/// Property of `--publish` parsing (runtime/spec.zig): a text parses exactly when an oracle
+/// written apart from the parser says it is two decimal ports without leading zeros, 1 to 65535,
+/// around one colon, and what parses renders back to the same text. The texts are random bytes
+/// over the characters that matter, and valid texts damaged by one change.
+fn fuzz_publish(seed: u64) void {
+    var prng = std.Random.Xoshiro256.init(seed);
+    const random = prng.random();
+    var buffer: [16]u8 = undefined;
+    var length: usize = 0;
+    if (random.boolean()) {
+        const alphabet = "0123456789:::/-+ x";
+        length = random.uintAtMost(usize, buffer.len);
+        for (buffer[0..length]) |*byte| byte.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+    } else {
+        const valid: runtime_spec.Publish = .{
+            .host = random.intRangeAtMost(u16, 1, 65535),
+            .container = random.intRangeAtMost(u16, 1, 65535),
+        };
+        var rendered: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+        const text = valid.text(&rendered);
+        @memcpy(buffer[0..text.len], text);
+        length = text.len;
+        if (random.boolean()) {
+            const at = random.uintLessThan(usize, length);
+            buffer[at] = "0123456789:a"[random.uintLessThan(usize, 12)];
+        }
+    }
+    const input = buffer[0..length];
+    const parsed = runtime_spec.parse_publish(input);
+    const expected = publish_reference(input);
+    switch (parsed) {
+        .ok => |publish| {
+            assert(expected != null);
+            assert(publish.host == expected.?.host);
+            assert(publish.container == expected.?.container);
+            var rendered: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+            assert(std.mem.eql(u8, publish.text(&rendered), input));
+        },
+        .problem => assert(expected == null),
+    }
+}
+
+/// The oracle: written with compound conditions on purpose (STYLE.md lets an oracle), so that it
+/// does not mirror the parser's structure.
+fn publish_reference(text: []const u8) ?runtime_spec.Publish {
+    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return null;
+    if (std.mem.lastIndexOfScalar(u8, text, ':').? != colon) return null;
+    const sides = [2][]const u8{ text[0..colon], text[colon + 1 ..] };
+    var ports: [2]u16 = undefined;
+    for (sides, 0..) |side, index| {
+        if (side.len == 0 or side.len > 5 or side[0] == '0') return null;
+        var value: u32 = 0;
+        for (side) |byte| {
+            if (byte < '0' or byte > '9') return null;
+            value = value * 10 + (byte - '0');
+        }
+        if (value == 0 or value > 65535) return null;
+        ports[index] = @intCast(value);
+    }
+    return .{ .host = ports[0], .container = ports[1] };
+}
+
 /// Errors a doctor fault may inject. NotFound is excluded because it is a legitimate answer
 /// ("this sysctl does not exist"), indistinguishable from an injected one.
 fn random_doctor_error(random: std.Random) host.Error {
@@ -455,6 +527,7 @@ fn expected_code(id: doctor.CheckId) codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
+        .net => unreachable, // The net check only warns: it has no code to report.
     };
 }
 
@@ -524,7 +597,8 @@ fn check_doctor_report(
             assert(check.diag.code.? == expected_code(check.id));
             assert(check.diag.entry().blame == .environment);
         }
-        if (counts.hard > 0) assert(check.status == .fail);
+        // The net check only warns, whatever the fault: nothing it looks for is required.
+        if (counts.hard > 0 and check.id != .net) assert(check.status == .fail);
         if (counts.any == 0) {
             assert(check.status == reference.status);
             assert(std.mem.eql(u8, check.detail.slice(), reference.detail.slice()));
@@ -663,6 +737,9 @@ pub fn main(init: std.process.Init) u8 {
         arguments_storage[count] = argument;
         count += 1;
     }
+    if (count >= 1 and std.mem.eql(u8, arguments_storage[0], "all")) {
+        return run_all(init.io, out, arguments_storage[1..count]);
+    }
     const parsed = parse_arguments(arguments_storage[0..count]) catch |err| {
         print_usage(out, err) catch {};
         return constants.tool_exit_usage;
@@ -691,12 +768,44 @@ pub fn main(init: std.process.Init) u8 {
     return constants.tool_exit_ok;
 }
 
+/// `fuzz all [iterations]`, which `zig build check` runs: every fuzzer once, each with a fresh
+/// seed, which is printed and flushed before its first iteration, so a crash names the line that
+/// replays it (`zig build fuzz -- <fuzzer> <seed> <iterations>`).
+fn run_all(io: std.Io, out: *std.Io.Writer, arguments: []const []const u8) u8 {
+    assert(fuzzers.len > 0);
+    var iterations = constants.fuzz_check_iterations;
+    if (arguments.len > 1) {
+        print_usage(out, error.TooManyArguments) catch {};
+        return constants.tool_exit_usage;
+    }
+    if (arguments.len == 1) {
+        iterations = std.fmt.parseInt(u32, arguments[0], 10) catch 0;
+        if (iterations == 0 or iterations > constants.fuzz_iterations_max) {
+            print_usage(out, error.BadIterations) catch {};
+            return constants.tool_exit_usage;
+        }
+    }
+    assert(iterations > 0);
+    for (&fuzzers) |*fuzzer| {
+        var entropy: [8]u8 = undefined;
+        io.random(&entropy);
+        const seed = std.mem.readInt(u64, &entropy, .little);
+        out.print("fuzz: {s} seed={d} iterations={d}\n", .{ fuzzer.name, seed, iterations }) catch
+            return constants.tool_exit_failed;
+        out.flush() catch return constants.tool_exit_failed;
+        var splitmix = std.Random.SplitMix64.init(seed);
+        for (0..iterations) |_| fuzzer.run_iteration(splitmix.next());
+    }
+    out.print("fuzz: all {d} ok\n", .{fuzzers.len}) catch return constants.tool_exit_failed;
+    out.flush() catch return constants.tool_exit_failed;
+    return constants.tool_exit_ok;
+}
+
 fn print_usage(out: *std.Io.Writer, err: UsageError) !void {
     assert(@errorName(err).len > 0);
     assert(fuzzers.len > 0);
-    try out.print("fuzz: {s}\nusage: zig build fuzz -- <fuzzer> [seed] [iterations]\n", .{
-        @errorName(err),
-    });
+    const usage = "usage: zig build fuzz -- <fuzzer> [seed] [iterations] | all [iterations]";
+    try out.print("fuzz: {s}\n{s}\n", .{ @errorName(err), usage });
     try out.writeAll("fuzzers:");
     for (fuzzers) |fuzzer| try out.print(" {s}", .{fuzzer.name});
     try out.writeAll("\n");

@@ -1,0 +1,7 @@
+error[ZBX-E0605]: the host lets users bind no port this low
+  cause  host port 80 is below net.ipv4.ip_unprivileged_port_start (1024), which
+         an unprivileged process may not bind
+  fix    publish a higher host port:              zbx run --publish 8080:80 nginx
+         or let users bind from 80 up, as root:   sudo sysctl net.ipv4.ip_unprivileged_port_start=80
+  more   zbx explain E0605 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0605.html

@@ -92,6 +92,8 @@ pub const Prepared = struct {
     work: Path,
     /// A read-only run's second lower layer: an empty directory.
     empty: Path,
+    /// The layer on top of the tree: the mount points of the generated /etc files.
+    net: Path,
     read_only: bool,
 
     pub fn tree_text(prepared: *const Prepared) []const u8 {
@@ -100,6 +102,7 @@ pub const Prepared = struct {
 
     pub fn overlay(prepared: *const Prepared) @import("plan.zig").Overlay {
         return .{
+            .net = prepared.net.text(),
             .lower = prepared.lower.text(),
             .upper = if (prepared.read_only) null else prepared.upper.text(),
             .work = if (prepared.read_only) null else prepared.work.text(),
@@ -173,13 +176,14 @@ pub fn prepare(
         prepared.merged.set(&.{ base.text(), "/merged" }) and
         prepared.upper.set(&.{ base.text(), "/upper" }) and
         prepared.work.set(&.{ base.text(), "/work" }) and
-        prepared.empty.set(&.{ base.text(), "/empty" });
+        prepared.empty.set(&.{ base.text(), "/empty" }) and
+        prepared.net.set(&.{ base.text(), "/net" });
     if (!ok) {
         diagnose.overlay_path(diag, farm, 0);
         return error.Failed;
     }
     const layers = [_]*const Path{
-        &prepared.lower, &prepared.upper, &prepared.work, &prepared.empty,
+        &prepared.lower, &prepared.upper, &prepared.work, &prepared.empty, &prepared.net,
     };
     for (layers) |layer| {
         if (spec.overlay_path_problem(layer.text())) |byte| {
@@ -372,10 +376,11 @@ fn make_container(store: *Store, job: *Job, diag: *Diag) Error!void {
     try make_path(store, job.base, job.existing, diag);
     const directories = [_]*const Path{
         &prepared.merged,
+        &prepared.net,
         if (prepared.read_only) &prepared.empty else &prepared.upper,
         &prepared.work,
     };
-    const count: usize = if (prepared.read_only) 2 else 3;
+    const count: usize = if (prepared.read_only) 3 else 4;
     for (directories[0..count]) |directory| {
         fs.make_directory(directory.text(), false) catch |err| {
             diagnose.write_failed(
@@ -388,8 +393,52 @@ fn make_container(store: *Store, job: *Job, diag: *Diag) Error!void {
             return error.Failed;
         };
     }
+    try give_net_layer_the_etc(store, job, diag);
     if (prepared.read_only) return;
     try give_upper_the_root(store, job, diag);
+}
+
+/// The net layer is the top lower layer, so its `etc` shows through for the container's /etc:
+/// it says what the tree's /etc says (mode, owner, time), or 0755 and root if the tree has none.
+fn give_net_layer_the_etc(store: *Store, job: *Job, diag: *Diag) Error!void {
+    const prepared = job.prepared;
+    const fs = store.fs;
+    var etc_buffer: [constants.state_path_bytes_max + 8:0]u8 = undefined;
+    const etc = std.fmt.bufPrintSentinel(&etc_buffer, "{s}/etc", .{prepared.net.text()}, 0) catch {
+        diagnose.overlay_path(diag, prepared.net.text(), 0);
+        return error.Failed;
+    };
+    var tree_buffer: [constants.store_path_bytes_max + 8:0]u8 = undefined;
+    const lower = prepared.lower.text();
+    const tree_etc = std.fmt.bufPrintSentinel(&tree_buffer, "{s}/etc", .{lower}, 0) catch {
+        diagnose.overlay_path(diag, prepared.lower.text(), 0);
+        return error.Failed;
+    };
+    var attributes: @import("../store/fs.zig").PathAttributes = .{
+        .mode = 0o755,
+        .uid = 0,
+        .gid = 0,
+        .mtime = constants.store_mtime_seconds,
+    };
+    if (fs.lstat(tree_etc)) |found| {
+        if (found.kind == .dir) {
+            attributes = .{
+                .mode = found.mode,
+                .uid = found.uid,
+                .gid = found.gid,
+                .mtime = found.mtime,
+            };
+        }
+    } else |_| {} // No /etc in the tree (or none readable): the default stands.
+    const operation = "making the net layer's etc";
+    fs.make_directory(etc, false) catch |err| {
+        diagnose.write_failed(diag, store, operation, err, fs.last_errno());
+        return error.Failed;
+    };
+    fs.set_path_attributes(etc, attributes) catch |err| {
+        diagnose.write_failed(diag, store, operation, err, fs.last_errno());
+        return error.Failed;
+    };
 }
 
 /// The upper layer's root says what the tree's root says: the overlay shows the upper's.

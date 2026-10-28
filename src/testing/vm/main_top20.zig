@@ -326,37 +326,41 @@ fn try_image(
     return result;
 }
 
-/// The command for one image's default run. A server with a probe runs in the background while
-/// the guest asks it, as root on 127.0.0.1 (the container shares the host's network), every 2 s
-/// until it answers, the container ends or `probe_steps_max` steps pass. The answer goes to
-/// `probe_file`; the run's own exit code stays the command's.
+/// The command for one image's default run. A server with a probe runs in the background with its
+/// port published on a high host port (`checks_top20.published_port`, M5's `--publish`), and the
+/// guest asks it there, on 127.0.0.1, every 2 s until it answers, the container ends or
+/// `probe_steps_max` steps pass. The answer goes to `probe_file`; the run's own exit code stays
+/// the command's. An image without a probe shares the host's network, as in M5 slice 2.
 fn run_command(
     arena: std.mem.Allocator,
     ref: []const u8,
     probe: ?checks_top20.ProbeSpec,
 ) ![]const u8 {
-    const plain = z ++ " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
+    const plain = z ++ " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
     const spec = probe orelse return std.fmt.allocPrint(arena, plain, .{ref});
+    const host_port = checks_top20.published_port(spec.port);
+    const published = z ++ " run --publish {d}:{d} --timeout " ++ run_timeout_ms ++
+        " {s} </dev/null";
     var text: std.ArrayList(u8) = .empty;
-    try text.print(arena, "rm -f " ++ probe_file ++ "; {{ " ++ plain ++ " & ZP=$!; ZI=0; " ++
+    try text.print(arena, "rm -f " ++ probe_file ++ "; {{ " ++ published ++ " & ZP=$!; ZI=0; " ++
         "while [ $ZI -lt {d} ] && kill -0 $ZP 2>/dev/null; do sleep 2; ZI=$((ZI+1)); ", .{
-        ref, probe_steps_max,
+        host_port, spec.port, ref, probe_steps_max,
     });
     // `read` rather than `head`: a killed `head` loses what it buffered.
     const connect = "exec 3<>/dev/tcp/127.0.0.1/{d}";
     if (spec.expect.len == 0) {
         try text.print(arena, "ZR=$(timeout 6 bash -c '" ++ connect ++ "' 2>&1); " ++
-            "if [ -z \"$ZR\" ]; then echo ok >" ++ probe_file ++ "; break; fi; ", .{spec.port});
+            "if [ -z \"$ZR\" ]; then echo ok >" ++ probe_file ++ "; break; fi; ", .{host_port});
     } else {
         try text.print(arena, "ZR=$(timeout 6 bash -c '" ++ connect ++ " && printf \"{s}\" >&3 " ++
             "&& read -t 3 -r -n 300 L <&3; echo \"$L\"' 2>&1); " ++
             "case \"$ZR\" in *{s}*) echo ok >" ++ probe_file ++ "; break;; esac; ", .{
-            spec.port, spec.send, spec.expect,
+            host_port, spec.send, spec.expect,
         });
     }
     // Without an answer the file says what the last try got.
     try text.print(arena, "done; [ -e " ++ probe_file ++ " ] || echo \"no answer on port {d}: " ++
-        "$ZR\" >" ++ probe_file ++ "; wait $ZP; }}", .{spec.port});
+        "$ZR\" >" ++ probe_file ++ "; wait $ZP; }}", .{host_port});
     return text.items;
 }
 
@@ -396,7 +400,7 @@ fn find_seccomp(session: *Session, out: *Io.Writer, entry: Entry, traced: bool) 
     const command = try std.fmt.allocPrint(
         arena,
         "strace -f -o " ++ strace_log ++ " -e status=failed " ++ z ++
-            " run --timeout " ++ run_timeout_ms ++ " {s} </dev/null >/dev/null 2>&1; " ++
+            " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null >/dev/null 2>&1; " ++
             "grep -h ' = -1 EPERM' " ++ strace_log ++
             " | sed -E 's/^[0-9]+ +//; s/\\(.*//' | sort -u | tr '\\n' ' '",
         .{entry.ref},

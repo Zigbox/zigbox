@@ -6,7 +6,7 @@ error[ZBX-E0301]: can't reach the systemd user manager over D-Bus
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (6 of 52)
+  step   start_scope (6 of 63)
   fix    check this host (ZBX-E0103):     zbx doctor
          keep the user manager running:   loginctl enable-linger $USER
   more   zbx explain E0301

@@ -64,6 +64,10 @@ fn world_dirs(name: []const u8) void {
         .{name},
     ) catch unreachable; // Short.
     sim.world.add_node(merged, .dir);
+    var net_path: [220]u8 = undefined;
+    const net_format = state ++ "/{s}/net";
+    const net = std.fmt.bufPrint(&net_path, net_format, .{name}) catch unreachable; // Short.
+    sim.world.add_node(net, .dir);
     for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
         const text = std.fmt.bufPrint(
             &inner,
@@ -74,6 +78,11 @@ fn world_dirs(name: []const u8) void {
     }
     const shell = std.fmt.bufPrint(&inner, "{s}/bin/sh", .{merged}) catch unreachable; // Short.
     sim.world.add_node(shell, .file);
+    // The overlay shows the mount points of the generated files, which are in the net layer.
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
+        const joined = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix });
+        sim.world.add_node(joined catch unreachable, .file); // Short.
+    }
 }
 
 fn spec_for(digest_text: []const u8, name: []const u8, read_only: bool) lib.Spec {
@@ -154,6 +163,36 @@ test "a run by digest materializes the tree, makes the container's layers and mo
         files.kind_of(state ++ "/img-1/upper"),
     );
     try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "the net layer's etc says what the tree's etc says" {
+    // Goal: the net layer is the top lower layer, so its etc shows through for /etc. Method:
+    // a tree whose /etc is 0750 and owned by 5:6; after the run's preparation the layer's etc
+    // has that mode and owner and the tree's time.
+    const known = try setup(1);
+    _ = known;
+    files.set_mode_of("/src/etc", 0o750);
+    files.set_owner_of("/src/etc", 5, 6);
+    var result: import.Result = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    try import.import(
+        &store,
+        &import_ws,
+        "/src",
+        .{ .squash_owner = false, .warn = null },
+        &result,
+        &diag,
+    );
+    world_dirs("img-etc");
+    const text = result.digest.text();
+    const spec = spec_for(text[3..15], "img-etc", false);
+    try start(&spec, &handle, &diag);
+    const layer = files.stat_of(state ++ "/img-etc/net/etc").?;
+    try testing.expectEqual(@as(u16, 0o750), layer.mode);
+    try testing.expectEqual(@as(u32, 5), layer.uid);
+    try testing.expectEqual(@as(u32, 6), layer.gid);
+    _ = lib.wait(&handle);
 }
 
 test "a read-only run has no upper layer and no work directory" {

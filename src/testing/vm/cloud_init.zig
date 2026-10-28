@@ -2,6 +2,7 @@
 //! genisoimage, no cloud-localds). Provisioning, in the order it happens:
 //!   - user `demo` (uid 1000, no sudo, no password) with subuid/subgid 100000:65536;
 //!   - `uidmap` installed (newuidmap/newgidmap, setuid root);
+//!   - `passt` (pasta, for `--net user`) and `iptables` (demo-m5 reads the rules before and after);
 //!   - kernel.apparmor_restrict_unprivileged_userns=0 persisted: Ubuntu 24.04 ships it as 1,
 //!     which refuses user namespaces to unconfined users, and doctor rightly reports that;
 //!   - lingering enabled for demo, so the systemd user manager (user@1000.service) exists
@@ -46,6 +47,8 @@ fn base(comptime dropin: []const u8) []const u8 {
     \\package_update: true
     \\packages:
     \\  - uidmap
+    \\  - passt
+    \\  - iptables
     \\write_files:
     \\  - path: /etc/sysctl.d/60-zigbox-userns.conf
     \\    content: |

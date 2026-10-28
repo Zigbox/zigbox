@@ -148,7 +148,7 @@ pub fn split_streams(combined: []const u8) CheckError!Streams {
 // ---- The doctor report ---------------------------------------------------------------------
 
 pub const check_names = [_][]const u8{
-    "kernel", "userns", "cgroup", "overlay", "subid", "seccomp",
+    "kernel", "userns", "cgroup", "overlay", "subid", "seccomp", "net",
 };
 
 /// One parsed line of a doctor report (stdout).
@@ -159,7 +159,7 @@ pub const Line = struct {
 };
 
 /// Parses `ok   <name>  <detail>` / `FAIL <name>  <detail>  [ZBX-E01xx]` lines into `out`,
-/// requiring exactly the six checks in order. Anything else is `ReportMalformed`.
+/// requiring exactly the seven checks in order. Anything else is `ReportMalformed`.
 pub fn parse_report(output: []const u8, out: *[check_names.len]Line) CheckError!void {
     var lines = std.mem.splitScalar(u8, output, '\n');
     var count: usize = 0;
@@ -181,11 +181,15 @@ pub fn parse_report(output: []const u8, out: *[check_names.len]Line) CheckError!
     if (count != check_names.len) return error.ReportMalformed;
 }
 
-/// Demo step 1: every check is `ok`, nothing is written to stderr, and the exit code is 0.
+/// Demo step 1: every check is `ok` (the last, `net`, may be a `warn`: a missing pasta fails
+/// nothing), nothing is written to stderr, and the exit code is 0.
 pub fn check_all_ok(streams: Streams, exit_code: u8) CheckError!void {
     var report: [check_names.len]Line = undefined;
     try parse_report(streams.stdout, &report);
     for (report) |line| {
+        const warn_allowed = std.mem.eql(u8, line.name, "net");
+        const warned = std.mem.startsWith(u8, line.text, "warn ");
+        if (warn_allowed and warned) continue;
         if (!std.mem.startsWith(u8, line.text, "ok   ")) return error.CheckNotOk;
     }
     if (std.mem.trim(u8, streams.stderr, " \r\n").len != 0) return error.StderrNotEmpty;
@@ -294,7 +298,8 @@ const good_report =
     "ok   cgroup  cgroup v2, user@1000.service delegated to uid 1000: cpu memory pids\n" ++
     "ok   overlay  overlayfs mounts inside a user and mount namespace\n" ++
     "ok   subid  demo (uid 1000): subuid 65536 ids, subgid 65536 ids\n" ++
-    "ok   seccomp  seccomp is supported (current mode: disabled for this process)\n";
+    "ok   seccomp  seccomp is supported (current mode: disabled for this process)\n" ++
+    "warn net  pasta not found: --net user and --publish need it (apt install passt)\n";
 
 /// The doctor with user.max_user_namespaces=0: userns and (needing a namespace) overlay fail.
 const userns_failed_stdout =
@@ -302,7 +307,7 @@ const userns_failed_stdout =
     "FAIL userns  user.max_user_namespaces is 0, so no user namespace can be created  " ++
     "[ZBX-E0101]\n" ++
     "ok   cgroup  c\nFAIL overlay  could not enter the user and mount namespaces  [ZBX-E0104]\n" ++
-    "ok   subid  s\nok   seccomp  s\n";
+    "ok   subid  s\nok   seccomp  s\nwarn net  n\n";
 
 const userns_failed_stderr =
     "error[ZBX-E0101]: can't create a user namespace\n" ++
@@ -416,12 +421,12 @@ test "step 2: each way the new output can regress is refused" {
     // is not under the `fix` label, and blocks that do not match the FAIL lines.
     const old_line = "FAIL userns  broken \u{2014} fix: sudo sysctl -w a.b=1  [ZBX-E0101]\n";
     const old_format = "ok   kernel  k\n" ++ old_line ++
-        "ok   cgroup  c\nok   overlay  o\nok   subid  s\nok   seccomp  s\n";
+        "ok   cgroup  c\nok   overlay  o\nok   subid  s\nok   seccomp  s\nwarn net  n\n";
     const old: Streams = .{ .stdout = old_format, .stderr = userns_failed_stderr };
     try testing.expectError(error.FixOnStdout, check_fails_with_fix(old, 2, userns_failure));
 
     const no_code = "ok   kernel  k\nFAIL userns  broken\nok   cgroup  c\n" ++
-        "ok   overlay  o\nok   subid  s\nok   seccomp  s\n";
+        "ok   overlay  o\nok   subid  s\nok   seccomp  s\nwarn net  n\n";
     const bare: Streams = .{ .stdout = no_code, .stderr = userns_failed_stderr };
     try testing.expectError(error.CodeMissing, check_fails_with_fix(bare, 2, userns_failure));
 

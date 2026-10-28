@@ -1,0 +1,6 @@
+error[ZBX-E0604]: a published host port is already in use
+  cause  another program already listens on host port 8080
+  fix    see which program holds it:     ss -tlnp 'sport = :8080'
+         or publish another host port:   zbx run --publish 8081:80 nginx
+  more   zbx explain E0604 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0604.html

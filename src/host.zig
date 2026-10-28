@@ -148,6 +148,9 @@ pub const SpawnFlags = struct {
     pid: bool,
     uts: bool,
     ipc: bool,
+    /// A network namespace of its own, owned by the new user namespace. Without it the child
+    /// shares the host's (`--net host`).
+    net: bool,
 };
 
 /// The body of a spawned child. It runs in the child, on a copy of the parent's memory, and its
@@ -194,6 +197,9 @@ pub const MountKind = enum {
     /// tree at once (`mount_setattr` with `AT_RECURSIVE`), which a user namespace may do because
     /// it only adds a restriction.
     remount_readonly_tree,
+    /// A fresh sysfs on `target`, read-only: nosuid, nodev, noexec. In a network namespace of the
+    /// container's own it shows that namespace's devices, not the host's.
+    sysfs,
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
     overlay,
@@ -335,6 +341,13 @@ pub const VTable = struct {
     ) Error!Pid,
     /// Forks the scope's keeper (see `Host.start_keeper`).
     start_keeper: *const fn (context: *anyopaque, hold: Handle) Error!Pid,
+    /// Starts a program that outlives the call (see `Host.start_program`).
+    start_program: *const fn (
+        context: *anyopaque,
+        request: ExecRequest,
+        stdout: Handle,
+        log: [:0]const u8,
+    ) Error!Pid,
     /// Blocks until the child ends and reaps it.
     wait: *const fn (context: *anyopaque, pid: Pid) Error!ExitStatus,
     signal: *const fn (context: *anyopaque, pid: Pid, signal: u8) Error!void,
@@ -353,7 +366,10 @@ pub const VTable = struct {
     ) Error!void,
     change_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
     make_directory: *const fn (context: *anyopaque, path: [:0]const u8, exist_ok: bool) Error!void,
-    create_file: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
+    create_file: *const fn (context: *anyopaque, path: [:0]const u8, exist_ok: bool) Error!void,
+    /// Brings the loopback interface `lo` up in the caller's network namespace: one ioctl on a
+    /// throwaway socket. In a namespace of the container's own, `lo` is down until this runs.
+    bring_up_loopback: *const fn (context: *anyopaque) Error!void,
     symlink: *const fn (context: *anyopaque, target: [:0]const u8, link: [:0]const u8) Error!void,
     set_hostname: *const fn (context: *anyopaque, name: []const u8) Error!void,
     /// Marks every descriptor above 2 close-on-exec (`close_range`), so none reaches the command.
@@ -413,8 +429,13 @@ pub const VTable = struct {
     signal_state: *const fn (context: *anyopaque, pid: Pid) Error!SignalState,
     /// Seconds since the epoch.
     time_now: *const fn (context: *anyopaque) u64,
-    /// Creates the file (mode 0600) or empties it, and writes all of `bytes`.
-    write_file: *const fn (context: *anyopaque, path: [:0]const u8, bytes: []const u8) Error!void,
+    /// Creates the file with `mode` or empties it, and writes all of `bytes`.
+    write_file: *const fn (
+        context: *anyopaque,
+        path: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+    ) Error!void,
     rename: *const fn (context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void,
     remove_file: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
     list_directory: *const fn (
@@ -634,6 +655,7 @@ pub const Host = struct {
     pub fn read_timeout(host: Host, handle: Handle, buffer: []u8, timeout_ms: u32) Error!u32 {
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
+        comptime assert(constants.pasta_ready_timeout_ms <= constants.dbus_job_timeout_ms);
         assert(timeout_ms <= constants.dbus_job_timeout_ms);
         for (0..constants.eintr_retries_max + 1) |_| {
             const count = host.vtable.read_timeout(
@@ -711,6 +733,29 @@ pub const Host = struct {
         assert(hold < std.math.maxInt(i32));
         const pid = try host.vtable.start_keeper(host.context, hold);
         assert(pid > 1);
+        return pid;
+    }
+
+    /// Starts `request` as a child of this process that goes on running: pasta. It has a session
+    /// of its own (a terminal's ^C or hang-up is not for it), the kernel kills it when this
+    /// thread dies (`PR_SET_PDEATHSIG`, so a SIGKILL of zbx releases what it holds), its stdin
+    /// is /dev/null, its stdout is `stdout` (a pipe's write end, which the caller then closes)
+    /// and its stderr is the file `log`, created or emptied with mode 0600, or /dev/null when
+    /// `log` is empty or cannot be made. The caller waits for it (`wait_for`) and is the one who
+    /// ends it.
+    pub fn start_program(
+        host: Host,
+        request: ExecRequest,
+        stdout: Handle,
+        log: [:0]const u8,
+    ) Error!Pid {
+        assert(request.path.len > 0);
+        assert(request.path[0] == '/');
+        assert(request.argv[0] != null);
+        if (log.len > 0) assert(log[0] == '/');
+        const pid = try host.vtable.start_program(host.context, request, stdout, log);
+        assert(pid > 1);
+        assert(host.vtable.last_errno(host.context) == 0);
         return pid;
     }
 
@@ -792,11 +837,19 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
-    /// Creates an empty file, failing if it exists: it is a mount point on a fresh tmpfs.
-    pub fn create_file(host: Host, path: [:0]const u8) Error!void {
+    /// Creates an empty file. It fails if the file exists, unless `exist_ok`: a mount point on a
+    /// fresh tmpfs is new, one in an image's tree may be there already (and is left as it is).
+    pub fn create_file(host: Host, path: [:0]const u8, exist_ok: bool) Error!void {
         assert(path.len > 0);
         assert(path[path.len] == 0);
-        try host.vtable.create_file(host.context, path);
+        try host.vtable.create_file(host.context, path, exist_ok);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// Brings `lo` up in this process's network namespace.
+    pub fn bring_up_loopback(host: Host) Error!void {
+        assert(@intFromPtr(host.vtable) != 0);
+        try host.vtable.bring_up_loopback(host.context);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
@@ -985,10 +1038,22 @@ pub const Host = struct {
     }
 
     pub fn write_file(host: Host, path: [:0]const u8, bytes: []const u8) Error!void {
+        try host.write_file_mode(path, bytes, 0o600);
+    }
+
+    /// Like `write_file`, with the file's mode: a file the container's other users read
+    /// (`/etc/hosts`) is 0644, the records' 0600 would shut them out.
+    pub fn write_file_mode(
+        host: Host,
+        path: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+    ) Error!void {
         assert(path.len > 0);
         assert(path[path.len] == 0);
         assert(bytes.len <= constants.write_bytes_max);
-        try host.vtable.write_file(host.context, path, bytes);
+        assert(mode <= 0o777);
+        try host.vtable.write_file(host.context, path, bytes, mode);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

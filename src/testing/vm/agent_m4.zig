@@ -1,18 +1,21 @@
 //! The agent test of M4 (docs/SPEC.md, "Production readiness"): a scripted agent drives the demo
-//! in the guest using only `--output json`, `zbx schema <command>` and `zbx explain`. It never
-//! scrapes text: every decision is made on a member of a JSON document that `zbx schema` says it
-//! may rely on, and every document is checked against that schema first. What the agent has to
-//! guess is a finding (docs/demos/m4.md, "The agent test"), not something to work around here.
+//! in the guest using only `--output json`, `zbx schema <command>`, `zbx explain --output json`
+//! and `zbx lock show --output json`. It never scrapes text and never reads `zbx.lock` as text:
+//! every decision is made on a member of a JSON document that `zbx schema` says it may rely on,
+//! and every document is checked against that schema first. What the agent has to guess is a
+//! finding (docs/demos/m4.md, "The agent test"), not something to work around here.
 //!
 //! The agent's five steps are the spec's, in its own project directory with its own `zbx.lock`
 //! (the store, and so the blobs, are the demo's own):
 //!   1. `pull alpine:3.20`: the document has the manifest digest, the tree and the lock's path.
-//!   2. `run alpine:3.20`: how it ended is the `container_exit` line, not the program's output.
+//!   2. `run alpine:3.20`: how it ended is the `container_exit` line, not the program's output,
+//!      and the line's `ran` names the image, its manifest and its tree.
 //!   3. `pull` of both python images; `store du --by-image` and its ratio.
 //!   4. `run python:3.12-slim` prints the number.
-//!   5. The lock's tree is made wrong (the digest is an opaque string to replace at the path the
-//!      pull's JSON gave): `run` is refused with a diagnostic whose context holds both trees; the
-//!      agent reads the entry with `explain`, runs the first fix's command, and the run works.
+//!   5. The lock's tree is read with `lock show` and made wrong (the digest is an opaque string to
+//!      replace at the path `lock show` gave): `run` is refused with a diagnostic whose context
+//!      holds both trees; the agent reads the entry with `explain --output json`, runs the first
+//!      fix's command, and `lock show` has the first tree again.
 //! Every assertion is a function of json.zig or m4.zig with unit tests.
 
 const std = @import("std");
@@ -41,15 +44,24 @@ const wanted_schemas = [_]Wanted{
     .{ .command = "store-du", .id = "zbx.store.du/1" },
     .{ .command = "store-ls", .id = "zbx.store.ls/1" },
     .{ .command = "store-verify", .id = "zbx.store.verify/1" },
+    .{ .command = "explain", .id = "zbx.explain/1" },
+    .{ .command = "lock-show", .id = "zbx.lock/1" },
 };
 
-const Schemas = struct { pull: []const u8, du: []const u8, ls: []const u8, verify: []const u8 };
+const Schemas = struct {
+    pull: []const u8,
+    du: []const u8,
+    ls: []const u8,
+    verify: []const u8,
+    explain: []const u8,
+    lock: []const u8,
+};
 
 pub fn run_agent(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m4: AGENT: the demo again, by JSON only\n", .{});
     const schemas = try fetch_schemas(session, out);
     const alpine = try agent_pull(session, out, schemas.pull, "alpine:3.20");
-    try agent_run_alpine(session, out);
+    try agent_run_alpine(session, out, alpine);
     const old = try agent_pull(session, out, schemas.pull, "python:3.12-slim");
     const new = try agent_pull(session, out, schemas.pull, "python:3.13-slim");
     if (std.mem.eql(u8, old.tree, new.tree)) {
@@ -73,7 +85,14 @@ fn fetch_schemas(session: *Session, out: *Io.Writer) !Schemas {
         };
         texts[index] = try arena.dupe(u8, result.streams.stdout);
     }
-    return .{ .pull = texts[0], .du = texts[1], .ls = texts[2], .verify = texts[3] };
+    return .{
+        .pull = texts[0],
+        .du = texts[1],
+        .ls = texts[2],
+        .verify = texts[3],
+        .explain = texts[4],
+        .lock = texts[5],
+    };
 }
 
 /// Fails the step unless `document` follows `schema`.
@@ -110,11 +129,18 @@ fn agent_pull(
     return doc;
 }
 
-fn agent_run_alpine(session: *Session, out: *Io.Writer) !void {
+fn agent_run_alpine(session: *Session, out: *Io.Writer, alpine: m4.PullDoc) !void {
     const command = za ++ " --output json run alpine:3.20 -- cat /etc/os-release";
     const result = try expect_exit(session, out, step, command, 0);
-    json.check_exited(session.scratch_allocator(), result.streams, result.status, 0) catch |err| {
+    const arena = session.scratch_allocator();
+    json.check_exited(arena, result.streams, result.status, 0) catch |err| {
         return fail_step(out, step, "expected container_exit exited 0", err);
+    };
+    const reference = "alpine:3.20";
+    const stderr = result.streams.stderr;
+    const manifest = alpine.manifest_digest;
+    json.check_ran_image(arena, stderr, reference, manifest, alpine.tree) catch |err| {
+        return fail_step(out, step, "expected the run to say which image, manifest and tree", err);
     };
     m4.check_output_has(result.streams, result.status, "ID=alpine") catch |err| {
         return fail_step(out, step, "expected the program's own output", err);
@@ -153,7 +179,33 @@ fn wrong_tree(session: *Session, tree: []const u8) ![]const u8 {
     return common.format(session, "{s}{s}", .{ wrong, tree[wrong.len..] });
 }
 
-/// Step 5: the refusal read from its members, the entry read with `explain`, the fix run.
+/// `lock show --output json`: the document follows its schema, and has the entry of `alpine:3.20`.
+fn agent_lock_show(session: *Session, out: *Io.Writer, schemas: Schemas) !json.LockShown {
+    const shown = try expect_exit(session, out, step, za ++ " --output json lock show", 0);
+    try conforms(session, out, schemas.lock, shown.streams.stdout, "lock show");
+    const arena = session.scratch_allocator();
+    return json.check_lock_show(arena, shown.streams, shown.status, "alpine:3.20") catch |err| {
+        return fail_step(out, step, "expected lock show to have the entry of alpine:3.20", err);
+    };
+}
+
+/// The lock names what the pull reported: the same file, manifest, platform and tree.
+fn agent_lock_agrees(out: *Io.Writer, locked: json.LockShown, alpine: m4.PullDoc) !void {
+    const entry = locked.entry;
+    const path = alpine.lock.?.path;
+    if (!std.mem.eql(u8, locked.path, path)) {
+        return fail_step(out, step, "expected lock show to name the pull's lock", error.LockWrong);
+    }
+    if (!std.mem.eql(u8, entry.manifest, alpine.manifest_digest) or
+        !std.mem.eql(u8, entry.tree, alpine.tree) or
+        !std.mem.eql(u8, entry.platform, alpine.platform))
+    {
+        return fail_step(out, step, "expected lock show to agree with the pull", error.LockWrong);
+    }
+}
+
+/// Step 5: the lock read with `lock show`, the refusal read from its members, the entry read
+/// with `explain --output json`, the fix run, and the lock read again.
 fn agent_refusal(
     session: *Session,
     out: *Io.Writer,
@@ -161,11 +213,13 @@ fn agent_refusal(
     alpine: m4.PullDoc,
 ) !void {
     const arena = session.scratch_allocator();
-    const wrong = try wrong_tree(session, alpine.tree);
+    const locked = try agent_lock_show(session, out, schemas);
+    try agent_lock_agrees(out, locked, alpine);
+    const wrong = try wrong_tree(session, locked.entry.tree);
     const edit = try common.format(
         session,
         "runuser -u demo -- sed -i 's/{s}/{s}/' {s}",
-        .{ alpine.tree, wrong, alpine.lock.?.path },
+        .{ locked.entry.tree, wrong, locked.path },
     );
     const edited = try session.run(edit, limits.command_timeout_kvm_s);
     if (edited.status != 0) return fail_step(out, step, "editing the lock", error.LockNotEdited);
@@ -176,10 +230,15 @@ fn agent_refusal(
     const found = checked catch |err| {
         return fail_step(out, step, "expected E0519 with both trees in its context", err);
     };
-    const explain = try common.format(session, "{s} explain {s}", .{ za, found.code[4..] });
+    const explain = try common.format(
+        session,
+        "{s} --output json explain {s}",
+        .{ za, found.code[4..] },
+    );
     const explained = try expect_exit(session, out, step, explain, 0);
-    json.check_explain(explained.streams, explained.status, found) catch |err| {
-        return fail_step(out, step, "expected explain to start with the diagnostic's summary", err);
+    try conforms(session, out, schemas.explain, explained.streams.stdout, "explain");
+    json.check_explain(arena, explained.streams, explained.status, found) catch |err| {
+        return fail_step(out, step, "expected explain to carry the diagnostic's members", err);
     };
     var buffer: [limits.command_bytes_max]u8 = undefined;
     const fix = json.fix_command(&buffer, wrapper_path, found.fixes[0].command.?) catch |err| {
@@ -195,6 +254,8 @@ fn agent_refusal(
     if (!std.mem.eql(u8, repaired.tree, alpine.tree)) {
         return fail_step(out, step, "expected the fix to give the same tree", error.IdentityWrong);
     }
+    const restored = try agent_lock_show(session, out, schemas);
+    try agent_lock_agrees(out, restored, alpine);
     try agent_after_fix(session, out, schemas);
 }
 

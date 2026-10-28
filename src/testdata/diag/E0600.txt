@@ -1,0 +1,5 @@
+error[ZBX-E0600]: --publish is not a usable HOST:CONTAINER
+  cause  --publish '8080': it is not HOST:CONTAINER, two ports and a colon
+  fix    give a host port and the container's port, both 1 to 65535:   zbx run --publish 8080:80 nginx
+  more   zbx explain E0600 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0600.html

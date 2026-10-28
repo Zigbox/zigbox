@@ -4,8 +4,9 @@
 // Refresh it by reading that list again and changing `date`; a changed list is a reviewed change.
 //
 // Each image runs its default command for 45 s (zbx run --timeout). A server that is still up
-// then has run, and where it has a `probe` it must also answer: "port|send|expect" has the guest
-// connect to 127.0.0.1:port, write `send` (printf escapes) and find `expect` in the reply (an
+// then has run, and where it has a `probe` it must also answer: "port|send|expect" publishes the
+// container's port on host port port+20000 (--publish, M5) and has the guest connect there on
+// 127.0.0.1, write `send` (printf escapes) and find `expect` in the reply (an
 // empty `expect` is a connection alone, an empty probe none). An image that exits 0 passes; a
 // server without a probe passes by staying up (a database or broker whose protocol needs a client
 // the guest lacks is judged by its connection). An entry with a `known` reason is an image that
@@ -19,7 +20,7 @@
     .date = "2026-10-27",
     .source = "Docker Hub official images, ordered by pull count",
     .images = .{
-        .{ .ref = "nginx:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "nginx:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
         .{ .ref = "memcached:latest", .known = "", .probe = "11211|version\\r\\n|VERSION" },
         .{ .ref = "busybox:latest", .known = "", .probe = "" },
         .{ .ref = "alpine:latest", .known = "", .probe = "" },
@@ -30,10 +31,10 @@
         .{ .ref = "node:latest", .known = "", .probe = "" },
         .{ .ref = "mysql:latest", .known = "its entrypoint exits 1 without a root password (MYSQL_ROOT_PASSWORD); zbx run sets no environment variable yet", .probe = "" },
         .{ .ref = "mongo:latest", .known = "", .probe = "27017||" },
-        .{ .ref = "httpd:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "httpd:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
         .{ .ref = "rabbitmq:latest", .known = "", .probe = "5672||" },
         .{ .ref = "docker:latest", .known = "its entrypoint starts dockerd, which mounts filesystems and opens raw sockets: mount is refused by the seccomp profile and the user namespace holds no CAP_SYS_ADMIN of the host, so a daemon cannot run in a rootless container", .probe = "" },
-        .{ .ref = "traefik:latest", .known = "its web entry point listens on port 80, which is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "traefik:latest", .known = "", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
         .{ .ref = "hello-world:latest", .known = "", .probe = "" },
         .{ .ref = "mariadb:latest", .known = "its entrypoint exits 1 without a root password (MARIADB_ROOT_PASSWORD); zbx run sets no environment variable yet", .probe = "" },
         .{ .ref = "golang:latest", .known = "", .probe = "" },

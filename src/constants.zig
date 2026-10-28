@@ -87,9 +87,14 @@ pub const user_name_bytes_max: u32 = 256;
 pub const controller_name_bytes_max: u32 = 32;
 pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
-pub const doctor_checks_count: u32 = 6;
+pub const doctor_checks_count: u32 = 7;
 pub const detail_bytes_max: u32 = 240;
 pub const binary_candidates_count: u32 = 3;
+/// The doctor's look for `pasta` (M5): directories of PATH tried, the longest path kept, and the
+/// bytes of `pasta --version` read (its first line is shown).
+pub const pasta_path_dirs_max: u32 = 32;
+pub const pasta_path_bytes_max: u32 = 256;
+pub const pasta_version_bytes_max: u32 = helper_output_bytes_max;
 
 // Diagnostics (docs: DIAGNOSTICS.md). All of these are fixed-size: a `Diag` never allocates, and
 // text past a bound is cut with a visible "..." marker, items past a bound are counted and shown
@@ -165,8 +170,8 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 pub const sim_path_bytes_max: u32 = 256;
 pub const sim_nodes_max: u32 = 160;
 pub const sim_mounts_max: u32 = 32;
-pub const sim_processes_max: u32 = 3;
-pub const sim_pipe_ends_max: u32 = 8;
+pub const sim_processes_max: u32 = 4;
+pub const sim_pipe_ends_max: u32 = 10;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
 pub const sim_written_files_max: u32 = 72;
@@ -217,8 +222,51 @@ pub const candidates_max: u32 = 16;
 pub const container_devices_count: u32 = 6;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
+/// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them
+/// holds. The host's `resolv.conf`, which a `--net host` container gets, is cut to whole lines
+/// within this.
+pub const etc_file_bytes_max: u32 = 4096;
+/// The hidden names, in the container's `/dev` tmpfs, the two files are written to before they
+/// are bound over the image's `/etc` files and removed again.
+pub const etc_stage_hosts = ".zbx-hosts";
+pub const etc_stage_resolv = ".zbx-resolv";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
 pub const plan_steps_max: u32 = 80;
+
+// User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
+// against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
+
+/// `--publish` given at most this many times.
+pub const publish_count_max: u32 = 16;
+/// The address a `--net user` container's /etc/resolv.conf names. pasta's `--dns-forward` maps
+/// DNS sent to it to the host's own first resolver, from the host's side, which is how a
+/// container reaches systemd-resolved's stub at 127.0.0.53. Link-local, like Podman's choice,
+/// so that it is never a real host the container would mean.
+pub const pasta_dns_forward = "169.254.1.1";
+/// The oldest pasta zbx runs: the first release (2024_02_16.08344da) whose watch of a namespace
+/// named by a PID (`/proc/<pid>/ns/net`, where inotify sees nothing) falls back to a timer, so
+/// that it exits when the container does. As a date, and as its release prints it.
+pub const pasta_version_min_date: u32 = 20240216;
+pub const pasta_version_min = "2024_02_16";
+/// How long pasta has, from its start, to report the container's interface configured and the
+/// ports bound (its PID on its standard output, `--pid /proc/self/fd/1`). It takes tens of
+/// milliseconds; a pasta that has not done it in this long is stuck, and the run is refused.
+pub const pasta_ready_timeout_ms: u32 = 10_000;
+/// The ready line is a PID and a newline; anything longer is not one.
+pub const pasta_ready_line_bytes_max: u32 = 16;
+/// Reads of the ready pipe: each returns a byte or more, an end of file, or a timeout.
+pub const pasta_ready_reads_max: u32 = pasta_ready_line_bytes_max + eintr_retries_max + 4;
+/// pasta's arguments: twenty fixed words, two per forward (`-t` and its value), and the PID.
+pub const pasta_argv_words_max: u32 = 20 + 2 * publish_count_max + 1;
+/// The bytes of those words: the fixed ones, the forwards and the PID, with their NULs.
+pub const pasta_argv_bytes_max: u32 = 512 + publish_count_max * 16;
+/// What may stand between "port " and the number in pasta's bind failure: an IPv6 address, a
+/// wildcard and a slash.
+pub const pasta_port_prefix_bytes_max: u32 = 48;
+/// The end of pasta's log read for the diagnostic of a pasta that failed: its last line.
+pub const pasta_log_tail_bytes_max: u32 = 4096;
+/// The file name of a run's pasta log in the logs directory, after the run's name.
+pub const pasta_log_suffix = ".pasta.log";
 
 /// The size of the tmpfs mounts of a read-only rootfs (`/tmp` and `/run`): memory the container
 /// may use for scratch files, in addition to any memory limit it has.
@@ -239,7 +287,7 @@ pub const id_map_line_bytes_max: u32 = 32;
 /// A record the child writes to the failure pipe: kind, step, and a two-byte errno.
 pub const sync_record_bytes: u32 = 4;
 /// Records a child can write: one note per tolerant step, then at most one failure.
-pub const sync_records_max: u32 = 8;
+pub const sync_records_max: u32 = 12;
 /// `read` calls the parent spends collecting records; each non-EOF call returns at least one
 /// byte, so this covers one-byte reads of a full buffer and the EOF read.
 pub const sync_read_calls_max: u32 = sync_record_bytes * sync_records_max + 1;
@@ -540,13 +588,16 @@ pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
 pub const registry_mirrors_max: u32 = 4;
 pub const registry_mirrors_bytes_max: u32 = 1024;
-/// An image record (`store/images.zig`): its fixed fields, the reference, 128 layer digests and
-/// the image's settings.
-pub const image_record_bytes_max: u32 = 48 * 1024;
+/// An image record (`store/images.zig`): its fixed fields, its tags (each a reference escaped
+/// four bytes a byte at the worst), 128 layer digests and the image's settings.
+pub const image_record_bytes_max: u32 = 80 * 1024;
 /// The settings an image carries (entrypoint, cmd, env, working directory, user): the bytes of
 /// all their strings together, and the words of each list. An image with more is refused.
 pub const image_settings_bytes_max: u32 = 6 * 1024;
 pub const image_settings_words_max: u32 = 48;
+/// The tags an image record keeps: every reference the image was pulled as. When it is full, the
+/// oldest goes.
+pub const image_tags_max: u32 = 8;
 pub const images_max: u32 = 4096;
 /// `zbx.lock` (`lock_file.zig`): the entries it holds, the bytes of their references together,
 /// and the largest file read or written.
@@ -561,6 +612,8 @@ pub const net_addresses_max: u32 = 8;
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;
+/// Each fuzzer's share of `zig build check`, with a fresh seed: a quick look, not the soak.
+pub const fuzz_check_iterations: u32 = 2_000;
 
 comptime {
     // Four distinct failure classes, none colliding with success, and the internal code is the
@@ -725,10 +778,11 @@ comptime {
     assert(std.mem.count(u8, container_path, ":") + 1 == container_path_dirs_count);
     assert(container_devices_count == 6);
     assert(container_links_count == 5);
-    const derived_paths_max = 4 + container_devices_count + container_links_count;
+    const derived_paths_max = 12 + container_devices_count + container_links_count;
     const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
-        2 * id_map_line_bytes_max + 512;
+        2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512 +
+        pasta_path_bytes_max + state_path_bytes_max + 80 + 2;
     assert(paths_needed <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
@@ -743,11 +797,23 @@ comptime {
     assert(sim_path_bytes_max >= 64);
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
-    assert(sim_processes_max >= 2);
+    assert(sim_processes_max >= 4); // zbx, the container, its keeper and pasta.
     assert(sim_pipe_ends_max >= 4);
     assert(sim_written_files_max > runs_max + 4); // Every record, a temporary one, and slack.
     assert(sim_written_bytes_max > 1024);
 
+    assert(publish_count_max > 0);
+    assert(publish_count_max < 1024); // A forward per port number would be absurd, not useful.
+    assert(pasta_argv_words_max >= 20 + 2 * publish_count_max + 1);
+    // Eleven bytes per forward ("65535:65535"), a NUL and "-t" with its NUL.
+    assert(pasta_argv_bytes_max >= 400 + publish_count_max * (11 + 1 + 3));
+    assert(pasta_ready_line_bytes_max >= "4294967295\n".len);
+    assert(pasta_ready_timeout_ms <= wait_timeout_ms_max);
+    assert(pasta_log_tail_bytes_max <= file_bytes_max);
+    // The logs directory is never listed, so a log's name may be longer than a listed one;
+    // its path fits the room a run keeps for it (`Handle.pasta_log`).
+    assert(state_path_bytes_max + 1 + container_name_bytes_max + pasta_log_suffix.len <=
+        state_path_bytes_max + 80);
     assert(helper_words_max >= 2 + 6 + 1); // name, pid, two triples' worth... and the null.
     assert(helper_map_bytes_max >= "0 4294967295 1 1 4294967295 4294967295".len);
     assert(helper_output_bytes_max < diag_field_bytes_max);
@@ -811,7 +877,12 @@ comptime {
     assert(net_idle_timeout_ms < net_request_timeout_ms);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
+    assert(image_tags_max > 0);
+    // A record holds the tags escaped, 128 layer lines of 90 bytes and the settings escaped.
+    assert(image_tags_max * (reference_bytes_max * 4 + 16) + registry_layers_max * 90 +
+        image_settings_bytes_max * 4 + 2048 <= image_record_bytes_max);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);
+    assert(fuzz_check_iterations <= fuzz_iterations_default);
 }

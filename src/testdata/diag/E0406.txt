@@ -1,6 +1,6 @@
 error[ZBX-E0406]: no schema for that command
-  cause  'explain' has no JSON schema; the commands with one are run, bundle,
-         ps, stop, doctor, and store-import, store-ls, store-du and store-rm
+  cause  'help' has no JSON schema; the commands with one are run, bundle, ps,
+         stop, doctor, and store-import, store-ls, store-du and store-rm
   fix    print one:   zbx schema ps
   more   zbx explain E0406 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0406.html

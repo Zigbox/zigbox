@@ -6,4 +6,7 @@
     // The same for `demo-m4`: the merge of PR #9, the merged M3. Its `zbx` imports a tree, runs
     // it by digest and commits it; M4's `zbx` has to read that store and its run records.
     .m4_commit = "47b436b",
+    // The same for `demo-m5`: the merge of PR #10, the merged M4. Its `zbx` pulls alpine:3.20,
+    // runs it and commits; M5's `zbx` has to read the store, the records and the lock it leaves.
+    .m5_commit = "cd5adbc",
 }

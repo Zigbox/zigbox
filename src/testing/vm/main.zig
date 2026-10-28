@@ -89,8 +89,8 @@ fn step_doctor_ok(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const result = try H.run_split(session, doctor_as_demo);
     try H.show_split(out, doctor_as_demo, result);
     checks.check_all_ok(result.streams, result.status) catch |err| {
-        try out.print("demo-m0: STEP 1 FAILED: expected six `ok` lines, empty stderr and " ++
-            "exit 0 ({s})\n", .{
+        try out.print("demo-m0: STEP 1 FAILED: expected seven lines, six `ok` and `net` ok or " ++
+            "warn, empty stderr and exit 0 ({s})\n", .{
             @errorName(err),
         });
         return err;

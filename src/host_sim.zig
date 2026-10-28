@@ -234,6 +234,7 @@ pub const HostSim = struct {
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
+        .start_program = start_program,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -243,6 +244,7 @@ pub const HostSim = struct {
         .change_directory = change_directory,
         .make_directory = make_directory,
         .create_file = create_file,
+        .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
@@ -574,9 +576,17 @@ pub const HostSim = struct {
         timeout_ms: u32,
     ) host.Error!u32 {
         const sim = from_context(context);
-        assert(handle >= sim_world.bus_handle_base);
         assert(timeout_ms > 0);
-        return sim.read_bus(handle, buffer, true);
+        if (handle >= sim_world.bus_handle_base) return sim.read_bus(handle, buffer, true);
+        assert(handle >= sim_world.pipe_handle_base);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        // The model has no time: a pipe with nothing in it and a writer is a timeout at once,
+        // and the clock moves on by the time waited.
+        return sim.world.read_pipe_timed(handle, buffer) orelse {
+            sim.world.now_ms += timeout_ms;
+            return error.TimedOut;
+        };
     }
 
     /// The model has no time: a read that finds nothing queued is a timeout at once.
@@ -657,6 +667,22 @@ pub const HostSim = struct {
         return sim.world.start_keeper(hold) orelse sim.model_error(11);
     }
 
+    fn start_program(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        output: host.Handle,
+        log: [:0]const u8,
+    ) host.Error!host.Pid {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(output >= sim_world.pipe_handle_base);
+        assert(output < sim_world.bus_handle_base);
+        switch (sim.world.start_program(request, output, log)) {
+            .pid => |pid| return pid,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
         const sim = from_context(context);
         try sim.begin_call();
@@ -719,10 +745,16 @@ pub const HostSim = struct {
         if (sim.world.make_directory(path, exist_ok)) |errno| return sim.model_error(errno);
     }
 
-    fn create_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+    fn create_file(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
-        if (sim.world.create_file(path)) |errno| return sim.model_error(errno);
+        if (sim.world.create_file(path, exist_ok)) |errno| return sim.model_error(errno);
+    }
+
+    fn bring_up_loopback(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.bring_up_loopback()) |errno| return sim.model_error(errno);
     }
 
     fn symlink(context: *anyopaque, target: [:0]const u8, link: [:0]const u8) host.Error!void {
@@ -891,8 +923,14 @@ pub const HostSim = struct {
         return from_context(context).world.now;
     }
 
-    fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
+    fn write_file(
+        context: *anyopaque,
+        path: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+    ) host.Error!void {
         const sim = from_context(context);
+        assert(mode <= 0o777);
         try sim.begin_call();
         if (sim.world.write_file(path, bytes)) |errno| return sim.model_error(errno);
     }

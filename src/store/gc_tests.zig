@@ -748,9 +748,8 @@ fn put_blob(text: []const u8) Sha256 {
 /// An image record for `tree` that names `config` and `layer`.
 fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
     var image: images.Image = undefined;
-    const written = "docker.io/library/fixture:1";
-    @memcpy(image.reference[0..written.len], written);
-    image.reference_len = written.len;
+    image.tag_count = 0;
+    image.add_tag("docker.io/library/fixture:1");
     image.manifest = Sha256.of("manifest");
     image.platform_len = 11;
     @memcpy(image.platform[0..11], "linux/amd64");
@@ -880,6 +879,8 @@ test "two callers with two regions plan gc independently, also at once" {
     // plans are the same.
     callers[0].extra = 0;
     callers[1].extra = 9;
+    // A known fill, so the region's use shows whatever the backend leaves in undefined memory.
+    for (&callers) |*caller| @memset(&caller.tables, 0xaa);
     for (&callers) |*caller| {
         caller.planned = null;
         caller_plan(caller);
@@ -887,8 +888,8 @@ test "two callers with two regions plan gc independently, also at once" {
     const expected = [2]gc.Plan{ callers[0].planned.?, callers[1].planned.? };
     try testing.expect(expected[0].counts.objects != expected[1].counts.objects);
     try testing.expect(!expected[0].hash.eql(expected[1].hash));
-    // Each region was used by its own owner: the sets leave their keys in it.
-    for (&callers) |*caller| try testing.expect(!std.mem.allEqual(u8, &caller.tables, 0));
+    // Each region was used by its own owner: its sets were carved and cleared there.
+    for (&callers) |*caller| try testing.expect(!std.mem.allEqual(u8, &caller.tables, 0xaa));
     var threads: [2]std.Thread = undefined;
     for (&callers) |*caller| caller.planned = null;
     for (&threads, 0..) |*thread, at| {

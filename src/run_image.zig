@@ -68,6 +68,8 @@ pub const Services = struct {
 pub const Prepared = struct {
     /// The tree to run on, "b3:" and 64 hex digits.
     tree: []const u8,
+    /// The manifest of the image the name meant; null for a run that is not of an image.
+    manifest: ?Sha256 = null,
     command: []const []const u8,
     env: []const spec.Label,
     workdir: []const u8,
@@ -129,7 +131,7 @@ pub fn prepare(
     } else {
         try via_lock(services, ws, &store, present, operand, &reference, diag);
     }
-    try compose(&store, ws, given, out, diag);
+    try compose(&store, ws, operand, given, out, diag);
 }
 
 fn via_lock(
@@ -240,6 +242,7 @@ fn warn_created(services: *const Services, operand: []const u8, path: []const u8
 fn compose(
     store: *const Store,
     ws: *Workspace,
+    operand: []const u8,
     given: []const []const u8,
     out: *Prepared,
     diag: *Diag,
@@ -249,6 +252,7 @@ fn compose(
     const settings = &image.settings;
     ws.tree = image.tree.text();
     out.tree = &ws.tree;
+    out.manifest = image.manifest;
     var count: usize = 0;
     for (0..settings.count(.entrypoint)) |index| {
         if (count == ws.words.len) return too_many_words(image, diag);
@@ -269,7 +273,7 @@ fn compose(
         }
     }
     if (count == 0) {
-        image_diagnose.no_command(diag, image.reference_text());
+        image_diagnose.no_command(diag, operand);
         return error.Failed;
     }
     out.command = ws.words[0..count];

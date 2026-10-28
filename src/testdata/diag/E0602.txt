@@ -1,0 +1,6 @@
+error[ZBX-E0602]: pasta is too old
+  cause  /usr/bin/pasta is 'pasta 2023_12_30.f091893', and zbx needs pasta
+         2024_02_16 or newer, which ends with the container
+  fix    install a newer passt package:   sudo apt install passt
+  more   zbx explain E0602 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0602.html

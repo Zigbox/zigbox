@@ -201,6 +201,21 @@ pub fn no_command(diag: *Diag, name: []const u8) void {
     diag.fix_with("say what to run:", "zbx run '{s}' -- <command> [arguments]", .{echo});
 }
 
+/// ZBX-E0526: `zbx lock show` found no `zbx.lock`. `directory` is where one would be made.
+pub fn no_lock(diag: *Diag, directory: []const u8) void {
+    assert(diag.code == null);
+    var storage: [echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, directory);
+    diag.raise(.E0526);
+    diag.while_("reading zbx.lock", .{});
+    diag.cause("there is no zbx.lock in '{s}' or any directory above it", .{echo});
+    diag.context("dir", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "pull an image from the project directory; that makes the lock:",
+        .command = "zbx pull alpine:3.20",
+    });
+}
+
 /// ZBX-E0525: `zbx.lock` could not be written.
 pub fn lock_not_written(diag: *Diag, path: []const u8, failure: *const fs_mod.Failure) void {
     assert(diag.code == null);

@@ -9,6 +9,7 @@
 //!   exit 125 and names the digest the lock expects and the store's.
 //! CONFIG. `memcached:alpine` runs as the user its configuration names (the full id map is on
 //!   in the guest, so the image's /etc/passwd is used); `/sys` is read-only in a container.
+//! (The network checks M5 slices 2 and 3 added here are demo-m5's now: net_m5.zig.)
 //! SPEC 3. `zbx pull python:3.12-slim` and then `python:3.13-slim`; `zbx store du --by-image`
 //!   shows the second costs a share of its compressed size (a ratio, never exact bytes).
 //! UPGRADE, IDENTITY, RESUME, BLOBS (accept_m4.zig): the merged M3 `zbx` leaves a store this one

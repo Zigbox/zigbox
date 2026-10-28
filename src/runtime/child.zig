@@ -38,6 +38,9 @@ const Error = host_mod.Error || error{
 /// tries several paths and reports the most telling failure, not the last).
 const State = struct {
     errno_override: u16,
+    /// The generated /etc files whose steps failed (bit n for `netfiles.File` n): the rest of
+    /// that file's steps are skipped, and the one note says what went wrong.
+    failed_etc: u8,
 };
 
 pub const go_ahead: u8 = 1;
@@ -52,9 +55,10 @@ pub fn entry(context: *anyopaque) u8 {
     // The parent's ends of the pipes are closed here so that end of file reaches both sides.
     host.close(child.ready.write);
     host.close(child.report.read);
-    var state: State = .{ .errno_override = 0 };
+    var state: State = .{ .errno_override = 0, .failed_etc = 0 };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
+        if (skipped(step, &state)) continue;
         host.begin_step(@intCast(index));
         state.errno_override = 0;
         run_step(child, step, &state) catch |err| {
@@ -68,7 +72,11 @@ pub fn entry(context: *anyopaque) u8 {
                 .errno = errno,
             };
             write_record(child, record);
-            if (step.tolerant) continue;
+            if (step.tolerant) {
+                const group = plan_mod.group_of(step);
+                if (group > 0) state.failed_etc |= @as(u8, 1) << @intCast(group - 1);
+                continue;
+            }
             return constants.child_exit_setup_failed;
         };
     }
@@ -76,6 +84,18 @@ pub fn entry(context: *anyopaque) u8 {
     // Only the simulator gets here: the real host's `exec` never returns.
     assert(child.plan.steps[child.plan.count - 3].kind == .exec);
     return constants.exit_ok;
+}
+
+/// A step of a generated /etc file whose file already failed is not tried: the failure was
+/// noted once. Removing the staged copy is the exception, since a copy left in /dev would
+/// still be writable; it runs whatever happened before.
+fn skipped(step: *const Step, state: *const State) bool {
+    assert(plan_mod.side_of(step.kind) == .child);
+    const group = plan_mod.group_of(step);
+    assert(group <= 2);
+    if (group == 0) return false;
+    if (step.kind == .unstage_etc_file) return false;
+    return state.failed_etc & (@as(u8, 1) << @intCast(group - 1)) != 0;
 }
 
 /// Tells the parent. If this write fails there is nobody to tell and nothing more to do: the
@@ -117,10 +137,18 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
         .make_sys_dir => try host.make_directory(target, true),
         .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .bring_up_loopback => try host.bring_up_loopback(),
+        .mount_sysfs => try mount(host, .sysfs, target, null),
+        .make_etc_dir => try host.make_directory(target, true),
+        .create_etc_file => try host.create_file(target, true),
+        .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
+        .bind_etc_file => try mount(host, .bind_file, target, plan.text(step.source)),
+        .remount_etc_file => try mount(host, .remount_readonly, target, null),
+        .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
         .set_user => try host.set_user(plan.user_uid, plan.user_gid),
-        .create_device_file => try host.create_file(target),
+        .create_device_file => try host.create_file(target, false),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
         .pivot_root => try host.pivot_root(target, plan.text(step.source)),
@@ -129,8 +157,19 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .exec => try exec(child, state),
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
+        .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
     }
+}
+
+/// Removes the staged copy of a generated file. A copy that was never written (the file's steps
+/// stopped before) is not there, which is fine.
+fn unstage(host: Host, target: [:0]const u8) host_mod.Error!void {
+    assert(target.len > 0);
+    assert(target[0] == '/');
+    host.remove_file(target) catch |err| {
+        if (err != error.NotFound) return err;
+    };
 }
 
 /// Makes the directory and the ones above it that are missing, then goes there. The prefixes

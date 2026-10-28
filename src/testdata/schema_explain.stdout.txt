@@ -1,0 +1,13 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema",
+"$id":"https://zigbox.github.io/zigbox/schema/explain/1","version":1,
+"title":"zbx explain <code> --output json",
+"description":"stdout: one registered code. An unknown code is a diagnostic on stderr.",
+"type":"object","required":["schema","code","severity","blame","summary","explanation",
+"docs"],
+"properties":{"schema":{"const":"zbx.explain/1"},
+"code":{"type":"string","pattern":"^ZBX-[EWB][0-9]{4}$"},
+"severity":{"enum":["error","warning","note","bug"]},
+"blame":{"enum":["user","environment","external","internal"]},
+"summary":{"type":"string"},
+"explanation":{"type":"string","description":"the long text, hard-wrapped, with newlines"},
+"docs":{"type":"string","description":"the page of the code on the project site"}}}

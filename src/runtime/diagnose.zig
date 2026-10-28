@@ -16,6 +16,7 @@ const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
+const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
@@ -41,6 +42,16 @@ pub const Details = struct {
     scope: ?*const scope_mod.Problem = null,
     /// The caller's room for the doctor's facts, which a refused namespace is explained with.
     facts: *doctor.Facts,
+    /// How pasta ended, when it did not become ready (`Session.PastaEnd`).
+    pasta: ?PastaEnd = null,
+};
+
+/// How a pasta that never became ready ended (the session's own type, repeated here so that the
+/// diagnostics do not import the session).
+pub const PastaEnd = union(enum) {
+    exited: host_mod.ExitStatus,
+    timed_out,
+    garbled,
 };
 
 /// A failed step: its index in the plan, the coarse error and the errno the kernel returned.
@@ -181,6 +192,8 @@ pub fn step_failed(
             helper,
         ),
         .start_scope => scope_step_failed(diag, plan.text(step.target), details.scope),
+        .start_pasta => pasta_not_started(diag, plan, operation, failure),
+        .await_pasta => pasta_not_ready(host, diag, plan, operation, failure, details.pasta),
         .exec => command_failed(diag, plan, info, failure),
         .mount_overlay => overlay_failed(diag, operation, failure),
         .restrict_capabilities,
@@ -234,7 +247,7 @@ fn namespaces_failed(host: Host, facts: *doctor.Facts, diag: *Diag, failure: Fai
     assert(diag.code == null);
     assert(failure.errno < 4096);
     diag.raise(.E0203);
-    const call = "clone3 with new user, mount, PID, UTS and IPC namespaces";
+    const call = "clone3 with new user, mount, PID, UTS, IPC and network namespaces";
     errors.cause_host_error(diag, call, failure.err, failure.errno);
     if (spawn_reason(failure.errno)) |reason| diag.cause("{s}", .{reason});
     if (failure.err == error.WouldBlock) {
@@ -935,4 +948,218 @@ fn errno_words(errno: u16, buffer: []u8) []const u8 {
     const code: linux.E = @fromBackingInt(errno);
     const name = std.enums.tagName(linux.E, code) orelse "unknown";
     return std.fmt.bufPrint(buffer, "refused by the kernel (E{s})", .{name}) catch "refused";
+}
+
+// ---- pasta (06xx) ----------------------------------------------------------------------------
+
+const pasta_install = "apt install passt";
+
+/// ZBX-E0600 for a library caller whose list of forwards the command line would have refused.
+pub fn publish_list_invalid(diag: *Diag, problem: spec.PublishListProblem) void {
+    assert(diag.code == null);
+    diag.raise(.E0600);
+    diag.while_("checking the container's forwards", .{});
+    switch (problem) {
+        .too_many => diag.cause("more than {d} forwards", .{constants.publish_count_max}),
+        .host_port_twice => |port| diag.cause("host port {d} is published twice", .{port}),
+    }
+    diag.fix(.{
+        .sentence = "publish each host port once:",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    assert(diag.code.? == .E0600);
+}
+
+/// ZBX-E0601: `--net user` or `--publish`, and no pasta on PATH.
+pub fn pasta_missing(diag: *Diag, network: spec.Network) void {
+    assert(diag.code == null);
+    assert(network == .user);
+    diag.raise(.E0601);
+    diag.while_("connecting the container to the network (--net user)", .{});
+    diag.cause("no executable named pasta in the directories of PATH", .{});
+    diag.fix(.{
+        .sentence = "install pasta (Debian, Ubuntu):",
+        .command = "sudo " ++ pasta_install,
+    });
+    diag.fix(.{
+        .sentence = "or run with the host's network:",
+        .command = "zbx run --net host alpine -- sh",
+    });
+    assert(diag.fixes.count == 2);
+}
+
+/// ZBX-E0602: a pasta whose version names a date before the oldest zbx runs.
+pub fn pasta_too_old(diag: *Diag, path: []const u8, version: []const u8) void {
+    assert(diag.code == null);
+    assert(version.len > 0);
+    diag.raise(.E0602);
+    diag.while_("connecting the container to the network (--net user)", .{});
+    diag.cause("{s} is '{s}', and zbx needs pasta {s} or newer, which ends with the container", .{
+        path, version, constants.pasta_version_min,
+    });
+    diag.context("pasta", "{s}", .{path});
+    diag.fix(.{
+        .sentence = "install a newer passt package:",
+        .command = "sudo " ++ pasta_install,
+    });
+    assert(diag.code.? == .E0602);
+}
+
+/// ZBX-E0605: a host port below `net.ipv4.ip_unprivileged_port_start`, refused before anything
+/// starts (`start` is the bound when it could be read), or by the bind pasta tried.
+pub fn pasta_port_refused(
+    diag: *Diag,
+    port: ?u16,
+    start: ?u32,
+    pasta_line: []const u8,
+) void {
+    assert(diag.code == null);
+    if (port) |number| assert(number > 0);
+    diag.raise(.E0605);
+    diag.while_("publishing the container's ports", .{});
+    // pasta's own words are the symptom; the bound is the cause, so it comes last.
+    if (pasta_line.len > 0) diag.cause("pasta: {s}", .{pasta_line});
+    if (port) |number| {
+        if (start) |bound| {
+            diag.cause("host port {d} is below net.ipv4.ip_unprivileged_port_start ({d}), " ++
+                "which an unprivileged process may not bind", .{ number, bound });
+        } else {
+            diag.cause("the host refused to let pasta bind host port {d}: it is below " ++
+                "net.ipv4.ip_unprivileged_port_start", .{number});
+        }
+        diag.context("port", "{d}", .{number});
+    } else {
+        diag.cause("the host refused to let pasta bind a published host port: it is below " ++
+            "net.ipv4.ip_unprivileged_port_start", .{});
+    }
+    diag.fix(.{
+        .sentence = "publish a higher host port:",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    diag.fix(.{
+        .sentence = "or let users bind from 80 up, as root:",
+        .command = "sudo sysctl net.ipv4.ip_unprivileged_port_start=80",
+    });
+    assert(diag.fixes.count == 2);
+}
+
+/// The start of pasta failed in zbx itself: the pipe, its log or the fork (E0603).
+fn pasta_not_started(diag: *Diag, plan: *const Plan, operation: []const u8, failure: Failure) void {
+    assert(diag.code == null);
+    assert(plan.has_pasta);
+    diag.raise(.E0603);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    diag.context("pasta", "{s}", .{plan.text(plan.pasta_path)});
+    pasta_log_context(diag, plan);
+    diag.fix(.{ .sentence = "see whether pasta runs here:", .command = "zbx doctor" });
+    assert(diag.code.? == .E0603);
+}
+
+/// pasta did not become ready: a port in use (E0604), a port the host refuses (E0605), or
+/// anything else, with pasta's own last line as the cause (E0603).
+fn pasta_not_ready(
+    host: Host,
+    diag: *Diag,
+    plan: *const Plan,
+    operation: []const u8,
+    failure: Failure,
+    end: ?PastaEnd,
+) void {
+    assert(diag.code == null);
+    assert(plan.has_pasta);
+    var storage: [constants.pasta_log_tail_bytes_max]u8 = undefined;
+    const line = pasta_last_line(host, plan, &storage);
+    switch (pasta_mod.classify(line, plan.publish_slice())) {
+        .in_use => |port| return pasta_port_in_use(diag, plan, port, line),
+        .refused => |port| return pasta_port_refused(diag, port, null, line),
+        .other => {},
+    }
+    diag.raise(.E0603);
+    diag.while_("connecting the container to the network (--net user)", .{});
+    // No end: zbx could not read pasta's pipe; the call that failed is the cause.
+    const how = end orelse {
+        errors.cause_host_error(diag, operation, failure.err, failure.errno);
+        diag.context("pasta", "{s}", .{plan.text(plan.pasta_path)});
+        pasta_log_context(diag, plan);
+        diag.fix(.{ .sentence = "see whether pasta runs here:", .command = "zbx doctor" });
+        return;
+    };
+    switch (how) {
+        .exited => |status| switch (status) {
+            .exited => |code| {
+                if (code == 127) {
+                    diag.cause("pasta could not be run (exit 127)", .{});
+                } else {
+                    diag.cause("pasta exited with status {d} before it was ready", .{code});
+                }
+            },
+            .signaled => |number| {
+                diag.cause("pasta was killed by signal {d} before it was ready", .{number});
+            },
+        },
+        .timed_out => diag.cause("pasta did not report the container's network ready within " ++
+            "{d} ms, and was stopped", .{constants.pasta_ready_timeout_ms}),
+        .garbled => diag.cause("pasta wrote something other than its process id where zbx " ++
+            "waits for it", .{}),
+    }
+    if (line.len > 0) diag.cause("pasta: {s}", .{line});
+    diag.context("pasta", "{s}", .{plan.text(plan.pasta_path)});
+    pasta_log_context(diag, plan);
+    pasta_log_fix(diag, plan);
+    diag.fix(.{
+        .sentence = "or run with the host's network:",
+        .command = "zbx run --net host alpine -- sh",
+    });
+    assert(diag.code.? == .E0603);
+}
+
+fn pasta_port_in_use(diag: *Diag, plan: *const Plan, port: ?u16, line: []const u8) void {
+    assert(diag.code == null);
+    assert(line.len > 0);
+    diag.raise(.E0604);
+    diag.while_("publishing the container's ports", .{});
+    diag.cause("pasta: {s}", .{line}); // The symptom; the cause below is the real one.
+    if (port) |number| {
+        diag.cause("another program already listens on host port {d}", .{number});
+        diag.context("port", "{d}", .{number});
+        diag.fix_with("see which program holds it:", "ss -tlnp 'sport = :{d}'", .{number});
+    } else {
+        diag.cause("another program already listens on a published host port", .{});
+        diag.fix(.{ .sentence = "see which programs listen:", .command = "ss -tlnp" });
+    }
+    pasta_log_context(diag, plan);
+    diag.fix(.{
+        .sentence = "or publish another host port:",
+        .command = "zbx run --publish 8081:80 nginx",
+    });
+    assert(diag.fixes.count == 2);
+}
+
+/// The last line of pasta's log, or empty when there is no log or nothing in it. The log holds
+/// only what pasta wrote in this run (it is emptied when pasta starts), so the start of the file
+/// is enough for a pasta that failed while starting.
+fn pasta_last_line(
+    host: Host,
+    plan: *const Plan,
+    storage: *[constants.pasta_log_tail_bytes_max]u8,
+) []const u8 {
+    const log = plan.text(plan.pasta_log);
+    if (log.len == 0) return "";
+    const found = host.read_prefix(log, storage) catch return "";
+    return pasta_mod.last_line(found.bytes);
+}
+
+fn pasta_log_context(diag: *Diag, plan: *const Plan) void {
+    const log = plan.text(plan.pasta_log);
+    if (log.len > 0) {
+        diag.context("log", "{s}", .{log});
+    } else {
+        diag.context("log", "none: this run has no state directory", .{});
+    }
+}
+
+fn pasta_log_fix(diag: *Diag, plan: *const Plan) void {
+    const log = plan.text(plan.pasta_log);
+    if (log.len == 0) return;
+    diag.fix_with("read what pasta wrote:", "cat {s}", .{log});
 }

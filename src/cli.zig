@@ -17,6 +17,7 @@ const text_util = @import("text.zig");
 const codes = @import("diag/codes.zig");
 const errors = @import("diag/errors.zig");
 const explain = @import("diag/explain.zig");
+const lock_commands = @import("lock_commands.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
@@ -32,6 +33,7 @@ const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
 const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
+const Sha256 = @import("registry/digest.zig").Sha256;
 
 const Host = host_mod.Host;
 
@@ -48,9 +50,11 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
-    \\  explain <code>  explain a diagnostic code offline, for example E0001
+    \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
+    \\                  document, see zbx schema explain)
     \\  help            show this text
     \\  --version       print the version
     \\
@@ -70,6 +74,10 @@ const help_text =
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
+    \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
+    \\                  or user (the network through pasta, as the user: apt install passt)
+    \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
+    \\                  implies --net user)
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -138,6 +146,7 @@ pub const Command = enum {
     doctor,
     explain,
     help,
+    lock,
     ps,
     pull,
     run,
@@ -193,6 +202,17 @@ pub const RunArgs = struct {
     all: bool = false,
     /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
     read_only: bool = false,
+    /// `--net` as typed. No `--net` is `none` (unless `--publish` was given, which implies
+    /// `user`), and a run with neither says so when it fails.
+    net: ?[]const u8 = null,
+    /// The `--publish` values, parsed as each was read (a bad one is refused there, E0600).
+    publish: [constants.publish_count_max]runtime_spec.Publish = undefined,
+    publish_count: u32 = 0,
+
+    pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
+        assert(run_args.publish_count <= constants.publish_count_max);
+        return run_args.publish[0..run_args.publish_count];
+    }
 };
 
 /// The options of `run` that take a value, before the `--`.
@@ -204,9 +224,11 @@ const RunOption = enum {
     cpus,
     timeout,
     grace,
+    net,
+    publish,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 6);
+        assert(@backingInt(option) <= 8);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -216,6 +238,8 @@ const RunOption = enum {
             .cpus => "--cpus",
             .timeout => "--timeout",
             .grace => "--grace",
+            .net => "--net",
+            .publish => "--publish",
         };
     }
 };
@@ -324,7 +348,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 7);
+    assert(std.enums.values(RunOption).len == 9);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -387,6 +411,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "run")) found = .run;
@@ -403,7 +428,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock => 1,
         .store => 2,
     };
     assert(count <= 2);
@@ -657,6 +682,7 @@ fn take_run_option(
             break :blk args[next];
         },
     };
+    if (option == .publish) return take_publish(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -665,6 +691,8 @@ fn take_run_option(
         .cpus => &run_args.cpus,
         .timeout => &run_args.timeout,
         .grace => &run_args.grace,
+        .net => &run_args.net,
+        .publish => unreachable, // Repeatable: `take_publish` above.
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -673,6 +701,7 @@ fn take_run_option(
 /// `run` needs a rootfs and a command: the two things a user is most likely to forget.
 fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
+    try check_network_args(diag, run_args);
     if (run_args.rootfs == null and digest == null) {
         return missing_argument(diag, .run, .rootfs);
     }
@@ -689,6 +718,99 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     }
     assert((run_args.rootfs != null) != (digest != null));
     if (!has_default) assert(run_args.command.len > 0);
+}
+
+/// The network mode `--net` names; null for any other word.
+const NetWord = enum { none, host, user };
+
+fn net_word_named(value: []const u8) ?NetWord {
+    assert(value.len <= constants.arg_bytes_max);
+    assert(std.mem.indexOfScalar(u8, value, 0) == null); // Arguments are C strings.
+    return std.meta.stringToEnum(NetWord, value);
+}
+
+/// `--net` takes none, host or user. `--publish` implies `user`: with an explicit `none` or
+/// `host` it names a forward into a network the container does not get, which is refused.
+fn check_network_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.publish_count <= constants.publish_count_max);
+    const value = run_args.net orelse return;
+    const word = net_word_named(value) orelse return bad_net_value(diag, value);
+    if (run_args.publish_count == 0) return;
+    if (word == .user) return;
+    var storage: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+    const first = run_args.publish[0].text(&storage);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    if (word == .none) {
+        diag.cause("--publish forwards a host port into the container's own network, " ++
+            "and --net none gives it none", .{});
+    } else {
+        diag.cause("--publish forwards a host port into the container's own network, " ++
+            "and --net host shares the host's instead", .{});
+    }
+    diag.context("cmd", "run", .{});
+    diag.context("arg", "--net {s} --publish {s}", .{ value, first });
+    diag.fix(.{
+        .sentence = "drop --net: --publish implies --net user",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    return error.UnexpectedArgument;
+}
+
+/// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
+fn take_publish(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.publish_count <= constants.publish_count_max);
+    const parsed = switch (runtime_spec.parse_publish(value)) {
+        .ok => |publish| publish,
+        .problem => |problem| return bad_publish(diag, value, problem.sentence()),
+    };
+    if (run_args.publish_count == constants.publish_count_max) {
+        return bad_publish(diag, value, "--publish is given more than 16 times");
+    }
+    for (run_args.publish_slice()) |earlier| {
+        if (earlier.host == parsed.host) {
+            return bad_publish(diag, value, "that host port is already published");
+        }
+    }
+    run_args.publish[run_args.publish_count] = parsed;
+    run_args.publish_count += 1;
+    assert(runtime_spec.publish_problem(.user, run_args.publish_slice()) == null);
+}
+
+/// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
+fn bad_publish(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(reason.len > 0);
+    comptime assert(constants.publish_count_max == 16); // The sentence above says so.
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0600);
+    diag.while_("reading the command line", .{});
+    diag.cause("--publish '{s}': {s}", .{ echo, reason });
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give a host port and the container's port, both 1 to 65535:",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    return error.BadOptionValue;
+}
+
+fn bad_net_value(diag: *Diag, value: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(net_word_named(value) == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("--net takes none, host or user, not '{s}'", .{echo});
+    diag.context("value", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "choose a mode:",
+        .command = "zbx run --net user alpine -- wget -qO- https://example.com",
+    });
+    return error.BadOptionValue;
 }
 
 /// True if `operand` names a tree of the store (`b3:` and hex, or 12 hex digits or more); any
@@ -734,6 +856,7 @@ fn resolve(
         const what: Missing = switch (command) {
             .stop, .commit => .container,
             .schema => .topic,
+            .lock => .action,
             .pull => .reference,
             else => .code,
         };
@@ -742,6 +865,25 @@ fn resolve(
     invocation.command = command;
     invocation.operand = if (given == 1) operands[1] else null;
     if (invocation.operand == null) assert(given == 0);
+    if (command == .lock) {
+        if (!std.mem.eql(u8, invocation.operand.?, "show")) {
+            return lock_unknown(diag, invocation.operand.?);
+        }
+    }
+}
+
+/// `lock` was given a word that is not its subcommand.
+fn lock_unknown(diag: *Diag, word: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, word, "show"));
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, word);
+    diag.raise(.E0001);
+    diag.while_("reading the command line", .{});
+    diag.cause("'{s}' is not a lock subcommand; the only one is show", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+    return error.UnknownCommand;
 }
 
 /// `store` takes a subcommand, and for `import` and `rm` an operand; `du` takes one if it likes.
@@ -932,6 +1074,8 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix(.{ .sentence = "commit one container at a time:", .command = "zbx commit web-1" });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
+    } else if (command == .lock) {
+        diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
     } else {
         diag.fix_with("pass one code:", "zbx {s} E0001", .{name});
     }
@@ -939,7 +1083,7 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic, reference };
+const Missing = enum { code, rootfs, command, target, container, topic, reference, action };
 
 /// What `pull` lacks: its reference.
 fn missing_pull(diag: *Diag, missing: Missing) void {
@@ -949,6 +1093,13 @@ fn missing_pull(diag: *Diag, missing: Missing) void {
     diag.fix(.{ .sentence = "name an image:", .command = "zbx pull alpine:3.20" });
 }
 
+/// What `lock` lacks: its subcommand.
+fn missing_lock(diag: *Diag) void {
+    assert(diag.code != null);
+    diag.cause("'lock' needs a subcommand: show", .{});
+    diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+}
+
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
     if (command == .run) assert(missing != .code);
@@ -956,6 +1107,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .bundle) assert(missing == .target);
     if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
+    if (command == .lock) assert(missing == .action);
     if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
 
     assert(command != .doctor);
@@ -1005,6 +1157,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
         .reference => missing_pull(diag, missing),
+        .action => missing_lock(diag),
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
             diag.fix(.{
@@ -1193,7 +1346,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit, .pull => true,
+        .explain, .bundle, .schema, .stop, .run, .commit, .pull, .lock => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1202,7 +1355,18 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .bundle => return run_bundle(host, invocation, &storage.workspace, diag),
         .help => try print(host, help_text, diag),
         .version => try print(host, version_text, diag),
-        .explain => try run_explain(host, invocation.operand.?, diag),
+        .explain => try run_explain(
+            host,
+            invocation.operand.?,
+            invocation.options.output == .json,
+            diag,
+        ),
+        .lock => lock_commands.run_show(
+            host,
+            &storage.pull.unpack.locking,
+            invocation.options.output == .json,
+            diag,
+        ) catch |err| return lock_error(err),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -1221,6 +1385,14 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .store => return run_store(host, invocation, storage, diag),
     }
     return constants.exit_ok;
+}
+
+fn lock_error(err: lock_commands.Error) RunError {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.Failed => error.CommandFailed,
+        error.OutputFailed => error.OutputFailed,
+    };
 }
 
 fn command_error(err: commands.Error) RunError {
@@ -1446,8 +1618,11 @@ fn run_container(
         .env = prepared.env,
         .workdir = prepared.workdir,
         .user = prepared.user,
+        .network = network_of(&given),
+        .publish = given.publish_slice(),
     };
-    if (given.detach) return run_detached(host, invocation, &container, times, storage, diag);
+    const ran = ran_of(invocation, &prepared);
+    if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
@@ -1466,8 +1641,84 @@ fn run_container(
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
-    report_outcome(host, invocation.options, handle, &reason);
+    report_outcome(host, invocation.options, handle, &reason, &ran, given.net != null);
     return code;
+}
+
+/// What a run ran, for `--output json`: an image (the name as typed, its manifest and the tree
+/// it became), a tree of the store, or a directory. The tree is not here: a prefix of one is
+/// only resolved when the run starts, so it is taken from the run.
+const Ran = struct {
+    kind: enum { image, tree, rootfs },
+    /// The name as typed (image), or the directory (rootfs); empty for a tree.
+    text: []const u8,
+    manifest: ?Sha256,
+};
+
+fn ran_of(invocation: *const Invocation, prepared: *const run_image.Prepared) Ran {
+    assert(invocation.command == .run);
+    const operand = invocation.operand orelse {
+        const path = invocation.run.rootfs.?; // check_run_args refused neither or both.
+        return .{ .kind = .rootfs, .text = path, .manifest = null };
+    };
+    assert(invocation.run.rootfs == null);
+    if (is_tree_operand(operand)) return .{ .kind = .tree, .text = "", .manifest = null };
+    assert(prepared.manifest != null);
+    return .{ .kind = .image, .text = operand, .manifest = prepared.manifest };
+}
+
+/// Adds `"ran":{...}` to the JSON line in `writer`, which ends in "}\n": inside the line's one
+/// object, after its last member. `tree` is the digest the run used; empty for a directory.
+/// If the line has no room the line is left as it was.
+fn append_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) void {
+    const line = writer.buffered();
+    assert(line.len >= 3);
+    assert(std.mem.endsWith(u8, line, "}\n"));
+    const mark = writer.end;
+    writer.end -= 2;
+    if (write_ran(writer, ran, tree)) {
+        writer.writeAll("}\n") catch unreachable; // Two bytes were freed above.
+        return;
+    }
+    writer.end = mark;
+    assert(std.mem.endsWith(u8, writer.buffered(), "}\n"));
+}
+
+fn write_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) bool {
+    if (ran.kind == .tree) assert(tree.len > 0);
+    switch (ran.kind) {
+        .image => {
+            writer.writeAll(",\"ran\":{\"kind\":\"image\",\"reference\":") catch return false;
+            bundle.write_json_string(writer, ran.text) catch return false;
+            const manifest = ran.manifest.?;
+            writer.print(",\"manifest\":\"{s}\",\"tree\":\"{s}\"}}", .{
+                &manifest.text(), tree,
+            }) catch return false;
+        },
+        .tree => writer.print(",\"ran\":{{\"kind\":\"tree\",\"tree\":\"{s}\"}}", .{tree}) catch
+            return false,
+        .rootfs => {
+            writer.writeAll(",\"ran\":{\"kind\":\"rootfs\",\"path\":") catch return false;
+            bundle.write_json_string(writer, ran.text) catch return false;
+            writer.writeByte('}') catch return false;
+        },
+    }
+    return true;
+}
+
+/// The network the flags asked for: none unless granted; `--publish` alone is `user`.
+/// `check_network_args` has refused every other combination already.
+fn network_of(given: *const RunArgs) runtime_spec.Network {
+    const value = given.net orelse {
+        return if (given.publish_count > 0) .user else .none;
+    };
+    const word = net_word_named(value).?;
+    if (given.publish_count > 0) assert(word == .user);
+    return switch (word) {
+        .none => .none,
+        .host => .host,
+        .user => .user,
+    };
 }
 
 /// The limits the flags asked for, or `ZBX-E0306` for the first that is not acceptable.
@@ -1549,6 +1800,7 @@ fn run_detached(
     container: *const runtime_spec.Spec,
     times: Times,
     storage: *Storage,
+    ran: *const Ran,
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
@@ -1567,7 +1819,7 @@ fn run_detached(
         .parent => {
             host.close(pipe.write);
             defer host.close(pipe.read);
-            return relay(host, pipe.read, invocation.options, diag);
+            return relay(host, pipe.read, invocation.options, ran, diag);
         },
         .supervisor => {
             host.close(pipe.read);
@@ -1626,14 +1878,17 @@ fn supervise(
         return code;
     };
     const started_bytes_max = constants.container_name_bytes_max +
-        constants.scope_name_bytes_max + 24;
+        constants.scope_name_bytes_max + 24 + constants.store_digest_text_bytes + 1;
     var body: [started_bytes_max]u8 = undefined;
     const scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "-";
-    const made = std.fmt.bufPrint(&body, "{s} {d} {s}", .{
+    // The tree the container runs on, whole (a prefix was resolved by the start), or "-".
+    const tree = if (handle.has_image) handle.image.tree_text() else "-";
+    const made = std.fmt.bufPrint(&body, "{s} {d} {s} {s}", .{
         handle.name_slice(),
         handle.pid,
         scope,
-    }) catch unreachable; // A name, a pid and a scope name fit the buffer.
+        tree,
+    }) catch unreachable; // A name, a pid, a scope name and a tree fit the buffer.
     write_frame(host, fd, frame_started, null, made) catch {};
     host.close(fd); // The caller can go; the container's end is ours to see to.
     _ = runtime.wait(handle);
@@ -1654,7 +1909,13 @@ fn read_exact(host: Host, fd: host_mod.Handle, into: []u8) host_mod.Error!bool {
 }
 
 /// The caller of `run -d`: passes the supervisor's warnings on, then prints how the start went.
-fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunError!u8 {
+fn relay(
+    host: Host,
+    fd: host_mod.Handle,
+    options: Options,
+    ran: *const Ran,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(options.runs_container);
     var body: [constants.output_bytes_max]u8 = undefined;
@@ -1673,7 +1934,7 @@ fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunErro
                 host.write_all(.stderr, body[1..length]) catch {};
                 return body[0];
             },
-            frame_started => return print_started(host, options, body[0..length], diag),
+            frame_started => return print_started(host, options, body[0..length], ran, diag),
             else => break,
         }
     }
@@ -1681,14 +1942,21 @@ fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunErro
     return error.CommandFailed;
 }
 
-fn print_started(host: Host, options: Options, text: []const u8, diag: *Diag) RunError!u8 {
+fn print_started(
+    host: Host,
+    options: Options,
+    text: []const u8,
+    ran: *const Ran,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(text.len < constants.output_bytes_max);
     var fields = std.mem.splitScalar(u8, text, ' ');
     const name = fields.next() orelse "";
     const pid = fields.next() orelse "0";
     const scope = fields.next() orelse "-";
-    var buffer: [512]u8 = undefined;
+    const tree = fields.next() orelse "-";
+    var buffer: [constants.path_bytes_max * 6 + 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     // Cannot fail: the fields are bounded names and a number, in 512 bytes.
     if (options.output == .json) {
@@ -1702,6 +1970,7 @@ fn print_started(host: Host, options: Options, text: []const u8, diag: *Diag) Ru
             bundle.write_json_string(&writer, scope) catch unreachable; // Same.
         }
         writer.writeAll(",\"detached\":true}}\n") catch unreachable; // Same.
+        append_ran(&writer, ran, tree);
     } else {
         writer.print("{s}\n", .{name}) catch unreachable; // Same bound.
     }
@@ -1768,6 +2037,8 @@ fn report_outcome(
     options: Options,
     handle: *const runtime.Handle,
     reason: *const runtime.ExitReason,
+    ran: *const Ran,
+    network_given: bool,
 ) void {
     assert(handle.status == .stopped);
     assert(reason.code() != null);
@@ -1776,11 +2047,17 @@ fn report_outcome(
     const timed_out = runtime.timed_out(handle);
     if (options.output == .json) {
         write_container_exit(&writer, reason);
-        // The line ends "}}\n"; a run that was stopped for its time says so inside.
+        // The line ends "}}\n"; the network mode goes inside, and so does a stop for the time.
+        writer.end -= 3;
+        // Cannot fail: three bytes were freed and a short field fits a message.
+        writer.print(",\"network\":\"{s}\"}}}}\n", .{handle.network.word()}) catch unreachable;
+        writer.end -= 3;
+        write_published(&writer, handle.publish_slice());
         if (timed_out) {
             writer.end -= 3;
             writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
         }
+        append_ran(&writer, ran, if (handle.has_image) handle.image.tree_text() else "");
     } else {
         if (options.verbose) {
             for (handle.note_slice()) |*note| {
@@ -1795,9 +2072,50 @@ fn report_outcome(
             // Cannot fail: a short line into a buffer that holds a message.
             writer.print(format, .{handle.wait_options.timeout_ms}) catch unreachable;
         }
+        write_network_hint(&writer, handle.network, network_given, reason);
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
+}
+
+/// `"published":[{"host":8080,"container":80}]` and the line's end, "}}\n": the forwards, in
+/// the order given, empty for a run without any. Added in M5 beside `network`; additive.
+fn write_published(writer: *std.Io.Writer, list: []const runtime_spec.Publish) void {
+    assert(list.len <= constants.publish_count_max);
+    // A forward is at most 34 bytes; sixteen of them and the member's name fit with room.
+    comptime assert(constants.publish_count_max * 40 + 32 < constants.output_bytes_max / 4);
+    writer.writeAll(",\"published\":[") catch unreachable; // Bounded above.
+    for (list, 0..) |publish, index| {
+        assert(publish.host > 0);
+        const comma: []const u8 = if (index == 0) "" else ",";
+        const format = "{s}{{\"host\":{d},\"container\":{d}}}";
+        // Cannot fail: bounded above.
+        writer.print(format, .{ comma, publish.host, publish.container }) catch unreachable;
+    }
+    writer.writeAll("]}}\n") catch unreachable; // Bounded above.
+}
+
+/// The one line a failed run without `--net` gets after the container's own output: the network
+/// was none, and here is the flag. Only after the container's own exit with a code. A note,
+/// not a diagnostic: the exit code is the container's.
+/// Never for an explicit `--net none`.
+fn write_network_hint(
+    writer: *std.Io.Writer,
+    network: runtime_spec.Network,
+    network_given: bool,
+    reason: *const runtime.ExitReason,
+) void {
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    if (network_given) return;
+    if (network != .none) return;
+    // Only the container's own non-zero exit: a signal, a timeout or a limit has its own line.
+    const code = switch (reason.*) {
+        .exited => |value| value,
+        else => return,
+    };
+    if (code == constants.exit_ok) return;
+    // Cannot fail: a short line into a buffer that holds a message.
+    writer.writeAll("zbx: network: none (grant with --net)\n") catch unreachable;
 }
 
 /// With --verbose, what the container's first process did when the report says something else
@@ -1949,7 +2267,7 @@ fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) R
     return code;
 }
 
-fn run_explain(host: Host, operand: []const u8, diag: *Diag) RunError!void {
+fn run_explain(host: Host, operand: []const u8, json: bool, diag: *Diag) RunError!void {
     assert(operand.len <= constants.arg_bytes_max);
     assert(diag.code == null);
     const code = codes.parse(operand) orelse {
@@ -1963,6 +2281,7 @@ fn run_explain(host: Host, operand: []const u8, diag: *Diag) RunError!void {
         return error.UnknownCode;
     };
     var buffer: [constants.output_bytes_max]u8 = undefined;
+    if (json) return print(host, explain.render_json(code, &buffer), diag);
     try print(host, explain.render(code, &buffer), diag);
 }
 
@@ -2072,6 +2391,49 @@ test "snapshot: explain prints the registry text on stdout, exit 0" {
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0007]: "));
     try testing.expectEqual(@as(u8, 1), try run_case(&sim, &.{ "zbx", "explain" }));
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0006]: "));
+}
+
+test "snapshot: explain --output json is the zbx.explain/1 document; schemas for it and lock" {
+    // Goal: the machine form of `explain` is exactly the checked-in document, wherever the option
+    // stands; an unknown code is still a diagnostic and prints nothing on stdout; the schemas
+    // `zbx schema` prints for it and for `lock show` are the checked-in text.
+    var sim: HostSim = undefined;
+    const want = @embedFile("testdata/explain_E0001.json.txt");
+    const before = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E0001" };
+    try testing.expectEqual(@as(u8, 0), try run_case(&sim, &before));
+    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const after = [_][:0]const u8{ "zbx", "explain", "zbx-e0001", "--output=json" };
+    try testing.expectEqual(@as(u8, 0), try run_case(&sim, &after));
+    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expect(try @import("test_util.zig").json_is_valid(std.mem.trimEnd(u8, want, "\n")));
+    const unknown = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E9999" };
+    try testing.expectEqual(@as(u8, 1), try run_case(&sim, &unknown));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-E0007\""));
+
+    const goldens = [_]struct { topic: [:0]const u8, text: []const u8 }{
+        .{ .topic = "explain", .text = @embedFile("testdata/schema_explain.stdout.txt") },
+        .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
+    };
+    for (goldens) |golden| {
+        const args = [_][:0]const u8{ "zbx", "schema", golden.topic };
+        try testing.expectEqual(@as(u8, 0), try run_case(&sim, &args));
+        try testing.expectEqualStrings(golden.text, sim.stdout());
+    }
+}
+
+test "parse: lock takes the one subcommand show" {
+    // Goal: `lock` alone is E0006, an unknown word E0001, an extra word E0003; `lock show` parses.
+    var invocation: Invocation = undefined;
+    try testing.expect(try parse_case(&.{ "lock", "show" }, &invocation) == null);
+    try testing.expect(invocation.command == .lock);
+    const json = [_][]const u8{ "--output", "json", "lock", "show" };
+    try testing.expect(try parse_case(&json, &invocation) == null);
+    try testing.expectEqual(codes.Code.E0006, (try parse_case(&.{"lock"}, &invocation)).?);
+    try testing.expectEqual(codes.Code.E0001, (try parse_case(&.{ "lock", "ls" }, &invocation)).?);
+    const extra = try parse_case(&.{ "lock", "show", "more" }, &invocation);
+    try testing.expectEqual(codes.Code.E0003, extra.?);
 }
 
 test "parse: options come before or after the command and never change the command" {
@@ -2596,6 +2958,8 @@ test "run --timeout stops the container when its time is up and says so" {
 
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
+const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
+
 fn framed(sim: *HostSim, frames: []const Frame) !host_mod.Handle {
     const host = sim.interface();
     const pipe = try host.pipe();
@@ -2614,7 +2978,8 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     var diag: Diag = undefined;
     diag.reset();
     const options: Options = .{ .runs_container = true };
-    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), read, options, &diag));
+    const host = sim.interface();
+    try testing.expectEqual(@as(u8, 0), try relay(host, read, options, &test_ran, &diag));
     sim.interface().close(read);
     try testing.expectEqualStrings("web-1\n", sim.stdout());
     try testing.expectEqualStrings("zbx: warning: something\n", sim.stderr());
@@ -2623,10 +2988,11 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     const bare: Frame = .{ .tag = frame_started, .head = null, .body = "web-1 502 -" };
     const again = try framed(&sim, &.{bare});
     const json: Options = .{ .runs_container = true, .output = .json };
-    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &diag));
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &test_ran, &diag));
     sim.interface().close(again);
     const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
-        "\"pid\":502,\"scope\":null,\"detached\":true}}\n";
+        "\"pid\":502,\"scope\":null,\"detached\":true},\"ran\":{\"kind\":\"rootfs\"," ++
+        "\"path\":\"/srv/root\"}}\n";
     try testing.expectEqualStrings(expected, sim.stdout());
 }
 
@@ -2638,7 +3004,8 @@ test "run -d: a failed start passes the supervisor's diagnostic and code through
     var diag: Diag = undefined;
     diag.reset();
     const options: Options = .{ .runs_container = true };
-    try testing.expectEqual(@as(u8, 126), try relay(sim.interface(), read, options, &diag));
+    const host = sim.interface();
+    try testing.expectEqual(@as(u8, 126), try relay(host, read, options, &test_ran, &diag));
     sim.interface().close(read);
     try testing.expectEqualStrings("zbx: refused\n", sim.stderr());
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
@@ -2657,7 +3024,8 @@ test "run -d: a supervisor that ends without a report, or sends nonsense, is E04
         var diag: Diag = undefined;
         diag.reset();
         const options: Options = .{ .runs_container = true };
-        try testing.expectError(error.CommandFailed, relay(host, pipe.read, options, &diag));
+        const failed = relay(host, pipe.read, options, &test_ran, &diag);
+        try testing.expectError(error.CommandFailed, failed);
         host.close(pipe.read);
         try testing.expectEqual(codes.Code.E0405, diag.code.?);
         try testing.expectEqual(@as(usize, 0), sim.stdout().len);
@@ -2765,4 +3133,98 @@ test "parse: run takes a tree digest or --rootfs, one of them" {
         @as(?codes.Code, .E0003),
         try parse_case(&.{ "run", "2f9c4a1d7e03", "another", "--", "sh" }, &invocation),
     );
+}
+
+test "parse: --net takes none, host or user; --publish is repeatable and implies user" {
+    // Goal: M5's flags. Method: each mode parses to the word the run reads; none given is null
+    // (the default, none, and the hint's condition); --publish alone is user, and with an
+    // explicit none or host is E0003; a bad word is E0005; a bad --publish is E0600.
+    var invocation: Invocation = undefined;
+    const base = [_][]const u8{ "run", "--rootfs", "alpine" };
+    for ([_][]const u8{ "none", "host", "user" }) |word| {
+        const args = base ++ [_][]const u8{ "--net", word, "--", "sh" };
+        try testing.expect(try parse_case(&args, &invocation) == null);
+        try testing.expectEqualStrings(word, invocation.run.net.?);
+        try testing.expectEqualStrings(word, network_of(&invocation.run).word());
+    }
+    const inline_form = base ++ [_][]const u8{ "--net=host", "--", "sh" };
+    try testing.expect(try parse_case(&inline_form, &invocation) == null);
+    try testing.expectEqual(runtime_spec.Network.host, network_of(&invocation.run));
+    const plain = base ++ [_][]const u8{ "--", "sh" };
+    try testing.expect(try parse_case(&plain, &invocation) == null);
+    try testing.expect(invocation.run.net == null);
+    try testing.expectEqual(runtime_spec.Network.none, network_of(&invocation.run));
+    const publish = base ++ [_][]const u8{
+        "--publish", "8080:80", "--publish=8443:443", "--", "sh",
+    };
+    try testing.expect(try parse_case(&publish, &invocation) == null);
+    try testing.expectEqual(runtime_spec.Network.user, network_of(&invocation.run));
+    try testing.expectEqual(@as(usize, 2), invocation.run.publish_slice().len);
+    try testing.expectEqual(@as(u16, 8443), invocation.run.publish_slice()[1].host);
+    try testing.expectEqual(@as(u16, 443), invocation.run.publish_slice()[1].container);
+    const with_user = base ++ [_][]const u8{ "--net", "user", "--publish", "8080:80", "--", "sh" };
+    try testing.expect(try parse_case(&with_user, &invocation) == null);
+    for ([_][]const u8{ "none", "host" }) |word| {
+        const args = base ++ [_][]const u8{ "--publish", "8080:80", "--net", word, "--", "sh" };
+        try testing.expectEqual(@as(?codes.Code, .E0003), try parse_case(&args, &invocation));
+    }
+    const bad_values = [_][]const []const u8{
+        &.{"8080"}, &.{"0:80"}, &.{"80:x"}, &.{"65536:80"}, &.{ "8080:80", "8080:81" },
+    };
+    for (bad_values) |values| {
+        var args: [16][]const u8 = undefined;
+        @memcpy(args[0..base.len], &base);
+        var count: usize = base.len;
+        for (values) |value| {
+            args[count] = "--publish";
+            args[count + 1] = value;
+            count += 2;
+        }
+        args[count] = "--";
+        args[count + 1] = "sh";
+        const code = try parse_case(args[0 .. count + 2], &invocation);
+        try testing.expectEqual(@as(?codes.Code, .E0600), code);
+    }
+    const bad = base ++ [_][]const u8{ "--net", "bridge", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&bad, &invocation));
+    const twice = base ++ [_][]const u8{ "--net", "none", "--net", "host", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0003), try parse_case(&twice, &invocation));
+    const last = [_][]const u8{ "run", "--rootfs", "alpine", "--net" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&last, &invocation));
+    const last_publish = [_][]const u8{ "run", "--rootfs", "alpine", "--publish" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&last_publish, &invocation));
+    // A word that is not an option of `run` is still refused for the other commands.
+    const elsewhere = [_][]const u8{ "doctor", "--net", "host" };
+    try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&elsewhere, &invocation));
+    const stop = [_][]const u8{ "stop", "web", "--publish", "8080:80" };
+    try testing.expect(try parse_case(&stop, &invocation) != null);
+}
+
+test "parse: --publish at its bound of sixteen, and one past it" {
+    // Goal: the bound of `publish_count_max`. Method: sixteen distinct forwards parse; a
+    // seventeenth is E0600.
+    var invocation: Invocation = undefined;
+    var args: [3 + 2 * (constants.publish_count_max + 1) + 2][]const u8 = undefined;
+    args[0] = "run";
+    args[1] = "--rootfs";
+    args[2] = "alpine";
+    var texts: [constants.publish_count_max + 1][16]u8 = undefined;
+    for (0..constants.publish_count_max + 1) |index| {
+        args[3 + 2 * index] = "--publish";
+        args[4 + 2 * index] = try std.fmt.bufPrint(&texts[index], "{d}:80", .{9000 + index});
+    }
+    const full = 3 + 2 * constants.publish_count_max;
+    args[full] = "--";
+    args[full + 1] = "sh";
+    try testing.expect(try parse_case(args[0 .. full + 2], &invocation) == null);
+    try testing.expectEqual(@as(u32, constants.publish_count_max), invocation.run.publish_count);
+    args[full + 2] = "--";
+    args[full + 3] = "sh";
+    const over = full + 2;
+    args[full] = "--publish";
+    args[full + 1] = args[4 + 2 * constants.publish_count_max];
+    args[over] = "--";
+    args[over + 1] = "sh";
+    const refused = try parse_case(args[0 .. over + 2], &invocation);
+    try testing.expectEqual(@as(?codes.Code, .E0600), refused);
 }

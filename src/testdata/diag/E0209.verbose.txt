@@ -6,7 +6,7 @@ error[ZBX-E0209]: can't set up the read-only rootfs
          made read-only
   name   web-1
   rootfs /srv/alpine
-  step   make_tmp_dir (41 of 57)
+  step   make_tmp_dir (52 of 68)
   fix    make them as the rootfs's owner:   mkdir -p "/srv/alpine/tmp" "/srv/alpine/run"
          or unpack the rootfs as the user who runs zbx
   more   zbx explain E0209

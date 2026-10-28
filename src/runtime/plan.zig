@@ -15,15 +15,38 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const netfiles = @import("netfiles.zig");
 const spec = @import("spec.zig");
 
 pub const Side = enum { parent, child };
 
-/// The steps that give the container the host's /sys.
+/// The steps that give the container a /sys: the host's, bound, or a sysfs of its own.
 pub fn is_sys(kind: Kind) bool {
     assert(@backingInt(kind) <= @backingInt(Kind.exec));
     if (kind == .bind_sys) assert(side_of(kind) == .child);
-    return kind == .make_sys_dir or kind == .bind_sys or kind == .remount_sys;
+    return kind == .make_sys_dir or kind == .bind_sys or kind == .remount_sys or
+        kind == .mount_sysfs;
+}
+
+/// The steps that give the container its generated /etc/hosts and /etc/resolv.conf. Each acts
+/// on one of the two files (`Step.index`, a `netfiles.File`).
+pub fn is_etc(kind: Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(Kind.exec));
+    return switch (kind) {
+        .make_etc_dir, .create_etc_file, .stage_etc_file => true,
+        .bind_etc_file, .remount_etc_file, .unstage_etc_file => true,
+        else => false,
+    };
+}
+
+/// The failure group of a tolerant step: 0 for none. The steps of one generated file are a
+/// group: when one fails the rest of the group is skipped, so one file makes one note and not
+/// a note per step.
+pub fn group_of(step: *const Step) u8 {
+    if (!is_etc(step.kind)) return 0;
+    assert(step.index < 2);
+    assert(step.tolerant);
+    return step.index + 1;
 }
 
 /// What a step does. Parent steps first in the declaration, then the child's.
@@ -43,6 +66,13 @@ pub const Kind = enum {
     /// Asks the user's systemd manager for the container's scope and waits for its job; only in
     /// a plan built with a scope.
     start_scope,
+    /// In a plan with `--net user`: starts pasta, attached to the child's namespaces by its
+    /// pid, once the id maps are written (so that pasta is root in the container's user
+    /// namespace when it joins it). zbx's own child, killed by the kernel if zbx dies.
+    start_pasta,
+    /// ... and waits, within `pasta_ready_timeout_ms`, for pasta to report the interface
+    /// configured and the host's ports bound. Only then is the child let go.
+    await_pasta,
     release_child,
     await_report,
     reap,
@@ -72,6 +102,23 @@ pub const Kind = enum {
     make_sys_dir,
     bind_sys,
     remount_sys,
+    /// In a plan with a network namespace of its own: brings `lo` up. Before the capabilities
+    /// are restricted, since changing an interface needs CAP_NET_ADMIN.
+    bring_up_loopback,
+    /// ... and there a sysfs of the container's own replaces the three /sys steps above but
+    /// the first. A sysfs shows the devices of the network namespace it is mounted in.
+    mount_sysfs,
+    /// The generated /etc files (`netfiles.zig`). Their mount points are made first, where the
+    /// image's own tree is not written: in the overlay's extra lower layer for a tree from the
+    /// store, in the rootfs for a directory. The text is staged in a hidden file of the
+    /// container's /dev, bound read-only over the mount point, and the staged name removed so
+    /// that only the bound file is left. All are tolerant, a file at a time.
+    make_etc_dir,
+    create_etc_file,
+    stage_etc_file,
+    bind_etc_file,
+    remount_etc_file,
+    unstage_etc_file,
     /// Only in a plan with a working directory: makes it (and its parents) if the image lacks
     /// it, and goes there. After the new root is entered.
     enter_workdir,
@@ -104,6 +151,7 @@ pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
+        .start_pasta, .await_pasta => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -131,14 +179,18 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// The child's steps: twenty-six that happen once (four of them the hardening, three the /sys),
-/// and two per device and one per link. A read-only plan has `read_only_steps_count` more, one
-/// with a working directory, one with a user.
-pub const child_steps_count: u32 = 26 + 2 * constants.container_devices_count +
+/// The child's steps: thirty-seven that happen once (four of them the hardening, three the /sys
+/// or the loopback and the sysfs, eleven the /etc files), and two per device and one per link. A
+/// read-only plan has `read_only_steps_count` more, one with a working directory, one with a
+/// user. A plan with a network namespace of its own has one /sys step fewer and the loopback.
+pub const child_steps_count: u32 = 37 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
+
+/// The steps `--net user` adds to the parent's: pasta's start and the wait for it to be ready.
+pub const pasta_steps_count: u32 = 2;
 
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
@@ -218,6 +270,20 @@ pub const Input = struct {
     /// Set for a run of a tree from the store: `rootfs` is then the empty directory the overlay
     /// is mounted on, and the layers are these.
     overlay: ?Overlay = null,
+    /// What the container can reach.
+    network: spec.Network = .none,
+    /// The host's `resolv.conf`, whole lines within `etc_file_bytes_max`; read for `--net host`.
+    host_resolv: []const u8 = "",
+    /// Set exactly when `network` is `user`: how pasta is started.
+    pasta: ?PastaInput = null,
+};
+
+/// What the parent needs to start pasta: its path, the file its standard error goes to (empty:
+/// nowhere, when the run has no state directory), and the forwards.
+pub const PastaInput = struct {
+    path: []const u8,
+    log: []const u8,
+    publish: []const spec.Publish,
 };
 
 /// The layers of an overlay (docs/briefs/M3-store.md, "Materialize and run"). The lower layer
@@ -225,6 +291,10 @@ pub const Input = struct {
 /// upper layer by copy-up. A read-only run has no upper layer (and no work directory); the
 /// kernel wants two lower layers then, so the second is an empty directory.
 pub const Overlay = struct {
+    /// The topmost lower layer: a directory of zbx's own with the mount points of the generated
+    /// /etc files, so that the image's tree and the upper layer (which a commit reads) are not
+    /// written for them.
+    net: []const u8,
     lower: []const u8,
     upper: ?[]const u8,
     work: ?[]const u8,
@@ -255,6 +325,15 @@ pub const Plan = struct {
     scope_description: Text,
     scope_version: u32,
     scope_limits: spec.Limits,
+    /// What the container can reach, and the text of the two generated /etc files.
+    network: spec.Network,
+    etc_texts: [2]Text,
+    /// A plan with `--net user` starts pasta: its path, its log (empty: none) and the forwards.
+    has_pasta: bool,
+    pasta_path: Text,
+    pasta_log: Text,
+    publish: [constants.publish_count_max]spec.Publish,
+    publish_count: u32,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -278,6 +357,7 @@ pub const Plan = struct {
         plan.scoped = input.scope != null;
         plan.read_only = input.read_only;
         plan.overlay = input.overlay != null;
+        plan.network = input.network;
         plan.has_workdir = input.workdir.len > 0;
         plan.has_user = if (input.user) |user| user.uid != 0 or user.gid != 0 else false;
         plan.user_uid = if (input.user) |user| user.uid else 0;
@@ -289,7 +369,9 @@ pub const Plan = struct {
         assert(plan.add_text(&.{""}).offset == 0);
         plan.name = plan.add_text(&.{input.name});
         plan.workdir = plan.add_text(&.{input.workdir});
+        plan.build_etc_texts(input);
         plan.build_scope(input);
+        plan.build_pasta(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
@@ -323,6 +405,13 @@ pub const Plan = struct {
         assert(@intFromPtr(first_argument) >= @intFromPtr(&plan.strings[0]));
         assert(@intFromPtr(first_argument) < @intFromPtr(&plan.strings[0]) + plan.strings.len);
         assert(plan.candidates_count > 0);
+        // pasta's two steps are the last of the parent's start before the scope's, exactly in
+        // a plan for `--net user`.
+        assert(plan.has_pasta == (plan.network == .user));
+        const pasta_at = child_start - 1 - scope_steps_count * @intFromBool(plan.scoped);
+        assert((plan.steps[pasta_at - 1].kind == .await_pasta) == plan.has_pasta);
+        assert((plan.steps[pasta_at - 2].kind == .start_pasta) == plan.has_pasta);
+        if (!plan.has_pasta) assert(plan.publish_count == 0);
     }
 
     pub fn steps_expected(plan: *const Plan) u32 {
@@ -330,7 +419,8 @@ pub const Plan = struct {
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) + @intFromBool(plan.has_user);
-        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras;
+        const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -338,7 +428,48 @@ pub const Plan = struct {
     pub fn first_child(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const parent: u32 = if (plan.full) 5 else 6;
-        return parent + scope_steps_count * @intFromBool(plan.scoped);
+        const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
+        return parent + scope_steps_count * @intFromBool(plan.scoped) + pasta;
+    }
+
+    /// Whether the container has a network namespace of its own.
+    pub fn isolated(plan: *const Plan) bool {
+        assert(plan.count <= constants.plan_steps_max);
+        const result = plan.network.isolated();
+        if (!result) assert(plan.network == .host);
+        if (plan.has_pasta) assert(result);
+        return result;
+    }
+
+    pub fn publish_slice(plan: *const Plan) []const spec.Publish {
+        assert(plan.publish_count <= constants.publish_count_max);
+        if (plan.publish_count > 0) assert(plan.has_pasta);
+        return plan.publish[0..plan.publish_count];
+    }
+
+    fn build_pasta(plan: *Plan, input: *const Input) void {
+        plan.has_pasta = input.pasta != null;
+        plan.pasta_path = empty_text;
+        plan.pasta_log = empty_text;
+        plan.publish_count = 0;
+        assert(plan.has_pasta == (input.network == .user));
+        const pasta = input.pasta orelse return;
+        assert(pasta.path.len > 0);
+        assert(pasta.path[0] == '/');
+        assert(spec.publish_problem(.user, pasta.publish) == null);
+        plan.pasta_path = plan.add_text(&.{pasta.path});
+        plan.pasta_log = plan.add_text(&.{pasta.log});
+        @memcpy(plan.publish[0..pasta.publish.len], pasta.publish);
+        plan.publish_count = @intCast(pasta.publish.len);
+    }
+
+    fn build_etc_texts(plan: *Plan, input: *const Input) void {
+        var buffer: netfiles.Buffer = undefined;
+        plan.etc_texts[0] = plan.add_text(&.{netfiles.hosts(&buffer, input.name)});
+        const resolv = netfiles.resolv_conf(input.network, input.host_resolv);
+        plan.etc_texts[1] = plan.add_text(&.{resolv});
+        assert(plan.etc_texts[0].len > 0);
+        assert(plan.etc_texts[1].len > 0);
     }
 
     /// The unit name and description of a scoped plan: "zbx-<name>.scope" and "zbx: <name>".
@@ -404,7 +535,7 @@ pub const Plan = struct {
             .target = target,
             .source = source,
             .index = index,
-            .tolerant = kind == .mount_pts or is_sys(kind),
+            .tolerant = kind == .mount_pts or is_sys(kind) or is_etc(kind),
         };
         plan.count += 1;
     }
@@ -416,6 +547,10 @@ pub const Plan = struct {
             .single => plan.push_direct_maps(input),
             .full => |helpers| plan.push_helper_maps(input, helpers),
         }
+        // pasta joins the namespaces as root of the user namespace, so after the maps; it is
+        // outside the scope (its memory and processes are not the container's).
+        if (plan.has_pasta) plan.push(.start_pasta, plan.pasta_path, plan.pasta_log, 0);
+        if (plan.has_pasta) plan.push(.await_pasta, empty_text, empty_text, 0);
         // The scope exists before the child may run its first step, and so before its command;
         // the keeper is forked first, so that it can be put in the scope with the child.
         if (plan.scoped) plan.push(.spawn_keeper, empty_text, empty_text, 0);
@@ -480,10 +615,13 @@ pub const Plan = struct {
         plan.push(.await_release, empty_text, empty_text, 0);
         plan.push(.set_hostname, plan.name, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
+        if (plan.isolated()) plan.push(.bring_up_loopback, empty_text, empty_text, 0);
         if (overlay) |layers| {
+            plan.push_etc_mount_points(layers.net);
             plan.push(.mount_overlay, rootfs, plan.overlay_options(layers), 0);
         } else {
             plan.push(.bind_rootfs, rootfs, rootfs, 0);
+            plan.push_etc_mount_points(rootfs_text);
         }
         plan.push(.make_proc_dir, proc, empty_text, 0);
         plan.push(.mount_proc, proc, empty_text, 0);
@@ -492,6 +630,7 @@ pub const Plan = struct {
         plan.push_devices(rootfs_text);
         plan.push_dev_mounts(rootfs_text);
         plan.push_links(rootfs_text);
+        plan.push_etc_files(rootfs_text);
         plan.push_sys(rootfs_text);
         if (plan.read_only) plan.push_read_only(rootfs, rootfs_text);
         const here = plan.add_text(&.{"."});
@@ -516,6 +655,7 @@ pub const Plan = struct {
     /// backslash (`spec.overlay_path_problem`), which the kernel would read as separators.
     fn overlay_options(plan: *Plan, layers: Overlay) Text {
         assert(spec.overlay_path_problem(layers.lower) == null);
+        assert(spec.overlay_path_problem(layers.net) == null);
         assert((layers.upper == null) == (layers.work == null));
         assert((layers.upper == null) == (layers.empty != null));
         if (layers.upper) |upper| {
@@ -523,11 +663,14 @@ pub const Plan = struct {
             assert(spec.overlay_path_problem(layers.work.?) == null);
             const work = layers.work.?;
             return plan.add_text(&.{
-                "userxattr,lowerdir=", layers.lower, ",upperdir=", upper, ",workdir=", work,
+                "userxattr,lowerdir=", layers.net, ":",         layers.lower,
+                ",upperdir=",          upper,      ",workdir=", work,
             });
         }
         assert(spec.overlay_path_problem(layers.empty.?) == null);
-        return plan.add_text(&.{ "userxattr,lowerdir=", layers.lower, ":", layers.empty.? });
+        return plan.add_text(&.{
+            "userxattr,lowerdir=", layers.net, ":", layers.lower, ":", layers.empty.?,
+        });
     }
 
     /// `/tmp` and `/run` as tmpfs (their mount points are made first, while the rootfs is still
@@ -568,12 +711,52 @@ pub const Plan = struct {
         plan.push(.mount_pts, pts, empty_text, 0);
     }
 
-    /// The host's /sys, bound recursively and made read-only.
-    fn push_sys(plan: *Plan, rootfs: []const u8) void {
+    /// The mount points of the two generated files below `base` (the rootfs, or the overlay's
+    /// net layer): `base/etc`, then the two files, each left alone if it is there already.
+    fn push_etc_mount_points(plan: *Plan, base: []const u8) void {
         const start = plan.count;
         defer assert(plan.count == start + 3);
+        assert(base.len > 0);
+        const directory = plan.add_text(&.{ base, "/etc" });
+        plan.push(.make_etc_dir, directory, empty_text, 0);
+        for (std.enums.values(netfiles.File)) |file| {
+            const path = plan.add_text(&.{ base, "/etc/", file.etc_name() });
+            plan.push(.create_etc_file, path, empty_text, @backingInt(file));
+        }
+    }
+
+    /// Writes each generated file to the container's /dev, binds it read-only over its mount
+    /// point in the rootfs and removes the staged name. The /dev is a fresh tmpfs by now.
+    fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
+        const start = plan.count;
+        defer assert(plan.count == start + 8);
+        assert(rootfs.len > 0);
+        assert(plan.etc_texts[0].offset != plan.etc_texts[1].offset);
+        for (std.enums.values(netfiles.File)) |file| {
+            const index: u8 = @backingInt(file);
+            const staged = plan.add_text(&.{ rootfs, "/dev/", file.stage_name() });
+            const inside = plan.add_text(&.{ rootfs, "/etc/", file.etc_name() });
+            plan.push(.stage_etc_file, staged, plan.etc_texts[index], index);
+            plan.push(.bind_etc_file, inside, staged, index);
+            plan.push(.remount_etc_file, inside, empty_text, index);
+            plan.push(.unstage_etc_file, staged, empty_text, index);
+        }
+    }
+
+    /// The container's /sys: the host's, bound recursively and made read-only, when it shares
+    /// the host's network namespace; a sysfs of its own, read-only, when it has one.
+    fn push_sys(plan: *Plan, rootfs: []const u8) void {
+        const start = plan.count;
+        const expected: u32 = if (plan.isolated()) 2 else 3;
+        defer assert(plan.count == start + expected);
+        assert(rootfs.len > 0);
+        assert(plan.count < constants.plan_steps_max);
         const inside = plan.add_text(&.{ rootfs, "/sys" });
         plan.push(.make_sys_dir, inside, empty_text, 0);
+        if (plan.isolated()) {
+            plan.push(.mount_sysfs, inside, empty_text, 0);
+            return;
+        }
         plan.push(.bind_sys, inside, plan.add_text(&.{"/sys"}), 0);
         plan.push(.remount_sys, inside, empty_text, 0);
     }
@@ -688,16 +871,18 @@ pub const Plan = struct {
 
 // ---- Naming a step ----
 
+fn etc_name(index: u8) []const u8 {
+    assert(index < 2);
+    const file: netfiles.File = @fromBackingInt(@intCast(index));
+    return file.etc_name();
+}
+
 /// A short phrase for the step, for the cause line of a diagnostic: "mounting a fresh /proc".
 /// Formats into `buffer`, so it is for the parent only.
-pub fn describe(step: *const Step, buffer: []u8) []const u8 {
-    assert(buffer.len >= 128);
-    const name = switch (step.kind) {
-        .create_device_file, .bind_device => devices[step.index],
-        .link_dev => links[step.index].name,
-        else => "",
-    };
-    const phrase: []const u8 = switch (step.kind) {
+/// What a step of the parent's does, for `describe`.
+fn parent_phrase(kind: Kind) []const u8 {
+    assert(side_of(kind) == .parent);
+    const phrase: []const u8 = switch (kind) {
         .make_pipes => "creating the pipes between zbx and the container",
         .spawn => "creating the container's namespaces",
         .deny_setgroups => "denying setgroups in the container's user namespace",
@@ -707,9 +892,31 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .run_newgidmap => "running newgidmap to write the container's gid map",
         .spawn_keeper => "starting the process that keeps the container's cgroup scope alive",
         .start_scope => "starting the container's cgroup scope",
+        .start_pasta => "starting pasta for the container's network",
+        .await_pasta => "waiting for pasta to configure the container's network",
         .release_child => "letting the container continue",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
+        else => unreachable, // The child's steps; asserted above.
+    };
+    assert(phrase.len > 0);
+    return phrase;
+}
+
+pub fn describe(step: *const Step, buffer: []u8) []const u8 {
+    assert(buffer.len >= 128);
+    const name = switch (step.kind) {
+        .create_device_file, .bind_device => devices[step.index],
+        .create_etc_file, .stage_etc_file, .bind_etc_file => etc_name(step.index),
+        .remount_etc_file, .unstage_etc_file => etc_name(step.index),
+        .link_dev => links[step.index].name,
+        else => "",
+    };
+    const phrase: []const u8 = switch (step.kind) {
+        .make_pipes, .spawn, .deny_setgroups, .write_gid_map => parent_phrase(step.kind),
+        .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
+        .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
+        .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
@@ -726,6 +933,14 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .mount_pts => "mounting devpts on /dev/pts",
         .make_sys_dir => "creating /sys in the rootfs",
         .bind_sys => "binding the host's /sys",
+        .bring_up_loopback => "bringing up the loopback interface",
+        .mount_sysfs => "mounting a sysfs of the container's own",
+        .make_etc_dir => "creating the mount point directory for the generated /etc files",
+        .create_etc_file => "creating the mount point /etc/",
+        .stage_etc_file => "writing the generated /etc/",
+        .bind_etc_file => "binding the generated /etc/",
+        .remount_etc_file => "making the generated /etc file read-only: /etc/",
+        .unstage_etc_file => "removing the staged copy of /etc/",
         .remount_sys => "making /sys read-only",
         .enter_workdir => "entering the image's working directory",
         .set_user => "becoming the image's user",
@@ -753,6 +968,11 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
 
 comptime {
     assert(steps_count_single <= constants.plan_steps_max);
+    // The longest plan: the single map, a scope, a read-only root, a working directory, a user
+    // and pasta.
+    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 2 +
+        pasta_steps_count;
+    assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
     assert(links.len == constants.container_links_count);
@@ -791,7 +1011,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
-    try testing.expectEqual(@as(u32, 50), plan.count);
+    try testing.expectEqual(@as(u32, 61), plan.count);
     try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
     try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
@@ -810,25 +1030,27 @@ test "with the helpers the parent has one step per map, and the words are the ra
 test "the plan has the steps in order, parent and child interleaved, and all within bounds" {
     // Goal: the shape every other module relies on. Method: build once and walk it; each step
     // belongs to the side the order says, the device and link steps repeat per device and link,
-    // and only the devpts mount and the three of /sys are tolerant.
+    // and only the devpts mount, the /sys steps and the generated /etc files' are tolerant.
     var plan: Plan = undefined;
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
     try testing.expectEqual(steps_count_single, plan.count);
-    try testing.expectEqual(@as(u32, 51), plan.count);
+    try testing.expectEqual(@as(u32, 62), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
     var links_seen: u32 = 0;
     for (plan.steps[0..plan.count]) |step| {
         if (step.tolerant) {
             tolerant += 1;
-            const allowed = step.kind == .mount_pts or is_sys(step.kind);
+            const allowed = step.kind == .mount_pts or is_sys(step.kind) or is_etc(step.kind);
             try testing.expect(allowed);
         }
         if (step.kind == .bind_device) devices_seen += 1;
         if (step.kind == .link_dev) links_seen += 1;
     }
-    try testing.expectEqual(@as(u32, 4), tolerant);
+    // The devpts mount, the two /sys steps of a container with a sysfs of its own, and eleven
+    // for the two generated files.
+    try testing.expectEqual(@as(u32, 14), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
     // The mounts come in the order the kernel needs: private, bind, proc, dev, ... pivot, exec.
@@ -1021,11 +1243,13 @@ fn overlay_input(read_only: bool) Input {
     input.rootfs = state_containers ++ "/merged";
     input.read_only = read_only;
     input.overlay = if (read_only) .{
+        .net = state_containers ++ "/net",
         .lower = store_cache,
         .upper = null,
         .work = null,
         .empty = state_containers ++ "/empty",
     } else .{
+        .net = state_containers ++ "/net",
         .lower = store_cache,
         .upper = state_containers ++ "/upper",
         .work = state_containers ++ "/work",
@@ -1051,7 +1275,8 @@ test "a run of a tree mounts the overlay where a rootfs is bound, and has as man
     const step = found.?;
     try testing.expectEqualStrings(state_containers ++ "/merged", plan.text(step.target));
     try testing.expectEqualStrings(
-        "userxattr,lowerdir=" ++ store_cache ++ ",upperdir=" ++ state_containers ++ "/upper" ++
+        "userxattr,lowerdir=" ++ state_containers ++ "/net:" ++ store_cache ++
+            ",upperdir=" ++ state_containers ++ "/upper" ++
             ",workdir=" ++ state_containers ++ "/work",
         plan.text(step.source),
     );
@@ -1074,7 +1299,8 @@ test "a read-only run of a tree has no upper layer, and a second empty lower one
         if (step.kind != .mount_overlay) continue;
         const data = plan.text(step.source);
         try testing.expectEqualStrings(
-            "userxattr,lowerdir=" ++ store_cache ++ ":" ++ state_containers ++ "/empty",
+            "userxattr,lowerdir=" ++ state_containers ++ "/net:" ++ store_cache ++ ":" ++
+                state_containers ++ "/empty",
             data,
         );
         try testing.expect(std.mem.indexOf(u8, data, "upperdir") == null);
@@ -1103,7 +1329,7 @@ test "no step ever mounts a path of the store writable, or makes anything in it"
             try testing.expectEqual(Kind.mount_overlay, step.kind);
             mentions += 1;
             // The store's path is the lower layer, and only that.
-            const lower = "lowerdir=" ++ store_cache;
+            const lower = ":" ++ store_cache;
             try testing.expect(std.mem.indexOf(u8, source, lower) != null);
             if (std.mem.indexOf(u8, source, "upperdir=")) |at| {
                 try testing.expect(!under_store(source[at..]));
@@ -1131,11 +1357,13 @@ fn index_of(plan: *const Plan, kind: Kind) ?usize {
     return null;
 }
 
-test "/sys is bound read-only from the host, in every plan, before the pivot" {
-    // Goal: the M4 decision. Method: the three steps are there, in order, with the host's /sys
-    // as the source and the rootfs's as the target, whether or not the rootfs is read-only.
+test "/sys is bound read-only from the host in a plan that shares the host's network" {
+    // Goal: the M4 decision, kept for `--net host`. Method: the three steps are there, in order,
+    // with the host's /sys as the source and the rootfs's as the target, whether or not the
+    // rootfs is read-only.
     var plan: Plan = undefined;
     var input = test_input(&.{"sh"});
+    input.network = .host;
     plan.build(&input);
     const made = index_of(&plan, .make_sys_dir).?;
     try testing.expectEqual(Kind.bind_sys, plan.steps[made + 1].kind);
@@ -1189,4 +1417,90 @@ test "an image's PATH decides where a bare command is looked for" {
     try testing.expectEqualStrings("/opt/py/bin/python", plan.text(plan.candidates[0]));
     try testing.expectEqualStrings("/bin/python", plan.text(plan.candidates[3]));
     plan.check();
+}
+
+test "a container with a network of its own gets a sysfs of its own, and lo up first" {
+    // Goal: M5's /sys and loopback. Method: in the default plan the sysfs replaces the bind and
+    // the remount, `lo` comes up before the capabilities are restricted, and a plan that shares
+    // the host's network has neither and the same number of steps.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    try testing.expect(plan.isolated());
+    const made = index_of(&plan, .make_sys_dir).?;
+    try testing.expectEqual(Kind.mount_sysfs, plan.steps[made + 1].kind);
+    try testing.expectEqualStrings("/srv/alpine/sys", plan.text(plan.steps[made + 1].target));
+    try testing.expect(index_of(&plan, .bind_sys) == null);
+    try testing.expect(index_of(&plan, .remount_sys) == null);
+    const loopback = index_of(&plan, .bring_up_loopback).?;
+    try testing.expect(loopback < index_of(&plan, .restrict_capabilities).?);
+    try testing.expect(!plan.steps[index_of(&plan, .bring_up_loopback).?].tolerant);
+    const isolated_count = plan.count;
+    input.network = .host;
+    plan.build(&input);
+    try testing.expect(!plan.isolated());
+    try testing.expect(index_of(&plan, .bring_up_loopback) == null);
+    try testing.expect(index_of(&plan, .mount_sysfs) == null);
+    try testing.expectEqual(isolated_count, plan.count);
+}
+
+test "the generated /etc files are bound read-only over the image's, and the staged name goes" {
+    // Goal: M5's hosts and resolv.conf. Method: for each file the mount point, the stage, the
+    // bind, the read-only remount and the removal come in that order, the text is the file's,
+    // all are tolerant and in one group per file, and the bind comes after /dev is mounted and
+    // before the pivot.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    var stages: u32 = 0;
+    for (plan.steps[0..plan.count], 0..) |step, at| {
+        if (step.kind != .stage_etc_file) continue;
+        stages += 1;
+        const name = if (step.index == 0) "hosts" else "resolv.conf";
+        try testing.expectEqual(Kind.bind_etc_file, plan.steps[at + 1].kind);
+        try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
+        try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + 3].kind);
+        for (plan.steps[at .. at + 4]) |part| {
+            try testing.expect(part.tolerant);
+            try testing.expectEqual(step.index + 1, group_of(&part));
+        }
+        const staged = plan.text(step.target);
+        try testing.expect(std.mem.startsWith(u8, staged, "/srv/alpine/dev/.zbx-"));
+        try testing.expectEqualStrings(staged, plan.text(plan.steps[at + 1].source));
+        const inside = plan.text(plan.steps[at + 1].target);
+        try testing.expect(std.mem.endsWith(u8, inside, name));
+        try testing.expect(std.mem.startsWith(u8, inside, "/srv/alpine/etc/"));
+        try testing.expect(at > index_of(&plan, .mount_dev).?);
+        try testing.expect(at < index_of(&plan, .pivot_root).?);
+    }
+    try testing.expectEqual(@as(u32, 2), stages);
+    const hosts_text = plan.text(plan.etc_texts[0]);
+    try testing.expect(std.mem.indexOf(u8, hosts_text, "127.0.0.1\tlocalhost web-1\n") != null);
+    try testing.expect(std.mem.indexOf(u8, plan.text(plan.etc_texts[1]), "nameserver") == null);
+    input.network = .host;
+    input.host_resolv = "nameserver 127.0.0.53\n";
+    plan.build(&input);
+    try testing.expectEqualStrings("nameserver 127.0.0.53\n", plan.text(plan.etc_texts[1]));
+}
+
+test "a tree's mount points are in the net layer, a directory's in the rootfs" {
+    // Goal: the image's tree and the upper layer (which a commit reads) are not written for the
+    // generated files. Method: the mount points of a tree are made below the net layer, before
+    // the overlay is mounted; those of a directory below the rootfs, after the bind.
+    var plan: Plan = undefined;
+    plan.build(&overlay_input(false));
+    const overlay_at = index_of(&plan, .mount_overlay).?;
+    var points: u32 = 0;
+    for (plan.steps[0..plan.count], 0..) |step, at| {
+        if (step.kind != .make_etc_dir and step.kind != .create_etc_file) continue;
+        points += 1;
+        try testing.expect(at < overlay_at);
+        const target = plan.text(step.target);
+        try testing.expect(std.mem.startsWith(u8, target, state_containers ++ "/net/etc"));
+    }
+    try testing.expectEqual(@as(u32, 3), points);
+    plan.build(&test_input(&.{"sh"}));
+    const bind_at = index_of(&plan, .bind_rootfs).?;
+    try testing.expectEqual(Kind.make_etc_dir, plan.steps[bind_at + 1].kind);
+    try testing.expectEqualStrings("/srv/alpine/etc", plan.text(plan.steps[bind_at + 1].target));
 }

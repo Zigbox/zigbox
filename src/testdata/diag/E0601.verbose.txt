@@ -1,0 +1,7 @@
+error[ZBX-E0601]: pasta is not installed
+  while  connecting the container to the network (--net user)
+  cause  no executable named pasta in the directories of PATH
+  fix    install pasta (Debian, Ubuntu):   sudo apt install passt
+         or run with the host's network:   zbx run --net host alpine -- sh
+  more   zbx explain E0601
+  docs   https://zigbox.github.io/zigbox/errors/E0601.html

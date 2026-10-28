@@ -54,6 +54,10 @@ pub const Spec = struct {
     subuid_readable: bool = true,
     newuidmap: ?Binary = .{},
     newgidmap: ?Binary = .{},
+    /// `pasta` on PATH (/usr/bin/pasta): the warning of the net check goes away.
+    pasta: ?Binary = null,
+    /// What that pasta says to `--version`; null: the simulator's default, a recent release.
+    pasta_version: ?[]const u8 = null,
     status: ?[]const u8 = default_status,
     seccomp: host.Error!u32 = 0,
     probes: sim.Probes = .{},
@@ -76,6 +80,7 @@ pub const Fixture = struct {
     machine: []const u8,
     seccomp: host.Error!u32,
     probes: sim.Probes,
+    pasta_version: ?[]const u8,
 
     /// Points `host_sim` at this fixture.
     pub fn apply(fixture: *const Fixture, target: *sim.HostSim) void {
@@ -88,6 +93,7 @@ pub const Fixture = struct {
         target.seccomp_result = fixture.seccomp;
         target.probes = fixture.probes;
         target.environment_variables = fixture.environment;
+        if (fixture.pasta_version) |line| target.world.pasta_version_line = line;
         const model = &target.world.bus.model;
         switch (fixture.bus) {
             .present, .no_environment => {},
@@ -148,6 +154,7 @@ pub fn build(comptime spec: Spec) Fixture {
         list.add("/etc/subgid", spec.subgid);
         list.add_binary("/usr/bin/newuidmap", spec.newuidmap);
         list.add_binary("/usr/bin/newgidmap", spec.newgidmap);
+        list.add_binary("/usr/bin/pasta", spec.pasta);
         list.add("/proc/self/status", spec.status);
         for (spec.extra_files) |file| {
             list.items[list.len] = file;
@@ -176,6 +183,7 @@ pub fn build(comptime spec: Spec) Fixture {
         .machine = spec.machine,
         .seccomp = spec.seccomp,
         .probes = spec.probes,
+        .pasta_version = spec.pasta_version,
     };
 }
 
@@ -188,7 +196,7 @@ const cap_setuid_namespaced =
     "\x01\x00\x00\x03\x80\x00\x00\x00" ++ zero_pairs ++ "\xe8\x03\x00\x00";
 
 pub const all = [_]Fixture{
-    build(.{ .name = "ubuntu_2404" }),
+    build(.{ .name = "ubuntu_2404", .pasta = .{ .mode = 0o100755 } }),
     // Ubuntu 24.04 as installed: the AppArmor restriction is on, so the probe is refused.
     build(.{
         .name = "ubuntu_2404_restricted",
@@ -307,6 +315,14 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_exactly_minimum", .kernel = "5.15.0" }),
     build(.{ .name = "kernel_just_below", .kernel = "5.14.21-generic" }),
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
+    // The default host without pasta: the net check warns and says how to install it.
+    build(.{ .name = "pasta_missing" }),
+    // A pasta from before 2024_02_16: the run would refuse it, so the net check warns.
+    build(.{
+        .name = "pasta_old",
+        .pasta = .{ .mode = 0o100755 },
+        .pasta_version = "pasta 2023_12_30.f091893\n",
+    }),
 };
 
 /// The fixture called `name`, or null.

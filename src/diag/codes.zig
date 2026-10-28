@@ -123,9 +123,16 @@ pub const Code = enum(u8) {
     E0523,
     E0524,
     E0525,
+    E0526,
     W0501,
     W0502,
     W0503,
+    E0600,
+    E0601,
+    E0602,
+    E0603,
+    E0604,
+    E0605,
     E0701,
     E0702,
     E0703,
@@ -180,6 +187,10 @@ pub const registry = [_]Entry{
         \\"--version" take none; "explain" takes exactly one code; "run" takes its
         \\command only after "--".
         \\
+        \\Some options of "run" exclude each other: --rootfs and a tree, and
+        \\--publish with --net none or --net host (a forward needs the network of
+        \\its own that pasta gives, --net user, which --publish implies).
+        \\
         \\Remove the extra arguments. The message names the first one zbx ignored.
         ,
     },
@@ -204,8 +215,10 @@ pub const registry = [_]Entry{
         .summary = "option has a missing or invalid value",
         .explanation =
         \\--output needs a value, and the only values are "text" and "json".
-        \\--rootfs and --name need one too, a directory and a name. Either the
-        \\value is missing (the option was last, or empty) or it is wrong.
+        \\--net takes none, host or user. --rootfs and --name need one too, a
+        \\directory and a name; --publish takes HOST:CONTAINER (ZBX-E0600 says
+        \\what is wrong with one). Either the value is missing (the option was
+        \\last, or empty) or it is wrong.
         \\
         \\Write --output json or --output=json. With json, every failure is written
         \\to stderr as one JSON object per line, for scripts and CI.
@@ -428,9 +441,10 @@ pub const registry = [_]Entry{
         .blame = .environment,
         .summary = "can't create the container's namespaces",
         .explanation =
-        \\zbx runs a container in new user, mount, PID, UTS and IPC namespaces and
-        \\writes the id maps of the user namespace. The kernel refused one of
-        \\these, or a setting forbids it, so the container was not started.
+        \\zbx runs a container in new user, mount, PID, UTS, IPC and network
+        \\namespaces and writes the id maps of the user namespace. The kernel
+        \\refused one of these, or a setting forbids it, so the container was not
+        \\started.
         \\
         \\The cause names what failed. The usual reason is a restriction on
         \\unprivileged user namespaces: user.max_user_namespaces is 0,
@@ -832,9 +846,9 @@ pub const registry = [_]Entry{
         \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
         \\doctor ("zbx schema ps"), of commit, and of the store commands, named
         \\store-import, store-ls, store-du, store-rm, store-diff, store-verify,
-        \\store-gc, store-trash (gc --trash) and store-restore. Other commands have
-        \\no machine-readable output that needs one: explain and help print text,
-        \\version prints a line.
+        \\store-gc, store-trash (gc --trash) and store-restore, and of explain and
+        \\"lock show" (lock-show). Other commands have no machine-readable output
+        \\that needs one: help prints text, version prints a line.
         ,
     },
     .{
@@ -1745,6 +1759,18 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0526,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "there is no zbx.lock for this project",
+        .explanation =
+        \\zbx lock show prints the project's zbx.lock: the nearest one in the working
+        \\directory or any directory above it. There is none. A lock is made by the
+        \\first pull (or the first run of a tag) in the project directory, so pull
+        \\an image to make one, from the directory the project lives in.
+        ,
+    },
+    .{
         .code = .W0501,
         .severity = .warning,
         .blame = .external,
@@ -1785,6 +1811,102 @@ pub const registry = [_]Entry{
         \\in the working directory, recording which manifest and tree the name meant
         \\today. Commit the file to keep every machine on the same image. The next run
         \\checks the store against it and refuses if they differ.
+        ,
+    },
+    .{
+        .code = .E0600,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--publish is not a usable HOST:CONTAINER",
+        .explanation =
+        \\--publish HOST:CONTAINER forwards TCP port HOST of this machine to port
+        \\CONTAINER of the container, through pasta. Both are decimal port numbers
+        \\from 1 to 65535, with no protocol after them: every forward is TCP. The
+        \\option may be given up to 16 times, each with its own host port.
+        \\
+        \\--publish gives the container a network of its own through pasta, as
+        \\--net user does, so it needs no --net. The cause names what is wrong with
+        \\the value; nothing was started.
+        ,
+    },
+    .{
+        .code = .E0601,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "pasta is not installed",
+        .explanation =
+        \\--net user and --publish connect the container to the network through
+        \\pasta, a program from the passt project that runs as the user, needs no
+        \\privilege and changes no firewall rule, route or interface of the host.
+        \\zbx looks for it in the directories of PATH and found none.
+        \\
+        \\Install it (Debian and Ubuntu: apt install passt; Fedora: dnf install
+        \\passt), or run without a network (the default) or with the host's
+        \\(--net host). zbx doctor shows whether pasta was found.
+        ,
+    },
+    .{
+        .code = .E0602,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "pasta is too old",
+        .explanation =
+        \\zbx attaches pasta to the container's network namespace by the
+        \\container's process id. pasta releases created before 2024_02_16 do not
+        \\notice when such a namespace goes away, so they would keep the published
+        \\ports after the container ended. zbx refuses them before it starts
+        \\anything.
+        \\
+        \\The cause names the version found and the one needed. Install a newer
+        \\passt package; Ubuntu 24.04 and Debian 13 ship one that is new enough.
+        ,
+    },
+    .{
+        .code = .E0603,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "pasta failed to start",
+        .explanation =
+        \\zbx started pasta to connect the container's network namespace, and pasta
+        \\ended, or did not report the interface ready within 10 seconds, before
+        \\the container's command could run. The container was stopped and never
+        \\ran.
+        \\
+        \\The cause is pasta's own last line. Its whole output is in the run's
+        \\pasta log, named in the context (zbx state directory, logs). A host with
+        \\no default route, or a security policy that confines pasta, are the
+        \\usual reasons.
+        ,
+    },
+    .{
+        .code = .E0604,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a published host port is already in use",
+        .explanation =
+        \\--publish HOST:CONTAINER has pasta listen on port HOST of this machine,
+        \\on every address. Another program already listens there, so pasta could
+        \\not, and the container was not started.
+        \\
+        \\Choose another host port, or stop the program that holds it. On the host,
+        \\ss -tlnp shows which program listens on which port.
+        ,
+    },
+    .{
+        .code = .E0605,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the host lets users bind no port this low",
+        .explanation =
+        \\pasta listens on the host's port as the user, without privilege. Linux
+        \\lets an unprivileged process bind only ports from
+        \\net.ipv4.ip_unprivileged_port_start up (1024 unless changed), so a lower
+        \\host port was refused before anything started. The container's own port
+        \\may be low: port 80 inside the container works.
+        \\
+        \\Publish a host port at or above that bound (--publish 8080:80), or lower
+        \\the bound for every user, as root:
+        \\    sysctl net.ipv4.ip_unprivileged_port_start=80
         ,
     },
     .{
@@ -2006,7 +2128,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .E0517, .W0501, .W0502 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         else => true,
     };
 }

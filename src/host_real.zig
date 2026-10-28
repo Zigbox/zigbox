@@ -100,6 +100,7 @@ pub const HostReal = struct {
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
+        .start_program = start_program,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -109,6 +110,7 @@ pub const HostReal = struct {
         .change_directory = change_directory,
         .make_directory = make_directory,
         .create_file = create_file,
+        .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
@@ -384,6 +386,57 @@ pub const HostReal = struct {
         return @intCast(forked);
     }
 
+    /// Opens the child's stdin and stderr here, where a failure can be reported, then forks;
+    /// the child (`program_child`) makes only raw system calls before `execve`.
+    fn start_program(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        stdout: host.Handle,
+        log: [:0]const u8,
+    ) host.Error!host.Pid {
+        _ = from_context(context);
+        assert(request.path.len > 0);
+        assert(stdout > 2); // A pipe's end, never one of our own standard streams.
+        const input = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try check(input);
+        const stdin_fd: i32 = @intCast(input);
+        const log_flags: linux.O = .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+            .CLOEXEC = true,
+        };
+        const null_flags: linux.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
+        // A log that cannot be made (a full disk, a directory gone) is not a reason to refuse the
+        // run: pasta's stderr then goes to /dev/null, as for a run with no state directory.
+        var output: usize = if (log.len > 0) linux.open(log.ptr, log_flags, 0o600) else 0;
+        if (log.len == 0 or linux.errno(output) != .SUCCESS) {
+            output = linux.open("/dev/null", null_flags, 0);
+        }
+        check(output) catch |err| {
+            const errno_open = errno_last;
+            _ = linux.close(stdin_fd);
+            errno_last = errno_open; // The close must not hide why the open failed.
+            return err;
+        };
+        const stderr_fd: i32 = @intCast(output);
+        const parent: i32 = linux.getpid();
+        const forked = linux.fork();
+        // In the child (result 0) only raw system calls run, and it never returns.
+        if (forked == 0) program_child(request, parent, stdin_fd, @intCast(stdout), stderr_fd);
+        const errno_fork = linux.errno(forked);
+        _ = linux.close(stdin_fd); // The child has its copies; ours would only leak.
+        _ = linux.close(stderr_fd);
+        if (errno_fork != .SUCCESS) {
+            errno_last = @backingInt(errno_fork);
+            return host.error_for_errno(errno_last);
+        }
+        errno_last = 0;
+        assert(forked > 1);
+        assert(forked <= std.math.maxInt(i32));
+        return @intCast(forked);
+    }
+
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {
         _ = from_context(context);
         assert(pid > 0);
@@ -451,7 +504,7 @@ pub const HostReal = struct {
                 0,
                 @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
             ),
-            .proc, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
+            .proc, .sysfs, .dev_tmpfs, .shm_tmpfs, .devpts, .tmp_tmpfs, .run_tmpfs => blk: {
                 const fresh = fresh_filesystem(request.kind);
                 const data = @intFromPtr(fresh.data.ptr);
                 break :blk linux.mount(fresh.source, target, fresh.type, fresh.flags, data);
@@ -496,18 +549,36 @@ pub const HostReal = struct {
         try check(result);
     }
 
-    fn create_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+    fn create_file(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {
         _ = from_context(context);
         assert(path.len > 0);
+        // Without O_EXCL, creating a file that is there opens it and leaves it as it is: no
+        // O_TRUNC, and read-only, so a file the user may read but not write is fine.
         const flags: linux.O = .{
-            .ACCMODE = .WRONLY,
+            .ACCMODE = .RDONLY,
             .CREAT = true,
-            .EXCL = true,
+            .EXCL = !exist_ok,
             .CLOEXEC = true,
         };
         const opened = linux.open(path.ptr, flags, 0o644);
         try check(opened);
         _ = linux.close(@intCast(opened)); // An empty file: nothing was written to lose.
+    }
+
+    /// `lo` up: `SIOCGIFFLAGS`, then `SIOCSIFFLAGS` with `IFF_UP` added, on a datagram socket
+    /// that is closed again. A new network namespace has `lo`, down; the kernel then brings up
+    /// `127.0.0.1` and `::1` with it. The socket needs no privilege, the flag change needs
+    /// `CAP_NET_ADMIN` in the user namespace that owns the network namespace, which the
+    /// container's root has until the capabilities are restricted.
+    fn bring_up_loopback(context: *anyopaque) host.Error!void {
+        _ = from_context(context);
+        assert(@sizeOf(linux.ifreq) == 40); // The kernel's struct ifreq.
+        const opened = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+        try check(opened);
+        const descriptor: i32 = @intCast(opened);
+        const result = set_interface_up(descriptor, "lo");
+        _ = linux.close(descriptor); // Nothing buffered: the ioctls were the operation.
+        try result;
     }
 
     fn symlink(context: *anyopaque, target: [:0]const u8, link: [:0]const u8) host.Error!void {
@@ -809,9 +880,15 @@ pub const HostReal = struct {
         return @intCast(now.sec);
     }
 
-    fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
+    fn write_file(
+        context: *anyopaque,
+        path: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+    ) host.Error!void {
         _ = from_context(context);
         assert(path.len > 0);
+        assert(mode <= 0o777);
         assert(bytes.len <= constants.write_bytes_max);
         const flags: linux.O = .{
             .ACCMODE = .WRONLY,
@@ -819,9 +896,15 @@ pub const HostReal = struct {
             .TRUNC = true,
             .CLOEXEC = true,
         };
-        const opened = linux.open(path.ptr, flags, 0o600);
+        const opened = linux.open(path.ptr, flags, mode);
         try check(opened);
         const descriptor: i32 = @intCast(opened);
+        // The process umask has cut the mode the file was made with, and a file that was there
+        // kept its own: the mode asked for is set on the descriptor.
+        check(linux.fchmod(descriptor, mode)) catch |err| {
+            _ = linux.close(descriptor);
+            return err;
+        };
         var written: usize = 0;
         var calls: u32 = 0;
         const result: host.Error!void = while (written < bytes.len) {
@@ -958,6 +1041,7 @@ fn clone_flags(flags: host.SpawnFlags) u64 {
     if (flags.pid) bits |= linux.CLONE.NEWPID;
     if (flags.uts) bits |= linux.CLONE.NEWUTS;
     if (flags.ipc) bits |= linux.CLONE.NEWIPC;
+    if (flags.net) bits |= linux.CLONE.NEWNET;
     assert(bits & linux.CLONE.VM == 0); // The child gets its own memory, as after fork.
     assert(bits & linux.CSIGNAL == 0); // The exit signal is its own field.
     return bits;
@@ -996,6 +1080,21 @@ const Fresh = struct {
     flags: u32,
     data: [:0]const u8,
 };
+
+/// Adds `IFF_UP` to the flags of the interface `name` through the socket `descriptor`. The two
+/// ioctls are the whole of what `ip link set lo up` does for an interface that exists.
+fn set_interface_up(descriptor: i32, name: []const u8) host.Error!void {
+    assert(name.len > 0);
+    assert(name.len < linux.IFNAMESIZE);
+    var request: linux.ifreq = std.mem.zeroes(linux.ifreq);
+    @memcpy(request.ifrn.name[0..name.len], name);
+    const get = linux.ioctl(descriptor, linux.SIOCGIFFLAGS, @intFromPtr(&request));
+    try HostReal.check(get);
+    request.ifru.flags.UP = true;
+    const set = linux.ioctl(descriptor, linux.SIOCSIFFLAGS, @intFromPtr(&request));
+    try HostReal.check(set);
+    assert(request.ifru.flags.UP);
+}
 
 /// Makes a bind mount read-only. A bind remount that does not repeat the mount's own flags
 /// (nosuid, nodev, noexec, noatime, nodiratime, relatime) is refused in a user namespace, where
@@ -1051,6 +1150,12 @@ fn fresh_filesystem(kind: host.MountKind) Fresh {
             .source = "proc",
             .type = "proc",
             .flags = ms.NOSUID | ms.NODEV | ms.NOEXEC,
+            .data = "",
+        },
+        .sysfs => .{
+            .source = "sysfs",
+            .type = "sysfs",
+            .flags = ms.RDONLY | ms.NOSUID | ms.NODEV | ms.NOEXEC,
             .data = "",
         },
         .dev_tmpfs => .{
@@ -1156,6 +1261,30 @@ fn wait_child(pid: i32) host.Error!host.ExitStatus {
 
 /// The forked helper: its output goes to the pipe, then it becomes the program. It never
 /// returns; a failed exec ends it with the conventional "command not found" code.
+/// The child of `start_program`: its own session, killed with its parent, the signals zbx may
+/// have blocked unblocked, its three streams, then the program. Exit code 127 is "could not run
+/// it", as a shell says, and a parent that died before the death signal was set ends it too.
+fn program_child(
+    request: host.ExecRequest,
+    parent: i32,
+    stdin_fd: i32,
+    stdout_fd: i32,
+    stderr_fd: i32,
+) noreturn {
+    _ = linux.setsid();
+    const kill: usize = @backingInt(linux.SIG.KILL);
+    const death = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0);
+    if (death != 0) linux.exit_group(127);
+    if (linux.getppid() != parent) linux.exit_group(127);
+    const none: linux.sigset_t = linux.sigemptyset();
+    _ = linux.sigprocmask(linux.SIG.SETMASK, &none, null);
+    if (linux.errno(linux.dup2(stdin_fd, linux.STDIN_FILENO)) != .SUCCESS) linux.exit_group(127);
+    if (linux.errno(linux.dup2(stdout_fd, linux.STDOUT_FILENO)) != .SUCCESS) linux.exit_group(127);
+    if (linux.errno(linux.dup2(stderr_fd, linux.STDERR_FILENO)) != .SUCCESS) linux.exit_group(127);
+    _ = linux.execve(request.path.ptr, request.argv, request.envp);
+    linux.exit_group(127);
+}
+
 fn helper_child(request: host.ExecRequest, output: i32) noreturn {
     _ = linux.dup2(output, linux.STDOUT_FILENO);
     _ = linux.dup2(output, linux.STDERR_FILENO);

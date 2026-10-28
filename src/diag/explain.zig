@@ -5,6 +5,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const codes = @import("codes.zig");
+const Product = @import("product.zig").Product;
 
 /// One explanation as plain data: what `zbx explain` prints for a code. A second product builds
 /// one from its own registry and renders it with `render_entry`, so the two products' `explain`
@@ -63,6 +64,69 @@ pub fn render_entry(entry: ExplainEntry, buffer: []u8) []const u8 {
     return output;
 }
 
+/// The JSON document `zbx explain <code> --output json` prints, `zbx.explain/1`: one object on
+/// one line with the code, severity, blame, summary, explanation and the docs page. The buffer
+/// must be `output_bytes_max` bytes.
+pub fn render_json(code: codes.Code, buffer: []u8) []const u8 {
+    assert(buffer.len >= constants.output_bytes_max);
+    const entry = codes.entry(code);
+    var url: [constants.docs_url_bytes_max]u8 = undefined;
+    return render_json_entry(.{
+        .full_name = codes.full_name(code),
+        .severity = entry.severity,
+        .blame = entry.blame,
+        .summary = entry.summary,
+        .explanation = entry.explanation,
+        .exit_text = "",
+    }, Product.zbx.docs_url(&url, codes.full_name(code)), buffer);
+}
+
+/// `render_json` for an entry given as data, with the address of its page.
+pub fn render_json_entry(entry: ExplainEntry, docs: []const u8, buffer: []u8) []const u8 {
+    assert(buffer.len >= constants.output_bytes_max);
+    assert(entry.explanation.len <= constants.diag_explanation_bytes_max);
+    assert(docs.len <= constants.docs_url_bytes_max);
+    var writer = std.Io.Writer.fixed(buffer);
+    // Cannot fail: the longest explanation escaped (twice its length at the worst: a newline
+    // and a quote are two bytes) and a short header and docs address fit far below the buffer.
+    writer.writeAll("{\"schema\":\"zbx.explain/1\",\"code\":") catch unreachable; // Same.
+    write_json_text(&writer, entry.full_name);
+    writer.print(",\"severity\":\"{s}\",\"blame\":\"{s}\",\"summary\":", .{
+        @tagName(entry.severity), @tagName(entry.blame),
+    }) catch unreachable; // Same.
+    write_json_text(&writer, entry.summary);
+    writer.writeAll(",\"explanation\":") catch unreachable; // Same.
+    write_json_text(&writer, entry.explanation);
+    writer.writeAll(",\"docs\":") catch unreachable; // Same.
+    write_json_text(&writer, docs);
+    writer.writeAll("}\n") catch unreachable; // Same.
+    const output = writer.buffered();
+    assert(output[output.len - 1] == '\n');
+    assert(std.mem.indexOfScalar(u8, output[0 .. output.len - 1], '\n') == null);
+    return output;
+}
+
+/// A JSON string of printable ASCII and newlines, which is what registry text is made of.
+fn write_json_text(writer: *std.Io.Writer, text: []const u8) void {
+    assert(writer.buffer.len >= constants.output_bytes_max);
+    // Cannot fail: see `render_json_entry`.
+    writer.writeByte('"') catch unreachable; // Same.
+    for (text) |byte| {
+        switch (byte) {
+            '"', '\\' => {
+                writer.writeByte('\\') catch unreachable; // Same.
+                writer.writeByte(byte) catch unreachable; // Same.
+            },
+            '\n' => writer.writeAll("\\n") catch unreachable, // Same.
+            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => {
+                writer.writeByte(byte) catch unreachable; // Same.
+            },
+            else => writer.print("\\u{x:0>4}", .{byte}) catch unreachable, // Same.
+        }
+    }
+    writer.writeByte('"') catch unreachable; // Same.
+}
+
 test "explain prints the code, summary, blame, exit code and the long text" {
     // Goal: the exact shape of one explanation, and that every registered code can be explained
     // without overflowing the buffer. Method: render E0001 fully, then all codes.
@@ -78,6 +142,31 @@ test "explain prints the code, summary, blame, exit code and the long text" {
     for (codes.registry) |item| {
         const each = render(item.code, &buffer);
         try std.testing.expect(std.mem.indexOf(u8, each, item.explanation) != null);
+    }
+}
+
+test "the JSON form of every code is one valid line that says what the text form does" {
+    // Goal: `render_json` never overflows and never breaks the JSON, for every registered code.
+    // Method: parse each; the code, summary and explanation come back as the registry has them.
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    for (codes.registry) |item| {
+        const line = render_json(item.code, &buffer);
+        const valid = try @import("../test_util.zig").json_is_valid(line[0 .. line.len - 1]);
+        try std.testing.expect(valid);
+        const allocator = std.testing.allocator;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        try std.testing.expectEqualStrings("zbx.explain/1", object.get("schema").?.string);
+        try std.testing.expectEqualStrings(codes.full_name(item.code), object.get("code").?.string);
+        try std.testing.expectEqualStrings(item.summary, object.get("summary").?.string);
+        try std.testing.expectEqualStrings(item.explanation, object.get("explanation").?.string);
+        const severity = object.get("severity").?.string;
+        try std.testing.expectEqualStrings(@tagName(item.severity), severity);
+        try std.testing.expectEqualStrings(@tagName(item.blame), object.get("blame").?.string);
+        const docs = object.get("docs").?.string;
+        try std.testing.expect(std.mem.startsWith(u8, docs, constants.docs_url_base));
+        try std.testing.expect(std.mem.endsWith(u8, docs, ".html"));
     }
 }
 

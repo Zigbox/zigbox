@@ -1,0 +1,15 @@
+error[ZBX-E0604]: a published host port is already in use
+  while  starting container web-1
+  while  publishing the container's ports
+  cause  pasta: Failed to bind port 8080 (Address already in use) for option '-t
+         8080:80', exiting
+  cause  another program already listens on host port 8080
+  port   8080
+  log    /home/alice/.local/state/zbx/logs/web-1.pasta.log
+  name   web-1
+  rootfs /srv/alpine
+  step   await_pasta (6 of 65)
+  fix    see which program holds it:     ss -tlnp 'sport = :8080'
+         or publish another host port:   zbx run --publish 8081:80 nginx
+  more   zbx explain E0604
+  docs   https://zigbox.github.io/zigbox/errors/E0604.html

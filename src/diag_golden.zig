@@ -79,6 +79,26 @@ fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
 
+fn prepare_no_pasta(sim: *HostSim) void {
+    sim_run.start(sim, 1, sim_run.files_without_pasta);
+}
+
+fn prepare_old_pasta(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.pasta_version_line = "pasta 2023_12_30.f091893\n";
+}
+
+fn prepare_pasta_fails(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.pasta_behaviour = .fails;
+}
+
+fn prepare_port_taken(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim.world.ports_taken[0] = 8080;
+    sim.world.ports_taken_count = 1;
+}
+
 fn prepare_helper_refuses(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.helper_fails_with = 1;
@@ -553,6 +573,16 @@ fn prepare_store_unmapped(sim: *HostSim) void {
 
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
 
+const net_user_args = [_][:0]const u8{
+    "run", "--net", "user", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh",
+};
+
+fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
+    return .{
+        "run", "--publish", forward, "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh",
+    };
+}
+
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases;
 
@@ -566,6 +596,41 @@ const base_cases = [_]Case{
     .{ .code = .E0007, .args = &.{ "explain", "E9999" }, .exit = 1 },
     .{ .code = .E0008, .args = &many_arguments, .exit = 1 },
     .{ .code = .E0009, .args = &.{"help"}, .stdout_full = true, .exit = 2 },
+    .{
+        .code = .E0600,
+        .args = &.{ "run", "--publish", "8080", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
+        .exit = 125,
+    },
+    .{
+        .code = .E0601,
+        .args = &net_user_args,
+        .prepare = prepare_no_pasta,
+        .exit = 125,
+    },
+    .{
+        .code = .E0602,
+        .args = &net_user_args,
+        .prepare = prepare_old_pasta,
+        .exit = 125,
+    },
+    .{
+        .code = .E0603,
+        .args = &net_user_args,
+        .prepare = prepare_pasta_fails,
+        .exit = 125,
+    },
+    .{
+        .code = .E0604,
+        .args = &publish_args("8080:80"),
+        .prepare = prepare_port_taken,
+        .exit = 125,
+    },
+    .{
+        .code = .E0605,
+        .args = &publish_args("80:80"),
+        .prepare = prepare_container,
+        .exit = 125,
+    },
     .{ .code = .E0101, .args = &.{"doctor"}, .fixture = "ubuntu_2404_restricted", .exit = 2 },
     .{ .code = .E0102, .args = &.{"doctor"}, .fixture = "old_kernel", .exit = 2 },
     .{ .code = .E0103, .args = &.{"doctor"}, .fixture = "cgroup_missing_controllers", .exit = 2 },
@@ -647,7 +712,7 @@ const base_cases = [_]Case{
         .prepare = prepare_no_fork,
         .exit = 125,
     },
-    .{ .code = .E0406, .args = &.{ "schema", "explain" }, .exit = 1 },
+    .{ .code = .E0406, .args = &.{ "schema", "help" }, .exit = 1 },
     .{
         .code = .E0410,
         .args = &.{ "store", "du", "aaaaaaaaaaaa" },
@@ -1243,6 +1308,7 @@ const image_cases = [_]Case{
         .prepare = prepare_lock_unwritable,
         .exit = 2,
     },
+    .{ .code = .E0526, .args = &.{ "lock", "show" }, .prepare = prepare_image_world, .exit = 1 },
     .{
         .code = .W0503,
         .args = &run_open,

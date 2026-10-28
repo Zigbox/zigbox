@@ -6,7 +6,8 @@
 //! command can write a byte, so a terminal user sees it first.
 //!
 //! Process model (docs/briefs/M1-shell.md): the caller's process stays in the host PID namespace
-//! as the parent. `clone3` creates a child in new user, mount, PID, UTS and IPC namespaces. The
+//! as the parent. `clone3` creates a child in new user, mount, PID, UTS, IPC and (unless the
+//! host's network is shared, `--net host`) network namespaces. The
 //! child is PID 1 of its namespace, sets the container up and runs the command; there is no init
 //! shim. Two pipes carry the synchronisation: the parent tells the child when the id maps are
 //! written (`ready`), and the child tells the parent about a failed or skipped step (`report`).
@@ -50,6 +51,8 @@ const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const image_mod = @import("image.zig");
+const netfiles = @import("netfiles.zig");
+const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
@@ -214,6 +217,14 @@ pub const Handle = struct {
     notes_count: u32,
     /// The limits the run was started with, for the exit report and the record.
     limits: spec_mod.Limits,
+    /// What the container could reach, for the exit report.
+    network: spec_mod.Network,
+    /// The host's ports forwarded to the container's (`--publish`), for the exit report.
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    publish_count: u32,
+    /// For `--net user`: where pasta is, and the file its output goes to (empty: none).
+    pasta_path: text_util.Bounded(constants.pasta_path_bytes_max),
+    pasta_log: text_util.Bounded(constants.state_path_bytes_max + 80),
     /// Why the run ended, as the record says it; `none` until it has.
     end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
@@ -231,6 +242,12 @@ pub const Handle = struct {
     pub fn rootfs_slice(handle: *const Handle) []const u8 {
         assert(handle.rootfs_len > 0);
         return handle.rootfs[0..handle.rootfs_len];
+    }
+
+    pub fn publish_slice(handle: *const Handle) []const spec_mod.Publish {
+        assert(handle.publish_count <= constants.publish_count_max);
+        if (handle.publish_count > 0) assert(handle.network == .user);
+        return handle.publish[0..handle.publish_count];
     }
 
     pub fn note_slice(handle: *const Handle) []const Note {
@@ -282,6 +299,10 @@ pub fn start(
     handle.record_warned = false;
     handle.notes_count = 0;
     handle.limits = container.limits;
+    handle.network = container.network;
+    handle.publish_count = 0;
+    handle.pasta_path = .{};
+    handle.pasta_log = .{};
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.command = container.command;
@@ -290,28 +311,14 @@ pub fn start(
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
+    try check_network(host, container, handle, diag);
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
-    const input: plan_mod.Input = .{
-        .rootfs = handle.rootfs_slice(),
-        .name = handle.name_slice(),
-        .command = container.command,
-        .term = host.environment("TERM", constants.term_bytes_max),
-        .uid = host.uid(),
-        .gid = host.gid(),
-        .mapping = choice.mapping,
-        .scope = scope_input,
-        .read_only = container.read_only,
-        .env = container.env,
-        .workdir = container.workdir,
-        .user = container.user,
-        .overlay = if (handle.has_image) handle.image.overlay() else null,
-    };
-    handle.plan.build(&input);
+    build_plan(host, container, choice, scope_input, handle);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
     if (builtin.mode == .debug) assert_single_threaded(host);
 
@@ -331,6 +338,69 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
+/// when the container shares the host's network: the child formats and reads nothing.
+fn build_plan(
+    host: Host,
+    container: *const Spec,
+    choice: ids.Choice,
+    scope_input: ?plan_mod.ScopeInput,
+    handle: *Handle,
+) void {
+    assert(handle.name_len > 0);
+    assert(handle.status == .starting);
+    var resolv: netfiles.Buffer = undefined;
+    const host_resolv = host_resolv_conf(host, container.network, &resolv, handle);
+    const input: plan_mod.Input = .{
+        .rootfs = handle.rootfs_slice(),
+        .name = handle.name_slice(),
+        .command = container.command,
+        .term = host.environment("TERM", constants.term_bytes_max),
+        .uid = host.uid(),
+        .gid = host.gid(),
+        .mapping = choice.mapping,
+        .scope = scope_input,
+        .read_only = container.read_only,
+        .env = container.env,
+        .workdir = container.workdir,
+        .user = container.user,
+        .overlay = if (handle.has_image) handle.image.overlay() else null,
+        .network = container.network,
+        .host_resolv = host_resolv,
+        .pasta = if (container.network == .user) .{
+            .path = handle.pasta_path.slice(),
+            .log = handle.pasta_log.slice(),
+            .publish = handle.publish_slice(),
+        } else null,
+    };
+    handle.plan.build(&input);
+    assert(handle.plan.count == handle.plan.steps_expected());
+}
+
+/// The host's `/etc/resolv.conf`, for a container that shares the host's network: whole lines,
+/// within the bound. A file that cannot be read gives none, and a note says so. Other modes
+/// need none.
+fn host_resolv_conf(
+    host: Host,
+    network: spec_mod.Network,
+    out: *netfiles.Buffer,
+    handle: *Handle,
+) []const u8 {
+    assert(handle.notes_count < handle.notes.len);
+    if (network != .host) return "";
+    var raw: netfiles.Buffer = undefined;
+    const found = host.read_prefix("/etc/resolv.conf", &raw) catch |err| {
+        const note = &handle.notes[handle.notes_count];
+        note.* = .{};
+        note.print("the host's /etc/resolv.conf could not be read ({s}): no nameserver", .{
+            @errorName(err),
+        });
+        handle.notes_count += 1;
+        return "";
+    };
+    return netfiles.whole_lines(out, found.bytes);
 }
 
 /// What the diagnostics say about this run.
@@ -364,6 +434,9 @@ pub fn wait(handle: *Handle) ExitReason {
     host.begin_step(@intCast(handle.plan.count - 1)); // The `reap` step.
     const result = handle.session.wait(handle.wait_options);
     host.begin_step(host_mod.step_none);
+    // The container is gone (or zbx lost it, and `abandon` below ends it): pasta goes now, and
+    // the host's ports with it, before anything else is done.
+    handle.session.release_pasta();
     handle.status = .stopped;
     const status = result catch |err| {
         const failure: diagnose.Failure = .{
@@ -595,6 +668,83 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     handle.rootfs_len = @intCast(rootfs.len);
 }
 
+/// A run with `--net user`: the forwards are a list pasta can make, pasta is there and new
+/// enough, and no host port is below what the host lets a user bind. Everything is refused here,
+/// before anything is created. The path of pasta's log is chosen too.
+fn check_network(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(handle.publish_count == 0);
+    if (container.publish.len > 0) assert(container.network == .user);
+    if (container.network != .user) return;
+    if (spec_mod.publish_problem(.user, container.publish)) |problem| {
+        diagnose.publish_list_invalid(diag, problem);
+        return error.StartFailed;
+    }
+    @memcpy(handle.publish[0..container.publish.len], container.publish);
+    handle.publish_count = @intCast(container.publish.len);
+    doctor.gather_net(host, &handle.facts);
+    const pasta = &handle.facts.pasta;
+    if (!pasta.found) {
+        diagnose.pasta_missing(diag, container.network);
+        return error.StartFailed;
+    }
+    // A version line with no date ("unknown version", as Ubuntu 24.04's build prints) cannot be
+    // judged, and is not refused (docs/demos/m5.md).
+    if (pasta_mod.version_date(pasta.version.slice())) |date| {
+        if (date < constants.pasta_version_min_date) {
+            diagnose.pasta_too_old(diag, pasta.path.slice(), pasta.version.slice());
+            return error.StartFailed;
+        }
+    }
+    try check_low_ports(host, handle, diag);
+    handle.pasta_path.print("{s}", .{pasta.path.slice()});
+    choose_pasta_log(host, handle);
+    assert(handle.pasta_path.len > 0);
+}
+
+/// A host port below `net.ipv4.ip_unprivileged_port_start` is refused before pasta is started,
+/// with the bound in the message. A bound that cannot be read leaves it to pasta's own bind.
+fn check_low_ports(host: Host, handle: *const Handle, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    var buffer: [32]u8 = undefined;
+    const text = host.read_file("/proc/sys/net/ipv4/ip_unprivileged_port_start", &buffer) catch
+        return;
+    const bound = std.fmt.parseInt(u32, std.mem.trim(u8, text, " \n"), 10) catch return;
+    for (handle.publish_slice()) |forward| {
+        if (forward.host < bound) {
+            diagnose.pasta_port_refused(diag, forward.host, bound, "");
+            return error.StartFailed;
+        }
+    }
+}
+
+/// pasta's log: `<state>/zbx/logs/<name>.pasta.log`, beside the runs directory. A run with no
+/// state directory, or one where the directory cannot be made, has none: pasta's stderr then
+/// goes to /dev/null, and a failure's diagnostic says so.
+fn choose_pasta_log(host: Host, handle: *Handle) void {
+    assert(handle.pasta_log.len == 0);
+    var dir: records.Dir = undefined;
+    if (!records.locate(host, &dir)) return;
+    var logs: records.Dir = undefined;
+    if (!logs_dir_of(&dir, &logs)) return;
+    records.ensure(host, &logs) catch return;
+    handle.pasta_log.print("{s}/{s}{s}", .{
+        logs.text(), handle.name_slice(), constants.pasta_log_suffix,
+    });
+    assert(handle.pasta_log.len > logs.len);
+}
+
+/// The logs directory beside a runs directory: the same path with "logs" for its last part.
+fn logs_dir_of(runs: *const records.Dir, out: *records.Dir) bool {
+    const text = runs.text();
+    if (!std.mem.endsWith(u8, text, "/runs")) return false;
+    out.* = runs.*;
+    @memcpy(out.path[out.len - "runs".len .. out.len], "logs");
+    assert(out.path[out.len] == 0);
+    assert(std.mem.endsWith(u8, out.text(), "/logs"));
+    return true;
+}
+
 /// The limits of a library caller, against the bounds the flags are held to.
 fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
     assert(diag.code == null);
@@ -694,11 +844,28 @@ fn begin_record(handle: *Handle) void {
     var pruned: records.Pruned = undefined;
     records.prune(handle.host, &dir, handle.name_slice(), &skipped, &pruned) catch return;
     reclaim_layers(handle, &pruned);
+    remove_pasta_logs(handle, &dir, &pruned);
     if (skipped.count == 0) return;
     var warning: Diag = undefined;
     warning.reset();
     diagnose.records_skipped(&warning, dir.text(), &skipped);
     handle.report(&warning);
+}
+
+/// A record that was pruned takes its pasta log with it, if it had one. Best effort: a log that
+/// stays is a small file the next run of that name empties.
+fn remove_pasta_logs(handle: *Handle, dir: *const records.Dir, pruned: *const records.Pruned) void {
+    var logs: records.Dir = undefined;
+    if (!logs_dir_of(dir, &logs)) return;
+    for (0..pruned.count) |index| {
+        var path: [constants.state_path_bytes_max + 96]u8 = undefined;
+        const name = pruned.name(@intCast(index));
+        const format = "{s}/{s}" ++ constants.pasta_log_suffix;
+        // Cannot fail: a bounded directory and a run name of at most 63 bytes.
+        const text = std.fmt.bufPrintSentinel(&path, format, .{ logs.text(), name }, 0) catch
+            unreachable; // Same bound as above.
+        handle.host.remove_file(text) catch {};
+    }
 }
 
 /// A record that was pruned no longer needs the layers kept for it: they go, from inside the
@@ -785,7 +952,8 @@ fn warn_not_saved(handle: *Handle, directory: ?[]const u8, failure: ?diagnose.Fa
 }
 
 fn collect_notes(handle: *Handle) void {
-    assert(handle.notes_count <= 1); // The bus note, if the inherited bus was not the one used.
+    // The bus note, and the note that the host's resolv.conf could not be read.
+    assert(handle.notes_count <= 2);
     assert(handle.notes.len >= handle.notes_count + 1); // Room for the scope's.
     assert(handle.session.report.note_slice().len + handle.notes_count <= handle.notes.len);
     for (handle.session.report.note_slice()) |record| {

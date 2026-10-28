@@ -1,0 +1,3 @@
+/home/alice/project/zbx.lock: 1 image
+IMAGE                              MANIFEST                                                                PLATFORM     TREE
+registry.test/fixture/open:3.20    sha256:caa46fd3afcc62196418e5ec851addfb446dc14f7c1cb53f2d20afa96e82b184 linux/amd64  b3:5ba8785a24c71d8de1b422070831f5287cdb89390558fbc2e1da8f3eff719981
