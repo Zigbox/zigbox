@@ -8,7 +8,7 @@ name: vm
 
 on:
   push:
-    branches: ['vm/**']
+    branches: ['vm/**', '!vm/top20-**']
 
 concurrency:
   group: vm-${{ github.ref }}

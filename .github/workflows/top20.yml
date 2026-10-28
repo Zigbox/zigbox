@@ -2,13 +2,18 @@
 # images (src/testing/vm/top20.zon) in the test VM. Weekly and on demand, never on a pull
 # request. It uses the real Docker Hub, not the mirror the PR demos use, so it can meet the
 # anonymous pull limit; a 429 shows as that image's reason. One line per image goes to the job
-# summary; the job fails if an image fails without a documented reason.
+# summary; the job fails if an image fails without a documented reason. Weekly and on demand
+# (and on vm/top20-* scratch branches), never on a pull request.
 name: top20
 
 on:
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
+  # Dispatch needs the workflow on main; until it is, a push to vm/top20-<anything> runs it
+  # (vm.yml ignores those branches). Scratch branches are deleted once read (AGENTS.md, "Git").
+  push:
+    branches: ['vm/top20-**']
 
 permissions:
   contents: read
