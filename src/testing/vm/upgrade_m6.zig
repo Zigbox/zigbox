@@ -29,6 +29,7 @@ const harness = @import("harness.zig");
 const limits = @import("limits.zig");
 const m3 = @import("checks_m3.zig");
 const m4 = @import("checks_m4.zig");
+const net_user = @import("net_user_m5.zig");
 const session_mod = @import("session.zig");
 const state = @import("state_m6.zig");
 const up5 = @import("upgrade_m5.zig");
@@ -203,6 +204,8 @@ fn read_run_records(session: *Session, out: *Io.Writer) !void {
 
 /// postgres with a new `--state` volume, on M5's store.
 fn postgres_state(session: *Session, out: *Io.Writer) !void {
+    // `state ls` is run by `zn` (state_m6.zig's listing); it reads the same state directory.
+    try net_user.make_net_wrapper(session, out);
     _ = try state.expect_long(session, out, start_pg, 0, 300);
     const ready = comptime state.pg_ready_on(port);
     try state.wait_ready_on(session, out, ready);
