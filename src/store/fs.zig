@@ -41,6 +41,9 @@ pub const Stat = struct {
     rdev_minor: u32 = 0,
     /// When the bytes last changed, in seconds since the epoch.
     mtime: u64 = 0,
+    /// The space the file takes on the disk, in 512-byte blocks (`st_blocks`); what `state ls`
+    /// adds up. Zero where the file system does not say.
+    blocks: u64 = 0,
 };
 
 /// Called once per name in a directory, "." and ".." excluded, in the order the file system

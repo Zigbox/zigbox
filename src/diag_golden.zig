@@ -589,7 +589,7 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 }
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases;
+const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1052,6 +1052,136 @@ const bundle_cases = [_]Case{
         .code = .W0701,
         .args = &.{ "bundle", "--last", "--no-redact" },
         .prepare = prepare_with_record,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
+// ---- State volumes (M6) --------------------------------------------------------------------
+
+const state_root = sim_run.state_root;
+const pg_target = "pgdata:/var/lib/postgresql/data";
+/// When the golden state's trash entry was made: two minutes before the simulated clock.
+const trash_removed: u64 = 1_760_000_000 - 120;
+
+fn prepare_state_world(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim_run.prepare_state(sim, &golden_files, &.{"pgdata"});
+}
+
+fn prepare_state_volume(sim: *HostSim) void {
+    prepare_state_world(sim);
+    golden_files.put_dir(state_root, 0o755);
+    golden_files.put_dir(state_root ++ "/pgdata", 0o755);
+    golden_files.put_dir(state_root ++ "/pgdata/data", 0o700);
+}
+
+fn prepare_state_held(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    // The descriptor stays open for the whole case, as the other run would keep it.
+    const path = state_root ++ "/pgdata/lock";
+    golden_lock = golden_files.interface().lock(path, true, "4242 pg") catch {
+        unreachable; // The volume's directory is there and nothing else holds the lock.
+    };
+}
+
+fn prepare_state_trash(sim: *HostSim) void {
+    prepare_state_world(sim);
+    golden_files.put_dir(state_root, 0o755);
+    golden_files.put_dir(state_root ++ "/.trash", 0o755);
+    golden_files.put_dir(state_root ++ "/.trash/pgdata@1759999880", 0o755);
+}
+
+fn prepare_state_restore_over(sim: *HostSim) void {
+    prepare_state_trash(sim);
+    golden_files.put_dir(state_root ++ "/pgdata", 0o755);
+}
+
+fn prepare_state_expired(sim: *HostSim) void {
+    prepare_state_trash(sim);
+    sim.world.now = trash_removed + 8 * 24 * 60 * 60;
+}
+
+fn prepare_state_no_home(sim: *HostSim) void {
+    prepare_state_world(sim);
+    sim.environment_variables = &.{};
+}
+
+fn prepare_state_record_newer(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_file(state_root ++ "/pgdata/state.zon", 0o644, ".{\n    .version = 9,\n}\n");
+}
+
+/// The container's model has no directory for the volume, so the child's first state step
+/// (making `data`) fails.
+fn prepare_state_unmountable(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim_run.prepare_state(sim, &golden_files, &.{});
+}
+
+fn prepare_state_unreadable(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_dir(state_root ++ "/pgdata/data/base", 0o700);
+    golden_files.set_unreadable(state_root ++ "/pgdata/data/base");
+}
+
+const state_run = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine", "--name", "web-1" };
+
+const state_cases = [_]Case{
+    .{
+        .code = .E0705,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", "PgData:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0706,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_held,
+        .exit = 125,
+    },
+    .{
+        .code = .E0707,
+        .args = &.{ "state", "rm", "pgdata" },
+        .prepare = prepare_state_world,
+        .exit = 1,
+    },
+    .{
+        .code = .E0708,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_restore_over,
+        .exit = 1,
+    },
+    .{
+        .code = .E0709,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_world,
+        .exit = 1,
+    },
+    .{
+        .code = .E0710,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_expired,
+        .exit = 1,
+    },
+    .{ .code = .E0711, .args = &.{ "state", "ls" }, .prepare = prepare_state_no_home, .exit = 2 },
+    .{
+        .code = .E0712,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_record_newer,
+        .exit = 125,
+    },
+    .{
+        .code = .E0713,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_unmountable,
+        .exit = 125,
+    },
+    .{
+        .code = .W0702,
+        .args = &.{ "state", "ls" },
+        .prepare = prepare_state_unreadable,
         .prints = true,
         .warning = true,
         .exit = 0,

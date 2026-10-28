@@ -29,6 +29,9 @@ const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const state_commands = @import("state_commands.zig");
+const volume = @import("state/volume.zig");
+const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
@@ -52,6 +55,7 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  state <cmd>     the state volumes that outlive containers: ls, rm, restore (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
@@ -86,6 +90,9 @@ const help_text =
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
+    \\  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
+    \\                  8); the first use makes it, empty. One run writes a volume at a time;
+    \\                  with :ro it is mounted read-only and shared with other readers
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\stop:
@@ -105,6 +112,13 @@ const help_text =
     \\  zbx store gc --trash     list the trash
     \\  zbx store restore <id>   put a gc's trash back
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+    \\
+    \\state:
+    \\  zbx state ls             each volume: size, created, last used, last container, in use by
+    \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
+    \\  zbx state restore <name> bring the newest trash of <name> back
+    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
+    \\  touches them, and nothing but state rm removes one
     \\
     \\pull:
     \\  zbx pull [--resolve-only] <reference>
@@ -158,6 +172,7 @@ pub const Command = enum {
     schema,
     stop,
     store,
+    state,
     version,
 };
 
@@ -218,9 +233,18 @@ pub const RunArgs = struct {
     env: [constants.run_env_count_max]run_env.Setting = undefined,
     env_count: u32 = 0,
 
+    /// The `--state` values, parsed as each was read (`take_state`).
+    state: [constants.state_volumes_max]volume.Mount = undefined,
+    state_count: u32 = 0,
+
     pub fn env_slice(run_args: *const RunArgs) []const run_env.Setting {
         assert(run_args.env_count <= constants.run_env_count_max);
         return run_args.env[0..run_args.env_count];
+    }
+
+    pub fn state_slice(run_args: *const RunArgs) []const volume.Mount {
+        assert(run_args.state_count <= constants.state_volumes_max);
+        return run_args.state[0..run_args.state_count];
     }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
@@ -240,9 +264,10 @@ const RunOption = enum {
     grace,
     net,
     publish,
+    state,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 8);
+        assert(@backingInt(option) <= 9);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -254,6 +279,7 @@ const RunOption = enum {
             .grace => "--grace",
             .net => "--net",
             .publish => "--publish",
+            .state => "--state",
         };
     }
 };
@@ -277,6 +303,12 @@ pub const StoreArgs = struct {
     by_image: bool = false,
 };
 
+/// What `state` was given: the subcommand and the volume's name (`rm`, `restore`).
+pub const StateArgs = struct {
+    action: state_commands.Action,
+    operand: ?[]const u8,
+};
+
 /// What `pull` was given besides its reference.
 pub const PullArgs = struct {
     resolve_only: bool = false,
@@ -295,6 +327,8 @@ pub const Invocation = struct {
     store: StoreArgs,
     /// Set only when `command` is `pull`.
     pull: PullArgs,
+    /// Set only when `command` is `state`.
+    state: StateArgs,
 };
 
 pub const ParseError = error{
@@ -365,7 +399,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 9);
+    assert(std.enums.values(RunOption).len == 10);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -440,6 +474,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "stop")) found = .stop;
     if (std.mem.eql(u8, name, "store")) found = .store;
+    if (std.mem.eql(u8, name, "state")) found = .state;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -451,7 +486,7 @@ fn operands_count(command: Command) u32 {
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .lock => 1,
-        .store => 2,
+        .store, .state => 2,
     };
     assert(count <= 2);
     return count;
@@ -703,6 +738,7 @@ fn take_run_option(
         },
     };
     if (option == .publish) return take_publish(diag, run_args, value);
+    if (option == .state) return take_state(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -713,6 +749,7 @@ fn take_run_option(
         .grace => &run_args.grace,
         .net => &run_args.net,
         .publish => unreachable, // Repeatable: `take_publish` above.
+        .state => unreachable, // Repeatable: `take_state` above.
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -860,6 +897,41 @@ fn take_publish(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!v
     assert(runtime_spec.publish_problem(.user, run_args.publish_slice()) == null);
 }
 
+/// One `--state NAME:PATH[:ro]`: parsed now, and checked against the ones before it, so that the
+/// diagnostic quotes the value that is wrong. A bad name is ZBX-E0705; anything else E0005.
+fn take_state(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.state_count <= constants.state_volumes_max);
+    const mount = switch (volume.parse_mount(value)) {
+        .ok => |found| found,
+        .problem => |problem| switch (problem) {
+            .no_target => {
+                state_diagnose.bad_value(diag, value, "a volume needs a path: NAME:PATH");
+                return error.BadOptionValue;
+            },
+            .name => |name_problem| {
+                const colon = std.mem.indexOfScalar(u8, value, ':').?; // `no_target` otherwise.
+                state_diagnose.bad_name(diag, value[0..colon], name_problem);
+                return error.BadOptionValue;
+            },
+            .target => |target_problem| {
+                state_diagnose.bad_value(diag, value, target_problem.sentence());
+                return error.BadOptionValue;
+            },
+        },
+    };
+    if (run_args.state_count == constants.state_volumes_max) {
+        state_diagnose.bad_value(diag, value, state_diagnose.list_sentence(.too_many));
+        return error.BadOptionValue;
+    }
+    run_args.state[run_args.state_count] = mount;
+    if (volume.list_problem(run_args.state[0 .. run_args.state_count + 1])) |problem| {
+        state_diagnose.bad_value(diag, value, state_diagnose.list_sentence(problem));
+        return error.BadOptionValue;
+    }
+    run_args.state_count += 1;
+}
+
 /// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
 fn bad_publish(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
     assert(diag.code == null);
@@ -924,9 +996,11 @@ fn resolve(
 ) ParseError!void {
     assert(operands.len <= constants.args_count_max);
     invocation.store = .{ .action = .ls, .operand = null }; // Only `store` and `commit` set it.
+    invocation.state = .{ .action = .ls, .operand = null }; // Only `state` sets it.
     if (operands.len == 0) return missing_command(diag, args.len);
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
     if (command == .store) return resolve_store(operands, invocation, diag);
+    if (command == .state) return resolve_state(operands, invocation, diag);
     defer if (invocation.command == .commit) {
         invocation.store = .{ .action = .commit, .operand = invocation.operand };
     };
@@ -1006,6 +1080,52 @@ fn resolve_store(
         .second = if (given == 2) operands[3] else null,
     };
     assert((invocation.store.operand != null) == (given >= 1));
+}
+
+/// `state` takes a subcommand, and for `rm` and `restore` a volume's name.
+fn resolve_state(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .state);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    if (operands.len == 1) {
+        return state_usage(diag, "'state' needs a subcommand: ls, rm or restore");
+    }
+    const action = std.meta.stringToEnum(state_commands.Action, operands[1]) orelse {
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a state subcommand; they are ls, rm and restore", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    };
+    const wanted: usize = if (action == .ls) 0 else 1;
+    const given: usize = operands.len - 2;
+    if (given > wanted) return unexpected_argument(diag, .state, operands[2 + wanted]);
+    if (given < wanted) {
+        return state_usage(diag, if (action == .rm)
+            "'state rm' needs the name of the volume to remove"
+        else
+            "'state restore' needs the name of the volume to bring back");
+    }
+    invocation.command = .state;
+    invocation.operand = null;
+    invocation.state = .{ .action = action, .operand = if (given == 1) operands[2] else null };
+    assert((invocation.state.operand != null) == (action != .ls));
+}
+
+fn state_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "state", .{});
+    diag.fix(.{ .sentence = "see the volumes and the trash:", .command = "zbx state ls" });
+    return error.MissingArgument;
 }
 
 const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
@@ -1380,6 +1500,8 @@ pub const Storage = struct {
     /// The container's environment: the image's variables with the `-e` options merged over them
     /// (`run_env.zig`).
     run_env: run_env.Storage,
+    /// The state commands' memory: the listing, the records, the size walk.
+    state: state_commands.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
@@ -1482,6 +1604,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .pull => return run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
+        .state => return run_state(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -1593,6 +1716,29 @@ fn run_store(
     ) catch {
         return error.CommandFailed;
     };
+}
+
+/// `zbx state ...`: the parent decides, the file work runs in the store's child.
+fn run_state(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .state);
+    assert(diag.code == null);
+    const mode = invocation.options.mode();
+    const output: state_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = invocation.options.output == .json,
+    };
+    const args: state_commands.Args = .{
+        .action = invocation.state.action,
+        .operand = invocation.state.operand,
+    };
+    return state_commands.run(host, args, output, &storage.handle.facts, &storage.state, diag) catch
+        return error.CommandFailed;
 }
 
 const Times = struct { timeout_ms: u32, grace_ms: u32 };
@@ -1724,6 +1870,7 @@ fn run_container(
         .user = prepared.user,
         .network = network_of(&given),
         .publish = given.publish_slice(),
+        .state = given.state_slice(),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);

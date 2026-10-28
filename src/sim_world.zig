@@ -40,6 +40,8 @@ pub const errno_pipe: u16 = 32;
 pub const errno_nametoolong: u16 = 36;
 pub const errno_noexec: u16 = 8;
 pub const errno_nospc: u16 = 28;
+pub const errno_busy: u16 = 16;
+pub const errno_notempty: u16 = 39;
 
 /// A path of the simulated machine. Fixed-size, so the model never allocates.
 pub const SimPath = struct {
@@ -84,6 +86,10 @@ pub const NodeKind = enum { dir, file, symlink };
 const Node = struct {
     path: SimPath,
     kind: NodeKind,
+    /// Made by `make_directory` from a process in a user namespace of its own, with its id maps
+    /// written, as that namespace's root (before `set_user`): what the container's root makes
+    /// is owned by the user on the host and by root in the container (a state volume's `data`).
+    made_as_namespace_root: bool = false,
 };
 
 /// One mount. `kind` is null for a mount the host had before any container ran.
@@ -1514,7 +1520,39 @@ pub const World = struct {
         if (world.resolve(path, &real)) |errno| return errno;
         if (world.node_kind(real.slice())) |_| return if (exist_ok) null else errno_exist;
         if (!world.parent_is_dir(&real)) return errno_noent;
-        return world.add_checked(real.slice(), .dir);
+        if (world.add_checked(real.slice(), .dir)) |errno| return errno;
+        const process = &world.processes[world.current];
+        const as_root = process.new_user and process.maps.uid_map and process.user_set == null;
+        world.nodes[world.nodes_count - 1].made_as_namespace_root = as_root;
+        return null;
+    }
+
+    /// `rmdir`: an empty directory that nothing is mounted on.
+    pub fn remove_directory(world: *World, path: []const u8) ?u16 {
+        var real: SimPath = .{};
+        if (world.resolve(path, &real)) |errno| return errno;
+        const index = world.find_node(real.slice()) orelse return errno_noent;
+        if (world.nodes[index].kind != .dir) return errno_notdir;
+        for (world.nodes[0..world.nodes_count], 0..) |*node, other| {
+            if (other == index) continue;
+            if (node.path.under(real.slice())) return errno_notempty;
+        }
+        const table = &world.tables[world.processes[world.current].table];
+        if (table.find(real.slice()) != null) return errno_busy;
+        world.nodes[index] = world.nodes[world.nodes_count - 1];
+        world.nodes_count -= 1;
+        return null;
+    }
+
+    /// `MS_MOVE`: the mount at `source` (which must be one) goes to `target`, a directory.
+    fn move_mount(world: *World, source: []const u8, target: *const SimPath) ?u16 {
+        const table = &world.tables[world.processes[world.current].table];
+        var from: SimPath = .{};
+        if (world.resolve(source, &from)) |errno| return errno;
+        const index = table.find(from.slice()) orelse return errno_inval;
+        if (!table.private) return errno_inval; // A shared parent cannot give a mount away.
+        table.mounts[index].target = target.*;
+        return null;
     }
 
     pub fn create_file(world: *World, path: []const u8, exist_ok: bool) ?u16 {
@@ -1581,6 +1619,7 @@ pub const World = struct {
             return null;
         }
         if (world.mount_target_error(request.kind, &target)) |errno| return errno;
+        if (request.kind == .move) return world.move_mount(request.source.?, &target);
         // A sysfs shows the network devices of the namespace it is mounted in, so the kernel
         // lets only the owner of that namespace mount one.
         if (request.kind == .sysfs and !process.new_net) return errno_perm;

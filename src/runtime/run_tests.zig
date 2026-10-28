@@ -681,7 +681,7 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
     try testing.expectEqual(@as(u8, 42), run(&sim, &args));
     var parsed: records.Parsed = undefined;
     try records.parse(record_text(&sim, "rec-1").?, &parsed);
-    try testing.expectEqual(@as(u32, 5), parsed.version);
+    try testing.expectEqual(constants.record_version, parsed.version);
     try testing.expectEqual(@as(u64, 1_760_000_100), parsed.started);
     try testing.expectEqual(@as(?u64, 1_760_000_100), parsed.ended);
     try testing.expectEqual(records.Exit{ .exited = 42 }, parsed.exit);

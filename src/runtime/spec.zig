@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const volume = @import("../state/volume.zig");
 const constants = @import("../constants.zig");
 
 /// A key and a value kept in the run record, for whoever started the container to find it by.
@@ -204,6 +205,9 @@ pub const Spec = struct {
     network: Network = .none,
     /// The host's TCP ports forwarded to the container's (`--publish`); only with `user`.
     publish: []const Publish = &.{},
+    /// The state volumes it mounts (`--state`): each made on first use, held for the run's whole
+    /// life (one writer, or readers), and named in the run record.
+    state: []const volume.Mount = &.{},
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.

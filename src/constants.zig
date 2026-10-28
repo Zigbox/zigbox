@@ -235,7 +235,7 @@ pub const etc_file_bytes_max: u32 = 4096;
 pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 80;
+pub const plan_steps_max: u32 = 160;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
@@ -285,7 +285,7 @@ pub const events_poll_ms_max: u32 = 1000;
 
 pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
-pub const plan_paths_bytes_max: u32 = 64 * 1024;
+pub const plan_paths_bytes_max: u32 = 96 * 1024;
 /// One id map line, "0 4294967295 1\n", with room to spare.
 pub const id_map_line_bytes_max: u32 = 32;
 /// A record the child writes to the failure pipe: kind, step, and a two-byte errno.
@@ -394,9 +394,9 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 5;
+pub const record_version: u32 = 6;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 40 * 1024;
+pub const record_bytes_max: u32 = 52 * 1024;
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
 pub const label_key_bytes_max: u32 = 32;
@@ -533,6 +533,44 @@ pub const store_verify_damaged_max: u32 = 256;
 pub const store_verify_paths_max: u32 = 16;
 /// The most gc ids `gc --trash` lists.
 pub const store_trash_entries_max: u32 = 256;
+
+// State volumes (M6 slice 2, docs/briefs/M6-state.md). The layout is in the module doc of
+// `src/state/state.zig`.
+/// A volume's name: lowercase letters, digits, `.`, `-` and `_`, starting with a letter or digit.
+/// A directory name, never a path.
+pub const state_name_bytes_max: u32 = 63;
+/// `--state` given at most this many times in one run.
+pub const state_volumes_max: u32 = 8;
+/// A mount target in the container: absolute, every part a name, no `.` or `..` part.
+pub const state_target_bytes_max: u32 = 256;
+/// A `--state` value: the name, a colon, the target and ":ro".
+pub const state_value_bytes_max: u32 = state_name_bytes_max + 1 + state_target_bytes_max + 3;
+/// The version `state.zon` records. A record with a larger one is refused, never misread.
+pub const state_record_version: u32 = 1;
+/// One `state.zon`: a name, a container name and a target, every byte escaped, and the rest.
+pub const state_record_bytes_max: u32 = 4096;
+/// The times a volume's record keeps are seconds since the epoch, below this (year 36812): a
+/// bound `render` asserts and `parse` refuses past.
+pub const state_time_max: u64 = 1 << 40;
+/// The state directory: the data directory, then "/zbx/state", a name, and "/data" or a trash
+/// entry's name; a state path holds the longest of these.
+pub const state_volume_path_bytes_max: u32 = 640;
+/// The trash keeps what `zbx state rm` moved for `store_trash_seconds`, as gc's does; the most
+/// entries `state ls` lists, and the most volumes.
+pub const state_trash_listed_max: u32 = 64;
+pub const state_volumes_listed_max: u32 = 128;
+/// A run waits this long for a volume's lock before it refuses (a `zbx state rm` holding it for
+/// a moment), trying every `store_lock_retry_ms`.
+pub const state_lock_wait_ms: u32 = 500;
+/// The size walk of `state ls`: the names of every open directory share one region, nesting is
+/// at most `store_depth_max`, entries counted at most this many, and inodes with more than one
+/// name are remembered (so that each is counted once) up to this many. Past any of them the
+/// size is not known, and a warning says so.
+pub const state_walk_arena_bytes: u32 = 4 * 1024 * 1024;
+pub const state_walk_entries_max: u32 = 1 << 22;
+pub const state_walk_links_max: u32 = 16384;
+/// Containers named as holding one volume, in a refusal or in `state ls`.
+pub const state_holders_max: u32 = 8;
 
 // The simulator's file tree for the store (`src/store/fs_sim.zig`): nodes, the bytes of every
 // file written, and open files.
@@ -787,7 +825,11 @@ comptime {
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
         2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512 +
         pasta_path_bytes_max + state_path_bytes_max + 80 + 2;
-    assert(paths_needed <= plan_paths_bytes_max);
+    // Each state volume: its name, its target twice, its data directory, and a stage path below
+    // the rootfs and one below /dev, each with its NUL.
+    const state_paths = state_volumes_max * (state_name_bytes_max + 2 * state_target_bytes_max +
+        state_volume_path_bytes_max + rootfs_bytes_max + 2 * 20 + 6);
+    assert(paths_needed + state_paths <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
     assert(sync_record_bytes == 4);
@@ -867,6 +909,26 @@ comptime {
     assert(store_warnings_shown_max > 0);
     assert(sim_fs_path_bytes_max > 100); // A store path: "/s/objects/ab/" and 62 digits.
     assert(sim_fs_handles_max >= 4);
+
+    assert(state_name_bytes_max <= container_name_bytes_max);
+    assert(state_volumes_max > 0);
+    assert(state_volumes_max <= 16);
+    assert(state_target_bytes_max <= path_bytes_max / 4);
+    assert(state_value_bytes_max <= arg_bytes_max);
+    assert(state_record_bytes_max >= 4 * (state_name_bytes_max + container_name_bytes_max +
+        state_target_bytes_max) + 512); // Every string escaped to four bytes, and the rest.
+    assert(state_time_max > 4_000_000_000); // Past 2106: a u32 of seconds would not do.
+    assert(state_volume_path_bytes_max + state_target_bytes_max <= path_bytes_max);
+    // The data directory, "/zbx/state/.trash/", a name, "@" and 20 digits, "/data/", and a
+    // temporary file's name.
+    assert(state_volume_path_bytes_max >= store_data_base_bytes_max + 18 +
+        state_name_bytes_max + 21 + 6 + 64);
+    assert(state_lock_wait_ms % store_lock_retry_ms == 0);
+    assert(state_walk_arena_bytes >= (store_depth_max + 1) * (store_name_bytes_max + 1) * 4);
+    assert(state_walk_links_max > 0);
+    assert(state_holders_max > 0);
+    // A plan with every volume: each has seven steps, eight when read-only.
+    assert(80 + state_volumes_max * 8 <= plan_steps_max);
 
     assert(oci_digest_hex_bytes == oci_digest_bytes * 2);
     assert(oci_digest_text_bytes == "sha256:".len + oci_digest_hex_bytes);

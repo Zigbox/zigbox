@@ -475,9 +475,10 @@ pub fn check_ps_lists(streams: Streams, status: u8, names: []const []const u8) E
 }
 
 /// The version of the run records the binary under test writes. M3 introduced version 4; M6
-/// slice 1 made it 5 (the network, the forwards and the names of `-e`), and the earlier demos
+/// slice 1 made it 5 (the network, the forwards and the names of `-e`), slice 2 made it 6 (the
+/// state volumes), and the earlier demos
 /// that check what the current binary writes follow it.
-pub const record_version_written: u32 = 5;
+pub const record_version_written: u32 = 6;
 
 /// A run record file has the version line `.version = <n>,`.
 pub fn check_record_version(output: []const u8, version: u32) Error!void {

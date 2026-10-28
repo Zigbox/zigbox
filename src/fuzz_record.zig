@@ -11,6 +11,7 @@ const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const records = @import("runtime/records.zig");
 const spec_mod = @import("runtime/spec.zig");
+const volume = @import("state/volume.zig");
 
 const text_bytes_max = constants.record_bytes_max;
 
@@ -118,6 +119,29 @@ fn random_reach(random: std.Random, reach: *Reach) void {
     }
 }
 
+/// Up to `state_volumes_max` mounts a run could have: distinct names, targets apart, some
+/// read-only, and targets with bytes the writer escapes.
+fn random_mounts(
+    random: std.Random,
+    out: *[constants.state_volumes_max]volume.Mount,
+) []volume.Mount {
+    const mount_names = [_][]const u8{ "pgdata", "a", "0.x", "cache_1", "v-4", "b", "c", "d" };
+    const targets = [_][]const u8{
+        "/var/lib/postgresql/data", "/t1", "/a\"b", "/\"q\"", "/x/y/z", "/caf\xc3\xa9", "/t\\7",
+        "/data",
+    };
+    const count = random.uintAtMost(usize, constants.state_volumes_max);
+    for (out[0..count], 0..) |*mount, index| {
+        mount.* = .{
+            .name = mount_names[index],
+            .target = targets[index],
+            .read_only = random.boolean(),
+        };
+    }
+    assert(volume.list_problem(out[0..count]) == null);
+    return out[0..count];
+}
+
 fn check_round_trip(random: std.Random) void {
     var rootfs_bytes: [constants.rootfs_bytes_max]u8 = undefined;
     const rootfs = random_text(random, &rootfs_bytes);
@@ -127,6 +151,7 @@ fn check_round_trip(random: std.Random) void {
     for (words[0..count], 0..) |*word, at| word.* = random_text(random, &words_bytes[at]);
     var reach: Reach = undefined;
     random_reach(random, &reach);
+    var mounts: [constants.state_volumes_max]volume.Mount = undefined;
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -149,6 +174,7 @@ fn check_round_trip(random: std.Random) void {
         .network = reach.network,
         .publish = reach.publish[0..reach.publish_count],
         .env_names = reach.names[0..reach.names_count],
+        .state = random_mounts(random, &mounts),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -174,6 +200,13 @@ fn check_round_trip(random: std.Random) void {
     for (view.env_names, 0..) |wanted, at| {
         assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
     }
+    assert(parsed.state_count == view.state.len);
+    for (view.state, 0..) |mount, index| {
+        const back = parsed.state_mount(@intCast(index));
+        assert(std.mem.eql(u8, back.name, mount.name));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.read_only == mount.read_only);
+    }
     check_damaged(random, text);
 }
 
@@ -192,6 +225,39 @@ fn check_damaged(random: std.Random, text: []const u8) void {
     assert(spec_mod.name_problem(parsed.name_slice()) == null);
     assert(parsed.rootfs_len <= constants.rootfs_bytes_max);
     check_reach_accepted(&parsed);
+    rerender(&parsed);
+}
+
+/// What a damaged record that still parses holds can be written again: the fields with bounds
+/// `render` asserts (the name, the scope, the reach, the state volumes) go into a view and are
+/// rendered, and read back the same.
+fn rerender(parsed: *const records.Parsed) void {
+    var mounts: [constants.state_volumes_max]volume.Mount = undefined;
+    for (mounts[0..parsed.state_count], 0..) |*mount, index| {
+        mount.* = parsed.state_mount(@intCast(index));
+    }
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
+    const view: records.View = .{
+        .name = parsed.name_slice(),
+        .rootfs = parsed.rootfs_slice(),
+        .command = &.{"sh"},
+        .labels = &.{},
+        .started = parsed.started,
+        .ended = parsed.ended,
+        .exit = parsed.exit,
+        .ids = parsed.ids orelse .single,
+        .zbx_version = "0.0.0",
+        .scope = parsed.scope_slice(),
+        .network = parsed.network orelse .none,
+        .publish = if (parsed.network != null) parsed.publish_slice() else &.{},
+        .env_names = words[0..parsed.env_names_count],
+        .state = mounts[0..parsed.state_count],
+    };
+    var buffer: [text_bytes_max]u8 = undefined;
+    var again: records.Parsed = undefined;
+    records.parse(records.render(&view, &buffer), &again) catch unreachable; // Written: reads.
+    assert(again.state_count == parsed.state_count);
 }
 
 /// What `render` asserts about M6's fields, which `parse` must have refused to break.
@@ -210,7 +276,7 @@ fn check_reach_accepted(parsed: *const records.Parsed) void {
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = "    .version = 5,\n";
+    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{constants.record_version});
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

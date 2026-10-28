@@ -420,6 +420,55 @@ const store_restore_schema =
     \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"}}}
 ;
 
+const state_ls_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-ls/1","version":1,
+    \\"title":"zbx state ls --output json",
+    \\"description":"stdout: the state volumes by name, and the trash of zbx state rm",
+    \\"type":"object","required":["schema","directory","volumes","trash","truncated"],
+    \\"properties":{"schema":{"const":"zbx.state.ls/1"},"directory":{"type":"string"},
+    \\"volumes":{"type":"array","items":{"type":"object","required":["name","bytes",
+    \\"disk_bytes","files","record","created","last_used","last_container","last_path",
+    \\"last_read_only","in_use","used_by"],
+    \\"properties":{"name":{"type":"string","pattern":"^[a-z0-9][a-z0-9._-]{0,62}$"},
+    \\"bytes":{"type":["integer","null"],"description":"files and symlinks, hard links once"},
+    \\"disk_bytes":{"type":["integer","null"],"description":"space on the disk; null: not counted"},
+    \\"files":{"type":["integer","null"]},
+    \\"record":{"enum":["ok","missing","unreadable"],"description":"state.zon"},
+    \\"created":{"type":["integer","null"]},"last_used":{"type":["integer","null"]},
+    \\"last_container":{"type":["string","null"]},"last_path":{"type":["string","null"]},
+    \\"last_read_only":{"type":["boolean","null"]},
+    \\"in_use":{"type":"boolean","description":"a running container mounts it"},
+    \\"used_by":{"type":"array","items":{"type":"object","required":["container","read_only"],
+    \\"properties":{"container":{"type":"string"},"read_only":{"type":"boolean"}}}}}}},
+    \\"trash":{"type":"array","items":{"type":"object","required":["name","entry","removed",
+    \\"expires","expired"],"properties":{"name":{"type":"string"},"entry":{"type":"string"},
+    \\"removed":{"type":"integer"},"expires":{"type":"integer"},"expired":{"type":"boolean"}}}},
+    \\"truncated":{"type":"boolean","description":"more volumes or trash than are listed"}}}
+;
+
+const state_rm_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-rm/1","version":1,
+    \\"title":"zbx state rm --output json",
+    \\"description":"stdout: the volume moved to the trash",
+    \\"type":"object","required":["schema","name","entry","removed","expires","emptied"],
+    \\"properties":{"schema":{"const":"zbx.state.rm/1"},"name":{"type":"string"},
+    \\"entry":{"type":"string","description":"its name in the trash: <name>@<removed>"},
+    \\"removed":{"type":"integer"},"expires":{"type":"integer"},
+    \\"emptied":{"type":"integer","description":"expired trash emptied now"}}}
+;
+
+const state_restore_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-restore/1","version":1,
+    \\"title":"zbx state restore --output json",
+    \\"description":"stdout: the volume brought back from the trash",
+    \\"type":"object","required":["schema","name","entry","removed"],
+    \\"properties":{"schema":{"const":"zbx.state.restore/1"},"name":{"type":"string"},
+    \\"entry":{"type":"string"},"removed":{"type":"integer"}}}
+;
+
 const pull_resolve_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
@@ -533,12 +582,15 @@ const table = [_]Entry{
     .{ .command = "pull", .text = pull_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
+    .{ .command = "state-ls", .text = state_ls_schema },
+    .{ .command = "state-rm", .text = state_rm_schema },
+    .{ .command = "state-restore", .text = state_restore_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 19);
+    assert(table.len == 22);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -567,7 +619,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 19), table.len);
+    try testing.expectEqual(@as(usize, 22), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

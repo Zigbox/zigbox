@@ -109,6 +109,7 @@ pub const HostReal = struct {
         .pivot_root = pivot_root,
         .change_directory = change_directory,
         .make_directory = make_directory,
+        .remove_directory = remove_directory,
         .create_file = create_file,
         .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
@@ -495,6 +496,7 @@ pub const HostReal = struct {
             .make_private => linux.mount(null, target, null, linux.MS.REC | linux.MS.PRIVATE, 0),
             .bind_tree => linux.mount(bind_source, target, null, linux.MS.BIND | linux.MS.REC, 0),
             .bind_file => linux.mount(bind_source, target, null, linux.MS.BIND, 0),
+            .move => linux.mount(bind_source, target, null, linux.MS.MOVE, 0),
             .remount_readonly => return remount_readonly(request.target),
             .remount_readonly_tree => return remount_readonly_tree(request.target),
             .overlay => linux.mount(
@@ -547,6 +549,12 @@ pub const HostReal = struct {
             }
         }
         try check(result);
+    }
+
+    fn remove_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        _ = from_context(context);
+        assert(path.len > 0);
+        try check(linux.rmdir(path.ptr));
     }
 
     fn create_file(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {

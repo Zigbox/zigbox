@@ -39,6 +39,23 @@ pub fn is_etc(kind: Kind) bool {
     };
 }
 
+/// The steps that mount the state volumes (M6). Each acts on one volume (`Step.index`). Before
+/// the new root is entered: the volume's `data` directory is made, in the container's user
+/// namespace as its root (so that its owner is the container's root, and a `chown` inside the
+/// container owns it through the id map); a hidden directory is made in the container's fresh
+/// /dev, the volume is bound there, and made read-only for `:ro`. After the new root is entered,
+/// so that the target is read as the container reads it (a symlink in the image resolves inside
+/// the container, never on the host): the target is made with its parents, the volume is moved
+/// onto it, and the hidden directory removed.
+pub fn is_state(kind: Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(Kind.exec));
+    return switch (kind) {
+        .make_state_data, .make_state_stage, .bind_state, .remount_state => true,
+        .make_state_target, .move_state, .remove_state_stage => true,
+        else => false,
+    };
+}
+
 /// The failure group of a tolerant step: 0 for none. The steps of one generated file are a
 /// group: when one fails the rest of the group is skipped, so one file makes one note and not
 /// a note per step.
@@ -119,6 +136,16 @@ pub const Kind = enum {
     bind_etc_file,
     remount_etc_file,
     unstage_etc_file,
+    /// The state volumes (`is_state`): before the new root is entered...
+    make_state_data,
+    make_state_stage,
+    bind_state,
+    /// (only for `:ro`)
+    remount_state,
+    /// ... and after.
+    make_state_target,
+    move_state,
+    remove_state_stage,
     /// Only in a plan with a working directory: makes it (and its parents) if the image lacks
     /// it, and goes there. After the new root is entered.
     enter_workdir,
@@ -194,6 +221,14 @@ pub const pasta_steps_count: u32 = 2;
 
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
+
+/// The steps each state volume adds, and the one more of a `:ro` volume (`is_state`).
+pub const state_steps_count: u32 = 6;
+pub const state_read_only_steps_count: u32 = 1;
+
+/// The hidden name in the container's /dev a volume is bound at before it is moved to its target,
+/// followed by the volume's index.
+pub const state_stage_prefix = "/dev/.zbx-state-";
 
 /// Steps of a plan with the single-id map: the parent has eight (it denies setgroups and
 /// writes both maps itself), the child has `child_steps_count`.
@@ -276,6 +311,21 @@ pub const Input = struct {
     host_resolv: []const u8 = "",
     /// Set exactly when `network` is `user`: how pasta is started.
     pasta: ?PastaInput = null,
+    /// The state volumes, in the order given (`spec.zig`'s `state` rules hold for them).
+    state: []const StateInput = &.{},
+};
+
+/// One state volume as the plan needs it: the host's directory that holds its files (already
+/// made by the parent up to its parent: the child makes `data` itself), where it goes in the
+/// container, and whether read-only. `name` is for the diagnostics.
+/// A volume's name and target, as a plan keeps them for its diagnostics.
+pub const StateNames = struct { name: []const u8, target: []const u8 };
+
+pub const StateInput = struct {
+    name: []const u8,
+    data: []const u8,
+    target: []const u8,
+    read_only: bool,
 };
 
 /// What the parent needs to start pasta: its path, the file its standard error goes to (empty:
@@ -334,6 +384,11 @@ pub const Plan = struct {
     pasta_log: Text,
     publish: [constants.publish_count_max]spec.Publish,
     publish_count: u32,
+    /// The state volumes: how many, how many of them read-only, and each one's name and target.
+    state_count: u32,
+    state_read_only_count: u32,
+    state_names: [constants.state_volumes_max]Text,
+    state_targets: [constants.state_volumes_max]Text,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -372,10 +427,11 @@ pub const Plan = struct {
         plan.build_etc_texts(input);
         plan.build_scope(input);
         plan.build_pasta(input);
+        plan.build_state(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
-        plan.push_child_steps(input.rootfs, input.overlay);
+        plan.push_child_steps(input);
         plan.push(.await_report, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
         assert(plan.count == plan.steps_expected());
@@ -420,7 +476,10 @@ pub const Plan = struct {
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) + @intFromBool(plan.has_user);
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
-        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta;
+        const state = state_steps_count * plan.state_count +
+            state_read_only_steps_count * plan.state_read_only_count;
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
+            state;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -461,6 +520,32 @@ pub const Plan = struct {
         plan.pasta_log = plan.add_text(&.{pasta.log});
         @memcpy(plan.publish[0..pasta.publish.len], pasta.publish);
         plan.publish_count = @intCast(pasta.publish.len);
+    }
+
+    fn build_state(plan: *Plan, input: *const Input) void {
+        assert(input.state.len <= constants.state_volumes_max);
+        plan.state_count = @intCast(input.state.len);
+        plan.state_read_only_count = 0;
+        for (input.state, 0..) |volume, index| {
+            assert(volume.data.len > 0);
+            assert(volume.data[0] == '/');
+            assert(volume.target.len > 1);
+            assert(volume.target[0] == '/');
+            plan.state_names[index] = plan.add_text(&.{volume.name});
+            plan.state_targets[index] = plan.add_text(&.{volume.target});
+            plan.state_read_only_count += @intFromBool(volume.read_only);
+        }
+        assert(plan.state_read_only_count <= plan.state_count);
+    }
+
+    /// The name and target of the volume a state step acts on, for a diagnostic.
+    pub fn state_of(plan: *const Plan, step: *const Step) StateNames {
+        assert(is_state(step.kind));
+        assert(step.index < plan.state_count);
+        return .{
+            .name = plan.text(plan.state_names[step.index]),
+            .target = plan.text(plan.state_targets[step.index]),
+        };
     }
 
     fn build_etc_texts(plan: *Plan, input: *const Input) void {
@@ -605,7 +690,9 @@ pub const Plan = struct {
         );
     }
 
-    fn push_child_steps(plan: *Plan, rootfs_text: []const u8, overlay: ?Overlay) void {
+    fn push_child_steps(plan: *Plan, input: *const Input) void {
+        const rootfs_text = input.rootfs;
+        const overlay = input.overlay;
         assert(plan.count == plan.first_child()); // After the parent's start.
         assert(rootfs_text.len > 0);
         const rootfs = plan.add_text(&.{rootfs_text});
@@ -632,12 +719,14 @@ pub const Plan = struct {
         plan.push_links(rootfs_text);
         plan.push_etc_files(rootfs_text);
         plan.push_sys(rootfs_text);
+        plan.push_state_stages(input.state, rootfs_text);
         if (plan.read_only) plan.push_read_only(rootfs, rootfs_text);
         const here = plan.add_text(&.{"."});
         plan.push(.enter_rootfs, rootfs, empty_text, 0);
         plan.push(.pivot_root, here, here, 0);
         plan.push(.detach_old_root, here, empty_text, 0);
         plan.push(.enter_new_root, plan.add_text(&.{"/"}), empty_text, 0);
+        plan.push_state_moves(input.state);
         if (plan.has_workdir) plan.push(.enter_workdir, plan.workdir, empty_text, 0);
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
         plan.push(.restrict_capabilities, empty_text, empty_text, 0);
@@ -648,6 +737,40 @@ pub const Plan = struct {
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
         assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+    }
+
+    /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound
+    /// there (read-only for `:ro`). The paths are the host's: the old root is still there.
+    fn push_state_stages(plan: *Plan, state: []const StateInput, rootfs: []const u8) void {
+        const start = plan.count;
+        defer assert(plan.count == start + state_steps_count / 2 * plan.state_count +
+            plan.state_read_only_count);
+        assert(state.len == plan.state_count);
+        for (state, 0..) |volume, index| {
+            const number = [1]u8{'0' + @as(u8, @intCast(index))};
+            const stage = plan.add_text(&.{ rootfs, state_stage_prefix, &number });
+            const data = plan.add_text(&.{volume.data});
+            const at: u8 = @intCast(index);
+            plan.push(.make_state_data, data, empty_text, at);
+            plan.push(.make_state_stage, stage, empty_text, at);
+            plan.push(.bind_state, stage, data, at);
+            if (volume.read_only) plan.push(.remount_state, stage, empty_text, at);
+        }
+    }
+
+    /// In the new root: each target made, the volume moved onto it, the hidden directory gone.
+    fn push_state_moves(plan: *Plan, state: []const StateInput) void {
+        const start = plan.count;
+        defer assert(plan.count == start + state_steps_count / 2 * plan.state_count);
+        for (state, 0..) |volume, index| {
+            const number = [1]u8{'0' + @as(u8, @intCast(index))};
+            const stage = plan.add_text(&.{ state_stage_prefix, &number });
+            const at: u8 = @intCast(index);
+            plan.push(.make_state_target, plan.state_targets[index], empty_text, at);
+            plan.push(.move_state, plan.state_targets[index], stage, at);
+            plan.push(.remove_state_stage, stage, empty_text, at);
+            assert(std.mem.eql(u8, plan.text(plan.state_targets[index]), volume.target));
+        }
     }
 
     /// The mount data of an overlay: `userxattr` (a mount made from a user namespace keeps its
@@ -941,6 +1064,13 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .bind_etc_file => "binding the generated /etc/",
         .remount_etc_file => "making the generated /etc file read-only: /etc/",
         .unstage_etc_file => "removing the staged copy of /etc/",
+        .make_state_data => "creating the state volume's data directory",
+        .make_state_stage => "creating the state volume's mount point in the container's /dev",
+        .bind_state => "binding the state volume",
+        .remount_state => "making the state volume read-only",
+        .make_state_target => "creating the state volume's mount point in the container",
+        .move_state => "moving the state volume onto its mount point",
+        .remove_state_stage => "removing the state volume's mount point in /dev",
         .remount_sys => "making /sys read-only",
         .enter_workdir => "entering the image's working directory",
         .set_user => "becoming the image's user",
@@ -971,14 +1101,17 @@ comptime {
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
     // and pasta.
     const longest = steps_count_single + scope_steps_count + read_only_steps_count + 2 +
-        pasta_steps_count;
+        pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
+        constants.state_volumes_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
     assert(links.len == constants.container_links_count);
+    // A volume's stage name ends in one digit.
+    assert(constants.state_volumes_max <= 10);
     // The failure record names a step in one byte, and a step's kind must be nameable too.
     assert(steps_count_single <= std.math.maxInt(u8));
-    assert(std.meta.fieldNames(Kind).len <= 64);
+    assert(std.meta.fieldNames(Kind).len <= 96);
 }
 
 const testing = std.testing;

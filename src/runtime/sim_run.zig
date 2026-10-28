@@ -410,3 +410,31 @@ test "tables_equal compares counts, order of content and privacy" {
     sim.world.tables[0].count -= 1;
     try std.testing.expect(leak(&sim, &before) != null);
 }
+
+/// The user's state directory in the simulated host (`XDG_DATA_HOME` unset, HOME as above).
+pub const state_root = "/home/alice/.local/share/zbx/state";
+
+/// Gives the simulator a file tree for the state directory (`tree`, which the caller owns),
+/// with the user's data directory's parents, and puts the volumes `names` in the container
+/// model: their directories, where the container's child makes `data` (the two models are
+/// separate; on a real host they are one file system).
+pub fn prepare_state(sim: *HostSim, tree: *SimFs, names: []const []const u8) void {
+    tree.init(1);
+    sim.store_fs = tree;
+    const parents = [_][]const u8{
+        "/home",
+        "/home/alice",
+        "/home/alice/.local",
+        "/home/alice/.local/share",
+        "/home/alice/.local/share/zbx",
+    };
+    for (parents) |parent| tree.put_dir(parent, 0o755);
+    var path: [constants.sim_path_bytes_max]u8 = undefined;
+    for (names) |name| {
+        const text = std.fmt.bufPrint(&path, state_root ++ "/{s}", .{name}) catch
+            unreachable; // Test names are short.
+        sim.world.add_node(text, .dir);
+    }
+}
+
+const SimFs = @import("../store/fs_sim.zig").SimFs;

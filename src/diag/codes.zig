@@ -141,7 +141,17 @@ pub const Code = enum(u8) {
     E0702,
     E0703,
     E0704,
+    E0705,
+    E0706,
+    E0707,
+    E0708,
+    E0709,
+    E0710,
+    E0711,
+    E0712,
+    E0713,
     W0701,
+    W0702,
     B0001,
 };
 
@@ -2041,6 +2051,141 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0705,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid state volume name",
+        .explanation =
+        \\A state volume's name is a directory name under the state directory, never
+        \\a path: lowercase letters, digits, '.', '-' and '_', starting with a letter
+        \\or a digit, at most 63 bytes. "pgdata", "web.cache" and "db_2" are names;
+        \\"PgData", ".hidden" and "a/b" are not.
+        \\
+        \\--state takes NAME:PATH, or NAME:PATH:ro to mount it read-only:
+        \\    zbx run --state pgdata:/var/lib/postgresql/data postgres:16
+        ,
+    },
+    .{
+        .code = .E0706,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the state volume is in use",
+        .explanation =
+        \\A state volume has one writer at a time. A run that mounts it read-write
+        \\holds it for its whole life, from before its command starts until it ends
+        \\(a clean exit, zbx stop, --timeout, a killed container or a killed zbx all
+        \\let it go). A run that mounts it with :ro shares it with other readers,
+        \\never with a writer. zbx state rm needs it free as well.
+        \\
+        \\The cause names the container that holds it. Stop that container first
+        \\(zbx stop <name>), or mount the volume read-only with NAME:PATH:ro if
+        \\reading is all this run needs.
+        ,
+    },
+    .{
+        .code = .E0707,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no state volume with that name",
+        .explanation =
+        \\There is no state volume of that name in the state directory
+        \\($XDG_DATA_HOME/zbx/state, or ~/.local/share/zbx/state). A volume is made
+        \\only by the first run that names it with --state, and removed only by zbx
+        \\state rm, after which zbx state restore brings it back for a week.
+        \\
+        \\zbx state ls lists the volumes, and the trash.
+        ,
+    },
+    .{
+        .code = .E0708,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a state volume with that name exists already",
+        .explanation =
+        \\zbx state restore puts a removed volume back under its name, and a volume
+        \\of that name was made again since it was removed (a run named it with
+        \\--state). Restoring would replace the new one, so nothing was changed.
+        \\
+        \\Remove the new volume first if it is not needed (zbx state rm <name>,
+        \\which moves it to the trash too), then restore the old one.
+        ,
+    },
+    .{
+        .code = .E0709,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no state volume with that name in the trash",
+        .explanation =
+        \\zbx state restore brings back a volume that zbx state rm moved to the trash.
+        \\The trash has no volume of that name: it was never removed, the name is
+        \\misspelled, or its trash was emptied by a later zbx state rm after it
+        \\expired.
+        \\
+        \\zbx state ls lists the volumes and what the trash holds.
+        ,
+    },
+    .{
+        .code = .E0710,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the state volume's trash has expired",
+        .explanation =
+        \\What zbx state rm moves to the trash is kept for 7 days, as what zbx store
+        \\gc moves is; after that the next zbx state rm empties it. This volume was
+        \\removed longer ago than that, so it is not restored: an expired trash is
+        \\due to go, and bringing it back would make the expiry a matter of luck.
+        \\
+        \\Its files are still in the trash directory until then
+        \\(<state>/.trash/<name>@<seconds>), and can be copied out by hand from the
+        \\user's namespace: unshare --map-auto --map-root-user, then cp -a.
+        ,
+    },
+    .{
+        .code = .E0711,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't make or read the state directory",
+        .explanation =
+        \\State volumes live in $XDG_DATA_HOME/zbx/state, or ~/.local/share/zbx/state
+        \\when that is not set, beside the store. Either neither variable names an
+        \\absolute directory, or a directory or file there could not be made, read
+        \\or written; the cause names the path and what the system said. A full
+        \\disk and a directory owned by another user are the usual reasons.
+        \\
+        \\Set HOME, or point XDG_DATA_HOME at a directory you own with room.
+        ,
+    },
+    .{
+        .code = .E0712,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read a state volume's record",
+        .explanation =
+        \\Each volume has a small record, <state>/<name>/state.zon: when it was made,
+        \\when it was last used and by which container. This one is damaged, or was
+        \\written by a newer zbx, which this one does not misread.
+        \\
+        \\Use the zbx that wrote it, or move the record aside: the volume's files in
+        \\<state>/<name>/data are not touched, and the next run writes a new record.
+        ,
+    },
+    .{
+        .code = .E0713,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't mount a state volume in the container",
+        .explanation =
+        \\A state volume is bound into the container before its command starts: its
+        \\data directory is made by the container's root, bound in the container's
+        \\/dev, then moved onto its path once the container's root is entered, so
+        \\that the path is read as the container reads it. One of those steps
+        \\failed; the cause names it and what the kernel said.
+        \\
+        \\With --read-only the path must already exist in the image: nothing can be
+        \\made in a read-only root. zbx doctor shows what this host allows.
+        ,
+    },
+    .{
         .code = .W0701,
         .severity = .warning,
         .blame = .user,
@@ -2052,6 +2197,22 @@ pub const registry = [_]Entry{
         \\
         \\Leave --no-redact out and the values are replaced by [redacted:<kind>],
         \\which is what you want for a bug report.
+        ,
+    },
+    .{
+        .code = .W0702,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "a state volume's size could not be counted",
+        .explanation =
+        \\zbx state ls counts a volume's size in the user's namespace, where files of
+        \\the container's users can be read, each file with several names once. The
+        \\count stopped for this volume (a file could not be read, the tree is deeper
+        \\than 64 directories, or it has more names or hard links than one listing
+        \\keeps), so its size is shown as unknown. The rest of the listing is right.
+        \\
+        \\du -sh in the user's namespace counts it by hand:
+        \\    unshare --map-auto --map-root-user du -sh <state>/<name>/data
         ,
     },
     .{
@@ -2196,6 +2357,7 @@ pub fn can_end_run(code: Code) bool {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0702, .E0703, .E0704 => false,
+        .E0707, .E0708, .E0709, .E0710, .W0702 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,

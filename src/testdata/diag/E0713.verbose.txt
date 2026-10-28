@@ -1,0 +1,13 @@
+error[ZBX-E0713]: can't mount a state volume in the container
+  while  starting container web-1
+  while  mounting the state volume pgdata at /var/lib/postgresql/data
+  cause  creating the state volume's data directory failed: no such file or
+         directory (ENOENT)
+  volume pgdata
+  target /var/lib/postgresql/data
+  name   web-1
+  rootfs /srv/alpine
+  step   make_state_data (52 of 69)
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0713
+  docs   https://zigbox.github.io/zigbox/errors/E0713.html

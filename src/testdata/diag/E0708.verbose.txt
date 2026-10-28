@@ -1,0 +1,9 @@
+error[ZBX-E0708]: a state volume with that name exists already
+  while  restoring the state volume pgdata
+  cause  a volume called pgdata was made again after pgdata@1759999880 went to
+         the trash; restoring would replace it
+  volume pgdata
+  trash  pgdata@1759999880
+  fix    move the new one to the trash first, if it is not needed:   zbx state rm pgdata
+  more   zbx explain E0708
+  docs   https://zigbox.github.io/zigbox/errors/E0708.html

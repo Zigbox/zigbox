@@ -11,6 +11,7 @@ commands:
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+  state <cmd>     the state volumes that outlive containers: ls, rm, restore (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   schema <cmd>    print the JSON schema of a command's output
@@ -45,6 +46,9 @@ run:
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
+  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
+                  8); the first use makes it, empty. One run writes a volume at a time;
+                  with :ro it is mounted read-only and shared with other readers
   --              ends the options; everything after it is the command, as typed
 
 stop:
@@ -64,6 +68,13 @@ store:
   zbx store gc --trash     list the trash
   zbx store restore <id>   put a gc's trash back
   a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+
+state:
+  zbx state ls             each volume: size, created, last used, last container, in use by
+  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
+  zbx state restore <name> bring the newest trash of <name> back
+  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
+  touches them, and nothing but state rm removes one
 
 pull:
   zbx pull [--resolve-only] <reference>

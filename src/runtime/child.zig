@@ -145,6 +145,15 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .bind_etc_file => try mount(host, .bind_file, target, plan.text(step.source)),
         .remount_etc_file => try mount(host, .remount_readonly, target, null),
         .unstage_etc_file => try unstage(host, target),
+        // The container's root makes the volume's `data` in its own user namespace, so that it
+        // is the owner as the container sees it; an existing one is the volume's files.
+        .make_state_data => try host.make_directory(target, true),
+        .make_state_stage => try host.make_directory(target, false),
+        .bind_state => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .remount_state => try mount(host, .remount_readonly, target, null),
+        .make_state_target => try make_parents(host, target),
+        .move_state => try mount(host, .move, target, plan.text(step.source)),
+        .remove_state_stage => try host.remove_directory(target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
         .set_user => try host.set_user(plan.user_uid, plan.user_gid),
@@ -172,10 +181,15 @@ fn unstage(host: Host, target: [:0]const u8) host_mod.Error!void {
     };
 }
 
-/// Makes the directory and the ones above it that are missing, then goes there. The prefixes
-/// are cut from the path in a buffer on the stack: the child formats nothing and allocates
-/// nothing.
+/// Makes the directory and the ones above it that are missing, then goes there.
 fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
+    try make_parents(host, path);
+    try host.change_directory(path);
+}
+
+/// Makes the directory and the ones above it that are missing. The prefixes are cut from the
+/// path in a buffer on the stack: the child formats nothing and allocates nothing.
+fn make_parents(host: Host, path: [:0]const u8) host_mod.Error!void {
     assert(path.len > 0);
     assert(path[0] == '/');
     var prefix: [constants.path_bytes_max + 1]u8 = undefined;
@@ -188,7 +202,6 @@ fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
         prefix[at] = 0;
         if (at > 1) try host.make_directory(prefix[0..at :0], true);
     }
-    try host.change_directory(path);
 }
 
 fn mount(
@@ -199,7 +212,9 @@ fn mount(
 ) host_mod.Error!void {
     assert(target.len > 0);
     assert(target[0] != 0);
-    assert((source != null) == (kind == .bind_tree or kind == .bind_file or kind == .overlay));
+    const has_source = kind == .bind_tree or kind == .bind_file or kind == .overlay or
+        kind == .move;
+    assert((source != null) == has_source);
     try host.mount(.{ .kind = kind, .target = target, .source = source });
 }
 

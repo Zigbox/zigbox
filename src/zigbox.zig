@@ -86,6 +86,9 @@ pub const records = @import("runtime/records.zig");
 /// single-threaded child inside the user's namespace (`store.namespace`).
 pub const store = @import("store/store.zig");
 
+/// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
+pub const state = @import("state/state.zig");
+
 test "the module's surface is what the contract names" {
     // Goal: a rename or a removal in the runtime that Zigcube relies on fails here, loudly.
     _ = Spec;

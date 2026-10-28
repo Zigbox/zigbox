@@ -59,6 +59,7 @@ const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
+const volumes_mod = @import("volumes.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -231,6 +232,8 @@ pub const Handle = struct {
     end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
     lost_diag: Diag,
+    /// The state volumes, held from before the container is created until it has ended.
+    volumes: volumes_mod.Held,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -307,6 +310,7 @@ pub fn start(
     handle.pasta_log = .{};
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
+    handle.volumes.count = 0;
     handle.command = container.command;
     handle.labels = container.labels;
     handle.env_names = container.env_names;
@@ -321,6 +325,11 @@ pub fn start(
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
+    // The volumes last, so that nothing above can fail with them held; from here every way out
+    // of `start` that is not a running container lets them go.
+    volumes_mod.take(host, container.state, handle.name_slice(), &handle.volumes, diag) catch
+        return error.StartFailed;
+    errdefer volumes_mod.release(host, &handle.volumes);
     build_plan(host, container, choice, scope_input, handle);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
     if (builtin.mode == .debug) assert_single_threaded(host);
@@ -377,6 +386,7 @@ fn build_plan(
             .log = handle.pasta_log.slice(),
             .publish = handle.publish_slice(),
         } else null,
+        .state = handle.volumes.input_slice(),
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -455,6 +465,7 @@ pub fn wait(handle: *Handle) ExitReason {
         });
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         finish_scope(handle); // `abandon` ended the container.
+        volumes_mod.release(host, &handle.volumes);
         handle.ended = .lost;
         return .lost;
     };
@@ -485,6 +496,8 @@ pub fn wait(handle: *Handle) ExitReason {
     };
     save_record(handle, exit, host.time_now(), null);
     finish_scope(handle);
+    // The container is reaped: its volumes are free for the next run.
+    volumes_mod.release(host, &handle.volumes);
     handle.ended = reason;
     return reason;
 }
@@ -936,6 +949,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .publish = handle.publish_slice(),
         .env_names = handle.env_names,
         .zbx_version = build_options.version,
+        .state = handle.volumes.mount_slice(),
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

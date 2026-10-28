@@ -1,0 +1,6 @@
+error[ZBX-E0712]: can't read a state volume's record
+  cause  /home/alice/.local/share/zbx/state/pgdata/state.zon was written by a
+         newer zbx
+  fix    use the zbx that wrote it, or move the record aside (the data is not in it)
+  more   zbx explain E0712 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0712.html

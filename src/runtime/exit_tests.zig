@@ -501,7 +501,7 @@ test "a version 1 record reads unchanged, with the version 2 fields defaulted" {
     try testing.expectEqual(records.EndReason.none, parsed.reason);
 }
 
-test "a version 2 record round-trips, and version 6 is newer" {
+test "a version 2 record round-trips, and the version after this one is newer" {
     var view = sim_run.sample_view("web-1", 1000);
     view.reason = .pid_limit;
     view.limits = .{ .memory_bytes = 64 << 20, .pids = 16, .cpu_millis = 500 };
@@ -512,14 +512,16 @@ test "a version 2 record round-trips, and version 6 is newer" {
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     try records.parse(text, &parsed);
-    try testing.expectEqual(@as(u32, 5), parsed.version);
+    try testing.expectEqual(constants.record_version, parsed.version);
     try testing.expectEqual(records.EndReason.pid_limit, parsed.reason);
     try testing.expectEqual(view.limits, parsed.limits);
     try testing.expectEqualStrings("zbx-web-1.scope", parsed.scope_slice());
     try testing.expect(parsed.detached);
     try testing.expect(parsed.timed_out);
     const gpa = testing.allocator;
-    const newer = try std.mem.replaceOwned(u8, gpa, text, ".version = 5,", ".version = 6,");
+    const now = std.fmt.comptimePrint(".version = {d},", .{constants.record_version});
+    const next = std.fmt.comptimePrint(".version = {d},", .{constants.record_version + 1});
+    const newer = try std.mem.replaceOwned(u8, gpa, text, now, next);
     defer testing.allocator.free(newer);
     try testing.expectError(error.Newer, records.parse(newer, &parsed));
     const reason = ".reason = .pid_limit";

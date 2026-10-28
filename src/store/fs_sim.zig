@@ -283,6 +283,11 @@ pub const SimFs = struct {
             .rdev_major = node.rdev_major,
             .rdev_minor = node.rdev_minor,
             .mtime = node.mtime,
+            // A file system of 4 KiB blocks: a directory takes one, a file what its bytes need.
+            .blocks = if (node.kind == .dir)
+                8
+            else
+                8 * (std.math.divCeil(u64, node.data_len, 4096) catch unreachable), // 4096 > 0.
         };
     }
 

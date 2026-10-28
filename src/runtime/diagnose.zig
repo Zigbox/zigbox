@@ -18,6 +18,7 @@ const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
+const state_diagnose = @import("../state/diagnose.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
@@ -183,6 +184,20 @@ pub fn step_failed(
     const step = &plan.steps[failure.step];
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
+    if (plan_mod.is_state(step.kind)) {
+        const volume = plan.state_of(step);
+        state_diagnose.mount_failed(
+            diag,
+            operation,
+            volume.name,
+            volume.target,
+            failure.err,
+            failure.errno,
+        );
+        starting(diag, info);
+        step_context(diag, plan, failure.step);
+        return;
+    }
     switch (step.kind) {
         .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),

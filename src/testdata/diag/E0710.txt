@@ -1,0 +1,6 @@
+error[ZBX-E0710]: the state volume's trash has expired
+  cause  pgdata went to the trash more than 7 days ago, and its trash has
+         expired
+  fix    copy its files out by hand first (zbx explain E0710)
+  more   zbx explain E0710 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0710.html

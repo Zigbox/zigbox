@@ -163,3 +163,11 @@ test {
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
 }
+
+test {
+    // State volumes (M6).
+    _ = @import("runtime/volumes.zig");
+    _ = @import("runtime/volume_tests.zig");
+    _ = @import("state/state.zig");
+    _ = @import("state_commands.zig");
+}
