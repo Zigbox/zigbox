@@ -199,6 +199,7 @@ fn run_all(
         }
         selected += 1;
         const result = try try_image(session, out, entry, traced);
+        try clear_store(session, out);
         var buffer: [1024]u8 = undefined;
         const line = try checks_top20.format_line(&buffer, result);
         lines[index] = try arena.dupe(u8, line);
@@ -286,10 +287,11 @@ fn try_image(
     const ran = try split_long(session, run);
     try H.show_split(out, run, ran);
     const stderr = try arena.dupe(u8, ran.streams.stderr);
-    const probe_result = if (probe != null and checks_top20.stopped_by_timeout(stderr))
+    const answer: ProbeAnswer = if (probe != null and checks_top20.stopped_by_timeout(stderr))
         try read_probe(session)
     else
-        checks_top20.Probe.none;
+        .{ .probe = .none, .text = "" };
+    const probe_result = answer.probe;
     const observed: checks_top20.Observed = .{
         .pulled = true,
         .status = ran.status,
@@ -302,6 +304,9 @@ fn try_image(
     result.verdict = checks_top20.judge(observed, entry.known);
     const refused = !checks_top20.command_started(ran.status);
     result.reason = reason_of(entry, result.verdict, stderr, if (refused) "error[" else "");
+    if (result.verdict == .fail and probe_result == .failed) {
+        result.reason = try arena.dupe(u8, answer.text);
+    }
     // Only a failure is looked at again under strace: a pass needs no explanation.
     if (result.verdict != .pass) result.seccomp = try find_seccomp(session, out, entry, traced);
     return result;
@@ -323,26 +328,35 @@ fn run_command(
         "while [ $ZI -lt {d} ] && kill -0 $ZP 2>/dev/null; do sleep 2; ZI=$((ZI+1)); ", .{
         ref, probe_steps_max,
     });
+    // `read` rather than `head`: a killed `head` loses what it buffered.
+    const connect = "exec 3<>/dev/tcp/127.0.0.1/{d}";
     if (spec.expect.len == 0) {
-        try text.print(arena, "if timeout 6 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{d}' " ++
-            "2>/dev/null; then echo ok >" ++ probe_file ++ "; break; fi; done; wait $ZP; }}", .{
-            spec.port,
-        });
+        try text.print(arena, "ZR=$(timeout 6 bash -c '" ++ connect ++ "' 2>&1); " ++
+            "if [ -z \"$ZR\" ]; then echo ok >" ++ probe_file ++ "; break; fi; ", .{spec.port});
     } else {
-        try text.print(arena, "ZR=$(timeout 6 bash -c 'exec 3<>/dev/tcp/127.0.0.1/{d} && " ++
-            "printf \"{s}\" >&3 && timeout 3 head -c 300 <&3' 2>/dev/null); " ++
-            "case \"$ZR\" in *{s}*) echo ok >" ++ probe_file ++ "; break;; esac; " ++
-            "done; wait $ZP; }}", .{ spec.port, spec.send, spec.expect });
+        try text.print(arena, "ZR=$(timeout 6 bash -c '" ++ connect ++ " && printf \"{s}\" >&3 " ++
+            "&& read -t 3 -r -n 300 L <&3; echo \"$L\"' 2>&1); " ++
+            "case \"$ZR\" in *{s}*) echo ok >" ++ probe_file ++ "; break;; esac; ", .{
+            spec.port, spec.send, spec.expect,
+        });
     }
+    // Without an answer the file says what the last try got.
+    try text.print(arena, "done; [ -e " ++ probe_file ++ " ] || echo \"no answer on port {d}: " ++
+        "$ZR\" >" ++ probe_file ++ "; wait $ZP; }}", .{spec.port});
     return text.items;
 }
 
-/// What the probe wrote: `ok`, or nothing (it never got its answer).
-fn read_probe(session: *Session) !checks_top20.Probe {
+/// What the probe wrote: `ok`, or why it got no answer.
+const ProbeAnswer = struct { probe: checks_top20.Probe, text: []const u8 };
+
+fn read_probe(session: *Session) !ProbeAnswer {
     const command = "cat " ++ probe_file ++ " 2>/dev/null";
     const read = try session.run(command, limits.command_timeout_kvm_s);
     const text = std.mem.trim(u8, read.output, " \r\n");
-    return if (std.mem.eql(u8, text, "ok")) .ok else .failed;
+    if (std.mem.eql(u8, text, "ok")) return .{ .probe = .ok, .text = "" };
+    const arena = session.scratch_allocator();
+    const kept = try arena.dupe(u8, if (text.len == 0) "the probe wrote nothing" else text);
+    return .{ .probe = .failed, .text = kept };
 }
 
 fn reason_of(
