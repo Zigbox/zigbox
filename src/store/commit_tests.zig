@@ -63,6 +63,21 @@ fn commit_upper(path: []const u8, parent: Digest) import.Error!import.Result {
     return result;
 }
 
+fn commit_excluding(path: []const u8, parent: Digest, exclude: []const []const u8) Digest {
+    var result: import.Result = undefined;
+    diag.reset();
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .parent = parent,
+        .exclude = exclude,
+    };
+    import.commit(&store, &workspace, path, options, &result, &diag) catch {
+        unreachable; // The sample layers commit.
+    };
+    return result.digest;
+}
+
 /// An upper layer whose root is the sample's root, as the overlay's would be.
 fn make_upper(path: []const u8) void {
     files.put_dir(path, 0o755);
@@ -511,4 +526,37 @@ fn expect_no_overlay_marks(root: []const u8) !void {
         try testing.expect(std.mem.indexOf(u8, content, "overlay") == null);
     }
     try testing.expect(seen > 10);
+}
+
+test "a commit leaves the mount points of the container's mounts as the parent has them" {
+    // Goal: a secret's mount point (and a tmpfs's, a bind's) is made in the container's root
+    // by zbx and is not the container's change. Method: an upper layer with a new file and a new
+    // directory at the excluded paths, a changed file the parent has, and an ordinary new file;
+    // the commit must equal the commit of the same layer without the mount points, and an
+    // excluded path the parent has stays as the parent has it.
+    const parent = start();
+    make_upper("/upper");
+    files.put_dir("/upper/run", 0o755);
+    files.put_dir("/upper/run/secrets", 0o755);
+    files.put_file("/upper/run/secrets/key", 0o400, "");
+    files.put_file("/upper/run/note", 0o644, "kept\n");
+    files.put_dir("/upper/scratch", 0o1777);
+    files.put_file("/upper/scratch/inside", 0o644, "x");
+    files.put_dir("/upper/etc", 0o755);
+    files.put_file("/upper/etc/shadow", 0o600, "changed\n");
+    make_upper("/plain");
+    files.put_dir("/plain/run", 0o755);
+    files.put_dir("/plain/run/secrets", 0o755);
+    files.put_file("/plain/run/note", 0o644, "kept\n");
+    const excluded = [_][]const u8{ "/run/secrets/key", "/scratch", "/etc/shadow" };
+    const left = commit_excluding("/upper", parent, &excluded);
+    const plain = commit_excluding("/plain", parent, &.{});
+    try testing.expect(left.eql(plain));
+    try testing.expect(!left.eql(parent));
+    // Without the exclusion the same layer is another tree.
+    try testing.expect(!commit_excluding("/upper", parent, &.{}).eql(plain));
+    // Nothing excluded matches by prefix: `/scratchy` is not `/scratch`.
+    files.put_file("/plain/scratchy", 0o644, "y");
+    const other = commit_excluding("/plain", parent, &[_][]const u8{"/scratch"});
+    try testing.expect(!other.eql(plain));
 }

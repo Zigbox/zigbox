@@ -242,3 +242,114 @@ test "an expired trash is refused by restore and emptied by the next rm" {
     try testing.expect(contains(sim.stdout(), "\"emptied\":1"));
     try testing.expect(files.kind_of(entry) == null);
 }
+
+fn gunzip_member(gz: []const u8, name: []const u8, owner: u32) !?[]const u8 {
+    const flate = std.compress.flate;
+    const plain = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(plain);
+    var input: std.Io.Reader = .fixed(gz);
+    var window: [flate.max_window_len]u8 = undefined;
+    var decompress: flate.Decompress = .init(&input, .gzip, &window);
+    var output = std.Io.Writer.fixed(plain);
+    _ = try decompress.reader.streamRemaining(&output);
+    const tar = output.buffered();
+    var at: usize = 0;
+    while (at + 512 <= tar.len) {
+        const header = tar[at..][0..512];
+        if (std.mem.allEqual(u8, header, 0)) break;
+        const size_text = std.mem.trim(u8, header[124..136], " \x00");
+        const size = try std.fmt.parseInt(usize, size_text, 8);
+        const path = std.mem.sliceTo(header[0..100], 0);
+        if (std.mem.eql(u8, path, name)) {
+            // The owner as `tar -tzv` shows it, and the first bytes of the content.
+            const uid = try std.fmt.parseInt(u32, std.mem.trim(u8, header[108..116], " \x00"), 8);
+            try testing.expectEqual(owner, uid);
+            const head = tar[at + 512 ..][0..@min(size, 8)];
+            const copy: []const u8 = try testing.allocator.dupe(u8, head);
+            return copy;
+        }
+        at += 512 + std.mem.alignForward(usize, size, 512);
+    }
+    return null;
+}
+
+test "export writes a gzip tar of the volume with the container's owners, to a file or stdout" {
+    // Goal: the archive the demo lists with `tar -tzvf`. Method: a volume with a file owned by
+    // 999; export to a file (text and JSON summary) and to stdout; read the archive back.
+    start(7);
+    try ran_pg();
+    const out = "/home/alice/pgdata.tar.gz";
+    try testing.expectEqual(@as(u8, 0), command(&.{ "state", "export", "pgdata", "-o", out }));
+    try testing.expect(contains(sim.stdout(), "pgdata: exported 1 files"));
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expect(files.kind_of(out ++ ".zbx-part") == null);
+    const archive = files.content_of(out).?;
+    try testing.expectEqual(@as(u8, 0x1f), archive[0]);
+    const first = (try gunzip_member(archive, "./base/1", 0)).?;
+    defer testing.allocator.free(first);
+    try testing.expectEqualStrings("rrrrrrrr", first);
+    const directory = (try gunzip_member(archive, "./base/", 999)).?;
+    testing.allocator.free(directory);
+    // JSON: the summary on stdout, the object checked against the schema.
+    try testing.expectEqual(@as(u8, 0), command(&.{
+        "--output", "json", "state", "export", "pgdata", "-o", out,
+    }));
+    var parsed = try parse_stdout();
+    defer parsed.deinit();
+    const keys = [_][]const u8{ "schema", "name", "file", "files", "bytes", "archive_bytes" };
+    try has_keys(parsed.value.object, schemas.of("state-export").?, &keys);
+    const schema = parsed.value.object.get("schema").?.string;
+    try testing.expectEqualStrings("zbx.state.export/1", schema);
+    // Standard output (not a terminal): only the archive.
+    try testing.expectEqual(@as(u8, 0), command(&.{ "state", "export", "pgdata" }));
+    try testing.expectEqual(@as(u8, 0x1f), sim.stdout()[0]);
+    try testing.expectEqual(@as(u8, 0x8b), sim.stdout()[1]);
+    try testing.expectEqualSlices(u8, archive[0..4], sim.stdout()[0..4]);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "export is refused while a run writes the volume, and shares it with readers" {
+    // Goal: a consistent read. Method: the lock held exclusive, as a run holds it, then shared;
+    // nothing is written when refused, the volume is as it was.
+    start(8);
+    try ran_pg();
+    var text: lock.HolderText = undefined;
+    lock.holder_text(77, "pg", &text);
+    const writer = try lock.take(sim.interface(), root ++ "/pgdata/lock", .exclusive, &text, 0);
+    const out = "/home/alice/pgdata.tar.gz";
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "export", "pgdata", "-o", out }));
+    try testing.expect(contains(sim.stderr(), "ZBX-E0706"));
+    try testing.expect(files.kind_of(out) == null);
+    try testing.expect(files.kind_of(out ++ ".zbx-part") == null);
+    lock.release(sim.interface(), writer);
+    const reader = try lock.take(sim.interface(), root ++ "/pgdata/lock", .shared, &text, 0);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "state", "export", "pgdata", "-o", out }));
+    lock.release(sim.interface(), reader);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "export refuses a missing volume, a full disk and bad words, leaving no file" {
+    // Goal: each refusal is coded and leaves nothing. Method: a name that is not there (E0707),
+    // a disk that takes no more (E0715, the part removed), `-o` on another command, a missing
+    // name, and an extra one.
+    start(9);
+    try ran_pg();
+    const out = "/home/alice/pgdata.tar.gz";
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "export", "nothing", "-o", out }));
+    try testing.expect(contains(sim.stderr(), "ZBX-E0707"));
+    try testing.expect(contains(sim.stderr(), "no state volume called nothing"));
+    files.faults.bytes_max = 200;
+    try testing.expectEqual(@as(u8, 2), command(&.{ "state", "export", "pgdata", "-o", out }));
+    try testing.expect(contains(sim.stderr(), "ZBX-E0715"));
+    files.faults.bytes_max = null;
+    try testing.expect(files.kind_of(out) == null);
+    try testing.expect(files.kind_of(out ++ ".zbx-part") == null);
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "ls", "-o", out }));
+    try testing.expect(contains(sim.stderr(), "ZBX-E0004"));
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "export" }));
+    try testing.expect(contains(sim.stderr(), "needs the name of the volume to export"));
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "export", "a", "b" }));
+    try testing.expectEqual(@as(u8, 1), command(&.{ "state", "export", "a", "-o" }));
+    const twice = [_][:0]const u8{ "state", "export", "a", "-o", "x", "-o", "y" };
+    try testing.expectEqual(@as(u8, 1), command(&twice));
+}

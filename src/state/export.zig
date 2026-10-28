@@ -422,9 +422,9 @@ const Walk = struct {
     }
 };
 
-const EntryKind = enum { directory, regular, symlink, hard_link };
+pub const EntryKind = enum { directory, regular, symlink, hard_link };
 
-const HeaderError = error{ WriteFailed, OwnerTooBig };
+pub const HeaderError = error{ WriteFailed, OwnerTooBig };
 
 fn pad(writer: *Io.Writer, size: u64) Io.Writer.Error!void {
     const rest: usize = @intCast(size % block);
@@ -451,6 +451,9 @@ fn write_extended(writer: *Io.Writer, kind: Header.FileType, text: []const u8) H
     assert(kind != .regular);
     assert(kind != .directory);
     var header: Header = .init(kind);
+    // The name GNU tar gives these records; a reader that stops at an empty name must not.
+    const record_name = "././@LongLink";
+    @memcpy(header.name[0..record_name.len], record_name);
     header.setSize(text.len) catch unreachable; // A path of at most 4100 bytes.
     header.write(writer) catch |err| switch (err) {
         error.WriteFailed => return error.WriteFailed,
@@ -461,7 +464,7 @@ fn write_extended(writer: *Io.Writer, kind: Header.FileType, text: []const u8) H
 }
 
 /// One entry's header (and the long-name records before it that it needs).
-fn write_header(
+pub fn write_header(
     writer: *Io.Writer,
     kind: EntryKind,
     name: []const u8,
@@ -496,12 +499,19 @@ fn write_header(
         bytes[156] = '1';
     }
     header.setPath("", name) catch |err| switch (err) {
-        error.NameTooLong => try write_extended(writer, .gnu_long_name, name),
+        error.NameTooLong => {
+            try write_extended(writer, .gnu_long_name, name);
+            // As GNU tar does: the header carries the first bytes, for readers without the record.
+            @memcpy(&header.name, name[0..header.name.len]);
+        },
         else => unreachable, // `setPath` fails only on the length.
     };
     if (link.len > 0) {
         header.setLinkname(link) catch |err| switch (err) {
-            error.NameTooLong => try write_extended(writer, .gnu_long_link, link),
+            error.NameTooLong => {
+                try write_extended(writer, .gnu_long_link, link);
+                @memcpy(&header.linkname, link[0..header.linkname.len]);
+            },
             else => unreachable, // Same.
         };
     }

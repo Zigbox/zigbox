@@ -1487,13 +1487,17 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 /// `--rootfs` or `--name` with no value after it.
 fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     assert(diag.code == null);
-    assert(option.len > 2);
+    assert(option.len >= 2);
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
+    const export_option = std.mem.eql(u8, option, "-o");
     diag.fix(.{
         .sentence = "give it a value:",
-        .command = "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
+        .command = if (export_option)
+            "zbx state export pgdata -o pgdata.tar.gz"
+        else
+            "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
         .template = true,
     });
     assert(diag.code.? == .E0005);

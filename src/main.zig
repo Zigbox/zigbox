@@ -171,4 +171,13 @@ test {
     _ = @import("state/state.zig");
     _ = @import("state_commands.zig");
     _ = @import("state_commands_tests.zig");
+    _ = @import("state/export.zig");
+    _ = @import("state/export_tests.zig");
+}
+
+test {
+    // The other mounts (M6 slice 3).
+    _ = @import("runtime/mounts.zig");
+    _ = @import("runtime/mounts_diagnose.zig");
+    _ = @import("runtime/mount_tests.zig");
 }
