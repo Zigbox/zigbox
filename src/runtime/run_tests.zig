@@ -138,7 +138,7 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         try testing.expectEqual(case.code, run(&sim, &json));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"container_exit\":{"));
-        var number_text: [32]u8 = undefined;
+        var number_text: [64]u8 = undefined;
         // The container_exit object ends with the code; the line goes on with what ran.
         const format = "\"code\":{d},\"network\":\"none\"}},\"ran\":{{";
         const code_text = try std.fmt.bufPrint(&number_text, format, .{case.code});
@@ -878,7 +878,8 @@ test "--net host shares the host's network: its /sys bound, no lo of its own" {
     };
     try testing.expectEqual(@as(u8, 3), run(&sim, &json));
     try testing.expectEqualStrings(
-        "{\"container_exit\":{\"reason\":\"exited\",\"code\":3,\"network\":\"host\"}}\n",
+        "{\"container_exit\":{\"reason\":\"exited\",\"code\":3,\"network\":\"host\"}," ++
+            "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n",
         sim.stderr(),
     );
 }
