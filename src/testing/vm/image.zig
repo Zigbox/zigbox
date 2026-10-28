@@ -139,6 +139,21 @@ pub fn make_overlay(init: std.process.Init, base: []const u8, overlay: []const u
     }
 }
 
+/// Makes the raw disk image of the M4 blob cache if it is not there: sparse, `size_text` big.
+/// The guest formats it on first use (`blkid` finds no file system on it).
+pub fn ensure_cache_disk(init: std.process.Init, path: []const u8, size_text: []const u8) !void {
+    const io = init.io;
+    if (Io.Dir.cwd().statFile(io, path, .{})) |_| return else |_| {}
+    if (std.fs.path.dirname(path)) |parent| try Io.Dir.cwd().createDirPath(io, parent);
+    const argv = [_][]const u8{ "qemu-img", "create", "-q", "-f", "raw", path, size_text };
+    var child = try std.process.spawn(io, .{ .argv = &argv });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code != 0) return error.CacheDiskFailed,
+        else => return error.CacheDiskFailed,
+    }
+}
+
 test "the pinned image identifies a dated release and a SHA-256" {
     // Goal: the pin cannot silently become a moving target or a malformed hash.
     try std.testing.expect(std.mem.startsWith(u8, pinned.url, "https://"));

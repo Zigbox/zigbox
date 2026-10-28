@@ -6,7 +6,10 @@
 const std = @import("std");
 const Io = std.Io;
 
-const tree = ".zig-cache/zbx-old-tree";
+/// One worktree for each commit, so that two demos can build their older releases at once.
+fn tree_path(arena: std.mem.Allocator, commit: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, ".zig-cache/zbx-old-tree-{s}", .{commit});
+}
 
 /// Runs `argv` (in `cwd` if given), its output on stderr, and fails unless it exits 0.
 fn run(io: Io, argv: []const []const u8, cwd: ?[]const u8, quiet: bool) !void {
@@ -34,6 +37,7 @@ pub fn main(init: std.process.Init) !u8 {
     const commit = arguments.next() orelse return usage(err);
     const output = arguments.next() orelse return usage(err);
     const io = init.io;
+    const tree = try tree_path(init.arena.allocator(), commit);
     const exists = [_][]const u8{ "git", "cat-file", "-e", try std.fmt.allocPrint(
         init.arena.allocator(),
         "{s}^{{commit}}",
@@ -55,7 +59,11 @@ pub fn main(init: std.process.Init) !u8 {
     }
     try run(io, &.{ "git", "-C", tree, "checkout", "--quiet", "--detach", commit }, null, false);
     try run(io, &.{ zig, "build", "release" }, tree, false);
-    const built = tree ++ "/zig-out/release/x86_64-linux/zbx";
+    const built = try std.fmt.allocPrint(
+        init.arena.allocator(),
+        "{s}/zig-out/release/x86_64-linux/zbx",
+        .{tree},
+    );
     try Io.Dir.cwd().copyFile(built, Io.Dir.cwd(), output, io, .{});
     return 0;
 }

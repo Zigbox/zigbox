@@ -31,10 +31,12 @@ var store: Store = undefined;
 var other: Store = undefined;
 var workspace: import.Workspace = undefined;
 var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
 var verify_workspace: verify.Workspace = undefined;
 var diag: Diag = undefined;
 
 fn start() void {
+    gc_workspace.tables = &gc_tables;
     sim.init(1, &.{});
     files.init(1);
     sim.store_fs = &files;

@@ -77,6 +77,9 @@ pub const Options = struct {
     warn: ?Warn,
     /// Set for a commit: the tree the walked directory (an upper layer) is applied to.
     parent: ?Digest = null,
+    /// What the root record says the tree came from, when it is not the directory (a pulled
+    /// image names its reference here; the directory is a staging area).
+    label: ?[]const u8 = null,
 };
 
 pub const Result = struct {
@@ -840,7 +843,7 @@ pub fn import(
     try diagnose.hold(diag, store, .shared, "import", "importing a directory");
     defer lock.release(store);
     var run = try walk(store, ws, source, options, result, diag);
-    try run.save_root(source);
+    try run.save_root(options.label orelse source);
     assert(run.depth == 0);
 }
 

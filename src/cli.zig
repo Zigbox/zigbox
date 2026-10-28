@@ -27,6 +27,10 @@ const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const digest_prefix = @import("store/digest.zig");
+const run_image = @import("run_image.zig");
+const gc = @import("store/gc.zig");
+const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 
 const Host = host_mod.Host;
@@ -44,14 +48,20 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001
     \\  help            show this text
     \\  --version       print the version
     \\
     \\run:
+    \\  zbx run <image> [--name <name>] [-- <command> [args...]]
     \\  zbx run <digest> [--name <name>] -- <command> [args...]
     \\  zbx run --rootfs <dir> [--name <name>] -- <command> [args...]
+    \\  <image>         a pulled image by name (alpine:3.20, name@sha256:...): it runs what the
+    \\                  image says (entrypoint, command, environment, directory, user); words
+    \\                  after -- replace its command. A tag is looked up in zbx.lock, which is
+    \\                  made if the project has none, and refused if it and the store disagree
     \\  <digest>        a tree of the store (or a unique prefix of 12 or more hex digits), run on
     \\                  an overlay: its writes go to the container's own layer, never the store
     \\  --rootfs <dir>  or a directory to use as the container's root, read and written in place
@@ -71,9 +81,10 @@ const help_text =
     \\
     \\store:
     \\  zbx store import <dir>   read a directory into the store and print its digest
-    \\  zbx store ls             list the roots (the trees the store keeps)
+    \\  zbx store ls             list the roots (the trees the store keeps) and the images
     \\  zbx store du [<digest>]  the store's size, or what one tree costs
-    \\  zbx store rm <digest>    drop a root (the data stays until zbx store gc)
+    \\  zbx store du --by-image  what each pulled image costs, and how much it shares
+    \\  zbx store rm <digest>    drop a root and its image records (the data stays until gc)
     \\  zbx store diff <a> <b>   list the paths that differ between two trees
     \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
     \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
@@ -81,6 +92,18 @@ const help_text =
     \\  zbx store gc --trash     list the trash
     \\  zbx store restore <id>   put a gc's trash back
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+    \\
+    \\pull:
+    \\  zbx pull [--resolve-only] <reference>
+    \\  <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
+    \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
+    \\  --resolve-only  print the digest of the image manifest for this machine's platform,
+    \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY are used)
+    \\  without it, the layers are downloaded into the store (a cut download resumes), unpacked
+    \\  into one tree and recorded, and zbx.lock (the nearest one up from here, else here) gets
+    \\  the entry; the manifest digest is printed, or with --output json the object of
+    \\  "zbx schema pull", which has the tree's digest
+    \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -116,6 +139,7 @@ pub const Command = enum {
     explain,
     help,
     ps,
+    pull,
     run,
     schema,
     stop,
@@ -211,6 +235,13 @@ pub const StoreArgs = struct {
     /// `store gc --confirm <hash>`, and `store gc --trash`.
     confirm: ?[]const u8 = null,
     trash: bool = false,
+    /// `store du --by-image`.
+    by_image: bool = false,
+};
+
+/// What `pull` was given besides its reference.
+pub const PullArgs = struct {
+    resolve_only: bool = false,
 };
 
 pub const Invocation = struct {
@@ -224,6 +255,8 @@ pub const Invocation = struct {
     bundle: BundleArgs,
     /// Set only when `command` is `store`.
     store: StoreArgs,
+    /// Set only when `command` is `pull`.
+    pull: PullArgs,
 };
 
 pub const ParseError = error{
@@ -245,6 +278,8 @@ pub const RunError = error{
     OutputFailed,
     /// The container could not be started; the reason is in the diagnostic.
     StartFailed,
+    /// A pull the run began failed, and its child has written the diagnostic.
+    PullFailed,
     /// The bundle could not be written; the reason is in the diagnostic.
     BundleFailed,
     /// `ps`, `stop` or `schema` failed; the reason is in the diagnostic.
@@ -271,11 +306,15 @@ const Token = union(enum) {
     /// `--confirm`, whose value is the next argument, and `--confirm=<value>`: `store gc`'s.
     confirm_next,
     confirm_inline: []const u8,
+    /// `--by-image`: `store du`'s.
+    by_image,
     /// `--trash`: `store gc`'s.
     trash,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
+    /// `--resolve-only`: `pull`'s.
+    resolve_only,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -318,6 +357,8 @@ fn classify(argument: []const u8) Token {
         return .{ .confirm_inline = argument["--confirm=".len..] };
     }
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
+    if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
+    if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -347,6 +388,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
+    if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "run")) found = .run;
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "stop")) found = .stop;
@@ -361,7 +403,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit => 1,
+        .explain, .schema, .stop, .commit, .pull => 1,
         .store => 2,
     };
     assert(count <= 2);
@@ -400,7 +442,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash => {},
+            .confirm_inline, .trash, .resolve_only, .by_image => {},
             .run_option_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
@@ -427,6 +469,7 @@ pub fn parse(
     var count: u32 = 0;
     var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var bundle_args: BundleArgs = .{};
+    var pull_args: PullArgs = .{};
     var gc_args: GcArgs = .{};
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -446,12 +489,7 @@ pub fn parse(
                 if (!is_run and !is_stop) return unknown_option(diag, argument);
                 try take_run_option(diag, &run_args, args, &index, is_run);
             },
-            .all => {
-                if (count == 0 or command_named(operands[0]) != .ps) {
-                    return unknown_option(diag, argument);
-                }
-                run_args.all = true;
-            },
+            .all => try take_all_option(diag, &run_args, operands[0..count], argument),
             .separator => {
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
@@ -470,6 +508,8 @@ pub fn parse(
                 bundle_args.last = bundle_args.last or classify(argument) == .last;
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
+            .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
+            .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -481,8 +521,35 @@ pub fn parse(
     invocation.options = scan_options(args);
     invocation.run = run_args;
     invocation.bundle = bundle_args;
+    invocation.pull = pull_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+}
+
+/// `--all`, which only `ps` takes.
+fn take_all_option(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .all);
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .ps) return unknown_option(diag, argument);
+    run_args.all = true;
+}
+
+/// `--resolve-only`, which only `pull` takes.
+fn take_pull_option(
+    diag: *Diag,
+    pull_args: *PullArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .resolve_only);
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .pull) return unknown_option(diag, argument);
+    pull_args.resolve_only = true;
 }
 
 /// The checks that need the command resolved: what `store gc`, `run` and `bundle` were given.
@@ -491,16 +558,35 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     if (invocation.command == .store and invocation.store.action == .gc) {
         try check_gc_args(diag, gc_args, invocation);
     }
+    if (gc_args.by_image) {
+        // `du --by-image` lists every image; a tree to measure is another question.
+        if (invocation.store.operand) |operand| return unexpected_argument(diag, .store, operand);
+        invocation.store.by_image = true;
+    }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
 /// What `store gc` was given besides its words.
-const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false };
+const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false, by_image: bool = false };
 
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
         std.mem.eql(u8, operands[1], "gc");
+}
+
+/// `--by-image`, which only `store du` takes.
+fn take_by_image(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .by_image);
+    const is_du = operands.len >= 2 and command_named(operands[0]) == .store and
+        std.mem.eql(u8, operands[1], "du");
+    if (!is_du) return unknown_option(diag, argument);
+    gc_args.by_image = true;
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
@@ -591,11 +677,25 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
         return missing_argument(diag, .run, .rootfs);
     }
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
-    if (run_args.command.len == 0) return missing_argument(diag, .run, .command);
+    // An image named by a tag has a command of its own, so the words after `--` are optional;
+    // a rootfs and a tree digest have none.
+    const has_default = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
+    if (run_args.command.len == 0 and !has_default) {
+        return missing_argument(diag, .run, .command);
+    }
     // `-- ""` names no program either.
-    if (run_args.command[0].len == 0) return missing_argument(diag, .run, .command);
+    if (run_args.command.len > 0 and run_args.command[0].len == 0) {
+        return missing_argument(diag, .run, .command);
+    }
     assert((run_args.rootfs != null) != (digest != null));
-    assert(run_args.command.len > 0);
+    if (!has_default) assert(run_args.command.len > 0);
+}
+
+/// True if `operand` names a tree of the store (`b3:` and hex, or 12 hex digits or more); any
+/// other operand of `run` is the name of an image.
+fn is_tree_operand(operand: []const u8) bool {
+    assert(operand.len <= constants.arg_bytes_max);
+    return digest_prefix.Prefix.parse(operand) != null;
 }
 
 /// `bundle` needs exactly one of `--last` and a run's name.
@@ -634,6 +734,7 @@ fn resolve(
         const what: Missing = switch (command) {
             .stop, .commit => .container,
             .schema => .topic,
+            .pull => .reference,
             else => .code,
         };
         return missing_argument(diag, command, what);
@@ -838,7 +939,15 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic };
+const Missing = enum { code, rootfs, command, target, container, topic, reference };
+
+/// What `pull` lacks: its reference.
+fn missing_pull(diag: *Diag, missing: Missing) void {
+    assert(diag.code != null);
+    assert(missing == .reference);
+    diag.cause("'pull' needs the reference of the image to pull", .{});
+    diag.fix(.{ .sentence = "name an image:", .command = "zbx pull alpine:3.20" });
+}
 
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
@@ -847,6 +956,8 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .bundle) assert(missing == .target);
     if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
+    if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
+
     assert(command != .doctor);
     assert(command != .ps);
     assert(command != .help);
@@ -893,6 +1004,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.cause("'schema' needs the command whose output schema to print", .{});
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
+        .reference => missing_pull(diag, missing),
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
             diag.fix(.{
@@ -1012,25 +1124,35 @@ pub const Storage = struct {
     store: store_commands.Workspace,
     /// A run of a tree from the store prepares it here (`runtime/image.zig`).
     image: image_mod.Workspace,
+    /// A pull resolves a reference here (`pull_commands.zig`).
+    pull: pull_commands.Workspace,
+    /// `run` by an image's name: the lookup and the settings (`run_image.zig`).
+    run_image: run_image.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
+    /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
+    /// `gc.tables_bytes_min`. `zbx` gives it a static region of `store_gc_tables_bytes`.
+    gc_tables: []align(8) u8,
 };
 
 /// One shared `Storage` for callers that run one command line at a time (the tests, the
 /// fuzzers). Two at once is a bug in the caller, and the assertion says so; a caller that wants
 /// concurrency owns a `Storage` and uses `run_with`.
 var shared_storage: Storage = undefined;
+var shared_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
 var shared_busy = std.atomic.Value(bool).init(false);
 
 pub fn run_from_iterator(host: Host, iterator: anytype) u8 {
     assert(!shared_busy.swap(true, .acquire));
     defer assert(shared_busy.swap(false, .release));
+    shared_storage.gc_tables = &shared_tables;
     return run_with(host, iterator, &shared_storage);
 }
 
 pub fn run(host: Host, args: []const []const u8) u8 {
     assert(!shared_busy.swap(true, .acquire));
     defer assert(shared_busy.swap(false, .release));
+    shared_storage.gc_tables = &shared_tables;
     return run_slice(host, args, &shared_storage);
 }
 
@@ -1071,7 +1193,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit => true,
+        .explain, .bundle, .schema, .stop, .run, .commit, .pull => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1094,6 +1216,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             return command_error(err);
         },
         .stop => return run_stop(host, invocation, diag),
+        .pull => return run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
     }
@@ -1106,6 +1229,46 @@ fn command_error(err: commands.Error) RunError {
     return switch (err) {
         error.Failed => error.CommandFailed,
         error.OutputFailed => error.OutputFailed,
+    };
+}
+
+/// `zbx pull [--resolve-only] <reference>`: the registry's answer for this machine's platform,
+/// and unless only that was asked for, the image in the store.
+fn run_pull(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .pull);
+    const args: pull_commands.Args = .{
+        .reference = invocation.operand.?,
+        .json = invocation.options.output == .json,
+    };
+    if (invocation.pull.resolve_only) {
+        pull_commands.run_resolve(host, args, &storage.pull, diag) catch |err| switch (err) {
+            error.Failed => return error.CommandFailed,
+            error.OutputFailed => return error.OutputFailed,
+        };
+        return constants.exit_ok;
+    }
+    const mode = invocation.options.mode();
+    const output: pull_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = args.json,
+    };
+    return pull_commands.run_pull(
+        host,
+        args,
+        output,
+        &storage.handle.facts,
+        &storage.pull,
+        &storage.store.import,
+        diag,
+    ) catch |err| switch (err) {
+        error.Failed => return error.CommandFailed,
+        error.OutputFailed => return error.OutputFailed,
     };
 }
 
@@ -1133,6 +1296,8 @@ fn run_store(
 ) RunError!u8 {
     if (invocation.command != .store) assert(invocation.command == .commit);
     assert(diag.code == null);
+    assert(storage.gc_tables.len >= gc.tables_bytes_min); // The caller gave gc its room.
+    storage.store.gc.tables = storage.gc_tables;
     const mode = invocation.options.mode();
     const output: store_commands.Output = .{
         .mode = mode,
@@ -1145,6 +1310,7 @@ fn run_store(
         .second = invocation.store.second,
         .confirm = invocation.store.confirm,
         .trash = invocation.store.trash,
+        .by_image = invocation.store.by_image,
     };
     return store_commands.run(
         host,
@@ -1207,6 +1373,43 @@ comptime {
 /// Runs a container in the foreground and returns its exit code: the command's own, or 128
 /// plus the signal that killed it. A container that could not be started is a diagnostic; so is
 /// one whose end could not be waited for.
+/// An image named by a tag or a digest reference: finds it, pulls it if the project has no lock.
+fn prepare_image(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    operand: []const u8,
+    prepared: *run_image.Prepared,
+    diag: *Diag,
+) RunError!void {
+    assert(operand.len > 0);
+    const mode = invocation.options.mode();
+    var reporter: Reporter = .{ .host = host, .options = invocation.options };
+    const services: run_image.Services = .{
+        .host = host,
+        .facts = &storage.handle.facts,
+        .pull = &storage.pull,
+        .import_workspace = &storage.store.import,
+        .output = .{
+            .mode = mode,
+            .color = mode != .json and host.color_enabled(.stderr),
+            .json = false,
+        },
+        .warn = .{ .context = &reporter, .call = report_warning },
+    };
+    run_image.prepare(
+        &services,
+        &storage.run_image,
+        operand,
+        invocation.run.command,
+        prepared,
+        diag,
+    ) catch |err| switch (err) {
+        error.Failed => return error.StartFailed,
+        error.PullFailed => return error.PullFailed,
+    };
+}
+
 fn run_container(
     host: Host,
     invocation: *const Invocation,
@@ -1217,13 +1420,32 @@ fn run_container(
     assert(invocation.command == .run);
     const given = invocation.run;
     const times = try times_of(&given, diag);
+    var prepared: run_image.Prepared = .{
+        .tree = invocation.operand orelse "",
+        .command = given.command,
+        .env = &.{},
+        .workdir = "",
+        .user = null,
+    };
+    if (invocation.operand) |operand| {
+        if (operand.len > 0 and !is_tree_operand(operand)) {
+            prepare_image(host, invocation, storage, operand, &prepared, diag) catch |err| {
+                // A pull the run began has written its own diagnostic: only the exit code is left.
+                if (err == error.PullFailed) return constants.exit_run_failed;
+                return err;
+            };
+        }
+    }
     const container: runtime_spec.Spec = .{
         .rootfs = given.rootfs orelse "", // check_run_args refused neither or both.
-        .image = invocation.operand,
+        .image = if (invocation.operand != null) prepared.tree else null,
         .name = given.name,
-        .command = given.command,
+        .command = prepared.command,
         .limits = try limits_of(&given, diag),
         .read_only = given.read_only,
+        .env = prepared.env,
+        .workdir = prepared.workdir,
+        .user = prepared.user,
     };
     if (given.detach) return run_detached(host, invocation, &container, times, storage, diag);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
@@ -2212,8 +2434,10 @@ test "parse: every way a run command line is wrong has its code" {
 const sim_run = @import("runtime/sim_run.zig");
 
 var test_storage: Storage = undefined;
+var test_tables: [8 * 1024 * 1024]u8 align(8) = @splat(0);
 
 fn command_line(sim: *HostSim, args: []const []const u8) u8 {
+    test_storage.gc_tables = &test_tables;
     return run_slice(sim.interface(), args, &test_storage);
 }
 

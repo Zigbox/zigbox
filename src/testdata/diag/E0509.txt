@@ -1,0 +1,5 @@
+error[ZBX-E0509]: the image has no build for this platform
+  cause  no linux/amd64 build: the image offers linux/arm/v7, linux/ppc64le
+  fix    choose a tag or an image built for this platform
+  more   zbx explain E0509 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0509.html

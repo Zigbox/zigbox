@@ -1,0 +1,13 @@
+error[ZBX-E0520]: the image zbx.lock names is not in the store
+  while  checking registry.test/fixture/open:3.20 against the lock
+  cause  zbx.lock wants manifest
+         sha256:1111111111111111111111111111111111111111111111111111111111111111;
+         the store has
+         sha256:caa46fd3afcc62196418e5ec851addfb446dc14f7c1cb53f2d20afa96e82b184
+  actual sha256:caa46fd3afcc62196418e5ec851addfb446dc14f7c1cb53f2d20afa96e82b184
+  ref    registry.test/fixture/open:3.20
+  expect sha256:1111111111111111111111111111111111111111111111111111111111111111
+  path   /home/alice/project/zbx.lock
+  fix    fetch the locked image:   zbx pull 'registry.test/fixture/open@sha256:1111111111111111111111111111111111111111111111111111111111111111'
+  more   zbx explain E0520
+  docs   https://zigbox.github.io/zigbox/errors/E0520.html

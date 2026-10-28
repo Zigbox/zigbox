@@ -352,6 +352,22 @@ test "each group has a syscall it allows, on both architectures" {
     }
 }
 
+test "what the top-20 run found is allowed, and its neighbours that change things are not" {
+    // Goal: the two calls added from real failures (mongo asked get_mempolicy, a JDK asked
+    // fchmodat2) are allowed on both architectures, while the calls that change a NUMA policy
+    // and io_uring, which the images that ask for it do without, are still refused. Method:
+    // the shipped program's verdict for each name.
+    inline for (.{ "get_mempolicy", "fchmodat2", "fchmodat" }) |name| {
+        try testing.expectEqual(ret_allow, verdict(arch_x64, name, 0));
+        try testing.expectEqual(ret_allow, verdict(arch_arm64, name, 0));
+    }
+    const refused = .{ "set_mempolicy", "mbind", "migrate_pages", "move_pages", "io_uring_setup" };
+    inline for (refused) |name| {
+        try testing.expectEqual(denied, verdict(arch_x64, name, 0));
+        try testing.expectEqual(denied, verdict(arch_arm64, name, 0));
+    }
+}
+
 test "what the container has no capability for is refused with EPERM" {
     // Goal: a deny case that matters per family of calls the policy leaves out: mounting,
     // namespaces, the clock, reboot, modules, bpf, keys and tracing another process.

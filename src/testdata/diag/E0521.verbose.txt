@@ -1,0 +1,9 @@
+error[ZBX-E0521]: the image's user is not in the image
+  while  choosing the user the image runs as
+  cause  the image runs as user 'ghost', which /etc/passwd in the image has no
+         entry for
+  user   ghost
+  file   /etc/passwd
+  fix    the image's configuration is wrong; try another tag of it
+  more   zbx explain E0521
+  docs   https://zigbox.github.io/zigbox/errors/E0521.html

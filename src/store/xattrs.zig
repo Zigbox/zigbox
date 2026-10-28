@@ -73,7 +73,10 @@ pub fn validate(blob: []const u8) Malformed {
 
 /// How long the section at the start of `bytes` is, or null if it is cut short or malformed.
 pub fn section_length(bytes: []const u8) ?u32 {
-    assert(bytes.len <= constants.file_bytes_max);
+    // `bytes` is the rest of a tree object after an entry's name, which can be megabytes in a
+    // directory of thousands of entries (nginx's /usr/lib); only the section's own length is
+    // bounded, and offsets into it are u32.
+    assert(bytes.len <= std.math.maxInt(u32));
     assert(constants.store_xattr_blob_bytes_max > 0);
     if (bytes.len == 0) return null;
     var iterator = Iterator.init(bytes);
@@ -254,6 +257,19 @@ test "the builder sorts, and the section validates and iterates back" {
     try testing.expectEqualStrings("two", last.value);
     try testing.expect(iterator.next() == null);
     try testing.expectEqual(@as(?u32, @intCast(first.len)), section_length(first));
+}
+
+test "the length of a section is found at the start of a much longer buffer" {
+    // Goal: a tree object's entry is followed by every later entry, so the buffer is far larger
+    // than a section (found by the top-20 run: nginx failed on an assertion here). Method: an
+    // empty section and a one-attribute section, each followed by 200 KiB of other bytes.
+    var rest: [200 * 1024]u8 = @splat(0xaa);
+    rest[0] = 0;
+    try testing.expectEqual(@as(?u32, 1), section_length(&rest));
+    const one = [_]u8{ 1, 1, 0, 'a', 2, 0, 'v', 'w' };
+    @memcpy(rest[0..one.len], &one);
+    try testing.expectEqual(@as(?u32, one.len), section_length(&rest));
+    try testing.expectEqual(@as(?u32, null), section_length(""));
 }
 
 test "validate refuses every way a section can be wrong, at the boundary" {

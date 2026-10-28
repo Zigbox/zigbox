@@ -31,6 +31,7 @@ const vtable: fs.VTable = .{
     .open_read = open_read,
     .read = read,
     .create = create,
+    .open_append = open_append,
     .write = write,
     .fsync = fsync,
     .close = close,
@@ -89,6 +90,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .GID = true,
         .INO = true,
         .SIZE = true,
+        .MTIME = true,
     };
     var buffer: linux.Statx = undefined;
     try check(linux.statx(linux.AT.FDCWD, path.ptr, linux.AT.SYMLINK_NOFOLLOW, mask, &buffer));
@@ -106,6 +108,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .links = buffer.nlink,
         .rdev_major = buffer.rdev_major,
         .rdev_minor = buffer.rdev_minor,
+        .mtime = if (buffer.mask.MTIME and buffer.mtime.sec > 0) @intCast(buffer.mtime.sec) else 0,
     };
 }
 
@@ -201,6 +204,22 @@ fn read(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
     const result = linux.read(@intCast(fd), buffer.ptr, buffer.len);
     try check(result);
     assert(result <= buffer.len);
+    return @intCast(result);
+}
+
+fn open_append(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
+    const self = from_context(context);
+    assert(path.len > 0);
+    const flags: linux.O = .{
+        .ACCMODE = .WRONLY,
+        .APPEND = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    };
+    const result = linux.open(path.ptr, flags, 0);
+    try check(result);
+    assert(result <= std.math.maxInt(i32));
+    self.open_count += 1;
     return @intCast(result);
 }
 
@@ -374,7 +393,7 @@ fn set_path_attributes(
     _ = from_context(context);
     assert(path.len > 0);
     assert(attributes.mtime < 1 << 40);
-    try check(linux.lchown(path.ptr, attributes.uid, attributes.gid));
+    if (attributes.set_owner) try check(linux.lchown(path.ptr, attributes.uid, attributes.gid));
     // A change of owner clears the setuid and setgid bits, so the mode is set after it.
     if (attributes.mode) |mode| {
         assert(mode <= 0o7777);

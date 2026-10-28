@@ -24,6 +24,10 @@ const tree_fuzz = @import("fuzz_tree.zig");
 const store_fuzz = @import("fuzz_store.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
+const reference_fuzz = @import("fuzz_reference.zig");
+const registry_fuzz = @import("fuzz_registry.zig");
+const layer_fuzz = @import("fuzz_layer.zig");
+const lock_fuzz = @import("fuzz_lock.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -54,6 +58,10 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "store", .run_iteration = store_fuzz.fuzz_store },
     .{ .name = "commit", .run_iteration = commit_fuzz.fuzz_commit },
     .{ .name = "gc", .run_iteration = gc_fuzz.fuzz_gc },
+    .{ .name = "reference", .run_iteration = reference_fuzz.fuzz_reference },
+    .{ .name = "registry", .run_iteration = registry_fuzz.fuzz_registry },
+    .{ .name = "layer", .run_iteration = layer_fuzz.fuzz_layer },
+    .{ .name = "lock", .run_iteration = lock_fuzz.fuzz_lock },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },
@@ -194,6 +202,7 @@ fn random_args(
         "stop",    "schema",   "--all",         "-d",        "--timeout", "--grace",   "1000",
         "web-1",   "store",    "import",        "ls",        "du",        "rm",        "b3:",
     };
+    const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
     args.items[0] = "zbx";
@@ -207,7 +216,8 @@ fn random_args(
         // the count limit.
         const kind = if (many) random.uintLessThan(u8, 6) else random.uintLessThan(u8, 8);
         const argument: []const u8 = switch (kind) {
-            0...3 => words[random.uintLessThan(usize, words.len)],
+            0...2 => words[random.uintLessThan(usize, words.len)],
+            3 => pull_words[random.uintLessThan(usize, pull_words.len)],
             4...5 => blk: {
                 random.bytes(&short[slot]);
                 for (&short[slot]) |*byte| byte.* |= @intFromBool(byte.* == 0); // No NUL.
@@ -312,9 +322,9 @@ fn fuzz_cli(seed: u64) void {
     if (random.boolean()) faulted.faults.fail_call_index = random.uintLessThan(u32, 3);
     faulted.faults.fail_call_error = random_injected_error(random);
     // The doctor reads the host, so read faults change what it reports (that is the doctor
-    // fuzzer's subject); here only the output path is faulted for it.
+    // fuzzer's subject), and so does a pull; here only the output path is faulted for them.
     const runs_doctor = std.mem.indexOf(u8, reference.stdout(), "kernel") != null;
-    if (runs_doctor) faulted.faults = only_write_faults(faulted.faults);
+    if (runs_doctor or is_pull_line(args)) faulted.faults = only_write_faults(faulted.faults);
     if (random.boolean()) {
         faulted.faults.write_fault_stream = if (random.boolean()) .stdout else .stderr;
     }
@@ -335,28 +345,42 @@ fn fuzz_cli(seed: u64) void {
     }
 }
 
-/// Whether the command line is a `run` one, stated independently of `cli.scan_options`: the
-/// first word that is not an option, where `--output` takes the next word as its value.
-fn is_run_line(args: FuzzArgs) bool {
+/// The command word of the command line, stated independently of `cli.scan_options`: the first
+/// word that is not an option, where `--output` takes the next word as its value. Null if
+/// collection stops before one.
+fn command_word(args: FuzzArgs) ?[]const u8 {
     var index: u32 = 1;
     // Collection stops at the first argument that is too long or past the count bound; what came
     // before it is all the failure can see.
     const seen_max = @min(args.count, constants.args_count_max + 1);
     while (index < seen_max) : (index += 1) {
         const word = args.items[index];
-        if (word.len > constants.arg_bytes_max) return false;
+        if (word.len > constants.arg_bytes_max) return null;
         if (std.mem.eql(u8, word, "--output")) {
             index += 1; // Its value, whatever it is, but collection stops at one that is too long.
-            if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return false;
+            if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return null;
             continue;
         }
         const is_option = word.len > 1 and word[0] == '-';
         const is_command_like = std.mem.eql(u8, word, "--help") or
             std.mem.eql(u8, word, "--version");
         if (is_option and !is_command_like) continue;
-        return std.mem.eql(u8, word, "run");
+        return word;
     }
-    return false;
+    return null;
+}
+
+/// Whether the command line is a `run` one.
+fn is_run_line(args: FuzzArgs) bool {
+    const word = command_word(args) orelse return false;
+    return std.mem.eql(u8, word, "run");
+}
+
+/// Whether it is a `pull` one: like the doctor it reads the host (the machine type, the
+/// network), so a fault on a read changes what it reports and not only whether it gets there.
+fn is_pull_line(args: FuzzArgs) bool {
+    const word = command_word(args) orelse return false;
+    return std.mem.eql(u8, word, "pull");
 }
 
 /// An independent statement of "printable" (space to tilde), so a wrong `is_printable` is caught.

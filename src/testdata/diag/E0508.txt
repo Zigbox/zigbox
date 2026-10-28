@@ -1,0 +1,5 @@
+error[ZBX-E0508]: the registry has no such image
+  cause  registry.test has no '3.20' in the repository fixture/missing
+  fix    check the spelling of the name and the tag
+  more   zbx explain E0508 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0508.html

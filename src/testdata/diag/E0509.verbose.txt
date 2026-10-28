@@ -1,0 +1,7 @@
+error[ZBX-E0509]: the image has no build for this platform
+  while  resolving registry.test/fixture/nomatch:3.20
+  cause  no linux/amd64 build: the image offers linux/arm/v7, linux/ppc64le
+  offer  2
+  fix    choose a tag or an image built for this platform
+  more   zbx explain E0509
+  docs   https://zigbox.github.io/zigbox/errors/E0509.html

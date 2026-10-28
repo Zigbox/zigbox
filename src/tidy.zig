@@ -55,8 +55,24 @@ const shipped_files = [_][]const u8{
     "src/host_real.zig",
     "src/main.zig",
     "src/parse.zig",
+    "src/pull_commands.zig",
     "src/redact.zig",
     "src/schemas.zig",
+    "src/host_real_net.zig",
+    "src/layer/apply.zig",
+    "src/layer/diagnose.zig",
+    "src/layer/reader.zig",
+    "src/layer/tar.zig",
+    "src/pull_unpack.zig",
+    "src/registry/auth.zig",
+    "src/registry/blobs.zig",
+    "src/registry/client.zig",
+    "src/registry/diagnose.zig",
+    "src/registry/digest.zig",
+    "src/registry/manifest.zig",
+    "src/registry/net.zig",
+    "src/registry/proxy.zig",
+    "src/registry/reference.zig",
     "src/runtime/bpf.zig",
     "src/runtime/capabilities.zig",
     "src/runtime/child.zig",
@@ -84,6 +100,7 @@ const shipped_files = [_][]const u8{
     "src/store/fs.zig",
     "src/store/gc.zig",
     "src/store/generation.zig",
+    "src/store/images.zig",
     "src/store/import.zig",
     "src/store/layout.zig",
     "src/store/lock.zig",
@@ -103,7 +120,9 @@ const shipped_files = [_][]const u8{
 };
 const asserts_per_function_min: u32 = 2;
 
-const module_allowlist = [_][]const u8{ "std", "builtin", "build_options" };
+// `seccomp_policy` is the allowlist file, handed to the top-20 harness by build.zig because the
+// harness's module root cannot reach it by a path.
+const module_allowlist = [_][]const u8{ "std", "builtin", "build_options", "seccomp_policy" };
 
 const skipped_directories = [_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" };
 

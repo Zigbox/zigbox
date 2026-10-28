@@ -1,0 +1,9 @@
+error[ZBX-E0503]: can't reach the registry
+  while  resolving registry.test/fixture/open:3.20
+  cause  the connection to registry.test:443 failed
+  host   registry.test
+  errno  111
+  fix    check that the network is up and that HTTPS_PROXY, if set, works
+         then run the command again
+  more   zbx explain E0503
+  docs   https://zigbox.github.io/zigbox/errors/E0503.html

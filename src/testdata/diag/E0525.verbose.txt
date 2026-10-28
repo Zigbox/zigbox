@@ -1,0 +1,16 @@
+warning[ZBX-W0502]: extended attributes in a layer were left out
+  while  unpacking the layers
+  cause  1 extended attributes were left out; the first is on 'bin/ping'
+  count  1
+  path   bin/ping
+  fix    nothing to do unless the image relies on file capabilities
+  more   zbx explain W0502
+  docs   https://zigbox.github.io/zigbox/errors/W0502.html
+error[ZBX-E0525]: zbx.lock can't be written
+  while  writing the lock file
+  cause  writing '/home/alice/gone/zbx.lock' failed: no such file or directory
+         (ENOENT)
+  path   /home/alice/gone/zbx.lock
+  fix    make the directory writable, then run the command again
+  more   zbx explain E0525
+  docs   https://zigbox.github.io/zigbox/errors/E0525.html

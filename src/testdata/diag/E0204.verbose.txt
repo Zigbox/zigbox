@@ -8,7 +8,7 @@ error[ZBX-E0204]: writing the id maps failed
   helper /usr/bin/newuidmap
   name   web-1
   rootfs /srv/alpine
-  step   run_newuidmap (3 of 49)
+  step   run_newuidmap (3 of 52)
   fix    check the helpers and the ranges:   zbx doctor
          look at the helper:                 ls -l /usr/bin/newuidmap
   more   zbx explain E0204

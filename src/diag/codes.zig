@@ -98,6 +98,34 @@ pub const Code = enum(u8) {
     W0411,
     W0412,
     W0413,
+    E0501,
+    E0502,
+    E0503,
+    E0504,
+    E0505,
+    E0506,
+    E0507,
+    E0508,
+    E0509,
+    E0510,
+    E0511,
+    E0512,
+    E0513,
+    E0514,
+    E0515,
+    E0516,
+    E0517,
+    E0518,
+    E0519,
+    E0520,
+    E0521,
+    E0522,
+    E0523,
+    E0524,
+    E0525,
+    W0501,
+    W0502,
+    W0503,
     E0701,
     E0702,
     E0703,
@@ -219,7 +247,8 @@ pub const registry = [_]Entry{
         \\zbx accepts at most 64 arguments of at most 4096 bytes each, and refuses
         \\more instead of cutting them, so that a command is never silently
         \\misread. The command after "run --" has its own limits: 48 words of at
-        \\most 4000 bytes, 32 KiB with the environment.
+        \\most 4000 bytes, 32 KiB with the environment. A working directory is an
+        \\absolute path without "..".
         \\
         \\Pass fewer or shorter arguments. For long lists, use a file when the
         \\command supports one.
@@ -1306,6 +1335,459 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0501,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not an image reference",
+        .explanation =
+        \\zbx was given text that is not an image reference. A reference is
+        \\
+        \\    [registry/][namespace/]name[:tag][@sha256:<64 hex digits>]
+        \\
+        \\and zbx never guesses a repair: an uppercase name, a space, a URL, a
+        \\missing name or a digest of another kind is refused with the reason.
+        \\
+        \\Without a registry the image is on Docker Hub (docker.io), and a name of
+        \\one part there lives in the library/ namespace, so "alpine:3.20" is
+        \\docker.io/library/alpine:3.20. The first part names a registry when it
+        \\has a dot or a port, or is "localhost"; otherwise it is a namespace.
+        \\With no tag and no digest the tag is "latest". With both a tag and a
+        \\digest, the digest decides.
+        \\
+        \\The message names what is wrong with the text.
+        ,
+    },
+    .{
+        .code = .E0502,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the registry's name does not resolve",
+        .explanation =
+        \\zbx could not find an address for the registry's host name. Either the
+        \\name is misspelled in the reference, or this machine has no working DNS,
+        \\or the network is down.
+        \\
+        \\When the machine reaches the internet through an HTTPS proxy (the
+        \\HTTPS_PROXY variable), the proxy looks the name up and this error means
+        \\the proxy could not. Check the name in the reference first, then that
+        \\other programs on this machine can resolve names.
+        ,
+    },
+    .{
+        .code = .E0503,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't reach the registry",
+        .explanation =
+        \\zbx found the registry's address but the connection failed: it was
+        \\refused, the network is unreachable, the proxy refused to open a tunnel,
+        \\or nothing answered within 30 seconds.
+        \\
+        \\zbx honours HTTPS_PROXY and NO_PROXY (and the lower-case spellings). A
+        \\proxy that is set but not running, or a firewall that blocks the
+        \\registry, shows up here. The message names the host, the port and the
+        \\reason; --verbose adds the system error.
+        \\
+        \\A registry on localhost is spoken to in plain HTTP on the port in the
+        \\reference.
+        ,
+    },
+    .{
+        .code = .E0504,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the registry's certificate can't be trusted",
+        .explanation =
+        \\The TLS handshake with the registry failed its checks: the certificate
+        \\does not lead to a root this machine trusts, it has expired, or it is for
+        \\another host name. zbx verifies every HTTPS connection and has no option
+        \\to turn that off.
+        \\
+        \\Behind a proxy that inspects traffic, the proxy's own certificate
+        \\authority must be trusted: put it in the system store, or point
+        \\SSL_CERT_FILE at a file holding the certificates to trust. A wrong clock
+        \\makes every certificate look expired or not yet valid.
+        ,
+    },
+    .{
+        .code = .E0505,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry answered with an error",
+        .explanation =
+        \\The registry answered a request with an HTTP status that zbx does not
+        \\handle, or a redirect it could not follow. The message names the URL
+        \\without its query (a query can carry a signature) and the status.
+        \\
+        \\A 5xx status is the registry's own failure and usually passes: run the
+        \\command again later. Statuses with their own meaning have their own
+        \\codes: 401 is ZBX-E0507, 404 is ZBX-E0508 and 429 is ZBX-E0506.
+        ,
+    },
+    .{
+        .code = .E0506,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry is rate limiting this host",
+        .explanation =
+        \\The registry answered 429 Too Many Requests. Docker Hub limits anonymous
+        \\pulls by the address they come from, so machines behind one NAT, and
+        \\CI runners, share one allowance.
+        \\
+        \\zbx does not retry on its own: a retry inside the limit only uses more
+        \\of it. When the registry says how long to wait (Retry-After) the message
+        \\gives it. Try again after that, name a mirror of Docker Hub in
+        \\ZBX_REGISTRY_MIRRORS (for example mirror.gcr.io), pull from another
+        \\registry, or reuse an image already in the store (zbx store ls).
+        ,
+    },
+    .{
+        .code = .E0507,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused anonymous access",
+        .explanation =
+        \\zbx pulls anonymously: when a registry answers 401 it asks for a token
+        \\from the realm in the WWW-Authenticate header, with no credentials, and
+        \\repeats the request once. This time that did not work: the token
+        \\service refused, the registry refused the token, or the challenge asked
+        \\for credentials (Basic) that zbx does not have.
+        \\
+        \\A private image, or one that does not exist (some registries answer
+        \\"denied" for both), ends here. Private registries are not supported
+        \\yet. Check the name; the message says which step was refused.
+        ,
+    },
+    .{
+        .code = .E0508,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the registry has no such image",
+        .explanation =
+        \\The registry answered 404 for the manifest: the repository does not
+        \\exist, or the tag or digest is not in it. The message names the
+        \\registry, the repository and the tag or digest.
+        \\
+        \\Check the spelling, and the tag with the registry's own listing. On
+        \\Docker Hub an official image lives in library/, which zbx adds for a
+        \\name of one part.
+        ,
+    },
+    .{
+        .code = .E0509,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image has no build for this platform",
+        .explanation =
+        \\An image index lists one image per platform. zbx runs linux/amd64 and
+        \\linux/arm64 images, the one that matches this machine (arm64 images
+        \\with variant v8 or none), and the index has none for it. The message
+        \\lists the platforms the image offers, up to eight.
+        \\
+        \\Choose another tag or image, or run on a machine of a platform the
+        \\image has. An image built for another CPU cannot run here.
+        ,
+    },
+    .{
+        .code = .E0510,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry sent a type of document zbx does not read",
+        .explanation =
+        \\zbx reads the OCI image index and manifest and the Docker v2 manifest
+        \\list and manifest, with layers that are tar, gzip tar or zstd tar. The
+        \\registry sent something else and the message names its media type:
+        \\the old Docker schema 1 manifests, a Helm chart or other artifact, a
+        \\layer type that cannot be unpacked here, or a document whose own type
+        \\and Content-Type disagree.
+        \\
+        \\zbx refuses rather than guess from the shape of the JSON. Pull an image
+        \\that is published in the supported formats.
+        ,
+    },
+    .{
+        .code = .E0511,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "downloaded bytes do not match their digest",
+        .explanation =
+        \\Every manifest and every layer is named by the SHA-256 of its bytes, and
+        \\zbx hashes what arrives before using it. These bytes hash to something
+        \\else than the digest that named them (or than the Docker-Content-Digest
+        \\header), or a layer in the blob cache has changed on the disk since it
+        \\was downloaded. The message shows both digests.
+        \\
+        \\The bytes were damaged on the way, or the registry, a mirror or a proxy
+        \\in between is serving something it should not. Nothing from this
+        \\answer was kept. Try again; if it repeats, the source is not to be
+        \\trusted. For a damaged cache the message gives the file to remove.
+        ,
+    },
+    .{
+        .code = .E0512,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry's answer can't be used",
+        .explanation =
+        \\The registry answered, but the answer is not a document zbx can use:
+        \\the JSON is malformed or too complex, a manifest is larger than 1 MiB,
+        \\an index has more than 256 entries, an image more than 128 layers, a
+        \\digest is not sha256 and 64 hex digits, or a size is zero or too large.
+        \\
+        \\The message says which. Nothing was kept. This is the registry's or a
+        \\proxy's fault, not something to fix on this machine.
+        ,
+    },
+    .{
+        .code = .E0513,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry's answer ended early",
+        .explanation =
+        \\The connection ended, or went quiet, before the whole answer arrived: the
+        \\body was shorter than the Content-Length the registry declared. zbx does
+        \\not use part of a document.
+        \\
+        \\A network drop or a proxy timeout is the usual cause. Run the command
+        \\again.
+        ,
+    },
+    .{
+        .code = .E0514,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a registry mirror",
+        .explanation =
+        \\ZBX_REGISTRY_MIRRORS names registries to try before Docker Hub, as a
+        \\comma-separated list of host or host:port, for example
+        \\
+        \\    ZBX_REGISTRY_MIRRORS=mirror.gcr.io
+        \\
+        \\At most four are read, each a DNS name, with no scheme and no path. An
+        \\entry that is anything else is refused at once, also for a pull that
+        \\would not use it, so a typo is found before it matters.
+        \\
+        \\A mirror only changes where bytes come from: every answer is checked by
+        \\digest, so a mirror can make a pull fail but never change what is
+        \\pulled. The lock file records the reference as written, not the mirror.
+        ,
+    },
+    .{
+        .code = .E0515,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a layer entry would leave the image's root",
+        .explanation =
+        \\A layer of the image holds an entry that could write outside the
+        \\directory the image is unpacked into, and zbx refused the whole layer:
+        \\an absolute path, a path with "..", a path that goes through a symlink
+        \\(the layer or an earlier one made it), or a hard link to a path outside
+        \\the image. An honest image has none; the message names the entry.
+        \\
+        \\Nothing from the image was kept in the store as a tree. The blobs that
+        \\were downloaded stay, so the layer is not fetched again. Do not run an
+        \\image you did not build or trust.
+        ,
+    },
+    .{
+        .code = .E0516,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "a layer can't be unpacked",
+        .explanation =
+        \\A layer of the image is damaged or uses something zbx does not read:
+        \\a compressed stream that is cut or corrupt, a tar header with a wrong
+        \\checksum, a sparse file, a name over 4095 bytes, a hard link to a file
+        \\that is not there, an owner the user namespace does not map, or more
+        \\than 64 GiB in one layer. The message says which, and names the entry.
+        \\
+        \\The blob was checked against its digest when it arrived, so the image
+        \\itself is at fault (or the disk is, if the digest check also fails).
+        \\Nothing from the image was kept in the store as a tree.
+        ,
+    },
+    .{
+        .code = .E0517,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "an image's configuration can't be used",
+        .explanation =
+        \\The configuration of an image (the JSON blob its manifest names) says what
+        \\it runs by default: the entrypoint, the command, the environment, the
+        \\working directory and the user. This one is not JSON of that shape, or has
+        \\more words or more bytes than zbx keeps (48 words in a list, 64 variables,
+        \\1024 bytes in a word, 6 KiB in all), or an environment entry without a
+        \\name or a "=".
+        \\
+        \\The blob was checked against its digest, so the image is at fault. Nothing
+        \\from the image was recorded. Try another tag of the image.
+        ,
+    },
+    .{
+        .code = .E0518,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "zbx.lock can't be read",
+        .explanation =
+        \\zbx.lock is ZON, one field a line, and zbx reads it line by line. The
+        \\message names the line and what is wrong with it: a line that belongs
+        \\nowhere, a digest or platform that is not one, an entry missing a field,
+        \\two entries for one image, a version newer than this zbx reads, or more
+        \\than 256 entries.
+        \\
+        \\Fix the line, or remove the file and run zbx pull again to write a new
+        \\one: the lock only records what each reference resolved to, and a pull
+        \\makes it again. Do not edit a lock to point at digests you have not
+        \\checked.
+        ,
+    },
+    .{
+        .code = .E0519,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "zbx.lock and the store disagree about an image",
+        .explanation =
+        \\zbx.lock says the reference means one tree, and the store's record of the
+        \\image with the lock's manifest digest says another. A run starts from
+        \\neither: it would be running something nobody chose.
+        \\
+        \\The message names both tree digests. Either the lock was changed by hand
+        \\(or by a merge), or the store's record was made by a different pull. To
+        \\take the store's tree as the truth, remove the entry or the file and pull
+        \\again; to keep the lock's, restore the store from it with the pull the
+        \\message shows.
+        ,
+    },
+    .{
+        .code = .E0520,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image zbx.lock names is not in the store",
+        .explanation =
+        \\zbx.lock names a manifest digest for the reference, and the store has no
+        \\image with that digest. The store may be new, the image may have been
+        \\removed (zbx store rm), or the lock may name a digest that was never
+        \\pulled. A run never fetches by itself, because the lock is what says what
+        \\to trust.
+        \\
+        \\The message names the digest the lock wants and, if the store has some
+        \\other image under the same reference, that one. Pull the locked digest to
+        \\fill the store from the lock:  zbx pull <repository>@sha256:<digest>
+        ,
+    },
+    .{
+        .code = .E0521,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the image's user is not in the image",
+        .explanation =
+        \\The image's configuration says it runs as a user (or group) by name, and the
+        \\image's own /etc/passwd or /etc/group has no such name. A number needs no
+        \\lookup and is used as it is; a name does. The message names what was looked
+        \\for and where.
+        \\
+        \\The image is at fault. Nothing was started.
+        ,
+    },
+    .{
+        .code = .E0522,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no image of that name is locked or in the store",
+        .explanation =
+        \\zbx run was given a name that is not a tree digest, and neither zbx.lock nor
+        \\the store knows an image by it. A run starts only what a lock has recorded
+        \\(or what is in the store when a library caller names it): it does not pull
+        \\by itself once a zbx.lock exists. Run zbx pull with the name to fetch the
+        \\image and record it.
+        ,
+    },
+    .{
+        .code = .E0523,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the image's user needs more ids than this run maps",
+        .explanation =
+        \\The image runs as a user other than root. That user's id exists in the
+        \\container only when the container maps a whole range of ids, which needs
+        \\the setuid helpers newuidmap and newgidmap and a range of subordinate ids
+        \\for your account. Without them the container maps only root, to your own
+        \\id (the warning ZBX-W0201 says so), and the image's user cannot be set.
+        \\
+        \\Give your account the ranges (zbx doctor shows how), or use an image that
+        \\runs as root.
+        ,
+    },
+    .{
+        .code = .E0524,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image has no command to run",
+        .explanation =
+        \\The image sets neither an entrypoint nor a command, and none was given after
+        \\"--". Docker would fail the same way. Give the command to run:
+        \\
+        \\    zbx run <image> -- <command> [arguments]
+        ,
+    },
+    .{
+        .code = .E0525,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "zbx.lock can't be written",
+        .explanation =
+        \\zbx writes zbx.lock to the nearest directory up from the working directory
+        \\that has one, or else the working directory, through a temporary file in
+        \\the same directory that it renames over the lock. That failed: the disk is
+        \\full, the directory is not writable, or it is read-only. The message gives
+        \\the path and the reason. The image itself was pulled and is in the store;
+        \\run the command again once the directory can be written.
+        ,
+    },
+    .{
+        .code = .W0501,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "device nodes in a layer were left out",
+        .explanation =
+        \\A layer holds device nodes, FIFOs or sockets. The store keeps regular
+        \\files, directories and symlinks only, and a rootless container cannot
+        \\make device nodes, so they were skipped. The message names the first
+        \\and says how many there were.
+        \\
+        \\A container gets its own /dev, so a root filesystem does not miss them.
+        ,
+    },
+    .{
+        .code = .W0502,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "extended attributes in a layer were left out",
+        .explanation =
+        \\The store keeps the user.* attributes and security.capability. A layer
+        \\carried others (trusted.*, system.*, security.selinux), too many on one
+        \\file or too large, or this file system would not take them, so they
+        \\were skipped. The message names the first file and says how many.
+        \\
+        \\The tree's digest does not cover them. Nothing to do unless the image
+        \\relies on file capabilities that were refused: then the program may
+        \\need a different capability setup.
+        ,
+    },
+    .{
+        .code = .W0503,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "no zbx.lock was found, so one was written",
+        .explanation =
+        \\zbx run was given an image name and there is no zbx.lock in the working
+        \\directory or any directory above it. It pulled the image and wrote zbx.lock
+        \\in the working directory, recording which manifest and tree the name meant
+        \\today. Commit the file to keep every machine on the same image. The next run
+        \\checks the store against it and refuses if they differ.
+        ,
+    },
+    .{
         .code = .E0701,
         .severity = .@"error",
         .blame = .environment,
@@ -1522,6 +2004,9 @@ pub fn can_end_run(code: Code) bool {
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
+        .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
+        .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502 => false,
         else => true,
     };
 }

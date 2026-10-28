@@ -74,7 +74,7 @@ pub const Root = struct {
 
 // ---- Writing -------------------------------------------------------------------------------
 
-fn put_string(writer: *std.Io.Writer, text: []const u8) void {
+pub fn put_string(writer: *std.Io.Writer, text: []const u8) void {
     assert(writer.buffer.len >= constants.store_root_record_bytes_max);
     assert(text.len <= constants.store_source_bytes_max);
     writer.writeAll(
@@ -132,7 +132,7 @@ fn hex_value(byte: u8) ?u8 {
 }
 
 /// Reads a quoted string with the escapes `put_string` writes into `out`; the length, or null.
-fn parse_string(literal: []const u8, out: []u8) ?usize {
+pub fn parse_string(literal: []const u8, out: []u8) ?usize {
     assert(out.len > 0);
     assert(literal.len <= constants.file_bytes_max);
     if (literal.len < 2) return null;
@@ -201,6 +201,8 @@ pub fn parse(text: []const u8, root: *Root) ParseResult {
             seen_kind = true;
         } else if (std.mem.eql(u8, key, "time")) {
             root.time = std.fmt.parseInt(u64, value, 10) catch return .malformed;
+            // `render` holds a time under 2^40; a damaged record may not read as more.
+            if (root.time >= 1 << 40) return .malformed;
         } else if (std.mem.eql(u8, key, "files")) {
             root.files = std.fmt.parseInt(u64, value, 10) catch return .malformed;
         } else if (std.mem.eql(u8, key, "bytes")) {
@@ -369,6 +371,8 @@ test "a record that is malformed or newer is not misread" {
     );
     const bad_number = ".{\n    .version = 1,\n    .kind = \"import\",\n    .time = x,\n}\n";
     try testing.expectEqual(ParseResult.malformed, parse(bad_number, &back));
+    const late = ".{\n    .version = 1,\n    .kind = \"import\",\n    .time = 1099511627776,\n}\n";
+    try testing.expectEqual(ParseResult.malformed, parse(late, &back));
     const bad_kind = ".{\n    .version = 1,\n    .kind = \"nope\",\n}\n";
     try testing.expectEqual(ParseResult.malformed, parse(bad_kind, &back));
     const newer = ".{\n    .version = 2,\n    .kind = \"import\",\n}\n";

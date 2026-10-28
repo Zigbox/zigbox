@@ -13,10 +13,10 @@ pub const command_bytes_max: u32 = 1024;
 pub const http_connections_max: u32 = 4;
 pub const http_request_bytes_max: u32 = 8 * 1024;
 pub const http_routes_max: u32 = 8;
-/// One served file. The release binaries are under 2 MiB (the milestone limit itself).
-pub const http_body_bytes_max: u32 = 4 * 1024 * 1024;
+/// One served file: a release binary (under `binary_bytes_max`) or a rootfs tarball.
+pub const http_body_bytes_max: u32 = 8 * 1024 * 1024;
 /// Size of a binary the harness reads to inspect its ELF headers.
-pub const elf_bytes_max: u32 = 4 * 1024 * 1024;
+pub const elf_bytes_max: u32 = 8 * 1024 * 1024;
 pub const program_headers_max: u32 = 64;
 pub const dynamic_entries_max: u32 = 256;
 pub const poll_step_ms: u32 = 200;
@@ -28,11 +28,20 @@ pub const command_timeout_kvm_s: u32 = 60;
 pub const shutdown_timeout_s: u32 = 60;
 pub const download_chunk_bytes: u32 = 64 * 1024;
 pub const overlay_size_text = "8G";
+/// The M4 blob cache disk: room for the demo's images (about 150 MB of blobs) with headroom.
+pub const blob_cache_size_text = "1G";
 pub const guest_memory_mib: u32 = 2048;
 pub const guest_cpus: u32 = 2;
 
-/// The release size limit from the milestone: a static binary under 2 MiB.
-pub const binary_bytes_max: u64 = 2 * 1024 * 1024;
+/// The release size limit: a static binary under 4 MiB (the spec's criterion since rev 54; 2 MiB
+/// before). It must match `release_size_limit_bytes` in `build.zig`.
+pub const binary_bytes_max: u64 = 4 * 1024 * 1024;
+
+comptime {
+    // A binary at the limit can still be read and served.
+    std.debug.assert(binary_bytes_max <= elf_bytes_max);
+    std.debug.assert(binary_bytes_max <= http_body_bytes_max);
+}
 
 comptime {
     assert(console_bytes_max >= 1024 * 1024);

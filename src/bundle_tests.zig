@@ -70,7 +70,8 @@ const env_secrets = [_]host_sim.EnvironmentVariable{
 
 const pem = "-----BEGIN PRIVATE KEY-----\nFAKEPEMBODY0123\n-----END PRIVATE KEY-----";
 const command_text = "curl -H 'Authorization: Bearer FAKEbearer123' --password=FAKEcmdpass " ++
-    "API_TOKEN=FAKEcmdtoken; echo FAKEenvpassw0rd!";
+    "API_TOKEN=FAKEcmdtoken; echo FAKEenvpassw0rd!; " ++
+    "echo '{\"token\":\"FAKEregtoken0123\",\"expires_in\":300}'";
 const diagnostic_text =
     "{\"code\":\"ZBX-E0204\",\"causes\":[\"the helper said api_key=FAKEdiagkey\"]}";
 
@@ -79,6 +80,7 @@ const planted = [_][]const u8{
     "ghp_FAKEenvtoken0123456789abcd", "FAKEenvpassw0rd!", "FAKEenvplainvalue",
     "FAKEbearer123",                  "FAKEcmdpass",      "FAKEcmdtoken",
     "FAKEPEMBODY0123",                "FAKElabelvalue",   "FAKEdiagkey",
+    "FAKEregtoken0123",
 };
 
 fn prepare_secrets(sim: *HostSim) void {

@@ -907,6 +907,17 @@ pub fn env_too_big(diag: *Diag, index: u32) void {
     assert(diag.code.? == .E0008);
 }
 
+/// ZBX-E0008: the working directory of a `Spec` is not an absolute path without "..".
+pub fn workdir_unusable(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.E0008);
+    diag.while_("reading the working directory", .{});
+    diag.cause("the working directory is not an absolute path of at most {d} bytes without " ++
+        "'..' parts", .{constants.rootfs_bytes_max});
+    diag.fix(.{ .sentence = "give an absolute directory such as /srv/app" });
+    assert(diag.code.? == .E0008);
+}
+
 /// The note for a step that was allowed to fail and did, for `--verbose` and the run record.
 pub fn skipped_note(plan: *const Plan, step_index: u8, errno: u16, buffer: []u8) []const u8 {
     assert(step_index < plan.count);

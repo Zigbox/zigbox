@@ -1,0 +1,43 @@
+// The images the weekly top-20 run pulls and runs (docs/demos/m4.md, "The top-20 check"). It is
+// the twenty most-pulled official images of Docker Hub, read on `date` from the Hub's API:
+//   https://hub.docker.com/v2/repositories/library/?page_size=25&ordering=pull_count
+// Refresh it by reading that list again and changing `date`; a changed list is a reviewed change.
+//
+// Each image runs its default command for 45 s (zbx run --timeout). A server that is still up
+// then has run, and where it has a `probe` it must also answer: "port|send|expect" has the guest
+// connect to 127.0.0.1:port, write `send` (printf escapes) and find `expect` in the reply (an
+// empty `expect` is a connection alone, an empty probe none). An image that exits 0 passes; a
+// server without a probe passes by staying up (a database or broker whose protocol needs a client
+// the guest lacks is judged by its connection). An entry with a `known` reason is an image that
+// cannot run its default command as a rootless, unconfigured container: the run records that
+// reason instead of a failure, and the harness still runs it, so a note that is no longer true
+// shows as a pass with a NOTE line.
+// openjdk is deprecated on the Hub: it has no `latest` tag, only early-access ones, so this is the
+// newest slim JDK tag; if the Hub drops it the run says so (E0508) and the entry is replaced.
+// An empty `known` means the image must pass. A failure without a reason fails the whole run.
+.{
+    .date = "2026-10-27",
+    .source = "Docker Hub official images, ordered by pull count",
+    .images = .{
+        .{ .ref = "nginx:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "memcached:latest", .known = "", .probe = "11211|version\\r\\n|VERSION" },
+        .{ .ref = "busybox:latest", .known = "", .probe = "" },
+        .{ .ref = "alpine:latest", .known = "", .probe = "" },
+        .{ .ref = "postgres:latest", .known = "its entrypoint exits 1 without a root password (POSTGRES_PASSWORD); zbx run sets no environment variable yet", .probe = "" },
+        .{ .ref = "redis:latest", .known = "", .probe = "6379|PING\\r\\n|PONG" },
+        .{ .ref = "ubuntu:latest", .known = "", .probe = "" },
+        .{ .ref = "python:latest", .known = "", .probe = "" },
+        .{ .ref = "node:latest", .known = "", .probe = "" },
+        .{ .ref = "mysql:latest", .known = "its entrypoint exits 1 without a root password (MYSQL_ROOT_PASSWORD); zbx run sets no environment variable yet", .probe = "" },
+        .{ .ref = "mongo:latest", .known = "", .probe = "27017||" },
+        .{ .ref = "httpd:latest", .known = "bind() to port 80 is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "rabbitmq:latest", .known = "", .probe = "5672||" },
+        .{ .ref = "docker:latest", .known = "its entrypoint starts dockerd, which mounts filesystems and opens raw sockets: mount is refused by the seccomp profile and the user namespace holds no CAP_SYS_ADMIN of the host, so a daemon cannot run in a rootless container", .probe = "" },
+        .{ .ref = "traefik:latest", .known = "its web entry point listens on port 80, which is refused: an unprivileged user may bind only ports from 1024 (net.ipv4.ip_unprivileged_port_start), and the container shares the host network", .probe = "80|GET / HTTP/1.0\\r\\n\\r\\n|HTTP/" },
+        .{ .ref = "hello-world:latest", .known = "", .probe = "" },
+        .{ .ref = "mariadb:latest", .known = "its entrypoint exits 1 without a root password (MARIADB_ROOT_PASSWORD); zbx run sets no environment variable yet", .probe = "" },
+        .{ .ref = "golang:latest", .known = "", .probe = "" },
+        .{ .ref = "openjdk:28-ea-jdk-slim", .known = "", .probe = "" },
+        .{ .ref = "registry:latest", .known = "", .probe = "5000|GET /v2/ HTTP/1.0\\r\\n\\r\\n|200" },
+    },
+}

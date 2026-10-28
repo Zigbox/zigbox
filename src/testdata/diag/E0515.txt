@@ -1,0 +1,6 @@
+error[ZBX-E0515]: a layer entry would leave the image's root
+  cause  layer 1 has '/etc/passwd', an absolute path
+  fix    do not run this image unless you built it, and check what it writes
+         the downloaded blobs are kept, so the layers are not fetched again
+  more   zbx explain E0515 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0515.html

@@ -1,0 +1,5 @@
+warning[ZBX-W0501]: device nodes in a layer were left out
+  cause  2 device nodes, FIFOs or sockets were left out; the first is 'dev/tty'
+  fix    nothing to do: a container makes its own /dev
+  more   zbx explain W0501 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0501.html

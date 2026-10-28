@@ -89,7 +89,24 @@ section{padding-block:48px;border-top:1px solid var(--line)}
 footer{border-top:1px solid var(--line);padding-block:28px;color:var(--muted);font-size:.85rem}
 footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .digest{font-family:var(--mono);font-size:.75rem;color:var(--muted);word-break:break-all}
-@media (max-width:820px){.hero{grid-template-columns:1fr;padding-block:36px 28px}.principles,.facts{grid-template-columns:1fr 1fr}.ms{grid-template-columns:1fr;gap:0}.docs{grid-template-columns:1fr}}
+.arch{display:grid;gap:8px;margin-bottom:28px}
+.arch .row{display:grid;gap:8px}
+.arch .box{border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:12px 14px;min-width:0}
+.arch .box h3{font-size:1rem;margin-bottom:4px} .arch .box p{margin:0;color:var(--muted);font-size:.88rem}
+.arch .box .tag{font-family:var(--mono);font-size:.7rem;color:var(--accent)}
+.arch .r4{grid-template-columns:repeat(4,1fr)} .arch .host{border-style:dashed} .arch .kernel{background:transparent}
+.arch .r1{grid-template-columns:1fr}
+.flow{counter-reset:step;list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.flow li{counter-increment:step;display:grid;grid-template-columns:2.2em 1fr;gap:10px;min-width:0}
+.flow li::before{content:counter(step);font-family:var(--mono);font-size:.8rem;color:var(--accent);border:1px solid var(--line);border-radius:6px;height:1.9em;display:grid;place-items:center}
+.flow li p{margin:0;color:var(--muted);font-size:.93rem} .flow li b{color:var(--fg);font-weight:600}
+.cols{display:grid;grid-template-columns:1.25fr 1fr;gap:32px;margin-bottom:32px} .cols>*{min-width:0}
+.cols h3{margin-bottom:12px}
+.next{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.next .item{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.next .item .head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.next .item p{margin:0;color:var(--muted);font-size:.92rem}
+@media (max-width:820px){.arch .r4{grid-template-columns:1fr 1fr}.cols,.next{grid-template-columns:1fr}.hero{grid-template-columns:1fr;padding-block:36px 28px}.principles,.facts{grid-template-columns:1fr 1fr}.ms{grid-template-columns:1fr;gap:0}.docs{grid-template-columns:1fr}}
 @media (max-width:520px){.principles,.facts{grid-template-columns:1fr} nav{margin-left:0;width:100%}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -99,7 +116,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <header class="top"><div class="wrap">
   <a class="brand" href="#top"><span class="mark" aria-hidden="true"></span>Zigbox</a>
   <span class="pill s-plan" id="hdr-status">Pre-alpha</span>
-  <nav aria-label="Sections"><a href="#why">Why</a><a href="#demos">Demos</a><a href="#docs">Docs</a><a href="#project">Project</a><a href="#" id="sister">Zigcube →</a></nav>
+  <nav aria-label="Sections"><a href="#why">Why</a><a href="#architecture">Architecture</a><a href="#demos">Demos</a><a href="#docs">Docs</a><a href="#project">Project</a><a href="#" id="sister">Zigcube →</a></nav>
 </div></header>
 
 <main class="wrap" id="top">
@@ -114,7 +131,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
       </div>
     </div>
     <div class="term" aria-label="Example session">
-      <div class="bar"><span>zbx · example session</span><span class="planned">target for M4</span></div>
+      <div class="bar"><span>zbx · example session</span><a class="rec" href="https://github.com/Zigbox/zigbox/actions/runs/40624651773">✓ recorded in CI · M4</a></div>
       <pre id="hero-term"></pre>
     </div>
   </div>
@@ -123,12 +140,54 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
     <div class="sec-head"><div><p class="eyebrow">Design principles</p><h2>Docker, designed as if it started today</h2></div></div>
     <div class="principles">
       <div><h3>No daemon, no root</h3><p>Every command is an ordinary process you own. Privilege comes only from user namespaces.</p></div>
-      <div><h3>Files, not layers</h3><p>Images are Merkle trees of BLAKE3-hashed chunks. Identical files are stored once across every image.</p></div>
+      <div><h3>Files, not layers</h3><p>Images are Merkle trees of BLAKE3-hashed files. Identical files are stored once across every image.</p></div>
       <div><h3>Builds that cannot lie</h3><p>Steps run sandboxed, offline by default, cached on input content. Same inputs, same digest, on any machine.</p></div>
       <div><h3>Secure by default</h3><p>Capabilities denied, seccomp on, no network unless granted. Refusals say what was refused and why.</p></div>
       <div><h3>Signed by construction</h3><p>Signatures cover tree digests, so a host can refuse anything it cannot trace to a trusted key.</p></div>
       <div><h3>Thirty seconds to run</h3><p><code>zbx pull alpine && zbx run alpine sh</code> stays as easy as it was in 2013.</p></div>
     </div>
+  </section>
+
+  <section id="architecture">
+    <div class="sec-head"><div><p class="eyebrow">Architecture</p><h2>What is being built, layer by layer</h2>
+    <p>One static Zig binary: no daemon, no libc, no third-party code. Every layer but the last is ordinary user-space code; the privilege it needs comes from kernel features an unprivileged user may already use.</p></div></div>
+    <div class="arch" aria-label="Zigbox layers, from the command line down to the kernel">
+      <div class="row r1"><div class="box"><span class="tag">zbx</span><h3>Command line</h3><p>Every command has a versioned JSON result (<code>--output json</code>, <code>zbx schema</code>) and every failure is a registered diagnostic with a cause and a fix (<code>zbx explain</code>). Nothing prompts. Exit codes never overlap a container's.</p></div></div>
+      <div class="row r1"><div class="box"><span class="tag">zigbox module</span><h3>Library</h3><p>The same code as a Zig module, shaped to the runtime contract Zigcube's node agent drives: start, stop, list, re-adopt, events. Each caller owns its memory; nothing is global.</p></div></div>
+      <div class="row r4">
+        <div class="box"><span class="tag">runtime</span><h3>Isolation</h3><p><code>clone3</code> into user, mount, PID, UTS and IPC namespaces; the full subuid map via <code>newuidmap</code>; setup as an explicit plan of steps, then <code>pivot_root</code>.</p></div>
+        <div class="box"><span class="tag">limits</span><h3>Limits and hardening</h3><p>A transient systemd user scope per container, asked for over D-Bus by a wire client written in Zig. A capability allowlist, <code>no_new_privs</code>, and a checked-in seccomp allowlist compiled to BPF at build time.</p></div>
+        <div class="box"><span class="tag">store</span><h3>Content-addressed store</h3><p>Files are objects named by BLAKE3 over content and metadata; directories are canonical trees, so a root digest names a whole filesystem. Runs use a hardlink farm as the overlay's lower layer.</p></div>
+        <div class="box"><span class="tag">registry</span><h3>Pull</h3><p>An OCI registry client: anonymous token flow, manifest and index parsing, platform selection, std's TLS over sockets with deadlines. Layers are flattened into one store tree.</p></div>
+      </div>
+      <div class="row r1"><div class="box host"><span class="tag">host interface</span><h3>Every system call goes through one vtable</h3><p>The real host makes raw Linux syscalls; a seeded simulator stands in for it in tests, with fault injection at every step: a failed mount, a full disk, a bus that refuses, a crash between two writes.</p></div></div>
+      <div class="row r1"><div class="box kernel"><span class="tag">Linux</span><h3>Kernel features, used unprivileged</h3><p>User namespaces, cgroup v2 delegated by the user's systemd, overlayfs with <code>userxattr</code>, seccomp filters, <code>flock</code>. <code>zbx doctor</code> checks each one and says how to turn it on.</p></div></div>
+    </div>
+    <div class="cols">
+      <div><h3>The life of <code>zbx run &lt;digest&gt;</code></h3>
+        <ol class="flow">
+          <li><p><b>Resolve.</b> A digest, or a unique 12-hex prefix, names a tree in the store. An unknown or ambiguous one is refused before anything starts.</p></li>
+          <li><p><b>Materialize.</b> In a child inside the user's namespace, the tree becomes a directory of hardlinks to its objects, built once, atomically, and cached.</p></li>
+          <li><p><b>Scope.</b> zbx asks the systemd user manager for a transient scope with the memory, CPU and PID limits, and puts a small keeper process in it, so the cgroup's counters outlive the container long enough to be read.</p></li>
+          <li><p><b>Namespaces.</b> A single-threaded child is cloned into new namespaces; the parent writes its id maps. The child mounts an overlay (the farm below, a per-container upper layer above), <code>/proc</code>, a minimal <code>/dev</code> and tmpfs, then pivots into it.</p></li>
+          <li><p><b>Harden.</b> Capabilities drop to the allowlist, <code>no_new_privs</code> is set, and the seccomp filter goes on last, just before <code>execve</code>.</p></li>
+          <li><p><b>Wait.</b> The parent forwards signals by the PID 1 rules, enforces <code>--timeout</code>, then reads <code>memory.events</code> and <code>pids.events</code>, so an out-of-memory kill or a fork bomb is reported in plain words.</p></li>
+          <li><p><b>Record.</b> A versioned run record keeps the exit and its reason; <code>zbx commit</code> can later turn the upper layer into a new tree.</p></li>
+        </ol>
+      </div>
+      <div><h3>How it is checked</h3>
+        <ol class="flow">
+          <li><p><b>Simulation.</b> Unit and snapshot tests run against the simulated host, faults included.</p></li>
+          <li><p><b>Seeded fuzzers.</b> 25 of them, from the image-reference parser to D-Bus messages, seccomp and gc, each replayable from its seed.</p></li>
+          <li><p><b>Golden diagnostics.</b> Every code is rendered in text, verbose and JSON and compared with checked-in files; no output may show a stack trace or a raw error name.</p></li>
+          <li><p><b>Real VMs.</b> Each milestone's demo runs start to finish in an Ubuntu 24.04 guest under KVM on every pull request, and every earlier demo with it.</p></li>
+          <li><p><b>Upgrades.</b> The new binary reads state the previous release wrote.</p></li>
+          <li><p><b>Mechanical rules.</b> <code>zig build tidy</code>: line and function length, assertion density, banned patterns, and no test file left unrun.</p></li>
+        </ol>
+      </div>
+    </div>
+    <h3 style="margin-bottom:12px">Coming next</h3>
+    <div class="next" id="next-list"></div>
   </section>
 
   <section id="demos">
@@ -165,10 +224,10 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-10-24",
+  updated: "2026-10-28",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M3 shipped",
-  stageStatus: "wip",
+  stage: "Pre-alpha · M4 shipped",
+  stageStatus: "done",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
@@ -190,8 +249,11 @@ const MILESTONES = [
   {id:"M3", name:"Store", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40480046060", date:"2026-10-27"}, goal:"Root filesystems live in a deduplicated, verifiable store and run by digest.",
    demo:[["$", "zbx store import ./alpine"], ["", "b3:418d183a516cd74f078f1a50b44cefe5b1e0b167154835079dc5aebeb0ab7417"], ["$", "zbx store import ./alpine-big   (the same rootfs plus one 10 MB file)"], ["", "(store du: 7,815,125 → 17,816,683 bytes)"], ["$", "zbx run 418d183a516c --name apk1 -- sh   (apk add --no-cache dtach; exit)"], ["", "(1/1) Installing dtach (0.9-r5)"], ["$", "zbx commit apk1"], ["", "b3:17e62c5ad89f35b19d1c0404160419d78956400c822538f1849b4c31a34d3d78"], ["$", "zbx store diff 418d183a516c 17e62c5ad89f"], ["", "M /etc/apk/world  content"], ["", "M /lib/apk/db/installed  content"], ["", "M /lib/apk/db/scripts.tar  content"], ["", "A /usr/bin/dtach"], ["$", "zbx store verify   (after damaging one object by hand)"], ["", "error[ZBX-E0429]: a file in the store is damaged"], ["", "  … reached by /etc/passwd in root 0baa9e23114b and 2 more   (exit 2)"], ["$", "zbx store diff 0baa9e23114b 24e1bb184cee   (a commit that deleted /big.bin)"], ["", "D /big.bin"], ["", "(store du of each tree: 17,787,433 → 7,787,187 bytes stored)"]]},
-  {id:"M4", name:"Pull", status:"plan", goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
-   demo:[["$","zbx pull python:3.12-slim"],["","resolved sha256:9a1f…  stored 41 MB"],["$","zbx pull python:3.13-slim"],["","resolved sha256:2c7e…  stored 9 MB (31 MB already present)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"]]},
+  // M4's demo below is output recorded by demo-m4 in CI (Ubuntu 24.04 VM, KVM, docker.io through
+  // mirror.gcr.io), trimmed where marked; the du table drops its TREE column and the digests are cut.
+  {id:"M4", name:"Pull", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM; top-20 check passed"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40624651773", date:"2026-10-28"}, goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
+   demo:[["$","zbx pull alpine:3.20"],["","sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"],["$","zbx run alpine:3.20 -- cat /etc/os-release"],["","NAME=\"Alpine Linux\""],["","…    (four more lines; VERSION_ID=3.20.10)"],["$","zbx pull python:3.12-slim && zbx pull python:3.13-slim"],["$","zbx store du --by-image"],["","IMAGE              FILES    LOGICAL  COMPRESSED     STORED     SHARED"],["","python:3.12-slim    4413  114.3 MiB    41.5 MiB  110.1 MiB   81.9 MiB"],["","alpine:3.20           87    7.4 MiB     3.5 MiB    7.4 MiB    7.4 MiB"],["","python:3.13-slim    4446  113.2 MiB    41.3 MiB  108.9 MiB   81.9 MiB"],["","(python:3.13-slim costs 28,365,524 bytes of its 43,320,189 compressed)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"],["$","zbx run alpine:3.20 -- true   (after changing the tree in zbx.lock)"],["","error[ZBX-E0519]: zbx.lock and the store disagree about an image"],["","  cause  zbx.lock has tree b3:00000000e56b…; the store has tree b3:2e478596e56b…"],["","  fix    to take the store's image, pull again and let the lock follow:   zbx pull 'alpine:3.20'"],["","         or put the tree the lock names back, from version control"],["","(exit 125)"]]},
   {id:"M5", name:"Network", status:"plan", goal:"No network unless granted; a granted service is reachable from the host.",
    demo:[["$","zbx run alpine -- wget -qO- https://example.com"],["","network: none (grant with --net)"],["$","zbx run --publish 8080:80 nginx &"],["$","curl -s localhost:8080 | head -1"],["","<!DOCTYPE html>"]]},
   {id:"M6", name:"State", status:"plan", goal:"Data that must outlive a container is named, typed and listed.",
@@ -212,12 +274,22 @@ const DOCS = [
   {t:"Hermetic builds", m:"M7", d:"The build file, step inputs, cache keys and reproducibility checks."},
   {t:"Signing and policy", m:"M8", d:"Keys, provenance records and run policies."},
 ];
+// The technical next steps shown under "Coming next"; status comes from MILESTONES.
+const NEXT = [
+  {m:"M4", t:"OCI images, by digest", d:"Pull public images from Docker Hub and GHCR, flatten their layers (gzip, zstd, tar with whiteouts) into one store tree, honour the image config, and pin tags to digests in a project's zbx.lock."},
+  {m:"M5", t:"Networking, granted", d:"Each container gets its own network namespace with nothing in it; --net grants connectivity through pasta, and --publish maps a port. A real sysfs replaces today's read-only host /sys."},
+  {m:"M6", t:"Named state", d:"Volumes for data that must outlive a container, kept outside the content store and never collected implicitly."},
+  {m:"M7", t:"Hermetic builds", d:"A declared DAG of steps, each an M2-hardened container, offline by default, cached on the hash of its inputs, with timestamps normalized so the same inputs give the same digest."},
+  {m:"M8", t:"Trust", d:"ed25519 signatures over tree digests, provenance from M7 builds, and a run policy that refuses what it cannot trace."},
+  {m:"C0–C2", t:"Zigcube", d:"The orchestrator: desired state in Postgres or SQLite, controllers that reconcile it, and node agents that link this runtime and fetch store chunks from peers."},
+];
 // ===== Rendering =====
 const $ = s => document.querySelector(s);
 const label = {done:"Shipped", wip:"In progress", plan:"Planned"};
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function termHTML(lines){return lines.map(([k,t])=>k? `<span class="p">${k}</span> ${esc(t)}` : `<span class="d">${esc(t)}</span>`).join("\n")}
-$("#hero-term").innerHTML = termHTML([["$","zbx pull alpine:3.20"],["","resolved sha256:1e42…  stored 3.4 MB"],["$","zbx run alpine:3.20 -- sh"],["#","id"],["","uid=0(root) gid=0(root)"],["#","exit"],["$","ps -o user,cmd -C zbx"],["","alex  zbx run alpine:3.20 -- sh"]]);
+// Recorded by demo-m4 in CI (run 56), as the M4 entry below.
+$("#hero-term").innerHTML = termHTML([["$","zbx pull alpine:3.20"],["","sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"],["$","zbx run alpine:3.20 -- cat /etc/os-release"],["","NAME=\"Alpine Linux\""],["","PRETTY_NAME=\"Alpine Linux v3.20\""],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"]]);
 const done = MILESTONES.filter(m=>m.status==="done").length;
 const wip = MILESTONES.filter(m=>m.status==="wip").length;
 $("#ms-count").textContent = `${done} of ${MILESTONES.length} shipped` + (wip?` · ${wip} in progress`:"");
@@ -229,6 +301,8 @@ $("#milestones").innerHTML = MILESTONES.map(m=>`
   </article>`).join("");
 $("#docs-list").innerHTML = DOCS.map(d=>{const ms=MILESTONES.find(x=>x.id===d.m); const st=ms?ms.status:"plan";
   return `<div class="doc"><h3>${d.t}</h3><p>${d.d}</p><span class="when">${st==="done"&&d.href?`<a href="${d.href}">Read it</a>`:(st==="done"?"Being written":"Arrives with "+d.m)}</span></div>`}).join("");
+$("#next-list").innerHTML = NEXT.map(n=>{const ms=MILESTONES.find(x=>x.id===n.m); const st=ms?ms.status:"plan";
+  return `<div class="item"><div class="head"><span class="code" style="font-family:var(--mono);color:var(--accent);font-size:.85rem">${n.m}</span><h3>${n.t}</h3><span class="pill s-${st}">${label[st]}</span></div><p>${esc(n.d)}</p></div>`}).join("");
 $("#updated").textContent = SITE.updated;
 $("#hdr-status").textContent = SITE.stage;
 $("#hdr-status").className = "pill s-" + (SITE.stageStatus || "plan");

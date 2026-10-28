@@ -128,8 +128,8 @@ const store_ls_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/store-ls/1","version":1,
     \\"title":"zbx store ls --output json",
-    \\"description":"stdout: the roots, newest first.",
-    \\"type":"object","required":["schema","roots"],
+    \\"description":"stdout: the roots, newest first, and the pulled images.",
+    \\"type":"object","required":["schema","roots","images"],
     \\"properties":{"schema":{"const":"zbx.store.ls/1"},
     \\"roots":{"type":"array","items":{"type":"object",
     \\"required":["digest","kind","time","files","bytes","source","parent"],
@@ -137,7 +137,14 @@ const store_ls_schema =
     \\"kind":{"enum":["import","commit","container"]},
     \\"time":{"type":"integer","description":"seconds since the epoch"},
     \\"files":{"type":"integer"},"bytes":{"type":"integer"},
-    \\"source":{"type":"string"},"parent":{"type":["string","null"]}}}}}}
+    \\"source":{"type":"string"},"parent":{"type":["string","null"]}}}},
+    \\"images":{"type":"array","description":"pulled images, by the reference they were pulled as",
+    \\"items":{"type":"object","required":["reference","manifest","platform","tree","time"],
+    \\"properties":{"reference":{"type":"string"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"platform":{"type":"string"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"time":{"type":"integer"}}}}}}
 ;
 
 const store_du_schema =
@@ -156,8 +163,17 @@ const store_du_schema =
     \\"files":{"type":"integer"},"logical_bytes":{"type":"integer"},
     \\"objects":{"type":"integer","description":"distinct objects"},
     \\"stored_bytes":{"type":"integer","description":"bytes of the distinct objects"},
-    \\"shared_bytes":{"type":"integer","description":"of those, bytes other roots also use"}}}},
-    \\"oneOf":[{"required":["store"]},{"required":["tree"]}]}
+    \\"shared_bytes":{"type":"integer","description":"of those, bytes other roots also use"}}},
+    \\"images":{"type":"array","description":"du --by-image: one entry for each pulled image",
+    \\"items":{"type":"object","required":["reference","manifest","platform","tree","files",
+    \\"logical_bytes","compressed_bytes","stored_bytes","shared_bytes"],
+    \\"properties":{"reference":{"type":"string"},"manifest":{"type":"string"},
+    \\"platform":{"type":"string"},"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"files":{"type":"integer"},"logical_bytes":{"type":"integer"},
+    \\"compressed_bytes":{"type":"integer","description":"the layers as downloaded"},
+    \\"stored_bytes":{"type":"integer","description":"bytes of the distinct objects"},
+    \\"shared_bytes":{"type":"integer","description":"of those, bytes other roots also use"}}}}},
+    \\"oneOf":[{"required":["store"]},{"required":["tree"]},{"required":["images"]}]}
 ;
 
 const store_rm_schema =
@@ -167,7 +183,8 @@ const store_rm_schema =
     \\"description":"stdout: the root that was dropped. A failure is a diagnostic on stderr.",
     \\"type":"object","required":["schema","digest","removed"],
     \\"properties":{"schema":{"const":"zbx.store.rm/1"},
-    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"removed":{"const":true}}}
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"removed":{"const":true},
+    \\"images":{"type":"integer","description":"image records of the tree that went with it"}}}
 ;
 
 const commit_schema =
@@ -257,6 +274,8 @@ const store_gc_schema =
     \\"expired":{"type":"integer","description":"applied only: old trash emptied now"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer","description":"chunk lists"},
     \\"trees":{"type":"integer"},"farms":{"type":"integer","description":"materialized dirs"},
+    \\"blobs":{"type":"integer","description":"downloaded blobs no image names"},
+    \\"partials":{"type":"integer","description":"cut downloads untouched for 24 hours"},
     \\"tmp":{"type":"integer","description":"leftovers of dead processes in tmp/"},
     \\"bytes":{"type":"integer"}}}
 ;
@@ -272,7 +291,8 @@ const store_trash_schema =
     \\"properties":{"gc":{"type":"string"},"readable":{"type":"boolean"},
     \\"time":{"type":"integer"},"expires":{"type":"integer"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
-    \\"farms":{"type":"integer"},"bytes":{"type":"integer"},
+    \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"},
+    \\"bytes":{"type":"integer"},
     \\"complete":{"type":"boolean","description":"false if a gc or restore was interrupted"}}}}}}
 ;
 
@@ -284,7 +304,66 @@ const store_restore_schema =
     \\"type":"object","required":["schema","gc","objects","lists","trees","farms"],
     \\"properties":{"schema":{"const":"zbx.store.restore/1"},"gc":{"type":"string"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer"},"trees":{"type":"integer"},
-    \\"farms":{"type":"integer"}}}
+    \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"}}}
+;
+
+const pull_resolve_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
+    \\"title":"zbx pull --resolve-only --output json",
+    \\"description":"stdout: what a reference names for this platform. A failure is on stderr.",
+    \\"type":"object","required":["schema","reference","registry","repository","index_digest",
+    \\"manifest_digest","manifest_size","platform","config_digest","config_size","layers"],
+    \\"properties":{"schema":{"const":"zbx.pull.resolve/1"},
+    \\"reference":{"type":"string","description":"the canonical form of the reference"},
+    \\"registry":{"type":"string"},"repository":{"type":"string"},
+    \\"index_digest":{"type":["string","null"],"pattern":"^sha256:[0-9a-f]{64}$",
+    \\"description":"the index or manifest list the reference named; null for a single manifest"},
+    \\"manifest_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$",
+    \\"description":"the manifest of this platform: what zbx.lock records"},
+    \\"manifest_size":{"type":"integer"},
+    \\"platform":{"enum":["linux/amd64","linux/arm64"]},
+    \\"config_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"config_size":{"type":"integer"},
+    \\"layers":{"type":"array","items":{"type":"object","required":["digest","size","kind"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"size":{"type":"integer"},"kind":{"enum":["tar","tar_gzip","tar_zstd"]}}}}}}
+;
+
+const pull_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/pull/1","version":1,
+    \\"title":"zbx pull --output json",
+    \\"description":"stdout: the image pulled and the tree it became. A failure is on stderr.",
+    \\"type":"object","required":["schema","reference","registry","repository","manifest_digest",
+    \\"platform","tree","config","layers","files","directories","symlinks","bytes",
+    \\"special_skipped","xattrs_skipped","image","lock"],
+    \\"properties":{"schema":{"const":"zbx.pull/1"},
+    \\"reference":{"type":"string","description":"as the user wrote it"},
+    \\"registry":{"type":"string"},"repository":{"type":"string"},
+    \\"manifest_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"platform":{"enum":["linux/amd64","linux/arm64"]},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the store's identity of the image: the digest of its flattened tree"},
+    \\"config":{"type":"object","required":["digest","cache"],
+    \\"properties":{"digest":{"type":"string"},"cache":{"enum":["cached","downloaded","resumed"]}}},
+    \\"layers":{"type":"array","items":{"type":"object","required":["digest","size","cache"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"size":{"type":"integer"},"cache":{"enum":["cached","downloaded","resumed"]}}}},
+    \\"files":{"type":"integer"},"directories":{"type":"integer"},"symlinks":{"type":"integer"},
+    \\"bytes":{"type":"integer"},"special_skipped":{"type":"integer"},
+    \\"xattrs_skipped":{"type":"integer"},
+    \\"image":{"type":"object","description":"what the image runs by default",
+    \\"required":["entrypoint","cmd","env","workdir","user"],
+    \\"properties":{"entrypoint":{"type":"array","items":{"type":"string"}},
+    \\"cmd":{"type":"array","items":{"type":"string"}},
+    \\"env":{"type":"array","items":{"type":"string"}},
+    \\"workdir":{"type":"string"},"user":{"type":"string"}}},
+    \\"lock":{"type":["object","null"],
+    \\"description":"zbx.lock after the pull; null for a digest reference, which needs none",
+    \\"required":["path","created"],
+    \\"properties":{"path":{"type":"string"},
+    \\"created":{"type":"boolean","description":"this pull made the file"}}}}}
 ;
 
 const Entry = struct { command: []const u8, text: []const u8 };
@@ -305,12 +384,14 @@ const table = [_]Entry{
     .{ .command = "store-gc", .text = store_gc_schema },
     .{ .command = "store-trash", .text = store_trash_schema },
     .{ .command = "store-restore", .text = store_restore_schema },
+    .{ .command = "pull-resolve", .text = pull_resolve_schema },
+    .{ .command = "pull", .text = pull_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 15);
+    assert(table.len == 17);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -339,5 +420,5 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("explain") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 15), table.len);
+    try testing.expectEqual(@as(usize, 17), table.len);
 }

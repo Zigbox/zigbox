@@ -34,6 +34,12 @@ pub const Limits = struct {
     }
 };
 
+/// A user and group id inside the container.
+pub const User = struct {
+    uid: u32,
+    gid: u32,
+};
+
 pub const Spec = struct {
     /// The directory to use as the container's root, read and written in place. Empty when
     /// `image` is set; exactly one of the two is.
@@ -55,7 +61,26 @@ pub const Spec = struct {
     /// there; one of these with the same name replaces it). Not kept in the run record: a value
     /// may be a secret.
     env: []const Label = &.{},
+    /// The directory the command starts in, absolute; made if the root file system lacks it.
+    /// Empty: the root.
+    workdir: []const u8 = "",
+    /// The user and group the command runs as. Null: root (id 0). Any other needs the full id
+    /// map; a run with only root mapped refuses it.
+    user: ?User = null,
 };
+
+/// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.
+pub fn workdir_problem(path: []const u8) bool {
+    assert(path.len <= constants.arg_bytes_max * 4);
+    if (path.len == 0) return false;
+    if (path.len > constants.rootfs_bytes_max or path[0] != '/') return true;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return true;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return true;
+    }
+    return false;
+}
 
 /// The index of the first label that does not fit, or null. Too many labels is reported at the
 /// index of the first one past the bound. A key is non-empty printable ASCII without '='.

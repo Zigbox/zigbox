@@ -1,0 +1,14 @@
+error[ZBX-E0519]: zbx.lock and the store disagree about an image
+  while  checking registry.test/fixture/open:3.20 against the lock
+  cause  zbx.lock has tree
+         b3:0000000000000000000000000000000000000000000000000000000000000000;
+         the store has tree
+         b3:5ba8785a24c71d8de1b422070831f5287cdb89390558fbc2e1da8f3eff719981
+  ref    registry.test/fixture/open:3.20
+  expect b3:0000000000000000000000000000000000000000000000000000000000000000
+  actual b3:5ba8785a24c71d8de1b422070831f5287cdb89390558fbc2e1da8f3eff719981
+  path   /home/alice/project/zbx.lock
+  fix    to take the store's image, pull again and let the lock follow:   zbx pull 'registry.test/fixture/open:3.20'
+         or put the tree the lock names back, from version control
+  more   zbx explain E0519
+  docs   https://zigbox.github.io/zigbox/errors/E0519.html

@@ -37,6 +37,8 @@ const trees = @import("store/trees.zig");
 const usage = @import("store/usage.zig");
 const verify = @import("store/verify.zig");
 const gc = @import("store/gc.zig");
+const image_find = @import("store/image_find.zig");
+const images = @import("store/images.zig");
 
 const Digest = digest_mod.Digest;
 const Host = host_mod.Host;
@@ -57,6 +59,8 @@ pub const Args = struct {
     confirm: ?[]const u8 = null,
     /// `gc --trash`: list the trash instead of planning.
     trash: bool = false,
+    /// `du --by-image`: one line for each image instead of the store's total.
+    by_image: bool = false,
 };
 
 /// How results and diagnostics are written.
@@ -80,6 +84,9 @@ pub const Workspace = struct {
     live: [constants.store_roots_max]Digest,
     live_count: u32,
     trash: [constants.store_trash_entries_max]gc.TrashEntry,
+    /// `ls`, `rm` and `du --by-image` look through the image records here.
+    image_memory: image_find.Memory,
+    image: images.Image,
 };
 
 const Job = struct {
@@ -312,13 +319,80 @@ fn do_ls(job: *Job, diag: *Diag) Error!void {
         };
     }
     const found = job.workspace.root_list[0..listing.count];
-    if (job.output.json) return ls_json(job, found, diag);
+    if (job.output.json) return ls_json(job, &store, exists, found, diag);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const head = std.fmt.bufPrint(&buffer, "{s: <67} {s: <9} {s: >7} {s: >11}  {s: <19}  {s}\n", .{
         "DIGEST", "KIND", "FILES", "SIZE", "TIME", "SOURCE",
     }) catch unreachable; // A short fixed line.
     try put(job, head, diag);
     for (found) |*root| try put(job, ls_row(root, &buffer), diag);
+    if (exists) try ls_images(job, &store, false, diag);
+}
+
+/// The image records, after the roots: text as a second table when there are any, JSON as the
+/// members of "images". Each shows the reference it was pulled as and the tree it became.
+const LsImages = struct {
+    job: *const Job,
+    diag: *Diag,
+    json: bool,
+    count: u32 = 0,
+    failed: bool = false,
+
+    pub fn visit(self: *LsImages, image: *const images.Image) void {
+        assert(image.layer_count <= constants.registry_layers_max);
+        assert(image.reference_len <= constants.reference_bytes_max);
+        if (self.failed) return;
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        var when: [19]u8 = undefined;
+        var safe: [constants.store_source_bytes_max]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        // Cannot fail: a few fixed columns and a reference of at most 1024 bytes.
+        if (self.json) {
+            if (self.count > 0) writer.writeByte(',') catch unreachable; // Same bound.
+            writer.writeAll("{\"reference\":") catch unreachable; // Same bound.
+            json_string(&writer, image.reference_text()) catch unreachable; // Same bound.
+            const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
+                "\"time\":{d}}}";
+            writer.print(fields, .{
+                &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
+            }) catch unreachable; // Same bound.
+        } else {
+            if (self.count == 0) {
+                writer.print("\n{s: <34} {s: <71} {s: <12} {s: <19}  {s}\n", .{
+                    "IMAGE", "MANIFEST", "PLATFORM", "TIME", "TREE",
+                }) catch unreachable; // Same bound.
+            }
+            const reference = text_util.sanitise(&safe, image.reference_text());
+            writer.print("{s: <34} {s: <71} {s: <12} {s}  {s}\n", .{
+                reference,
+                &image.manifest.text(),
+                image.platform_text(),
+                commands.clock_text(image.time, &when),
+                image.tree.text(),
+            }) catch unreachable; // Same bound.
+        }
+        self.count += 1;
+        put(self.job, writer.buffered(), self.diag) catch {
+            self.failed = true;
+        };
+    }
+};
+
+/// The refusal for a scan of the image records that failed.
+fn images_unreadable(diag: *Diag, store: *const Store) Error {
+    assert(diag.code == null);
+    const step = "looking through the images";
+    diagnose.cannot_read(diag, store, step, error.IoFailed, store.fs.last_errno());
+    return error.Failed;
+}
+
+fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    var visitor: LsImages = .{ .job = job, .diag = diag, .json = json };
+    image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
+        return images_unreadable(diag, store);
+    };
+    if (visitor.failed) return error.Failed;
 }
 
 fn ls_row(root: *const roots.Root, buffer: *[constants.output_bytes_max]u8) []const u8 {
@@ -341,7 +415,13 @@ fn ls_row(root: *const roots.Root, buffer: *[constants.output_bytes_max]u8) []co
     }) catch unreachable; // Same bound.
 }
 
-fn ls_json(job: *const Job, found: []const roots.Root, diag: *Diag) Error!void {
+fn ls_json(
+    job: *Job,
+    store: *const Store,
+    exists: bool,
+    found: []const roots.Root,
+    diag: *Diag,
+) Error!void {
     assert(found.len <= constants.store_roots_max);
     assert(diag.code == null);
     try put(job, "{\"schema\":\"zbx.store.ls/1\",\"roots\":[", diag);
@@ -362,6 +442,8 @@ fn ls_json(job: *const Job, found: []const roots.Root, diag: *Diag) Error!void {
         }
         try put(job, writer.buffered(), diag);
     }
+    try put(job, "],\"images\":[", diag);
+    if (exists) try ls_images(job, store, true, diag);
     try put(job, "]}\n", diag);
 }
 
@@ -386,6 +468,7 @@ fn do_du(job: *Job, diag: *Diag) Error!void {
     assert(diag.code == null);
     var store: Store = undefined;
     const exists = try open_store(job, &store, .existing, diag);
+    if (job.args.by_image) return du_by_image(job, &store, exists, diag);
     if (job.args.operand) |text| {
         const digest = try resolve(&store, exists, text, diag);
         return du_tree(job, &store, digest, diag);
@@ -411,6 +494,135 @@ fn do_du(job: *Job, diag: *Diag) Error!void {
         }) catch unreachable; // Same bound.
     }
     try put(job, writer.buffered(), diag);
+}
+
+/// `du --by-image`: for each image, the sizes of its tree and of the layers it came as. Calls
+/// `usage.tree_usage` for each, so "shared" is what other roots (other images, among them) use.
+const DuImages = struct {
+    job: *const Job,
+    store: *const Store,
+    memory: usage.Memory,
+    diag: *Diag,
+    count: u32 = 0,
+    failure: ?usage.Failure = null,
+    output_failed: bool = false,
+
+    pub fn visit(self: *DuImages, image: *const images.Image) void {
+        assert(image.layer_count <= constants.registry_layers_max);
+        assert(self.count < constants.images_max);
+        if (self.failure != null or self.output_failed) return;
+        var result: usage.TreeUsage = undefined;
+        var failure: usage.Failure = undefined;
+        usage.tree_usage(self.store, &self.memory, image.tree, &result, &failure) catch {
+            self.failure = failure;
+            return;
+        };
+        const compressed = self.compressed_bytes(image);
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        const row = if (self.job.output.json)
+            du_image_json(&buffer, image, &result, compressed, self.count)
+        else
+            du_image_text(&buffer, image, &result, compressed);
+        self.count += 1;
+        put(self.job, row, self.diag) catch {
+            self.output_failed = true;
+        };
+    }
+
+    /// The layers' sizes as they are in the blob cache; a blob that was removed counts as none.
+    fn compressed_bytes(self: *const DuImages, image: *const images.Image) u64 {
+        assert(image.layer_count <= constants.registry_layers_max);
+        var total: u64 = 0;
+        for (image.layers[0..image.layer_count]) |layer| {
+            var path: fs_path_buffer = undefined;
+            const hex = layer.hex();
+            const where = self.store.path(&path, &.{ "/blobs/sha256/", &hex });
+            const stat = self.store.fs.lstat(where) catch continue;
+            total += stat.size;
+        }
+        return total;
+    }
+};
+
+const du_image_row = "{s: <34} {d: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n";
+const du_image_head = "{s: <34} {s: >7} {s: >11} {s: >11} {s: >11} {s: >11}  {s}\n";
+
+fn du_image_text(
+    buffer: *[constants.output_bytes_max]u8,
+    image: *const images.Image,
+    result: *const usage.TreeUsage,
+    compressed: u64,
+) []const u8 {
+    assert(image.layer_count <= constants.registry_layers_max);
+    var sizes: [4][32]u8 = undefined;
+    var safe: [constants.store_source_bytes_max]u8 = undefined;
+    const reference = text_util.sanitise(&safe, image.reference_text());
+    // Cannot fail: a reference of at most 1024 bytes and fixed columns.
+    return std.fmt.bufPrint(buffer, du_image_row, .{
+        reference,
+        result.files,
+        size_words(&sizes[0], result.logical_bytes),
+        size_words(&sizes[1], compressed),
+        size_words(&sizes[2], result.stored_bytes),
+        size_words(&sizes[3], result.shared_bytes),
+        image.tree.text(),
+    }) catch unreachable; // Same bound.
+}
+
+fn du_image_json(
+    buffer: *[constants.output_bytes_max]u8,
+    image: *const images.Image,
+    result: *const usage.TreeUsage,
+    compressed: u64,
+    index: u32,
+) []const u8 {
+    assert(image.layer_count <= constants.registry_layers_max);
+    var writer = std.Io.Writer.fixed(buffer);
+    // Cannot fail: one object, the reference escaped being the bulk.
+    if (index > 0) writer.writeByte(',') catch unreachable; // Same bound.
+    writer.writeAll("{\"reference\":") catch unreachable; // Same bound.
+    json_string(&writer, image.reference_text()) catch unreachable; // Same bound.
+    writer.print(",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\",\"files\":{d}," ++
+        "\"logical_bytes\":{d},\"compressed_bytes\":{d},\"stored_bytes\":{d}," ++
+        "\"shared_bytes\":{d}}}", .{
+        &image.manifest.text(),
+        image.platform_text(),
+        image.tree.text(),
+        result.files,
+        result.logical_bytes,
+        compressed,
+        result.stored_bytes,
+        result.shared_bytes,
+    }) catch unreachable; // Same bound.
+    return writer.buffered();
+}
+
+fn du_by_image(job: *Job, store: *const Store, exists: bool, diag: *Diag) Error!void {
+    assert(job.args.by_image);
+    assert(job.args.operand == null);
+    if (job.output.json) {
+        try put(job, "{\"schema\":\"zbx.store.du/1\",\"images\":[", diag);
+    } else {
+        var head: [constants.output_bytes_max]u8 = undefined;
+        const line = std.fmt.bufPrint(&head, du_image_head, .{
+            "IMAGE", "FILES", "LOGICAL", "COMPRESSED", "STORED", "SHARED", "TREE",
+        }) catch unreachable; // A short fixed line.
+        try put(job, line, diag);
+    }
+    var visitor: DuImages = .{
+        .job = job,
+        .store = store,
+        .memory = usage_memory(job),
+        .diag = diag,
+    };
+    if (exists) {
+        image_find.scan(store, &job.workspace.image_memory, &job.workspace.image, &visitor) catch {
+            return images_unreadable(diag, store);
+        };
+    }
+    if (visitor.output_failed) return error.Failed;
+    if (visitor.failure) |*failure| return usage_failed(store, failure, diag);
+    if (job.output.json) try put(job, "]}\n", diag);
 }
 
 /// The memory a tree's usage is counted in: the import workspace's arena, which no other
@@ -529,17 +741,24 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
     const digest = try resolve(&store, exists, job.args.operand.?, diag);
     var root: roots.Root = undefined;
     var errno: u16 = 0;
-    roots.load(&store, digest, &root, &errno) catch |err| switch (err) {
-        error.NotFound => {
-            diagnose.not_a_root(diag, digest);
-            return error.Failed;
-        },
-        else => {
-            const damaged = err != error.Unreadable;
-            const kind: host_mod.Error = if (damaged) error.FileTooLarge else error.IoFailed;
-            diagnose.cannot_read(diag, &store, "reading the root record", kind, errno);
-            return error.Failed;
-        },
+    var by_tree: image_find.ByTree = .{ .tree = digest };
+    image_find.scan(&store, &job.workspace.image_memory, &job.workspace.image, &by_tree) catch {
+        return images_unreadable(diag, &store);
+    };
+    const is_root = if (roots.load(&store, digest, &root, &errno)) |_| true else |err| blk: {
+        if (err == error.NotFound and by_tree.count > 0) break :blk false;
+        switch (err) {
+            error.NotFound => {
+                diagnose.not_a_root(diag, digest);
+                return error.Failed;
+            },
+            else => {
+                const damaged = err != error.Unreadable;
+                const kind: host_mod.Error = if (damaged) error.FileTooLarge else error.IoFailed;
+                diagnose.cannot_read(diag, &store, "reading the root record", kind, errno);
+                return error.Failed;
+            },
+        }
     };
     try diagnose.hold(diag, &store, .shared, "rm", "dropping a root");
     defer lock.release(&store);
@@ -548,17 +767,35 @@ fn do_rm(job: *Job, diag: *Diag) Error!void {
         diagnose.write_failed(diag, &store, "raising the generation", raised.err, raised.errno);
         return error.Failed;
     };
-    roots.remove(&store, digest) catch |err| {
-        diagnose.write_failed(diag, &store, "removing the root record", err, store.fs.last_errno());
-        return error.Failed;
-    };
+    // The image records of the tree go first; a kill between the two leaves the root, which
+    // a second `rm` removes. A pulled tree is kept by its image record as well as by its root,
+    // so removing only the root would have freed nothing.
+    for (by_tree.manifests[0..@min(by_tree.count, image_find.ByTree.kept_max)]) |manifest| {
+        images.remove(&store, manifest) catch |err| {
+            const failed_errno = store.fs.last_errno();
+            diagnose.write_failed(diag, &store, "removing an image record", err, failed_errno);
+            return error.Failed;
+        };
+    }
+    if (is_root) {
+        roots.remove(&store, digest) catch |err| {
+            const failed_errno = store.fs.last_errno();
+            diagnose.write_failed(diag, &store, "removing the root record", err, failed_errno);
+            return error.Failed;
+        };
+    }
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const text = if (job.output.json)
         std.fmt.bufPrint(
             &buffer,
-            "{{\"schema\":\"zbx.store.rm/1\",\"digest\":\"{s}\",\"removed\":true}}\n",
-            .{digest.text()},
+            "{{\"schema\":\"zbx.store.rm/1\",\"digest\":\"{s}\",\"removed\":true," ++
+                "\"images\":{d}}}\n",
+            .{ digest.text(), by_tree.count },
         )
+    else if (by_tree.count > 0)
+        std.fmt.bufPrint(&buffer, "removed {s} and {d} image record(s)\n", .{
+            digest.text(), by_tree.count,
+        })
     else
         std.fmt.bufPrint(&buffer, "removed {s}\n", .{digest.text()});
     // Cannot fail: one short line.
@@ -1127,10 +1364,21 @@ fn counts_words(counts: *const gc.Counts, buffer: *[constants.output_bytes_max]u
     assert(counts.total() < 1 << 40);
     assert(buffer.len == constants.output_bytes_max);
     var size: [32]u8 = undefined;
-    // Cannot fail: one short line.
+    var blobs: [96]u8 = undefined;
+    // Cannot fail: a short fixed line, and one for the blobs and the cut downloads.
+    const more = if (counts.blobs + counts.partials > 0) std.fmt.bufPrint(
+        &blobs,
+        "{d} downloaded blobs, {d} abandoned partial downloads, ",
+        .{ counts.blobs, counts.partials },
+    ) catch unreachable else blobs[0..0]; // Short.
     return std.fmt.bufPrint(buffer, "{d} objects, {d} chunk lists, {d} trees, {d} materialized " ++
-        "directories, {s}", .{
-        counts.objects, counts.lists, counts.trees, counts.farms, size_words(&size, counts.bytes),
+        "directories, {s}{s}", .{
+        counts.objects,
+        counts.lists,
+        counts.trees,
+        counts.farms,
+        more,
+        size_words(&size, counts.bytes),
     }) catch unreachable; // Same bound.
 }
 
@@ -1143,13 +1391,15 @@ fn put_plan(job: *const Job, planned: *const gc.Plan, diag: *Diag) Error!void {
         const text = std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.gc/1\"," ++
             "\"applied\":false," ++
             "\"plan\":\"{s}\",\"generation\":{d},\"objects\":{d},\"lists\":{d},\"trees\":{d}," ++
-            "\"farms\":{d},\"tmp\":{d},\"bytes\":{d}}}\n", .{
+            "\"farms\":{d},\"blobs\":{d},\"partials\":{d},\"tmp\":{d},\"bytes\":{d}}}\n", .{
             planned.hash.text(),
             planned.generation,
             counts.objects,
             counts.lists,
             counts.trees,
             counts.farms,
+            counts.blobs,
+            counts.partials,
             counts.tmp,
             counts.bytes,
         }) catch unreachable; // One short object.
@@ -1187,7 +1437,9 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
         const text = std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.gc/1\"," ++
             "\"applied\":true," ++
             "\"plan\":\"{s}\",\"gc\":\"{s}\",\"expires\":{d},\"objects\":{d},\"lists\":{d}," ++
-            "\"trees\":{d},\"farms\":{d},\"tmp\":{d},\"bytes\":{d},\"expired\":{d}}}\n", .{
+            "\"trees\":{d},\"farms\":{d},\"blobs\":{d},\"partials\":{d},\"tmp\":{d}," ++
+            "\"bytes\":{d}," ++
+            "\"expired\":{d}}}\n", .{
             job.confirm.text(),
             applied.gc,
             applied.expires,
@@ -1195,6 +1447,8 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
             counts.lists,
             counts.trees,
             counts.farms,
+            counts.blobs,
+            counts.partials,
             counts.tmp,
             counts.bytes,
             applied.expired,
@@ -1318,10 +1572,11 @@ fn trash_json(
     // Cannot fail: a short fixed object.
     return std.fmt.bufPrint(buffer, "{s}{{\"gc\":\"{s}\",\"readable\":true,\"time\":{d}," ++
         "\"expires\":{d}," ++
-        "\"objects\":{d},\"lists\":{d},\"trees\":{d},\"farms\":{d},\"bytes\":{d}," ++
-        "\"complete\":{}}}", .{
-        comma,      entry.id,   meta.time,  meta.expires, meta.objects,
-        meta.lists, meta.trees, meta.farms, meta.bytes,   meta.complete,
+        "\"objects\":{d},\"lists\":{d},\"trees\":{d},\"farms\":{d},\"blobs\":{d}," ++
+        "\"partials\":{d},\"bytes\":{d},\"complete\":{}}}", .{
+        comma,      entry.id,      meta.time,  meta.expires, meta.objects,
+        meta.lists, meta.trees,    meta.farms, meta.blobs,   meta.partials,
+        meta.bytes, meta.complete,
     }) catch unreachable; // Cannot fail: the buffer holds the longest one.
 }
 
@@ -1364,8 +1619,9 @@ fn do_restore(job: *Job, diag: *Diag) Error!void {
     const out = if (job.output.json)
         std.fmt.bufPrint(&buffer, "{{\"schema\":\"zbx.store.restore/1\",\"gc\":\"{s}\"," ++
             "\"objects\":{d}," ++
-            "\"lists\":{d},\"trees\":{d},\"farms\":{d}}}\n", .{
-            id, counts.objects, counts.lists, counts.trees, counts.farms,
+            "\"lists\":{d},\"trees\":{d},\"farms\":{d},\"blobs\":{d},\"partials\":{d}}}\n", .{
+            id,           counts.objects,  counts.lists, counts.trees, counts.farms,
+            counts.blobs, counts.partials,
         })
     else
         std.fmt.bufPrint(&buffer, "restored {d} objects, {d} chunk lists, {d} trees and {d} " ++

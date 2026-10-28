@@ -30,10 +30,13 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - `zig build tidy` checks line length, function length and banned patterns.
 - `zig build fuzz -- <fuzzer> [seed]` runs one seeded fuzzer.
 - `zig build demo-mN` runs milestone N's demo inside the test VM (harness in `src/testing/vm/`, written in Zig).
+- `zig build check` runs every gate (build, test, tidy, release, errors-site-check), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run.
 
 ## Working as the implementer subagent
 
-- Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push.** The supervisor reviews each slice adversarially, and you fix what the review finds before the next slice.
+- Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push to the working branch.** The supervisor reviews each slice adversarially, and you fix what the review finds before the next slice.
+- **Gates are `zig build check`, on the commit you report.** Paste its last line (`check: PASS <commit>`, without `+dirty`) into the report. A report without that line, or with another commit's, is not a report. Run the fuzzers you touched as well, and say which.
+- **VM checks run on CI's KVM runners, not under TCG here.** Push the commit to a scratch branch named `vm/<demo>-<slug>` (`<demo>` is `m0` to `m4`, or `all`; for example `git push origin HEAD:vm/m4-slice4`). `.github/workflows/vm.yml` runs that demo in minutes. Read the result with the GitHub tools (`actions_list` with the branch, then `get_job_logs`), quote the run link in your report. The run deletes its branch when it ends, so push a new commit to the same name to run again. Scratch branches are the only branches you may push to. Use local TCG only to debug something CI cannot show.
 - Report what you ran and its output, what you did not run and why, every deviation from the brief, and anything in the spec or brief that seemed wrong.
 
 ## README status
@@ -45,5 +48,5 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
 - Never report an unpushed commit as pushed.
-- CI runs only on pull requests and on `main`, never on a plain branch push. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited.
+- CI (`ci.yml`) runs only on pull requests and on `main`, never on a plain branch push. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited. The exception is `vm.yml`: a push to a `vm/*` scratch branch runs one demo, for checking work in progress (see the implementer section).
 - A commit that only records status (README.md and `site/index.html` updated after a CI result) carries `[skip ci]` in its message, so it does not start a run of its own. Never use `[skip ci]` on a commit that changes code, tests, the harness, CI or generated files.

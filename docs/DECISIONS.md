@@ -3,6 +3,23 @@
 These are decisions the owner has made ahead of the milestone that needs them. Each one goes into that milestone's brief when the brief is written. Newest first.
 
 
+
+
+## M4 · A 4 MB binary, and a docker.io mirror for PR CI
+
+*Decided 2026-10-27, after M4 slice 1.*
+
+- **The release size limit is 4 MB**, up from 2 MB (live doc rev 54). std's TLS client and its crypto are about 550 KB, and gzip, zstd and tar follow in slice 2. Splitting the pull code into a second binary or shipping `ReleaseSmall` (assertions off) were rejected. The size is still checked on every CI run, so growth stays visible.
+- **PR CI reaches docker.io through a mirror.** Docker Hub's anonymous limit ran out after about 20 resolves from one address, and GitHub runners share egress addresses. zbx gets a registry-mirror setting, as Docker's `registry-mirrors` does: a pull of a docker.io image tries the mirror first, then falls back to Docker Hub. PR CI's `demo-m4` points docker.io at `mirror.gcr.io`, with blobs cached. The weekly top-20 run and the by-hand demo use real Docker Hub, so its token flow stays tested.
+
+## M4 · Pull: the lockfile, the top-20 check, and /sys
+
+*Decided 2026-10-27.*
+
+- **`zbx.lock` lives in the project directory**: the nearest one up from the working directory, as with `Cargo.lock`. `zbx pull` adds or updates the entry for the tag. `zbx run <tag>` runs the locked digest and refuses, naming both digests, when the lock and the store disagree; it never re-pulls silently. Without a lockfile, `run <tag>` resolves the tag and writes one. Live doc rev 53.
+- **The top-20 acceptance check runs weekly and on demand**, in its own workflow. `demo-m4` on every PR uses only alpine and the two python images, from a cached blob store. M4 is demonstrated once both the `demo-m4` job and one top-20 run are green, with the run linked.
+- **`/sys` is the host's, bound read-only**, until M5 gives each container its own network namespace and a real sysfs can be mounted. Podman does the same when running rootless without its own netns. It shows the host's network devices; that leak is recorded in `docs/demos/m4.md` and closes in M5.
+
 ## M3 · The store: whole-file objects, per-user, gc by plan hash with a trash
 
 *Decided 2026-10-26.*

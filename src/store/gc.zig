@@ -8,6 +8,11 @@
 //!   - file objects no kept tree names (and their chunk lists), and chunk lists with no object;
 //!   - tree objects no kept tree reaches;
 //!   - materialized directories (`cache/<digest>`) of a tree that is neither a root nor live;
+//!   - downloaded blobs (`blobs/sha256/<digest>`) that no image record names. An image record
+//!     (`images/`, `images.zig`) keeps its tree, its config blob and its layer blobs. Cut
+//!     downloads (`blobs/partial/`) are a pull's to resume, so only those older than
+//!     `constants.store_partial_seconds` are planned, as their own class: no pull is
+//!     writing one that old, and an apply holds the lock a pull holds shared.
 //!   - leftovers in `tmp/` whose `<pid>-<n>` names a process that is gone (a killed import).
 //!
 //! The plan hash is the BLAKE3 of `"zbx-gc-plan" 0x01`, the store's generation counter
@@ -36,6 +41,7 @@ const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const generation = @import("generation.zig");
+const images = @import("images.zig");
 const layout = @import("layout.zig");
 const lock = @import("lock.zig");
 const object = @import("object.zig");
@@ -45,6 +51,7 @@ const sets = @import("sets.zig");
 const shards = @import("shards.zig");
 const tree = @import("tree.zig");
 const walk = @import("walk.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
 
 const Digest = digest_mod.Digest;
 const Hasher = digest_mod.Hasher;
@@ -60,6 +67,10 @@ pub const Counts = struct {
     lists: u64 = 0,
     trees: u64 = 0,
     farms: u64 = 0,
+    /// Downloaded blobs no image names.
+    blobs: u64 = 0,
+    /// Cut downloads nobody has written to for `store_partial_seconds`.
+    partials: u64 = 0,
     /// Leftovers of dead processes in `tmp/`; deleted, not trashed, and not in the hash.
     tmp: u64 = 0,
     /// Bytes of the objects, lists and trees.
@@ -68,7 +79,8 @@ pub const Counts = struct {
     pub fn total(counts: *const Counts) u64 {
         assert(counts.objects < 1 << 40);
         assert(counts.trees < 1 << 40);
-        return counts.objects + counts.lists + counts.trees + counts.farms;
+        return counts.objects + counts.lists + counts.trees + counts.farms + counts.blobs +
+            counts.partials;
     }
 };
 
@@ -126,22 +138,67 @@ pub const Workspace = struct {
     /// A restore that has to make a chunk list reads the object into these.
     io: [constants.store_io_buffer_bytes]u8,
     chunks: [constants.store_chunks_max]Digest,
+    /// The room for the sets of what is kept (see `Layout`), the caller's: at least
+    /// `tables_bytes_min`, and `constants.store_gc_tables_bytes` for a store of about a million
+    /// objects. The caller keeps it zeroed or not as it likes (the sets clear what they use), but
+    /// a region of zero pages from the program's bss costs nothing until a plan uses it, which is
+    /// why `zbx` keeps a static one and a debug-built test does not put it in a `Workspace`.
+    /// Two callers with two regions plan independently; one region is for one gc at a time.
+    tables: []align(8) u8,
 };
 
 pub const meta_bytes_max = 512;
 
-pub const arena_bytes: u32 = names_bytes + offsets_bytes + objects_bytes + trees_bytes +
-    tops_bytes + stack_bytes;
+/// The memory outside `Workspace.tables` that a pass uses, in the caller's arena: the names of a
+/// directory, their offsets, and the stack of a walk.
+pub const arena_bytes: u32 = names_bytes + offsets_bytes + stack_bytes;
 const names_bytes: u32 = remove.arena_bytes;
 const offsets_bytes: u32 = 1024 * 1024;
-const objects_bytes: u32 = 5 * 1024 * 1024 + 512 * 1024;
-const trees_bytes: u32 = 3 * 1024 * 1024;
-const tops_bytes: u32 = 1024 * 1024;
 const stack_bytes: u32 = 1024 * 1024;
+
+/// What `Workspace.tables` holds, front to back: the memory a removal borrows, the roots and the
+/// blobs that images keep (fixed), then the sets of objects and of trees, which are sized to the
+/// store. The sets grow with the store, in the bound the caller gave: a store with more than
+/// `table_entries_max` objects is refused with a message that names the limit, never cut.
+const removal_bytes: u32 = remove.arena_bytes;
+const tops_bytes: u32 = 1024 * 1024;
+const blobs_bytes: u32 = 2 * 1024 * 1024;
+const fixed_bytes: u32 = removal_bytes + tops_bytes + blobs_bytes;
+
+/// The least a region can be: the fixed parts and room for a small store's sets.
+pub const tables_bytes_min: u32 = fixed_bytes + 64 * 1024;
 
 comptime {
     assert(arena_bytes <= constants.store_arena_bytes_max);
-    assert(objects_bytes + trees_bytes >= remove.arena_bytes);
+    assert(tables_bytes_min < constants.store_gc_tables_bytes);
+}
+
+/// How much of the tables the sets of objects and of trees take.
+pub const Layout = struct {
+    objects_bytes: u64,
+    trees_bytes: u64,
+};
+
+/// The bytes of a set that holds `count` entries at three quarters full, a power of two of
+/// slots (`sets.KeySet` never fills past that).
+pub fn table_bytes(count: u64) u64 {
+    assert(count < 1 << 40);
+    var slots: u64 = 16;
+    while (slots * 3 < count * 4) slots *= 2;
+    assert(slots * 3 >= count * 4);
+    return slots * @sizeOf(sets.KeySet.Key);
+}
+
+/// The layout for a store with at most `objects` file objects and `trees` trees in the room
+/// `available`; null if they do not fit. A kept object is a stored object, so the number of
+/// stored ones is an upper bound of the kept.
+pub fn plan_tables(objects: u64, trees: u64, available: u64) ?Layout {
+    assert(available < 1 << 40);
+    assert(objects < 1 << 40);
+    const layout_objects = table_bytes(objects);
+    const layout_trees = table_bytes(trees);
+    if (layout_objects + layout_trees > available) return null;
+    return .{ .objects_bytes = layout_objects, .trees_bytes = layout_trees };
 }
 
 // ---- The metadata of a trash ---------------------------------------------------------------
@@ -153,6 +210,8 @@ pub const Meta = struct {
     lists: u64,
     trees: u64,
     farms: u64,
+    blobs: u64 = 0,
+    partials: u64 = 0,
     bytes: u64,
     /// False while the move is going on, and for ever if it was killed.
     complete: bool,
@@ -165,9 +224,11 @@ pub fn render_meta(meta: *const Meta, out: *[meta_bytes_max]u8) []const u8 {
     // Cannot fail: eight short fields fit 512 bytes.
     writer.print(".{{\n    .version = 1,\n    .time = {d},\n    .expires = {d},\n" ++
         "    .objects = {d},\n    .lists = {d},\n    .trees = {d},\n    .farms = {d},\n" ++
-        "    .bytes = {d},\n    .complete = {},\n}}\n", .{
-        meta.time,  meta.expires, meta.objects, meta.lists,
-        meta.trees, meta.farms,   meta.bytes,   meta.complete,
+        "    .blobs = {d},\n    .partials = {d},\n    .bytes = {d},\n" ++
+        "    .complete = {},\n}}\n", .{
+        meta.time,  meta.expires,  meta.objects, meta.lists,
+        meta.trees, meta.farms,    meta.blobs,   meta.partials,
+        meta.bytes, meta.complete,
     }) catch unreachable; // Cannot fail: the buffer holds the longest one.
     return writer.buffered();
 }
@@ -187,6 +248,16 @@ pub fn parse_meta(text: []const u8) ?Meta {
         const key = line[1..equals];
         var value = line[equals + 3 ..];
         if (value.len > 0 and value[value.len - 1] == ',') value = value[0 .. value.len - 1];
+        if (std.mem.eql(u8, key, "blobs")) {
+            // Absent in a trash made before blobs were kept: then there are none.
+            meta.blobs = std.fmt.parseInt(u64, value, 10) catch continue;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "partials")) {
+            // Absent in a trash made before partial downloads were collected.
+            meta.partials = std.fmt.parseInt(u64, value, 10) catch continue;
+            continue;
+        }
         if (std.mem.eql(u8, key, "complete")) {
             if (std.mem.eql(
                 u8,
@@ -229,6 +300,8 @@ pub const Class = enum {
     list,
     tree,
     farm,
+    blob,
+    partial,
 
     fn directory(class: Class) []const u8 {
         assert(@tagName(class).len > 0);
@@ -237,6 +310,8 @@ pub const Class = enum {
             .object, .list => "objects",
             .tree => "trees",
             .farm => "cache",
+            .blob => "blobs/sha256",
+            .partial => "blobs/partial",
         };
     }
 
@@ -248,6 +323,8 @@ pub const Class = enum {
             .list => 'l',
             .tree => 't',
             .farm => 'f',
+            .blob => 'b',
+            .partial => 'p',
         };
     }
 };
@@ -269,10 +346,16 @@ fn locate(
     switch (where) {
         .store => {
             if (class == .farm) return store.path(buffer, &.{ "/cache/", &hex });
+            if (class == .blob) return store.path(buffer, &.{ "/blobs/sha256/", &hex });
+            if (class == .partial) return store.path(buffer, &.{ "/blobs/partial/", &hex });
             return store.id_path(buffer, class.directory(), id, suffix);
         },
         .trash => |gc| {
             if (class == .farm) return store.path(buffer, &.{ "/trash/", &gc, "/cache/", &hex });
+            if (class == .blob) return store.path(buffer, &.{ "/trash/", &gc, "/blobs/", &hex });
+            if (class == .partial) {
+                return store.path(buffer, &.{ "/trash/", &gc, "/partial/", &hex });
+            }
             return store.path(buffer, &.{
                 "/trash/", &gc, "/", class.directory(), "/", hex[0..2], "/", hex[2..], suffix,
             });
@@ -307,9 +390,11 @@ const Run = struct {
     failure: *Failure,
     names: []u8,
     offsets: []u32,
-    objects: sets.DigestMap,
-    trees: sets.DigestMap,
-    tops: sets.DigestMap,
+    objects: sets.KeySet,
+    trees: sets.KeySet,
+    tops: sets.KeySet,
+    /// The blobs that image records name, by their digests' bytes.
+    blobs_live: sets.KeySet,
     stack: []Digest,
     full: bool,
     live: []const Digest,
@@ -337,6 +422,13 @@ const Run = struct {
         return error.Failed;
     }
 
+    /// The memory a removal borrows: the front of the tables.
+    fn removal_memory(run: *const Run) []u8 {
+        assert(run.ws.removal.path.len > 0);
+        assert(run.ws.tables.len >= tables_bytes_min);
+        return run.ws.tables[0..removal_bytes];
+    }
+
     pub fn entry(run: *Run, found: *const tree.Entry) void {
         assert(@intFromPtr(found) != 0);
         assert(run.objects.slots.len > 0);
@@ -360,26 +452,80 @@ fn init_run(
     at += names_bytes;
     const offsets: []u32 = @alignCast(std.mem.bytesAsSlice(u32, arena[at..][0..offsets_bytes]));
     at += offsets_bytes;
-    const objects = sets.DigestMap.init(@alignCast(arena[at..][0..objects_bytes]));
-    at += objects_bytes;
-    const trees = sets.DigestMap.init(@alignCast(arena[at..][0..trees_bytes]));
-    at += trees_bytes;
-    const tops = sets.DigestMap.init(@alignCast(arena[at..][0..tops_bytes]));
-    at += tops_bytes;
     const stack: []Digest = @alignCast(std.mem.bytesAsSlice(Digest, arena[at..][0..stack_bytes]));
+    const empty: sets.KeySet = .{ .slots = &.{}, .count = 0 };
     return .{
         .store = store,
         .ws = ws,
         .failure = failure,
         .names = names,
         .offsets = offsets,
-        .objects = objects,
-        .trees = trees,
-        .tops = tops,
+        .objects = empty,
+        .trees = empty,
+        .tops = empty,
+        .blobs_live = empty,
         .stack = stack,
         .full = false,
         .live = live,
     };
+}
+
+/// Counts the names in the 256 shards of `directory` (`objects` or `trees`).
+fn count_shards(run: *Run, directory: []const u8) Error!u64 {
+    assert(directory.len > 0);
+    var counter: Counter = .{ .count = 0 };
+    for (0..constants.store_shards_count) |shard| {
+        var hex: [2]u8 = undefined;
+        // Cannot fail: two digits.
+        _ = std.fmt.bufPrint(&hex, "{x:0>2}", .{shard}) catch unreachable;
+        var path: PathBuf = undefined;
+        const listed = run.store.path(&path, &.{ "/", directory, "/", &hex });
+        run.store.fs.read_dir(listed, counter.visitor()) catch |err| {
+            if (err == error.NotFound) continue;
+            return run.io("counting a shard", err);
+        };
+    }
+    return counter.count;
+}
+
+const Counter = struct {
+    count: u64,
+
+    fn visitor(counter: *Counter) fs_mod.Visitor {
+        assert(counter.count < 1 << 62);
+        assert(@intFromPtr(counter) != 0);
+        return .{ .context = counter, .call = visit };
+    }
+
+    fn visit(context: *anyopaque, name: []const u8) void {
+        assert(name.len > 0);
+        const counter: *Counter = @ptrCast(@alignCast(context));
+        counter.count += 1;
+    }
+};
+
+/// Sizes the sets to the store: one slot per stored object (and per tree) is room for the most
+/// that can be kept. A store too big for the tables is refused, and the message says so.
+fn size_tables(run: *Run) Error!void {
+    assert(run.objects.slots.len == 0);
+    const objects = try count_shards(run, "objects");
+    const trees = try count_shards(run, "trees");
+    assert(run.ws.tables.len >= tables_bytes_min);
+    const available = run.ws.tables.len - fixed_bytes;
+    const found = plan_tables(objects, trees, available) orelse {
+        run.failure.* = .{ .too_big = "the objects and trees of the store (the gc tables)" };
+        return error.Failed;
+    };
+    var at: usize = removal_bytes;
+    const tables = run.ws.tables;
+    run.tops = sets.KeySet.init(@alignCast(tables[at..][0..tops_bytes]));
+    at += tops_bytes;
+    run.blobs_live = sets.KeySet.init(@alignCast(tables[at..][0..blobs_bytes]));
+    at += blobs_bytes;
+    run.objects = sets.KeySet.init(@alignCast(tables[at..][0..found.objects_bytes]));
+    at += found.objects_bytes;
+    run.trees = sets.KeySet.init(@alignCast(tables[at..][0..found.trees_bytes]));
+    assert(run.objects.slots.len * 3 >= objects * 4);
 }
 
 /// Marks everything the roots and the live containers keep.
@@ -401,6 +547,43 @@ fn reach(run: *Run) Error!void {
         try mark_tree(run, digest);
     }
     for (run.live) |digest| try mark_tree(run, digest);
+    try reach_images(run);
+}
+
+/// Image records keep their trees and their blobs.
+fn reach_images(run: *Run) Error!void {
+    assert(run.blobs_live.slots.len > 0);
+    assert(run.tops.slots.len > 0);
+    const directory = images.directory_name;
+    const found = shards.read(run.store, run.names, run.offsets, directory, null) catch |err| {
+        return run.io("listing the images", err);
+    };
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const manifest = Sha256.from_hex(found.name(index)) orelse continue;
+        var image: images.Image = undefined;
+        var errno: u16 = 0;
+        images.load(run.store, manifest, &image, &errno) catch {
+            run.failure.* = .{ .io = .{
+                .err = error.IoFailed,
+                .errno = errno,
+                .step = "reading an image record",
+            } };
+            return error.Failed;
+        };
+        try mark_tree(run, image.tree);
+        try keep_blob(run, image.config);
+        for (image.layers[0..image.layer_count]) |layer| try keep_blob(run, layer);
+    }
+}
+
+fn keep_blob(run: *Run, blob: Sha256) Error!void {
+    assert(run.blobs_live.slots.len > 0);
+    const key: Digest = .{ .bytes = blob.bytes };
+    if (run.blobs_live.put(key, 0) == .full) {
+        run.failure.* = .{ .too_big = "the blobs that images keep" };
+        return error.Failed;
+    }
 }
 
 fn mark_tree(run: *Run, digest: Digest) Error!void {
@@ -442,6 +625,8 @@ const Pass = struct {
             .list => pass.counts.lists += 1,
             .tree => pass.counts.trees += 1,
             .farm => pass.counts.farms += 1,
+            .blob => pass.counts.blobs += 1,
+            .partial => pass.counts.partials += 1,
         }
     }
 };
@@ -462,7 +647,7 @@ fn move_to_trash(run: *Run, pass: *const Pass, class: Class, id: Digest) Error!v
     var to_storage: PathBuf = undefined;
     const from = locate(run.store, &from_storage, .store, class, id);
     const to = locate(run.store, &to_storage, .{ .trash = pass.gc }, class, id);
-    if (class != .farm) {
+    if (class != .farm and class != .blob and class != .partial) {
         var directory_storage: PathBuf = undefined;
         const directory = trash_shard(run.store, &directory_storage, pass.gc, class, id);
         try ensure_chain(run, pass.gc, class, directory);
@@ -571,6 +756,77 @@ fn enumerate_farms(run: *Run, pass: *Pass) Error!void {
     }
 }
 
+/// The downloaded blobs that no image record names.
+fn enumerate_blobs(run: *Run, pass: *Pass) Error!void {
+    assert(run.names.len > 0);
+    assert(pass.counts.blobs == 0);
+    const found = shards.read(run.store, run.names, run.offsets, "blobs/sha256", null) catch |err| {
+        return run.io("listing the blobs", err);
+    };
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const id = Digest.from_hex(found.name(index)) orelse continue;
+        if (run.blobs_live.get(id) != null) continue;
+        var path: PathBuf = undefined;
+        pass.counts.bytes += try file_size(run, locate(run.store, &path, .store, .blob, id));
+        pass.note(.blob, id);
+        if (pass.mode == .apply) {
+            try ensure_trash_blobs(run, pass.gc);
+            try move_to_trash(run, pass, .blob, id);
+        }
+    }
+}
+
+/// The cut downloads nobody has written to for `store_partial_seconds`. A pull holds the shared
+/// lock while it writes one, and an apply holds the lock exclusive, so what an apply moves is no
+/// pull's; the age keeps a plan from naming what a pull is writing now.
+fn enumerate_partials(run: *Run, pass: *Pass) Error!void {
+    assert(run.names.len > 0);
+    assert(pass.counts.partials == 0);
+    const listed = shards.read(run.store, run.names, run.offsets, "blobs/partial", null);
+    const found = listed catch |err| return run.io("listing the cut downloads", err);
+    const now = run.store.host.time_now();
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const id = Digest.from_hex(found.name(index)) orelse continue;
+        var path: PathBuf = undefined;
+        const where = locate(run.store, &path, .store, .partial, id);
+        const stat = run.store.fs.lstat(where) catch |err| {
+            return run.io("sizing a cut download", err);
+        };
+        if (stat.kind != .file) continue;
+        if (stat.mtime + constants.store_partial_seconds > now) continue; // Recent: a pull's.
+        pass.counts.bytes += stat.size;
+        pass.note(.partial, id);
+        if (pass.mode == .apply) {
+            try ensure_trash_partial(run, pass.gc);
+            try move_to_trash(run, pass, .partial, id);
+        }
+    }
+}
+
+fn ensure_trash_partial(run: *Run, gc: Id) Error!void {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    assert(run.store.root_len > 1);
+    var storage: PathBuf = undefined;
+    const path = run.store.path(&storage, &.{ "/trash/", &gc, "/partial" });
+    run.store.fs.make_directory(
+        path,
+        true,
+    ) catch |err| return run.io("making a trash directory", err);
+}
+
+fn ensure_trash_blobs(run: *Run, gc: Id) Error!void {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    assert(run.store.root_len > 1);
+    var storage: PathBuf = undefined;
+    const path = run.store.path(&storage, &.{ "/trash/", &gc, "/blobs" });
+    run.store.fs.make_directory(
+        path,
+        true,
+    ) catch |err| return run.io("making a trash directory", err);
+}
+
 fn ensure_trash_cache(run: *Run, gc: Id) Error!void {
     assert(gc.len == constants.store_gc_id_hex_bytes);
     assert(run.store.root_len > 1);
@@ -613,7 +869,7 @@ fn remove_leftover(run: *Run, name: []const u8) Error!void {
     var failure: remove.Failure = undefined;
     // The names and offsets are in use; the removal borrows the memory of the tables, which an
     // apply no longer needs when it gets here.
-    const memory: []u8 = @as([*]u8, @ptrCast(run.objects.slots.ptr))[0..remove.arena_bytes];
+    const memory = run.removal_memory();
     remove.tree(run.store.fs, &run.ws.removal, memory, path, &failure) catch {
         run.failure.* = .{ .io = .{
             .err = failure.err,
@@ -641,6 +897,8 @@ fn make_plan(run: *Run, pass: *Pass, generation_now: u64) Error!Plan {
     try enumerate_shards(run, pass, .object);
     try enumerate_shards(run, pass, .tree);
     try enumerate_farms(run, pass);
+    try enumerate_blobs(run, pass);
+    try enumerate_partials(run, pass);
     return .{ .counts = pass.counts, .hash = pass.hasher.final(), .generation = generation_now };
 }
 
@@ -657,6 +915,7 @@ pub fn plan(
     assert(live.len <= constants.store_roots_max);
     var run = init_run(store, ws, arena, live, failure);
     const now = generation.read(store) catch |err| return run.io("reading the generation", err);
+    try size_tables(&run);
     try reach(&run);
     var pass = new_pass(.plan, now);
     result.* = try make_plan(&run, &pass, now);
@@ -717,6 +976,7 @@ pub fn apply(
     defer lock.release(store);
     var run = init_run(store, ws, arena, live, failure);
     const now = generation.read(store) catch |err| return run.io("reading the generation", err);
+    try size_tables(&run);
     try reach(&run);
     var check = new_pass(.plan, now);
     result.fresh = try make_plan(&run, &check, now);
@@ -751,6 +1011,8 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
         .lists = result.counts.lists,
         .trees = result.counts.trees,
         .farms = result.counts.farms,
+        .blobs = result.counts.blobs,
+        .partials = result.counts.partials,
         .bytes = result.counts.bytes,
         .complete = false,
     };
@@ -767,6 +1029,8 @@ fn move_all(run: *Run, result: *Applied, time: u64) Error!void {
     meta.lists = again.counts.lists;
     meta.trees = again.counts.trees;
     meta.farms = again.counts.farms;
+    meta.blobs = again.counts.blobs;
+    meta.partials = again.counts.partials;
     meta.bytes = again.counts.bytes;
     meta.complete = true;
     try write_meta(run, result.gc, &meta);
@@ -1022,9 +1286,11 @@ pub fn restore(
         .lists = meta.lists,
         .trees = meta.trees,
         .farms = meta.farms,
+        .blobs = meta.blobs,
+        .partials = meta.partials,
     };
     const short = found.objects < meta.objects or found.trees < meta.trees or
-        found.farms < meta.farms;
+        found.farms < meta.farms or found.blobs < meta.blobs or found.partials < meta.partials;
     if (meta.complete and short) {
         return error.Incomplete;
     }
@@ -1051,7 +1317,7 @@ fn remove_trash(run: *Run, directory: [:0]const u8) Error!void {
     assert(directory.len > 0);
     assert(std.mem.indexOf(u8, directory, "/trash/") != null);
     var removal: remove.Failure = undefined;
-    const memory: []u8 = @as([*]u8, @ptrCast(run.objects.slots.ptr))[0..remove.arena_bytes];
+    const memory = run.removal_memory();
     remove.tree(run.store.fs, &run.ws.removal, memory, directory, &removal) catch {
         run.failure.* = .{ .io = .{
             .err = removal.err,
@@ -1118,6 +1384,49 @@ fn restore_pass(
         const id = Digest.from_hex(names.name(index)) orelse continue;
         try restore_one(run, gc, mode, .farm, id, counts, result);
     }
+    try restore_downloads(run, gc, mode, counts, result);
+}
+
+/// The blobs and the cut downloads of a trash.
+fn restore_downloads(
+    run: *Run,
+    gc: Id,
+    mode: RestoreMode,
+    counts: *Counts,
+    result: *Restored,
+) RestoreError!void {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    assert(run.names.len > 0);
+    var blob_directory: [96]u8 = undefined;
+    // Cannot fail: "trash/", twelve digits and "/blobs" fit 96 bytes.
+    const blobs_format = "trash/{s}/blobs";
+    const blobs_where = std.fmt.bufPrint(&blob_directory, blobs_format, .{gc}) catch
+        unreachable; // Same bound.
+    const names_of = shards.read(run.store, run.names, run.offsets, blobs_where, null);
+    const blob_names = names_of catch |err| {
+        return run.io("listing the trash's blobs", err);
+    };
+    var index: u32 = 0;
+    while (index < blob_names.count()) : (index += 1) {
+        const id = Digest.from_hex(blob_names.name(index)) orelse continue;
+        try restore_one(run, gc, mode, .blob, id, counts, result);
+    }
+    const cut_where = partials_where(gc, &blob_directory);
+    const partial_names = shards.read(run.store, run.names, run.offsets, cut_where, null);
+    const cut_names = partial_names catch |err| {
+        return run.io("listing the trash's cut downloads", err);
+    };
+    index = 0;
+    while (index < cut_names.count()) : (index += 1) {
+        const id = Digest.from_hex(cut_names.name(index)) orelse continue;
+        try restore_one(run, gc, mode, .partial, id, counts, result);
+    }
+}
+
+fn partials_where(gc: Id, buffer: *[96]u8) []const u8 {
+    assert(gc.len == constants.store_gc_id_hex_bytes);
+    // Cannot fail: "trash/", twelve digits and "/partial" fit 96 bytes.
+    return std.fmt.bufPrint(buffer, "trash/{s}/partial", .{gc}) catch unreachable;
 }
 
 fn restore_name(
@@ -1170,9 +1479,13 @@ fn restore_one(
         .list => counts.lists += 1,
         .tree => counts.trees += 1,
         .farm => counts.farms += 1,
+        .blob => counts.blobs += 1,
+        .partial => counts.partials += 1,
     }
     if (mode == .check) {
-        if (class == .list) return; // Identical content by name; replaced if it is there.
+        // Identical content by name; replaced if it is there. A blob that was downloaded again
+        // since is the same bytes, so it is no conflict either.
+        if (class == .list or class == .blob) return;
         if (fs.lstat(to)) |_| {
             if (result.conflicts == 0) {
                 result.conflict_class = class;
@@ -1184,7 +1497,7 @@ fn restore_one(
         }
         return;
     }
-    if (class != .farm) {
+    if (class != .farm and class != .blob and class != .partial) {
         var shard_storage: PathBuf = undefined;
         const shard = run.store.shard_path(&shard_storage, class.directory(), id);
         fs.make_directory(shard, true) catch |err| return run.io("making a shard directory", err);

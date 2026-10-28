@@ -15,6 +15,8 @@ const host = @import("host.zig");
 const sim_world = @import("sim_world.zig");
 const fs_sim = @import("store/fs_sim.zig");
 const store_fs = @import("store/fs.zig");
+const registry_net = @import("registry/net.zig");
+const net_sim = @import("registry/net_sim.zig");
 
 pub const File = struct {
     path: []const u8,
@@ -89,6 +91,33 @@ fn down_fs() store_fs.Fs {
     return down_files.interface();
 }
 
+/// The network of a host that was given none: no route to anywhere, so every request is refused
+/// at the connect. One for all hosts, since it never holds anything.
+fn down_net() registry_net.Net {
+    const vtable: registry_net.VTable = .{ .get = down_get, .last_errno = down_errno };
+    return .{ .context = &down_net_context, .vtable = &vtable };
+}
+
+var down_net_context: u8 = 0;
+
+fn down_get(
+    context: *anyopaque,
+    request: *const registry_net.Request,
+    head: *registry_net.Head,
+    sink: registry_net.Sink,
+) registry_net.Error!void {
+    _ = context;
+    _ = head;
+    _ = sink;
+    assert(request.host.len > 0);
+    return error.ConnectFailed;
+}
+
+fn down_errno(context: *anyopaque) u16 {
+    _ = context;
+    return 101; // ENETUNREACH.
+}
+
 pub const HostSim = struct {
     prng: std.Random.Xoshiro256,
     faults: Faults,
@@ -124,6 +153,9 @@ pub const HostSim = struct {
     /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
     /// uses it; null for a host with none.
     store_fs: ?*fs_sim.SimFs,
+    /// The network (registry/net_sim.zig), kept by the test that uses it; null for a host with
+    /// none.
+    wire: ?*net_sim.SimNet,
 
     /// Initialises in place: the output buffers make this struct large.
     pub fn init(sim: *HostSim, seed: u64, files: []const File) void {
@@ -153,6 +185,7 @@ pub const HostSim = struct {
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
         sim.store_fs = null;
+        sim.wire = null;
         assert(sim.open_count() == 0);
         assert(sim.stdout().len == 0);
     }
@@ -217,6 +250,7 @@ pub const HostSim = struct {
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
+        .set_user = set_user,
         .install_seccomp = install_seccomp,
         .exec = exec,
         .gid = gid,
@@ -227,6 +261,7 @@ pub const HostSim = struct {
         .block_signals = block_signals,
         .wait_event = wait_event,
         .own_pid = own_pid,
+        .working_directory = working_directory,
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
@@ -242,6 +277,7 @@ pub const HostSim = struct {
         .read_timeout = read_timeout,
         .begin_step = begin_step,
         .filesystem = filesystem,
+        .network = network,
     };
 
     fn from_context(context: *anyopaque) *HostSim {
@@ -734,6 +770,12 @@ pub const HostSim = struct {
         sim.world.no_new_privs();
     }
 
+    fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.set_user(user_id, group_id)) |errno| return sim.model_error(errno);
+    }
+
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
@@ -811,6 +853,15 @@ pub const HostSim = struct {
         return world.processes[world.current].pid;
     }
 
+    fn working_directory(context: *anyopaque, buffer: []u8) host.Error![]const u8 {
+        assert(buffer.len > 1);
+        const world = &from_context(context).world;
+        const path = world.processes[world.current].cwd.slice();
+        if (path.len > buffer.len) return error.FileTooLarge;
+        @memcpy(buffer[0..path.len], path);
+        return buffer[0..path.len];
+    }
+
     fn sleep_ms(context: *anyopaque, ms: u32) void {
         from_context(context).world.now_ms += ms;
     }
@@ -876,6 +927,12 @@ pub const HostSim = struct {
         const sim = from_context(context);
         if (sim.store_fs) |files| return files.interface();
         return down_fs();
+    }
+
+    fn network(context: *anyopaque) registry_net.Net {
+        const sim = from_context(context);
+        if (sim.wire) |wire| return wire.interface();
+        return down_net();
     }
 
     fn begin_step(context: *anyopaque, index: u32) void {

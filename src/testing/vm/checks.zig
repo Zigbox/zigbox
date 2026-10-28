@@ -500,7 +500,7 @@ test "ELF: a plain static executable passes; interpreter, needed libs, wrong mac
     try testing.expectError(error.Truncated, check_static_elf(buffer[0..100], .aarch64));
 }
 
-test "ELF: a binary at or over 2 MiB is too big" {
+test "ELF: a binary at or over the size limit is too big" {
     // Goal: the boundary of the milestone's size limit, exact.
     var header: [512]u8 = undefined;
     _ = elf_with(&header, 62, 1);

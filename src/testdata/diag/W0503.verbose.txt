@@ -1,0 +1,18 @@
+warning[ZBX-W0502]: extended attributes in a layer were left out
+  while  unpacking the layers
+  cause  1 extended attributes were left out; the first is on 'bin/ping'
+  count  1
+  path   bin/ping
+  fix    nothing to do unless the image relies on file capabilities
+  more   zbx explain W0502
+  docs   https://zigbox.github.io/zigbox/errors/W0502.html
+warning[ZBX-W0503]: no zbx.lock was found, so one was written
+  while  finding the project's lock file
+  cause  no zbx.lock in the working directory or above; pulled
+         'registry.test/fixture/open:3.20' and wrote
+         '/home/alice/project/zbx.lock'
+  path   /home/alice/project/zbx.lock
+  fix    commit it, so every machine runs the same image
+  more   zbx explain W0503
+  docs   https://zigbox.github.io/zigbox/errors/W0503.html
+zbx: note: scope zbx-web-1.scope went by itself just after the run ended

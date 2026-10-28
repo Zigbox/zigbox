@@ -52,6 +52,16 @@ pub const Options = struct {
     /// provisioned overlay instead of making a new one.
     keep_overlay: bool = false,
     reuse_overlay: bool = false,
+    /// A development aid: a CA bundle the guest's `zbx` is told to trust (SSL_CERT_FILE), for a
+    /// host behind a network that inspects TLS. CI runs on a direct network and sets none.
+    ca_file: []const u8 = "",
+    /// The top-20 run only: a registry mirror for docker.io (ZBX_REGISTRY_MIRRORS). Empty means
+    /// the real Docker Hub, which is what the weekly workflow uses.
+    mirror: []const u8 = "",
+    /// The top-20 run only, a development aid: image names (before the tag), comma separated.
+    only: []const u8 = "",
+    /// demo-m4 only: the raw disk image that keeps the pulled blobs between runs (CI caches it).
+    blob_cache: []const u8 = "",
 };
 
 pub fn parse_options(init: std.process.Init) !Options {
@@ -81,6 +91,14 @@ pub fn parse_options(init: std.process.Init) !Options {
             options.zbx_aarch64 = value;
         } else if (std.mem.eql(u8, name, "--old-zbx")) {
             options.old_zbx = value;
+        } else if (std.mem.eql(u8, name, "--ca-file")) {
+            options.ca_file = value;
+        } else if (std.mem.eql(u8, name, "--mirror")) {
+            options.mirror = value;
+        } else if (std.mem.eql(u8, name, "--only")) {
+            options.only = value;
+        } else if (std.mem.eql(u8, name, "--blob-cache")) {
+            options.blob_cache = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             options.cache_dir = value;
         } else {
@@ -117,7 +135,7 @@ pub const Timer = struct {
 };
 
 /// Reads both release binaries and checks them: static ELF for the right machine, under
-/// 2 MiB. Returns the x86_64 binary, which is the one the guest runs.
+/// 4 MiB. Returns the x86_64 binary, which is the one the guest runs.
 pub fn check_binaries(init: std.process.Init, out: *Io.Writer, options: Options) ![]const u8 {
     const arena = init.arena.allocator();
     const pairs = [_]struct { path: []const u8, machine: checks.Machine }{
@@ -129,7 +147,7 @@ pub fn check_binaries(init: std.process.Init, out: *Io.Writer, options: Options)
         const limit: Io.Limit = .limited(limits.elf_bytes_max);
         const bytes = try Io.Dir.cwd().readFileAlloc(init.io, pair.path, arena, limit);
         checks.check_static_elf(bytes, pair.machine) catch |err| {
-            try out.print("{s}: {s} is not a static {s} ELF under 2 MiB: {s}\n", .{
+            try out.print("{s}: {s} is not a static {s} ELF under 4 MiB: {s}\n", .{
                 demo_name,
                 pair.path,
                 @tagName(pair.machine),
@@ -249,6 +267,10 @@ test "every demo command that runs zbx as the demo user goes through the session
         @embedFile("main_m1.zig"),
         @embedFile("main_m2.zig"),
         @embedFile("main_m3.zig"),
+        @embedFile("main_m4.zig"),
+        @embedFile("accept_m4.zig"),
+        @embedFile("agent_m4.zig"),
+        @embedFile("common_m4.zig"),
     };
     const allowed = [_][]const u8{ "H.as_demo", "H.demo_env", "no-bus-env:", "z=/home/demo/zbx" };
     for (sources) |source| {
@@ -272,4 +294,34 @@ test "every demo command that runs zbx as the demo user goes through the session
             try std.testing.expect(found);
         }
     }
+}
+
+/// Writes `text` to `path` in the guest through base64 in short pieces (a typed line is at most
+/// 1 KiB, and the text has quotes in it), and makes it executable.
+pub fn put_file(session: *Session, path: []const u8, text: []const u8) !void {
+    const encoder = std.base64.standard.Encoder;
+    var encoded: [2048]u8 = undefined;
+    if (encoder.calcSize(text.len) > encoded.len) return error.ScriptTooBig;
+    const whole = encoder.encode(&encoded, text);
+    const piece = 600;
+    var at: usize = 0;
+    var command_buffer: [900]u8 = undefined;
+    _ = try session.run("rm -f /tmp/put.b64", limits.command_timeout_kvm_s);
+    while (at < whole.len) : (at += piece) {
+        const end = @min(at + piece, whole.len);
+        const command = try std.fmt.bufPrint(
+            &command_buffer,
+            "printf %s {s} >> /tmp/put.b64",
+            .{whole[at..end]},
+        );
+        const result = try session.run(command, limits.command_timeout_kvm_s);
+        if (result.status != 0) return error.ScriptNotWritten;
+    }
+    const decode = try std.fmt.bufPrint(
+        &command_buffer,
+        "base64 -d /tmp/put.b64 > {s} && chmod 755 {s}",
+        .{ path, path },
+    );
+    const result = try session.run(decode, limits.command_timeout_kvm_s);
+    if (result.status != 0) return error.ScriptNotWritten;
 }

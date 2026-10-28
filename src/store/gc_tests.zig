@@ -33,9 +33,11 @@ var store: Store = undefined;
 var workspace: import.Workspace = undefined;
 var verify_workspace: verify.Workspace = undefined;
 var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
 var diag: Diag = undefined;
 
 fn start() void {
+    gc_workspace.tables = &gc_tables;
     sim.init(1, &.{});
     files.init(1);
     sim.store_fs = &files;
@@ -720,4 +722,230 @@ test "a restore killed or failed at any write leaves the store whole, and can be
         }
         try testing.expect(point > 10);
     }
+}
+
+// ---- gc: downloaded blobs and image records --------------------------------------------------
+
+const images = @import("images.zig");
+const KeyType = @import("sets.zig").KeySet.Key;
+const Sha256 = @import("../registry/digest.zig").Sha256;
+
+/// A blob of the cache, named by the digest of `text` (gc does not hash blobs).
+fn put_blob(text: []const u8) Sha256 {
+    const digest = Sha256.of(text);
+    if (files.kind_of(root_path ++ "/blobs") == null) {
+        files.put_dir(root_path ++ "/blobs", 0o755);
+        files.put_dir(root_path ++ "/blobs/sha256", 0o755);
+        files.put_dir(root_path ++ "/blobs/partial", 0o755);
+    }
+    var path: [160]u8 = undefined;
+    const format = root_path ++ "/blobs/sha256/{s}";
+    const where = std.fmt.bufPrint(&path, format, .{&digest.hex()}) catch unreachable; // Short.
+    files.put_file(where, 0o644, text);
+    return digest;
+}
+
+/// An image record for `tree` that names `config` and `layer`.
+fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
+    var image: images.Image = undefined;
+    const written = "docker.io/library/fixture:1";
+    @memcpy(image.reference[0..written.len], written);
+    image.reference_len = written.len;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = config;
+    image.tree = tree;
+    image.time = 1_800_000_000;
+    image.layer_count = 1;
+    image.layers[0] = layer;
+    image.settings.clear();
+    var failure: @import("fs.zig").Failure = undefined;
+    images.save(&store, &image, &failure) catch unreachable; // The simulated store writes.
+}
+
+test "blobs no image names are planned, trashed and restored; the others and cut downloads stay" {
+    // Goal: the blob cache is in gc's live set. Method: one image names two blobs; a third and
+    // a cut download are not named; the cycle plan, apply, restore moves exactly the third.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    const orphan = put_blob("an abandoned layer");
+    files.put_file(root_path ++ "/blobs/partial/cut", 0o644, "half");
+    record_image(trees_[0], config, layer);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.blobs);
+    try testing.expectEqual(@as(u64, 1), planned.counts.total());
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.blobs);
+    var path: [160]u8 = undefined;
+    const gone = try std.fmt.bufPrint(&path, root_path ++ "/blobs/sha256/{s}", .{&orphan.hex()});
+    try testing.expect(files.kind_of(gone) == null);
+    var kept: [160]u8 = undefined;
+    const format = root_path ++ "/blobs/sha256/{s}";
+    const layer_path = try std.fmt.bufPrint(&kept, format, .{&layer.hex()});
+    try testing.expect(files.kind_of(layer_path) != null);
+    try testing.expect(files.kind_of(root_path ++ "/blobs/partial/cut") != null);
+    const again = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), again.counts.total());
+    const restored = try do_restore(applied.gc);
+    try testing.expectEqual(@as(u64, 1), restored.counts.blobs);
+    try testing.expectEqualStrings("an abandoned layer", files.content_of(gone).?);
+}
+
+test "an image record keeps its tree and blobs when its root is gone" {
+    // Goal: the record is a root of its own. Method: drop the tree's root record; with an image
+    // record the plan is empty, without it the tree's own objects are planned.
+    const trees_ = two_trees();
+    const config = put_blob("config bytes");
+    const layer = put_blob("layer bytes");
+    drop_root(trees_[1]);
+    const without = try make_plan(&.{});
+    try testing.expect(without.counts.objects + without.counts.trees > 0);
+    try testing.expectEqual(@as(u64, 2), without.counts.blobs);
+    record_image(trees_[1], config, layer);
+    const with = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), with.counts.total());
+}
+
+test "the sets are sized to the store, and a store beyond the room is refused with the limit" {
+    // Goal: the old limit of about 49,000 objects is gone: tables for 100,000 and a million fit
+    // the room; the smallest that does not fit is refused, not cut.
+    const room = @as(u64, constants.store_gc_tables_bytes) - (4 * 1024 * 1024 + 7 * 1024 * 1024);
+    try testing.expect(gc.plan_tables(100_000, 10_000, room) != null);
+    const million = gc.plan_tables(1_000_000, 100_000, room).?;
+    const slot = @sizeOf(KeyType);
+    try testing.expect(million.objects_bytes * 3 >= 1_000_000 * 4 * slot);
+    try testing.expect(gc.plan_tables(100_000_000, 10, room) == null);
+    try testing.expectEqual(@as(u64, 16 * @sizeOf(KeyType)), gc.table_bytes(0));
+    try testing.expectEqual(@as(u64, 32 * @sizeOf(KeyType)), gc.table_bytes(24));
+    try testing.expectEqual(@as(u64, 64 * @sizeOf(KeyType)), gc.table_bytes(25));
+}
+
+/// A library user's whole world: a store of its own and a region of its own for gc.
+const Caller = struct {
+    sim: HostSim,
+    files: SimFs,
+    store: Store,
+    workspace: import.Workspace,
+    gc_workspace: gc.Workspace,
+    tables: [16 * 1024 * 1024]u8 align(8),
+    planned: ?gc.Plan,
+    extra: u32,
+};
+
+var callers: [2]Caller = undefined;
+
+/// Makes a store with `extra` more files than the smallest, drops its only root, and plans.
+fn caller_plan(caller: *Caller) void {
+    caller.sim.init(1, &.{});
+    caller.files.init(1);
+    caller.sim.store_fs = &caller.files;
+    caller.files.put_dir("/data", 0o755);
+    support.make_store_directories(&caller.files, root_path);
+    caller.store.at(caller.sim.interface(), root_path);
+    caller.store.chunk_bytes = 8;
+    caller.sim.world.now = 1_800_000_000;
+    caller.gc_workspace.tables = &caller.tables;
+    support.make_source(&caller.files, 0);
+    var index: u32 = 0;
+    while (index < caller.extra) : (index += 1) {
+        var name: [32]u8 = undefined;
+        const format = "/src/etc/more-{d}";
+        const path = std.fmt.bufPrint(&name, format, .{index}) catch unreachable; // Short.
+        var content: [24]u8 = undefined;
+        const words = "file number {d} here";
+        const text = std.fmt.bufPrint(&content, words, .{index}) catch unreachable; // Short.
+        caller.files.put_file(path, 0o644, text);
+    }
+    var result: import.Result = undefined;
+    var local_diag: Diag = undefined;
+    local_diag.reset();
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    import.import(&caller.store, &caller.workspace, "/src", options, &result, &local_diag) catch {
+        unreachable; // The sample tree imports.
+    };
+    roots.remove(&caller.store, result.digest) catch unreachable; // The root is there.
+    var plan: gc.Plan = undefined;
+    var failure: gc.Failure = undefined;
+    const arena = &caller.workspace.arena;
+    gc.plan(&caller.store, &caller.gc_workspace, arena, &.{}, &plan, &failure) catch return;
+    caller.planned = plan;
+}
+
+test "two callers with two regions plan gc independently, also at once" {
+    // Goal: the library keeps no module-level state for gc: its sets live in the caller's
+    // region. Method: two worlds with different stores, planned one after the other for the
+    // expected plans, then planned again on two threads at once, each with its own region; the
+    // plans are the same.
+    callers[0].extra = 0;
+    callers[1].extra = 9;
+    for (&callers) |*caller| {
+        caller.planned = null;
+        caller_plan(caller);
+    }
+    const expected = [2]gc.Plan{ callers[0].planned.?, callers[1].planned.? };
+    try testing.expect(expected[0].counts.objects != expected[1].counts.objects);
+    try testing.expect(!expected[0].hash.eql(expected[1].hash));
+    // Each region was used by its own owner: the sets leave their keys in it.
+    for (&callers) |*caller| try testing.expect(!std.mem.allEqual(u8, &caller.tables, 0));
+    var threads: [2]std.Thread = undefined;
+    for (&callers) |*caller| caller.planned = null;
+    for (&threads, 0..) |*thread, at| {
+        thread.* = try std.Thread.spawn(.{}, caller_plan, .{&callers[at]});
+    }
+    for (&threads) |thread| thread.join();
+    for (&callers, expected) |*caller, want| {
+        const got = caller.planned.?;
+        try testing.expect(got.hash.eql(want.hash));
+        try testing.expectEqual(want.counts.objects, got.counts.objects);
+    }
+}
+
+fn put_partial(text: []const u8, mtime: u64, buffer: *[160]u8) []const u8 {
+    if (files.kind_of(root_path ++ "/blobs") == null) {
+        files.put_dir(root_path ++ "/blobs", 0o755);
+        files.put_dir(root_path ++ "/blobs/sha256", 0o755);
+        files.put_dir(root_path ++ "/blobs/partial", 0o755);
+    }
+    const format = root_path ++ "/blobs/partial/{s}";
+    const hex = Sha256.of(text).hex();
+    const where = std.fmt.bufPrint(buffer, format, .{&hex}) catch unreachable; // Short.
+    files.put_file(where, 0o644, text);
+    files.set_mtime_of(where, mtime);
+    return where;
+}
+
+test "abandoned cut downloads are planned, trashed and restored; recent ones stay" {
+    // Goal: a cut download nobody has written to for a day is gc's, as its own class; one a pull
+    // may be writing is not. Method: two partial files, one touched a minute ago and one two days
+    // ago; the cycle plan, apply, restore moves exactly the old one, and a restore refuses when
+    // a new download of the same blob has begun.
+    _ = two_trees();
+    const now = sim.world.now;
+    var recent_buffer: [160]u8 = undefined;
+    var old_buffer: [160]u8 = undefined;
+    const recent = put_partial("a pull writes this", now - 60, &recent_buffer);
+    const two_days = 2 * constants.store_partial_seconds;
+    const old = put_partial("a pull gave this up", now - two_days, &old_buffer);
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.partials);
+    try testing.expectEqual(@as(u64, 0), planned.counts.blobs);
+    try testing.expectEqual(@as(u64, "a pull gave this up".len), planned.counts.bytes);
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.partials);
+    try testing.expect(files.kind_of(old) == null);
+    try testing.expect(files.kind_of(recent) != null);
+    try testing.expectEqual(@as(u64, 0), (try make_plan(&.{})).counts.total());
+    // The same blob is being downloaded again: the restore would overwrite it, so it refuses.
+    var again_buffer: [160]u8 = undefined;
+    _ = put_partial("a pull gave this up", now, &again_buffer);
+    try testing.expectError(error.Conflict, do_restore(applied.gc));
+    files.remove_path(old);
+    const restored = try do_restore(applied.gc);
+    try testing.expectEqual(@as(u64, 1), restored.counts.partials);
+    try testing.expectEqualStrings("a pull gave this up", files.content_of(old).?);
+    // It is old again, so it is planned again.
+    try testing.expectEqual(@as(u64, 1), (try make_plan(&.{})).counts.partials);
+    try support.check_whole(&files, root_path, store.chunk_bytes);
 }

@@ -66,6 +66,10 @@ pub const Faults = struct {
     grow_on_open: bool = false,
     /// The most names one inode may have; a `link` past it is `EMLINK` (ext4 allows 65000).
     link_max: ?u32 = null,
+    /// A path with a symlink above its last part is a bug of the caller, as a real file system
+    /// would follow the link: the model has no links to follow, so it panics instead. The layer
+    /// fuzzer sets it.
+    forbid_link_above: bool = false,
 };
 
 const Node = struct {
@@ -134,6 +138,8 @@ pub const SimFs = struct {
     mutations: u32,
     crashed: bool,
     errno_last: u16,
+    /// The time the model stamps on what is created or written, for the tests that age things.
+    clock: u64,
     next_inode: u64,
     /// Bytes held by live files now.
     bytes_live: u64,
@@ -143,6 +149,7 @@ pub const SimFs = struct {
     /// Initialises in place. The tree is empty (the root exists and cannot be removed).
     pub fn init(sim: *SimFs, seed: u64) void {
         sim.count = 0;
+        sim.clock = 0;
         sim.pool_len = 0;
         sim.opens = @splat(closed_slot);
         sim.prng = std.Random.Xoshiro256.init(seed);
@@ -170,6 +177,7 @@ pub const SimFs = struct {
         .open_read = open_read,
         .read = read,
         .create = create,
+        .open_append = open_append,
         .write = write,
         .fsync = fsync,
         .close = close,
@@ -211,10 +219,21 @@ pub const SimFs = struct {
     fn find(sim: *const SimFs, path: []const u8) ?u32 {
         // A path is a C string: a NUL inside one is a buffer reused while a slice of it was kept.
         assert(std.mem.indexOfScalar(u8, path, 0) == null);
+        if (sim.faults.forbid_link_above) sim.assert_no_link_above(path);
         for (sim.nodes[0..sim.count], 0..) |*node, index| {
             if (node.alive and std.mem.eql(u8, node.text(), path)) return @intCast(index);
         }
         return null;
+    }
+
+    fn assert_no_link_above(sim: *const SimFs, path: []const u8) void {
+        var from: usize = 1;
+        while (std.mem.indexOfScalarPos(u8, path, from, '/')) |slash| : (from = slash + 1) {
+            for (sim.nodes[0..sim.count]) |*node| {
+                if (!node.alive or !std.mem.eql(u8, node.text(), path[0..slash])) continue;
+                assert(node.kind != .symlink);
+            }
+        }
     }
 
     /// The path of the node in slot `index`, or null if the slot is empty or dead. Tests walk the
@@ -263,6 +282,7 @@ pub const SimFs = struct {
             .links = sim.links_of(node.inode),
             .rdev_major = node.rdev_major,
             .rdev_minor = node.rdev_minor,
+            .mtime = node.mtime,
         };
     }
 
@@ -388,7 +408,7 @@ pub const SimFs = struct {
         node.path_len = @intCast(path.len);
         node.xattr_at = 0;
         node.xattr_len = 0;
-        node.mtime = 0;
+        node.mtime = sim.clock;
         node.unreadable = false;
         node.rdev_major = 0;
         node.rdev_minor = 0;
@@ -677,6 +697,16 @@ pub const SimFs = struct {
         return length;
     }
 
+    fn open_append(context: *anyopaque, path: [:0]const u8) Error!Fd {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const index = sim.find(path) orelse return sim.fail(errno_noent);
+        const node = &sim.nodes[index];
+        if (node.kind == .symlink) return sim.fail(errno_loop);
+        if (node.kind != .file) return sim.fail(errno_isdir);
+        return sim.take_slot(index, true);
+    }
+
     fn create(context: *anyopaque, path: [:0]const u8, mode: u16) Error!Fd {
         const sim = from_context(context);
         try sim.begin_mutation();
@@ -753,6 +783,7 @@ pub const SimFs = struct {
         }
         if (sim.pool_len + node.data_len + length > sim.pool.len) return sim.fail(errno_nospc);
         sim.append(node, bytes[0..length]);
+        node.mtime = sim.clock;
         return @intCast(length);
     }
 
@@ -945,8 +976,10 @@ pub const SimFs = struct {
         // Every name of the inode shows the change, as in a real file system.
         for (sim.nodes[0..sim.count]) |*node| {
             if (!node.alive or node.inode != inode) continue;
-            node.uid = attributes.uid;
-            node.gid = attributes.gid;
+            if (attributes.set_owner) {
+                node.uid = attributes.uid;
+                node.gid = attributes.gid;
+            }
             if (attributes.mode) |mode| node.mode = mode;
             node.mtime = attributes.mtime;
         }

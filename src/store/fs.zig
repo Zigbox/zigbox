@@ -39,6 +39,8 @@ pub const Stat = struct {
     /// overlay's upper layer records a deletion.
     rdev_major: u32 = 0,
     rdev_minor: u32 = 0,
+    /// When the bytes last changed, in seconds since the epoch.
+    mtime: u64 = 0,
 };
 
 /// Called once per name in a directory, "." and ".." excluded, in the order the file system
@@ -55,6 +57,8 @@ pub const PathAttributes = struct {
     uid: u32,
     gid: u32,
     mtime: u64,
+    /// False leaves the owner as it is (a one-id map: every owner is the user's own already).
+    set_owner: bool = true,
 };
 
 pub const VTable = struct {
@@ -78,6 +82,9 @@ pub const VTable = struct {
     /// Creates a new file for writing with the given permission bits (before any umask the
     /// process has: the real host clears it). Fails if the path exists.
     create: *const fn (context: *anyopaque, path: [:0]const u8, mode: u16) Error!Fd,
+    /// Opens an existing regular file for writing at its end (a partial download that is
+    /// resumed). Refuses a symlink; fails if the path does not exist.
+    open_append: *const fn (context: *anyopaque, path: [:0]const u8) Error!Fd,
     write: *const fn (context: *anyopaque, fd: Fd, bytes: []const u8) Error!u32,
     fsync: *const fn (context: *anyopaque, fd: Fd) Error!void,
     close: *const fn (context: *anyopaque, fd: Fd) void,
@@ -239,6 +246,19 @@ pub const Fs = struct {
             };
             assert(count <= buffer.len);
             return count;
+        }
+        return error.IoFailed;
+    }
+
+    /// Opens the existing file at `path` to append to it.
+    pub fn open_append(fs: Fs, path: [:0]const u8) Error!Fd {
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            return fs.vtable.open_append(fs.context, path) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
         }
         return error.IoFailed;
     }
@@ -548,10 +568,26 @@ pub const Fs = struct {
         mode: u16,
         failure: *Failure,
     ) Error!void {
-        assert(bytes.len <= constants.store_tree_bytes_max);
+        return fs.write_atomic_stamped(temporary, final, directory, bytes, mode, true, failure);
+    }
+
+    /// Like `write_atomic`; `fixed_time` says whether the file gets the store's fixed
+    /// modification time (a store file does) or keeps the time it was written (a file of the
+    /// user's, like zbx.lock).
+    pub fn write_atomic_stamped(
+        fs: Fs,
+        temporary: [:0]const u8,
+        final: [:0]const u8,
+        directory: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+        fixed_time: bool,
+        failure: *Failure,
+    ) Error!void {
+        assert(bytes.len <= constants.lock_file_bytes_max + constants.store_tree_bytes_max);
         assert(!std.mem.eql(u8, temporary, final));
         const fd = fs.create(temporary, mode) catch |err| return fs.note(failure, err);
-        fs.fill(fd, bytes) catch |err| {
+        fs.fill(fd, bytes, fixed_time) catch |err| {
             const noted = fs.note(failure, err);
             fs.close(fd);
             fs.unlink(temporary) catch {}; // The write's own error is the one to report.
@@ -574,11 +610,11 @@ pub const Fs = struct {
         return err;
     }
 
-    fn fill(fs: Fs, fd: Fd, bytes: []const u8) Error!void {
+    fn fill(fs: Fs, fd: Fd, bytes: []const u8, fixed_time: bool) Error!void {
         assert(fd < std.math.maxInt(i32));
-        assert(bytes.len <= constants.store_tree_bytes_max);
+        assert(bytes.len <= constants.lock_file_bytes_max + constants.store_tree_bytes_max);
         try fs.write_all(fd, bytes);
-        try fs.set_mtime(fd, constants.store_mtime_seconds);
+        if (fixed_time) try fs.set_mtime(fd, constants.store_mtime_seconds);
         try fs.fsync(fd);
     }
 };

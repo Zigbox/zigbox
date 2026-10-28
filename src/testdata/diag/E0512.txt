@@ -1,0 +1,5 @@
+error[ZBX-E0512]: the registry's answer can't be used
+  cause  registry.test sent more than zbx accepts in one answer
+  fix    run the command again; if it repeats, the registry or a proxy is at fault
+  more   zbx explain E0512 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0512.html

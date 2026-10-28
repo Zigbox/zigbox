@@ -35,9 +35,15 @@ fn panic_handler(message: []const u8, first_trace_addr: ?usize) noreturn {
 /// runs per process.
 var storage: cli.Storage = undefined;
 
+/// The room gc keeps its sets in: static and zero, so it is in bss and costs nothing in the
+/// program's file or in memory until a gc sizes the sets to its store. About 1.5 million
+/// objects fit.
+var gc_tables: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
+    storage.gc_tables = &gc_tables;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
@@ -111,4 +117,42 @@ test {
     _ = @import("dbus/client_tests.zig");
     _ = @import("sim_bus.zig");
     _ = @import("fuzz_dbus.zig");
+    _ = @import("fuzz_layer.zig");
+}
+
+test {
+    _ = @import("registry/digest.zig");
+    _ = @import("registry/blobs.zig");
+    _ = @import("store/images.zig");
+    _ = @import("pull_unpack.zig");
+    _ = @import("layer/reader.zig");
+    _ = @import("layer/tar.zig");
+    _ = @import("layer/apply.zig");
+    _ = @import("layer/diagnose.zig");
+    _ = @import("registry/reference.zig");
+    _ = @import("registry/net.zig");
+    _ = @import("registry/net_sim.zig");
+    _ = @import("registry/auth.zig");
+    _ = @import("registry/manifest.zig");
+    _ = @import("registry/client.zig");
+    _ = @import("registry/client_tests.zig");
+    _ = @import("registry/test_registry.zig");
+    _ = @import("registry/proxy.zig");
+    _ = @import("registry/diagnose.zig");
+    _ = @import("pull_commands.zig");
+    _ = @import("pull_tests.zig");
+    _ = @import("host_real_net.zig");
+    _ = @import("testing/vm/registry_server.zig");
+    _ = @import("testing/vm/registry_fixture.zig");
+}
+
+test {
+    // The images: settings, the lock, running by name.
+    _ = @import("registry/config.zig");
+    _ = @import("lock_file.zig");
+    _ = @import("image_user.zig");
+    _ = @import("run_image.zig");
+    _ = @import("image_diagnose.zig");
+    _ = @import("store/image_find.zig");
+    _ = @import("testing/vm/checks_m4.zig");
 }
