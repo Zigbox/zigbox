@@ -134,8 +134,9 @@ fn step_exits(session: *Session, out: *Io.Writer) !void {
     try expect_free(session, out, 8082, "after --timeout");
 
     try start_nginx(session, out, "web8083", 8083);
-    const pid_of = zn ++ " ps --output json | grep '\"web8083\"' | " ++
-        "sed -n 's/.*\"pid\":\\([0-9]*\\).*/\\1/p' | head -1";
+    // `ps` prints one document, every container on its one line: one object per line first.
+    const pid_of = zn ++ " ps --output json | tr '{' '\\n' | grep '\"name\":\"web8083\"' | " ++
+        "sed -n 's/.*\"pid\":\\([0-9]*\\),\"supervisor\".*/\\1/p'";
     const kill_container = "kill -KILL $(" ++ pid_of ++ ") && echo killed";
     const killed_container = try session.run(kill_container, limits.command_timeout_kvm_s);
     try H.show(out, "SIGKILL of web8083's PID 1", killed_container);
