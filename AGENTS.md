@@ -17,6 +17,11 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - All namespace work happens in a single-threaded child before `execve`. Thread pools only in the parent.
 - Never run anything with `sudo` in tests on a developer's host. Privileged setup (sysctl toggles) happens only inside the test VM.
 
+## Disk
+
+- The session's disk allowance is fixed and cannot be raised. Give each parallel worktree its own `ZIG_GLOBAL_CACHE_DIR`, and when `zig build check` says `.zig-cache/o` is large, empty it outside a build (`rm -rf .zig-cache`). Never delete another worktree's cache.
+- A build that was killed can leave `.zig-cache` half written, which then fails with `FileNotFound`; `rm -rf .zig-cache` fixes it.
+
 ## Environment facts (checked 2026-10-23 in the Claude Code cloud container)
 
 - The cloud container runs as root, has cgroup v1/hybrid (no `cgroup.controllers`), no `/dev/kvm` and no `pasta`. A fresh container has no `newuidmap` either; a session may install `uidmap` and give a test user a subuid range to exercise the full id mapping, so check rather than assume. It is not a valid test host: use it to build, unit-test, cross-compile and smoke-test only; the VM demo is the real test.
@@ -30,11 +35,12 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - `zig build tidy` checks line length, function length and banned patterns.
 - `zig build fuzz -- <fuzzer> [seed]` runs one seeded fuzzer.
 - `zig build demo-mN` runs milestone N's demo inside the test VM (harness in `src/testing/vm/`, written in Zig).
-- `zig build check` runs every gate (build, test, tidy, release, errors-site-check), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run.
+- `zig build check` runs every gate (build, test, tidy, release, errors-site-check), then every fuzzer with a fresh seed (`zig build fuzz -- all`), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run. A failed fuzzer's seed is the last `fuzz:` line before the FAIL.
 
 ## Working as the implementer subagent
 
 - Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push to the working branch.** The supervisor reviews each slice adversarially, and you fix what the review finds before the next slice.
+- **Before you report, run [REVIEW.md](REVIEW.md) on your own diff**, and say which of its items your slice touched and what you checked.
 - **Gates are `zig build check`, on the commit you report.** Paste its last line (`check: PASS <commit>`, without `+dirty`) into the report. A report without that line, or with another commit's, is not a report. Run the fuzzers you touched as well, and say which.
 - **VM checks run on CI's KVM runners, not under TCG here.** Push the commit to a scratch branch named `vm/<demo>-<slug>` (`<demo>` is `m0` to `m4`, or `all`; for example `git push origin HEAD:vm/m4-slice4`). `.github/workflows/vm.yml` runs that demo in minutes. Read the result with the GitHub tools (`actions_list` with the branch, then `get_job_logs`), quote the run link in your report. The run deletes its branch when it ends, so push a new commit to the same name to run again. Scratch branches are the only branches you may push to. Use local TCG only to debug something CI cannot show.
 - Report what you ran and its output, what you did not run and why, every deviation from the brief, and anything in the spec or brief that seemed wrong.

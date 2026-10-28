@@ -663,6 +663,9 @@ pub fn main(init: std.process.Init) u8 {
         arguments_storage[count] = argument;
         count += 1;
     }
+    if (count >= 1 and std.mem.eql(u8, arguments_storage[0], "all")) {
+        return run_all(init.io, out, arguments_storage[1..count]);
+    }
     const parsed = parse_arguments(arguments_storage[0..count]) catch |err| {
         print_usage(out, err) catch {};
         return constants.tool_exit_usage;
@@ -691,12 +694,44 @@ pub fn main(init: std.process.Init) u8 {
     return constants.tool_exit_ok;
 }
 
+/// `fuzz all [iterations]`, which `zig build check` runs: every fuzzer once, each with a fresh
+/// seed, which is printed and flushed before its first iteration, so a crash names the line that
+/// replays it (`zig build fuzz -- <fuzzer> <seed> <iterations>`).
+fn run_all(io: std.Io, out: *std.Io.Writer, arguments: []const []const u8) u8 {
+    assert(fuzzers.len > 0);
+    var iterations = constants.fuzz_check_iterations;
+    if (arguments.len > 1) {
+        print_usage(out, error.TooManyArguments) catch {};
+        return constants.tool_exit_usage;
+    }
+    if (arguments.len == 1) {
+        iterations = std.fmt.parseInt(u32, arguments[0], 10) catch 0;
+        if (iterations == 0 or iterations > constants.fuzz_iterations_max) {
+            print_usage(out, error.BadIterations) catch {};
+            return constants.tool_exit_usage;
+        }
+    }
+    assert(iterations > 0);
+    for (&fuzzers) |*fuzzer| {
+        var entropy: [8]u8 = undefined;
+        io.random(&entropy);
+        const seed = std.mem.readInt(u64, &entropy, .little);
+        out.print("fuzz: {s} seed={d} iterations={d}\n", .{ fuzzer.name, seed, iterations }) catch
+            return constants.tool_exit_failed;
+        out.flush() catch return constants.tool_exit_failed;
+        var splitmix = std.Random.SplitMix64.init(seed);
+        for (0..iterations) |_| fuzzer.run_iteration(splitmix.next());
+    }
+    out.print("fuzz: all {d} ok\n", .{fuzzers.len}) catch return constants.tool_exit_failed;
+    out.flush() catch return constants.tool_exit_failed;
+    return constants.tool_exit_ok;
+}
+
 fn print_usage(out: *std.Io.Writer, err: UsageError) !void {
     assert(@errorName(err).len > 0);
     assert(fuzzers.len > 0);
-    try out.print("fuzz: {s}\nusage: zig build fuzz -- <fuzzer> [seed] [iterations]\n", .{
-        @errorName(err),
-    });
+    const usage = "usage: zig build fuzz -- <fuzzer> [seed] [iterations] | all [iterations]";
+    try out.print("fuzz: {s}\n{s}\n", .{ @errorName(err), usage });
     try out.writeAll("fuzzers:");
     for (fuzzers) |fuzzer| try out.print(" {s}", .{fuzzer.name});
     try out.writeAll("\n");

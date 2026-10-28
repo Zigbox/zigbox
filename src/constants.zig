@@ -564,6 +564,8 @@ pub const net_addresses_max: u32 = 8;
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;
+/// Each fuzzer's share of `zig build check`, with a fresh seed: a quick look, not the soak.
+pub const fuzz_check_iterations: u32 = 2_000;
 
 comptime {
     // Four distinct failure classes, none colliding with success, and the internal code is the
@@ -821,4 +823,5 @@ comptime {
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);
+    assert(fuzz_check_iterations <= fuzz_iterations_default);
 }
