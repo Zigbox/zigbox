@@ -374,7 +374,8 @@ pub fn check_lock_show(
     if (!std.mem.eql(u8, doc.schema, "zbx.lock/1")) return error.LockWrong;
     if (doc.path.len == 0 or doc.path[0] != '/') return error.LockWrong;
     for (doc.images) |entry| {
-        if (std.mem.eql(u8, entry.reference, reference)) return .{ .path = doc.path, .entry = entry };
+        if (!std.mem.eql(u8, entry.reference, reference)) continue;
+        return .{ .path = doc.path, .entry = entry };
     }
     return error.LockWrong;
 }
@@ -677,7 +678,8 @@ test "a run says what it ran: the name as typed, the manifest and the tree" {
     var state = std.heap.ArenaAllocator.init(testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    const line = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0},\"ran\":{\"kind\":\"image\"," ++
+    const exited = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0},";
+    const line = exited ++ "\"ran\":{\"kind\":\"image\"," ++
         "\"reference\":\"alpine:3.20\",\"manifest\":\"sha256:aa\",\"tree\":\"b3:bb\"}}\n";
     try check_ran_image(arena, line, "alpine:3.20", "sha256:aa", "b3:bb");
     const wrong_tree = check_ran_image(arena, line, "alpine:3.20", "sha256:aa", "b3:cc");
@@ -686,7 +688,7 @@ test "a run says what it ran: the name as typed, the manifest and the tree" {
     try testing.expectError(error.LockWrong, wrong_manifest);
     const wrong_name = check_ran_image(arena, line, "alpine:3.19", "sha256:aa", "b3:bb");
     try testing.expectError(error.LockWrong, wrong_name);
-    const path = "{\"container_exit\":{\"reason\":\"exited\",\"code\":0},\"ran\":{\"kind\":\"rootfs\"," ++
+    const path = exited ++ "\"ran\":{\"kind\":\"rootfs\"," ++
         "\"path\":\"/r\"}}\n";
     const rootfs = check_ran_image(arena, path, "alpine:3.20", "sha256:aa", "b3:bb");
     try testing.expectError(error.LockWrong, rootfs);

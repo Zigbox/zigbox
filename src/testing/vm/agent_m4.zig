@@ -138,7 +138,8 @@ fn agent_run_alpine(session: *Session, out: *Io.Writer, alpine: m4.PullDoc) !voi
     };
     const reference = "alpine:3.20";
     const stderr = result.streams.stderr;
-    json.check_ran_image(arena, stderr, reference, alpine.manifest_digest, alpine.tree) catch |err| {
+    const manifest = alpine.manifest_digest;
+    json.check_ran_image(arena, stderr, reference, manifest, alpine.tree) catch |err| {
         return fail_step(out, step, "expected the run to say which image, manifest and tree", err);
     };
     m4.check_output_has(result.streams, result.status, "ID=alpine") catch |err| {
