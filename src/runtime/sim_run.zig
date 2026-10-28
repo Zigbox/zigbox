@@ -57,14 +57,14 @@ const common_files = [_]host_sim.File{
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
-    // pasta, for `--net user` (the simulator's pasta is `sim_world.World.start_program`), and
-    // the lowest port a user may bind, as Ubuntu 24.04 has it.
-    .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
     // What `--bind` and `--secret` of the tests and the fuzzers mount (M6): a directory, a file
     // and a file with a marker in it that must reach nothing but the container.
     .{ .path = mount_dir_path, .content = "", .mode = 0o040755 },
     .{ .path = mount_file_path, .content = "a note\n", .mode = 0o100644 },
     .{ .path = secret_path, .content = secret_marker ++ "\n", .mode = 0o100600 },
+    // pasta, for `--net user` (the simulator's pasta is `sim_world.World.start_program`), and
+    // the lowest port a user may bind, as Ubuntu 24.04 has it.
+    .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
     .{ .path = "/proc/sys/net/ipv4/ip_unprivileged_port_start", .content = "1024\n" },
 };
 

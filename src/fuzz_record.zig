@@ -170,6 +170,18 @@ fn random_extra_mounts(
     return out[0..count];
 }
 
+/// The other mounts read back as they were written.
+fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.mounts_count == view.mounts.len);
+    for (view.mounts, 0..) |mount, index| {
+        const back = parsed.mount_at(@intCast(index));
+        assert(back.kind == mount.kind);
+        assert(std.mem.eql(u8, back.source, mount.source));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.size_bytes == mount.size_bytes);
+    }
+}
+
 fn check_round_trip(random: std.Random) void {
     var rootfs_bytes: [constants.rootfs_bytes_max]u8 = undefined;
     const rootfs = random_text(random, &rootfs_bytes);
@@ -237,14 +249,7 @@ fn check_round_trip(random: std.Random) void {
         assert(std.mem.eql(u8, back.target, mount.target));
         assert(back.read_only == mount.read_only);
     }
-    assert(parsed.mounts_count == view.mounts.len);
-    for (view.mounts, 0..) |mount, index| {
-        const back = parsed.mount_at(@intCast(index));
-        assert(back.kind == mount.kind);
-        assert(std.mem.eql(u8, back.source, mount.source));
-        assert(std.mem.eql(u8, back.target, mount.target));
-        assert(back.size_bytes == mount.size_bytes);
-    }
+    check_mounts_back(&view, &parsed);
     check_damaged(random, text);
 }
 

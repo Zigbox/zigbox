@@ -118,6 +118,7 @@ const marker_copied = "zbx-fuzz-copied-8e2";
 
 /// The words a command line of the fuzzer can have.
 const args_max = 48;
+const Words = [args_max][:0]const u8;
 
 /// The other mounts of the run (M6 slice 3): none, a tmpfs, two binds and a secret that all
 /// exist, or a bind of a path that is not there.
@@ -436,7 +437,12 @@ fn exit_for(code: codes.Code, command_missing: bool) u8 {
 const sample_mounts = [_]plan_mod.MountInput{
     .{ .shape = .tmpfs, .source = "", .target = "/scratch", .size_bytes = 8 << 20 },
     .{ .shape = .bind_dir, .source = sim_run.mount_dir_path, .target = "/data", .size_bytes = 0 },
-    .{ .shape = .bind_file, .source = sim_run.mount_file_path, .target = "/etc/note", .size_bytes = 0 },
+    .{
+        .shape = .bind_file,
+        .source = sim_run.mount_file_path,
+        .target = "/etc/note",
+        .size_bytes = 0,
+    },
     .{ .shape = .secret, .source = sim_run.secret_path, .target = "/run/key", .size_bytes = 0 },
 };
 
@@ -892,7 +898,7 @@ pub fn fuzz_run(seed: u64) void {
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
-    var args: [args_max][:0]const u8 = undefined;
+    var args: Words = undefined;
     const count = command_line(&scenario, &args);
     const code = sim_run.run_cli(&sim, args[0..count]);
 
@@ -943,7 +949,7 @@ const Environment = struct {
 };
 
 /// The command line of the scenario, after the program name; returns how many words.
-fn command_line(scenario: *const Scenario, args: *[args_max][:0]const u8) usize {
+fn command_line(scenario: *const Scenario, args: *Words) usize {
     var words_storage: [3][:0]const u8 = undefined;
     const words = command_words(scenario, &words_storage);
     var count: usize = 0;
@@ -984,7 +990,7 @@ fn command_line(scenario: *const Scenario, args: *[args_max][:0]const u8) usize 
     return count;
 }
 
-fn push_mounts(args: *[args_max][:0]const u8, count: *usize, choice: MountsChoice) void {
+fn push_mounts(args: *Words, count: *usize, choice: MountsChoice) void {
     switch (choice) {
         .none => {},
         .all => {
@@ -997,7 +1003,7 @@ fn push_mounts(args: *[args_max][:0]const u8, count: *usize, choice: MountsChoic
     }
 }
 
-fn push_env(args: *[args_max][:0]const u8, count: *usize, choice: EnvChoice) void {
+fn push_env(args: *Words, count: *usize, choice: EnvChoice) void {
     switch (choice) {
         .none => {},
         .given => push_pair(args, count, "-e", "SECRET_ONE=" ++ marker_given),
@@ -1013,7 +1019,7 @@ fn push_env(args: *[args_max][:0]const u8, count: *usize, choice: EnvChoice) voi
     }
 }
 
-fn push_limit(args: *[args_max][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
+fn push_limit(args: *Words, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
     const given = item orelse return;
     push(args, count, flag);
     push(args, count, given.text);
@@ -1074,12 +1080,12 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
 }
 
-fn push(args: *[args_max][:0]const u8, count: *usize, item: [:0]const u8) void {
+fn push(args: *Words, count: *usize, item: [:0]const u8) void {
     args[count.*] = item;
     count.* += 1;
 }
 
-fn push_pair(args: *[args_max][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
+fn push_pair(args: *Words, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
     push(args, count, name);
     push(args, count, value);
 }
