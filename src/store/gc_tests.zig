@@ -748,9 +748,8 @@ fn put_blob(text: []const u8) Sha256 {
 /// An image record for `tree` that names `config` and `layer`.
 fn record_image(tree: Digest, config: Sha256, layer: Sha256) void {
     var image: images.Image = undefined;
-    const written = "docker.io/library/fixture:1";
-    @memcpy(image.reference[0..written.len], written);
-    image.reference_len = written.len;
+    image.tag_count = 0;
+    image.add_tag("docker.io/library/fixture:1");
     image.manifest = Sha256.of("manifest");
     image.platform_len = 11;
     @memcpy(image.platform[0..11], "linux/amd64");

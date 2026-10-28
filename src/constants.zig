@@ -540,13 +540,16 @@ pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
 pub const registry_mirrors_max: u32 = 4;
 pub const registry_mirrors_bytes_max: u32 = 1024;
-/// An image record (`store/images.zig`): its fixed fields, the reference, 128 layer digests and
-/// the image's settings.
-pub const image_record_bytes_max: u32 = 48 * 1024;
+/// An image record (`store/images.zig`): its fixed fields, its tags (each a reference escaped
+/// four bytes a byte at the worst), 128 layer digests and the image's settings.
+pub const image_record_bytes_max: u32 = 80 * 1024;
 /// The settings an image carries (entrypoint, cmd, env, working directory, user): the bytes of
 /// all their strings together, and the words of each list. An image with more is refused.
 pub const image_settings_bytes_max: u32 = 6 * 1024;
 pub const image_settings_words_max: u32 = 48;
+/// The tags an image record keeps: every reference the image was pulled as. When it is full, the
+/// oldest goes.
+pub const image_tags_max: u32 = 8;
 pub const images_max: u32 = 4096;
 /// `zbx.lock` (`lock_file.zig`): the entries it holds, the bytes of their references together,
 /// and the largest file read or written.
@@ -811,6 +814,10 @@ comptime {
     assert(net_idle_timeout_ms < net_request_timeout_ms);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
+    assert(image_tags_max > 0);
+    // A record holds the tags escaped, 128 layer lines of 90 bytes and the settings escaped.
+    assert(image_tags_max * (reference_bytes_max * 4 + 16) + registry_layers_max * 90 +
+        image_settings_bytes_max * 4 + 2048 <= image_record_bytes_max);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

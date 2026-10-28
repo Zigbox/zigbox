@@ -123,6 +123,7 @@ pub const Code = enum(u8) {
     E0523,
     E0524,
     E0525,
+    E0526,
     W0501,
     W0502,
     W0503,
@@ -832,9 +833,9 @@ pub const registry = [_]Entry{
         \\zbx publishes a JSON schema for the output of run, bundle, ps, stop and
         \\doctor ("zbx schema ps"), of commit, and of the store commands, named
         \\store-import, store-ls, store-du, store-rm, store-diff, store-verify,
-        \\store-gc, store-trash (gc --trash) and store-restore. Other commands have
-        \\no machine-readable output that needs one: explain and help print text,
-        \\version prints a line.
+        \\store-gc, store-trash (gc --trash) and store-restore, and of explain and
+        \\"lock show" (lock-show). Other commands have no machine-readable output
+        \\that needs one: help prints text, version prints a line.
         ,
     },
     .{
@@ -1745,6 +1746,18 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0526,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "there is no zbx.lock for this project",
+        .explanation =
+        \\zbx lock show prints the project's zbx.lock: the nearest one in the working
+        \\directory or any directory above it. There is none. A lock is made by the
+        \\first pull (or the first run of a tag) in the project directory, so pull
+        \\an image to make one, from the directory the project lives in.
+        ,
+    },
+    .{
         .code = .W0501,
         .severity = .warning,
         .blame = .external,
@@ -2006,7 +2019,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .E0517, .W0501, .W0502 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         else => true,
     };
 }

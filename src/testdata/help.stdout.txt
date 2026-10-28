@@ -10,9 +10,11 @@ commands:
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+  lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   schema <cmd>    print the JSON schema of a command's output
-  explain <code>  explain a diagnostic code offline, for example E0001
+  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
+                  document, see zbx schema explain)
   help            show this text
   --version       print the version
 

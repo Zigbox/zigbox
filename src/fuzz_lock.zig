@@ -5,12 +5,14 @@
 //! the text and reads that.
 //!
 //! Properties, every iteration:
-//!   1. What was written is read back exactly: the entries (sorted), the settings (in order).
+//!   1. What was written is read back exactly: the entries (sorted), the settings (in order), the
+//!      tags of the record (in order, at most the bound, a repeat of a reference merged).
 //!   2. A lock that parses and is written again is the same bytes (a fixed point); the same for
 //!      the record's settings.
 //!   3. Damaged text never crashes the reader. If it still parses, writing it and reading that
 //!      again gives the same entries.
 //!   4. Noise of any bytes, including NUL and bytes over 127, never crashes either reader.
+//!   5. A record with one tag, written as M4's version 1 (`.reference`), reads as that one tag.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -135,8 +137,12 @@ fn remove_line(buffer: []u8, length: usize, random: std.Random) usize {
 }
 
 fn fill_image(random: std.Random) void {
-    image.reference_len = 11;
-    @memcpy(image.reference[0..11], "alpine:3.20");
+    image.tag_count = 0;
+    // More pulls than the record keeps, so the bound and the merging of a repeat are exercised.
+    for (0..random.uintAtMost(u32, constants.image_tags_max + 3)) |_| {
+        image.add_tag(references[random.uintLessThan(usize, references.len)]);
+        assert(image.tag_count <= constants.image_tags_max);
+    }
     image.manifest = random_manifest(random);
     image.platform_len = 11;
     @memcpy(image.platform[0..11], "linux/amd64");
@@ -156,6 +162,35 @@ fn fill_image(random: std.Random) void {
     }
     _ = image.settings.set(.workdir, if (random.boolean()) "" else "/srv/app");
     _ = image.settings.set(.user, if (random.boolean()) "" else "app:staff");
+}
+
+fn same_tags(one: *const images.Image, other: *const images.Image) bool {
+    if (one.tag_count != other.tag_count) return false;
+    for (0..one.tag_count) |index| {
+        const at: u32 = @intCast(index);
+        if (!std.mem.eql(u8, one.tag_text(at), other.tag_text(at))) return false;
+    }
+    return true;
+}
+
+/// The record as M4 wrote it: version 1 and `.reference` for the one tag. Only for a record
+/// with exactly one tag.
+fn as_version_one(written: []const u8, out: []u8) []const u8 {
+    assert(image.tag_count == 1);
+    const version_at = std.mem.indexOf(u8, written, "version = 2").?;
+    const tags_at = std.mem.indexOf(u8, written, ".tags = ").?;
+    assert(version_at < tags_at);
+    var length: usize = 0;
+    const pieces = [_][]const u8{
+        written[0..version_at],              "version = 1",
+        written[version_at + 11 .. tags_at], ".reference = ",
+        written[tags_at + 8 ..],
+    };
+    for (pieces) |piece| {
+        @memcpy(out[length..][0..piece.len], piece);
+        length += piece.len;
+    }
+    return out[0..length];
 }
 
 fn same_settings(one: *const images.Settings, other: *const images.Settings) bool {
@@ -182,9 +217,17 @@ fn fuzz_record_text(random: std.Random) void {
     assert(same_settings(&image.settings, &back.settings));
     assert(back.layer_count == image.layer_count);
     assert(back.tree.eql(image.tree));
+    assert(same_tags(&image, &back));
     // 2. A fixed point.
     var rewritten: [constants.image_record_bytes_max]u8 = undefined;
     assert(std.mem.eql(u8, written, images.render(&back, &rewritten)));
+    // 5. M4's version 1 reads as the one tag, and is written as version 2.
+    if (image.tag_count == 1) {
+        const old = as_version_one(written, &record_damaged);
+        assert(images.parse(old, &back) == .ok);
+        assert(same_tags(&image, &back));
+        assert(std.mem.eql(u8, written, images.render(&back, &rewritten)));
+    }
     // 3. Damaged text: never a crash; if it reads, it writes and reads again the same.
     for (0..4) |_| {
         const length = damage(written, &record_damaged, random);
@@ -193,6 +236,7 @@ fn fuzz_record_text(random: std.Random) void {
         const out = images.render(&copy, &rewritten);
         assert(images.parse(out, &back) == .ok);
         assert(same_settings(&copy.settings, &back.settings));
+        assert(same_tags(&copy, &back));
     }
 }
 

@@ -17,6 +17,7 @@ const text_util = @import("text.zig");
 const codes = @import("diag/codes.zig");
 const errors = @import("diag/errors.zig");
 const explain = @import("diag/explain.zig");
+const lock_commands = @import("lock_commands.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
@@ -32,6 +33,7 @@ const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
 const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
+const Sha256 = @import("registry/digest.zig").Sha256;
 
 const Host = host_mod.Host;
 
@@ -48,9 +50,11 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
-    \\  explain <code>  explain a diagnostic code offline, for example E0001
+    \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
+    \\                  document, see zbx schema explain)
     \\  help            show this text
     \\  --version       print the version
     \\
@@ -138,6 +142,7 @@ pub const Command = enum {
     doctor,
     explain,
     help,
+    lock,
     ps,
     pull,
     run,
@@ -387,6 +392,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "run")) found = .run;
@@ -403,7 +409,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock => 1,
         .store => 2,
     };
     assert(count <= 2);
@@ -734,6 +740,7 @@ fn resolve(
         const what: Missing = switch (command) {
             .stop, .commit => .container,
             .schema => .topic,
+            .lock => .action,
             .pull => .reference,
             else => .code,
         };
@@ -742,6 +749,25 @@ fn resolve(
     invocation.command = command;
     invocation.operand = if (given == 1) operands[1] else null;
     if (invocation.operand == null) assert(given == 0);
+    if (command == .lock) {
+        if (!std.mem.eql(u8, invocation.operand.?, "show")) {
+            return lock_unknown(diag, invocation.operand.?);
+        }
+    }
+}
+
+/// `lock` was given a word that is not its subcommand.
+fn lock_unknown(diag: *Diag, word: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, word, "show"));
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, word);
+    diag.raise(.E0001);
+    diag.while_("reading the command line", .{});
+    diag.cause("'{s}' is not a lock subcommand; the only one is show", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+    return error.UnknownCommand;
 }
 
 /// `store` takes a subcommand, and for `import` and `rm` an operand; `du` takes one if it likes.
@@ -932,6 +958,8 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix(.{ .sentence = "commit one container at a time:", .command = "zbx commit web-1" });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
+    } else if (command == .lock) {
+        diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
     } else {
         diag.fix_with("pass one code:", "zbx {s} E0001", .{name});
     }
@@ -939,7 +967,7 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic, reference };
+const Missing = enum { code, rootfs, command, target, container, topic, reference, action };
 
 /// What `pull` lacks: its reference.
 fn missing_pull(diag: *Diag, missing: Missing) void {
@@ -949,6 +977,13 @@ fn missing_pull(diag: *Diag, missing: Missing) void {
     diag.fix(.{ .sentence = "name an image:", .command = "zbx pull alpine:3.20" });
 }
 
+/// What `lock` lacks: its subcommand.
+fn missing_lock(diag: *Diag) void {
+    assert(diag.code != null);
+    diag.cause("'lock' needs a subcommand: show", .{});
+    diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+}
+
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
     // The commands with something to miss: `explain` its code, `run` its rootfs and command.
     if (command == .run) assert(missing != .code);
@@ -956,6 +991,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .bundle) assert(missing == .target);
     if (command == .stop or command == .commit) assert(missing == .container);
     if (command == .schema) assert(missing == .topic);
+    if (command == .lock) assert(missing == .action);
     if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
 
     assert(command != .doctor);
@@ -1005,6 +1041,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
         .reference => missing_pull(diag, missing),
+        .action => missing_lock(diag),
         .command => {
             diag.cause("'run' needs the command to run, after '--'", .{});
             diag.fix(.{
@@ -1193,7 +1230,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit, .pull => true,
+        .explain, .bundle, .schema, .stop, .run, .commit, .pull, .lock => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1202,7 +1239,18 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .bundle => return run_bundle(host, invocation, &storage.workspace, diag),
         .help => try print(host, help_text, diag),
         .version => try print(host, version_text, diag),
-        .explain => try run_explain(host, invocation.operand.?, diag),
+        .explain => try run_explain(
+            host,
+            invocation.operand.?,
+            invocation.options.output == .json,
+            diag,
+        ),
+        .lock => lock_commands.run_show(
+            host,
+            &storage.pull.unpack.locking,
+            invocation.options.output == .json,
+            diag,
+        ) catch |err| return lock_error(err),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -1221,6 +1269,14 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .store => return run_store(host, invocation, storage, diag),
     }
     return constants.exit_ok;
+}
+
+fn lock_error(err: lock_commands.Error) RunError {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.Failed => error.CommandFailed,
+        error.OutputFailed => error.OutputFailed,
+    };
 }
 
 fn command_error(err: commands.Error) RunError {
@@ -1447,7 +1503,8 @@ fn run_container(
         .workdir = prepared.workdir,
         .user = prepared.user,
     };
-    if (given.detach) return run_detached(host, invocation, &container, times, storage, diag);
+    const ran = ran_of(invocation, &prepared);
+    if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
@@ -1466,8 +1523,69 @@ fn run_container(
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
-    report_outcome(host, invocation.options, handle, &reason);
+    report_outcome(host, invocation.options, handle, &reason, &ran);
     return code;
+}
+
+/// What a run ran, for `--output json`: an image (the name as typed, its manifest and the tree
+/// it became), a tree of the store, or a directory. The tree is not here: a prefix of one is
+/// only resolved when the run starts, so it is taken from the run.
+const Ran = struct {
+    kind: enum { image, tree, rootfs },
+    /// The name as typed (image), or the directory (rootfs); empty for a tree.
+    text: []const u8,
+    manifest: ?Sha256,
+};
+
+fn ran_of(invocation: *const Invocation, prepared: *const run_image.Prepared) Ran {
+    assert(invocation.command == .run);
+    const operand = invocation.operand orelse {
+        const path = invocation.run.rootfs.?; // check_run_args refused neither or both.
+        return .{ .kind = .rootfs, .text = path, .manifest = null };
+    };
+    assert(invocation.run.rootfs == null);
+    if (is_tree_operand(operand)) return .{ .kind = .tree, .text = "", .manifest = null };
+    assert(prepared.manifest != null);
+    return .{ .kind = .image, .text = operand, .manifest = prepared.manifest };
+}
+
+/// Adds `"ran":{...}` to the JSON line in `writer`, which ends in "}\n": inside the line's one
+/// object, after its last member. `tree` is the digest the run used; empty for a directory.
+/// If the line has no room the line is left as it was.
+fn append_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) void {
+    const line = writer.buffered();
+    assert(line.len >= 3);
+    assert(std.mem.endsWith(u8, line, "}\n"));
+    const mark = writer.end;
+    writer.end -= 2;
+    if (write_ran(writer, ran, tree)) {
+        writer.writeAll("}\n") catch unreachable; // Two bytes were freed above.
+        return;
+    }
+    writer.end = mark;
+    assert(std.mem.endsWith(u8, writer.buffered(), "}\n"));
+}
+
+fn write_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) bool {
+    if (ran.kind == .tree) assert(tree.len > 0);
+    switch (ran.kind) {
+        .image => {
+            writer.writeAll(",\"ran\":{\"kind\":\"image\",\"reference\":") catch return false;
+            bundle.write_json_string(writer, ran.text) catch return false;
+            const manifest = ran.manifest.?;
+            writer.print(",\"manifest\":\"{s}\",\"tree\":\"{s}\"}}", .{
+                &manifest.text(), tree,
+            }) catch return false;
+        },
+        .tree => writer.print(",\"ran\":{{\"kind\":\"tree\",\"tree\":\"{s}\"}}", .{tree}) catch
+            return false,
+        .rootfs => {
+            writer.writeAll(",\"ran\":{\"kind\":\"rootfs\",\"path\":") catch return false;
+            bundle.write_json_string(writer, ran.text) catch return false;
+            writer.writeByte('}') catch return false;
+        },
+    }
+    return true;
 }
 
 /// The limits the flags asked for, or `ZBX-E0306` for the first that is not acceptable.
@@ -1549,6 +1667,7 @@ fn run_detached(
     container: *const runtime_spec.Spec,
     times: Times,
     storage: *Storage,
+    ran: *const Ran,
     diag: *Diag,
 ) RunError!u8 {
     assert(diag.code == null);
@@ -1567,7 +1686,7 @@ fn run_detached(
         .parent => {
             host.close(pipe.write);
             defer host.close(pipe.read);
-            return relay(host, pipe.read, invocation.options, diag);
+            return relay(host, pipe.read, invocation.options, ran, diag);
         },
         .supervisor => {
             host.close(pipe.read);
@@ -1626,14 +1745,17 @@ fn supervise(
         return code;
     };
     const started_bytes_max = constants.container_name_bytes_max +
-        constants.scope_name_bytes_max + 24;
+        constants.scope_name_bytes_max + 24 + constants.store_digest_text_bytes + 1;
     var body: [started_bytes_max]u8 = undefined;
     const scope = if (handle.plan.scoped) handle.plan.text(handle.plan.scope_name) else "-";
-    const made = std.fmt.bufPrint(&body, "{s} {d} {s}", .{
+    // The tree the container runs on, whole (a prefix was resolved by the start), or "-".
+    const tree = if (handle.has_image) handle.image.tree_text() else "-";
+    const made = std.fmt.bufPrint(&body, "{s} {d} {s} {s}", .{
         handle.name_slice(),
         handle.pid,
         scope,
-    }) catch unreachable; // A name, a pid and a scope name fit the buffer.
+        tree,
+    }) catch unreachable; // A name, a pid, a scope name and a tree fit the buffer.
     write_frame(host, fd, frame_started, null, made) catch {};
     host.close(fd); // The caller can go; the container's end is ours to see to.
     _ = runtime.wait(handle);
@@ -1654,7 +1776,13 @@ fn read_exact(host: Host, fd: host_mod.Handle, into: []u8) host_mod.Error!bool {
 }
 
 /// The caller of `run -d`: passes the supervisor's warnings on, then prints how the start went.
-fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunError!u8 {
+fn relay(
+    host: Host,
+    fd: host_mod.Handle,
+    options: Options,
+    ran: *const Ran,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(options.runs_container);
     var body: [constants.output_bytes_max]u8 = undefined;
@@ -1673,7 +1801,7 @@ fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunErro
                 host.write_all(.stderr, body[1..length]) catch {};
                 return body[0];
             },
-            frame_started => return print_started(host, options, body[0..length], diag),
+            frame_started => return print_started(host, options, body[0..length], ran, diag),
             else => break,
         }
     }
@@ -1681,14 +1809,21 @@ fn relay(host: Host, fd: host_mod.Handle, options: Options, diag: *Diag) RunErro
     return error.CommandFailed;
 }
 
-fn print_started(host: Host, options: Options, text: []const u8, diag: *Diag) RunError!u8 {
+fn print_started(
+    host: Host,
+    options: Options,
+    text: []const u8,
+    ran: *const Ran,
+    diag: *Diag,
+) RunError!u8 {
     assert(diag.code == null);
     assert(text.len < constants.output_bytes_max);
     var fields = std.mem.splitScalar(u8, text, ' ');
     const name = fields.next() orelse "";
     const pid = fields.next() orelse "0";
     const scope = fields.next() orelse "-";
-    var buffer: [512]u8 = undefined;
+    const tree = fields.next() orelse "-";
+    var buffer: [constants.path_bytes_max * 6 + 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     // Cannot fail: the fields are bounded names and a number, in 512 bytes.
     if (options.output == .json) {
@@ -1702,6 +1837,7 @@ fn print_started(host: Host, options: Options, text: []const u8, diag: *Diag) Ru
             bundle.write_json_string(&writer, scope) catch unreachable; // Same.
         }
         writer.writeAll(",\"detached\":true}}\n") catch unreachable; // Same.
+        append_ran(&writer, ran, tree);
     } else {
         writer.print("{s}\n", .{name}) catch unreachable; // Same bound.
     }
@@ -1768,6 +1904,7 @@ fn report_outcome(
     options: Options,
     handle: *const runtime.Handle,
     reason: *const runtime.ExitReason,
+    ran: *const Ran,
 ) void {
     assert(handle.status == .stopped);
     assert(reason.code() != null);
@@ -1781,6 +1918,7 @@ fn report_outcome(
             writer.end -= 3;
             writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
         }
+        append_ran(&writer, ran, if (handle.has_image) handle.image.tree_text() else "");
     } else {
         if (options.verbose) {
             for (handle.note_slice()) |*note| {
@@ -1949,7 +2087,7 @@ fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) R
     return code;
 }
 
-fn run_explain(host: Host, operand: []const u8, diag: *Diag) RunError!void {
+fn run_explain(host: Host, operand: []const u8, json: bool, diag: *Diag) RunError!void {
     assert(operand.len <= constants.arg_bytes_max);
     assert(diag.code == null);
     const code = codes.parse(operand) orelse {
@@ -1963,6 +2101,7 @@ fn run_explain(host: Host, operand: []const u8, diag: *Diag) RunError!void {
         return error.UnknownCode;
     };
     var buffer: [constants.output_bytes_max]u8 = undefined;
+    if (json) return print(host, explain.render_json(code, &buffer), diag);
     try print(host, explain.render(code, &buffer), diag);
 }
 
@@ -2072,6 +2211,49 @@ test "snapshot: explain prints the registry text on stdout, exit 0" {
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0007]: "));
     try testing.expectEqual(@as(u8, 1), try run_case(&sim, &.{ "zbx", "explain" }));
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0006]: "));
+}
+
+test "snapshot: explain --output json is the zbx.explain/1 document; schemas for it and lock" {
+    // Goal: the machine form of `explain` is exactly the checked-in document, wherever the option
+    // stands; an unknown code is still a diagnostic and prints nothing on stdout; the schemas
+    // `zbx schema` prints for it and for `lock show` are the checked-in text.
+    var sim: HostSim = undefined;
+    const want = @embedFile("testdata/explain_E0001.json.txt");
+    const before = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E0001" };
+    try testing.expectEqual(@as(u8, 0), try run_case(&sim, &before));
+    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const after = [_][:0]const u8{ "zbx", "explain", "zbx-e0001", "--output=json" };
+    try testing.expectEqual(@as(u8, 0), try run_case(&sim, &after));
+    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expect(try @import("test_util.zig").json_is_valid(std.mem.trimEnd(u8, want, "\n")));
+    const unknown = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E9999" };
+    try testing.expectEqual(@as(u8, 1), try run_case(&sim, &unknown));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-E0007\""));
+
+    const goldens = [_]struct { topic: [:0]const u8, text: []const u8 }{
+        .{ .topic = "explain", .text = @embedFile("testdata/schema_explain.stdout.txt") },
+        .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
+    };
+    for (goldens) |golden| {
+        const args = [_][:0]const u8{ "zbx", "schema", golden.topic };
+        try testing.expectEqual(@as(u8, 0), try run_case(&sim, &args));
+        try testing.expectEqualStrings(golden.text, sim.stdout());
+    }
+}
+
+test "parse: lock takes the one subcommand show" {
+    // Goal: `lock` alone is E0006, an unknown word E0001, an extra word E0003; `lock show` parses.
+    var invocation: Invocation = undefined;
+    try testing.expect(try parse_case(&.{ "lock", "show" }, &invocation) == null);
+    try testing.expect(invocation.command == .lock);
+    const json = [_][]const u8{ "--output", "json", "lock", "show" };
+    try testing.expect(try parse_case(&json, &invocation) == null);
+    try testing.expectEqual(codes.Code.E0006, (try parse_case(&.{"lock"}, &invocation)).?);
+    try testing.expectEqual(codes.Code.E0001, (try parse_case(&.{ "lock", "ls" }, &invocation)).?);
+    const extra = try parse_case(&.{ "lock", "show", "more" }, &invocation);
+    try testing.expectEqual(codes.Code.E0003, extra.?);
 }
 
 test "parse: options come before or after the command and never change the command" {
@@ -2596,6 +2778,8 @@ test "run --timeout stops the container when its time is up and says so" {
 
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
+const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
+
 fn framed(sim: *HostSim, frames: []const Frame) !host_mod.Handle {
     const host = sim.interface();
     const pipe = try host.pipe();
@@ -2614,7 +2798,8 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     var diag: Diag = undefined;
     diag.reset();
     const options: Options = .{ .runs_container = true };
-    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), read, options, &diag));
+    const host = sim.interface();
+    try testing.expectEqual(@as(u8, 0), try relay(host, read, options, &test_ran, &diag));
     sim.interface().close(read);
     try testing.expectEqualStrings("web-1\n", sim.stdout());
     try testing.expectEqualStrings("zbx: warning: something\n", sim.stderr());
@@ -2623,10 +2808,11 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     const bare: Frame = .{ .tag = frame_started, .head = null, .body = "web-1 502 -" };
     const again = try framed(&sim, &.{bare});
     const json: Options = .{ .runs_container = true, .output = .json };
-    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &diag));
+    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &test_ran, &diag));
     sim.interface().close(again);
     const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
-        "\"pid\":502,\"scope\":null,\"detached\":true}}\n";
+        "\"pid\":502,\"scope\":null,\"detached\":true},\"ran\":{\"kind\":\"rootfs\"," ++
+        "\"path\":\"/srv/root\"}}\n";
     try testing.expectEqualStrings(expected, sim.stdout());
 }
 
@@ -2638,7 +2824,8 @@ test "run -d: a failed start passes the supervisor's diagnostic and code through
     var diag: Diag = undefined;
     diag.reset();
     const options: Options = .{ .runs_container = true };
-    try testing.expectEqual(@as(u8, 126), try relay(sim.interface(), read, options, &diag));
+    const host = sim.interface();
+    try testing.expectEqual(@as(u8, 126), try relay(host, read, options, &test_ran, &diag));
     sim.interface().close(read);
     try testing.expectEqualStrings("zbx: refused\n", sim.stderr());
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
@@ -2657,7 +2844,8 @@ test "run -d: a supervisor that ends without a report, or sends nonsense, is E04
         var diag: Diag = undefined;
         diag.reset();
         const options: Options = .{ .runs_container = true };
-        try testing.expectError(error.CommandFailed, relay(host, pipe.read, options, &diag));
+        const failed = relay(host, pipe.read, options, &test_ran, &diag);
+        try testing.expectError(error.CommandFailed, failed);
         host.close(pipe.read);
         try testing.expectEqual(codes.Code.E0405, diag.code.?);
         try testing.expectEqual(@as(usize, 0), sim.stdout().len);

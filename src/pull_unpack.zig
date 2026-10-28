@@ -255,8 +255,10 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
     const resolved = job.resolved;
     var image: images.Image = undefined;
     const written = job.written[0..@min(job.written.len, constants.reference_bytes_max)];
-    @memcpy(image.reference[0..written.len], written);
-    image.reference_len = @intCast(written.len);
+    // A second pull of a manifest keeps what the first was pulled as; a pull by digest adds
+    // no tag and takes none away.
+    images.carry_tags(store, resolved.manifest_digest, &image);
+    if (job.reference.digest == null) image.add_tag(written);
     image.manifest = resolved.manifest_digest;
     var platform_buffer: [16]u8 = undefined;
     const platform = std.fmt.bufPrint(&platform_buffer, "linux/{s}", .{

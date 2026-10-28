@@ -329,8 +329,42 @@ fn do_ls(job: *Job, diag: *Diag) Error!void {
     if (exists) try ls_images(job, &store, false, diag);
 }
 
+/// The tags of an image as one line of text, `alpine:3.20, alpine:3.19`, each made safe to print;
+/// `<none>` for an image that was only ever pulled by digest.
+fn tags_text(storage: *[tags_text_bytes_max]u8, image: *const images.Image) []const u8 {
+    assert(image.tag_count <= constants.image_tags_max);
+    if (image.tag_count == 0) return "<none>";
+    var writer = std.Io.Writer.fixed(storage);
+    var safe: [constants.store_source_bytes_max]u8 = undefined;
+    for (0..image.tag_count) |index| {
+        // Cannot fail: the storage holds every tag at its longest and a separator after each.
+        if (index > 0) writer.writeAll(", ") catch unreachable; // Same bound.
+        const tag = text_util.sanitise(&safe, image.tag_text(@intCast(index)));
+        writer.writeAll(tag) catch unreachable; // Same bound.
+    }
+    return writer.buffered();
+}
+
+const tags_text_bytes_max = constants.image_tags_max * (constants.store_source_bytes_max + 2);
+
+/// The JSON member `"tags":[...]` of an image, written in pieces: the tags escaped can be more
+/// than one output buffer holds.
+fn put_tags_json(job: *const Job, image: *const images.Image, diag: *Diag) Error!void {
+    assert(image.tag_count <= constants.image_tags_max);
+    try put(job, "\"tags\":[", diag);
+    for (0..image.tag_count) |index| {
+        var buffer: [constants.reference_bytes_max * 6 + 8]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        // Cannot fail: a tag of at most 1024 bytes escapes to at most six times that.
+        if (index > 0) writer.writeByte(',') catch unreachable; // Same bound.
+        json_string(&writer, image.tag_text(@intCast(index))) catch unreachable; // Same bound.
+        try put(job, writer.buffered(), diag);
+    }
+    try put(job, "]", diag);
+}
+
 /// The image records, after the roots: text as a second table when there are any, JSON as the
-/// members of "images". Each shows the reference it was pulled as and the tree it became.
+/// members of "images". Each shows every tag it was pulled as and the tree it became.
 const LsImages = struct {
     job: *const Job,
     diag: *Diag,
@@ -340,41 +374,52 @@ const LsImages = struct {
 
     pub fn visit(self: *LsImages, image: *const images.Image) void {
         assert(image.layer_count <= constants.registry_layers_max);
-        assert(image.reference_len <= constants.reference_bytes_max);
+        assert(image.tag_count <= constants.image_tags_max);
         if (self.failed) return;
-        var buffer: [constants.output_bytes_max]u8 = undefined;
-        var when: [19]u8 = undefined;
-        var safe: [constants.store_source_bytes_max]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        // Cannot fail: a few fixed columns and a reference of at most 1024 bytes.
-        if (self.json) {
-            if (self.count > 0) writer.writeByte(',') catch unreachable; // Same bound.
-            writer.writeAll("{\"reference\":") catch unreachable; // Same bound.
-            json_string(&writer, image.reference_text()) catch unreachable; // Same bound.
-            const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
-                "\"time\":{d}}}";
-            writer.print(fields, .{
-                &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
-            }) catch unreachable; // Same bound.
-        } else {
-            if (self.count == 0) {
-                writer.print("\n{s: <34} {s: <71} {s: <12} {s: <19}  {s}\n", .{
-                    "IMAGE", "MANIFEST", "PLATFORM", "TIME", "TREE",
-                }) catch unreachable; // Same bound.
-            }
-            const reference = text_util.sanitise(&safe, image.reference_text());
-            writer.print("{s: <34} {s: <71} {s: <12} {s}  {s}\n", .{
-                reference,
-                &image.manifest.text(),
-                image.platform_text(),
-                commands.clock_text(image.time, &when),
-                image.tree.text(),
-            }) catch unreachable; // Same bound.
-        }
+        const first = self.count == 0;
         self.count += 1;
-        put(self.job, writer.buffered(), self.diag) catch {
+        const done = if (self.json) self.put_json(image, first) else self.put_text(image, first);
+        done catch {
             self.failed = true;
         };
+    }
+
+    fn put_json(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+        assert(self.json);
+        assert(self.count > 0);
+        try put(self.job, if (first) "{" else ",{", self.diag);
+        try put_tags_json(self.job, image, self.diag);
+        var buffer: [512]u8 = undefined;
+        const fields = ",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\"," ++
+            "\"time\":{d}}}";
+        // Cannot fail: a manifest, a platform, a tree and a time are under 200 bytes.
+        const text = std.fmt.bufPrint(&buffer, fields, .{
+            &image.manifest.text(), image.platform_text(), image.tree.text(), image.time,
+        }) catch unreachable; // Same bound.
+        try put(self.job, text, self.diag);
+    }
+
+    fn put_text(self: *LsImages, image: *const images.Image, first: bool) Error!void {
+        assert(!self.json);
+        assert(self.count > 0);
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        var when: [19]u8 = undefined;
+        var tags: [tags_text_bytes_max]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        // Cannot fail: a few fixed columns and the tags at most 1024 bytes each.
+        if (first) {
+            writer.print("\n{s: <34} {s: <71} {s: <12} {s: <19}  {s}\n", .{
+                "IMAGE", "MANIFEST", "PLATFORM", "TIME", "TREE",
+            }) catch unreachable; // Same bound.
+        }
+        writer.print("{s: <34} {s: <71} {s: <12} {s}  {s}\n", .{
+            tags_text(&tags, image),
+            &image.manifest.text(),
+            image.platform_text(),
+            commands.clock_text(image.time, &when),
+            image.tree.text(),
+        }) catch unreachable; // Same bound.
+        try put(self.job, writer.buffered(), self.diag);
     }
 };
 
@@ -519,14 +564,30 @@ const DuImages = struct {
         };
         const compressed = self.compressed_bytes(image);
         var buffer: [constants.output_bytes_max]u8 = undefined;
-        const row = if (self.job.output.json)
-            du_image_json(&buffer, image, &result, compressed, self.count)
-        else
-            du_image_text(&buffer, image, &result, compressed);
+        const first = self.count == 0;
         self.count += 1;
-        put(self.job, row, self.diag) catch {
+        const done = if (self.job.output.json)
+            self.put_json(image, &result, compressed, first, &buffer)
+        else
+            put(self.job, du_image_text(&buffer, image, &result, compressed), self.diag);
+        done catch {
             self.output_failed = true;
         };
+    }
+
+    fn put_json(
+        self: *const DuImages,
+        image: *const images.Image,
+        result: *const usage.TreeUsage,
+        compressed: u64,
+        first: bool,
+        buffer: *[constants.output_bytes_max]u8,
+    ) Error!void {
+        assert(self.job.output.json);
+        assert(self.count > 0);
+        try put(self.job, if (first) "{" else ",{", self.diag);
+        try put_tags_json(self.job, image, self.diag);
+        try put(self.job, du_image_json(buffer, image, result, compressed), self.diag);
     }
 
     /// The layers' sizes as they are in the blob cache; a blob that was removed counts as none.
@@ -555,11 +616,10 @@ fn du_image_text(
 ) []const u8 {
     assert(image.layer_count <= constants.registry_layers_max);
     var sizes: [4][32]u8 = undefined;
-    var safe: [constants.store_source_bytes_max]u8 = undefined;
-    const reference = text_util.sanitise(&safe, image.reference_text());
-    // Cannot fail: a reference of at most 1024 bytes and fixed columns.
+    var tags: [tags_text_bytes_max]u8 = undefined;
+    // Cannot fail: the tags of at most 1024 bytes each, and fixed columns.
     return std.fmt.bufPrint(buffer, du_image_row, .{
-        reference,
+        tags_text(&tags, image),
         result.files,
         size_words(&sizes[0], result.logical_bytes),
         size_words(&sizes[1], compressed),
@@ -569,22 +629,19 @@ fn du_image_text(
     }) catch unreachable; // Same bound.
 }
 
+/// The members of an image's row after its tags, and the closing brace.
 fn du_image_json(
     buffer: *[constants.output_bytes_max]u8,
     image: *const images.Image,
     result: *const usage.TreeUsage,
     compressed: u64,
-    index: u32,
 ) []const u8 {
     assert(image.layer_count <= constants.registry_layers_max);
-    var writer = std.Io.Writer.fixed(buffer);
-    // Cannot fail: one object, the reference escaped being the bulk.
-    if (index > 0) writer.writeByte(',') catch unreachable; // Same bound.
-    writer.writeAll("{\"reference\":") catch unreachable; // Same bound.
-    json_string(&writer, image.reference_text()) catch unreachable; // Same bound.
-    writer.print(",\"manifest\":\"{s}\",\"platform\":\"{s}\",\"tree\":\"{s}\",\"files\":{d}," ++
-        "\"logical_bytes\":{d},\"compressed_bytes\":{d},\"stored_bytes\":{d}," ++
-        "\"shared_bytes\":{d}}}", .{
+    assert(compressed <= std.math.maxInt(u64));
+    // Cannot fail: a few digests and numbers.
+    return std.fmt.bufPrint(buffer, ",\"manifest\":\"{s}\",\"platform\":\"{s}\"," ++
+        "\"tree\":\"{s}\",\"files\":{d},\"logical_bytes\":{d},\"compressed_bytes\":{d}," ++
+        "\"stored_bytes\":{d},\"shared_bytes\":{d}}}", .{
         &image.manifest.text(),
         image.platform_text(),
         image.tree.text(),
@@ -594,7 +651,6 @@ fn du_image_json(
         result.stored_bytes,
         result.shared_bytes,
     }) catch unreachable; // Same bound.
-    return writer.buffered();
 }
 
 fn du_by_image(job: *Job, store: *const Store, exists: bool, diag: *Diag) Error!void {

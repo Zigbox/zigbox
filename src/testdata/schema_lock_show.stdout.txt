@@ -1,0 +1,13 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema",
+"$id":"https://zigbox.github.io/zigbox/schema/lock-show/1","version":1,
+"title":"zbx lock show --output json",
+"description":"stdout: the project's zbx.lock. A failure is a diagnostic on stderr.",
+"type":"object","required":["schema","path","images"],
+"properties":{"schema":{"const":"zbx.lock/1"},
+"path":{"type":"string","description":"the lock file, found as run finds it"},
+"images":{"type":"array","description":"the entries, sorted by reference",
+"items":{"type":"object","required":["reference","manifest","platform","tree"],
+"properties":{"reference":{"type":"string","description":"as it was written"},
+"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+"platform":{"enum":["linux/amd64","linux/arm64"]},
+"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}}}}}

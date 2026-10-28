@@ -129,9 +129,13 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         try testing.expectEqual(case.code, run(&sim, &json));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"container_exit\":{"));
-        var number_text: [16]u8 = undefined;
-        const code_text = try std.fmt.bufPrint(&number_text, "\"code\":{d}}}}}\n", .{case.code});
-        try testing.expect(std.mem.endsWith(u8, sim.stderr(), code_text));
+        var number_text: [32]u8 = undefined;
+        // The container_exit object ends with the code; the line goes on with what ran.
+        const format = "\"code\":{d}}},\"ran\":{{";
+        const code_text = try std.fmt.bufPrint(&number_text, format, .{case.code});
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), code_text) != null);
+        const ran = "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n";
+        try testing.expect(std.mem.endsWith(u8, sim.stderr(), ran));
     }
 }
 

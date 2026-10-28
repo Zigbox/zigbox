@@ -1,13 +1,14 @@
 //! Image records: `<store>/images/<manifest digest hex>`, one per pulled image. A record says
-//! what was pulled (the reference as written, the manifest, the platform, the config blob and
-//! the layer blobs) and which tree it became. It keeps those blobs and that tree alive for gc:
+//! what was pulled (every reference it was pulled as, the manifest, the platform, the config blob
+//! and the layer blobs) and which tree it became. It keeps those blobs and that tree alive for gc:
 //! a blob is kept while an image record names it.
 //!
 //! The file is the text of a small ZON-like record, written atomically, one field a line:
 //!
 //!   .{
-//!       .version = 1,
-//!       .reference = "alpine:3.20",
+//!       .version = 2,
+//!       .tags = "alpine:3.20",      (none or more, oldest first; a pull by digest adds none)
+//!       .tags = "alpine:3.19",
 //!       .manifest = "sha256:...",
 //!       .platform = "linux/amd64",
 //!       .config = "sha256:...",
@@ -20,6 +21,9 @@
 //! After `.layers` come the image's settings, a line a word in order: `.entrypoint`, `.cmd`,
 //! `.env` ("NAME=value"), and the single `.workdir` and `.user` (left out when empty). A reader
 //! skips keys it does not know, and a record of a newer version is `Newer`, never guessed at.
+//!
+//! Version 1 (M4) kept one `.reference = "..."` where version 2 keeps the tags; a version-1
+//! record reads as an image with that one tag, and is written as version 2 the next time.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -29,13 +33,14 @@ const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
 const roots = @import("roots.zig");
+const lock_file = @import("../lock_file.zig");
 const Sha256 = @import("../registry/digest.zig").Sha256;
 
 const Digest = digest_mod.Digest;
 const PathBuf = fs_mod.PathBuf;
 const Store = layout.Store;
 
-pub const record_version: u32 = 1;
+pub const record_version: u32 = 2;
 pub const directory_name = "images";
 
 /// Where a string is in `Settings.bytes`.
@@ -141,8 +146,10 @@ pub const Settings = struct {
 };
 
 pub const Image = struct {
-    reference: [constants.reference_bytes_max]u8,
-    reference_len: u16,
+    /// Every reference the image was pulled as, oldest first. A pull by digest adds none.
+    tags: [constants.image_tags_max][constants.reference_bytes_max]u8,
+    tag_lens: [constants.image_tags_max]u16,
+    tag_count: u32,
     manifest: Sha256,
     platform: [16]u8,
     platform_len: u8,
@@ -153,9 +160,63 @@ pub const Image = struct {
     layers: [constants.registry_layers_max]Sha256,
     settings: Settings,
 
-    pub fn reference_text(image: *const Image) []const u8 {
-        assert(image.reference_len <= constants.reference_bytes_max);
-        return image.reference[0..image.reference_len];
+    pub fn tag_text(image: *const Image, index: u32) []const u8 {
+        assert(image.tag_count <= constants.image_tags_max);
+        assert(index < image.tag_count);
+        assert(image.tag_lens[index] <= constants.reference_bytes_max);
+        return image.tags[index][0..image.tag_lens[index]];
+    }
+
+    /// Appends a tag, as a record is read: no check, only the bound; false if the list is full.
+    fn push_tag(image: *Image, text: []const u8) bool {
+        assert(text.len <= constants.reference_bytes_max);
+        assert(image.tag_count <= constants.image_tags_max);
+        if (image.tag_count == constants.image_tags_max) return false;
+        @memcpy(image.tags[image.tag_count][0..text.len], text);
+        image.tag_lens[image.tag_count] = @intCast(text.len);
+        image.tag_count += 1;
+        return true;
+    }
+
+    fn drop_tag(image: *Image, index: u32) void {
+        assert(index < image.tag_count);
+        const last = image.tag_count - 1;
+        var at = index;
+        while (at < last) : (at += 1) {
+            const length = image.tag_lens[at + 1];
+            @memcpy(image.tags[at][0..length], image.tags[at + 1][0..length]);
+            image.tag_lens[at] = length;
+        }
+        image.tag_count = last;
+    }
+
+    /// Records that the image was pulled as `text`, which becomes the newest tag. A tag that
+    /// means the same reference (`alpine:3.20`, `docker.io/library/alpine:3.20`) is replaced;
+    /// when the list is full the oldest tag goes. Others stay.
+    pub fn add_tag(image: *Image, text: []const u8) void {
+        assert(text.len > 0);
+        assert(text.len <= constants.reference_bytes_max);
+        var index: u32 = 0;
+        while (index < image.tag_count) : (index += 1) {
+            if (lock_file.same_reference(image.tag_text(index), text)) {
+                image.drop_tag(index);
+                break;
+            }
+        }
+        if (image.tag_count == constants.image_tags_max) image.drop_tag(0);
+        const pushed = image.push_tag(text);
+        assert(pushed);
+        assert(image.tag_count > 0);
+    }
+
+    /// True if one of the tags means the same reference as `text`.
+    pub fn has_tag(image: *const Image, text: []const u8) bool {
+        assert(text.len <= constants.arg_bytes_max);
+        assert(image.tag_count <= constants.image_tags_max);
+        for (0..image.tag_count) |index| {
+            if (lock_file.same_reference(image.tag_text(@intCast(index)), text)) return true;
+        }
+        return false;
     }
 
     pub fn platform_text(image: *const Image) []const u8 {
@@ -169,12 +230,16 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
     assert(image.layer_count <= constants.registry_layers_max);
     assert(image.time < 1 << 40);
     var writer = std.Io.Writer.fixed(buffer);
-    // Cannot fail: the buffer holds the fixed fields, the reference escaped (four bytes a byte
-    // at the worst) and 128 layer lines of 90 bytes.
-    const head = ".{{\n    .version = {d},\n    .reference = ";
-    writer.print(head, .{record_version}) catch unreachable; // Sized.
-    roots.put_string(&writer, image.reference_text());
-    writer.print(",\n    .manifest = \"{s}\",\n    .platform = \"{s}\",\n", .{
+    assert(image.tag_count <= constants.image_tags_max);
+    // Cannot fail: the buffer holds the fixed fields, the tags escaped (four bytes a byte at the
+    // worst) and 128 layer lines of 90 bytes.
+    writer.print(".{{\n    .version = {d},\n", .{record_version}) catch unreachable; // Sized.
+    for (0..image.tag_count) |index| {
+        writer.writeAll("    .tags = ") catch unreachable; // Same bound.
+        roots.put_string(&writer, image.tag_text(@intCast(index)));
+        writer.writeAll(",\n") catch unreachable; // Same bound.
+    }
+    writer.print("    .manifest = \"{s}\",\n    .platform = \"{s}\",\n", .{
         &image.manifest.text(), image.platform_text(),
     }) catch unreachable; // Same bound.
     writer.print("    .config = \"{s}\",\n    .tree = \"{s}\",\n    .time = {d},\n", .{
@@ -242,13 +307,14 @@ fn parse_setting(settings: *Settings, key: []const u8, value: []const u8) bool {
 pub fn parse(text: []const u8, image: *Image) ParseResult {
     assert(@intFromPtr(image) != 0);
     assert(text.len <= constants.image_record_bytes_max);
-    image.reference_len = 0;
+    image.tag_count = 0;
     image.platform_len = 0;
     image.layer_count = 0;
     image.time = 0;
     image.settings.clear();
     var version: u32 = 0;
     var seen: u32 = 0;
+    var has_reference = false;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " ");
@@ -259,10 +325,12 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
         if (value.len > 0 and value[value.len - 1] == ',') value = value[0 .. value.len - 1];
         if (std.mem.eql(u8, key, "version")) {
             version = std.fmt.parseInt(u32, value, 10) catch return .malformed;
-        } else if (std.mem.eql(u8, key, "reference")) {
-            const length = roots.parse_string(value, &image.reference) orelse return .malformed;
-            image.reference_len = @intCast(length);
-            seen += 1;
+        } else if (std.mem.eql(u8, key, "reference") or std.mem.eql(u8, key, "tags")) {
+            // Version 1 wrote its one tag as `.reference`; that key is a tag in any version.
+            if (key[0] == 'r') has_reference = true;
+            var word: [constants.reference_bytes_max]u8 = undefined;
+            const length = roots.parse_string(value, &word) orelse return .malformed;
+            if (length > 0 and !image.push_tag(word[0..length])) return .malformed;
         } else if (std.mem.eql(u8, key, "manifest")) {
             image.manifest = quoted_digest(value) orelse return .malformed;
             seen += 1;
@@ -292,7 +360,8 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     }
     if (version == 0) return .malformed;
     if (version > record_version) return .newer;
-    if (seen != 5) return .malformed;
+    if (seen != 4) return .malformed;
+    if (version == 1 and !has_reference) return .malformed;
     return .ok;
 }
 
@@ -303,7 +372,23 @@ fn record_path(store: *const Store, buffer: *PathBuf, manifest: Sha256) [:0]cons
     return store.path(buffer, &.{ "/", directory_name, "/", &hex });
 }
 
-/// Writes the image's record atomically; a second pull of the same manifest replaces it.
+/// Fills `image.tags` with those of the record kept for `manifest`, or none if there is no record
+/// or it does not read: a pull of the same manifest again keeps what was pulled before. Every
+/// other field is the caller's to set.
+pub fn carry_tags(store: *const Store, manifest: Sha256, image: *Image) void {
+    assert(manifest.bytes.len == constants.oci_digest_bytes);
+    assert(@intFromPtr(image) != 0);
+    var errno: u16 = 0;
+    // A record that is damaged, newer or unreadable is replaced by this pull, as it always was.
+    load(store, manifest, image, &errno) catch {
+        image.tag_count = 0;
+        return;
+    };
+    assert(image.tag_count <= constants.image_tags_max);
+}
+
+/// Writes the image's record atomically; a second pull of the same manifest replaces it, so
+/// the caller carries the tags of the first over (`pulled_as`).
 pub fn save(store: *Store, image: *const Image, failure: *fs_mod.Failure) host_mod.Error!void {
     assert(image.layer_count <= constants.registry_layers_max);
     assert(image.time < 1 << 40);
@@ -355,9 +440,8 @@ const testing = std.testing;
 
 fn sample() Image {
     var image: Image = undefined;
-    const reference = "docker.io/library/alpine:3.20";
-    @memcpy(image.reference[0..reference.len], reference);
-    image.reference_len = reference.len;
+    image.tag_count = 0;
+    image.add_tag("docker.io/library/alpine:3.20");
     image.manifest = Sha256.of("manifest");
     image.platform_len = 11;
     @memcpy(image.platform[0..11], "linux/amd64");
@@ -378,7 +462,8 @@ test "a record round-trips, and the worst case fits the buffer" {
     const text = render(&image, &buffer);
     var back: Image = undefined;
     try testing.expectEqual(ParseResult.ok, parse(text, &back));
-    try testing.expectEqualStrings(image.reference_text(), back.reference_text());
+    try testing.expectEqual(@as(u32, 1), back.tag_count);
+    try testing.expectEqualStrings(image.tag_text(0), back.tag_text(0));
     try testing.expect(back.manifest.eql(image.manifest));
     try testing.expect(back.config.eql(image.config));
     try testing.expect(back.tree.eql(image.tree));
@@ -386,13 +471,20 @@ test "a record round-trips, and the worst case fits the buffer" {
     try testing.expect(back.layers[1].eql(image.layers[1]));
     try testing.expectEqualStrings("linux/amd64", back.platform_text());
 
-    image.reference_len = constants.reference_bytes_max;
-    @memset(image.reference[0..image.reference_len], '"');
+    image.tag_count = 0;
+    var quotes: [constants.reference_bytes_max]u8 = undefined;
+    for (0..constants.image_tags_max) |index| {
+        quotes[0] = @intCast('a' + index); // Tags that differ, or `add_tag` would merge them.
+        @memset(quotes[1..], '"');
+        image.add_tag(&quotes);
+    }
+    try testing.expectEqual(constants.image_tags_max, image.tag_count);
     image.layer_count = constants.registry_layers_max;
     for (&image.layers) |*layer| layer.* = Sha256.of("x");
     const worst = render(&image, &buffer);
     try testing.expectEqual(ParseResult.ok, parse(worst, &back));
     try testing.expectEqual(@as(u32, constants.registry_layers_max), back.layer_count);
+    try testing.expectEqual(constants.image_tags_max, back.tag_count);
 }
 
 test "the settings round-trip, with escapes, in order" {
@@ -446,7 +538,7 @@ test "a damaged or newer record is refused" {
     const text = render(&image, &buffer);
     var back: Image = undefined;
     const alloc = testing.allocator;
-    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 1", "version = 2");
+    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 2", "version = 3");
     defer testing.allocator.free(newer);
     try testing.expectEqual(ParseResult.newer, parse(newer, &back));
     const cut = text[0..std.mem.indexOf(u8, text, "    .tree").?];
@@ -463,4 +555,79 @@ test "a damaged or newer record is refused" {
     const far = try std.mem.replaceOwned(u8, alloc, text, time, late);
     defer testing.allocator.free(far);
     try testing.expectEqual(ParseResult.malformed, parse(far, &back));
+}
+
+test "tags are kept, merged by meaning, and the oldest goes when the list is full" {
+    // Goal: the pull-by-tag rules on the record's list, with no store.
+    var image = sample();
+    image.add_tag("alpine:3.19");
+    try testing.expectEqual(@as(u32, 2), image.tag_count);
+    try testing.expectEqualStrings("alpine:3.19", image.tag_text(1));
+    // The same reference spelled another way replaces the old spelling and is the newest.
+    image.add_tag("alpine:3.20");
+    try testing.expectEqual(@as(u32, 2), image.tag_count);
+    try testing.expectEqualStrings("alpine:3.19", image.tag_text(0));
+    try testing.expectEqualStrings("alpine:3.20", image.tag_text(1));
+    try testing.expect(image.has_tag("docker.io/library/alpine:3.19"));
+    try testing.expect(!image.has_tag("alpine:3.18"));
+    // Past the bound the oldest is dropped; the rest keep their order.
+    var name: [16]u8 = undefined;
+    for (0..constants.image_tags_max) |number| {
+        image.add_tag(std.fmt.bufPrint(&name, "repo:{d}", .{number}) catch unreachable); // Short.
+    }
+    try testing.expectEqual(constants.image_tags_max, image.tag_count);
+    try testing.expectEqualStrings("repo:0", image.tag_text(0));
+    image.add_tag("repo:new");
+    try testing.expectEqual(constants.image_tags_max, image.tag_count);
+    try testing.expectEqualStrings("repo:1", image.tag_text(0));
+    try testing.expectEqualStrings("repo:new", image.tag_text(constants.image_tags_max - 1));
+}
+
+test "a record with no tags reads and writes back with none" {
+    // Goal: a pull by digest first leaves no tag, and that is a valid record.
+    var image = sample();
+    image.tag_count = 0;
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, ".tags") == null);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expectEqual(@as(u32, 0), back.tag_count);
+}
+
+test "real version-1 text from M4 reads" {
+    // Goal: the exact bytes M4's binary wrote for an alpine pull, with settings.
+    const text =
+        \\.{
+        \\    .version = 1,
+        \\    .reference = "alpine:3.20",
+        \\    .manifest = "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        \\    .platform = "linux/amd64",
+        \\    .config = "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        \\    .tree = "b3:3333333333333333333333333333333333333333333333333333333333333333",
+        \\    .time = 1761600000,
+        \\    .layers = "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        \\    .cmd = "/bin/sh",
+        \\    .env = "PATH=/usr/bin",
+        \\    .workdir = "/",
+        \\}
+        \\
+    ;
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expectEqual(@as(u32, 1), back.tag_count);
+    try testing.expectEqualStrings("alpine:3.20", back.tag_text(0));
+    try testing.expectEqual(@as(u32, 1), back.layer_count);
+    try testing.expectEqualStrings("/bin/sh", back.settings.word(.cmd, 0));
+    try testing.expectEqualStrings("/", back.settings.get(.workdir));
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const written = render(&back, &buffer);
+    try testing.expect(std.mem.indexOf(u8, written, ".version = 2,") != null);
+    try testing.expect(std.mem.indexOf(u8, written, ".tags = \"alpine:3.20\",") != null);
+    try testing.expect(std.mem.indexOf(u8, written, ".reference") == null);
+    // The same text without its reference is damaged, as it was in M4.
+    const line = "    .reference = \"alpine:3.20\",\n";
+    const bare = try std.mem.replaceOwned(u8, testing.allocator, text, line, "");
+    defer testing.allocator.free(bare);
+    try testing.expectEqual(ParseResult.malformed, parse(bare, &back));
 }

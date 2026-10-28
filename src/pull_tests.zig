@@ -735,7 +735,10 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     const images = listed.value.object.get("images").?.array.items;
     try testing.expectEqual(@as(usize, 1), images.len);
     try testing.expectEqualStrings(tree, images[0].object.get("tree").?.string);
-    try testing.expectEqualStrings(reference, images[0].object.get("reference").?.string);
+    const tags = images[0].object.get("tags").?.array.items;
+    try testing.expectEqual(@as(usize, 1), tags.len);
+    try testing.expectEqualStrings(reference, tags[0].string);
+    try testing.expect(images[0].object.get("reference") == null);
 
     try testing.expectEqual(
         @as(u8, 0),
@@ -745,6 +748,7 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     defer sized.deinit();
     const row = sized.value.object.get("images").?.array.items[0].object;
     try testing.expectEqualStrings(tree, row.get("tree").?.string);
+    try testing.expectEqualStrings(reference, row.get("tags").?.array.items[0].string);
     try testing.expectEqual(layer_bytes, row.get("compressed_bytes").?.integer);
     try testing.expect(row.get("logical_bytes").?.integer > 0);
     try testing.expect(row.get("stored_bytes").?.integer > 0);
@@ -861,4 +865,137 @@ test "an empty name or a name that is no reference is a usage or reference error
     try testing.expectEqual(@as(u8, 125), run_text(&world, &.{ "zbx", "run", "Not A Name" }));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0501") != null);
     try testing.expectEqual(@as(usize, 0), world.sim.stdout().len);
+}
+
+test "a pull by digest after a pull by tag keeps the tag, and lists every tag" {
+    // Goal: the record keeps each tag the image was pulled as; a pull by digest adds none and
+    // removes none. Method: pull the tag, pull the same manifest by digest, then the tag again
+    // under another spelling; ls and du --by-image (text and JSON) list the tags and nothing else.
+    var world: World = undefined;
+    project_world(&world, 38, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }),
+    );
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    var by_digest: [256]u8 = undefined;
+    const written = try std.fmt.bufPrint(&by_digest, "{s}/{s}@{s}", .{
+        json_field(&pulled, "registry"),
+        json_field(&pulled, "repository"),
+        json_field(&pulled, "manifest_digest"),
+    });
+    by_digest[written.len] = 0;
+    const digest_reference = by_digest[0..written.len :0];
+    const code = run_text(&world, &.{ "zbx", "pull", digest_reference });
+    if (code != 0) std.debug.print("PULL BY DIGEST: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "ls" }),
+    );
+    const listed = try parse_json(world.sim.stdout());
+    defer listed.deinit();
+    const images = listed.value.object.get("images").?.array.items;
+    try testing.expectEqual(@as(usize, 1), images.len);
+    const tags = images[0].object.get("tags").?.array.items;
+    try testing.expectEqual(@as(usize, 1), tags.len);
+    try testing.expectEqualStrings(reference, tags[0].string);
+
+    // Text and the du rows list the tag too.
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), reference) != null);
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "store", "du", "--by-image" }),
+    );
+    const sized = try parse_json(world.sim.stdout());
+    defer sized.deinit();
+    const row = sized.value.object.get("images").?.array.items[0].object;
+    try testing.expectEqualStrings(reference, row.get("tags").?.array.items[0].string);
+}
+
+test "lock show prints the project's lock, as text and as zbx.lock/1, and only reads" {
+    // Goal: `lock show` reports the entries a pull wrote, found as `run` finds the lock, and
+    // changes nothing; with no lock it is E0526 and writes none. Method: no lock first; pull;
+    // compare both forms with the checked-in text; the lock file is the same afterwards.
+    var world: World = undefined;
+    project_world(&world, 39, "web-1");
+    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "lock", "show" }));
+    try testing.expectEqual(@as(usize, 0), world.sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0526") != null);
+    try testing.expect(store_files.kind_of(lock_path) == null);
+
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", reference }));
+    const before = try testing.allocator.dupe(u8, lock_text());
+    defer testing.allocator.free(before);
+
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "lock", "show" }),
+    );
+    try testing.expectEqualStrings(@embedFile("testdata/lock_show.json.txt"), world.sim.stdout());
+    const shown = try parse_json(world.sim.stdout());
+    defer shown.deinit();
+    try testing.expectEqualStrings(lock_path, json_field(&shown, "path"));
+    const entry = shown.value.object.get("images").?.array.items[0].object;
+    try testing.expectEqualStrings(reference, entry.get("reference").?.string);
+    try testing.expect(std.mem.indexOf(u8, before, entry.get("tree").?.string) != null);
+    try testing.expect(std.mem.indexOf(u8, before, entry.get("manifest").?.string) != null);
+
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "lock", "show" }));
+    try testing.expectEqualStrings(@embedFile("testdata/lock_show.stdout.txt"), world.sim.stdout());
+    try testing.expectEqualStrings(before, lock_text());
+
+    // A lock that does not read is the diagnostic `run` gives: E0518, naming the file.
+    overwrite(lock_path, ".{\n    .version = 1,\n    nonsense\n}\n");
+    try testing.expectEqual(@as(u8, 1), run_text(&world, &.{ "zbx", "lock", "show" }));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-E0518") != null);
+}
+
+test "run --output json says what ran: the image as typed, its manifest and tree" {
+    // Goal: the run's last line names the image, the manifest and the tree it ran, for a name and
+    // for a tree digest, and the detached start says the same. Method: pull, then run by name and
+    // by the tree the pull reported, and compare with the pull's own JSON.
+    var world: World = undefined;
+    project_world(&world, 40, "web-1");
+    const reference = test_registry.TestRegistry.reference(.open);
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "pull", reference }),
+    );
+    const pulled = try parse_json(world.sim.stdout());
+    defer pulled.deinit();
+    try testing.expectEqual(
+        @as(u8, 0),
+        run_text(&world, &.{ "zbx", "--output", "json", "run", "--name", "web-1", reference }),
+    );
+    const named = try parse_json(world.sim.stderr());
+    defer named.deinit();
+    const ran = named.value.object.get("ran").?.object;
+    try testing.expectEqualStrings("image", ran.get("kind").?.string);
+    try testing.expectEqualStrings(reference, ran.get("reference").?.string);
+    const manifest = json_field(&pulled, "manifest_digest");
+    try testing.expectEqualStrings(manifest, ran.get("manifest").?.string);
+    try testing.expectEqualStrings(json_field(&pulled, "tree"), ran.get("tree").?.string);
+    try testing.expect(named.value.object.get("container_exit") != null);
+
+    second_container(&world, "web-2");
+    const tree = try testing.allocator.dupeSentinel(u8, json_field(&pulled, "tree"), 0);
+    defer testing.allocator.free(tree);
+    const code = run_text(
+        &world,
+        &.{ "zbx", "--output", "json", "run", "--name", "web-2", tree, "--", "/bin/sh" },
+    );
+    if (code != 0) std.debug.print("RUN TREE: {s}\n", .{world.sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    const by_tree = try parse_json(world.sim.stderr());
+    defer by_tree.deinit();
+    const ran_tree = by_tree.value.object.get("ran").?.object;
+    try testing.expectEqualStrings("tree", ran_tree.get("kind").?.string);
+    try testing.expectEqualStrings(tree, ran_tree.get("tree").?.string);
+    try testing.expect(ran_tree.get("reference") == null);
 }

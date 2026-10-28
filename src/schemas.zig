@@ -16,7 +16,7 @@ const diagnostic_definition =
     \\"docs"],
     \\"properties":{"code":{"type":"string","pattern":"^ZBX-[EWB][0-9]{4}$"},
     \\"severity":{"enum":["error","warning","bug"]},"blame":{"enum":["user","environment",
-    \\"external","bug"]},
+    \\"external","internal","bug"]},
     \\"summary":{"type":"string"},"causes":{"type":"array","items":{"type":"string"}},
     \\"while":{"type":"array","items":{"type":"string"}},"context":{"type":"object"},
     \\"fixes":{"type":"array","items":{"type":"object"}},"docs":{"type":"string"}}}
@@ -37,12 +37,19 @@ const run_schema =
     \\"pid_limit"]},
     \\"code":{"type":"integer","minimum":0,"maximum":255},"signal":{"type":"integer"},
     \\"limit_bytes":{"type":["integer","null"]},"limit":{"type":["integer","null"]},
-    \\"timed_out":{"type":"boolean"}}}}},
+    \\"timed_out":{"type":"boolean"}}},"ran":{"$ref":"#/$defs/ran"}}},
+    \\"ran":{"type":"object","description":"what the run ran","required":["kind"],
+    \\"properties":{"kind":{"enum":["image","tree","rootfs"]},
+    \\"reference":{"type":"string","description":"image: the name as typed"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$","description":"image"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"image and tree"},
+    \\"path":{"type":"string","description":"rootfs: the directory as typed"}}},
     \\"detached":{"type":"object","required":["schema","container"],
     \\"properties":{"schema":{"const":"zbx.run/1"},
     \\"container":{"type":"object","required":["name","pid","detached"],
     \\"properties":{"name":{"type":"string"},
-    \\"pid":{"type":"integer"},"scope":{"type":["string","null"]},"detached":{"const":true}}}}}}}
+    \\"pid":{"type":"integer"},"scope":{"type":["string","null"]},"detached":{"const":true}}},
+    \\"ran":{"$ref":"#/$defs/ran"}}}}}
 ;
 
 const ps_schema =
@@ -138,9 +145,10 @@ const store_ls_schema =
     \\"time":{"type":"integer","description":"seconds since the epoch"},
     \\"files":{"type":"integer"},"bytes":{"type":"integer"},
     \\"source":{"type":"string"},"parent":{"type":["string","null"]}}}},
-    \\"images":{"type":"array","description":"pulled images, by the reference they were pulled as",
-    \\"items":{"type":"object","required":["reference","manifest","platform","tree","time"],
-    \\"properties":{"reference":{"type":"string"},
+    \\"images":{"type":"array","description":"pulled images, with every tag they were pulled as",
+    \\"items":{"type":"object","required":["tags","manifest","platform","tree","time"],
+    \\"properties":{"tags":{"type":"array","items":{"type":"string"},
+    \\"description":"the references it was pulled as, oldest first; none if only by digest"},
     \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
     \\"platform":{"type":"string"},
     \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
@@ -165,9 +173,11 @@ const store_du_schema =
     \\"stored_bytes":{"type":"integer","description":"bytes of the distinct objects"},
     \\"shared_bytes":{"type":"integer","description":"of those, bytes other roots also use"}}},
     \\"images":{"type":"array","description":"du --by-image: one entry for each pulled image",
-    \\"items":{"type":"object","required":["reference","manifest","platform","tree","files",
+    \\"items":{"type":"object","required":["tags","manifest","platform","tree","files",
     \\"logical_bytes","compressed_bytes","stored_bytes","shared_bytes"],
-    \\"properties":{"reference":{"type":"string"},"manifest":{"type":"string"},
+    \\"properties":{"tags":{"type":"array","items":{"type":"string"},
+    \\"description":"the references the image was pulled as, oldest first"},
+    \\"manifest":{"type":"string"},
     \\"platform":{"type":"string"},"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
     \\"files":{"type":"integer"},"logical_bytes":{"type":"integer"},
     \\"compressed_bytes":{"type":"integer","description":"the layers as downloaded"},
@@ -366,6 +376,38 @@ const pull_schema =
     \\"created":{"type":"boolean","description":"this pull made the file"}}}}}
 ;
 
+const explain_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/explain/1","version":1,
+    \\"title":"zbx explain <code> --output json",
+    \\"description":"stdout: one registered code. An unknown code is a diagnostic on stderr.",
+    \\"type":"object","required":["schema","code","severity","blame","summary","explanation",
+    \\"docs"],
+    \\"properties":{"schema":{"const":"zbx.explain/1"},
+    \\"code":{"type":"string","pattern":"^ZBX-[EWB][0-9]{4}$"},
+    \\"severity":{"enum":["error","warning","note","bug"]},
+    \\"blame":{"enum":["user","environment","external","internal"]},
+    \\"summary":{"type":"string"},
+    \\"explanation":{"type":"string","description":"the long text, hard-wrapped, with newlines"},
+    \\"docs":{"type":"string","description":"the page of the code on the project site"}}}
+;
+
+const lock_show_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/lock-show/1","version":1,
+    \\"title":"zbx lock show --output json",
+    \\"description":"stdout: the project's zbx.lock. A failure is a diagnostic on stderr.",
+    \\"type":"object","required":["schema","path","images"],
+    \\"properties":{"schema":{"const":"zbx.lock/1"},
+    \\"path":{"type":"string","description":"the lock file, found as run finds it"},
+    \\"images":{"type":"array","description":"the entries, sorted by reference",
+    \\"items":{"type":"object","required":["reference","manifest","platform","tree"],
+    \\"properties":{"reference":{"type":"string","description":"as it was written"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"platform":{"enum":["linux/amd64","linux/arm64"]},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -386,12 +428,14 @@ const table = [_]Entry{
     .{ .command = "store-restore", .text = store_restore_schema },
     .{ .command = "pull-resolve", .text = pull_resolve_schema },
     .{ .command = "pull", .text = pull_schema },
+    .{ .command = "explain", .text = explain_schema },
+    .{ .command = "lock-show", .text = lock_show_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 17);
+    assert(table.len == 19);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -418,7 +462,7 @@ test "every schema is valid JSON, names its command and its version" {
         try testing.expect(std.mem.indexOf(u8, entry.text, want) != null);
         try testing.expect(std.mem.indexOf(u8, entry.text, "\"version\":1") != null);
     }
-    try testing.expect(of("explain") == null);
+    try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 17), table.len);
+    try testing.expectEqual(@as(usize, 19), table.len);
 }

@@ -1,2 +1,2 @@
 {"code":"ZBX-W0202","severity":"warning","blame":"environment","summary":"can't save the run record","causes":["writing the run record failed: no space left on the device (ENOSPC)"],"while":["saving the run record"],"context":{"path":"/home/alice/.local/state/zbx/runs"},"fixes":[{"sentence":"free space, or choose another state directory:","command":"df -h \"/home/alice/.local/state/zbx/runs\""}],"docs":"https://zigbox.github.io/zigbox/errors/W0202.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}
-{"container_exit":{"reason":"exited","code":0}}
+{"container_exit":{"reason":"exited","code":0},"ran":{"kind":"rootfs","path":"/srv/alpine"}}

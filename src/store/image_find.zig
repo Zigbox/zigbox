@@ -5,7 +5,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
-const lock_file = @import("../lock_file.zig");
 const shards = @import("shards.zig");
 const images = @import("images.zig");
 const digest_mod = @import("digest.zig");
@@ -65,7 +64,7 @@ pub const ByReference = struct {
     pub fn visit(self: *ByReference, image: *const images.Image) void {
         assert(self.text.len > 0);
         assert(self.text.len > 0);
-        if (!lock_file.same_reference(image.reference_text(), self.text)) return;
+        if (!image.has_tag(self.text)) return;
         if (self.found and image.time < self.time) return;
         self.found = true;
         self.time = image.time;
@@ -96,9 +95,8 @@ const testing = std.testing;
 test "a visitor sees the records it is meant to" {
     // Goal: the visitors' selection logic, without a store.
     var image: images.Image = undefined;
-    const written = "docker.io/library/alpine:3.20";
-    @memcpy(image.reference[0..written.len], written);
-    image.reference_len = written.len;
+    image.tag_count = 0;
+    image.add_tag("docker.io/library/alpine:3.20");
     image.manifest = Sha256.of("m1");
     image.tree = Digest.of("t1");
     image.time = 5;

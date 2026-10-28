@@ -647,7 +647,7 @@ const base_cases = [_]Case{
         .prepare = prepare_no_fork,
         .exit = 125,
     },
-    .{ .code = .E0406, .args = &.{ "schema", "explain" }, .exit = 1 },
+    .{ .code = .E0406, .args = &.{ "schema", "help" }, .exit = 1 },
     .{
         .code = .E0410,
         .args = &.{ "store", "du", "aaaaaaaaaaaa" },
@@ -1243,6 +1243,7 @@ const image_cases = [_]Case{
         .prepare = prepare_lock_unwritable,
         .exit = 2,
     },
+    .{ .code = .E0526, .args = &.{ "lock", "show" }, .prepare = prepare_image_world, .exit = 1 },
     .{
         .code = .W0503,
         .args = &run_open,

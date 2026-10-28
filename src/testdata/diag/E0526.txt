@@ -1,0 +1,5 @@
+error[ZBX-E0526]: there is no zbx.lock for this project
+  cause  there is no zbx.lock in '/home/alice/project' or any directory above it
+  fix    pull an image from the project directory; that makes the lock:   zbx pull alpine:3.20
+  more   zbx explain E0526 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0526.html

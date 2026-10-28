@@ -154,7 +154,12 @@ test "the JSON container_exit names the reason for every way a container ends" {
         args[count] = "--";
         args[count + 1] = "sh";
         _ = run(&sim, args[0 .. count + 2]);
-        try testing.expectEqualStrings(case.want, sim.stderr());
+        // The line also says what ran: here a directory, as typed.
+        var line: [256]u8 = undefined;
+        const ran = ",\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n";
+        const without_end = case.want[0 .. case.want.len - 2];
+        const want = try std.fmt.bufPrint(&line, "{s}{s}", .{ without_end, ran });
+        try testing.expectEqualStrings(want, sim.stderr());
     }
 }
 
