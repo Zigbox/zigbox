@@ -66,6 +66,7 @@ const StepFault = enum {
 
 /// When the manager removes a scope whose last process has gone (`sim_bus.Model.scope_removal`).
 const Removal = enum { lazily, promptly, never };
+const NetChoice = enum { default, none, host };
 
 /// What goes wrong when the scope that stays is stopped.
 const StopFault = enum { none, refused, canceled, stays };
@@ -192,6 +193,8 @@ const Scenario = struct {
     read_only: bool,
     /// The root is a tree of the store, run on an overlay, instead of a directory.
     image: bool,
+    /// `--net`: not given (none, with the hint when the command fails), none, or host.
+    net: NetChoice,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -330,6 +333,7 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     const calm = scenario.fault_step == null and scenario.step_fault == .none and
         scenario.helper_fails == null;
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
+    scenario.net = random.enumValue(NetChoice);
     // A fifth of the good roots are trees of the store. The name is then a valid one: the
     // container's directory is made under it.
     scenario.image = scenario.rootfs == .good and scenario.name != .invalid and
@@ -370,6 +374,7 @@ fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
         scenario.scoped(),
         scenario.read_only,
         scenario.image,
+        if (scenario.net == .host) .host else .none,
     );
 }
 
@@ -557,7 +562,9 @@ fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
         .make_tmp_dir, .mount_tmp, .make_run_dir, .mount_run, .remount_readonly => return .E0209,
         .mount_overlay => return .E0425,
         // The steps that may fail: skipped with a note.
-        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys => return null,
+        .mount_pts, .make_sys_dir, .bind_sys, .remount_sys, .mount_sysfs => return null,
+        .make_etc_dir, .create_etc_file, .stage_etc_file => return null,
+        .bind_etc_file, .remount_etc_file, .unstage_etc_file => return null,
         .exec => {
             // A shell looks on: a missing or unrunnable first candidate is not the end while
             // another directory of PATH may have the program.
@@ -611,6 +618,27 @@ fn devpts_skipped(scenario: *const Scenario) bool {
     return plan.steps[found].kind == .mount_pts;
 }
 
+/// The exit code zbx ends with when the command started: its own, 128 plus its signal, or 137
+/// for an OOM kill.
+fn final_code(scenario: *const Scenario, status: host_mod.ExitStatus) u8 {
+    if (scenario.counts_as_oom()) return 137;
+    return switch (status) {
+        .exited => |code| code,
+        .signaled => |number| constants.exit_signal_offset + number,
+    };
+}
+
+/// Whether a failure was injected into a step of the /sys or the generated /etc files, which is
+/// then skipped with a note.
+fn net_steps_skipped(scenario: *const Scenario) bool {
+    const found = scenario.fault_step orelse return false;
+    var plan: plan_mod.Plan = undefined;
+    plan_for(&plan, scenario);
+    if (found >= plan.count) return false;
+    const kind = plan.steps[found].kind;
+    return plan_mod.is_sys(kind) or plan_mod.is_etc(kind);
+}
+
 /// How many steps were skipped with a note, which `--verbose` prints: the devpts mount, and the
 /// /sys steps. A failure in the directory step leaves nothing to bind, so the bind and the remount
 /// fail after it (both are tolerant); a failure in the bind leaves nothing to remount.
@@ -621,12 +649,21 @@ fn skipped_notes(scenario: *const Scenario) u32 {
     plan_for(&plan, scenario);
     if (found >= plan.count) return count;
     count += switch (plan.steps[found].kind) {
-        .make_sys_dir => 3,
+        .make_sys_dir => if (plan.isolated()) @as(u32, 2) else 3,
         .bind_sys => 2,
         .remount_sys => 1,
+        .make_etc_dir => 2, // The second file's mount point has no directory to be made in.
+        .create_etc_file, .stage_etc_file, .bind_etc_file, .remount_etc_file => 1,
+        // Removing a staged copy that is not there is no failure: only the others count.
+        .unstage_etc_file => @intFromBool(!removal_finds_nothing(scenario)),
         else => 0,
     };
     return count;
+}
+
+/// A failure injected into the removal of a staged file that says the file is not there.
+fn removal_finds_nothing(scenario: *const Scenario) bool {
+    return host_mod.error_for_errno(scenario.fault_errno) == error.NotFound;
 }
 
 fn command_words(scenario: *const Scenario, storage: *[3][:0]const u8) []const [:0]const u8 {
@@ -723,11 +760,16 @@ fn prepare_image(sim: *HostSim, scenario: *const Scenario) void {
     const merged = merged_path(&buffer, scenario.name_text);
     sim.world.add_node(merged, .dir);
     var inner: [constants.sim_path_bytes_max]u8 = undefined;
+    // The layer with the mount points of the generated /etc files, beside the merged directory.
+    sim.world.add_node(std.fmt.bufPrint(&inner, containers ++ "/{s}/net", .{
+        scenario.name_text,
+    }) catch unreachable, .dir); // Short.
     for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
         sim.world.add_node(std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch
             unreachable, .dir); // Short.
     }
-    for ([_][]const u8{ "/bin/sh", "/bin/sleep" }) |suffix| {
+    // The overlay shows the mount points of the generated files, which are in the net layer.
+    for ([_][]const u8{ "/bin/sh", "/bin/sleep", "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
         sim.world.add_node(std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch
             unreachable, .file); // Short.
     }
@@ -769,7 +811,7 @@ pub fn fuzz_run(seed: u64) void {
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
-    var args: [24][:0]const u8 = undefined;
+    var args: [28][:0]const u8 = undefined;
     const count = command_line(&scenario, &args);
     const code = sim_run.run_cli(&sim, args[0..count]);
 
@@ -817,7 +859,7 @@ const Environment = struct {
 };
 
 /// The command line of the scenario, after the program name; returns how many words.
-fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
+fn command_line(scenario: *const Scenario, args: *[28][:0]const u8) usize {
     var words_storage: [3][:0]const u8 = undefined;
     const words = command_words(scenario, &words_storage);
     var count: usize = 0;
@@ -829,6 +871,11 @@ fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
     }
     push(args, &count, "run");
     if (scenario.read_only) push(args, &count, "--read-only");
+    switch (scenario.net) {
+        .default => {},
+        .none => push_pair(args, &count, "--net", "none"),
+        .host => push_pair(args, &count, "--net", "host"),
+    }
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
@@ -849,7 +896,7 @@ fn command_line(scenario: *const Scenario, args: *[24][:0]const u8) usize {
     return count;
 }
 
-fn push_limit(args: *[24][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
+fn push_limit(args: *[28][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
     const given = item orelse return;
     push(args, count, flag);
     push(args, count, given.text);
@@ -910,9 +957,14 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
 }
 
-fn push(args: *[24][:0]const u8, count: *usize, item: [:0]const u8) void {
+fn push(args: *[28][:0]const u8, count: *usize, item: [:0]const u8) void {
     args[count.*] = item;
     count.* += 1;
+}
+
+fn push_pair(args: *[28][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
+    push(args, count, name);
+    push(args, count, value);
 }
 
 fn check(
@@ -1026,6 +1078,8 @@ fn check_started(
         .full = scenario.full,
         .read_only = scenario.read_only,
         .merged = if (scenario.image) merged_path(&merged_storage, name) else null,
+        .network = if (scenario.net == .host) .host else .none,
+        .network_mounts = !net_steps_skipped(scenario),
     };
     assert(sim_run.started(sim, container) == null);
     var received_storage: [8]u8 = undefined;
@@ -1102,8 +1156,16 @@ fn check_started_output(
         // Cannot fail: a reason word in 48 bytes.
         const text = std.fmt.bufPrint(&needle, "\"reason\":\"{s}\"", .{reason}) catch unreachable;
         assert(std.mem.indexOf(u8, stderr, text) != null);
+        const word = if (scenario.net == .host) "\"network\":\"host\"" else "\"network\":\"none\"";
+        assert(std.mem.indexOf(u8, stderr, word) != null);
+        assert(std.mem.indexOf(u8, stderr, "grant with --net") == null); // Text mode's note.
         return;
     }
+    // The hint: a failed run that was not given --net, once, last.
+    const hints = std.mem.count(u8, stderr, "zbx: network: none (grant with --net)\n");
+    const failed = final_code(scenario, status) != 0;
+    assert(hints == @intFromBool(failed and scenario.net == .default));
+    if (hints == 1) assert(std.mem.endsWith(u8, stderr, "(grant with --net)\n"));
     const skipped = std.mem.count(u8, stderr, "zbx: note: skipped");
     assert(skipped == if (scenario.verbose) skipped_notes(scenario) else 0);
     const oom = scenario.counts_as_oom();

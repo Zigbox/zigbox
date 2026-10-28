@@ -87,9 +87,14 @@ pub const user_name_bytes_max: u32 = 256;
 pub const controller_name_bytes_max: u32 = 32;
 pub const controllers_count_max: u32 = 32;
 pub const kernel_number_digits_max: u32 = 9;
-pub const doctor_checks_count: u32 = 6;
+pub const doctor_checks_count: u32 = 7;
 pub const detail_bytes_max: u32 = 240;
 pub const binary_candidates_count: u32 = 3;
+/// The doctor's look for `pasta` (M5): directories of PATH tried, the longest path kept, and the
+/// bytes of `pasta --version` read (its first line is shown).
+pub const pasta_path_dirs_max: u32 = 32;
+pub const pasta_path_bytes_max: u32 = 256;
+pub const pasta_version_bytes_max: u32 = helper_output_bytes_max;
 
 // Diagnostics (docs: DIAGNOSTICS.md). All of these are fixed-size: a `Diag` never allocates, and
 // text past a bound is cut with a visible "..." marker, items past a bound are counted and shown
@@ -217,6 +222,14 @@ pub const candidates_max: u32 = 16;
 pub const container_devices_count: u32 = 6;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
+/// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them
+/// holds. The host's `resolv.conf`, which a `--net host` container gets, is cut to whole lines
+/// within this.
+pub const etc_file_bytes_max: u32 = 4096;
+/// The hidden names, in the container's `/dev` tmpfs, the two files are written to before they
+/// are bound over the image's `/etc` files and removed again.
+pub const etc_stage_hosts = ".zbx-hosts";
+pub const etc_stage_resolv = ".zbx-resolv";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
 pub const plan_steps_max: u32 = 80;
 
@@ -239,7 +252,7 @@ pub const id_map_line_bytes_max: u32 = 32;
 /// A record the child writes to the failure pipe: kind, step, and a two-byte errno.
 pub const sync_record_bytes: u32 = 4;
 /// Records a child can write: one note per tolerant step, then at most one failure.
-pub const sync_records_max: u32 = 8;
+pub const sync_records_max: u32 = 12;
 /// `read` calls the parent spends collecting records; each non-EOF call returns at least one
 /// byte, so this covers one-byte reads of a full buffer and the EOF read.
 pub const sync_read_calls_max: u32 = sync_record_bytes * sync_records_max + 1;
@@ -730,10 +743,10 @@ comptime {
     assert(std.mem.count(u8, container_path, ":") + 1 == container_path_dirs_count);
     assert(container_devices_count == 6);
     assert(container_links_count == 5);
-    const derived_paths_max = 4 + container_devices_count + container_links_count;
+    const derived_paths_max = 12 + container_devices_count + container_links_count;
     const candidates_bytes_max = (container_path_dirs_count + 1) * (command_word_bytes_max + 20);
     const paths_needed = derived_paths_max * (rootfs_bytes_max + 16) + candidates_bytes_max +
-        2 * id_map_line_bytes_max + 512;
+        2 * id_map_line_bytes_max + 2 * etc_file_bytes_max + 512;
     assert(paths_needed <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);

@@ -4,3 +4,4 @@ FAIL cgroup  cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid hos
 ok   overlay  overlayfs mounts inside a user and mount namespace
 FAIL subid  root (uid 0); no subuid range of 65536 ids (largest: 0); no subgid range of 65536 ids (largest: 0); newuidmap not found; newgidmap not found  [ZBX-E0105]
 ok   seccomp  seccomp is supported (current mode: disabled for this process)
+warn net  pasta not found: --net user and --publish need it (apt install passt)

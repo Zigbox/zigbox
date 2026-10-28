@@ -92,6 +92,8 @@ pub const Prepared = struct {
     work: Path,
     /// A read-only run's second lower layer: an empty directory.
     empty: Path,
+    /// The layer on top of the tree: the mount points of the generated /etc files.
+    net: Path,
     read_only: bool,
 
     pub fn tree_text(prepared: *const Prepared) []const u8 {
@@ -100,6 +102,7 @@ pub const Prepared = struct {
 
     pub fn overlay(prepared: *const Prepared) @import("plan.zig").Overlay {
         return .{
+            .net = prepared.net.text(),
             .lower = prepared.lower.text(),
             .upper = if (prepared.read_only) null else prepared.upper.text(),
             .work = if (prepared.read_only) null else prepared.work.text(),
@@ -173,13 +176,14 @@ pub fn prepare(
         prepared.merged.set(&.{ base.text(), "/merged" }) and
         prepared.upper.set(&.{ base.text(), "/upper" }) and
         prepared.work.set(&.{ base.text(), "/work" }) and
-        prepared.empty.set(&.{ base.text(), "/empty" });
+        prepared.empty.set(&.{ base.text(), "/empty" }) and
+        prepared.net.set(&.{ base.text(), "/net" });
     if (!ok) {
         diagnose.overlay_path(diag, farm, 0);
         return error.Failed;
     }
     const layers = [_]*const Path{
-        &prepared.lower, &prepared.upper, &prepared.work, &prepared.empty,
+        &prepared.lower, &prepared.upper, &prepared.work, &prepared.empty, &prepared.net,
     };
     for (layers) |layer| {
         if (spec.overlay_path_problem(layer.text())) |byte| {
@@ -372,10 +376,11 @@ fn make_container(store: *Store, job: *Job, diag: *Diag) Error!void {
     try make_path(store, job.base, job.existing, diag);
     const directories = [_]*const Path{
         &prepared.merged,
+        &prepared.net,
         if (prepared.read_only) &prepared.empty else &prepared.upper,
         &prepared.work,
     };
-    const count: usize = if (prepared.read_only) 2 else 3;
+    const count: usize = if (prepared.read_only) 3 else 4;
     for (directories[0..count]) |directory| {
         fs.make_directory(directory.text(), false) catch |err| {
             diagnose.write_failed(

@@ -180,6 +180,9 @@ pub const Process = struct {
     new_user: bool,
     new_pid: bool,
     new_ipc: bool,
+    /// A network namespace of its own, and whether `lo` has been brought up in it.
+    new_net: bool,
+    loopback_up: bool,
     maps: IdMaps,
     /// The process's current directory, as a path of the machine (not of its root).
     cwd: SimPath,
@@ -699,6 +702,8 @@ pub const World = struct {
         child.new_user = flags.user;
         child.new_pid = flags.pid;
         child.new_ipc = flags.ipc;
+        child.new_net = flags.net;
+        child.loopback_up = parent.loopback_up and !flags.net;
         child.cwd = parent.cwd;
         child.root = parent.root;
         child.old_root_attached = parent.old_root_attached;
@@ -1064,7 +1069,7 @@ pub const World = struct {
         if (!world.parent_is_dir(&real)) return errno_noent;
         if (world.node_kind(real.slice()) != null) return errno_notdir;
         // A full disk is the state directory's; cgroup and proc files are not on it.
-        const on_disk = !real.under("/sys") and !real.under("/proc");
+        const on_disk = !real.under("/sys") and !real.under("/proc") and !world.on_tmpfs(&real);
         if (world.disk_full and on_disk) return errno_nospc;
         if (bytes.len > constants.sim_written_bytes_max) return errno_nospc;
         const existing = world.find_written(real.slice());
@@ -1078,6 +1083,19 @@ pub const World = struct {
         @memcpy(file.content[0..bytes.len], bytes);
         file.len = @intCast(bytes.len);
         return null;
+    }
+
+    /// Whether the path is on a tmpfs the current process mounted (the container's /dev): a full
+    /// disk does not stop a write there.
+    fn on_tmpfs(world: *const World, path: *const SimPath) bool {
+        assert(path.slice().len > 0);
+        const table = &world.tables[world.processes[world.current].table];
+        for (table.slice()) |*entry| {
+            const kind = entry.kind orelse continue;
+            if (kind != .dev_tmpfs and kind != .shm_tmpfs) continue;
+            if (path.under(entry.target.slice())) return true;
+        }
+        return false;
     }
 
     pub fn rename_file(world: *World, from: []const u8, to: []const u8) ?u16 {
@@ -1135,6 +1153,7 @@ pub const World = struct {
     ) HelperRun {
         world.helper_runs += 1;
         const program = std.fs.path.basename(request.path);
+        if (std.mem.eql(u8, program, "pasta")) return pasta_version(output);
         const is_uid = std.mem.eql(u8, program, "newuidmap");
         if (!is_uid) assert(std.mem.eql(u8, program, "newgidmap"));
         const refused = if (is_uid)
@@ -1161,6 +1180,14 @@ pub const World = struct {
         }
         done.* = true;
         return .{ .status = .{ .exited = 0 }, .len = 0 };
+    }
+
+    /// What `pasta --version` prints: one line, as the project's snapshots name themselves.
+    fn pasta_version(output: []u8) HelperRun {
+        const text = "pasta 2024_09_06.6b38f07\n";
+        assert(output.len >= text.len);
+        @memcpy(output[0..text.len], text);
+        return .{ .status = .{ .exited = 0 }, .len = text.len };
     }
 
     /// The caller's own id to 0, then ranges inside what it was given, each of three numbers.
@@ -1234,12 +1261,28 @@ pub const World = struct {
         return world.add_checked(real.slice(), .dir);
     }
 
-    pub fn create_file(world: *World, path: []const u8) ?u16 {
+    pub fn create_file(world: *World, path: []const u8, exist_ok: bool) ?u16 {
+        assert(path.len > 0);
+        assert(world.current < world.processes.len);
         var real: SimPath = .{};
         if (world.resolve(path, &real)) |errno| return errno;
-        if (world.node_kind(real.slice()) != null) return errno_exist;
+        if (world.node_kind(real.slice())) |found| {
+            if (exist_ok and found == .file) return null;
+            return errno_exist;
+        }
         if (!world.parent_is_dir(&real)) return errno_noent;
         return world.add_checked(real.slice(), .file);
+    }
+
+    /// `lo` up. Only the owner of the network namespace may change its interfaces: a process in
+    /// the host's namespace is refused, and so is one that has already dropped its capabilities.
+    pub fn bring_up_loopback(world: *World) ?u16 {
+        assert(world.current < world.processes.len);
+        const process = &world.processes[world.current];
+        if (!process.new_net) return errno_perm;
+        if (process.capabilities != null) return errno_perm;
+        process.loopback_up = true;
+        return null;
     }
 
     pub fn symlink(world: *World, link: []const u8) ?u16 {
@@ -1282,6 +1325,9 @@ pub const World = struct {
             return null;
         }
         if (world.mount_target_error(request.kind, &target)) |errno| return errno;
+        // A sysfs shows the network devices of the namespace it is mounted in, so the kernel
+        // lets only the owner of that namespace mount one.
+        if (request.kind == .sysfs and !process.new_net) return errno_perm;
         if (request.kind == .devpts) {
             if (world.devpts_refused) return errno_perm;
         }
@@ -1294,6 +1340,7 @@ pub const World = struct {
             .target = target,
             .kind = request.kind,
             .own_pid_namespace = process.new_pid,
+            .read_only = request.kind == .sysfs,
         };
         // A mount made while the tree is still shared propagates to the namespace it was
         // copied from. That is the host's: the leak `make_private` exists to prevent.
@@ -1313,7 +1360,10 @@ pub const World = struct {
     fn bind_source_error(world: *const World, kind: host.MountKind, source: []const u8) ?u16 {
         var real: SimPath = .{};
         if (world.resolve(source, &real)) |errno| return errno;
-        const found = world.node_kind(real.slice()) orelse return errno_noent;
+        // A file written through the host (a staged /etc/hosts) is a file as well.
+        const written = world.find_written(real.slice()) != null;
+        const found = world.node_kind(real.slice()) orelse
+            (if (written) NodeKind.file else return errno_noent);
         if (kind == .bind_file and found != .file) return errno_inval;
         if (kind == .bind_tree and found != .dir) return errno_notdir;
         return null;
@@ -1455,6 +1505,8 @@ fn unused_process() Process {
         .new_user = false,
         .new_pid = false,
         .new_ipc = false,
+        .new_net = false,
+        .loopback_up = false,
         .maps = .{},
         .cwd = .{},
         .root = null,
@@ -1571,6 +1623,7 @@ test "id maps: setgroups first, own id only, once" {
         .pid = true,
         .uts = true,
         .ipc = true,
+        .net = true,
     };
     const pid = world.spawn(all, entry, &unused).?;
     const ids: Ids = .{ .uid = 1000, .gid = 1000 };

@@ -4,7 +4,7 @@ error[ZBX-E0208]: can't install the container's seccomp filter
   cause  the kernel may lack seccomp filters, or a policy forbids installing one
   name   web-1
   rootfs /srv/alpine
-  step   install_seccomp (49 of 52)
+  step   install_seccomp (60 of 63)
   fix    check what this host allows:   zbx doctor
   more   zbx explain E0208
   docs   https://zigbox.github.io/zigbox/errors/E0208.html

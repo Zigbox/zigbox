@@ -234,7 +234,7 @@ fn namespaces_failed(host: Host, facts: *doctor.Facts, diag: *Diag, failure: Fai
     assert(diag.code == null);
     assert(failure.errno < 4096);
     diag.raise(.E0203);
-    const call = "clone3 with new user, mount, PID, UTS and IPC namespaces";
+    const call = "clone3 with new user, mount, PID, UTS, IPC and network namespaces";
     errors.cause_host_error(diag, call, failure.err, failure.errno);
     if (spawn_reason(failure.errno)) |reason| diag.cause("{s}", .{reason});
     if (failure.err == error.WouldBlock) {

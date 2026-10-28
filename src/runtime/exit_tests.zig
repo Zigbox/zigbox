@@ -60,7 +60,9 @@ test "an OOM kill with no --memory has no limit to name" {
     sim_run.init(&sim, 2);
     sim.world.oom_kills = 2;
     sim.world.command_exit = .{ .signaled = 9 };
-    const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "sh" };
+    const args = [_][:0]const u8{
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--", "sh",
+    };
     try testing.expectEqual(@as(u8, 137), run(&sim, &args));
     try testing.expectEqualStrings("zbx: killed: out of memory\n", sim.stderr());
 }
@@ -71,7 +73,8 @@ test "a process limit that was hit is the reason, and the command keeps its own 
     sim.world.pids_max_hits = 5;
     sim.world.command_exit = .{ .exited = 3 };
     const args = [_][:0]const u8{
-        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--pids", "64", "--", "sh",
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--pids", "64",
+        "--",  "sh",
     };
     try testing.expectEqual(@as(u8, 3), run(&sim, &args));
     try testing.expectEqualStrings(
@@ -110,29 +113,33 @@ test "the JSON container_exit names the reason for every way a container ends" {
     const cases = [_]Case{
         .{
             .exit = .{ .exited = 7 },
-            .want = "{\"container_exit\":{\"reason\":\"exited\",\"code\":7}}\n",
+            .want = "{\"container_exit\":{\"reason\":\"exited\",\"code\":7," ++
+                "\"network\":\"none\"}}\n",
         },
         .{
             .exit = .{ .signaled = 15 },
-            .want = "{\"container_exit\":{\"reason\":\"signal\",\"signal\":15,\"code\":143}}\n",
+            .want = "{\"container_exit\":{\"reason\":\"signal\",\"signal\":15,\"code\":143," ++
+                "\"network\":\"none\"}}\n",
         },
         .{
             .oom = 1,
             .exit = .{ .exited = 0 },
             .extra = &.{ "--memory", "128m" },
             .want = "{\"container_exit\":{\"reason\":\"oom\"," ++
-                "\"limit_bytes\":134217728,\"code\":137}}\n",
+                "\"limit_bytes\":134217728,\"code\":137,\"network\":\"none\"}}\n",
         },
         .{
             .oom = 1,
             .exit = .{ .exited = 0 },
-            .want = "{\"container_exit\":{\"reason\":\"oom\",\"limit_bytes\":null,\"code\":137}}\n",
+            .want = "{\"container_exit\":{\"reason\":\"oom\",\"limit_bytes\":null," ++
+                "\"code\":137,\"network\":\"none\"}}\n",
         },
         .{
             .pids = 1,
             .exit = .{ .exited = 2 },
             .extra = &.{ "--pids", "16" },
-            .want = "{\"container_exit\":{\"reason\":\"pid_limit\",\"limit\":16,\"code\":2}}\n",
+            .want = "{\"container_exit\":{\"reason\":\"pid_limit\",\"limit\":16,\"code\":2," ++
+                "\"network\":\"none\"}}\n",
         },
     };
     for (cases) |case| {
@@ -167,7 +174,9 @@ test "plain exits and signals keep M1's reporting" {
     var sim: HostSim = undefined;
     sim_run.init(&sim, 6);
     sim.world.command_exit = .{ .signaled = 15 };
-    const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "sh" };
+    const args = [_][:0]const u8{
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--", "sh",
+    };
     try testing.expectEqual(@as(u8, 143), run(&sim, &args));
     try testing.expectEqualStrings(
         "zbx: the container was killed by signal 15 (SIGTERM)\n",
@@ -200,7 +209,8 @@ test "an OOM kill is reported when the manager removes the cgroup the moment it 
     sim.world.oom_kills = 1;
     sim.world.command_exit = .{ .exited = 0 };
     const args = [_][:0]const u8{
-        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m", "--", "sh",
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m",
+        "--",  "sh",
     };
     try testing.expectEqual(@as(u8, 137), run(&sim, &args));
     try testing.expectEqualStrings(
@@ -243,7 +253,8 @@ test "without the keeper the same removal loses the counters (the model can show
     sim.world.oom_kills = 1;
     sim.world.command_exit = .{ .exited = 4 };
     const args = [_][:0]const u8{
-        "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m", "--", "sh",
+        "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--memory", "64m",
+        "--",  "sh",
     };
     try testing.expectEqual(@as(u8, 4), run(&sim, &args));
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
@@ -314,7 +325,7 @@ test "a scope that lingers is stopped, and one that cannot be stopped is a warni
         case.set_up(&sim);
         sim.world.command_exit = .{ .exited = 9 };
         const args = [_][:0]const u8{
-            "zbx", "run", "--rootfs", rootfs, "--name", "web-1", "--", "sh",
+            "zbx", "run", "--net", "none", "--rootfs", rootfs, "--name", "web-1", "--", "sh",
         };
         try testing.expectEqual(@as(u8, 9), run(&sim, &args));
         if (case.cause.len == 0) {

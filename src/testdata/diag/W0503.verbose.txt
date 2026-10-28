@@ -15,4 +15,6 @@ warning[ZBX-W0503]: no zbx.lock was found, so one was written
   fix    commit it, so every machine runs the same image
   more   zbx explain W0503
   docs   https://zigbox.github.io/zigbox/errors/W0503.html
+zbx: note: skipped creating the mount point directory for the generated /etc files: refused by the kernel (ENOENT)
+zbx: note: skipped creating the mount point /etc/resolv.conf: refused by the kernel (ENOENT)
 zbx: note: scope zbx-web-1.scope went by itself just after the run ended

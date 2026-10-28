@@ -64,6 +64,10 @@ fn world_dirs(name: []const u8) void {
         .{name},
     ) catch unreachable; // Short.
     sim.world.add_node(merged, .dir);
+    var net_path: [220]u8 = undefined;
+    const net_format = state ++ "/{s}/net";
+    const net = std.fmt.bufPrint(&net_path, net_format, .{name}) catch unreachable; // Short.
+    sim.world.add_node(net, .dir);
     for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
         const text = std.fmt.bufPrint(
             &inner,
@@ -74,6 +78,11 @@ fn world_dirs(name: []const u8) void {
     }
     const shell = std.fmt.bufPrint(&inner, "{s}/bin/sh", .{merged}) catch unreachable; // Short.
     sim.world.add_node(shell, .file);
+    // The overlay shows the mount points of the generated files, which are in the net layer.
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
+        const joined = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix });
+        sim.world.add_node(joined catch unreachable, .file); // Short.
+    }
 }
 
 fn spec_for(digest_text: []const u8, name: []const u8, read_only: bool) lib.Spec {

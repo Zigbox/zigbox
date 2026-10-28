@@ -566,6 +566,11 @@ const base_cases = [_]Case{
     .{ .code = .E0007, .args = &.{ "explain", "E9999" }, .exit = 1 },
     .{ .code = .E0008, .args = &many_arguments, .exit = 1 },
     .{ .code = .E0009, .args = &.{"help"}, .stdout_full = true, .exit = 2 },
+    .{
+        .code = .E0600,
+        .args = &.{ "run", "--net", "user", "--rootfs", "/srv/alpine", "--", "/bin/sh" },
+        .exit = 125,
+    },
     .{ .code = .E0101, .args = &.{"doctor"}, .fixture = "ubuntu_2404_restricted", .exit = 2 },
     .{ .code = .E0102, .args = &.{"doctor"}, .fixture = "old_kernel", .exit = 2 },
     .{ .code = .E0103, .args = &.{"doctor"}, .fixture = "cgroup_missing_controllers", .exit = 2 },

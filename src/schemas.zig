@@ -37,6 +37,7 @@ const run_schema =
     \\"pid_limit"]},
     \\"code":{"type":"integer","minimum":0,"maximum":255},"signal":{"type":"integer"},
     \\"limit_bytes":{"type":["integer","null"]},"limit":{"type":["integer","null"]},
+    \\"network":{"enum":["none","host"]},
     \\"timed_out":{"type":"boolean"}}},"ran":{"$ref":"#/$defs/ran"}}},
     \\"ran":{"type":"object","description":"what the run ran","required":["kind"],
     \\"properties":{"kind":{"enum":["image","tree","rootfs"]},

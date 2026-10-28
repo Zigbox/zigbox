@@ -54,6 +54,8 @@ pub const Spec = struct {
     subuid_readable: bool = true,
     newuidmap: ?Binary = .{},
     newgidmap: ?Binary = .{},
+    /// `pasta` on PATH (/usr/bin/pasta): the warning of the net check goes away.
+    pasta: ?Binary = null,
     status: ?[]const u8 = default_status,
     seccomp: host.Error!u32 = 0,
     probes: sim.Probes = .{},
@@ -148,6 +150,7 @@ pub fn build(comptime spec: Spec) Fixture {
         list.add("/etc/subgid", spec.subgid);
         list.add_binary("/usr/bin/newuidmap", spec.newuidmap);
         list.add_binary("/usr/bin/newgidmap", spec.newgidmap);
+        list.add_binary("/usr/bin/pasta", spec.pasta);
         list.add("/proc/self/status", spec.status);
         for (spec.extra_files) |file| {
             list.items[list.len] = file;
@@ -188,7 +191,7 @@ const cap_setuid_namespaced =
     "\x01\x00\x00\x03\x80\x00\x00\x00" ++ zero_pairs ++ "\xe8\x03\x00\x00";
 
 pub const all = [_]Fixture{
-    build(.{ .name = "ubuntu_2404" }),
+    build(.{ .name = "ubuntu_2404", .pasta = .{ .mode = 0o100755 } }),
     // Ubuntu 24.04 as installed: the AppArmor restriction is on, so the probe is refused.
     build(.{
         .name = "ubuntu_2404_restricted",
@@ -307,6 +310,8 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_exactly_minimum", .kernel = "5.15.0" }),
     build(.{ .name = "kernel_just_below", .kernel = "5.14.21-generic" }),
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
+    // The default host without pasta: the net check warns and says how to install it.
+    build(.{ .name = "pasta_missing" }),
 };
 
 /// The fixture called `name`, or null.

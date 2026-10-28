@@ -1,0 +1,8 @@
+error[ZBX-E0600]: this network mode is not available yet
+  while  reading the command line
+  cause  --net user needs user-mode networking through pasta, which zbx does not
+         drive yet
+  arg    user
+  fix    run with no network (the default), or share the host's:   zbx run --net host alpine -- sh
+  more   zbx explain E0600
+  docs   https://zigbox.github.io/zigbox/errors/E0600.html

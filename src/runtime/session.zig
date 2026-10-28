@@ -236,6 +236,7 @@ pub const Session = struct {
             .pid = true,
             .uts = true,
             .ipc = true,
+            .net = session.plan.isolated(),
         };
         session.pid = try host.spawn(flags, child_mod.entry, &session.child);
         session.container_pid = session.pid.?;

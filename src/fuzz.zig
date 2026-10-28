@@ -455,6 +455,7 @@ fn expected_code(id: doctor.CheckId) codes.Code {
         .overlay => .E0104,
         .subid => .E0105,
         .seccomp => .E0106,
+        .net => unreachable, // The net check only warns: it has no code to report.
     };
 }
 
@@ -524,7 +525,8 @@ fn check_doctor_report(
             assert(check.diag.code.? == expected_code(check.id));
             assert(check.diag.entry().blame == .environment);
         }
-        if (counts.hard > 0) assert(check.status == .fail);
+        // The net check only warns, whatever the fault: nothing it looks for is required.
+        if (counts.hard > 0 and check.id != .net) assert(check.status == .fail);
         if (counts.any == 0) {
             assert(check.status == reference.status);
             assert(std.mem.eql(u8, check.detail.slice(), reference.detail.slice()));

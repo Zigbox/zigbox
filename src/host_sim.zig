@@ -243,6 +243,7 @@ pub const HostSim = struct {
         .change_directory = change_directory,
         .make_directory = make_directory,
         .create_file = create_file,
+        .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
@@ -719,10 +720,16 @@ pub const HostSim = struct {
         if (sim.world.make_directory(path, exist_ok)) |errno| return sim.model_error(errno);
     }
 
-    fn create_file(context: *anyopaque, path: [:0]const u8) host.Error!void {
+    fn create_file(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
-        if (sim.world.create_file(path)) |errno| return sim.model_error(errno);
+        if (sim.world.create_file(path, exist_ok)) |errno| return sim.model_error(errno);
+    }
+
+    fn bring_up_loopback(context: *anyopaque) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.bring_up_loopback()) |errno| return sim.model_error(errno);
     }
 
     fn symlink(context: *anyopaque, target: [:0]const u8, link: [:0]const u8) host.Error!void {
@@ -891,8 +898,14 @@ pub const HostSim = struct {
         return from_context(context).world.now;
     }
 
-    fn write_file(context: *anyopaque, path: [:0]const u8, bytes: []const u8) host.Error!void {
+    fn write_file(
+        context: *anyopaque,
+        path: [:0]const u8,
+        bytes: []const u8,
+        mode: u16,
+    ) host.Error!void {
         const sim = from_context(context);
+        assert(mode <= 0o777);
         try sim.begin_call();
         if (sim.world.write_file(path, bytes)) |errno| return sim.model_error(errno);
     }

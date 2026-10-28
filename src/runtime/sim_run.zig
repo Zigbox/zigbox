@@ -12,6 +12,7 @@ const host_sim = @import("../host_sim.zig");
 const sim_world = @import("../sim_world.zig");
 const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
+const spec_mod = @import("spec.zig");
 
 const cli = @import("../cli.zig");
 const records = @import("records.zig");
@@ -119,7 +120,7 @@ pub fn sample_plan_with(plan: *plan_mod.Plan, full: bool, scoped: bool) void {
 
 /// Like `sample_plan_with`, for a run with (`read_only`) or without a read-only rootfs.
 pub fn sample_plan_ro(plan: *plan_mod.Plan, full: bool, scoped: bool, read_only: bool) void {
-    sample_plan_image(plan, full, scoped, read_only, false);
+    sample_plan_image(plan, full, scoped, read_only, false, .none);
 }
 
 /// Like `sample_plan_ro`, for a run of a tree from the store (`image`): the overlay replaces the
@@ -130,6 +131,7 @@ pub fn sample_plan_image(
     scoped: bool,
     read_only: bool,
     image: bool,
+    network: spec_mod.Network,
 ) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
@@ -147,7 +149,9 @@ pub fn sample_plan_image(
         .mapping = mapping,
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
         .read_only = read_only,
+        .network = network,
         .overlay = if (image) .{
+            .net = "/state/net",
             .lower = "/store/cache/b3",
             .upper = if (read_only) null else "/state/up",
             .work = if (read_only) null else "/state/work",
@@ -244,6 +248,12 @@ pub const Started = struct {
     /// A run of a tree from the store: the merged directory it pivoted into, which is an
     /// overlay mount where a rootfs run has a bind mount.
     merged: ?[]const u8 = null,
+    /// What the container could reach: `none` has a network namespace of its own with `lo` up
+    /// and a sysfs; `host` shares the host's and binds the host's /sys.
+    network: spec_mod.Network = .none,
+    /// The /sys and /etc steps all ran. A failure injected into one of them is skipped with a
+    /// note, and the container then lacks what the step would have made.
+    network_mounts: bool = true,
 };
 
 /// Null if the child process the last run created reached its command in the state the plan
@@ -268,12 +278,16 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     const hostname = sim.world.hostnames[child.uts].slice();
     if (!std.mem.eql(u8, hostname, expected.name)) return "the child's hostname is wrong";
     if (hardening(child)) |problem| return problem;
+    const isolated = expected.network == .none;
+    if (child.new_net != isolated) return "the network namespace is not as asked";
+    if (child.loopback_up != isolated) return "the loopback interface is not as asked";
     return container_mounts(
         &sim.world.tables[child.table],
         want_root,
         if (expected.merged != null) .overlay else .bind_tree,
         expected.devpts,
         expected.read_only,
+        if (expected.network_mounts) isolated else null,
     );
 }
 
@@ -295,6 +309,7 @@ fn container_mounts(
     root_kind: host_mod.MountKind,
     devpts: bool,
     read_only: bool,
+    isolated: ?bool,
 ) ?[]const u8 {
     if (!table.private) return "the mounts were not made private";
     if (!table.has(root_kind, root_path)) return "the rootfs was not mounted as the plan says";
@@ -316,11 +331,41 @@ fn container_mounts(
     if (tmp != read_only) return "/tmp is wrong";
     const run = table.has(.run_tmpfs, join(&buffer, root_path, "/run"));
     if (run != read_only) return "/run is wrong";
+    if (isolated) |own_network| {
+        if (network_mounts(table, root_path, own_network)) |problem| return problem;
+    }
     const root = table.find(root_path) orelse return "the rootfs is not a mount";
     if (table.mounts[root].read_only != read_only) return "the rootfs is not as read-only as asked";
     for (table.slice()) |*mount| {
         if (!mount.target.under(root_path)) return "a host mount is still visible";
         if (mount.kind == .proc and !mount.own_pid_namespace) return "/proc shows the host";
+    }
+    return null;
+}
+
+/// /sys is a sysfs of the container's own when it has its own network namespace and the host's,
+/// bound, when it has not; the two generated /etc files are read-only binds either way.
+fn network_mounts(
+    table: *const sim_world.MountTable,
+    root_path: []const u8,
+    isolated: bool,
+) ?[]const u8 {
+    assert(root_path.len > 0);
+    assert(table.count <= constants.sim_mounts_max);
+    var buffer: [constants.sim_path_bytes_max]u8 = undefined;
+    const sys = join(&buffer, root_path, "/sys");
+    if (table.has(.sysfs, sys) != isolated) return "/sys is not as the network asks";
+    if (table.has(.bind_tree, sys) == isolated) return "/sys is not as the network asks";
+    const sys_index = table.find(sys) orelse return "/sys is not a mount";
+    if (!table.mounts[sys_index].read_only) {
+        // A bind of the host's /sys is made read-only by the remount.
+        return "/sys is writable";
+    }
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |name| {
+        const path = join(&buffer, root_path, name);
+        if (!table.has(.bind_file, path)) return "a generated /etc file is not bound";
+        const index = table.find(path).?; // `has` found it.
+        if (!table.mounts[index].read_only) return "a generated /etc file is writable";
     }
     return null;
 }

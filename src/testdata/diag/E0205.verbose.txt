@@ -5,7 +5,7 @@ error[ZBX-E0205]: a container setup step failed
          which hides parts of /proc, or a security policy, is the usual reason
   name   web-1
   rootfs /srv/alpine
-  step   mount_proc (14 of 52)
+  step   mount_proc (18 of 63)
   fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux|userns'
          check what this host allows:          zbx doctor
   more   zbx explain E0205

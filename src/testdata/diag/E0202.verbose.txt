@@ -6,7 +6,7 @@ error[ZBX-E0202]: can't run the command in the rootfs
   cmd    /bin/nothere
   name   web-1
   rootfs /srv/alpine
-  step   exec (50 of 52)
+  step   exec (61 of 63)
   fix    look in the rootfs:               ls -l "/srv/alpine/bin"
          or use the program's full path:   zbx run --rootfs /srv/alpine -- /bin/sh
   more   zbx explain E0202

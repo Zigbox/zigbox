@@ -74,6 +74,7 @@ const help_text =
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
+    \\  --net <mode>    none (the default: a network of its own, only lo) or host (share the host's)
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -198,6 +199,9 @@ pub const RunArgs = struct {
     all: bool = false,
     /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
     read_only: bool = false,
+    /// `--net` and `--publish`, as typed. No `--net` is `none`, and the run says so when it fails.
+    net: ?[]const u8 = null,
+    publish: ?[]const u8 = null,
 };
 
 /// The options of `run` that take a value, before the `--`.
@@ -209,9 +213,11 @@ const RunOption = enum {
     cpus,
     timeout,
     grace,
+    net,
+    publish,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 6);
+        assert(@backingInt(option) <= 8);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -221,6 +227,8 @@ const RunOption = enum {
             .cpus => "--cpus",
             .timeout => "--timeout",
             .grace => "--grace",
+            .net => "--net",
+            .publish => "--publish",
         };
     }
 };
@@ -329,7 +337,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 7);
+    assert(std.enums.values(RunOption).len == 9);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -671,6 +679,8 @@ fn take_run_option(
         .cpus => &run_args.cpus,
         .timeout => &run_args.timeout,
         .grace => &run_args.grace,
+        .net => &run_args.net,
+        .publish => &run_args.publish,
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -679,6 +689,7 @@ fn take_run_option(
 /// `run` needs a rootfs and a command: the two things a user is most likely to forget.
 fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
+    try check_network_args(diag, run_args);
     if (run_args.rootfs == null and digest == null) {
         return missing_argument(diag, .run, .rootfs);
     }
@@ -695,6 +706,61 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     }
     assert((run_args.rootfs != null) != (digest != null));
     if (!has_default) assert(run_args.command.len > 0);
+}
+
+/// The network mode `--net` names; null for any other word. `user` is a mode, but not yet one a
+/// run can have (`network_unavailable`).
+const NetWord = enum { none, host, user };
+
+fn net_word_named(value: []const u8) ?NetWord {
+    assert(value.len <= constants.arg_bytes_max);
+    assert(std.mem.indexOfScalar(u8, value, 0) == null); // Arguments are C strings.
+    return std.meta.stringToEnum(NetWord, value);
+}
+
+/// `--net` takes none, host or user; `--publish` and `--net user` need pasta, which comes with
+/// a later part of this milestone, and are refused with a code that says so.
+fn check_network_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+    assert(diag.code == null);
+    if (run_args.publish) |value| return network_unavailable(diag, "--publish", value);
+    const value = run_args.net orelse return;
+    const word = net_word_named(value) orelse return bad_net_value(diag, value);
+    if (word == .user) return network_unavailable(diag, "--net user", value);
+}
+
+fn bad_net_value(diag: *Diag, value: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(net_word_named(value) == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("--net takes none, host or user, not '{s}'", .{echo});
+    diag.context("value", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "choose a mode:",
+        .command = "zbx run --net host alpine -- wget -qO- http://localhost",
+    });
+    return error.BadOptionValue;
+}
+
+/// ZBX-E0600: the option names a network that needs `pasta`, which this build does not drive.
+fn network_unavailable(diag: *Diag, option: []const u8, value: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(option.len > 2);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0600);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s} needs user-mode networking through pasta, which zbx does not drive yet", .{
+        option,
+    });
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "run with no network (the default), or share the host's:",
+        .command = "zbx run --net host alpine -- sh",
+    });
+    return error.BadOptionValue;
 }
 
 /// True if `operand` names a tree of the store (`b3:` and hex, or 12 hex digits or more); any
@@ -1502,6 +1568,7 @@ fn run_container(
         .env = prepared.env,
         .workdir = prepared.workdir,
         .user = prepared.user,
+        .network = network_of(&given),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
@@ -1523,7 +1590,7 @@ fn run_container(
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
-    report_outcome(host, invocation.options, handle, &reason, &ran);
+    report_outcome(host, invocation.options, handle, &reason, &ran, given.net != null);
     return code;
 }
 
@@ -1586,6 +1653,19 @@ fn write_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) bool {
         },
     }
     return true;
+}
+
+/// The network the flags asked for: none unless granted. `check_network_args` has refused every
+/// other value already.
+fn network_of(given: *const RunArgs) runtime_spec.Network {
+    const value = given.net orelse return .none;
+    const word = net_word_named(value).?;
+    assert(word != .user);
+    return switch (word) {
+        .none => .none,
+        .host => .host,
+        .user => unreachable, // Refused at parse time (E0600).
+    };
 }
 
 /// The limits the flags asked for, or `ZBX-E0306` for the first that is not acceptable.
@@ -1905,6 +1985,7 @@ fn report_outcome(
     handle: *const runtime.Handle,
     reason: *const runtime.ExitReason,
     ran: *const Ran,
+    network_given: bool,
 ) void {
     assert(handle.status == .stopped);
     assert(reason.code() != null);
@@ -1913,7 +1994,10 @@ fn report_outcome(
     const timed_out = runtime.timed_out(handle);
     if (options.output == .json) {
         write_container_exit(&writer, reason);
-        // The line ends "}}\n"; a run that was stopped for its time says so inside.
+        // The line ends "}}\n"; the network mode goes inside, and so does a stop for the time.
+        writer.end -= 3;
+        // Cannot fail: three bytes were freed and a short field fits a message.
+        writer.print(",\"network\":\"{s}\"}}}}\n", .{handle.network.word()}) catch unreachable;
         if (timed_out) {
             writer.end -= 3;
             writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
@@ -1933,9 +2017,27 @@ fn report_outcome(
             // Cannot fail: a short line into a buffer that holds a message.
             writer.print(format, .{handle.wait_options.timeout_ms}) catch unreachable;
         }
+        write_network_hint(&writer, handle.network, network_given, reason.code().?);
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
+}
+
+/// The one line a failed run without `--net` gets after the container's own output: the network
+/// was none, and here is the flag. A note, not a diagnostic: the exit code is the container's.
+/// Never for an explicit `--net none`.
+fn write_network_hint(
+    writer: *std.Io.Writer,
+    network: runtime_spec.Network,
+    network_given: bool,
+    code: u8,
+) void {
+    assert(writer.buffer.len >= constants.output_bytes_max / 2);
+    if (network_given) return;
+    if (network != .none) return;
+    if (code == constants.exit_ok) return;
+    // Cannot fail: a short line into a buffer that holds a message.
+    writer.writeAll("zbx: network: none (grant with --net)\n") catch unreachable;
 }
 
 /// With --verbose, what the container's first process did when the report says something else
@@ -2953,4 +3055,39 @@ test "parse: run takes a tree digest or --rootfs, one of them" {
         @as(?codes.Code, .E0003),
         try parse_case(&.{ "run", "2f9c4a1d7e03", "another", "--", "sh" }, &invocation),
     );
+}
+
+test "parse: --net takes none or host; user, --publish and other words are refused by code" {
+    // Goal: M5's flags. Method: none and host parse to the words the run reads; `user` and
+    // `--publish` are E0600 (they arrive with pasta); any other word is E0005; none given is null
+    // (the default, which is none, and the hint's condition).
+    var invocation: Invocation = undefined;
+    const base = [_][]const u8{ "run", "--rootfs", "alpine" };
+    for ([_][]const u8{ "none", "host" }) |word| {
+        const args = base ++ [_][]const u8{ "--net", word, "--", "sh" };
+        try testing.expect(try parse_case(&args, &invocation) == null);
+        try testing.expectEqualStrings(word, invocation.run.net.?);
+    }
+    const inline_form = base ++ [_][]const u8{ "--net=host", "--", "sh" };
+    try testing.expect(try parse_case(&inline_form, &invocation) == null);
+    try testing.expectEqual(runtime_spec.Network.host, network_of(&invocation.run));
+    const plain = base ++ [_][]const u8{ "--", "sh" };
+    try testing.expect(try parse_case(&plain, &invocation) == null);
+    try testing.expect(invocation.run.net == null);
+    try testing.expectEqual(runtime_spec.Network.none, network_of(&invocation.run));
+    const user = base ++ [_][]const u8{ "--net", "user", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&user, &invocation));
+    const publish = base ++ [_][]const u8{ "--publish", "8080:80", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&publish, &invocation));
+    const both = base ++ [_][]const u8{ "--net", "host", "--publish", "8080:80", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&both, &invocation));
+    const bad = base ++ [_][]const u8{ "--net", "bridge", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&bad, &invocation));
+    const twice = base ++ [_][]const u8{ "--net", "none", "--net", "host", "--", "sh" };
+    try testing.expectEqual(@as(?codes.Code, .E0003), try parse_case(&twice, &invocation));
+    const last = [_][]const u8{ "run", "--rootfs", "alpine", "--net" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&last, &invocation));
+    // A word that is not an option of `run` is still refused for the other commands.
+    const elsewhere = [_][]const u8{ "doctor", "--net", "host" };
+    try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&elsewhere, &invocation));
 }

@@ -97,6 +97,7 @@ pub fn run(
         .pid = false,
         .uts = false,
         .ipc = false,
+        .net = false,
     };
     const pid = host.spawn(flags, child_entry, &child) catch |err| {
         host.close(ready.read);

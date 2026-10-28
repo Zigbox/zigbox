@@ -6,7 +6,8 @@
 //! command can write a byte, so a terminal user sees it first.
 //!
 //! Process model (docs/briefs/M1-shell.md): the caller's process stays in the host PID namespace
-//! as the parent. `clone3` creates a child in new user, mount, PID, UTS and IPC namespaces. The
+//! as the parent. `clone3` creates a child in new user, mount, PID, UTS, IPC and (unless the
+//! host's network is shared, `--net host`) network namespaces. The
 //! child is PID 1 of its namespace, sets the container up and runs the command; there is no init
 //! shim. Two pipes carry the synchronisation: the parent tells the child when the id maps are
 //! written (`ready`), and the child tells the parent about a failed or skipped step (`report`).
@@ -50,6 +51,7 @@ const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const image_mod = @import("image.zig");
+const netfiles = @import("netfiles.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
@@ -214,6 +216,8 @@ pub const Handle = struct {
     notes_count: u32,
     /// The limits the run was started with, for the exit report and the record.
     limits: spec_mod.Limits,
+    /// What the container could reach, for the exit report.
+    network: spec_mod.Network,
     /// Why the run ended, as the record says it; `none` until it has.
     end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
@@ -282,6 +286,7 @@ pub fn start(
     handle.record_warned = false;
     handle.notes_count = 0;
     handle.limits = container.limits;
+    handle.network = container.network;
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.command = container.command;
@@ -296,22 +301,7 @@ pub fn start(
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
-    const input: plan_mod.Input = .{
-        .rootfs = handle.rootfs_slice(),
-        .name = handle.name_slice(),
-        .command = container.command,
-        .term = host.environment("TERM", constants.term_bytes_max),
-        .uid = host.uid(),
-        .gid = host.gid(),
-        .mapping = choice.mapping,
-        .scope = scope_input,
-        .read_only = container.read_only,
-        .env = container.env,
-        .workdir = container.workdir,
-        .user = container.user,
-        .overlay = if (handle.has_image) handle.image.overlay() else null,
-    };
-    handle.plan.build(&input);
+    build_plan(host, container, choice, scope_input, handle);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
     if (builtin.mode == .debug) assert_single_threaded(host);
 
@@ -331,6 +321,64 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
+/// when the container shares the host's network: the child formats and reads nothing.
+fn build_plan(
+    host: Host,
+    container: *const Spec,
+    choice: ids.Choice,
+    scope_input: ?plan_mod.ScopeInput,
+    handle: *Handle,
+) void {
+    assert(handle.name_len > 0);
+    assert(handle.status == .starting);
+    var resolv: netfiles.Buffer = undefined;
+    const host_resolv = host_resolv_conf(host, container.network, &resolv, handle);
+    const input: plan_mod.Input = .{
+        .rootfs = handle.rootfs_slice(),
+        .name = handle.name_slice(),
+        .command = container.command,
+        .term = host.environment("TERM", constants.term_bytes_max),
+        .uid = host.uid(),
+        .gid = host.gid(),
+        .mapping = choice.mapping,
+        .scope = scope_input,
+        .read_only = container.read_only,
+        .env = container.env,
+        .workdir = container.workdir,
+        .user = container.user,
+        .overlay = if (handle.has_image) handle.image.overlay() else null,
+        .network = container.network,
+        .host_resolv = host_resolv,
+    };
+    handle.plan.build(&input);
+    assert(handle.plan.count == handle.plan.steps_expected());
+}
+
+/// The host's `/etc/resolv.conf`, for a container that shares the host's network: whole lines,
+/// within the bound. A file that cannot be read gives none, and a note says so. Other modes
+/// need none.
+fn host_resolv_conf(
+    host: Host,
+    network: spec_mod.Network,
+    out: *netfiles.Buffer,
+    handle: *Handle,
+) []const u8 {
+    assert(handle.notes_count < handle.notes.len);
+    if (network != .host) return "";
+    var raw: netfiles.Buffer = undefined;
+    const found = host.read_prefix("/etc/resolv.conf", &raw) catch |err| {
+        const note = &handle.notes[handle.notes_count];
+        note.* = .{};
+        note.print("the host's /etc/resolv.conf could not be read ({s}): no nameserver", .{
+            @errorName(err),
+        });
+        handle.notes_count += 1;
+        return "";
+    };
+    return netfiles.whole_lines(out, found.bytes);
 }
 
 /// What the diagnostics say about this run.
@@ -785,7 +833,8 @@ fn warn_not_saved(handle: *Handle, directory: ?[]const u8, failure: ?diagnose.Fa
 }
 
 fn collect_notes(handle: *Handle) void {
-    assert(handle.notes_count <= 1); // The bus note, if the inherited bus was not the one used.
+    // The bus note, and the note that the host's resolv.conf could not be read.
+    assert(handle.notes_count <= 2);
     assert(handle.notes.len >= handle.notes_count + 1); // Room for the scope's.
     assert(handle.session.report.note_slice().len + handle.notes_count <= handle.notes.len);
     for (handle.session.report.note_slice()) |record| {

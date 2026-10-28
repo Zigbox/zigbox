@@ -127,6 +127,7 @@ pub const Code = enum(u8) {
     W0501,
     W0502,
     W0503,
+    E0600,
     E0701,
     E0702,
     E0703,
@@ -205,7 +206,8 @@ pub const registry = [_]Entry{
         .summary = "option has a missing or invalid value",
         .explanation =
         \\--output needs a value, and the only values are "text" and "json".
-        \\--rootfs and --name need one too, a directory and a name. Either the
+        \\--net takes none, host or user. --rootfs and --name need one too, a
+        \\directory and a name. Either the
         \\value is missing (the option was last, or empty) or it is wrong.
         \\
         \\Write --output json or --output=json. With json, every failure is written
@@ -429,9 +431,10 @@ pub const registry = [_]Entry{
         .blame = .environment,
         .summary = "can't create the container's namespaces",
         .explanation =
-        \\zbx runs a container in new user, mount, PID, UTS and IPC namespaces and
-        \\writes the id maps of the user namespace. The kernel refused one of
-        \\these, or a setting forbids it, so the container was not started.
+        \\zbx runs a container in new user, mount, PID, UTS, IPC and network
+        \\namespaces and writes the id maps of the user namespace. The kernel
+        \\refused one of these, or a setting forbids it, so the container was not
+        \\started.
         \\
         \\The cause names what failed. The usual reason is a restriction on
         \\unprivileged user namespaces: user.max_user_namespaces is 0,
@@ -1798,6 +1801,23 @@ pub const registry = [_]Entry{
         \\in the working directory, recording which manifest and tree the name meant
         \\today. Commit the file to keep every machine on the same image. The next run
         \\checks the store against it and refuses if they differ.
+        ,
+    },
+    .{
+        .code = .E0600,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "this network mode is not available yet",
+        .explanation =
+        \\--net user and --publish give a container a network through pasta, a
+        \\program that attaches to the container's network namespace and forwards
+        \\its traffic as the user, with no privilege and no change to the host's
+        \\firewall, routes or interfaces. This build of zbx does not drive pasta
+        \\yet, so both are refused before anything starts.
+        \\
+        \\A container has no network by default (--net none: only the loopback
+        \\interface). --net host shares the host's network instead, so a server in
+        \\the container listens on the host's own ports.
         ,
     },
     .{

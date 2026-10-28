@@ -34,6 +34,24 @@ pub const Limits = struct {
     }
 };
 
+/// How a container reaches the network (docs/briefs/M5-network.md, "The network modes"). `none`
+/// is the default: the container has a network namespace of its own with only `lo`. `host`
+/// shares the host's namespace. User-mode networking through `pasta` arrives with slice 3.
+pub const Network = enum {
+    none,
+    host,
+
+    pub fn word(network: Network) []const u8 {
+        const result: []const u8 = switch (network) {
+            .none => "none",
+            .host => "host",
+        };
+        assert(result.len > 0);
+        assert(std.mem.eql(u8, result, @tagName(network)));
+        return result;
+    }
+};
+
 /// A user and group id inside the container.
 pub const User = struct {
     uid: u32,
@@ -67,6 +85,8 @@ pub const Spec = struct {
     /// The user and group the command runs as. Null: root (id 0). Any other needs the full id
     /// map; a run with only root mapped refuses it.
     user: ?User = null,
+    /// What the container can reach. Nothing, unless granted.
+    network: Network = .none,
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.

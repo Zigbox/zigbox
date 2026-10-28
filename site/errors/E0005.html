@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">option has a missing or invalid value</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>--output needs a value, and the only values are &quot;text&quot; and &quot;json&quot;. --rootfs and --name need one too, a directory and a name. Either the value is missing (the option was last, or empty) or it is wrong.</p>
+<p>--output needs a value, and the only values are &quot;text&quot; and &quot;json&quot;. --net takes none, host or user. --rootfs and --name need one too, a directory and a name. Either the value is missing (the option was last, or empty) or it is wrong.</p>
 <p>Write --output json or --output=json. With json, every failure is written to stderr as one JSON object per line, for scripts and CI.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
