@@ -170,4 +170,5 @@ test {
     _ = @import("runtime/volume_tests.zig");
     _ = @import("state/state.zig");
     _ = @import("state_commands.zig");
+    _ = @import("state_commands_tests.zig");
 }

@@ -826,3 +826,34 @@ test "an ended container's tree survives gc, and commit still works" {
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("trees").?.integer > 0);
 }
+
+test "store gc never reads, moves or removes anything under state/" {
+    // Goal: state volumes are never collected implicitly (docs/briefs/M6-state.md). Method: a
+    // store with a dropped root next to a state directory holding a volume (files, a record,
+    // a lock), and a trash entry whose time is long past; a gc plan and its confirm with the
+    // clock moved past every expiry. Every path under state/ is there afterwards, with its bytes,
+    // and the plan counted nothing of it.
+    start();
+    const state = "/home/alice/.local/share/zbx/state";
+    const paths = [_][]const u8{
+        state,                         state ++ "/pgdata",
+        state ++ "/pgdata/data",       state ++ "/pgdata/data/base",
+        state ++ "/.trash",            state ++ "/.trash/old@1",
+        state ++ "/.trash/old@1/data",
+    };
+    var hash_storage: [80]u8 = undefined;
+    const hash = try drop_second_root(&hash_storage);
+    for (paths) |path| files.put_dir(path, 0o700);
+    files.put_file(state ++ "/pgdata/data/base/1", 0o600, "a row\n");
+    files.put_file(state ++ "/pgdata/state.zon", 0o644, ".{}\n");
+    files.put_file(state ++ "/pgdata/lock", 0o600, "");
+    files.put_file(state ++ "/.trash/old@1/data/f", 0o600, "old");
+    sim.world.now += 30 * 24 * 60 * 60;
+    files.clock += 30 * 24 * 60 * 60;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "gc", "--confirm", hash }));
+    for (paths) |path| try testing.expect(files.kind_of(path).? == .dir);
+    try testing.expectEqualStrings("a row\n", files.content_of(state ++ "/pgdata/data/base/1").?);
+    try testing.expectEqualStrings(".{}\n", files.content_of(state ++ "/pgdata/state.zon").?);
+    try testing.expectEqualStrings("old", files.content_of(state ++ "/.trash/old@1/data/f").?);
+    try testing.expect(files.kind_of(state ++ "/pgdata/lock") != null);
+}

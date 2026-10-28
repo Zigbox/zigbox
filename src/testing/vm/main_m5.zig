@@ -12,6 +12,7 @@
 //!   which were demo-m4's NET step; a published port released after each exit path; a missing
 //!   pasta caught by doctor and by run.
 //! AGENT (agent_m5.zig): the steps again, by JSON only; its findings are in docs/demos/m5.md.
+//! STATE (state_m6.zig, M6 slice 2): state volumes with postgres, until demo-m6 exists.
 //!
 //! `zig build demo-m5 -Daccel=tcg` for software emulation.
 
@@ -28,6 +29,7 @@ const upgrade = @import("upgrade_m5.zig");
 const accept_net = @import("accept_net_m5.zig");
 const agent = @import("agent_m5.zig");
 const spec = @import("spec_m5.zig");
+const state = @import("state_m6.zig");
 
 const Session = session_mod.Session;
 const H = harness;
@@ -109,6 +111,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     spec.step_spec,
     accept_net.step_accept,
     agent.run_agent,
+    state.step_state,
 };
 
 fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !void {
@@ -126,4 +129,5 @@ test {
     _ = @import("checks_upgrade_m5.zig");
     _ = @import("spec_m5.zig");
     _ = @import("upgrade_m5.zig");
+    _ = @import("state_m6.zig");
 }
