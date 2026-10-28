@@ -256,9 +256,13 @@ fn put(session: *Session, path: []const u8, text: []const u8) !void {
 const scribble_script =
     "set -e\n" ++
     "echo hi > /etc/motd\n" ++
-    "chmod -R go+w /etc /bin /lib /usr\n" ++
+    // /etc/hosts and /etc/resolv.conf are zbx's own, bound read-only (M5): they are left alone.
+    "skip='! ( -path /etc/hosts -o -path /etc/resolv.conf )'\n" ++
+    "find /etc $skip -exec chmod go+w {} \\;\n" ++
+    "chmod -R go+w /bin /lib /usr\n" ++
     "chmod 4755 /bin/busybox\n" ++
-    "chown -R 7:7 /etc /usr/share\n" ++
+    "find /etc $skip -exec chown 7:7 {} \\;\n" ++
+    "chown -R 7:7 /usr/share\n" ++
     "chown 5:5 /bin/busybox\n" ++
     "rm -rf /usr/share /lib/apk /var\n" ++
     "mkdir -p /newdir/deep\n" ++
