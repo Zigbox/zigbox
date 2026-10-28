@@ -141,7 +141,7 @@ fn kill_and_rerun(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: STATE 3: SIGKILL of postgres, the same command again, the row\n", .{
         H.demo_name,
     });
-    const kill = "kill -KILL $(" ++ pid_of("pg") ++ ") && echo killed";
+    const kill = "kill -KILL $(" ++ comptime pid_of("pg") ++ ") && echo killed";
     _ = try expect_long(session, out, kill, 0, limits.command_timeout_kvm_s);
     try expect_free(session, out, "after SIGKILL of the container");
     _ = try expect_long(session, out, start_pg, 0, 300);
