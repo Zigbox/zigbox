@@ -322,7 +322,7 @@ const LsDoc = struct {
     },
 };
 
-/// The image is its tree: the pull, `store ls` (an image record and a root) and the lock all
+/// The image is its tree: the pull, `store ls` (a record by manifest, and a root) and the lock
 /// name the same tree digest for it, and the lock also holds the manifest digest.
 pub fn check_identity(
     arena: Allocator,
@@ -334,10 +334,12 @@ pub fn check_identity(
     if (status != 0) return error.ExitCodeWrong;
     const doc = try parse_json(LsDoc, arena, ls.stdout);
     if (!std.mem.eql(u8, doc.schema, "zbx.store.ls/1")) return error.FieldWrong;
+    // The record is keyed by the image, not by the spelling: a pull by digest of the same
+    // manifest leaves one record, under the spelling of the latest pull. So it is found by its
+    // manifest, and its tree must be the pull's.
     var recorded = false;
     for (doc.images) |image| {
-        if (!std.mem.eql(u8, image.reference, pull.reference)) continue;
-        if (!std.mem.eql(u8, image.manifest, pull.manifest_digest)) return error.IdentityWrong;
+        if (!std.mem.eql(u8, image.manifest, pull.manifest_digest)) continue;
         if (!std.mem.eql(u8, image.tree, pull.tree)) return error.IdentityWrong;
         recorded = true;
     }
@@ -676,6 +678,9 @@ test "the pull, the store and the lock name an image by one tree digest" {
     const lock = ".{ .tree = \"" ++ tree_a ++ "\", .manifest = \"sha256:" ++ hex_a ++ "\" }";
     const other = "b3:" ++ hex_1;
     try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, pull, lock);
+    var alias = pull;
+    alias.reference = "python@sha256:" ++ hex_a;
+    try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, alias, lock);
     const split = only_stdout(ls_json(tree_a, other));
     try testing.expectError(error.IdentityWrong, check_identity(arena, split, 0, pull, lock));
     const rootless = only_stdout(ls_json(other, tree_a));
