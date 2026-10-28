@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const record_mod = @import("state/record.zig");
 const volume = @import("state/volume.zig");
+const mounts = @import("runtime/mounts.zig");
 
 const names = [_][]const u8{ "pgdata", "0", "a.b-c_d", "web" };
 const containers = [_][]const u8{ "pg", "zbx-1a2b3c", "a", "web-1" };
@@ -92,12 +93,40 @@ fn check_damaged(random: std.Random, text: []const u8) void {
     assert(same(&parsed, &back));
 }
 
+/// The other mounts (`runtime/mounts.zig`): random bytes read as each flag's value, and as the
+/// record's text. What a flag accepts keeps the rules everything after it asserts and has a text
+/// that reads back as the same mount; what the record's reader accepts is a mount a flag could
+/// have given, written the same way.
+fn check_mount_values(text: []const u8) void {
+    for (std.enums.values(mounts.Kind)) |kind| {
+        switch (mounts.parse(kind, text)) {
+            .ok => |mount| {
+                assert(mounts.mount_problem(&mount) == null);
+                assert(mount.kind == kind);
+                var echo: [constants.mount_value_bytes_max]u8 = undefined;
+                const back = mounts.parse_text(mounts.text(&mount, &echo)).?;
+                assert(back.kind == mount.kind);
+                assert(std.mem.eql(u8, back.source, mount.source));
+                assert(std.mem.eql(u8, back.target, mount.target));
+                assert(back.size_bytes == mount.size_bytes);
+            },
+            .problem => {},
+        }
+    }
+    if (mounts.parse_text(text)) |mount| {
+        assert(mounts.mount_problem(&mount) == null);
+        var echo: [constants.mount_value_bytes_max]u8 = undefined;
+        assert(std.mem.eql(u8, mounts.text(&mount, &echo), text)); // One spelling per mount.
+    }
+}
+
 /// Random bytes as a name, a `--state` value and a trash name: what is accepted keeps the rules.
 fn check_parsers(random: std.Random) void {
+    const alphabet = "ab0._-/:ro@19\x00\xfftmpfsbindscrt//::";
     var bytes: [80]u8 = undefined;
     const length = random.uintAtMost(usize, bytes.len);
     for (bytes[0..length]) |*byte| {
-        byte.* = "ab0._-/:ro@19\x00\xff"[random.uintLessThan(usize, 15)];
+        byte.* = alphabet[random.uintLessThan(usize, alphabet.len)];
     }
     const text = bytes[0..length];
     if (volume.name_problem(text) == null) {
@@ -115,6 +144,7 @@ fn check_parsers(random: std.Random) void {
         },
         .problem => {},
     }
+    check_mount_values(text);
     if (volume.parse_trash_name(text)) |entry| {
         var name: volume.TrashName = undefined;
         volume.trash_name_of(entry.name, entry.removed, &name);

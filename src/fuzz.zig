@@ -209,8 +209,11 @@ fn random_args(
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     // M5's network options, their good values and some that are not.
     const net_words = [_][]const u8{
-        "--net",   "user",  "host", "none", "--publish",
-        "8080:80", "80:80", "8080", "0:1",  "--net=user",
+        "--net",   "user",   "host",     "none",         "--publish",
+        "8080:80", "80:80",  "8080",     "0:1",          "--net=user",
+        // M6's other mounts and the export.
+        "--tmpfs", "--bind", "--secret", "/scratch:64m", "/srv/a:/data",
+        "-o",      "state",  "export",   "pgdata",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -328,6 +331,7 @@ fn fuzz_cli(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
     check_env_options(random);
+    check_mount_options(random);
 
     var short: [constants.args_count_max + 2][16]u8 = undefined;
     var long: [constants.arg_bytes_max + 8]u8 = undefined;
@@ -460,6 +464,120 @@ fn check_env_options(random: std.Random) void {
         assert(std.mem.eql(u8, setting.name, pick.text));
         assert((setting.value != null) == valued);
         if (setting.value) |value| assert(std.mem.eql(u8, value, env_marker ++ "=x"));
+    }
+}
+
+/// The other mounts as the command line reads them (M6 slice 3). Builds `run` lines of `--tmpfs`,
+/// `--bind`, `--secret` and `--state` options from values of every shape, and compares
+/// `cli.parse` with an oracle that states the rules on its own: the first option that is not a
+/// mount is ZBX-E0012 (or E0705/E0005 for `--state`), the first good one whose target is at, in
+/// or over an earlier target, or that is the ninth, is ZBX-E0013. When the line is accepted the
+/// mounts read back are the ones given, in order.
+const MountValue = struct {
+    flag: []const u8,
+    text: []const u8,
+    target: []const u8,
+    good: bool,
+};
+
+const mount_values = [_]MountValue{
+    .{ .flag = "--tmpfs", .text = "/scratch", .target = "/scratch", .good = true },
+    .{ .flag = "--tmpfs", .text = "/scratch:64m", .target = "/scratch", .good = true },
+    .{ .flag = "--tmpfs", .text = "/t:4096", .target = "/t", .good = true },
+    .{ .flag = "--tmpfs", .text = "/t:4095", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "/t:2t", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "relative", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "/dev/shm", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/a:/data", .target = "/data", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a:/data/sub", .target = "/data/sub", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a:/database", .target = "/database", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/../a:/x", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "a:/x", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/a:/x:ro", .target = "", .good = false },
+    .{ .flag = "--secret", .text = "/srv/k:/run/key", .target = "/run/key", .good = true },
+    .{ .flag = "--secret", .text = "/srv/k:/run", .target = "/run", .good = true },
+    .{ .flag = "--secret", .text = "/srv/k:/etc/hosts", .target = "", .good = false },
+    .{ .flag = "--secret", .text = "/srv/k:/proc", .target = "", .good = false },
+    .{ .flag = "--state", .text = "pg:/var/lib/pg", .target = "/var/lib/pg", .good = true },
+};
+
+fn mounts_meet(target: []const u8, other: []const u8) bool {
+    if (std.mem.eql(u8, target, other)) return true;
+    const short = @min(target.len, other.len);
+    if (!std.mem.eql(u8, target[0..short], other[0..short])) return false;
+    const longer = if (target.len > other.len) target else other;
+    return longer[short] == '/';
+}
+
+fn check_mount_options(random: std.Random) void {
+    const options_max = constants.mounts_max + 2;
+    var words: [constants.args_count_max][]const u8 = undefined;
+    var given: [options_max]MountValue = undefined;
+    var count: usize = 0;
+    words[count] = "run";
+    count += 1;
+    const options = random.uintAtMost(usize, options_max);
+    var first_bad: ?usize = null;
+    var bad_code: codes.Code = .E0012;
+    var targets: [options_max][]const u8 = undefined;
+    var accepted: usize = 0;
+    var mounts_given: usize = 0;
+    var state_given = false;
+    for (0..options) |index| {
+        var pick = mount_values[random.uintLessThan(usize, mount_values.len)];
+        // A volume is named once in a run; another `--state` would be another diagnostic.
+        if (std.mem.eql(u8, pick.flag, "--state") and state_given) pick = mount_values[0];
+        state_given = state_given or std.mem.eql(u8, pick.flag, "--state");
+        given[index] = pick;
+        words[count] = pick.flag;
+        words[count + 1] = pick.text;
+        count += 2;
+        if (first_bad != null) continue;
+        if (!pick.good) {
+            first_bad = index;
+            bad_code = .E0012;
+            continue;
+        }
+        const is_state = std.mem.eql(u8, pick.flag, "--state");
+        const too_many = !is_state and mounts_given == constants.mounts_max;
+        var meets = false;
+        for (targets[0..accepted]) |earlier| meets = meets or mounts_meet(pick.target, earlier);
+        if (too_many or meets) {
+            first_bad = index;
+            bad_code = .E0013;
+            continue;
+        }
+        targets[accepted] = pick.target;
+        accepted += 1;
+        if (!is_state) mounts_given += 1;
+    }
+    words[count] = "--rootfs";
+    words[count + 1] = "/srv/x";
+    words[count + 2] = "--";
+    words[count + 3] = "sh";
+    count += 4;
+
+    var invocation: cli.Invocation = undefined;
+    var diag: diag_fuzz.Diag = undefined;
+    diag.reset();
+    cli.parse(words[0..count], &invocation, &diag) catch {
+        assert(first_bad != null);
+        assert(diag.code.? == bad_code);
+        return;
+    };
+    assert(first_bad == null);
+    assert(diag.code == null);
+    assert(invocation.run.mounts_slice().len == mounts_given);
+    assert(invocation.run.state_slice().len == @intFromBool(state_given));
+    var at: usize = 0;
+    for (given[0..options]) |pick| {
+        if (std.mem.eql(u8, pick.flag, "--state")) continue;
+        const read = invocation.run.mounts_slice()[at];
+        assert(std.mem.eql(u8, read.target, pick.target));
+        assert(std.mem.eql(u8, read.kind.flag(), pick.flag));
+        at += 1;
     }
 }
 

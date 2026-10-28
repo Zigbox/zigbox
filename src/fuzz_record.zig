@@ -12,6 +12,7 @@ const codes = @import("diag/codes.zig");
 const records = @import("runtime/records.zig");
 const spec_mod = @import("runtime/spec.zig");
 const volume = @import("state/volume.zig");
+const mounts_mod = @import("runtime/mounts.zig");
 
 const text_bytes_max = constants.record_bytes_max;
 
@@ -142,6 +143,33 @@ fn random_mounts(
     return out[0..count];
 }
 
+/// Up to `mounts_max` other mounts a run could have: targets apart from each other and from the
+/// state volumes' (`random_mounts`), of every kind, with paths holding bytes the writer escapes.
+fn random_extra_mounts(
+    random: std.Random,
+    out: *[constants.mounts_max]mounts_mod.Mount,
+) []mounts_mod.Mount {
+    const targets = [_][]const u8{
+        "/m0", "/m1/x", "/m\"q", "/\xc3\xa9/m", "/m4", "/run/secrets/k", "/m6", "/m7",
+    };
+    const sources = [_][]const u8{ "/srv/a", "/s\"q\"", "/b\\c", "/caf\xc3\xa9", "/srv/d/e" };
+    const count = random.uintAtMost(usize, constants.mounts_max);
+    for (out[0..count], 0..) |*mount, index| {
+        const kind = random.enumValue(mounts_mod.Kind);
+        mount.* = .{
+            .kind = kind,
+            .source = if (kind == .tmpfs) "" else sources[random.uintLessThan(usize, sources.len)],
+            .target = targets[index],
+            .size_bytes = if (kind == .tmpfs) random.intRangeAtMost(
+                u64,
+                constants.tmpfs_mount_bytes_min,
+                constants.tmpfs_mount_bytes_max,
+            ) else 0,
+        };
+    }
+    return out[0..count];
+}
+
 fn check_round_trip(random: std.Random) void {
     var rootfs_bytes: [constants.rootfs_bytes_max]u8 = undefined;
     const rootfs = random_text(random, &rootfs_bytes);
@@ -152,6 +180,7 @@ fn check_round_trip(random: std.Random) void {
     var reach: Reach = undefined;
     random_reach(random, &reach);
     var mounts: [constants.state_volumes_max]volume.Mount = undefined;
+    var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -175,6 +204,7 @@ fn check_round_trip(random: std.Random) void {
         .publish = reach.publish[0..reach.publish_count],
         .env_names = reach.names[0..reach.names_count],
         .state = random_mounts(random, &mounts),
+        .mounts = random_extra_mounts(random, &extra),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -207,6 +237,14 @@ fn check_round_trip(random: std.Random) void {
         assert(std.mem.eql(u8, back.target, mount.target));
         assert(back.read_only == mount.read_only);
     }
+    assert(parsed.mounts_count == view.mounts.len);
+    for (view.mounts, 0..) |mount, index| {
+        const back = parsed.mount_at(@intCast(index));
+        assert(back.kind == mount.kind);
+        assert(std.mem.eql(u8, back.source, mount.source));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.size_bytes == mount.size_bytes);
+    }
     check_damaged(random, text);
 }
 
@@ -236,6 +274,10 @@ fn rerender(parsed: *const records.Parsed) void {
     for (mounts[0..parsed.state_count], 0..) |*mount, index| {
         mount.* = parsed.state_mount(@intCast(index));
     }
+    var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
+    for (extra[0..parsed.mounts_count], 0..) |*mount, index| {
+        mount.* = parsed.mount_at(@intCast(index));
+    }
     var words: [constants.run_env_count_max][]const u8 = undefined;
     for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
     const view: records.View = .{
@@ -253,11 +295,13 @@ fn rerender(parsed: *const records.Parsed) void {
         .publish = if (parsed.network != null) parsed.publish_slice() else &.{},
         .env_names = words[0..parsed.env_names_count],
         .state = mounts[0..parsed.state_count],
+        .mounts = extra[0..parsed.mounts_count],
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
     records.parse(records.render(&view, &buffer), &again) catch unreachable; // Written: reads.
     assert(again.state_count == parsed.state_count);
+    assert(again.mounts_count == parsed.mounts_count);
 }
 
 /// What `render` asserts about M6's fields, which `parse` must have refused to break.

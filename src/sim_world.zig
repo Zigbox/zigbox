@@ -873,8 +873,27 @@ pub const World = struct {
     fn reap(world: *World, process: *Process) void {
         assert(process.state == .zombie);
         process.state = .reaped;
+        world.drop_tmpfs_files(process);
         world.drop_proc_files(process.pid);
         world.scope_lost_process(process.pid);
+    }
+
+    /// A tmpfs is memory: what the container's processes wrote on the /dev they mounted goes with
+    /// them (a secret's copy staged there included).
+    fn drop_tmpfs_files(world: *World, process: *const Process) void {
+        if (process.table == 0) return; // The host's own tmpfs outlives the process.
+        const table = &world.tables[process.table];
+        var index = world.written_count;
+        while (index > 0) {
+            index -= 1;
+            for (table.slice()) |*entry| {
+                const kind = entry.kind orelse continue;
+                if (kind != .dev_tmpfs and kind != .shm_tmpfs) continue;
+                if (!world.written[index].path.under(entry.target.slice())) continue;
+                world.drop_written(index);
+                break;
+            }
+        }
     }
 
     /// A scope the manager has finished with leaves it, and its cgroup directory goes with it.

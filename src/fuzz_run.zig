@@ -116,6 +116,15 @@ const EnvChoice = enum {
 const marker_given = "zbx-fuzz-secret-5d1";
 const marker_copied = "zbx-fuzz-copied-8e2";
 
+/// The words a command line of the fuzzer can have.
+const args_max = 48;
+
+/// The other mounts of the run (M6 slice 3): none, a tmpfs, two binds and a secret that all
+/// exist, or a bind of a path that is not there.
+const MountsChoice = enum { none, all, missing };
+
+const marker_key = sim_run.secret_marker;
+
 /// What goes wrong when the scope that stays is stopped.
 const StopFault = enum { none, refused, canceled, stays };
 
@@ -245,6 +254,7 @@ const Scenario = struct {
     /// `--publish` alone.
     net: NetChoice,
     env: EnvChoice,
+    mounts: MountsChoice,
 
     /// Whether the probe finds a bus: the run then has a scope and the plan a step for it. A
     /// stale inherited address is not permission trouble, so nothing falls back from it.
@@ -325,7 +335,7 @@ fn random_scenario(random: std.Random) Scenario {
     else
         .{ .signaled = random.intRangeAtMost(u8, 1, 31) };
     const faulted = random.uintLessThan(u8, 4) != 0;
-    scenario.fault_step = if (faulted) random.uintLessThan(u32, 56) else null;
+    scenario.fault_step = if (faulted) random.uintLessThan(u32, 100) else null;
     scenario.fault_errno = errnos[random.uintLessThan(usize, errnos.len)];
     scenario.devpts_refused = random.uintLessThan(u8, 4) == 0;
     scenario.interrupts_per_mille = if (random.boolean()) 0 else random.uintLessThan(u16, 200);
@@ -385,6 +395,11 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.net = random.enumValue(NetChoice);
     scenario.env = if (random.boolean()) .none else random.enumValue(EnvChoice);
+    scenario.mounts = switch (random.uintLessThan(u8, 6)) {
+        0, 1 => .all,
+        2 => .missing,
+        else => .none,
+    };
     // A fifth of the good roots are trees of the store. The name is then a valid one: the
     // container's directory is made under it.
     scenario.image = scenario.rootfs == .good and scenario.name != .invalid and
@@ -418,14 +433,22 @@ fn exit_for(code: codes.Code, command_missing: bool) u8 {
     return if (command_missing) 127 else 126;
 }
 
+const sample_mounts = [_]plan_mod.MountInput{
+    .{ .shape = .tmpfs, .source = "", .target = "/scratch", .size_bytes = 8 << 20 },
+    .{ .shape = .bind_dir, .source = sim_run.mount_dir_path, .target = "/data", .size_bytes = 0 },
+    .{ .shape = .bind_file, .source = sim_run.mount_file_path, .target = "/etc/note", .size_bytes = 0 },
+    .{ .shape = .secret, .source = sim_run.secret_path, .target = "/run/key", .size_bytes = 0 },
+};
+
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
-    sim_run.sample_plan_image(
+    sim_run.sample_plan_mounts(
         plan,
         scenario.full,
         scenario.scoped(),
         scenario.read_only,
         scenario.image,
         scenario.net.network(),
+        if (scenario.mounts == .all) &sample_mounts else &.{},
     );
 }
 
@@ -493,6 +516,8 @@ fn verdict_of(scenario: *const Scenario) Verdict {
     if (scenario.limit_invalid()) return early_refusal(.E0306);
     if (scenario.name == .invalid) return early_refusal(.E0206);
     if (scenario.rootfs != .good) return early_refusal(.E0201);
+    // A bind of a path that is not there is refused before the ids are looked at.
+    if (scenario.mounts == .missing) return early_refusal(.E0210);
     // The ids come next (and their warning), then the scope: a limit with no bus is refused.
     if (!scenario.scoped() and scenario.has_limit()) {
         var verdict = refusal(.E0307, null, false);
@@ -606,6 +631,7 @@ fn fault_at(scenario: *const Scenario) ?Fault {
 
 /// The code a fault in a step of `kind` gives, or null if the run goes on past it.
 fn step_failure(scenario: *const Scenario, kind: plan_mod.Kind) ?codes.Code {
+    if (plan_mod.is_mount(kind)) return .E0211;
     switch (kind) {
         .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => return .E0203,
         .run_newuidmap, .run_newgidmap => return .E0204,
@@ -862,10 +888,11 @@ pub fn fuzz_run(seed: u64) void {
     set_bus(&sim, &scenario);
     preload(&sim, &scenario);
     if (scenario.image) prepare_image(&sim, &scenario);
+    sim_run.add_mount_sources(&sim);
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
 
-    var args: [36][:0]const u8 = undefined;
+    var args: [args_max][:0]const u8 = undefined;
     const count = command_line(&scenario, &args);
     const code = sim_run.run_cli(&sim, args[0..count]);
 
@@ -916,7 +943,7 @@ const Environment = struct {
 };
 
 /// The command line of the scenario, after the program name; returns how many words.
-fn command_line(scenario: *const Scenario, args: *[36][:0]const u8) usize {
+fn command_line(scenario: *const Scenario, args: *[args_max][:0]const u8) usize {
     var words_storage: [3][:0]const u8 = undefined;
     const words = command_words(scenario, &words_storage);
     var count: usize = 0;
@@ -936,6 +963,7 @@ fn command_line(scenario: *const Scenario, args: *[36][:0]const u8) usize {
         .publish => push_pair(args, &count, "--publish", "8080:80"),
     }
     push_env(args, &count, scenario.env);
+    push_mounts(args, &count, scenario.mounts);
     push_limit(args, &count, "--memory", scenario.memory);
     push_limit(args, &count, "--pids", scenario.pids);
     push_limit(args, &count, "--cpus", scenario.cpus);
@@ -956,7 +984,20 @@ fn command_line(scenario: *const Scenario, args: *[36][:0]const u8) usize {
     return count;
 }
 
-fn push_env(args: *[36][:0]const u8, count: *usize, choice: EnvChoice) void {
+fn push_mounts(args: *[args_max][:0]const u8, count: *usize, choice: MountsChoice) void {
+    switch (choice) {
+        .none => {},
+        .all => {
+            push_pair(args, count, "--tmpfs", "/scratch:8m");
+            push_pair(args, count, "--bind", sim_run.mount_dir_path ++ ":/data");
+            push_pair(args, count, "--bind", sim_run.mount_file_path ++ ":/etc/note");
+            push_pair(args, count, "--secret", sim_run.secret_path ++ ":/run/key");
+        },
+        .missing => push_pair(args, count, "--bind", "/srv/missing:/data"),
+    }
+}
+
+fn push_env(args: *[args_max][:0]const u8, count: *usize, choice: EnvChoice) void {
     switch (choice) {
         .none => {},
         .given => push_pair(args, count, "-e", "SECRET_ONE=" ++ marker_given),
@@ -972,7 +1013,7 @@ fn push_env(args: *[36][:0]const u8, count: *usize, choice: EnvChoice) void {
     }
 }
 
-fn push_limit(args: *[36][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
+fn push_limit(args: *[args_max][:0]const u8, count: *usize, flag: [:0]const u8, item: ?LimitText) void {
     const given = item orelse return;
     push(args, count, flag);
     push(args, count, given.text);
@@ -1033,12 +1074,12 @@ fn set_bus(sim: *HostSim, scenario: *const Scenario) void {
     }
 }
 
-fn push(args: *[36][:0]const u8, count: *usize, item: [:0]const u8) void {
+fn push(args: *[args_max][:0]const u8, count: *usize, item: [:0]const u8) void {
     args[count.*] = item;
     count.* += 1;
 }
 
-fn push_pair(args: *[36][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
+fn push_pair(args: *[args_max][:0]const u8, count: *usize, name: [:0]const u8, value: [:0]const u8) void {
     push(args, count, name);
     push(args, count, value);
 }
@@ -1078,7 +1119,7 @@ fn check(
 /// the logs, the pasta log). A command that started got exactly the variables: the defaults,
 /// then the image's (none here), then these, with `-e TERM` replacing the default TERM.
 fn check_env(sim: *const HostSim, scenario: *const Scenario, verdict: *const Verdict) void {
-    for ([_][]const u8{ marker_given, marker_copied }) |marker| {
+    for ([_][]const u8{ marker_given, marker_copied, marker_key }) |marker| {
         assert(std.mem.indexOf(u8, sim.stderr(), marker) == null);
         assert(std.mem.indexOf(u8, sim.stdout(), marker) == null);
         for (sim.world.written[0..sim.world.written_count]) |*file| {

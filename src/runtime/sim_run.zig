@@ -21,6 +21,17 @@ const HostSim = host_sim.HostSim;
 
 pub const rootfs_path = "/srv/alpine";
 pub const regular_file_path = "/srv/file";
+pub const mount_dir_path = "/srv/data";
+pub const mount_file_path = "/srv/note";
+pub const secret_path = "/srv/key";
+pub const secret_marker = "secret-marker-THETA-91";
+
+/// The container model's view of the host paths above, which the child binds from.
+pub fn add_mount_sources(sim: *HostSim) void {
+    sim.world.add_node(mount_dir_path, .dir);
+    sim.world.add_node(mount_file_path, .file);
+    sim.world.add_node(secret_path, .file);
+}
 
 pub const home_path = "/home/alice";
 pub const runs_path = "/home/alice/.local/state/zbx/runs";
@@ -49,6 +60,11 @@ const common_files = [_]host_sim.File{
     // pasta, for `--net user` (the simulator's pasta is `sim_world.World.start_program`), and
     // the lowest port a user may bind, as Ubuntu 24.04 has it.
     .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
+    // What `--bind` and `--secret` of the tests and the fuzzers mount (M6): a directory, a file
+    // and a file with a marker in it that must reach nothing but the container.
+    .{ .path = mount_dir_path, .content = "", .mode = 0o040755 },
+    .{ .path = mount_file_path, .content = "a note\n", .mode = 0o100644 },
+    .{ .path = secret_path, .content = secret_marker ++ "\n", .mode = 0o100600 },
     .{ .path = "/proc/sys/net/ipv4/ip_unprivileged_port_start", .content = "1024\n" },
 };
 
@@ -145,6 +161,19 @@ pub fn sample_plan_image(
     image: bool,
     network: spec_mod.Network,
 ) void {
+    sample_plan_mounts(plan, full, scoped, read_only, image, network, &.{});
+}
+
+/// Like `sample_plan_image`, with other mounts.
+pub fn sample_plan_mounts(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -162,6 +191,7 @@ pub fn sample_plan_image(
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
         .read_only = read_only,
         .network = network,
+        .mounts = mounts,
         .pasta = if (network == .user) .{
             .path = "/usr/bin/pasta",
             .log = logs_path ++ "/oracle.pasta.log",

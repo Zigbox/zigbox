@@ -16,22 +16,16 @@ const MountKind = @import("../host.zig").MountKind;
 const testing = std.testing;
 
 const rootfs = sim_run.rootfs_path;
-const secret_marker = "secret-marker-THETA-91";
+const secret_marker = sim_run.secret_marker;
 
-/// A host that has a directory, a file and a secret to mount.
+/// A host that has a directory, a file and a secret to mount, and a socket it cannot.
 const host_files = sim_run.files ++ [_]host_sim.File{
-    .{ .path = "/srv/data", .content = "", .mode = 0o040755 },
-    .{ .path = "/srv/note", .content = "a note\n", .mode = 0o100644 },
-    .{ .path = "/srv/key", .content = secret_marker ++ "\n", .mode = 0o100600 },
     .{ .path = "/srv/socket", .content = "", .mode = 0o140755 },
 };
 
 fn setup(sim: *HostSim, seed: u64) void {
     sim_run.start(sim, seed, &host_files);
-    // The container's model of the host's tree, which the child binds from.
-    sim.world.add_node("/srv/data", .dir);
-    sim.world.add_node("/srv/note", .file);
-    sim.world.add_node("/srv/key", .file);
+    sim_run.add_mount_sources(sim); // The container's model of the host's tree.
 }
 
 fn run(sim: *HostSim, words: []const [:0]const u8) u8 {

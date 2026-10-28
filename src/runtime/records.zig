@@ -1767,3 +1767,84 @@ test "version 6 keeps the state volumes; versions 4 and 5, as written, read with
     try testing.expectEqual(@as(u32, 4), parsed.version);
     try testing.expectEqual(@as(u8, 0), parsed.state_count);
 }
+
+/// The record version 6 (slice 2 of M6) wrote for a run with a state volume: the renderer then
+/// differed from this one in the version number and in having no `.mounts` line.
+const record_written_by_m6_slice_2 =
+    \\.{
+    \\    .version = 6,
+    \\    .name = "pg",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh" },
+    \\    .labels = .{},
+    \\    .started = 1700000000,
+    \\    .ended = null,
+    \\    .exit = .running,
+    \\    .ids = .full,
+    \\    .reason = .none,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "",
+    \\    .upper = "",
+    \\    .network = .none,
+    \\    .publish = .{ },
+    \\    .env_names = "",
+    \\    .state = "pgdata:/var/lib/postgresql/data",
+    \\    .zbx = "0.6.0",
+    \\}
+    \\
+;
+
+test "version 7 keeps the other mounts; a version 6 record reads with none" {
+    // Goal: the field this version adds round-trips as one string (the secret's path is in it,
+    // never its bytes), a list a run could not have is refused, and the record of the release
+    // before reads. Method: render, parse; edits of the field; then the version 6 text.
+    var view: View = sample_view();
+    const state = [_]volume.Mount{.{ .name = "pg", .target = "/data", .read_only = false }};
+    const extra = [_]mounts_mod.Mount{
+        .{ .kind = .tmpfs, .source = "", .target = "/scratch", .size_bytes = 8 << 20 },
+        .{ .kind = .bind, .source = "/srv/site", .target = "/site", .size_bytes = 0 },
+        .{ .kind = .secret, .source = "/run/key", .target = "/run/secrets/key", .size_bytes = 0 },
+    };
+    view.state = &state;
+    view.mounts = &extra;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    const line = "    .mounts = \"tmpfs:/scratch:8388608 bind:/srv/site:/site " ++
+        "secret:/run/key:/run/secrets/key\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, line) != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(u8, 3), parsed.mounts_count);
+    try testing.expectEqual(mounts_mod.Kind.secret, parsed.mount_at(2).kind);
+    try testing.expectEqualStrings("/run/key", parsed.mount_at(2).source);
+    try testing.expectEqual(@as(u64, 8 << 20), parsed.mount_at(0).size_bytes);
+    const bad = [_][]const u8{
+        "    .mounts = \"tmpfs:/scratch\",\n",
+        "    .mounts = \"tmpfs:/scratch:100\",\n",
+        "    .mounts = \"bind:/a:/b bind:/c:/b\",\n",
+        "    .mounts = \"bind:/a:/b/c tmpfs:/b:4096\",\n",
+        "    .mounts = \"bind:/a:/data\",\n",
+        "    .mounts = \"bind:/a:/b  bind:/c:/d\",\n",
+        "    .mounts = \"other:/a:/b\",\n",
+        "    .mounts = \"bind:/a:/b:/c\",\n",
+        "    .mounts = \"tmpfs:/a:4096 tmpfs:/b:4096 tmpfs:/c:4096 tmpfs:/d:4096 tmpfs:/e:4096 " ++
+            "tmpfs:/f:4096 tmpfs:/g:4096 tmpfs:/h:4096 tmpfs:/i:4096\",\n",
+    };
+    for (bad) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, line, edit);
+        _ = std.mem.replace(u8, text, line, edit, &edited);
+        try testing.expectError(error.Malformed, parse(edited[0..size], &parsed));
+    }
+    try parse(record_written_by_m6_slice_2, &parsed);
+    try testing.expectEqual(@as(u32, 6), parsed.version);
+    try testing.expectEqual(@as(u8, 0), parsed.mounts_count);
+    try testing.expectEqual(@as(u8, 1), parsed.state_count);
+}
