@@ -204,9 +204,9 @@ fn read_run_records(session: *Session, out: *Io.Writer) !void {
 /// postgres with a new `--state` volume, on M5's store.
 fn postgres_state(session: *Session, out: *Io.Writer) !void {
     _ = try state.expect_long(session, out, start_pg, 0, 300);
-    const ready = state.pg_ready_on(port);
+    const ready = comptime state.pg_ready_on(port);
     try state.wait_ready_on(session, out, ready);
-    const write = state.psql_on(port) ++ "-c \"create table t (v text)\" -c " ++
+    const write = comptime state.psql_on(port) ++ "-c \"create table t (v text)\" -c " ++
         "\"insert into t values ('from-m5-store')\"";
     const wrote = try state.expect_long_split(session, out, write, 0, limits.command_timeout_kvm_s);
     checks_spec.check_write(wrote.streams.stdout, wrote.status) catch |err| {
