@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-26 (doc rev 54; doc date 2026-10-27), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 59), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -133,7 +133,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 1. `zbx pull alpine:3.20` prints the resolved digest.
 2. `zbx run alpine:3.20 -- cat /etc/os-release`.
-3. `zbx pull python:3.12-slim` then `zbx pull python:3.13-slim`. `zbx store du --by-image` shows the second costs far less than its compressed size, because shared files are stored once.
+3. `zbx pull python:3.12-slim` then `zbx pull python:3.13-slim`. `zbx store du --by-image` shows the second costs the store less than its compressed size, because most of its stored bytes are files it shares with the first, and those are stored once.
 4. `zbx run python:3.12-slim -- python -c 'print(2**100)'`.
 5. Change the tag in `zbx.lock` to a wrong digest: `zbx run` refuses, naming the expected and actual digests.
 
@@ -167,7 +167,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** a container has no network unless granted, and a granted service is reachable from the host.
 
-**Scope:** `--net none` as the default (loopback only); `--net host`; rootless user-mode networking via `pasta` (from the passt project) for `--publish HOST:CONTAINER`; a generated `/etc/resolv.conf` and `/etc/hosts`. Deferred: container-to-container networks and egress allowlists (see stretch goals).
+**Scope:** `--net none` as the default (loopback only); `--net host`; rootless user-mode networking via `pasta` (from the passt project) for `--publish HOST:CONTAINER`; a generated `/etc/resolv.conf` and `/etc/hosts`. Publishing a port implies user-mode networking. A run on the default network that fails gets a one-line hint naming the grant. M5 also closes M4's agent-interface gaps: a JSON form of explain, a read-only view of the lockfile, and a run result that names what ran. Deferred: container-to-container networks and egress allowlists (see stretch goals).
 
 **Demo script:**
 
@@ -470,7 +470,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 **Goal:** services find each other by name, talk over authenticated encrypted links, and only along declared grants.
 
-**Scope:** WireGuard tunnels between nodes; cluster DNS for service names; per-workload identity issued by the control plane and bound to service name plus image digest; mutual TLS between workloads (or WireGuard-level identity, decided at C4 start); grants such as `web → db:5432` compiled into per-node rules. Default deny.
+**Scope:** WireGuard tunnels between nodes; cluster DNS for service names; per-workload identity issued by the control plane and bound to service name, image digest and placement epoch (the epoch is carried in every identity from C4 and enforced for stateful services from C7, so C7 needs no change to the identity format); mutual TLS between workloads (or WireGuard-level identity, decided at C4 start); grants such as `web → db:5432` compiled into per-node rules. Default deny.
 
 **Demo script:**
 
@@ -483,6 +483,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 - [ ] Grants change within seconds, cluster-wide, without restarts.
 - [ ] A workload's identity changes when its digest changes, so a grant can be scoped to signed versions.
+- [ ] Every identity carries the placement epoch of the replica it was issued to; grants ignore it until C7 enforces it for stateful services.
 
 #### C5 · Edge: public HTTPS
 
@@ -535,7 +536,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 **Acceptance criteria:**
 
-- [ ] A stateful replica never runs on two nodes at once (fencing via leases, verified by test).
+- [ ] A stateful replica never runs on two nodes at once (an expired lease alone never moves it: a move needs a fencing proof, which is the node confirming, an external fence succeeding, or an operator asserting the node is dead; snapshot writes and peer identities check the placement epoch; verified by test).
 - [ ] Snapshot restore is tested in CI from a cold cluster.
 
 #### C8 · Jobs: batch work and cluster builds
@@ -577,7 +578,7 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 | Risk | Where it bites | Mitigation |
 | --- | --- | --- |
 | Control-plane store choice limits scale or watch performance | C0 onward | Hide it behind a narrow storage interface; benchmark watch fan-out at C1 |
-| Split-brain runs a replica twice | C1, C7 | Lease-based fencing; agents stop work when their lease expires; partition tests in CI |
+| Split-brain runs a replica twice | C1, C7 | Lease-based fencing; agents stop work before their lease can expire; stateful moves need a fencing proof and epoch-checked writes; partition tests in CI |
 | Peer chunk fetch adds latency or load on busy nodes | C2 | Bandwidth caps per node; registry fallback after a timeout |
 | Identity and mTLS design is easy to get subtly wrong | C4, C6 | Reuse proven libraries and an existing identity format such as SPIFFE IDs; external review before C6 |
 | Demo cluster on one host hides real network behaviour | C1 to C5 | Add a netem-based latency and packet-loss profile to the demo VMs |
