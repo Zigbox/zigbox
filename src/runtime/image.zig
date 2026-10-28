@@ -393,8 +393,51 @@ fn make_container(store: *Store, job: *Job, diag: *Diag) Error!void {
             return error.Failed;
         };
     }
+    try give_net_layer_the_etc(store, job, diag);
     if (prepared.read_only) return;
     try give_upper_the_root(store, job, diag);
+}
+
+/// The net layer is the top lower layer, so its `etc` shows through for the container's /etc:
+/// it says what the tree's /etc says (mode, owner, time), or 0755 and root if the tree has none.
+fn give_net_layer_the_etc(store: *Store, job: *Job, diag: *Diag) Error!void {
+    const prepared = job.prepared;
+    const fs = store.fs;
+    var etc_buffer: [constants.state_path_bytes_max + 8:0]u8 = undefined;
+    const etc = std.fmt.bufPrintSentinel(&etc_buffer, "{s}/etc", .{prepared.net.text()}, 0) catch {
+        diagnose.overlay_path(diag, prepared.net.text(), 0);
+        return error.Failed;
+    };
+    var tree_buffer: [constants.store_path_bytes_max + 8:0]u8 = undefined;
+    const tree_etc = std.fmt.bufPrintSentinel(&tree_buffer, "{s}/etc", .{prepared.lower.text()}, 0) catch {
+        diagnose.overlay_path(diag, prepared.lower.text(), 0);
+        return error.Failed;
+    };
+    var attributes: @import("../store/fs.zig").PathAttributes = .{
+        .mode = 0o755,
+        .uid = 0,
+        .gid = 0,
+        .mtime = constants.store_mtime_seconds,
+    };
+    if (fs.lstat(tree_etc)) |found| {
+        if (found.kind == .dir) {
+            attributes = .{
+                .mode = found.mode,
+                .uid = found.uid,
+                .gid = found.gid,
+                .mtime = found.mtime,
+            };
+        }
+    } else |_| {} // No /etc in the tree (or none readable): the default stands.
+    const operation = "making the net layer's etc";
+    fs.make_directory(etc, false) catch |err| {
+        diagnose.write_failed(diag, store, operation, err, fs.last_errno());
+        return error.Failed;
+    };
+    fs.set_path_attributes(etc, attributes) catch |err| {
+        diagnose.write_failed(diag, store, operation, err, fs.last_errno());
+        return error.Failed;
+    };
 }
 
 /// The upper layer's root says what the tree's root says: the overlay shows the upper's.

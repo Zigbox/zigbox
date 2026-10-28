@@ -1163,7 +1163,10 @@ fn check_started_output(
     }
     // The hint: a failed run that was not given --net, once, last.
     const hints = std.mem.count(u8, stderr, "zbx: network: none (grant with --net)\n");
-    const failed = final_code(scenario, status) != 0;
+    // Only the container's own non-zero exit; a signal, an OOM or a pid limit has its own line.
+    const own_exit = status == .exited and !scenario.counts_as_oom() and
+        !scenario.counts_as_pid_limit();
+    const failed = own_exit and final_code(scenario, status) != 0;
     assert(hints == @intFromBool(failed and scenario.net == .default));
     if (hints == 1) assert(std.mem.endsWith(u8, stderr, "(grant with --net)\n"));
     const skipped = std.mem.count(u8, stderr, "zbx: note: skipped");

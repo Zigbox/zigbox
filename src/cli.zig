@@ -2017,24 +2017,29 @@ fn report_outcome(
             // Cannot fail: a short line into a buffer that holds a message.
             writer.print(format, .{handle.wait_options.timeout_ms}) catch unreachable;
         }
-        write_network_hint(&writer, handle.network, network_given, reason.code().?);
+        write_network_hint(&writer, handle.network, network_given, reason);
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
 }
 
 /// The one line a failed run without `--net` gets after the container's own output: the network
-/// was none, and here is the flag. A note, not a diagnostic: the exit code is the container's.
+/// was none, and here is the flag. Only after the container's own exit with a code. A note, not a diagnostic: the exit code is the container's.
 /// Never for an explicit `--net none`.
 fn write_network_hint(
     writer: *std.Io.Writer,
     network: runtime_spec.Network,
     network_given: bool,
-    code: u8,
+    reason: *const runtime.ExitReason,
 ) void {
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
     if (network_given) return;
     if (network != .none) return;
+    // Only the container's own non-zero exit: a signal, a timeout or a limit has its own line.
+    const code = switch (reason.*) {
+        .exited => |value| value,
+        else => return,
+    };
     if (code == constants.exit_ok) return;
     // Cannot fail: a short line into a buffer that holds a message.
     writer.writeAll("zbx: network: none (grant with --net)\n") catch unreachable;

@@ -121,11 +121,11 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
                 }
             },
             .signaled => |number| {
-                try testing.expectEqual(@as(usize, 2), std.mem.count(u8, sim.stderr(), "\n"));
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
                 var expected: [160]u8 = undefined;
                 const name = std.enums.tagName(std.os.linux.SIG, @fromBackingInt(number)).?;
                 const note = try std.fmt.bufPrint(&expected, "zbx: the container was killed by " ++
-                    "signal {d} (SIG{s})\n" ++ hint, .{ number, name });
+                    "signal {d} (SIG{s})\n", .{ number, name });
                 try testing.expectEqualStrings(note, sim.stderr());
             },
         }

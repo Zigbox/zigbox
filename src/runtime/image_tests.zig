@@ -165,6 +165,36 @@ test "a run by digest materializes the tree, makes the container's layers and mo
     try testing.expectEqual(@as(u32, 0), sim.open_count());
 }
 
+test "the net layer's etc says what the tree's etc says" {
+    // Goal: the net layer is the top lower layer, so its etc shows through for /etc. Method:
+    // a tree whose /etc is 0750 and owned by 5:6; after the run's preparation the layer's etc
+    // has that mode and owner and the tree's time.
+    const known = try setup(1);
+    _ = known;
+    files.set_mode_of("/src/etc", 0o750);
+    files.set_owner_of("/src/etc", 5, 6);
+    var result: import.Result = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    try import.import(
+        &store,
+        &import_ws,
+        "/src",
+        .{ .squash_owner = false, .warn = null },
+        &result,
+        &diag,
+    );
+    world_dirs("img-etc");
+    const text = result.digest.text();
+    const spec = spec_for(text[3..15], "img-etc", false);
+    try start(&spec, &handle, &diag);
+    const layer = files.stat_of(state ++ "/img-etc/net/etc").?;
+    try testing.expectEqual(@as(u16, 0o750), layer.mode);
+    try testing.expectEqual(@as(u32, 5), layer.uid);
+    try testing.expectEqual(@as(u32, 6), layer.gid);
+    _ = lib.wait(&handle);
+}
+
 test "a read-only run has no upper layer and no work directory" {
     // Goal: `--read-only` with a digest is an overlay without an upper. Method: the container's
     // directory has merged and empty only, and the record has no upper.
