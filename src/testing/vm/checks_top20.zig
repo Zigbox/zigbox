@@ -56,7 +56,8 @@ pub fn command_started(status: u8) bool {
 /// A server that is still up when the timeout stops it has run, unless its probe was asked and
 /// got no answer: up but not serving is not a pass.
 pub fn judge(observed: Observed, known: []const u8) Verdict {
-    if (!observed.pulled) return if (known.len > 0) .known else .fail;
+    // A reason explains a run that fails; it never excuses a pull that did.
+    if (!observed.pulled) return .fail;
     const up = observed.status == 0 or stopped_by_timeout(observed.stderr);
     if (up and observed.probe != .failed) return .pass;
     return if (known.len > 0) .known else .fail;
@@ -190,6 +191,7 @@ test "a run passes on exit 0 or on the harness's own timeout, and on nothing els
     try testing.expectEqual(Verdict.pass, judge(ok, "needs a password"));
     const unpulled: Observed = .{ .pulled = false, .status = 0, .stderr = "error[ZBX-E0505]" };
     try testing.expectEqual(Verdict.fail, judge(unpulled, ""));
+    try testing.expectEqual(Verdict.fail, judge(unpulled, "needs a password"));
 }
 
 test "a server that is up but does not answer its probe does not pass" {
