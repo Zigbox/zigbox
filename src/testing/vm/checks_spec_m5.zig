@@ -22,18 +22,32 @@ pub fn check_example_page(streams: Streams, status: u8) Error!void {
     if (contains(streams.stderr, "grant with --net")) return error.HintWrong;
 }
 
-/// Spec step 4, `ss -tlnp` run as the demo user: a listener on `port` that is pasta's. A user
-/// sees the process of a socket only if it owns it (`ss` leaves the `users:` column empty for
-/// another user's sockets), so a `users:(("pasta` on the line shows the socket is the demo
-/// user's. The peer address column ("0.0.0.0:*") never ends in ":PORT ".
-pub fn check_listener_as_user(text: []const u8, port: u16) Error!void {
+/// Spec step 4, `ss -tlnp` run as the demo user: a socket listens on `port`. The process column
+/// stays empty even though the socket is the demo user's: pasta drops its privileges and makes
+/// itself undumpable once it is ready, so its `/proc/PID/fd` is closed to the user (the root
+/// listing, `checks_m5.check_listener`, does name it). The peer address column ("0.0.0.0:*")
+/// never ends in ":PORT ".
+pub fn check_listener_listed(text: []const u8, port: u16) Error!void {
+    var needle: [16]u8 = undefined;
+    const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
+        if (contains(line, local)) return;
+    }
+    return error.ListenerWrong;
+}
+
+/// The same with `-e`, as the demo user: the listener on `port` is owned by uid 1000. The owner
+/// comes from the socket, so it shows without the process.
+pub fn check_listener_owned(text: []const u8, port: u16) Error!void {
     var needle: [16]u8 = undefined;
     const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
         if (!contains(line, local)) continue;
-        if (contains(line, "users:((\"pasta")) return;
+        if (contains(line, " uid:1000 ")) return;
     }
     return error.ListenerWrong;
 }
@@ -108,19 +122,24 @@ test "example.com's page came through --net user" {
     try testing.expectError(error.HintWrong, check_example_page(noted, 0));
 }
 
-test "the listener ss shows the demo user is pasta's" {
-    // Goal: spec step 4's `ss -tlnp` as the demo user. Method: the line the guest printed (run
-    // 40738142463, with the `-e` columns taken off); another program; no process shown (a
-    // listener of another user); the port free; a port that is a prefix.
-    const pasta = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    " ++
-        "users:((\"pasta.avx2\",pid=2286,fd=6))\n";
-    try check_listener_as_user("State Recv-Q Send-Q Local Address:Port\n" ++ pasta, 8080);
-    const other = "LISTEN 0 5 0.0.0.0:8080 0.0.0.0:* users:((\"python3\",pid=9,fd=3))\n";
-    try testing.expectError(error.ListenerWrong, check_listener_as_user(other, 8080));
-    const hidden = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*\n";
-    try testing.expectError(error.ListenerWrong, check_listener_as_user(hidden, 8080));
-    try testing.expectError(error.ListenerWrong, check_listener_as_user("", 8080));
-    try testing.expectError(error.ListenerWrong, check_listener_as_user(pasta, 808));
+test "the listener ss shows the demo user is on the port, and owns it" {
+    // Goal: spec step 4's `ss` as the demo user. Method: the line the guest printed in run
+    // 40746904215 (no process column); the same with the -e columns of run 40738142463; a
+    // listener of another uid; the port free; a port that is a prefix.
+    const listed = "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\n" ++
+        "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*          \n" ++
+        "LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*          \n";
+    try check_listener_listed(listed, 8080);
+    try testing.expectError(error.ListenerWrong, check_listener_listed(listed, 808));
+    try testing.expectError(error.ListenerWrong, check_listener_listed(listed, 9090));
+    try testing.expectError(error.ListenerWrong, check_listener_listed("", 8080));
+    const owned = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    " ++
+        "uid:1000 ino:16798 sk:1001 cgroup:/user.slice/user-0.slice/session-2.scope <->\n";
+    try check_listener_owned(owned, 8080);
+    try testing.expectError(error.ListenerWrong, check_listener_owned(listed, 8080));
+    try testing.expectError(error.ListenerWrong, check_listener_owned(owned, 808));
+    const root = "LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* uid:0 ino:1 sk:2 <->\n";
+    try testing.expectError(error.ListenerWrong, check_listener_owned(root, 8080));
 }
 
 test "the rules that were read are rules" {

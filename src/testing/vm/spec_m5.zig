@@ -6,8 +6,10 @@
 //!   2. `zbx run --net user alpine -- wget -qO- https://example.com` prints the page.
 //!   3. `zbx run --publish 8080:80 nginx`, in the background (`-d`), and `curl localhost:8080`
 //!      on the guest returns the nginx welcome page.
-//!   4. `ss -tlnp` as the demo user shows the listener, which is the demo user's; `iptables -S`
-//!      as root is the same before step 1 and after step 3.
+//!   4. `ss -tlnp` as the demo user shows the listener on 8080 and `ss -tlnpe` that its owner is
+//!      the demo user (the process column is empty for the user: pasta is undumpable), and
+//!      as root `ss -tlnpe` names pasta; `iptables -S` as root is the same before step 1 and
+//!      after step 3.
 //!
 //! The image names are the spec's: `alpine` and `nginx`, which are `alpine:latest` and
 //! `nginx:latest`. A name needs an entry in `zbx.lock` (a run without one is ZBX-E0522), so
@@ -98,10 +100,17 @@ fn step_four(session: *Session, out: *Io.Writer) !void {
     });
     const listing = try session.run(H.as_demo ++ "ss -tlnp", limits.command_timeout_kvm_s);
     try H.show(out, "ss -tlnp, as the demo user", listing);
-    checks_spec.check_listener_as_user(listing.output, port) catch |err| {
-        return fail_step(out, "SPEC 4", "expected the demo user's pasta on 8080", err);
+    checks_spec.check_listener_listed(listing.output, port) catch |err| {
+        return fail_step(out, "SPEC 4", "expected a listener on 8080", err);
     };
-    // The same listener as root sees it, with its owner's id.
+    // The process column is empty for the user (pasta is undumpable), so the owner is read from
+    // the socket with -e, and the process from the root listing below.
+    const command = H.as_demo ++ "ss -tlnpe";
+    const owned = try session.run(command, limits.command_timeout_kvm_s);
+    try H.show(out, "ss -tlnpe, as the demo user", owned);
+    checks_spec.check_listener_owned(owned.output, port) catch |err| {
+        return fail_step(out, "SPEC 4", "expected the listener to be the demo user's", err);
+    };
     try net_user.expect_listening(session, out, port);
     try expect_rules_unchanged(session, out);
 }
