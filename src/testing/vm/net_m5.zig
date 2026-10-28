@@ -1,5 +1,5 @@
-//! M5 slice 2's acceptance checks, in the guest, run by demo-m4 after its own steps (the network
-//! namespace is what slice 2 adds, and `demo-m5` is slice 4's):
+//! M5 slice 2's acceptance checks, in the guest, run by demo-m5's ACCEPT part (they ran in
+//! demo-m4 until slice 4 moved them: the network is M5's, not M4's):
 //!
 //!   A container has a network namespace of its own: `ls /sys/class/net` lists `lo` alone and
 //!   `ip link` says it is up. A web server on the guest's loopback is out of its reach, so
@@ -39,7 +39,7 @@ const serve = "runuser -u demo -- sh -c 'mkdir -p /tmp/www && echo " ++ page ++
     " --bind 127.0.0.1 </dev/null >/dev/null 2>&1 &)'; sleep 2; curl -fsS " ++ url;
 
 pub fn step_network(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    try out.print("\ndemo-m4: NET: a network namespace of its own (M5 slice 2)\n", .{});
+    try out.print("\n{s}: NET: a network namespace of its own (M5 slice 2)\n", .{H.demo_name});
     const started = try session.run(serve, limits.command_timeout_kvm_s);
     try H.show(out, "a web server on the guest's loopback", started);
     if (started.status != 0 or std.mem.indexOf(u8, started.output, page) == null) {

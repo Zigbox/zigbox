@@ -5,6 +5,14 @@
 //!   pulls, runs and commits; this `zbx` reads its store, records and lock, and runs its image
 //!   with `--net none`.
 //!
+//! SPEC (spec_m5.zig): the spec's four steps, as the spec types them: no network granted, then
+//!   `--net user`, then `--publish 8080:80` with nginx, then `ss -tlnp` as the demo user and the
+//!   firewall rules before and after.
+//! ACCEPT (accept_net_m5.zig): the network checks of slices 2 and 3 (net_m5.zig, net_user_m5.zig),
+//!   which were demo-m4's NET step; a published port released after each exit path; a missing
+//!   pasta caught by doctor and by run.
+//! AGENT (agent_m5.zig): the steps again, by JSON only; its findings are in docs/demos/m5.md.
+//!
 //! `zig build demo-m5 -Daccel=tcg` for software emulation.
 
 const std = @import("std");
@@ -17,6 +25,9 @@ const limits = @import("limits.zig");
 const old_release = @import("old_release.zon");
 const session_mod = @import("session.zig");
 const upgrade = @import("upgrade_m5.zig");
+const accept_net = @import("accept_net_m5.zig");
+const agent = @import("agent_m5.zig");
+const spec = @import("spec_m5.zig");
 
 const Session = session_mod.Session;
 const H = harness;
@@ -92,10 +103,12 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     return 0;
 }
 
-/// The parts, in order. A part is `fn (*Session, *Io.Writer, *H.Timer) !void`; the spec's steps
-/// and the agent test are added here.
+/// The parts, in order. A part is `fn (*Session, *Io.Writer, *H.Timer) !void`.
 const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     upgrade.step_upgrade,
+    spec.step_spec,
+    accept_net.step_accept,
+    agent.run_agent,
 };
 
 fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !void {
@@ -107,7 +120,10 @@ fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !vo
 
 test {
     // The files this demo is made of carry their own unit tests; a test root reaches them here.
+    _ = @import("accept_net_m5.zig");
+    _ = @import("agent_m5.zig");
     _ = @import("checks_m5.zig");
     _ = @import("checks_upgrade_m5.zig");
+    _ = @import("spec_m5.zig");
     _ = @import("upgrade_m5.zig");
 }

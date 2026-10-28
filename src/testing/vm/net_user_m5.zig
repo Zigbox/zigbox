@@ -1,4 +1,4 @@
-//! M5 slice 3's checks in the guest, the last part of demo-m4's NET step (net_m5.zig): user-mode
+//! M5 slice 3's checks in the guest, the last part of demo-m5's NET step (net_m5.zig): user-mode
 //! networking through pasta, which the VM installs (`passt`, cloud_init.zig).
 //!
 //!   `--net user`: the container's resolv.conf names pasta's DNS address, and `wget` of
@@ -29,8 +29,8 @@ const fail_step = common.fail_step;
 
 const step_name = "NET";
 /// `zbx` as the demo user in the net project: the `z` wrapper with another directory.
-const zn = H.as_demo ++ "/home/demo/zn";
-const net_project = "/home/demo/net-project";
+pub const zn = H.as_demo ++ "/home/demo/zn";
+pub const net_project = "/home/demo/net-project";
 const nginx = "nginx:alpine";
 
 const make_wrapper = "runuser -u demo -- mkdir -p " ++ net_project ++
@@ -39,16 +39,23 @@ const make_wrapper = "runuser -u demo -- mkdir -p " ++ net_project ++
 
 const rules = "(iptables -S; echo ---; ip6tables -S) 2>&1";
 
+/// Makes the net project's directory and the `zn` wrapper (idempotent: the spec's steps and the
+/// acceptance checks both need them, and either may run first).
+pub fn make_net_wrapper(session: *Session, out: *Io.Writer) !void {
+    const made = try session.run(make_wrapper, limits.command_timeout_kvm_s);
+    try H.show(out, "a wrapper for the net project", made);
+    if (made.status != 0) return error.PrepareFailed;
+}
+
 pub fn step_user(session: *Session, out: *Io.Writer) !void {
-    try out.print("\ndemo-m4: NET: --net user and --publish through pasta (M5 slice 3)\n", .{});
+    const title = "{s}: NET: --net user and --publish through pasta (M5 slice 3)";
+    try out.print("\n" ++ title ++ "\n", .{H.demo_name});
     const version = try session.run(H.as_demo ++ "pasta --version | head -1", 30);
     try H.show(out, "pasta --version", version);
     if (version.status != 0) {
         return fail_step(out, step_name, "pasta is not installed", error.NoPasta);
     }
-    const made = try session.run(make_wrapper, limits.command_timeout_kvm_s);
-    try H.show(out, "a wrapper for the net project", made);
-    if (made.status != 0) return error.PrepareFailed;
+    try make_net_wrapper(session, out);
     var before_storage: [8192]u8 = undefined;
     const before = try read_rules(session, out, &before_storage);
     try step_fetch(session, out);
@@ -61,7 +68,7 @@ pub fn step_user(session: *Session, out: *Io.Writer) !void {
     };
 }
 
-fn read_rules(session: *Session, out: *Io.Writer, storage: []u8) ![]const u8 {
+pub fn read_rules(session: *Session, out: *Io.Writer, storage: []u8) ![]const u8 {
     const result = try session.run(rules, limits.command_timeout_kvm_s);
     try H.show(out, "the host's firewall rules", result);
     if (result.output.len > storage.len) return error.RulesTooLong;
@@ -90,14 +97,20 @@ fn step_fetch(session: *Session, out: *Io.Writer) !void {
 fn step_publish(session: *Session, out: *Io.Writer) !void {
     const pulled = try common.run_shown(session, out, zn ++ " pull " ++ nginx);
     if (pulled.status != 0) return fail_step(out, step_name, "pull " ++ nginx, error.PullFailed);
-    try start_nginx(session, out, "web8080", 8080);
+    try start_nginx(session, out, "web8080", 8080, nginx);
     try expect_listening(session, out, 8080);
 }
 
 /// Starts nginx detached with a forward and waits for it to answer through the port.
-fn start_nginx(session: *Session, out: *Io.Writer, name: []const u8, port: u16) !void {
+pub fn start_nginx(
+    session: *Session,
+    out: *Io.Writer,
+    name: []const u8,
+    port: u16,
+    reference: []const u8,
+) !void {
     const command = try common.format(session, "{s} run -d --name {s} --publish {d}:80 {s}", .{
-        zn, name, port, nginx,
+        zn, name, port, reference,
     });
     _ = try common.expect_exit(session, out, step_name, command, 0);
     const curl = try common.format(session, "for i in $(seq 30); do " ++
@@ -124,7 +137,7 @@ fn step_exits(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step_name, "expected no pasta left", error.PastaLeft);
     }
 
-    try start_nginx(session, out, "web8081", 8081);
+    try start_nginx(session, out, "web8081", 8081, nginx);
     _ = try common.expect_exit(session, out, step_name, zn ++ " stop web8081", 0);
     try expect_free(session, out, 8081, "after zbx stop");
 
@@ -133,7 +146,7 @@ fn step_exits(session: *Session, out: *Io.Writer) !void {
     try H.show(out, timed, result);
     try expect_free(session, out, 8082, "after --timeout");
 
-    try start_nginx(session, out, "web8083", 8083);
+    try start_nginx(session, out, "web8083", 8083, nginx);
     // `ps` prints one document, every container on its one line: one object per line first.
     const pid_of = zn ++ " ps --output json | tr '{' '\\n' | grep '\"name\":\"web8083\"' | " ++
         "sed -n 's/.*\"pid\":\\([0-9]*\\),\"supervisor\".*/\\1/p'";
@@ -145,7 +158,7 @@ fn step_exits(session: *Session, out: *Io.Writer) !void {
 }
 
 /// `ss -tlnpe` as root shows pasta, as uid 1000, listening on `port`.
-fn expect_listening(session: *Session, out: *Io.Writer, port: u16) !void {
+pub fn expect_listening(session: *Session, out: *Io.Writer, port: u16) !void {
     const command = try common.format(session, "ss -tlnpe | grep -E '^State|:{d} '", .{port});
     const result = try session.run(command, limits.command_timeout_kvm_s);
     try H.show(out, command, result);
@@ -156,7 +169,7 @@ fn expect_listening(session: *Session, out: *Io.Writer, port: u16) !void {
 
 /// Waits up to five seconds for `port` to be free (pasta's own check of its namespace takes up
 /// to a second), then checks it with `ss -tlnpe`.
-fn expect_free(session: *Session, out: *Io.Writer, port: u16, why: []const u8) !void {
+pub fn expect_free(session: *Session, out: *Io.Writer, port: u16, why: []const u8) !void {
     const command = try common.format(session, "for i in $(seq 25); do " ++
         "ss -tln | grep -q ':{d} ' || break; sleep 0.2; done; " ++
         "ss -tlnpe | grep -E '^State|:{d} '", .{ port, port });

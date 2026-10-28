@@ -9,8 +9,7 @@
 //!   exit 125 and names the digest the lock expects and the store's.
 //! CONFIG. `memcached:alpine` runs as the user its configuration names (the full id map is on
 //!   in the guest, so the image's /etc/passwd is used); `/sys` is read-only in a container.
-//! NET (net_m5.zig, M5 slice 2). A container has a network namespace of its own with `lo` alone;
-//!   a failed run without --net ends with the hint; `--net host` reaches the guest's loopback.
+//! (The network checks M5 slices 2 and 3 added here are demo-m5's now: net_m5.zig.)
 //! SPEC 3. `zbx pull python:3.12-slim` and then `python:3.13-slim`; `zbx store du --by-image`
 //!   shows the second costs a share of its compressed size (a ratio, never exact bytes).
 //! UPGRADE, IDENTITY, RESUME, BLOBS (accept_m4.zig): the merged M3 `zbx` leaves a store this one
@@ -26,7 +25,6 @@ const agent = @import("agent_m4.zig");
 const checks_m4 = @import("checks_m4.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
-const net = @import("net_m5.zig");
 const image = @import("image.zig");
 const alpine_pin = @import("alpine.zon");
 const old_release = @import("old_release.zon");
@@ -144,7 +142,6 @@ fn steps(
     try step_run_python(session, out, timer);
     try step_lock_refusal(session, out, timer);
     try step_config(session, out, timer);
-    try net.step_network(session, out, timer);
     try accept.step_identity(session, out, timer);
     try accept.step_resume(session, out, timer);
     try agent.run_agent(session, out, timer);
@@ -302,7 +299,6 @@ test {
     // The files this demo is made of carry their own unit tests; a test root reaches them here.
     _ = @import("accept_m4.zig");
     _ = @import("agent_json.zig");
-    _ = @import("net_m5.zig");
     _ = @import("agent_m4.zig");
     _ = @import("checks_m4.zig");
     _ = @import("common_m4.zig");
