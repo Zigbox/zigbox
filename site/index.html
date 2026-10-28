@@ -131,7 +131,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
       </div>
     </div>
     <div class="term" aria-label="Example session">
-      <div class="bar"><span>zbx · example session</span><span class="planned">target for M4</span></div>
+      <div class="bar"><span>zbx · example session</span><a class="rec" href="https://github.com/Zigbox/zigbox/actions/runs/40624651773">✓ recorded in CI · M4</a></div>
       <pre id="hero-term"></pre>
     </div>
   </div>
@@ -224,10 +224,10 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-10-27",
+  updated: "2026-10-28",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M4 in progress",
-  stageStatus: "wip",
+  stage: "Pre-alpha · M4 shipped",
+  stageStatus: "done",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
@@ -249,8 +249,11 @@ const MILESTONES = [
   {id:"M3", name:"Store", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40480046060", date:"2026-10-27"}, goal:"Root filesystems live in a deduplicated, verifiable store and run by digest.",
    demo:[["$", "zbx store import ./alpine"], ["", "b3:418d183a516cd74f078f1a50b44cefe5b1e0b167154835079dc5aebeb0ab7417"], ["$", "zbx store import ./alpine-big   (the same rootfs plus one 10 MB file)"], ["", "(store du: 7,815,125 → 17,816,683 bytes)"], ["$", "zbx run 418d183a516c --name apk1 -- sh   (apk add --no-cache dtach; exit)"], ["", "(1/1) Installing dtach (0.9-r5)"], ["$", "zbx commit apk1"], ["", "b3:17e62c5ad89f35b19d1c0404160419d78956400c822538f1849b4c31a34d3d78"], ["$", "zbx store diff 418d183a516c 17e62c5ad89f"], ["", "M /etc/apk/world  content"], ["", "M /lib/apk/db/installed  content"], ["", "M /lib/apk/db/scripts.tar  content"], ["", "A /usr/bin/dtach"], ["$", "zbx store verify   (after damaging one object by hand)"], ["", "error[ZBX-E0429]: a file in the store is damaged"], ["", "  … reached by /etc/passwd in root 0baa9e23114b and 2 more   (exit 2)"], ["$", "zbx store diff 0baa9e23114b 24e1bb184cee   (a commit that deleted /big.bin)"], ["", "D /big.bin"], ["", "(store du of each tree: 17,787,433 → 7,787,187 bytes stored)"]]},
-  {id:"M4", name:"Pull", status:"wip", slices:{green:3, total:5, note:"slices green in CI; the top-20 check next"}, goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
-   demo:[["$","zbx pull python:3.12-slim"],["","resolved sha256:9a1f…  stored 41 MB"],["$","zbx pull python:3.13-slim"],["","resolved sha256:2c7e…  stored 9 MB (31 MB already present)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"]]},
+  // M4's demo below is output recorded by demo-m4 in CI (Ubuntu 24.04 VM, KVM, docker.io through
+  // mirror.gcr.io), trimmed where marked; the du table drops its TREE column and the digests are cut.
+  {id:"M4", name:"Pull", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM; top-20 check passed"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40624651773", date:"2026-10-28"}, goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
+   demo:[["$","zbx pull alpine:3.20"],["","sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"],["$","zbx run alpine:3.20 -- cat /etc/os-release"],["","NAME=\"Alpine Linux\""],["","…    (four more lines; VERSION_ID=3.20.10)"],["$","zbx pull python:3.12-slim && zbx pull python:3.13-slim"],["$","zbx store du --by-image"],["","IMAGE              FILES    LOGICAL  COMPRESSED     STORED     SHARED"],["","python:3.12-slim    4413  114.3 MiB    41.5 MiB  110.1 MiB   81.9 MiB"],["","alpine:3.20           87    7.4 MiB     3.5 MiB    7.4 MiB    7.4 MiB"],["","python:3.13-slim    4446  113.2 MiB    41.3 MiB  108.9 MiB   81.9 MiB"],["","(python:3.13-slim costs 28,365,524 bytes of its 43,320,189 compressed)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"],["$","zbx run alpine:3.20 -- true   (after changing the tree in zbx.lock)"],["","error[ZBX-E0519]: zbx.lock and the store disagree about an image"],["","  cause  zbx.lock has tree b3:00000000e56b…; the store has tree b3:2e478596e56b…"],["","  fix    to take the store's image, pull again and let the lock follow:   zbx pull 'alpine:3.20'"],["","         or put the tree the lock names back, from version control"],["","(exit 125)"]]},
   {id:"M5", name:"Network", status:"plan", goal:"No network unless granted; a granted service is reachable from the host.",
    demo:[["$","zbx run alpine -- wget -qO- https://example.com"],["","network: none (grant with --net)"],["$","zbx run --publish 8080:80 nginx &"],["$","curl -s localhost:8080 | head -1"],["","<!DOCTYPE html>"]]},
   {id:"M6", name:"State", status:"plan", goal:"Data that must outlive a container is named, typed and listed.",
@@ -285,7 +288,8 @@ const $ = s => document.querySelector(s);
 const label = {done:"Shipped", wip:"In progress", plan:"Planned"};
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function termHTML(lines){return lines.map(([k,t])=>k? `<span class="p">${k}</span> ${esc(t)}` : `<span class="d">${esc(t)}</span>`).join("\n")}
-$("#hero-term").innerHTML = termHTML([["$","zbx pull alpine:3.20"],["","resolved sha256:1e42…  stored 3.4 MB"],["$","zbx run alpine:3.20 -- sh"],["#","id"],["","uid=0(root) gid=0(root)"],["#","exit"],["$","ps -o user,cmd -C zbx"],["","alex  zbx run alpine:3.20 -- sh"]]);
+// Recorded by demo-m4 in CI (run 56), as the M4 entry below.
+$("#hero-term").innerHTML = termHTML([["$","zbx pull alpine:3.20"],["","sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"],["$","zbx run alpine:3.20 -- cat /etc/os-release"],["","NAME=\"Alpine Linux\""],["","PRETTY_NAME=\"Alpine Linux v3.20\""],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"]]);
 const done = MILESTONES.filter(m=>m.status==="done").length;
 const wip = MILESTONES.filter(m=>m.status==="wip").length;
 $("#ms-count").textContent = `${done} of ${MILESTONES.length} shipped` + (wip?` · ${wip} in progress`:"");
