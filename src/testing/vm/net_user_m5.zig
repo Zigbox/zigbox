@@ -117,7 +117,8 @@ fn step_exits(session: *Session, out: *Io.Writer) !void {
     const killed = try session.run(kill_zbx, limits.command_timeout_kvm_s);
     try H.show(out, "SIGKILL of zbx, the supervisor of web8080", killed);
     try expect_free(session, out, 8080, "after SIGKILL of zbx");
-    const left = try session.run("pgrep -u demo -x pasta | wc -l", limits.command_timeout_kvm_s);
+    // Not `-x pasta`: on amd64 the process is `pasta.avx2`.
+    const left = try session.run("pgrep -u demo pasta | wc -l", limits.command_timeout_kvm_s);
     try H.show(out, "pasta processes left", left);
     if (!std.mem.eql(u8, std.mem.trim(u8, left.output, " \r\n"), "0")) {
         return fail_step(out, step_name, "expected no pasta left", error.PastaLeft);

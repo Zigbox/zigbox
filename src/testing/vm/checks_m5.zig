@@ -175,8 +175,9 @@ pub fn check_nginx_page(text: []const u8, status: u8) Error!void {
     if (!contains(text, "Welcome to nginx!")) return error.PageWrong;
 }
 
-/// The lines of `ss -tlnpe` (as root) that listen on the host's `port`: `count` of them and,
-/// when there are any, every one is pasta's, owned by uid 1000 (the demo user).
+/// The lines of `ss -tlnpe` (as root) that listen on the host's `port`: there are some exactly
+/// when `want`, and every one is pasta's (on amd64 the process is `pasta.avx2`, which pasta
+/// executes when the CPU has AVX2), owned by uid 1000 (the demo user).
 pub fn check_listener(text: []const u8, port: u16, want: bool) Error!void {
     var needle: [16]u8 = undefined;
     const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
@@ -187,7 +188,7 @@ pub fn check_listener(text: []const u8, port: u16, want: bool) Error!void {
         // The local address is the fourth column; the peer's ("0.0.0.0:*") never ends ":PORT ".
         if (!contains(line, local)) continue;
         found += 1;
-        if (!contains(line, "((\"pasta\"")) return error.ListenerWrong;
+        if (!contains(line, "((\"pasta")) return error.ListenerWrong;
         if (!contains(line, " uid:1000 ")) return error.ListenerWrong;
     }
     if ((found > 0) != want) return error.ListenerWrong;
@@ -347,11 +348,11 @@ test "nginx answers through the published port" {
 }
 
 test "the listener is pasta's, as the user, and gone when it should be" {
-    // Goal: the port check. Method: lines in the shape `ss -tlnpe` prints (docs/demos/m5.md has
-    // the recorded ones); another program's listener; root's; the port free; a port that is a
-    // prefix of another.
+    // Goal: the port check. Method: the line `ss -tlnpe` printed in the guest (run 40738142463);
+    // another program's listener; root's; the port free; a port that is a prefix of another.
     const pasta = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    " ++
-        "users:((\"pasta\",pid=1828,fd=7)) uid:1000 ino:21120 sk:1 cgroup:/user.slice <->\n";
+        "users:((\"pasta.avx2\",pid=2286,fd=6)) uid:1000 ino:16798 sk:1001 " ++
+        "cgroup:/user.slice/user-0.slice/session-2.scope <->\n";
     try check_listener(pasta, 8080, true);
     try testing.expectError(error.ListenerWrong, check_listener(pasta, 8080, false));
     try check_listener(pasta, 80, false);

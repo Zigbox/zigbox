@@ -315,3 +315,22 @@ test "last_line: the last line with something on it" {
     try testing.expectEqualStrings("", last_line("\n\n"));
     try testing.expectEqualStrings("x y", last_line("first\n  x y \r\n"));
 }
+
+test "classify: what may stand before the port, at its bound and one past" {
+    // Goal: `pasta_port_prefix_bytes_max`. Method: "port ", then that many characters that are not
+    // digits, then the port, is read; one character more is not.
+    const one = [_]spec.Publish{.{ .host = 8080, .container = 80 }};
+    const bound = constants.pasta_port_prefix_bytes_max;
+    var line: [128]u8 = undefined;
+    const head = "Listen failed for HOST tcp port ";
+    @memcpy(line[0..head.len], head);
+    @memset(line[head.len..][0 .. bound + 1], '*');
+    const tail = "8080: Address already in use";
+    var length = head.len + bound;
+    @memcpy(line[length..][0..tail.len], tail);
+    try testing.expectEqual(@as(?u16, 8080), classify(line[0 .. length + tail.len], &one).in_use);
+    length += 1;
+    line[length - 1] = '*';
+    @memcpy(line[length..][0..tail.len], tail);
+    try testing.expectEqual(@as(?u16, null), classify(line[0 .. length + tail.len], &one).in_use);
+}
