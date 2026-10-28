@@ -409,7 +409,8 @@ fn give_net_layer_the_etc(store: *Store, job: *Job, diag: *Diag) Error!void {
         return error.Failed;
     };
     var tree_buffer: [constants.store_path_bytes_max + 8:0]u8 = undefined;
-    const tree_etc = std.fmt.bufPrintSentinel(&tree_buffer, "{s}/etc", .{prepared.lower.text()}, 0) catch {
+    const lower = prepared.lower.text();
+    const tree_etc = std.fmt.bufPrintSentinel(&tree_buffer, "{s}/etc", .{lower}, 0) catch {
         diagnose.overlay_path(diag, prepared.lower.text(), 0);
         return error.Failed;
     };

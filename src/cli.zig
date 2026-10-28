@@ -2024,7 +2024,8 @@ fn report_outcome(
 }
 
 /// The one line a failed run without `--net` gets after the container's own output: the network
-/// was none, and here is the flag. Only after the container's own exit with a code. A note, not a diagnostic: the exit code is the container's.
+/// was none, and here is the flag. Only after the container's own exit with a code. A note,
+/// not a diagnostic: the exit code is the container's.
 /// Never for an explicit `--net none`.
 fn write_network_hint(
     writer: *std.Io.Writer,
