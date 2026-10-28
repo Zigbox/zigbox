@@ -185,7 +185,8 @@ fn agent_refusal(
     const fix = json.fix_command(&buffer, wrapper_path, found.fixes[0].command.?) catch |err| {
         return fail_step(out, step, "expected a fix command to run", err);
     };
-    const fixed = try expect_exit(session, out, step, H.as_demo ++ fix, 0);
+    const as_demo = try common.format(session, "{s}{s}", .{ H.as_demo, fix });
+    const fixed = try expect_exit(session, out, step, as_demo, 0);
     try conforms(session, out, schemas.pull, fixed.streams.stdout, "the fix's pull");
     const tag = "alpine:3.20";
     const repaired = m4.check_pull_json(arena, fixed.streams, fixed.status, tag) catch |err| {
