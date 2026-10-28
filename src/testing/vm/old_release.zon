@@ -3,4 +3,7 @@
     // merged M2 commit. Its `zbx` is built from a git worktree of this commit and has to leave
     // state (version 3 run records) that M3's `zbx` reads. Replace it by a tag when there is one.
     .commit = "95ba1da",
+    // The same for `demo-m4`: the merge of PR #9, the merged M3. Its `zbx` imports a tree, runs
+    // it by digest and commits it; M4's `zbx` has to read that store and its run records.
+    .m4_commit = "47b436b",
 }

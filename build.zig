@@ -275,7 +275,13 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
-        if (std.mem.eql(u8, demo.step, "demo-m3")) add_old_binary(b, run);
+        if (std.mem.eql(u8, demo.step, "demo-m3")) {
+            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").commit);
+        }
+        if (std.mem.eql(u8, demo.step, "demo-m4")) {
+            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m4_commit);
+            run.addArgs(&.{ "--blob-cache", ".zig-cache/zbx-vm/m4-blobs.img" });
+        }
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
         if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
         if (ca_file) |path| {
@@ -304,9 +310,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
     }
 }
 
-/// demo-m3's upgrade test: the older zbx, built from a worktree of the pinned commit by
-/// `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
-fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run) void {
+/// The upgrade test of demo-m3 and demo-m4: the older zbx, built from a worktree of the pinned
+/// commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
+fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run, commit: []const u8) void {
     const builder = b.addExecutable(.{
         .name = "build_old",
         .root_module = b.createModule(.{
@@ -318,7 +324,7 @@ fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run) void {
     const old = b.addRunArtifact(builder);
     old.setCwd(b.path("."));
     old.addArg(b.graph.zig_exe);
-    old.addArg(@import("src/testing/vm/old_release.zon").commit);
+    old.addArg(commit);
     run.addArg("--old-zbx");
     run.addFileArg(old.addOutputFileArg("zbx-old"));
 }

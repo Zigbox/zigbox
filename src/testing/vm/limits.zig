@@ -28,6 +28,8 @@ pub const command_timeout_kvm_s: u32 = 60;
 pub const shutdown_timeout_s: u32 = 60;
 pub const download_chunk_bytes: u32 = 64 * 1024;
 pub const overlay_size_text = "8G";
+/// The M4 blob cache disk: room for the demo's images (about 150 MB of blobs) with headroom.
+pub const blob_cache_size_text = "1G";
 pub const guest_memory_mib: u32 = 2048;
 pub const guest_cpus: u32 = 2;
 

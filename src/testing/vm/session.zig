@@ -34,6 +34,9 @@ pub const Files = struct {
     /// A CA certificate bundle for the guest to trust, served at /ca.crt; empty for none. A
     /// development aid for a host whose network inspects TLS (the guest's `zbx` then says E0504).
     ca_file: []const u8 = "",
+    /// A raw disk image the guest sees as a second disk (`/dev/vdb`), kept between runs: the
+    /// M4 demo's blob cache. Empty for none.
+    cache_disk: []const u8 = "",
 };
 
 pub const Session = struct {
@@ -87,7 +90,7 @@ pub const Session = struct {
         if (files.old_binary.len > 0) session.server.add_route("/zbx-old", files.old_binary);
         if (files.ca_file.len > 0) session.server.add_route("/ca.crt", files.ca_file);
         if (files.rootfs.len > 0) session.server.add_route("/rootfs.tar.gz", files.rootfs);
-        const argv = try qemu_argv(arena, overlay, accel, session.server.port);
+        const argv = try qemu_argv(arena, overlay, accel, session.server.port, files.cache_disk);
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{
             @tagName(accel), session.server.port,
         });
@@ -266,6 +269,7 @@ pub fn qemu_argv(
     overlay: []const u8,
     accel: Accel,
     port: u16,
+    cache_disk: []const u8,
 ) ![]const []const u8 {
     const drive = try std.fmt.allocPrint(arena, "if=virtio,format=qcow2,file={s}", .{overlay});
     const seed = "type=1,serial=ds=nocloud;s=http://10.0.2.2:{d}/";
@@ -286,7 +290,13 @@ pub fn qemu_argv(
         "virtio-net-pci,netdev=net0", "-smbios",                      smbios,
         "-no-reboot",
     };
-    return try arena.dupe([]const u8, &items);
+    if (cache_disk.len == 0) return try arena.dupe([]const u8, &items);
+    const second = try std.fmt.allocPrint(arena, "if=virtio,format=raw,file={s}", .{cache_disk});
+    const all = try arena.alloc([]const u8, items.len + 2);
+    @memcpy(all[0..items.len], &items);
+    all[items.len] = "-drive";
+    all[items.len + 1] = second;
+    return all;
 }
 
 test "qemu arguments select the accelerator and point cloud-init at the host" {
@@ -294,13 +304,19 @@ test "qemu arguments select the accelerator and point cloud-init at the host" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const kvm = try qemu_argv(arena, "o.qcow2", .kvm, 4242);
-    const tcg = try qemu_argv(arena, "o.qcow2", .tcg, 4242);
+    const kvm = try qemu_argv(arena, "o.qcow2", .kvm, 4242, "");
+    const tcg = try qemu_argv(arena, "o.qcow2", .tcg, 4242, "");
     try std.testing.expectEqualStrings("qemu-system-x86_64", kvm[0]);
     try std.testing.expect(contains(kvm, "kvm") and contains(kvm, "host"));
     try std.testing.expect(contains(tcg, "tcg,thread=multi") and contains(tcg, "max"));
     try std.testing.expect(contains(kvm, "type=1,serial=ds=nocloud;s=http://10.0.2.2:4242/"));
     try std.testing.expect(contains(kvm, "if=virtio,format=qcow2,file=o.qcow2"));
+    try std.testing.expectEqual(kvm.len, tcg.len);
+    // The blob cache is a second disk, and only when one is named.
+    const cached = try qemu_argv(arena, "o.qcow2", .kvm, 4242, "blobs.img");
+    try std.testing.expectEqual(kvm.len + 2, cached.len);
+    try std.testing.expect(contains(cached, "if=virtio,format=raw,file=blobs.img"));
+    try std.testing.expect(!contains(kvm, "if=virtio,format=raw,file=blobs.img"));
 }
 
 fn contains(argv: []const []const u8, wanted: []const u8) bool {

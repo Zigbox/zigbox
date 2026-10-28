@@ -60,6 +60,8 @@ pub const Options = struct {
     mirror: []const u8 = "",
     /// The top-20 run only, a development aid: image names (before the tag), comma separated.
     only: []const u8 = "",
+    /// demo-m4 only: the raw disk image that keeps the pulled blobs between runs (CI caches it).
+    blob_cache: []const u8 = "",
 };
 
 pub fn parse_options(init: std.process.Init) !Options {
@@ -95,6 +97,8 @@ pub fn parse_options(init: std.process.Init) !Options {
             options.mirror = value;
         } else if (std.mem.eql(u8, name, "--only")) {
             options.only = value;
+        } else if (std.mem.eql(u8, name, "--blob-cache")) {
+            options.blob_cache = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             options.cache_dir = value;
         } else {
