@@ -1,8 +1,9 @@
 # VM runs on demand, for work in progress. A push to a branch named vm/<demo>-<anything> runs that
 # one demo in the KVM VM, where it takes minutes instead of the quarter hour TCG takes in a build
 # container without KVM. <demo> is m0 to m4, or all. Nothing else runs: no build matrix, no fuzzers
-# (ci.yml does those on the PR). Scratch branches are deleted once read; a newer push to the same
-# branch cancels the run it supersedes. See AGENTS.md, "Git".
+# (ci.yml does those on the PR). The run deletes its own scratch branch when it ends, pass or fail,
+# because a cloud session's git proxy cannot delete branches; the run and its logs stay readable.
+# A newer push to the same branch cancels the run it supersedes. See AGENTS.md, "Git".
 name: vm
 
 on:
@@ -14,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write # only to delete the scratch branch at the end
 
 jobs:
   demo:
@@ -68,3 +69,9 @@ jobs:
             zig build "$step" -Daccel=kvm
             echo "::endgroup::"
           done
+      # Not on cancel: a newer push to the branch superseded this run and still needs the branch.
+      - name: Delete the scratch branch
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }}"
