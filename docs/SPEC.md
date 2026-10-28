@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 59), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 60), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -113,7 +113,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 1. Import `./alpine`; note its digest and `zbx store du` total.
 2. Copy the rootfs, add one 10 MB file, import the copy. `zbx store du` grows by about 10 MB, not by a second full rootfs.
-3. `zbx run <digest> -- sh`, install a package with `apk add`, exit, then `zbx commit`. A new digest prints; `zbx store diff <old> <new>` lists only the added files.
+3. `zbx run <digest> -- sh`, install a package with `apk add`, exit, then `zbx commit`. A new digest prints; `zbx store diff <old> <new>` lists only the added files. From M5 on, the run adds --net host so that apk can reach its mirror, since a container has no network unless granted.
 4. Corrupt a chunk on disk by hand. `zbx store verify` names the damaged file and every tree that references it.
 5. Delete a file in a committed tree: the new tree's stored size drops (no whiteout baggage).
 
