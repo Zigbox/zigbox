@@ -651,7 +651,7 @@ fn skipped_notes(scenario: *const Scenario) u32 {
     count += switch (plan.steps[found].kind) {
         .make_sys_dir => if (plan.isolated()) @as(u32, 2) else 3,
         .bind_sys => 2,
-        .remount_sys => 1,
+        .remount_sys, .mount_sysfs => 1,
         .make_etc_dir => 2, // The second file's mount point has no directory to be made in.
         .create_etc_file, .stage_etc_file, .bind_etc_file, .remount_etc_file => 1,
         // Removing a staged copy that is not there is no failure: only the others count.
