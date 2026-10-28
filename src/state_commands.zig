@@ -32,6 +32,7 @@ const record_mod = @import("state/record.zig");
 const lock = @import("state/lock.zig");
 const holders = @import("state/holders.zig");
 const usage = @import("state/usage.zig");
+const export_mod = @import("state/export.zig");
 const diagnose = @import("state/diagnose.zig");
 
 const Host = host_mod.Host;
@@ -39,12 +40,14 @@ const NameList = names_mod.NameList;
 
 pub const Error = error{Failed};
 
-pub const Action = enum { ls, rm, restore };
+pub const Action = enum { ls, rm, @"export", restore };
 
 pub const Args = struct {
     action: Action,
-    /// The volume's name, for `rm` and `restore`.
+    /// The volume's name, for `rm`, `export` and `restore`.
     operand: ?[]const u8,
+    /// `export`: the file to write; null is standard output.
+    out: ?[]const u8 = null,
 };
 
 pub const Output = struct {
@@ -113,6 +116,8 @@ pub const Workspace = struct {
     usage: usage.Workspace,
     remove: remove.Workspace,
     remove_arena: [remove.arena_bytes]u8,
+    /// `export`: the archive's room (about 7 MiB).
+    archive: export_mod.Workspace,
 };
 
 const Job = struct {
@@ -125,6 +130,9 @@ const Job = struct {
     now: u64,
     entry: volume.TrashName,
     removed: u64,
+    /// `export`: the files left out so far, and the notes shown for them.
+    skipped: u64,
+    notes_shown: u32,
 };
 
 /// Runs a state command and returns its exit code. `diag` holds a failure of the parent's own;
@@ -154,6 +162,8 @@ pub fn run(
         .now = @min(host.time_now(), constants.state_time_max - 1),
         .entry = undefined,
         .removed = 0,
+        .skipped = 0,
+        .notes_shown = 0,
     };
     if (!job.root.locate(host)) {
         diagnose.directory_failed(diag, null);
@@ -162,6 +172,7 @@ pub fn run(
     return switch (args.action) {
         .ls => run_ls(&job, facts, diag),
         .rm => run_rm(&job, facts, diag),
+        .@"export" => run_export(&job, facts, diag),
         .restore => run_restore(&job, facts, diag),
     };
 }
@@ -179,6 +190,7 @@ fn work_call(context: *anyopaque, squash_owner: bool) u8 {
     const result = switch (job.args.action) {
         .ls => child_ls(job, &diag),
         .rm => child_rm(job, &diag),
+        .@"export" => child_export(job, &diag),
         .restore => child_restore(job, &diag),
     };
     result catch {
@@ -484,13 +496,13 @@ fn run_rm(job: *Job, facts: *doctor.Facts, diag: *Diag) Error!u8 {
     job.root.volume(&path, name, null);
     const found = fs.lstat(path.text()) catch |err| {
         if (err == error.NotFound) {
-            diagnose.no_such_volume(diag, name);
+            diagnose.no_such_volume(diag, name, "removing");
             return error.Failed;
         }
         return fail_path(job, diag, "reading", path.text());
     };
     if (found.kind != .dir) {
-        diagnose.no_such_volume(diag, name);
+        diagnose.no_such_volume(diag, name, "removing");
         return error.Failed;
     }
     var lock_path: volume.Path = undefined;
@@ -499,7 +511,7 @@ fn run_rm(job: *Job, facts: *doctor.Facts, diag: *Diag) Error!u8 {
     lock.holder_text(job.host.own_pid(), "zbx state rm", &text);
     const fd = lock.take(job.host, lock_path.text(), .exclusive, &text, 0) catch |err| {
         switch (err) {
-            error.Busy => refuse_in_use(job, lock_path.text(), name, diag),
+            error.Busy => refuse_in_use(job, lock_path.text(), name, .exclusive, diag),
             error.Failed => return fail_path(job, diag, "locking", lock_path.text()),
         }
         return error.Failed;
@@ -510,14 +522,20 @@ fn run_rm(job: *Job, facts: *doctor.Facts, diag: *Diag) Error!u8 {
     return in_child(job, facts, diag);
 }
 
-fn refuse_in_use(job: *Job, path: [:0]const u8, name: []const u8, diag: *Diag) void {
+fn refuse_in_use(
+    job: *Job,
+    path: [:0]const u8,
+    name: []const u8,
+    wanted: lock.Mode,
+    diag: *Diag,
+) void {
     var buffer: [constants.store_lock_holder_bytes]u8 = undefined;
-    const holder = lock.holder_of(job.host, path, .exclusive, &buffer);
+    const holder = lock.holder_of(job.host, path, wanted, &buffer);
     const ws = job.workspace;
     holders.find(job.host, name, &ws.scratch, &ws.found);
     var named: diagnose.Holders = undefined;
     holders.describe(holder, &ws.found, &named);
-    diagnose.in_use(diag, name, false, &named);
+    diagnose.in_use(diag, name, wanted == .shared, &named);
 }
 
 fn child_rm(job: *Job, diag: *Diag) Error!void {
@@ -574,6 +592,174 @@ fn empty_expired(job: *Job) u32 {
         emptied += 1;
     }
     return emptied;
+}
+
+// ---- export -----------------------------------------------------------------------------------
+
+fn run_export(job: *Job, facts: *doctor.Facts, diag: *Diag) Error!u8 {
+    const name = job.args.operand.?;
+    if (job.args.out == null and job.host.is_terminal(.stdout)) {
+        diagnose.export_to_terminal(diag, name);
+        return error.Failed;
+    }
+    const fs = job.host.filesystem();
+    var path: volume.Path = undefined;
+    job.root.volume(&path, name, null);
+    const found = fs.lstat(path.text()) catch |err| {
+        if (err != error.NotFound) return fail_path(job, diag, "reading", path.text());
+        diagnose.no_such_volume(diag, name, "exporting");
+        return error.Failed;
+    };
+    if (found.kind != .dir) {
+        diagnose.no_such_volume(diag, name, "exporting");
+        return error.Failed;
+    }
+    var lock_path: volume.Path = undefined;
+    job.root.volume(&lock_path, name, volume.lock_name);
+    var text: lock.HolderText = undefined;
+    lock.holder_text(job.host.own_pid(), "zbx state export", &text);
+    // Shared: any number of readers, and no writer while the files are read.
+    const fd = lock.take(job.host, lock_path.text(), .shared, &text, 0) catch |err| {
+        switch (err) {
+            error.Busy => refuse_in_use(job, lock_path.text(), name, .shared, diag),
+            error.Failed => return fail_path(job, diag, "locking", lock_path.text()),
+        }
+        return error.Failed;
+    };
+    defer lock.release(job.host, fd);
+    return in_child(job, facts, diag);
+}
+
+/// A note for each file left out, the first few in full and then one count.
+fn export_skip(context: *anyopaque, path: []const u8, kind: fs_mod.FileKind) void {
+    const job: *Job = @ptrCast(@alignCast(context));
+    job.skipped += 1;
+    if (job.notes_shown == constants.state_export_notes_max) return;
+    job.notes_shown += 1;
+    var warning: Diag = undefined;
+    warning.reset();
+    const word: []const u8 = switch (kind) {
+        .char_device => "character device",
+        .block_device => "block device",
+        .fifo => "fifo",
+        .socket => "socket",
+        .file, .dir, .symlink => unreachable, // Only the kinds a tar of this kind leaves out.
+    };
+    diagnose.export_skipped(&warning, path, word, 0);
+    report(job, &warning);
+}
+
+/// The archive's file: written as `<out>.zbx-part`, and renamed to `<out>` when it is whole, so
+/// that a stopped export leaves no half archive under the name asked for.
+const OutFile = struct {
+    part: [constants.path_bytes_max + 16:0]u8,
+    final: [constants.path_bytes_max + 1:0]u8,
+    fd: fs_mod.Fd,
+
+    fn part_path(file: *const OutFile) [:0]const u8 {
+        return std.mem.sliceTo(&file.part, 0);
+    }
+
+    fn final_path(file: *const OutFile) [:0]const u8 {
+        return std.mem.sliceTo(&file.final, 0);
+    }
+};
+
+fn child_export(job: *Job, diag: *Diag) Error!void {
+    const name = job.args.operand.?;
+    const fs = job.host.filesystem();
+    var data: volume.Path = undefined;
+    job.root.volume(&data, name, volume.data_name);
+    var file: OutFile = undefined;
+    var target: export_mod.Target = .{ .stdout = job.host };
+    const destination = job.args.out orelse "standard output";
+    if (job.args.out) |out| {
+        if (out.len == 0 or out.len > constants.path_bytes_max) {
+            return export_write_failure(job, diag, out, error.PathTooLong, 0);
+        }
+        // Cannot fail: the buffers hold the path and the suffix (checked just above).
+        _ = std.fmt.bufPrintSentinel(&file.final, "{s}", .{out}, 0) catch unreachable;
+        const part_format = "{s}.zbx-part";
+        _ = std.fmt.bufPrintSentinel(&file.part, part_format, .{out}, 0) catch unreachable; // Same.
+        fs.unlink(file.part_path()) catch {}; // A part an earlier export left; none is usual.
+        file.fd = fs.create(file.part_path(), 0o600) catch |err| {
+            return export_write_failure(job, diag, out, err, fs.last_errno());
+        };
+        target = .{ .file = file.fd };
+    }
+    var totals: export_mod.Totals = undefined;
+    var failure: export_mod.Failure = undefined;
+    const skip: export_mod.Skip = .{ .context = job, .call = export_skip };
+    const archive = &job.workspace.archive;
+    const written = export_mod.write(fs, archive, data.text(), target, skip, &totals, &failure);
+    if (job.args.out != null) fs.close(file.fd);
+    written catch {
+        if (job.args.out != null) fs.unlink(file.part_path()) catch {};
+        if (failure.stop == .write) {
+            return export_write_failure(job, diag, destination, failure.err, failure.errno);
+        }
+        const why = failure.stop.sentence();
+        diagnose.export_read_failed(diag, name, why, failure.path, failure.err, failure.errno);
+        return error.Failed;
+    };
+    if (job.skipped > job.notes_shown) {
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.export_skipped(&warning, "", "", job.skipped - job.notes_shown);
+        report(job, &warning);
+    }
+    if (job.args.out == null) return; // The archive was the output.
+    fs.rename(file.part_path(), file.final_path()) catch {
+        const errno = fs.last_errno();
+        fs.unlink(file.part_path()) catch {};
+        return export_write_failure(job, diag, destination, error.IoFailed, errno);
+    };
+    try export_summary(job, destination, &totals, diag);
+}
+
+fn export_write_failure(
+    job: *Job,
+    diag: *Diag,
+    destination: []const u8,
+    err: host_mod.Error,
+    errno: u16,
+) Error {
+    diagnose.export_write_failed(diag, job.args.operand.?, destination, err, errno);
+    return error.Failed;
+}
+
+/// What an export to a file wrote: one line, or the `zbx.state.export/1` object.
+fn export_summary(
+    job: *Job,
+    file: []const u8,
+    totals: *const export_mod.Totals,
+    diag: *Diag,
+) Error!void {
+    const name = job.args.operand.?;
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    // Cannot fail, any of these: a name, a bounded path and numbers fit the output buffer.
+    if (job.output.json) {
+        const head = "{{\"schema\":\"zbx.state.export/1\",\"name\":\"{s}\",\"file\":";
+        writer.print(head, .{name}) catch unreachable; // Same bound.
+        json.write_json_string(&writer, file) catch unreachable; // Same bound.
+        writer.print(",\"directories\":{d},\"files\":{d},\"symlinks\":{d},\"hard_links\":{d}," ++
+            "\"skipped\":{d},\"bytes\":{d},\"archive_bytes\":{d}}}\n", .{
+            totals.directories, totals.files, totals.symlinks,      totals.hard_links,
+            totals.skipped,     totals.bytes, totals.archive_bytes,
+        }) catch unreachable; // Same bound.
+    } else {
+        var raw: [32]u8 = undefined;
+        var packed_size: [32]u8 = undefined;
+        writer.print("{s}: exported {d} files ({s}) to {s}, {s} compressed\n", .{
+            name,
+            totals.files,
+            size_words(&raw, totals.bytes),
+            file,
+            size_words(&packed_size, totals.archive_bytes),
+        }) catch unreachable; // Same bound.
+    }
+    try put(job, writer.buffered(), diag);
 }
 
 // ---- restore ----------------------------------------------------------------------------------

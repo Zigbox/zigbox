@@ -1,0 +1,6 @@
+error[ZBX-E0715]: can't write the archive
+  cause  writing the archive to /nowhere/pgdata.tar.gz failed: no such file or
+         directory (ENOENT)
+  fix    free space, or write somewhere else with -o <file>
+  more   zbx explain E0715 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0715.html

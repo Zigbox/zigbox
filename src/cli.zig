@@ -31,6 +31,8 @@ const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
 const volume = @import("state/volume.zig");
+const mounts = @import("runtime/mounts.zig");
+const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
 const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const run_image = @import("run_image.zig");
@@ -55,7 +57,7 @@ const help_text =
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
-    \\  state <cmd>     the state volumes that outlive containers: ls, rm, restore (see below)
+    \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
@@ -93,6 +95,14 @@ const help_text =
     \\  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
     \\                  8); the first use makes it, empty. One run writes a volume at a time;
     \\                  with :ro it is mounted read-only and shared with other readers
+    \\  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
+    \\                  size; k, m or g). Its pages count against --memory
+    \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
+    \\                  <host> that does not exist is an error, never made (repeatable)
+    \\  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
+    \\                  owned by the container's root. Its contents are never stored or
+    \\                  printed, and the mount point is left out of zbx commit (repeatable).
+    \\                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\stop:
@@ -117,6 +127,10 @@ const help_text =
     \\  zbx state ls             each volume: size, created, last used, last container, in use by
     \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
     \\  zbx state restore <name> bring the newest trash of <name> back
+    \\  zbx state export <name> [-o <file>]   write the volume as a gzip-compressed tar, owners as
+    \\                           the container sees them (999, not the host's ids), to <file>
+    \\                           or standard output (never a terminal); refused while a run
+    \\                           writes the volume
     \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
     \\  touches them, and nothing but state rm removes one
     \\
@@ -237,6 +251,15 @@ pub const RunArgs = struct {
     state: [constants.state_volumes_max]volume.Mount = undefined,
     state_count: u32 = 0,
 
+    /// The `--tmpfs`, `--bind` and `--secret` values, parsed as each was read (`take_mount`).
+    mounts: [constants.mounts_max]mounts.Mount = undefined,
+    mounts_count: u32 = 0,
+
+    pub fn mounts_slice(run_args: *const RunArgs) []const mounts.Mount {
+        assert(run_args.mounts_count <= constants.mounts_max);
+        return run_args.mounts[0..run_args.mounts_count];
+    }
+
     pub fn env_slice(run_args: *const RunArgs) []const run_env.Setting {
         assert(run_args.env_count <= constants.run_env_count_max);
         return run_args.env[0..run_args.env_count];
@@ -265,9 +288,12 @@ const RunOption = enum {
     net,
     publish,
     state,
+    tmpfs,
+    bind,
+    secret,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 9);
+        assert(@backingInt(option) <= 12);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -280,6 +306,9 @@ const RunOption = enum {
             .net => "--net",
             .publish => "--publish",
             .state => "--state",
+            .tmpfs => "--tmpfs",
+            .bind => "--bind",
+            .secret => "--secret",
         };
     }
 };
@@ -307,6 +336,8 @@ pub const StoreArgs = struct {
 pub const StateArgs = struct {
     action: state_commands.Action,
     operand: ?[]const u8,
+    /// `state export -o FILE`; null writes the archive to standard output.
+    out: ?[]const u8 = null,
 };
 
 /// What `pull` was given besides its reference.
@@ -390,6 +421,8 @@ const Token = union(enum) {
     no_redact,
     /// `--resolve-only`: `pull`'s.
     resolve_only,
+    /// `-o`, whose value is the next argument: `state export`'s file.
+    out_next,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -399,7 +432,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 10);
+    assert(std.enums.values(RunOption).len == 13);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -439,6 +472,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
+    if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -521,7 +555,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next => {
+            .confirm_next, .out_next => {
                 if (index + 1 < args.len) index += 1;
             },
             .confirm_inline, .trash, .resolve_only, .by_image => {},
@@ -553,6 +587,7 @@ pub fn parse(
     var bundle_args: BundleArgs = .{};
     var pull_args: PullArgs = .{};
     var gc_args: GcArgs = .{};
+    var export_file: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -589,6 +624,7 @@ pub fn parse(
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
+            .out_next => try take_out_option(diag, &export_file, operands[0..count], args, &index),
             .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -604,6 +640,8 @@ pub fn parse(
     invocation.pull = pull_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+    invocation.state.out = export_file;
+    if (export_file != null) assert(invocation.state.action == .@"export"); // `-o` is its own.
 }
 
 /// `--all`, which only `ps` takes.
@@ -617,6 +655,26 @@ fn take_all_option(
     if (operands.len == 0) return unknown_option(diag, argument);
     if (command_named(operands[0]) != .ps) return unknown_option(diag, argument);
     run_args.all = true;
+}
+
+/// `-o FILE`, which only `state export` takes.
+fn take_out_option(
+    diag: *Diag,
+    export_file: *?[]const u8,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(classify(args[index.*]) == .out_next);
+    const argument = args[index.*];
+    const is_export = operands.len >= 2 and command_named(operands[0]) == .state and
+        std.mem.eql(u8, operands[1], "export");
+    if (!is_export) return unknown_option(diag, argument);
+    if (export_file.* != null) return unexpected_argument(diag, .state, argument);
+    if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
+    index.* += 1;
+    export_file.* = args[index.*];
 }
 
 /// `--resolve-only`, which only `pull` takes.
@@ -739,6 +797,9 @@ fn take_run_option(
     };
     if (option == .publish) return take_publish(diag, run_args, value);
     if (option == .state) return take_state(diag, run_args, value);
+    if (option == .tmpfs) return take_mount(diag, run_args, .tmpfs, value);
+    if (option == .bind) return take_mount(diag, run_args, .bind, value);
+    if (option == .secret) return take_mount(diag, run_args, .secret, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -750,6 +811,7 @@ fn take_run_option(
         .net => &run_args.net,
         .publish => unreachable, // Repeatable: `take_publish` above.
         .state => unreachable, // Repeatable: `take_state` above.
+        .tmpfs, .bind, .secret => unreachable, // Repeatable: `take_mount` above.
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -929,7 +991,42 @@ fn take_state(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!voi
         state_diagnose.bad_value(diag, value, state_diagnose.list_sentence(problem));
         return error.BadOptionValue;
     }
+    // A mount given before it may hold the same path.
+    if (mounts.conflict(mount.target, &.{}, run_args.mounts_slice())) |found| {
+        mounts_diagnose.conflict(diag, "--state", value, mounts.conflict_sentence(found));
+        return error.BadOptionValue;
+    }
     run_args.state_count += 1;
+}
+
+/// One `--tmpfs`, `--bind` or `--secret`: parsed now, and checked against the state volumes and
+/// the mounts before it, so that the diagnostic quotes the value that is wrong. A value that is
+/// not a mount is ZBX-E0012; one that meets another, or one too many, ZBX-E0013.
+fn take_mount(
+    diag: *Diag,
+    run_args: *RunArgs,
+    kind: mounts.Kind,
+    value: []const u8,
+) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.mounts_count <= constants.mounts_max);
+    const mount = switch (mounts.parse(kind, value)) {
+        .ok => |found| found,
+        .problem => |problem| {
+            mounts_diagnose.bad_value(diag, kind, value, problem.sentence());
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.mounts_count == constants.mounts_max) {
+        mounts_diagnose.conflict(diag, kind.flag(), value, mounts.too_many_sentence);
+        return error.BadOptionValue;
+    }
+    if (mounts.conflict(mount.target, run_args.state_slice(), run_args.mounts_slice())) |found| {
+        mounts_diagnose.conflict(diag, kind.flag(), value, mounts.conflict_sentence(found));
+        return error.BadOptionValue;
+    }
+    run_args.mounts[run_args.mounts_count] = mount;
+    run_args.mounts_count += 1;
 }
 
 /// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
@@ -1092,13 +1189,13 @@ fn resolve_state(
     assert(command_named(operands[0]) == .state);
     var storage: [constants.arg_echo_bytes_max]u8 = undefined;
     if (operands.len == 1) {
-        return state_usage(diag, "'state' needs a subcommand: ls, rm or restore");
+        return state_usage(diag, "'state' needs a subcommand: ls, rm, export or restore");
     }
     const action = std.meta.stringToEnum(state_commands.Action, operands[1]) orelse {
         const echo = echo_of(&storage, operands[1]);
         diag.raise(.E0001);
         diag.while_("reading the command line", .{});
-        diag.cause("'{s}' is not a state subcommand; they are ls, rm and restore", .{echo});
+        diag.cause("'{s}' is not a state subcommand; they are ls, rm, export and restore", .{echo});
         diag.context("arg", "{s}", .{echo});
         diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
         return error.UnknownCommand;
@@ -1107,10 +1204,11 @@ fn resolve_state(
     const given: usize = operands.len - 2;
     if (given > wanted) return unexpected_argument(diag, .state, operands[2 + wanted]);
     if (given < wanted) {
-        return state_usage(diag, if (action == .rm)
-            "'state rm' needs the name of the volume to remove"
-        else
-            "'state restore' needs the name of the volume to bring back");
+        return state_usage(diag, switch (action) {
+            .rm => "'state rm' needs the name of the volume to remove",
+            .@"export" => "'state export' needs the name of the volume to export",
+            else => "'state restore' needs the name of the volume to bring back",
+        });
     }
     invocation.command = .state;
     invocation.operand = null;
@@ -1736,6 +1834,7 @@ fn run_state(
     const args: state_commands.Args = .{
         .action = invocation.state.action,
         .operand = invocation.state.operand,
+        .out = invocation.state.out,
     };
     return state_commands.run(host, args, output, &storage.handle.facts, &storage.state, diag) catch
         return error.CommandFailed;
@@ -1871,6 +1970,7 @@ fn run_container(
         .network = network_of(&given),
         .publish = given.publish_slice(),
         .state = given.state_slice(),
+        .mounts = given.mounts_slice(),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);

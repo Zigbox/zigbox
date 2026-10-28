@@ -235,7 +235,7 @@ pub const etc_file_bytes_max: u32 = 4096;
 pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 160;
+pub const plan_steps_max: u32 = 224;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
@@ -394,7 +394,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 6;
+pub const record_version: u32 = 7;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 52 * 1024;
 pub const record_command_bytes_max: u32 = 2048;
@@ -571,6 +571,41 @@ pub const state_walk_entries_max: u32 = 1 << 22;
 pub const state_walk_links_max: u32 = 16384;
 /// Containers named as holding one volume, in a refusal or in `state ls`.
 pub const state_holders_max: u32 = 8;
+
+// Other mounts (M6 slice 3, docs/briefs/M6-state.md): `--tmpfs`, `--bind` and `--secret`.
+/// The three flags together, in one run. State volumes are counted apart (`state_volumes_max`).
+pub const mounts_max: u32 = 8;
+/// A path of a mount: the host's side (a bind or a secret) and the container's (all of them).
+/// The same bound as a state volume's target, so one set of rules reads both.
+pub const mount_path_bytes_max: u32 = 256;
+/// A mount as the run record keeps it: `secret:`, the host path, a colon and the target.
+pub const mount_value_bytes_max: u32 = 7 + mount_path_bytes_max + 1 + mount_path_bytes_max;
+/// The default size of a `--tmpfs`, and its bounds. The pages of a tmpfs are charged to the
+/// memory of the container's cgroup, so with `--memory` the limit holds for them too; the size
+/// is a ceiling for the mount, not a reservation.
+pub const tmpfs_mount_bytes_default: u64 = 64 * 1024 * 1024;
+pub const tmpfs_mount_bytes_min: u64 = 4096;
+pub const tmpfs_mount_bytes_max: u64 = 1 << 40;
+/// The longest secret file: it is copied into the container's own memory (a tmpfs file), and the
+/// copy is made by a child that keeps it on its stack.
+pub const secret_bytes_max: u32 = 64 * 1024;
+/// The hidden names, in the container's /dev, a mount is staged at before it is moved onto its
+/// target (followed by the mount's index, one digit).
+pub const mount_stage_prefix = "/dev/.zbx-mount-";
+/// The options of a `--tmpfs` mount: `mode=1777,size=` and the size in decimal.
+pub const tmpfs_options_bytes_max: u32 = 16 + 20;
+
+// `zbx state export` (M6 slice 3).
+/// Notes about devices, sockets and fifos left out: shown one each up to this many, then counted.
+pub const state_export_notes_max: u32 = 16;
+/// The room the archive is assembled in before each write, and the paths of hard-linked files
+/// remembered so that a second name becomes a link: past either the export stops, never cuts.
+pub const state_export_buffer_bytes: u32 = 64 * 1024;
+pub const state_export_links_bytes: u32 = 1024 * 1024;
+/// The largest owner a ustar header holds (seven octal digits).
+pub const state_export_id_max: u32 = 0o7777777;
+/// The largest time (eleven octal digits).
+pub const state_export_time_max: u64 = 0o77777777777;
 
 // The simulator's file tree for the store (`src/store/fs_sim.zig`): nodes, the bytes of every
 // file written, and open files.
@@ -927,8 +962,21 @@ comptime {
     assert(state_walk_arena_bytes >= (store_depth_max + 1) * (store_name_bytes_max + 1) * 4);
     assert(state_walk_links_max > 0);
     assert(state_holders_max > 0);
-    // A plan with every volume: each has seven steps, eight when read-only.
-    assert(80 + state_volumes_max * 8 <= plan_steps_max);
+    // A plan with every volume: each has seven steps, eight when read-only; and every other
+    // mount, at most six (plan.zig).
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 <= plan_steps_max);
+    assert(plan_steps_max <= std.math.maxInt(u8));
+    // The stage names end in one digit; a mount's value and options fit their buffers.
+    assert(mounts_max <= 10);
+    assert(mount_path_bytes_max == state_target_bytes_max);
+    assert(mount_value_bytes_max <= arg_bytes_max);
+    assert(tmpfs_mount_bytes_min < tmpfs_mount_bytes_default);
+    assert(tmpfs_mount_bytes_default <= tmpfs_mount_bytes_max);
+    assert(secret_bytes_max <= file_bytes_max);
+    assert(std.fmt.comptimePrint("mode=1777,size={d}", .{tmpfs_mount_bytes_max}).len <=
+        tmpfs_options_bytes_max);
+    assert(state_export_buffer_bytes >= 8 * 512);
+    assert(state_export_links_bytes >= 2 * path_bytes_max);
 
     assert(oci_digest_hex_bytes == oci_digest_bytes * 2);
     assert(oci_digest_text_bytes == "sha256:".len + oci_digest_hex_bytes);

@@ -60,6 +60,7 @@ const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 const volumes_mod = @import("volumes.zig");
+const mounts_mod = @import("mounts.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -234,6 +235,10 @@ pub const Handle = struct {
     lost_diag: Diag,
     /// The state volumes, held from before the container is created until it has ended.
     volumes: volumes_mod.Held,
+    /// The other mounts (they point into the `Spec`, like the command) and what the host showed
+    /// of each.
+    mounts: []const mounts_mod.Mount,
+    mount_inputs: [constants.mounts_max]plan_mod.MountInput,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -311,6 +316,7 @@ pub fn start(
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.volumes.count = 0;
+    handle.mounts = container.mounts;
     handle.command = container.command;
     handle.labels = container.labels;
     handle.env_names = container.env_names;
@@ -319,6 +325,8 @@ pub fn start(
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
     try check_network(host, container, handle, diag);
+    mounts_mod.resolve(host, container.state, container.mounts, &handle.mount_inputs, diag) catch
+        return error.StartFailed;
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
@@ -387,6 +395,7 @@ fn build_plan(
             .publish = handle.publish_slice(),
         } else null,
         .state = handle.volumes.input_slice(),
+        .mounts = handle.mount_inputs[0..handle.mounts.len],
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -950,6 +959,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .env_names = handle.env_names,
         .zbx_version = build_options.version,
         .state = handle.volumes.mount_slice(),
+        .mounts = handle.mounts,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

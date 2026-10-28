@@ -80,6 +80,10 @@ pub const Options = struct {
     /// What the root record says the tree came from, when it is not the directory (a pulled
     /// image names its reference here; the directory is a staging area).
     label: ?[]const u8 = null,
+    /// A commit: paths in the container (`/run/secrets/key`) that are left as the parent has
+    /// them, whatever the upper layer holds there, with everything below. They are the mount
+    /// points zbx made for the container's mounts, which are not the container's changes.
+    exclude: []const []const u8 = &.{},
 };
 
 pub const Result = struct {
@@ -479,7 +483,11 @@ const Run = struct {
     fn copy_parent(run: *Run, frame: *Frame) Error!void {
         assert(run.merging);
         assert(frame.has_peek);
-        const entry_ = frame.peek;
+        return run.write_parent_entry(frame, frame.peek);
+    }
+
+    fn write_parent_entry(run: *Run, frame: *Frame, entry_: tree.Entry) Error!void {
+        assert(run.merging);
         frame.writer.begin(
             entry_.name,
             entry_.kind,
@@ -513,6 +521,10 @@ const Run = struct {
         length += @intCast(name.len);
         ws.path[length] = 0;
         const path = run.path_text(length);
+        if (run.merging and run.excluded(length)) {
+            if (matched) |found| try run.write_parent_entry(frame, found);
+            return;
+        }
         const fs = run.store.fs;
         const stat = fs.lstat(path) catch |err| {
             return run.source_failure("lstat of", path, err, fs.last_errno());
@@ -528,6 +540,18 @@ const Run = struct {
             },
             .block_device, .fifo, .socket => run.warn_file(path, stat.kind),
         }
+    }
+
+    /// Whether the path being read (`length` bytes of `ws.path`) is one a commit leaves out.
+    fn excluded(run: *const Run, length: u32) bool {
+        assert(run.merging);
+        const root = run.ws.frames[0].path_len;
+        assert(length > root);
+        const relative = run.ws.path[root..length];
+        for (run.options.exclude) |path| {
+            if (std.mem.eql(u8, path, relative)) return true;
+        }
+        return false;
     }
 
     fn attrs_of(run: *const Run, stat: *const fs_mod.Stat, blob: []const u8) object.Attrs {

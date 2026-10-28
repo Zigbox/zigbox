@@ -35,6 +35,8 @@ pub const Code = enum(u8) {
     E0009,
     E0010,
     E0011,
+    E0012,
+    E0013,
     E0101,
     E0102,
     E0103,
@@ -52,6 +54,8 @@ pub const Code = enum(u8) {
     E0207,
     E0208,
     E0209,
+    E0210,
+    E0211,
     W0201,
     W0202,
     W0203,
@@ -150,8 +154,12 @@ pub const Code = enum(u8) {
     E0711,
     E0712,
     E0713,
+    E0714,
+    E0715,
+    E0716,
     W0701,
     W0702,
+    W0703,
     B0001,
 };
 
@@ -330,6 +338,43 @@ pub const registry = [_]Entry{
         \\Give the value on the command line ("-e NAME=VALUE"), or set the variable
         \\for this one command: NAME=VALUE zbx run -e NAME ... A value is never
         \\printed or stored by zbx.
+        ,
+    },
+    .{
+        .code = .E0012,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --tmpfs, --bind or --secret value",
+        .explanation =
+        \\--tmpfs takes PATH or PATH:SIZE, an empty tmpfs gone at exit (64 MiB
+        \\without a size; SIZE is bytes, or a number with k, m or g, from 4096
+        \\bytes to 1 TiB). --bind takes HOST:PATH, a host directory or file
+        \\mounted read-only. --secret takes HOST_FILE:PATH, a host file copied
+        \\into the container's memory, mode 0400, read-only, owned by the
+        \\container's root.
+        \\
+        \\Every path is absolute, with parts that are names (no empty, "." or ".."
+        \\part), at most 256 bytes, and holds no ':', space or control character.
+        \\A path in the container may not be "/", nor /proc, /sys, /dev or below
+        \\them, nor /etc/hosts, /etc/hostname or /etc/resolv.conf: zbx mounts
+        \\those itself. The cause names the part that is wrong.
+        \\
+        \\    zbx run --tmpfs /scratch:128m --bind /srv/site:/srv nginx
+        ,
+    },
+    .{
+        .code = .E0013,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "mounts that cannot go together",
+        .explanation =
+        \\One run's mounts (--state, --tmpfs, --bind and --secret) each have a
+        \\path in the container, and no path may be the same as another's, inside
+        \\it, or hold it: a mount inside another would be made in the outer one.
+        \\At most 8 of --tmpfs, --bind and --secret may be given in one run, and 8
+        \\--state.
+        \\
+        \\Give each mount its own place, or drop one.
         ,
     },
     .{
@@ -646,6 +691,40 @@ pub const registry = [_]Entry{
         \\the mount point: make both directories as the rootfs's owner (mkdir -p
         \\<rootfs>/tmp <rootfs>/run) and run again. Otherwise the kernel refused the
         \\mount or the remount; the cause says why.
+        ,
+    },
+    .{
+        .code = .E0210,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --bind or --secret source can't be used",
+        .explanation =
+        \\A --bind source is a directory or a regular file on the host, and a
+        \\--secret source is one regular file. The cause says what is wrong with
+        \\the path you gave: it does not exist, cannot be looked at, or is another
+        \\kind of file (a socket, a device). zbx never makes a source: a bind is
+        \\read-only, and what a container writes belongs in a state volume
+        \\(--state).
+        \\
+        \\Check the path, or make the file first, then run again.
+        ,
+    },
+    .{
+        .code = .E0211,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up a --tmpfs, --bind or --secret mount",
+        .explanation =
+        \\A mount is made before the container's command starts. A bind or a
+        \\secret is staged in the container's own /dev, made read-only, and moved
+        \\onto its path once the container's root is entered (so the path is read
+        \\as the container reads it); a tmpfs is mounted on its path. One of those
+        \\steps failed; the cause names it and what the kernel said.
+        \\
+        \\A secret is copied by the container's root, so the file must be readable
+        \\by you and at most 65536 bytes. With --read-only the path must already
+        \\exist in the image: nothing can be made in a read-only root. zbx doctor
+        \\shows what this host allows.
         ,
     },
     .{
@@ -2186,6 +2265,52 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0714,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "won't write the archive to a terminal",
+        .explanation =
+        \\zbx state export writes a gzip-compressed tar archive: binary data a
+        \\terminal would show as noise. Standard output is a terminal, so nothing
+        \\was read.
+        \\
+        \\Name a file with -o, or redirect the output:
+        \\    zbx state export pgdata -o pgdata.tar.gz
+        \\    zbx state export pgdata > pgdata.tar.gz
+        ,
+    },
+    .{
+        .code = .E0715,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the archive",
+        .explanation =
+        \\The archive could not be written: the file named with -o cannot be made,
+        \\the disk is full, or the output was closed. The cause says which. A file
+        \\that was started is removed again; nothing partial is left.
+        \\
+        \\Free space, or write somewhere else with -o.
+        ,
+    },
+    .{
+        .code = .E0716,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the state volume to export it",
+        .explanation =
+        \\Exporting reads every file of the volume in the user's namespace, where
+        \\files of the container's users can be read. The read stopped: a file or
+        \\directory could not be read, one changed while it was read, the tree is
+        \\deeper than 64 directories, a path is longer than 4095 bytes, or it has
+        \\more entries or more files with several names than one export keeps
+        \\(4194304 and 16384). The cause says which.
+        \\
+        \\Nothing is written for a stopped export when -o names a file. A volume
+        \\that a container is still changing cannot be read consistently: stop it
+        \\first.
+        ,
+    },
+    .{
         .code = .W0701,
         .severity = .warning,
         .blame = .user,
@@ -2213,6 +2338,18 @@ pub const registry = [_]Entry{
         \\
         \\du -sh in the user's namespace counts it by hand:
         \\    unshare --map-auto --map-root-user du -sh <state>/<name>/data
+        ,
+    },
+    .{
+        .code = .W0703,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "a file was left out of the export",
+        .explanation =
+        \\A state volume can hold files a tar archive of this kind does not keep:
+        \\devices, sockets and fifos. Each one is skipped with this note (the
+        \\first 16; the rest are counted). The archive holds everything else, and
+        \\is complete without them.
         ,
     },
     .{
@@ -2358,6 +2495,7 @@ pub fn can_end_run(code: Code) bool {
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0702, .E0703, .E0704 => false,
         .E0707, .E0708, .E0709, .E0710, .W0702 => false,
+        .E0714, .E0715, .E0716, .W0703 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,

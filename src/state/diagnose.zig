@@ -125,12 +125,12 @@ fn join_names(buffer: []u8, names: []const []const u8) []const u8 {
     return writer.buffered();
 }
 
-/// ZBX-E0707: `state rm` of a volume that is not there.
-pub fn no_such_volume(diag: *Diag, name: []const u8) void {
+/// ZBX-E0707: `state rm` or `state export` of a volume that is not there.
+pub fn no_such_volume(diag: *Diag, name: []const u8, doing: []const u8) void {
     assert(diag.code == null);
     assert(volume.name_problem(name) == null);
     diag.raise(.E0707);
-    diag.while_("removing the state volume {s}", .{name});
+    diag.while_("{s} the state volume {s}", .{ doing, name });
     diag.cause("there is no state volume called {s}", .{name});
     diag.context("volume", "{s}", .{name});
     diag.fix(.{ .sentence = "list the volumes and the trash:", .command = "zbx state ls" });
@@ -263,4 +263,80 @@ pub fn size_unknown(diag: *Diag, name: []const u8, why: []const u8) void {
     diag.cause("{s}", .{why});
     diag.context("volume", "{s}", .{name});
     diag.fix(.{ .sentence = "count it by hand from the user's namespace (zbx explain W0702)" });
+}
+
+/// ZBX-E0714: `state export` with standard output on a terminal.
+pub fn export_to_terminal(diag: *Diag, name: []const u8) void {
+    assert(diag.code == null);
+    assert(volume.name_problem(name) == null);
+    diag.raise(.E0714);
+    diag.while_("exporting the state volume {s}", .{name});
+    diag.cause("standard output is a terminal, and the archive is binary data", .{});
+    diag.context("volume", "{s}", .{name});
+    var command: [constants.state_name_bytes_max + 48]u8 = undefined;
+    // Cannot fail: a volume name and the fixed words fit the buffer.
+    const format = "zbx state export {s} -o {s}.tar.gz";
+    const text = std.fmt.bufPrint(&command, format, .{ name, name }) catch unreachable; // Same.
+    diag.fix(.{ .sentence = "name a file:", .command = text, .template = true });
+    diag.fix(.{ .sentence = "or redirect the output: zbx state export <name> > <name>.tar.gz" });
+}
+
+/// ZBX-E0715: the archive could not be written to its file or its output.
+pub fn export_write_failed(
+    diag: *Diag,
+    name: []const u8,
+    destination: []const u8,
+    err: host_mod.Error,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(destination.len > 0);
+    diag.raise(.E0715);
+    diag.while_("exporting the state volume {s}", .{name});
+    var operation: [constants.state_volume_path_bytes_max + 64]u8 = undefined;
+    const text = std.fmt.bufPrint(&operation, "writing the archive to {s}", .{destination}) catch
+        "writing the archive";
+    errors.cause_host_error(diag, text, err, errno);
+    diag.context("volume", "{s}", .{name});
+    diag.context("file", "{s}", .{destination});
+    diag.fix(.{ .sentence = "free space, or write somewhere else with -o <file>" });
+}
+
+/// ZBX-E0716: the volume's files could not be read into the archive.
+pub fn export_read_failed(
+    diag: *Diag,
+    name: []const u8,
+    why: []const u8,
+    path: []const u8,
+    err: host_mod.Error,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(why.len > 0);
+    diag.raise(.E0716);
+    diag.while_("exporting the state volume {s}", .{name});
+    diag.cause("{s}", .{why});
+    var operation: [constants.path_bytes_max + 32]u8 = undefined;
+    if (path.len > 0 and err != error.IoFailed) {
+        const text = std.fmt.bufPrint(&operation, "reading {s}", .{path}) catch "reading a file";
+        errors.cause_host_error(diag, text, err, errno);
+    }
+    diag.context("volume", "{s}", .{name});
+    if (path.len > 0) diag.context("path", "{s}", .{path});
+    diag.fix(.{ .sentence = "stop what changes the volume, then export again" });
+}
+
+/// ZBX-W0703: a device, socket or fifo left out of the archive; or, with `more`, the count of
+/// the others not shown.
+pub fn export_skipped(diag: *Diag, path: []const u8, kind: []const u8, more: u64) void {
+    assert(diag.code == null);
+    diag.raise(.W0703);
+    diag.while_("exporting a state volume", .{});
+    if (more > 0) {
+        diag.cause("{d} more devices, sockets and fifos were left out", .{more});
+    } else {
+        diag.cause("{s} is a {s}, which the archive does not keep", .{ path, kind });
+        diag.context("path", "{s}", .{path});
+    }
+    diag.fix(.{ .sentence = "nothing to do: the archive holds every other file" });
 }

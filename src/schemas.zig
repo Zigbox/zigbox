@@ -469,6 +469,21 @@ const state_restore_schema =
     \\"entry":{"type":"string"},"removed":{"type":"integer"}}}
 ;
 
+const state_export_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-export/1","version":1,
+    \\"title":"zbx state export -o FILE --output json",
+    \\"description":"stdout, only when -o names a file (else the archive is stdout)",
+    \\"type":"object","required":["schema","name","file","directories","files","symlinks",
+    \\"hard_links","skipped","bytes","archive_bytes"],
+    \\"properties":{"schema":{"const":"zbx.state.export/1"},"name":{"type":"string"},
+    \\"file":{"type":"string"},"directories":{"type":"integer"},"files":{"type":"integer"},
+    \\"symlinks":{"type":"integer"},"hard_links":{"type":"integer"},
+    \\"skipped":{"type":"integer","description":"devices, sockets and fifos left out"},
+    \\"bytes":{"type":"integer","description":"the files' bytes before compression"},
+    \\"archive_bytes":{"type":"integer"}}}
+;
+
 const pull_resolve_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
@@ -585,12 +600,13 @@ const table = [_]Entry{
     .{ .command = "state-ls", .text = state_ls_schema },
     .{ .command = "state-rm", .text = state_rm_schema },
     .{ .command = "state-restore", .text = state_restore_schema },
+    .{ .command = "state-export", .text = state_export_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 22);
+    assert(table.len == 23);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -619,7 +635,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 22), table.len);
+    try testing.expectEqual(@as(usize, 23), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

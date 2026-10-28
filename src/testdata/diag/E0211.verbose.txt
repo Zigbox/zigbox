@@ -1,0 +1,12 @@
+error[ZBX-E0211]: can't set up a --tmpfs, --bind or --secret mount
+  while  starting container web-1
+  while  mounting --bind at /data
+  cause  binding the file failed: no such file or directory (ENOENT)
+  source /srv/file
+  target /data
+  name   web-1
+  rootfs /srv/alpine
+  step   bind_mount_file (53 of 69)
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0211
+  docs   https://zigbox.github.io/zigbox/errors/E0211.html

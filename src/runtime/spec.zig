@@ -10,6 +10,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const volume = @import("../state/volume.zig");
+const mounts_mod = @import("mounts.zig");
 const constants = @import("../constants.zig");
 
 /// A key and a value kept in the run record, for whoever started the container to find it by.
@@ -208,6 +209,9 @@ pub const Spec = struct {
     /// The state volumes it mounts (`--state`): each made on first use, held for the run's whole
     /// life (one writer, or readers), and named in the run record.
     state: []const volume.Mount = &.{},
+    /// The other mounts (`--tmpfs`, `--bind`, `--secret`), in the order given. Their targets are
+    /// apart from each other's and from the state volumes' (`mounts.list_problem`).
+    mounts: []const mounts_mod.Mount = &.{},
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.
@@ -534,6 +538,16 @@ pub const LimitProblem = error{
 /// A bare number is bytes. 128m is 128 MiB.
 pub fn parse_memory(text: []const u8) LimitProblem!u64 {
     assert(constants.limit_memory_bytes_min >= 1 << 20);
+    const minimum = constants.limit_memory_bytes_min;
+    const bytes = try parse_size(text, minimum, constants.limit_memory_bytes_max);
+    assert(bytes >= constants.limit_memory_bytes_min);
+    return bytes;
+}
+
+/// A size in bytes like `parse_memory` reads it, between `minimum` and `maximum`.
+pub fn parse_size(text: []const u8, minimum: u64, maximum: u64) LimitProblem!u64 {
+    assert(minimum > 0);
+    assert(minimum < maximum);
     if (text.len == 0) return error.Empty;
     if (text.len > constants.limit_text_bytes_max) return error.NotANumber;
     var digits = text;
@@ -548,9 +562,8 @@ pub fn parse_memory(text: []const u8) LimitProblem!u64 {
     const count = parse_count(digits) catch |err| return err;
     if (count == 0) return error.Zero;
     const bytes = std.math.mul(u64, count, multiplier) catch return error.TooLarge;
-    if (bytes < constants.limit_memory_bytes_min) return error.TooSmall;
-    if (bytes > constants.limit_memory_bytes_max) return error.TooLarge;
-    assert(bytes >= constants.limit_memory_bytes_min);
+    if (bytes < minimum) return error.TooSmall;
+    if (bytes > maximum) return error.TooLarge;
     return bytes;
 }
 

@@ -87,6 +87,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <tr><td class="code"><a href="E0009.html">ZBX-E0009</a></td><td>can't write output</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0010.html">ZBX-E0010</a></td><td>can't use this -e option</td><td>user</td></tr>
 <tr><td class="code"><a href="E0011.html">ZBX-E0011</a></td><td>-e names a variable that is not set</td><td>user</td></tr>
+<tr><td class="code"><a href="E0012.html">ZBX-E0012</a></td><td>not a valid --tmpfs, --bind or --secret value</td><td>user</td></tr>
+<tr><td class="code"><a href="E0013.html">ZBX-E0013</a></td><td>mounts that cannot go together</td><td>user</td></tr>
 <tr><td class="code"><a href="E0101.html">ZBX-E0101</a></td><td>can't create a user namespace</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0102.html">ZBX-E0102</a></td><td>kernel version is unsupported or unknown</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0103.html">ZBX-E0103</a></td><td>cgroup v2 is not set up for this user</td><td>environment</td></tr>
@@ -104,6 +106,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <tr><td class="code"><a href="E0207.html">ZBX-E0207</a></td><td>can't restrict the container's capabilities</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0208.html">ZBX-E0208</a></td><td>can't install the container's seccomp filter</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0209.html">ZBX-E0209</a></td><td>can't set up the read-only rootfs</td><td>environment</td></tr>
+<tr><td class="code"><a href="E0210.html">ZBX-E0210</a></td><td>a --bind or --secret source can't be used</td><td>user</td></tr>
+<tr><td class="code"><a href="E0211.html">ZBX-E0211</a></td><td>can't set up a --tmpfs, --bind or --secret mount</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0201.html">ZBX-W0201</a></td><td>mapping only your own id into the container</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0202.html">ZBX-W0202</a></td><td>can't save the run record</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0203.html">ZBX-W0203</a></td><td>skipped a run record that can't be read</td><td>environment</td></tr>
@@ -202,8 +206,12 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <tr><td class="code"><a href="E0711.html">ZBX-E0711</a></td><td>can't make or read the state directory</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0712.html">ZBX-E0712</a></td><td>can't read a state volume's record</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0713.html">ZBX-E0713</a></td><td>can't mount a state volume in the container</td><td>environment</td></tr>
+<tr><td class="code"><a href="E0714.html">ZBX-E0714</a></td><td>won't write the archive to a terminal</td><td>user</td></tr>
+<tr><td class="code"><a href="E0715.html">ZBX-E0715</a></td><td>can't write the archive</td><td>environment</td></tr>
+<tr><td class="code"><a href="E0716.html">ZBX-E0716</a></td><td>can't read the state volume to export it</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0701.html">ZBX-W0701</a></td><td>writing a bundle without redaction</td><td>user</td></tr>
 <tr><td class="code"><a href="W0702.html">ZBX-W0702</a></td><td>a state volume's size could not be counted</td><td>environment</td></tr>
+<tr><td class="code"><a href="W0703.html">ZBX-W0703</a></td><td>a file was left out of the export</td><td>user</td></tr>
 <tr><td class="code"><a href="B0001.html">ZBX-B0001</a></td><td>zbx hit an internal error</td><td>internal</td></tr>
 </table>
 </main>

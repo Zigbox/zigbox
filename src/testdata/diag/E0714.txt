@@ -1,0 +1,6 @@
+error[ZBX-E0714]: won't write the archive to a terminal
+  cause  standard output is a terminal, and the archive is binary data
+  fix    name a file:   zbx state export pgdata -o pgdata.tar.gz
+         or redirect the output: zbx state export <name> > <name>.tar.gz
+  more   zbx explain E0714 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0714.html

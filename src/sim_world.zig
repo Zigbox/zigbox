@@ -41,6 +41,7 @@ pub const errno_nametoolong: u16 = 36;
 pub const errno_noexec: u16 = 8;
 pub const errno_nospc: u16 = 28;
 pub const errno_busy: u16 = 16;
+pub const errno_isdir: u16 = 21;
 pub const errno_notempty: u16 = 39;
 
 /// A path of the simulated machine. Fixed-size, so the model never allocates.
@@ -1175,8 +1176,20 @@ pub const World = struct {
     pub fn remove_written(world: *World, path: []const u8) ?u16 {
         var real: SimPath = .{};
         if (world.resolve(path, &real)) |errno| return errno;
-        const index = world.find_written(real.slice()) orelse return errno_noent;
+        const index = world.find_written(real.slice()) orelse
+            return world.remove_file_node(real.slice());
         world.drop_written(index);
+        return null;
+    }
+
+    /// `unlink` of a file the model made (`create_file`): not a directory, and not a mount point.
+    fn remove_file_node(world: *World, real: []const u8) ?u16 {
+        const index = world.find_node(real) orelse return errno_noent;
+        if (world.nodes[index].kind == .dir) return errno_isdir;
+        const table = &world.tables[world.processes[world.current].table];
+        if (table.find(real) != null) return errno_busy;
+        world.nodes[index] = world.nodes[world.nodes_count - 1];
+        world.nodes_count -= 1;
         return null;
     }
 
@@ -1618,7 +1631,12 @@ pub const World = struct {
             table.mounts[index].read_only = true;
             return null;
         }
-        if (world.mount_target_error(request.kind, &target)) |errno| return errno;
+        // A move puts a mount where it is wanted: a file's on a file, the rest on directories.
+        const wants = if (request.kind == .move)
+            world.moved_kind(request.source.?)
+        else
+            request.kind;
+        if (world.mount_target_error(wants, &target)) |errno| return errno;
         if (request.kind == .move) return world.move_mount(request.source.?, &target);
         // A sysfs shows the network devices of the namespace it is mounted in, so the kernel
         // lets only the owner of that namespace mount one.
@@ -1628,6 +1646,9 @@ pub const World = struct {
         }
         if (request.kind == .overlay) {
             if (world.overlay_refused) return errno_perm;
+        } else if (request.kind == .user_tmpfs) {
+            // The source is the mount data, not a path.
+            assert(std.mem.startsWith(u8, request.source.?, "mode="));
         } else if (request.source) |source| {
             if (world.bind_source_error(request.kind, source)) |errno| return errno;
         }
@@ -1644,7 +1665,19 @@ pub const World = struct {
         return if (added) null else errno_nomem;
     }
 
+    /// The kind of the mount that `MS_MOVE` takes from `source`; a directory's if there is none.
+    fn moved_kind(world: *const World, source: []const u8) host.MountKind {
+        const table = &world.tables[world.processes[world.current].table];
+        var from: SimPath = .{};
+        if (world.resolve(source, &from) != null) return .bind_tree;
+        const index = table.find(from.slice()) orelse return .bind_tree;
+        const kind = table.mounts[index].kind orelse return .bind_tree;
+        return if (kind == .bind_file) .bind_file else .bind_tree;
+    }
+
     fn mount_target_error(world: *const World, kind: host.MountKind, target: *const SimPath) ?u16 {
+        // A file written through the host (a secret's copy in /dev) is a file as well.
+        if (kind == .bind_file and world.find_written(target.slice()) != null) return null;
         const found = world.node_kind(target.slice()) orelse return errno_noent;
         const wants_file = kind == .bind_file;
         if (wants_file and found != .file) return errno_notdir;

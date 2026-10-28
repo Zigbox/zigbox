@@ -83,33 +83,58 @@ comptime {
     assert(constants.state_target_bytes_max == 256); // `TargetProblem.sentence` says so.
 }
 
+/// The same reasons for a path on the host (the source of a `--bind` or `--secret`).
+pub fn host_sentence(problem: TargetProblem) []const u8 {
+    assert(@tagName(problem).len > 0);
+    return switch (problem) {
+        .empty => "the path on the host is empty",
+        .relative => "the path on the host must be absolute",
+        .too_long => "the path on the host is longer than 256 bytes",
+        .bad_part => "the path on the host may not have an empty, '.' or '..' part",
+        .bad_character => "the path on the host may not hold a ':', a space or a " ++
+            "control character",
+        .root => "the host's root directory cannot be mounted in a container",
+        // `path_problem` protects nothing; a host path is never refused for this.
+        .protected => "the path on the host is one zbx mounts itself",
+    };
+}
+
 const protected_trees = [_][]const u8{ "/proc", "/sys", "/dev" };
 const protected_files = [_][]const u8{ "/etc/hosts", "/etc/hostname", "/etc/resolv.conf" };
 
-/// Null if `target` can be a mount point in the container. The rules are the ones the child
-/// that makes it applies (`child.zig`, `make_state_target`): it splits at `/` and makes each
-/// part, so a part that would mean something else to the kernel is refused here.
-pub fn target_problem(target: []const u8) ?TargetProblem {
-    if (target.len == 0) return .empty;
-    if (target[0] != '/') return .relative;
-    if (target.len > constants.state_target_bytes_max) return .too_long;
-    for (target) |byte| {
+/// Null if `path` is a path zbx can mount from or onto: absolute, every part a name, short, and
+/// without a byte that would make a value ambiguous. The rules of a host path (a `--bind` or
+/// `--secret` source) and of a target in the container, before the target's own protections.
+pub fn path_problem(path: []const u8) ?TargetProblem {
+    if (path.len == 0) return .empty;
+    if (path[0] != '/') return .relative;
+    if (path.len > constants.state_target_bytes_max) return .too_long;
+    for (path) |byte| {
         if (byte <= ' ' or byte == ':' or byte == 0x7f) return .bad_character;
     }
-    if (target.len == 1) return .root;
-    var parts = std.mem.splitScalar(u8, target[1..], '/');
+    if (path.len == 1) return .root;
+    var parts = std.mem.splitScalar(u8, path[1..], '/');
     while (parts.next()) |part| {
         if (part.len == 0) return .bad_part;
         if (std.mem.eql(u8, part, ".")) return .bad_part;
         if (std.mem.eql(u8, part, "..")) return .bad_part;
     }
+    assert(path[path.len - 1] != '/');
+    return null;
+}
+
+/// Null if `target` can be a mount point in the container. The rules are the ones the child
+/// that makes it applies (`child.zig`, `make_state_target`): it splits at `/` and makes each
+/// part, so a part that would mean something else to the kernel is refused here. The same for
+/// every kind of mount (`--state`, `--tmpfs`, `--bind`, `--secret`).
+pub fn target_problem(target: []const u8) ?TargetProblem {
+    if (path_problem(target)) |problem| return problem;
     for (protected_trees) |tree| {
         if (under(target, tree)) return .protected;
     }
     for (protected_files) |file| {
         if (std.mem.eql(u8, target, file)) return .protected;
     }
-    assert(target[target.len - 1] != '/');
     return null;
 }
 

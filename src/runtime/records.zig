@@ -5,7 +5,10 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 6 added the state volumes the run mounted (`.state`, one
+//! skipped, never misread. Version 7 added the other mounts of the run (`.mounts`, one string of
+//! `kind:...` values separated by spaces, `mounts.text`): a secret's host path is in it, its
+//! bytes never are; an older record has none. Version 6 added the state volumes the run mounted
+//! (`.state`, one
 //! string of `--state` values, `NAME:PATH[:ro]`, separated by spaces), so that `zbx state ls` can
 //! say which container uses a volume; an older record has none. Version 5 added what the run
 //! could reach (`network`, `publish`) and the names, never the values, of the variables set with
@@ -32,6 +35,7 @@ const host_mod = @import("../host.zig");
 const codes = @import("../diag/codes.zig");
 const spec_mod = @import("spec.zig");
 const volume = @import("../state/volume.zig");
+const mounts_mod = @import("mounts.zig");
 
 const Host = host_mod.Host;
 
@@ -106,6 +110,8 @@ pub const View = struct {
     env_names: []const []const u8 = &.{},
     /// Version 6: the state volumes the run mounted.
     state: []const volume.Mount = &.{},
+    /// Version 7: the other mounts (`--tmpfs`, `--bind`, `--secret`).
+    mounts: []const mounts_mod.Mount = &.{},
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -229,7 +235,34 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     }
     write_bytes(writer, "\",\n");
     write_state(writer, view.state);
+    write_mounts(writer, view.state, view.mounts);
 }
+
+/// `.mounts = "bind:/srv:/data tmpfs:/scratch:67108864",`: one string, for the same reason.
+fn write_mounts(
+    writer: *std.Io.Writer,
+    state: []const volume.Mount,
+    mounts: []const mounts_mod.Mount,
+) void {
+    assert(mounts_mod.list_problem(state, mounts) == null);
+    var text: [mounts_text_bytes_max]u8 = undefined;
+    var used: usize = 0;
+    for (mounts, 0..) |*mount, index| {
+        var buffer: [constants.mount_value_bytes_max]u8 = undefined;
+        const value = mounts_mod.text(mount, &buffer);
+        if (index > 0) {
+            text[used] = ' ';
+            used += 1;
+        }
+        @memcpy(text[used..][0..value.len], value);
+        used += value.len;
+    }
+    write_bytes(writer, "    .mounts = ");
+    write_string(writer, text[0..used]);
+    write_bytes(writer, ",\n");
+}
+
+const mounts_text_bytes_max = constants.mounts_max * (constants.mount_value_bytes_max + 1);
 
 /// `.state = "pgdata:/var/lib/postgresql/data cfg:/etc/app:ro",`: one string, as `env_names` is
 /// (a target holds no space), so that the bundle's redactor never reads two strings in a row.
@@ -387,6 +420,22 @@ pub const Parsed = struct {
     state: [state_text_bytes_max]u8,
     state_len: u16,
     state_count: u8,
+    /// Version 7: the other mounts, each as `mounts.text` writes it, followed by a NUL.
+    mounts: [mounts_text_bytes_max]u8,
+    mounts_len: u16,
+    mounts_count: u8,
+
+    /// The `index`th other mount the run made; its strings point into this record.
+    pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
+        assert(index < parsed.mounts_count);
+        assert(parsed.mounts_len > 0);
+        var parts = std.mem.splitScalar(u8, parsed.mounts[0..parsed.mounts_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |value| : (at += 1) {
+            if (at == index) return mounts_mod.parse_text(value).?; // `parse_mounts` checked each.
+        }
+        unreachable; // The count says it is there.
+    }
 
     /// The `index`th state volume the run mounted.
     pub fn state_mount(parsed: *const Parsed, index: u32) volume.Mount {
@@ -576,6 +625,8 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.env_names_count = 0;
     out.state_len = 0;
     out.state_count = 0;
+    out.mounts_len = 0;
+    out.mounts_count = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -604,6 +655,19 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     if (!has_reason) out.reason = reason_of(out.exit);
     if (spec_mod.name_problem(out.name_slice()) != null) return error.Malformed;
     try check_network_fields(out);
+    try check_mounts(out);
+}
+
+/// What `render` asserts about the mounts: the state volumes and the other mounts together are a
+/// list a run may have.
+fn check_mounts(out: *const Parsed) ParseError!void {
+    var state: [constants.state_volumes_max]volume.Mount = undefined;
+    for (0..out.state_count) |at| state[at] = out.state_mount(@intCast(at));
+    var mounts: [constants.mounts_max]mounts_mod.Mount = undefined;
+    for (0..out.mounts_count) |at| mounts[at] = out.mount_at(@intCast(at));
+    if (mounts_mod.list_problem(state[0..out.state_count], mounts[0..out.mounts_count]) != null) {
+        return error.Malformed;
+    }
 }
 
 /// What `render` asserts about the version 5 fields, so that a damaged file cannot read as valid
@@ -715,6 +779,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "publish")) return parse_publish_list(value, out);
     if (std.mem.eql(u8, key, "env_names")) return parse_env_names(value, out);
     if (std.mem.eql(u8, key, "state")) return parse_state(value, out);
+    if (std.mem.eql(u8, key, "mounts")) return parse_mounts(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
@@ -828,6 +893,27 @@ fn parse_state(value: []const u8, out: *Parsed) bool {
         out.state_count += 1;
     }
     return volume.list_problem(mounts[0..out.state_count]) == null;
+}
+
+/// `"VALUE VALUE"`: each a mount `mounts.text` writes; whether they go together is `check_mounts`.
+fn parse_mounts(value: []const u8, out: *Parsed) bool {
+    out.mounts_len = 0; // A repeated field: the later one wins.
+    out.mounts_count = 0;
+    var text: [mounts_text_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var parts = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (parts.next()) |part| {
+        if (out.mounts_count == constants.mounts_max) return false;
+        if (mounts_mod.parse_text(part) == null) return false;
+        const room = out.mounts[out.mounts_len..];
+        assert(room.len > part.len); // The room holds every value at its bound.
+        @memcpy(room[0..part.len], part);
+        room[part.len] = 0;
+        out.mounts_len += @intCast(part.len + 1);
+        out.mounts_count += 1;
+    }
+    return true;
 }
 
 /// `.{ .{ "key", "value" }, ... }`: the labels as key and value, NUL-separated.
@@ -1241,7 +1327,7 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 6,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 7,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
@@ -1283,7 +1369,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 7,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 8,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",

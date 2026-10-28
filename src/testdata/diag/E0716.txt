@@ -1,0 +1,6 @@
+error[ZBX-E0716]: can't read the state volume to export it
+  cause  reading /home/alice/.local/share/zbx/state/pgdata/data/base failed:
+         permission denied (EACCES)
+  fix    stop whatever changes the volume and export again; see zbx explain E0716
+  more   zbx explain E0716 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0716.html

@@ -1,0 +1,6 @@
+error[ZBX-E0013]: mounts that cannot go together
+  cause  --tmpfs '/scratch/in': that path is inside, or holds, another mount's
+         path
+  fix    give each mount a path of its own, or drop one
+  more   zbx explain E0013 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0013.html

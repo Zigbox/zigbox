@@ -207,6 +207,9 @@ pub const MountKind = enum {
     /// below it. A state volume is bound in the container's /dev first and moved into the new
     /// root after it is entered, so that its target is read as the container reads it.
     move,
+    /// A tmpfs of the user's asking (`--tmpfs`): nosuid, nodev, noexec, owned by the container's
+    /// root. `source` is the mount data (`mode=1777,size=<bytes>`), as for the overlay.
+    user_tmpfs,
 };
 
 pub const MountRequest = struct {
@@ -804,7 +807,7 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file, .overlay, .move => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs => assert(request.source != null),
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);

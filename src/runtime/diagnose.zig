@@ -18,6 +18,7 @@ const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
+const mounts_diagnose = @import("mounts_diagnose.zig");
 const state_diagnose = @import("../state/diagnose.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
@@ -194,6 +195,13 @@ pub fn step_failed(
             failure.err,
             failure.errno,
         );
+        starting(diag, info);
+        step_context(diag, plan, failure.step);
+        return;
+    }
+    if (plan_mod.is_mount(step.kind)) {
+        const names = plan.mount_of(step);
+        mounts_diagnose.mount_failed(diag, operation, names, failure.err, failure.errno);
         starting(diag, info);
         step_context(diag, plan, failure.step);
         return;

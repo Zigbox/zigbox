@@ -934,10 +934,12 @@ fn do_commit(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
         return error.Failed;
     };
     var reporter: Reporter = .{ .host = job.host, .output = job.output };
+    var excluded: [constants.state_volumes_max + constants.mounts_max][]const u8 = undefined;
     const options: import.Options = .{
         .squash_owner = squash_owner,
         .warn = .{ .context = &reporter, .call = report_warning },
         .parent = job.parent,
+        .exclude = mount_points(record, &excluded),
     };
     var result: import.Result = undefined;
     // Held from the walk to the recording of the root: a gc between the two could move the new
@@ -957,6 +959,24 @@ fn do_commit(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
     if (!unchanged) try save_commit_root(&store, name, &result, &totals, job.parent, diag);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     try put(job, commit_text(job, name, &result, &totals, unchanged, &buffer), diag);
+}
+
+/// Where the container's mounts were: the mount points zbx made in its root, which are not the
+/// container's changes. The strings are in the record.
+fn mount_points(
+    record: *const records.Parsed,
+    out: *[constants.state_volumes_max + constants.mounts_max][]const u8,
+) []const []const u8 {
+    var count: u32 = 0;
+    for (0..record.state_count) |at| {
+        out[count] = record.state_mount(@intCast(at)).target;
+        count += 1;
+    }
+    for (0..record.mounts_count) |at| {
+        out[count] = record.mount_at(@intCast(at)).target;
+        count += 1;
+    }
+    return out[0..count];
 }
 
 /// The new tree is a root, recording the container and the parent.

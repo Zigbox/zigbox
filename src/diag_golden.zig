@@ -589,7 +589,8 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 }
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases;
+const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
+    mount_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1182,6 +1183,75 @@ const state_cases = [_]Case{
         .code = .W0702,
         .args = &.{ "state", "ls" },
         .prepare = prepare_state_unreadable,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
+// ---- The other mounts and the export (M6 slice 3) ---------------------------------------
+
+fn prepare_export_terminal(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    sim.terminal = true;
+    sim.no_color_value = true;
+}
+
+fn prepare_export_fifo(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_file(state_root ++ "/pgdata/data/PG_VERSION", 0o600, "16\n");
+    golden_files.put(state_root ++ "/pgdata/data/pipe", .fifo, 0o600, .{ 0, 0 }, "");
+}
+
+const mount_cases = [_]Case{
+    .{
+        .code = .E0012,
+        .args = &(state_run ++ [_][:0]const u8{ "--tmpfs", "data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0013,
+        .args = &(state_run ++ [_][:0]const u8{
+            "--tmpfs", "/scratch", "--tmpfs", "/scratch/in", "--", "/bin/sh",
+        }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0210,
+        .args = &(state_run ++ [_][:0]const u8{ "--bind", "/srv/missing:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0211,
+        .args = &(state_run ++ [_][:0]const u8{ "--bind", "/srv/file:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0714,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_export_terminal,
+        .exit = 1,
+    },
+    .{
+        .code = .E0715,
+        .args = &.{ "state", "export", "pgdata", "-o", "/nowhere/pgdata.tar.gz" },
+        .prepare = prepare_state_volume,
+        .exit = 2,
+    },
+    .{
+        .code = .E0716,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_state_unreadable,
+        .exit = 2,
+    },
+    .{
+        .code = .W0703,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_export_fifo,
         .prints = true,
         .warning = true,
         .exit = 0,

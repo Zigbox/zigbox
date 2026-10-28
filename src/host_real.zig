@@ -499,6 +499,13 @@ pub const HostReal = struct {
             .move => linux.mount(bind_source, target, null, linux.MS.MOVE, 0),
             .remount_readonly => return remount_readonly(request.target),
             .remount_readonly_tree => return remount_readonly_tree(request.target),
+            .user_tmpfs => linux.mount(
+                "tmpfs",
+                target,
+                "tmpfs",
+                linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
+                @intFromPtr(bind_source.?), // The mount data; `Host.mount` asserted it is set.
+            ),
             .overlay => linux.mount(
                 "overlay",
                 target,
