@@ -168,6 +168,17 @@ fn install_strace(session: *Session, out: *Io.Writer) !bool {
     return result.status == 0;
 }
 
+/// The guest's disk holds one image at a time: the largest of the twenty is several times its
+/// compressed size once pulled, unpacked and run, and twenty of them do not fit in the overlay.
+/// So the store and the lock are removed after each image (as root: a container's layer can hold
+/// ids mapped from the demo user's subuid range).
+fn clear_store(session: *Session, out: *Io.Writer) !void {
+    const command = "rm -rf /home/demo/.local/share/zbx " ++ project ++ "/zbx.lock; " ++
+        "df -h / | tail -n 1";
+    const cleared = try session.run(command, limits.command_timeout_kvm_s * 5);
+    try H.show(out, "remove the store before the next image (free space follows)", cleared);
+}
+
 /// A development aid (`-Donly=redis,nginx`): with a list, only the images it names run. The
 /// weekly workflow names none, so all twenty run.
 fn is_selected(only: []const u8, ref: []const u8) bool {
