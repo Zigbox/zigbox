@@ -83,7 +83,7 @@ fn old_makes(session: *Session, out: *Io.Writer) !Made {
 }
 
 /// The image's record file has `.version = <version>,`.
-fn expect_record_version(
+pub fn expect_record_version(
     session: *Session,
     out: *Io.Writer,
     pull: m4.PullDoc,
@@ -233,7 +233,7 @@ fn expect_tags(
     };
 }
 
-fn pull_json(
+pub fn pull_json(
     session: *Session,
     out: *Io.Writer,
     program: []const u8,

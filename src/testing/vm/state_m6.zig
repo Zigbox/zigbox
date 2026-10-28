@@ -1,5 +1,5 @@
-//! M6 slice 2's state volumes in the VM, a part of demo-m5 (`STATE`) until demo-m6 exists in
-//! slice 4. As the user `demo`, in the net project (`zn`), with `postgres:16`:
+//! M6 slice 2's state volumes in the VM, the acceptance part of demo-m6 (`STATE`; it was a part
+//! of demo-m5 until slice 4). As the user `demo`, in the net project (`zn`), with `postgres:16`:
 //!
 //!   1. postgres runs detached with `--state pgdata:/var/lib/postgresql/data --publish
 //!      5432:5432`; `psql` from the guest creates a table and writes a row.
@@ -18,11 +18,15 @@
 //! postgres gets its password with `-e POSTGRES_PASSWORD=demo` (slice 1), and `psql` reads it
 //! from `PGPASSWORD`.
 //!
-//! Every assertion is a function of checks_state_m6.zig with a unit test.
+//! Every assertion is a function of checks_state_m6.zig with a unit test. The commands this part
+//! is made of (`psql` on a port, waiting for postgres, the lock of a volume) are `pub`, because
+//! demo-m6's SPEC and UPGRADE parts (spec_m6.zig, upgrade_m6.zig) run postgres too. The volume
+//! is `pgdata`, and it must not exist when this part starts: the SPEC part removes its own.
 
 const std = @import("std");
 const Io = std.Io;
 const checks = @import("checks_state_m6.zig");
+const checks_streams = @import("checks.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -39,19 +43,39 @@ const image = "postgres:16";
 const volume_flag = " --state pgdata:/var/lib/postgresql/data";
 const start_pg = zn ++ " run -d --name pg" ++ volume_flag ++ " --publish 5432:5432" ++
     " -e POSTGRES_PASSWORD=demo " ++ image;
-const psql = H.as_demo ++ "PGPASSWORD=demo psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 ";
+const psql = psql_on(5432);
 const row = "kept-across-sigkill";
-const lock_file = "/home/demo/.local/share/zbx/state/pgdata/lock";
-const pg_ready = H.as_demo ++ "PGPASSWORD=demo sh -c 'for i in $(seq 120); do " ++
-    "pg_isready -q -h 127.0.0.1 && psql -h 127.0.0.1 -U postgres -tAc \"select 1\" " ++
-    ">/dev/null 2>&1 && break; sleep 1; done; pg_isready -h 127.0.0.1'";
+const pg_ready = pg_ready_on(5432);
+
+/// `psql` as the demo user against postgres published on `port` of the guest.
+pub fn psql_on(comptime port: u16) []const u8 {
+    const pattern = "PGPASSWORD=demo psql -h 127.0.0.1 -p {d} -U postgres -v ON_ERROR_STOP=1 ";
+    return H.as_demo ++ std.fmt.comptimePrint(pattern, .{port});
+}
+
+/// Waits (up to 120 s) until postgres on `port` answers a query, then prints `pg_isready`.
+pub fn pg_ready_on(comptime port: u16) []const u8 {
+    const pattern = "PGPASSWORD=demo sh -c 'for i in $(seq 120); do " ++
+        "pg_isready -q -h 127.0.0.1 -p {d} && psql -h 127.0.0.1 -p {d} -U postgres " ++
+        "-tAc \"select 1\" >/dev/null 2>&1 && break; sleep 1; done; " ++
+        "pg_isready -h 127.0.0.1 -p {d}'";
+    return H.as_demo ++ std.fmt.comptimePrint(pattern, .{ port, port, port });
+}
+
 /// `flock(1)` tries the volume's lock without waiting, for up to ten seconds (a supervisor
 /// finishes its record a moment after its container is gone).
-const lock_free = H.as_demo ++ "sh -c 'for i in $(seq 50); do " ++
-    "flock -n -x " ++ lock_file ++ " true && break; sleep 0.2; done; " ++
-    "flock -n -x " ++ lock_file ++ " echo free || echo held'";
+fn lock_free_command(session: *Session, volume: []const u8) ![]const u8 {
+    const path = try common.format(session, "/home/demo/.local/share/zbx/state/{s}/lock", .{
+        volume,
+    });
+    const pattern = H.as_demo ++ "sh -c 'for i in $(seq 50); do " ++
+        "flock -n -x {s} true && break; sleep 0.2; done; " ++
+        "flock -n -x {s} echo free || echo held'";
+    return common.format(session, pattern, .{ path, path });
+}
+
 /// The pid of a container's PID 1, from `ps --output json` (one object per line first).
-fn pid_of(comptime name: []const u8) []const u8 {
+pub fn pid_of(comptime name: []const u8) []const u8 {
     return zn ++ " ps --output json | tr '{' '\\n' | grep '\"name\":\"" ++ name ++ "\"' | " ++
         "sed -n 's/.*\"pid\":\\([0-9]*\\),\"supervisor\".*/\\1/p'";
 }
@@ -72,7 +96,7 @@ pub fn step_state(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try timer.lap(out, "state");
 }
 
-fn expect_long(
+pub fn expect_long(
     session: *Session,
     out: *Io.Writer,
     command: []const u8,
@@ -85,20 +109,59 @@ fn expect_long(
     return result;
 }
 
+/// Like `expect_long`, with the two streams kept apart.
+pub fn expect_long_split(
+    session: *Session,
+    out: *Io.Writer,
+    command: []const u8,
+    want: u8,
+    timeout_s: u32,
+) !H.SplitResult {
+    var buffer: [limits.command_bytes_max]u8 = undefined;
+    const typed = try checks_streams.split_command(&buffer, command);
+    const result = try session.run(typed, timeout_s);
+    const streams = try checks_streams.split_streams(result.output);
+    const split: H.SplitResult = .{ .streams = streams, .status = result.status };
+    try H.show_split(out, command, split);
+    if (split.status != want) return fail_step(out, step_name, command, error.ExitCodeWrong);
+    return split;
+}
+
 fn wait_ready(session: *Session, out: *Io.Writer) !void {
-    _ = try expect_long(session, out, pg_ready, 0, 180);
+    try wait_ready_on(session, out, pg_ready);
+}
+
+/// Waits for the postgres that `pg_ready_on(port)` names.
+pub fn wait_ready_on(session: *Session, out: *Io.Writer, command: []const u8) !void {
+    _ = try expect_long(session, out, command, 0, 180);
 }
 
 fn expect_free(session: *Session, out: *Io.Writer, why: []const u8) !void {
-    const result = try session.run(lock_free, limits.command_timeout_kvm_s);
-    const title = try common.format(session, "the lock of pgdata {s}", .{why});
+    try expect_volume_free(session, out, "pgdata", why);
+}
+
+/// Nobody holds the lock of `volume` (waiting up to ten seconds for a release).
+pub fn expect_volume_free(
+    session: *Session,
+    out: *Io.Writer,
+    volume: []const u8,
+    why: []const u8,
+) !void {
+    const command = try lock_free_command(session, volume);
+    const result = try session.run(command, limits.command_timeout_kvm_s);
+    const title = try common.format(session, "the lock of {s} {s}", .{ volume, why });
     try H.show(out, title, result);
     checks.check_free(result.output) catch |err| {
         return fail_step(out, step_name, "expected the volume's lock free", err);
     };
 }
 
-fn listing(session: *Session, out: *Io.Writer, expect: checks.Expect, what: []const u8) !void {
+pub fn listing(
+    session: *Session,
+    out: *Io.Writer,
+    expect: checks.Expect,
+    what: []const u8,
+) !void {
     const result = try common.run_shown(session, out, zn ++ " --output json state ls");
     const allocator = session.scratch_allocator();
     checks.check_listing(allocator, result.streams.stdout, expect) catch |err| {

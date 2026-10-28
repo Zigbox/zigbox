@@ -1,6 +1,6 @@
 # VM runs on demand, for work in progress. A push to a branch named vm/<demo>-<anything> runs that
 # one demo in the KVM VM, where it takes minutes instead of the quarter hour TCG takes in a build
-# container without KVM. <demo> is m0 to m5, or all. Nothing else runs: no build matrix, no fuzzers
+# container without KVM. <demo> is m0 to m6, or all. Nothing else runs: no build matrix, no fuzzers
 # (ci.yml does those on the PR). The run deletes its own scratch branch when it ends, pass or fail,
 # because a cloud session's git proxy cannot delete branches; the run and its logs stay readable.
 # A newer push to the same branch cancels the run it supersedes. See AGENTS.md, "Git".
@@ -33,9 +33,9 @@ jobs:
           name="${GITHUB_REF_NAME#vm/}"
           demo="${name%%-*}"
           case "$demo" in
-            m0|m1|m2|m3|m4|m5) steps="demo-$demo" ;;
-            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5" ;;
-            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m5-<x> or vm/all-<x>)"; exit 1 ;;
+            m0|m1|m2|m3|m4|m5|m6) steps="demo-$demo" ;;
+            all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6" ;;
+            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x> or vm/all-<x>)"; exit 1 ;;
           esac
           echo "steps=$steps" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-zig
