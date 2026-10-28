@@ -226,8 +226,8 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 const SITE = {
   updated: "2026-10-28",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M5 in progress",
-  stageStatus: "wip",
+  stage: "Pre-alpha · M5 shipped",
+  stageStatus: "done",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
@@ -254,8 +254,11 @@ const MILESTONES = [
   {id:"M4", name:"Pull", status:"done", slices:{green:5, total:5, note:"slices green in CI; demo passed with KVM; top-20 check passed"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40624651773", date:"2026-10-28"}, goal:"Pull a public OCI image and run it, with the store deduplicating across images.",
    demo:[["$","zbx pull alpine:3.20"],["","sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"],["$","zbx run alpine:3.20 -- cat /etc/os-release"],["","NAME=\"Alpine Linux\""],["","…    (four more lines; VERSION_ID=3.20.10)"],["$","zbx pull python:3.12-slim && zbx pull python:3.13-slim"],["$","zbx store du --by-image"],["","IMAGE              FILES    LOGICAL  COMPRESSED     STORED     SHARED"],["","python:3.12-slim    4413  114.3 MiB    41.5 MiB  110.1 MiB   81.9 MiB"],["","alpine:3.20           87    7.4 MiB     3.5 MiB    7.4 MiB    7.4 MiB"],["","python:3.13-slim    4446  113.2 MiB    41.3 MiB  108.9 MiB   81.9 MiB"],["","(python:3.13-slim costs 28,365,524 bytes of its 43,320,189 compressed)"],["$","zbx run python:3.12-slim -- python -c 'print(2**100)'"],["","1267650600228229401496703205376"],["$","zbx run alpine:3.20 -- true   (after changing the tree in zbx.lock)"],["","error[ZBX-E0519]: zbx.lock and the store disagree about an image"],["","  cause  zbx.lock has tree b3:00000000e56b…; the store has tree b3:2e478596e56b…"],["","  fix    to take the store's image, pull again and let the lock follow:   zbx pull 'alpine:3.20'"],["","         or put the tree the lock names back, from version control"],["","(exit 125)"]]},
-  {id:"M5", name:"Network", status:"wip", slices:{green:3, total:4, note:"slices green in CI; slice 4 in CI"}, goal:"No network unless granted; a granted service is reachable from the host.",
-   demo:[["$","zbx run alpine -- wget -qO- https://example.com"],["","network: none (grant with --net)"],["$","zbx run --publish 8080:80 nginx &"],["$","curl -s localhost:8080 | head -1"],["","<!DOCTYPE html>"]]},
+  // M5's demo below is output recorded by demo-m5 in CI (Ubuntu 24.04 VM, KVM, systemd-resolved),
+  // trimmed where marked. "$" lines ran as the unprivileged user demo; "#" lines ran as root in the VM.
+  {id:"M5", name:"Network", status:"done", slices:{green:4, total:4, note:"slices green in CI; demo passed with KVM"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40751616386", date:"2026-10-28"}, goal:"No network unless granted; a granted service is reachable from the host.",
+   demo:[["$","zbx run alpine -- wget -qO- https://example.com"],["","wget: bad address 'example.com'"],["","zbx: network: none (grant with --net)"],["","(exit 1)"],["$","zbx run --net user alpine -- wget -qO- https://example.com"],["","<!doctype html><html lang=en><head>…<title>Example Domain</title>…"],["$","zbx run -d --name spec-nginx --publish 8080:80 nginx"],["","spec-nginx"],["$","curl -fsS http://localhost:8080/"],["","<title>Welcome to nginx!</title>"],["","…    (the rest of nginx's welcome page)"],["$","ss -tlnpe   (as the demo user; the 8080 line)"],["","LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    uid:1000 ino:15622 sk:4 …"],["#","iptables -S   (before step 1, and after step 3)"],["","-P INPUT ACCEPT"],["","-P FORWARD ACCEPT"],["","-P OUTPUT ACCEPT"],["","(the same three lines both times)"],["$","zbx stop spec-nginx"],["","spec-nginx stopped, exit code 0"],["","(port 8080: no listener left)"]]},
   {id:"M6", name:"State", status:"plan", goal:"Data that must outlive a container is named, typed and listed.",
    demo:[["$","zbx state ls"],["","NAME    SIZE    LAST USED BY"],["","pgdata  48 MB   postgres:16 (2 min ago)"]]},
   {id:"M7", name:"Build", status:"plan", goal:"Hermetic builds from a declared step DAG: same inputs, same digest.",
