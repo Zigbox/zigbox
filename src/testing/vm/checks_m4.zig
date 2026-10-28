@@ -157,7 +157,7 @@ pub fn check_alias(first: PullDoc, second: PullDoc) Error!void {
 }
 
 pub const DuImage = struct {
-    reference: []const u8,
+    tags: []const []const u8,
     manifest: []const u8,
     tree: []const u8,
     files: u64,
@@ -187,9 +187,16 @@ pub const Dedup = struct {
 
 fn find_image(images: []const DuImage, reference: []const u8) Error!DuImage {
     for (images) |image| {
-        if (std.mem.eql(u8, image.reference, reference)) return image;
+        if (has_tag(image.tags, reference)) return image;
     }
     return error.DedupWrong;
+}
+
+fn has_tag(tags: []const []const u8, reference: []const u8) bool {
+    for (tags) |tag| {
+        if (std.mem.eql(u8, tag, reference)) return true;
+    }
+    return false;
 }
 
 /// `zbx --output json store du --by-image` after pulling `first` and then `second`: the second
@@ -315,7 +322,7 @@ const LsDoc = struct {
     schema: []const u8,
     roots: []const struct { digest: []const u8, kind: []const u8, source: []const u8 },
     images: []const struct {
-        reference: []const u8,
+        tags: []const []const u8,
         manifest: []const u8,
         platform: []const u8,
         tree: []const u8,
@@ -323,24 +330,27 @@ const LsDoc = struct {
 };
 
 /// The image is its tree: the pull, `store ls` (a record by manifest, and a root) and the lock
-/// name the same tree digest for it, and the lock also holds the manifest digest.
+/// name the same tree digest for it, and the lock also holds the manifest digest. The record
+/// keeps `tag`, the name the image was first pulled as, although it was pulled by digest after.
 pub fn check_identity(
     arena: Allocator,
     ls: Streams,
     status: u8,
     pull: PullDoc,
+    tag: []const u8,
     lock_text: []const u8,
 ) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     const doc = try parse_json(LsDoc, arena, ls.stdout);
     if (!std.mem.eql(u8, doc.schema, "zbx.store.ls/1")) return error.FieldWrong;
     // The record is keyed by the image, not by the spelling: a pull by digest of the same
-    // manifest leaves one record, under the spelling of the latest pull. So it is found by its
-    // manifest, and its tree must be the pull's.
+    // manifest leaves the one record and every tag it had. So it is found by its manifest, its
+    // tree must be the pull's, and it still lists the tag.
     var recorded = false;
     for (doc.images) |image| {
         if (!std.mem.eql(u8, image.manifest, pull.manifest_digest)) continue;
         if (!std.mem.eql(u8, image.tree, pull.tree)) return error.IdentityWrong;
+        if (!has_tag(image.tags, tag)) return error.IdentityWrong;
         recorded = true;
     }
     if (!recorded) return error.IdentityWrong;
@@ -574,11 +584,11 @@ test "a tag and a digest name one tree; two trees or one spelling are refused" {
 
 fn du_json(comptime stored: []const u8, comptime shared: []const u8) []const u8 {
     return "{\"schema\":\"zbx.store.du/1\",\"images\":[" ++
-        "{\"reference\":\"python:3.12-slim\",\"manifest\":\"sha256:" ++ hex_0 ++ "\"," ++
+        "{\"tags\":[\"python:3.12-slim\"],\"manifest\":\"sha256:" ++ hex_0 ++ "\"," ++
         "\"platform\":\"linux/amd64\",\"tree\":\"b3:" ++ hex_0 ++ "\",\"files\":4413," ++
         "\"logical_bytes\":119829928,\"compressed_bytes\":43517772," ++
         "\"stored_bytes\":115410138,\"shared_bytes\":85862291}," ++
-        "{\"reference\":\"python:3.13-slim\",\"manifest\":\"sha256:" ++ hex_1 ++ "\"," ++
+        "{\"tags\":[\"python:3.13-slim\"],\"manifest\":\"sha256:" ++ hex_1 ++ "\"," ++
         "\"platform\":\"linux/amd64\",\"tree\":\"b3:" ++ hex_1 ++ "\",\"files\":4446," ++
         "\"logical_bytes\":118710716,\"compressed_bytes\":43320189," ++
         "\"stored_bytes\":" ++ stored ++ ",\"shared_bytes\":" ++ shared ++ "}]}";
@@ -662,7 +672,7 @@ test "a pull after a kill resumes the cut blob and downloads none that was compl
 fn ls_json(comptime tree: []const u8, comptime image_tree: []const u8) []const u8 {
     return "{\"schema\":\"zbx.store.ls/1\",\"roots\":[{\"digest\":\"" ++ tree ++
         "\",\"kind\":\"import\",\"time\":1,\"files\":3,\"bytes\":9,\"source\":\"x\"," ++
-        "\"parent\":null}],\"images\":[{\"reference\":\"python:3.13-slim\"," ++
+        "\"parent\":null}],\"images\":[{\"tags\":[\"python:3.13-slim\"]," ++
         "\"manifest\":\"sha256:" ++ hex_a ++ "\",\"platform\":\"linux/amd64\"," ++
         "\"tree\":\"" ++ image_tree ++ "\",\"time\":1}]}";
 }
@@ -677,18 +687,25 @@ test "the pull, the store and the lock name an image by one tree digest" {
     const pull = try check_pull_json(arena, output, 0, image313);
     const lock = ".{ .tree = \"" ++ tree_a ++ "\", .manifest = \"sha256:" ++ hex_a ++ "\" }";
     const other = "b3:" ++ hex_1;
-    try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, pull, lock);
+    try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, pull, image313, lock);
     var alias = pull;
     alias.reference = "python@sha256:" ++ hex_a;
-    try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, alias, lock);
+    try check_identity(arena, only_stdout(ls_json(tree_a, tree_a)), 0, alias, image313, lock);
     const split = only_stdout(ls_json(tree_a, other));
-    try testing.expectError(error.IdentityWrong, check_identity(arena, split, 0, pull, lock));
+    const pulled = check_identity(arena, split, 0, pull, image313, lock);
+    try testing.expectError(error.IdentityWrong, pulled);
     const rootless = only_stdout(ls_json(other, tree_a));
-    try testing.expectError(error.IdentityWrong, check_identity(arena, rootless, 0, pull, lock));
+    const unrooted = check_identity(arena, rootless, 0, pull, image313, lock);
+    try testing.expectError(error.IdentityWrong, unrooted);
     const good = only_stdout(ls_json(tree_a, tree_a));
     const lock_other = ".{ .tree = \"" ++ other ++ "\", .manifest = \"sha256:" ++ hex_a ++ "\" }";
-    try testing.expectError(error.IdentityWrong, check_identity(arena, good, 0, pull, lock_other));
-    try testing.expectError(error.ExitCodeWrong, check_identity(arena, good, 1, pull, lock));
+    const moved = check_identity(arena, good, 0, pull, image313, lock_other);
+    try testing.expectError(error.IdentityWrong, moved);
+    const bad_exit = check_identity(arena, good, 1, pull, image313, lock);
+    try testing.expectError(error.ExitCodeWrong, bad_exit);
+    // The tag the record lost (the M4 behaviour: a pull by digest replaced it) is refused.
+    const renamed = check_identity(arena, good, 0, pull, "python:3.12-slim", lock);
+    try testing.expectError(error.IdentityWrong, renamed);
 }
 
 test "the roots an older zbx left are listed, and a store that verifies clean is ok" {

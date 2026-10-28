@@ -196,7 +196,8 @@ pub fn step_identity(session: *Session, out: *Io.Writer, timer: *H.Timer) !void 
     const lock = try session.run(cat, limits.command_timeout_kvm_s);
     const lock_text = try arena.dupe(u8, lock.output);
     const listed = try expect_exit(session, out, step, z ++ " --output json store ls", 0);
-    m4.check_identity(arena, listed.streams, listed.status, by_tag, lock_text) catch |err| {
+    const tag = by_tag.reference;
+    m4.check_identity(arena, listed.streams, listed.status, by_tag, tag, lock_text) catch |err| {
         return fail_step(out, step, "expected pull, store ls and zbx.lock to name one tree", err);
     };
     const os_release = "{s} run {s} -- cat /etc/os-release";
