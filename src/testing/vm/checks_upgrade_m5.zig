@@ -306,3 +306,55 @@ test "a record's version line is read as it is written" {
     try testing.expectError(error.LineMissing, check_record_version(old, image_record_version_m5));
     try check_record_version("    .version = 4,\n", run_record_version);
 }
+
+// Text captured from a real run of this demo in the KVM guest (vm run 40728292575, the M4 binary
+// built from cd5adbc and this one): not what the code above is believed to print.
+const real_manifest = "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
+const real_tree = "b3:2e478596e56b3c0f1748d14e505d5d289ead0bb0526cbd53b325baff01afe599";
+const real_child = "b3:8d9d08cc7873038b9fb7fb6403f4e36c17db9f0b9374cea00061564f425336be";
+const real_pull = "{\"schema\":\"zbx.pull/1\",\"reference\":\"alpine:3.20\"," ++
+    "\"registry\":\"docker.io\",\"repository\":\"library/alpine\"," ++
+    "\"manifest_digest\":\"" ++ real_manifest ++ "\"," ++
+    "\"platform\":\"linux/amd64\",\"tree\":\"" ++ real_tree ++ "\",\"config\":{\"digest\":" ++
+    "\"sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731\"," ++
+    "\"cache\":\"downloaded\"},\"layers\":[{\"digest\":\"sha256:25f1d6b1951ac8eb3740558fe94cb83d" ++
+    "377bdadf95fd9f98b50d2e1b96130471\",\"size\":3630321,\"cache\":\"downloaded\"}]," ++
+    "\"files\":87,\"directories\":97,\"symlinks\":334,\"bytes\":7802737,\"special_skipped\":0," ++
+    "\"xattrs_skipped\":0,\"image\":{\"entrypoint\":[],\"cmd\":[\"/bin/sh\"]," ++
+    "\"env\":[\"PATH=/usr" ++
+    "/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"],\"workdir\":\"/\",\"user\":" ++
+    "\"\"},\"lock\":{\"path\":\"/home/demo/project/zbx.lock\",\"created\":true}}";
+const real_roots = "{\"schema\":\"zbx.store.ls/1\",\"roots\":[{\"digest\":\"" ++ real_tree ++
+    "\",\"kind\":\"import\",\"time\":1793205847,\"files\":87,\"bytes\":7802737,\"source\":" ++
+    "\"alpine:3.20\",\"parent\":null},{\"digest\":\"" ++ real_child ++ "\",\"kind\":\"commit\"," ++
+    "\"time\":1793205847,\"files\":88,\"bytes\":7802746,\"source\":\"up1\",\"parent\":\"" ++
+    real_tree ++ "\"}],\"images\":[";
+const real_image = "\"manifest\":\"" ++ real_manifest ++ "\",\"platform\":\"linux/amd64\"," ++
+    "\"tree\":\"" ++ real_tree ++ "\",\"time\":1793205847}]}";
+const real_tagged = real_roots ++ "{\"reference\":\"alpine:3.20\",\"tags\":[\"alpine:3.20\"]," ++
+    real_image;
+const real_untagged = real_roots ++ "{\"reference\":null,\"tags\":[]," ++ real_image;
+const real_lock = "{\"schema\":\"zbx.lock/1\",\"path\":\"/home/demo/project/zbx.lock\"," ++
+    "\"images\":[{\"reference\":\"alpine:3.20\",\"manifest\":\"" ++ real_manifest ++
+    "\",\"platform\":\"linux/amd64\",\"tree\":\"" ++ real_tree ++ "\"}]}\n";
+
+test "text the M4 binary and this one printed in the guest passes the checks" {
+    // Goal: the fixtures above are real output. Right: each check on it. Wrong: the tagged
+    // listing where none is wanted, and the untagged where one is.
+    var state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const pull = try m4.check_pull_json(arena, streams_of(real_pull), 0, tag);
+    const roots = [_][]const u8{ real_tree, real_child };
+    try check_image_listed(arena, streams_of(real_tagged), 0, pull, &.{tag}, &roots);
+    try check_image_listed(arena, streams_of(real_untagged), 0, pull, &.{}, &roots);
+    const stale = check_image_listed(arena, streams_of(real_untagged), 0, pull, &.{tag}, &roots);
+    try testing.expectError(error.TagsWrong, stale);
+    const extra = check_image_listed(arena, streams_of(real_tagged), 0, pull, &.{}, &roots);
+    try testing.expectError(error.TagsWrong, extra);
+    const shown = try agent_json.check_lock_show(arena, streams_of(real_lock), 0, tag);
+    try check_lock_entry(shown, "/home/demo/project/zbx.lock", pull);
+    var buffer: [128]u8 = undefined;
+    const path = try record_path(&buffer, "/s", pull.manifest_digest);
+    try testing.expectEqualStrings("/s/images/" ++ real_manifest[7..], path);
+}
