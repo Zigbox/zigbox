@@ -265,3 +265,55 @@ jobs:
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
       - name: Run the M3 demo
         run: zig build demo-m3 -Daccel=kvm
+
+  # Sibling of demo-m3: the same VM. First the upgrade test (the merged M3 zbx, built from a
+  # worktree of the commit in old_release.zon, leaves a store this build reads), then the five
+  # steps of the M4 spec (pull alpine, run it, pull the two pythons and compare their cost in
+  # `store du --by-image`, run python, a wrong digest in zbx.lock), the acceptance criteria (a
+  # pull killed halfway resumes; an image is its tree digest) and the scripted agent, which does
+  # the demo again through --output json, `zbx schema` and `zbx explain` only. docker.io is
+  # reached through mirror.gcr.io, as docs/DECISIONS.md decided: Docker Hub's anonymous limit is
+  # shared by every runner address. The pulled blobs stay on a second disk that is cached between
+  # runs, keyed by src/testing/vm/zbx.lock (the images the demo pulls). See docs/demos/m4.md.
+  demo-m4:
+    name: demo-m4 (Ubuntu 24.04 VM, KVM, pull, upgrade, agent test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+    steps:
+      # The whole history: the upgrade test builds the M3 commit in a git worktree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/image.zon') }}
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      # The blobs the demo pulled last time, as a raw disk image the guest formats and mounts
+      # (src/testing/vm/accept_m4.zig). The demo mirrors the store's blobs onto it at the end, so
+      # it holds what the lock names and nothing older. A hit saves the downloads; a miss only
+      # costs them.
+      - name: Cache the pulled blobs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/m4-blobs.img
+          key: vm-m4-blobs-${{ hashFiles('src/testing/vm/zbx.lock') }}
+      - name: Run the M4 demo
+        run: zig build demo-m4 -Daccel=kvm

@@ -59,6 +59,12 @@ jobs:
         with:
           path: .zig-cache/zbx-vm/alpine-*.tar.gz
           key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      # The blobs demo-m4 pulled last time (ci.yml's demo-m4 has the same entry and key).
+      - name: Cache the pulled blobs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/m4-blobs.img
+          key: vm-m4-blobs-${{ hashFiles('src/testing/vm/zbx.lock') }}
       # demo-m4 reaches docker.io through the mirror, as PR CI does (docs/DECISIONS.md, M4).
       - name: Run the demo
         env:

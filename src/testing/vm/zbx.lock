@@ -1,0 +1,29 @@
+.{
+    .version = 1,
+    .images = .{
+        .{
+            .reference = "alpine:3.20",
+            .manifest = "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
+            .platform = "linux/amd64",
+            .tree = "b3:2e478596e56b3c0f1748d14e505d5d289ead0bb0526cbd53b325baff01afe599",
+        },
+        .{
+            .reference = "memcached:alpine",
+            .manifest = "sha256:9057793717e87e054636eaf06cf8ec2792a3ad164ad9e8bcae1e90241ea73fb0",
+            .platform = "linux/amd64",
+            .tree = "b3:6af1ea2d0c60bf995daf058a95ad4df25c3b43b2fac92f2cc8ffb46b4f4e2b08",
+        },
+        .{
+            .reference = "python:3.12-slim",
+            .manifest = "sha256:6d2b0577e6d1632f077331de8e4780535f54839d163ded7abb4b7dd37b5d37ac",
+            .platform = "linux/amd64",
+            .tree = "b3:2ef2776fb138a7b7010d46af46cb15b338dff81ce3c2d8927e8bbe3fb6db0897",
+        },
+        .{
+            .reference = "python:3.13-slim",
+            .manifest = "sha256:fea139ecc0ab98360ead50b38872df6d42cf3503bec83215461224cbef0c8269",
+            .platform = "linux/amd64",
+            .tree = "b3:2ec6b79d8d9fb965b5c2ae195d7e41754b4fe0c7b835831f12cfdb18800f1f81",
+        },
+    },
+}
