@@ -347,11 +347,22 @@ fn tags_text(storage: *[tags_text_bytes_max]u8, image: *const images.Image) []co
 
 const tags_text_bytes_max = constants.image_tags_max * (constants.store_source_bytes_max + 2);
 
-/// The JSON member `"tags":[...]` of an image, written in pieces: the tags escaped can be more
-/// than one output buffer holds.
+/// The JSON members `"reference":..,"tags":[...]` of an image, written in pieces: the tags
+/// escaped can be more than one output buffer holds. `reference` is the newest tag (the member
+/// of `zbx.store.ls/1` and `zbx.store.du/1` since M4), or null for an image with none.
 fn put_tags_json(job: *const Job, image: *const images.Image, diag: *Diag) Error!void {
     assert(image.tag_count <= constants.image_tags_max);
-    try put(job, "\"tags\":[", diag);
+    try put(job, "\"reference\":", diag);
+    if (image.tag_count == 0) {
+        try put(job, "null", diag);
+    } else {
+        var newest: [constants.reference_bytes_max * 6 + 8]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&newest);
+        // Cannot fail: a tag of at most 1024 bytes escapes to at most six times that.
+        json_string(&writer, image.tag_text(image.tag_count - 1)) catch unreachable; // Same bound.
+        try put(job, writer.buffered(), diag);
+    }
+    try put(job, ",\"tags\":[", diag);
     for (0..image.tag_count) |index| {
         var buffer: [constants.reference_bytes_max * 6 + 8]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);

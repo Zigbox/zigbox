@@ -196,6 +196,7 @@ pub const Image = struct {
     pub fn add_tag(image: *Image, text: []const u8) void {
         assert(text.len > 0);
         assert(text.len <= constants.reference_bytes_max);
+        assert(std.mem.indexOfScalar(u8, text, '@') == null);
         var index: u32 = 0;
         while (index < image.tag_count) : (index += 1) {
             if (lock_file.same_reference(image.tag_text(index), text)) {
@@ -330,7 +331,10 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             if (key[0] == 'r') has_reference = true;
             var word: [constants.reference_bytes_max]u8 = undefined;
             const length = roots.parse_string(value, &word) orelse return .malformed;
-            if (length > 0 and !image.push_tag(word[0..length])) return .malformed;
+            // M4 wrote the reference as typed, so a pull by digest left `name@sha256:..`: a
+            // digest is never a tag.
+            const digest = std.mem.indexOfScalar(u8, word[0..length], '@') != null;
+            if (length > 0 and !digest and !image.push_tag(word[0..length])) return .malformed;
         } else if (std.mem.eql(u8, key, "manifest")) {
             image.manifest = quoted_digest(value) orelse return .malformed;
             seen += 1;
@@ -630,4 +634,28 @@ test "real version-1 text from M4 reads" {
     const bare = try std.mem.replaceOwned(u8, testing.allocator, text, line, "");
     defer testing.allocator.free(bare);
     try testing.expectEqual(ParseResult.malformed, parse(bare, &back));
+}
+
+test "real version-1 text spelled by digest has no tag" {
+    // Goal: M4 wrote the reference as typed, so a pull by digest left `name@sha256:..`. It is
+    // not a tag: the record reads as ok with none, and the same holds in a `.tags` line.
+    const five = "5555555555555555555555555555555555555555555555555555555555555555";
+    const text = ".{\n    .version = 1,\n" ++
+        "    .reference = \"alpine@sha256:" ++ five ++ "\",\n" ++
+        "    .manifest = \"sha256:" ++ five ++ "\",\n" ++
+        "    .platform = \"linux/amd64\",\n" ++
+        "    .config = \"sha256:" ++ five ++ "\",\n" ++
+        "    .tree = \"b3:" ++ five ++ "\",\n" ++
+        "    .time = 1761600000,\n" ++
+        "    .layers = \"sha256:" ++ five ++ "\",\n}\n";
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expectEqual(@as(u32, 0), back.tag_count);
+    const tagged = try std.mem.replaceOwned(u8, testing.allocator, text, ".reference", ".tags");
+    defer testing.allocator.free(tagged);
+    const old = "version = 1";
+    const as_two = try std.mem.replaceOwned(u8, testing.allocator, tagged, old, "version = 2");
+    defer testing.allocator.free(as_two);
+    try testing.expectEqual(ParseResult.ok, parse(as_two, &back));
+    try testing.expectEqual(@as(u32, 0), back.tag_count);
 }

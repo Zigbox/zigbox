@@ -140,7 +140,9 @@ fn fill_image(random: std.Random) void {
     image.tag_count = 0;
     // More pulls than the record keeps, so the bound and the merging of a repeat are exercised.
     for (0..random.uintAtMost(u32, constants.image_tags_max + 3)) |_| {
-        image.add_tag(references[random.uintLessThan(usize, references.len)]);
+        const reference = references[random.uintLessThan(usize, references.len)];
+        // A digest is never a tag: the record keeps only what the pull was typed as.
+        if (std.mem.indexOfScalar(u8, reference, '@') == null) image.add_tag(reference);
         assert(image.tag_count <= constants.image_tags_max);
     }
     image.manifest = random_manifest(random);

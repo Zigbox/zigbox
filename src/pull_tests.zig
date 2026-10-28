@@ -738,7 +738,7 @@ test "store ls and du --by-image show the images, and rm of a pulled tree takes 
     const tags = images[0].object.get("tags").?.array.items;
     try testing.expectEqual(@as(usize, 1), tags.len);
     try testing.expectEqualStrings(reference, tags[0].string);
-    try testing.expect(images[0].object.get("reference") == null);
+    try testing.expectEqualStrings(reference, images[0].object.get("reference").?.string);
 
     try testing.expectEqual(
         @as(u8, 0),

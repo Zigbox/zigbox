@@ -157,6 +157,7 @@ pub fn check_alias(first: PullDoc, second: PullDoc) Error!void {
 }
 
 pub const DuImage = struct {
+    reference: ?[]const u8,
     tags: []const []const u8,
     manifest: []const u8,
     tree: []const u8,
@@ -187,9 +188,16 @@ pub const Dedup = struct {
 
 fn find_image(images: []const DuImage, reference: []const u8) Error!DuImage {
     for (images) |image| {
+        if (!reference_is_newest(image.reference, image.tags)) return error.FieldWrong;
         if (has_tag(image.tags, reference)) return image;
     }
     return error.DedupWrong;
+}
+
+/// `reference` is the newest of `tags`, or null when there are none.
+fn reference_is_newest(reference: ?[]const u8, tags: []const []const u8) bool {
+    const text = reference orelse return tags.len == 0;
+    return tags.len > 0 and std.mem.eql(u8, text, tags[tags.len - 1]);
 }
 
 fn has_tag(tags: []const []const u8, reference: []const u8) bool {
@@ -322,6 +330,7 @@ const LsDoc = struct {
     schema: []const u8,
     roots: []const struct { digest: []const u8, kind: []const u8, source: []const u8 },
     images: []const struct {
+        reference: ?[]const u8,
         tags: []const []const u8,
         manifest: []const u8,
         platform: []const u8,
@@ -351,6 +360,7 @@ pub fn check_identity(
         if (!std.mem.eql(u8, image.manifest, pull.manifest_digest)) continue;
         if (!std.mem.eql(u8, image.tree, pull.tree)) return error.IdentityWrong;
         if (!has_tag(image.tags, tag)) return error.IdentityWrong;
+        if (!reference_is_newest(image.reference, image.tags)) return error.IdentityWrong;
         recorded = true;
     }
     if (!recorded) return error.IdentityWrong;
@@ -584,11 +594,13 @@ test "a tag and a digest name one tree; two trees or one spelling are refused" {
 
 fn du_json(comptime stored: []const u8, comptime shared: []const u8) []const u8 {
     return "{\"schema\":\"zbx.store.du/1\",\"images\":[" ++
-        "{\"tags\":[\"python:3.12-slim\"],\"manifest\":\"sha256:" ++ hex_0 ++ "\"," ++
+        "{\"reference\":\"python:3.12-slim\",\"tags\":[\"python:3.12-slim\"]," ++
+        "\"manifest\":\"sha256:" ++ hex_0 ++ "\"," ++
         "\"platform\":\"linux/amd64\",\"tree\":\"b3:" ++ hex_0 ++ "\",\"files\":4413," ++
         "\"logical_bytes\":119829928,\"compressed_bytes\":43517772," ++
         "\"stored_bytes\":115410138,\"shared_bytes\":85862291}," ++
-        "{\"tags\":[\"python:3.13-slim\"],\"manifest\":\"sha256:" ++ hex_1 ++ "\"," ++
+        "{\"reference\":\"python:3.13-slim\",\"tags\":[\"python:3.13-slim\"]," ++
+        "\"manifest\":\"sha256:" ++ hex_1 ++ "\"," ++
         "\"platform\":\"linux/amd64\",\"tree\":\"b3:" ++ hex_1 ++ "\",\"files\":4446," ++
         "\"logical_bytes\":118710716,\"compressed_bytes\":43320189," ++
         "\"stored_bytes\":" ++ stored ++ ",\"shared_bytes\":" ++ shared ++ "}]}";
@@ -672,7 +684,8 @@ test "a pull after a kill resumes the cut blob and downloads none that was compl
 fn ls_json(comptime tree: []const u8, comptime image_tree: []const u8) []const u8 {
     return "{\"schema\":\"zbx.store.ls/1\",\"roots\":[{\"digest\":\"" ++ tree ++
         "\",\"kind\":\"import\",\"time\":1,\"files\":3,\"bytes\":9,\"source\":\"x\"," ++
-        "\"parent\":null}],\"images\":[{\"tags\":[\"python:3.13-slim\"]," ++
+        "\"parent\":null}],\"images\":[{\"reference\":\"python:3.13-slim\"," ++
+        "\"tags\":[\"python:3.13-slim\"]," ++
         "\"manifest\":\"sha256:" ++ hex_a ++ "\",\"platform\":\"linux/amd64\"," ++
         "\"tree\":\"" ++ image_tree ++ "\",\"time\":1}]}";
 }
@@ -703,6 +716,11 @@ test "the pull, the store and the lock name an image by one tree digest" {
     try testing.expectError(error.IdentityWrong, moved);
     const bad_exit = check_identity(arena, good, 1, pull, image313, lock);
     try testing.expectError(error.ExitCodeWrong, bad_exit);
+    // A reference that is not the newest tag breaks the schema's promise.
+    const from = "\"reference\":\"python";
+    const stale = try std.mem.replaceOwned(u8, arena, good.stdout, from, "\"reference\":\"x");
+    const odd = check_identity(arena, .{ .stdout = stale, .stderr = "" }, 0, pull, image313, lock);
+    try testing.expectError(error.IdentityWrong, odd);
     // The tag the record lost (the M4 behaviour: a pull by digest replaced it) is refused.
     const renamed = check_identity(arena, good, 0, pull, "python:3.12-slim", lock);
     try testing.expectError(error.IdentityWrong, renamed);
