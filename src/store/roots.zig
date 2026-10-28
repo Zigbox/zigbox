@@ -201,6 +201,8 @@ pub fn parse(text: []const u8, root: *Root) ParseResult {
             seen_kind = true;
         } else if (std.mem.eql(u8, key, "time")) {
             root.time = std.fmt.parseInt(u64, value, 10) catch return .malformed;
+            // `render` holds a time under 2^40; a damaged record may not read as more.
+            if (root.time >= 1 << 40) return .malformed;
         } else if (std.mem.eql(u8, key, "files")) {
             root.files = std.fmt.parseInt(u64, value, 10) catch return .malformed;
         } else if (std.mem.eql(u8, key, "bytes")) {
@@ -369,6 +371,8 @@ test "a record that is malformed or newer is not misread" {
     );
     const bad_number = ".{\n    .version = 1,\n    .kind = \"import\",\n    .time = x,\n}\n";
     try testing.expectEqual(ParseResult.malformed, parse(bad_number, &back));
+    const late = ".{\n    .version = 1,\n    .kind = \"import\",\n    .time = 1099511627776,\n}\n";
+    try testing.expectEqual(ParseResult.malformed, parse(late, &back));
     const bad_kind = ".{\n    .version = 1,\n    .kind = \"nope\",\n}\n";
     try testing.expectEqual(ParseResult.malformed, parse(bad_kind, &back));
     const newer = ".{\n    .version = 2,\n    .kind = \"import\",\n}\n";

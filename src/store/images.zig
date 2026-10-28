@@ -280,6 +280,8 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             seen += 1;
         } else if (std.mem.eql(u8, key, "time")) {
             image.time = std.fmt.parseInt(u64, value, 10) catch return .malformed;
+            // `render` holds a time under 2^40; a damaged record may not read as more.
+            if (image.time >= 1 << 40) return .malformed;
         } else if (std.mem.eql(u8, key, "layers")) {
             if (image.layer_count == constants.registry_layers_max) return .malformed;
             image.layers[image.layer_count] = quoted_digest(value) orelse return .malformed;
@@ -453,4 +455,12 @@ test "a damaged or newer record is refused" {
     const bad = try std.mem.replaceOwned(u8, testing.allocator, text, "sha256:", "sha512:");
     defer testing.allocator.free(bad);
     try testing.expectEqual(ParseResult.malformed, parse(bad, &back));
+    // A time past what `render` writes (the fuzzer's `lock` seed 6775460128980188419).
+    const late = try std.fmt.allocPrint(alloc, "{d}", .{@as(u64, 1) << 40});
+    defer testing.allocator.free(late);
+    const time = try std.fmt.allocPrint(alloc, "{d}", .{image.time});
+    defer testing.allocator.free(time);
+    const far = try std.mem.replaceOwned(u8, alloc, text, time, late);
+    defer testing.allocator.free(far);
+    try testing.expectEqual(ParseResult.malformed, parse(far, &back));
 }
