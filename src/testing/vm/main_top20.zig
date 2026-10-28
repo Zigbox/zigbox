@@ -259,8 +259,11 @@ fn make_output_files(session: *Session) !void {
 /// first, the marker (checks.zig) and the second, so `split_streams` cuts them apart.
 fn split_long(session: *Session, command: []const u8) !H.SplitResult {
     var buffer: [limits.command_bytes_max]u8 = undefined;
+    // The `echo` ends a last line that has no newline (jshell's prompt), so the marker is
+    // always on a line of its own.
     const format = "{s} >" ++ out_file ++ " 2>" ++ err_file ++ "; ZBX_S=$?; tail -c 8192 " ++
-        out_file ++ "; echo ZBX-STDERR\"\"-FOLLOWS; tail -c 8192 " ++ err_file ++ "; exit $ZBX_S";
+        out_file ++ "; echo; echo ZBX-STDERR\"\"-FOLLOWS; tail -c 8192 " ++ err_file ++
+        "; exit $ZBX_S";
     const typed = try std.fmt.bufPrint(&buffer, format, .{command});
     const result = try session.run(typed, image_timeout_s);
     const streams = try checks.split_streams(result.output);
