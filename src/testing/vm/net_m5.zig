@@ -82,7 +82,7 @@ fn step_reach(session: *Session, out: *Io.Writer) !void {
 
 fn step_files(session: *Session, out: *Io.Writer) !void {
     const script = " alpine:3.20 -- sh -c 'cat /etc/hosts; echo ---; cat /etc/resolv.conf; " ++
-        "echo ---; (echo x >> /etc/hosts) 2>&1'";
+        "echo ---; (echo x >> /etc/hosts) 2>&1; true'";
     const own = try common.run_shown(session, out, z ++ " run --name gen2" ++ script);
     checks_m5.check_generated_files(own.streams, own.status, "gen2", false) catch |err| {
         return fail_step(out, step_name, "expected hosts, no nameserver, read-only", err);
