@@ -280,7 +280,17 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
         assert(code == environment_code);
         return;
     }
-    const fails = diag_fuzz.find_fail_lines(sim.stdout());
+    // The text report marks a failure with a FAIL line; the JSON report (`--output json`) is one
+    // document whose failing checks say so, and holds no such line.
+    const is_document = std.mem.startsWith(u8, sim.stdout(), "{\"schema\":\"zbx.doctor/1\"");
+    var fails = diag_fuzz.find_fail_lines(sim.stdout());
+    if (is_document) {
+        assert(fails.count == 0);
+        fails = diag_fuzz.find_diagnostics(sim.stderr());
+        const marked = std.mem.count(u8, sim.stdout(), "\"status\":\"fail\"");
+        // A write fault can cut the document short; whole, it names every failure.
+        if (!faulted) assert(marked == fails.count);
+    }
     // A write fault can cut a diagnostic short, and then the exit code is the environment's
     // whatever the blame was; without a fault the diagnostics are whole and blame decides.
     if (faulted and code == environment_code) {
