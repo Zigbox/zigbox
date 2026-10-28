@@ -34,7 +34,10 @@ run:
   --pids <n>      limit on processes and threads, as in 64
   --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
   --read-only     mount the root read-only, with a tmpfs at /tmp and /run
-  --net <mode>    none (the default: a network of its own, only lo) or host (share the host's)
+  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
+                  or user (the network through pasta, as the user: apt install passt)
+  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
+                  implies --net user)
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)

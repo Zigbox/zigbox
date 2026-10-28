@@ -7,6 +7,8 @@
 //! has no nameserver for a container with no network (a lookup then fails at once, as it should)
 //! and the host's file for one that shares the host's network, where the host's resolver is
 //! reachable as it is, including the stub resolver of a systemd-resolved host at 127.0.0.53.
+//! A `--net user` container names the address pasta forwards DNS on (`pasta_dns_forward`):
+//! pasta asks the host's own resolver from the host's side, stub included.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -44,6 +46,8 @@ pub const File = enum(u8) {
 pub const Buffer = [constants.etc_file_bytes_max]u8;
 
 const no_network_note = "# zbx: this container has no network (--net none).\n";
+const user_file = "# zbx: DNS goes through pasta to the host's resolver (--net user).\n" ++
+    "nameserver " ++ constants.pasta_dns_forward ++ "\n";
 const empty_host_note = "# zbx: the host's /etc/resolv.conf was empty or could not be read.\n";
 
 /// `/etc/hosts` of a container called `name` (a valid container name, so a short label).
@@ -72,6 +76,10 @@ pub fn resolv_conf(network: spec.Network, host_file: []const u8) []const u8 {
             if (host_file.len == 0) return empty_host_note;
             assert(host_file[host_file.len - 1] == '\n');
             return host_file;
+        },
+        .user => {
+            assert(host_file.len == 0); // The host's file is read for `host` only.
+            return user_file;
         },
     }
 }
@@ -129,6 +137,9 @@ test "resolv.conf: no nameserver without a network, the host's file with the hos
     try testing.expect(none[0] == '#');
     const stub = "nameserver 127.0.0.53\noptions edns0 trust-ad\n";
     try testing.expectEqualStrings(stub, resolv_conf(.host, stub));
+    const user = resolv_conf(.user, "");
+    try testing.expect(std.mem.endsWith(u8, user, "\nnameserver 169.254.1.1\n"));
+    try testing.expect(std.mem.indexOf(u8, user, "127.0.0.53") == null);
     const empty = resolv_conf(.host, "");
     try testing.expect(empty[0] == '#');
     try testing.expect(std.mem.indexOf(u8, empty, "nameserver") == null);

@@ -157,6 +157,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .exec => try exec(child, state),
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
+        .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
     }
 }

@@ -1,2 +1,2 @@
 {"code":"ZBX-W0302","severity":"warning","blame":"environment","summary":"the container's cgroup scope was left behind","causes":["systemd answered org.freedesktop.DBus.Error.AccessDenied: Refused"],"while":["making sure the container's scope zbx-web-1.scope is gone"],"context":{"scope":"zbx-web-1.scope"},"fixes":[{"sentence":"remove it by hand:","command":"systemctl --user stop zbx-web-1.scope"}],"docs":"https://zigbox.github.io/zigbox/errors/W0302.html","omitted":{"causes":0,"while":0,"context":0,"fixes":0}}
-{"container_exit":{"reason":"exited","code":0,"network":"none"},"ran":{"kind":"rootfs","path":"/srv/alpine"}}
+{"container_exit":{"reason":"exited","code":0,"network":"none","published":[]},"ran":{"kind":"rootfs","path":"/srv/alpine"}}

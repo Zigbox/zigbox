@@ -341,6 +341,13 @@ pub const VTable = struct {
     ) Error!Pid,
     /// Forks the scope's keeper (see `Host.start_keeper`).
     start_keeper: *const fn (context: *anyopaque, hold: Handle) Error!Pid,
+    /// Starts a program that outlives the call (see `Host.start_program`).
+    start_program: *const fn (
+        context: *anyopaque,
+        request: ExecRequest,
+        stdout: Handle,
+        log: [:0]const u8,
+    ) Error!Pid,
     /// Blocks until the child ends and reaps it.
     wait: *const fn (context: *anyopaque, pid: Pid) Error!ExitStatus,
     signal: *const fn (context: *anyopaque, pid: Pid, signal: u8) Error!void,
@@ -648,6 +655,7 @@ pub const Host = struct {
     pub fn read_timeout(host: Host, handle: Handle, buffer: []u8, timeout_ms: u32) Error!u32 {
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
+        comptime assert(constants.pasta_ready_timeout_ms <= constants.dbus_job_timeout_ms);
         assert(timeout_ms <= constants.dbus_job_timeout_ms);
         for (0..constants.eintr_retries_max + 1) |_| {
             const count = host.vtable.read_timeout(
@@ -725,6 +733,28 @@ pub const Host = struct {
         assert(hold < std.math.maxInt(i32));
         const pid = try host.vtable.start_keeper(host.context, hold);
         assert(pid > 1);
+        return pid;
+    }
+
+    /// Starts `request` as a child of this process that goes on running: pasta. It has a session
+    /// of its own (a terminal's ^C or hang-up is not for it), the kernel kills it when this
+    /// thread dies (`PR_SET_PDEATHSIG`, so a SIGKILL of zbx releases what it holds), its stdin
+    /// is /dev/null, its stdout is `stdout` (a pipe's write end, which the caller then closes)
+    /// and its stderr is the file `log`, created or emptied with mode 0600, or /dev/null when
+    /// `log` is empty. The caller waits for it (`wait_for`) and is the one who ends it.
+    pub fn start_program(
+        host: Host,
+        request: ExecRequest,
+        stdout: Handle,
+        log: [:0]const u8,
+    ) Error!Pid {
+        assert(request.path.len > 0);
+        assert(request.path[0] == '/');
+        assert(request.argv[0] != null);
+        if (log.len > 0) assert(log[0] == '/');
+        const pid = try host.vtable.start_program(host.context, request, stdout, log);
+        assert(pid > 1);
+        assert(host.vtable.last_errno(host.context) == 0);
         return pid;
     }
 

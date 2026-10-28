@@ -214,6 +214,13 @@ pub const Process = struct {
     /// A scope's keeper (`World.start_keeper`): alive in the `command` state until the pipe it
     /// holds has no writer left, or it is killed.
     keeper: bool,
+    /// pasta (`World.start_program`): alive in the `command` state, serving the namespaces of
+    /// `pasta_target`, listening on the host's `ports`, until it is killed, its parent dies, or
+    /// (unless `World.pasta_stays`) the process it serves is gone.
+    pasta: bool,
+    pasta_target: u32,
+    ports: [constants.publish_count_max]u16,
+    ports_count: u32,
 
     pub fn argv(process: *const Process) []const u8 {
         return process.exec_argv[0..process.exec_argv_len];
@@ -253,6 +260,23 @@ pub const Written = struct {
 };
 
 pub const script_max: u32 = 8;
+
+/// What the simulated pasta does when started for a process that exists and ports it can bind.
+pub const PastaBehaviour = enum {
+    /// Configures the namespace, binds the ports, writes its PID on its stdout.
+    works,
+    /// Writes `World.pasta_message` to its log and exits 1.
+    fails,
+    /// Never says anything: zbx's wait for it runs out.
+    silent,
+    /// Writes a line that is not its PID.
+    garbled,
+};
+
+/// The warning the real pasta writes when started as zbx starts it on Ubuntu 24.04 (with
+/// `--no-map-gw`, a resolver on the loopback is not one it passes on); captured in the guest,
+/// docs/demos/m5.md.
+pub const pasta_ready_output = "Couldn't get any nameserver address\n";
 
 /// What a simulated helper did: how it ended and how many bytes of output it wrote.
 pub const HelperRun = struct {
@@ -340,6 +364,18 @@ pub const World = struct {
     keeper_dies_early: bool,
     /// Keepers started so far.
     keepers_started: u32,
+    /// The pasta model: how it behaves, the line it fails with, the host ports other programs
+    /// hold, the lowest port a user may bind, whether it misses its namespace going away (an old
+    /// pasta), and how many were started.
+    pasta_behaviour: PastaBehaviour,
+    pasta_message: []const u8,
+    ports_taken: [4]u16,
+    ports_taken_count: u32,
+    unprivileged_port_start: u32,
+    pasta_stays: bool,
+    pasta_starts: u32,
+    /// What `pasta --version` prints (its first line is what counts).
+    pasta_version_line: []const u8,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -389,6 +425,13 @@ pub const World = struct {
         world.keeper_fork_errno = null;
         world.keeper_dies_early = false;
         world.keepers_started = 0;
+        world.pasta_behaviour = .works;
+        world.pasta_message = "Couldn't set up tap device in namespace";
+        world.ports_taken_count = 0;
+        world.unprivileged_port_start = 1024;
+        world.pasta_stays = false;
+        world.pasta_starts = 0;
+        world.pasta_version_line = "pasta 2024_09_06.6b38f07\n";
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -753,6 +796,7 @@ pub const World = struct {
         }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
         child.state = .zombie;
+        world.namespace_gone(child.pid);
     }
 
     /// Ends a child that has not run: it never gets to. Returns false if it is not pending.
@@ -763,6 +807,11 @@ pub const World = struct {
             return if (gone) errno_srch else null;
         }
         if (world.kill_errno) |errno| return errno;
+        if (process.pasta) {
+            // pasta ends on SIGTERM (its handler exits) and on SIGKILL; zbx sends only SIGKILL.
+            if (process.state == .command) world.pasta_ends(process, .{ .signaled = number });
+            return null;
+        }
         if (process.keeper) {
             // A keeper has no handlers and is not PID 1 of anything: SIGKILL ends it and the
             // other signals end it too, but only SIGKILL is ever sent to it.
@@ -792,6 +841,7 @@ pub const World = struct {
                 process.exit = .{ .signaled = number };
                 process.state = .zombie;
                 process.holds = @splat(false);
+                world.namespace_gone(process.pid);
             },
             .zombie => {},
             .unused, .reaped, .running => return errno_srch,
@@ -803,8 +853,10 @@ pub const World = struct {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
-        // A keeper never ends by itself: waiting for one that is alive would never return.
-        if (process.state == .command and !process.keeper) world.finish_command(process);
+        // A keeper or a pasta never ends by itself: waiting for one alive would never return.
+        if (process.state == .command and !process.keeper and !process.pasta) {
+            world.finish_command(process);
+        }
         if (process.state != .zombie) return .{ .errno = errno_child };
         world.reap(process);
         return .{ .status = process.exit.? };
@@ -992,8 +1044,10 @@ pub const World = struct {
         world.process_died(process.pid);
     }
 
-    /// The kernel counts a zombie out of its cgroup: the scope is no longer populated.
+    /// The kernel counts a zombie out of its cgroup: the scope is no longer populated. A pasta
+    /// that serves it notices its namespace gone.
     fn process_died(world: *World, pid: u32) void {
+        world.namespace_gone(pid);
         if (world.find_process(pid)) |process| {
             // The status file of a process that ended and is not reaped says so.
             if (process.execd) world.put_status_file(pid, true);
@@ -1145,6 +1199,208 @@ pub const World = struct {
     /// What `newuidmap` and `newgidmap` do for a caller with these ids: map the caller's own id
     /// to 0 and a range of its subordinate ids above it, once. `argv` is the program's name,
     /// the pid and the triples, as numbers in text.
+    // ---- pasta ----
+
+    /// Starts pasta as `request` says: the namespaces of the PID its last word names, a forward
+    /// per `--tcp-ports` value, its stdout the pipe end `stdout`, its stderr the file `log`. It
+    /// decides at once how it goes, as the real one does within milliseconds.
+    pub fn start_program(
+        world: *World,
+        request: host.ExecRequest,
+        stdout: host.Handle,
+        log: []const u8,
+    ) union(enum) { pid: u32, errno: u16 } {
+        assert(std.mem.eql(u8, std.fs.path.basename(request.path), "pasta"));
+        const slot = for (world.processes[1..], 1..) |*process, index| {
+            if (process.state == .unused or process.state == .reaped) break index;
+        } else return .{ .errno = 11 };
+        const end = end_index(stdout);
+        assert(end % 2 == 1); // The write end.
+        assert(world.processes[world.current].holds[end]);
+        if (log.len > 0) {
+            if (world.write_file(log, "")) |errno| return .{ .errno = errno };
+        }
+        world.pasta_starts += 1;
+        const pasta = &world.processes[slot];
+        pasta.* = unused_process();
+        pasta.state = .command;
+        pasta.pasta = true;
+        pasta.pid = world.take_pid();
+        pasta.cwd = world.processes[world.current].cwd;
+        pasta.holds[end] = true;
+        pasta.exec_argv_len = copy_lines(&pasta.exec_argv, request.argv);
+        var words: [constants.pasta_argv_words_max][]const u8 = undefined;
+        var count: usize = 0;
+        while (request.argv[count]) |word| : (count += 1) words[count] = std.mem.span(word);
+        assert(count > 1);
+        pasta.pasta_target = std.fmt.parseInt(u32, words[count - 1], 10) catch 0;
+        var failure: [160]u8 = undefined;
+        const failed = world.pasta_failure(pasta, words[0 .. count - 1], &failure);
+        if (failed) |line| {
+            world.pasta_log(log, line);
+            world.pasta_ends(pasta, .{ .exited = 1 });
+            return .{ .pid = pasta.pid };
+        }
+        switch (world.pasta_behaviour) {
+            .works => {
+                world.pasta_log(log, pasta_ready_output);
+                var line: [16]u8 = undefined;
+                // Cannot fail: a pid and a newline fit sixteen bytes.
+                const text = std.fmt.bufPrint(&line, "{d}\n", .{pasta.pid}) catch unreachable;
+                world.pipe_append(end / 2, text);
+            },
+            .fails => unreachable, // `pasta_failure` said so.
+            .silent => {},
+            .garbled => world.pipe_append(end / 2, "pasta is ready\n"),
+        }
+        return .{ .pid = pasta.pid };
+    }
+
+    /// Why this pasta fails, as its last line, or null if it does not; binds its ports if not.
+    fn pasta_failure(
+        world: *World,
+        pasta: *Process,
+        words: []const []const u8,
+        buffer: *[160]u8,
+    ) ?[]const u8 {
+        const target = world.find_process(pasta.pasta_target);
+        const gone = if (target) |found| found.state == .reaped or found.state == .zombie else true;
+        if (gone) {
+            const format = "Couldn't open user namespace /proc/{d}/ns/user: " ++
+                "No such file or directory";
+            // Cannot fail: the line and a pid fit 160 bytes.
+            return std.fmt.bufPrint(buffer, format, .{pasta.pasta_target}) catch unreachable;
+        }
+        if (world.pasta_behaviour == .fails) return world.pasta_message;
+        for (words, 0..) |word, index| {
+            if (!std.mem.eql(u8, word, "--tcp-ports")) continue;
+            const value = words[index + 1];
+            if (std.mem.eql(u8, value, "none")) continue;
+            const colon = std.mem.indexOfScalar(u8, value, ':').?;
+            // Cannot fail: zbx writes the forwards it parsed, HOST:CONTAINER.
+            const port = std.fmt.parseInt(u16, value[0..colon], 10) catch unreachable;
+            const others = world.ports_taken[0..world.ports_taken_count];
+            const taken = std.mem.indexOfScalar(u16, others, port) != null or
+                world.port_listened(port);
+            const reason: ?[]const u8 = if (taken)
+                "Address already in use"
+            else if (port < world.unprivileged_port_start) "Permission denied" else null;
+            if (reason) |text| {
+                const format = "Failed to bind port {d} ({s}) for option '-t {s}', exiting";
+                // Cannot fail: the line, a port and a forward fit 160 bytes.
+                return std.fmt.bufPrint(buffer, format, .{ port, text, value }) catch unreachable;
+            }
+            pasta.ports[pasta.ports_count] = port;
+            pasta.ports_count += 1;
+        }
+        return null;
+    }
+
+    fn pasta_log(world: *World, log: []const u8, line: []const u8) void {
+        if (log.len == 0) return;
+        var text: [200]u8 = undefined;
+        const ended = if (std.mem.endsWith(u8, line, "\n"))
+            line
+        else
+            std.fmt.bufPrint(&text, "{s}\n", .{line}) catch unreachable; // Lines are short.
+        _ = world.write_file(log, ended); // A log that cannot be written is not pasta's failure.
+    }
+
+    fn pipe_append(world: *World, pipe_index: u32, bytes: []const u8) void {
+        const pipe = &world.pipes[pipe_index];
+        assert(pipe.used);
+        assert(pipe.written + bytes.len <= pipe.data.len);
+        @memcpy(pipe.data[pipe.written..][0..bytes.len], bytes);
+        pipe.written += @intCast(bytes.len);
+    }
+
+    fn pasta_ends(world: *World, process: *Process, status: host.ExitStatus) void {
+        _ = world;
+        assert(process.pasta);
+        assert(process.state == .command);
+        process.exit = status;
+        process.state = .zombie;
+        process.holds = @splat(false);
+        process.ports_count = 0;
+    }
+
+    /// The process `pid` is gone: a pasta that serves it sees `/proc/<pid>/ns/net` go and exits,
+    /// unless the model says it is a pasta too old to notice.
+    fn namespace_gone(world: *World, pid: u32) void {
+        if (world.pasta_stays) return;
+        for (&world.processes) |*process| {
+            if (!process.pasta or process.state != .command) continue;
+            if (process.pasta_target != pid) continue;
+            world.pasta_ends(process, .{ .exited = 0 });
+        }
+    }
+
+    fn port_listened(world: *const World, port: u16) bool {
+        for (&world.processes) |*process| {
+            if (!process.pasta or process.state != .command) continue;
+            if (std.mem.indexOfScalar(u16, process.ports[0..process.ports_count], port) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Host ports some pasta still listens on: zero after a run on every exit path.
+    pub fn ports_listening(world: *const World) u32 {
+        var count: u32 = 0;
+        for (&world.processes) |*process| {
+            if (process.pasta and process.state == .command) count += process.ports_count;
+        }
+        return count;
+    }
+
+    /// pasta processes not yet reaped.
+    pub fn pasta_alive(world: *const World) u32 {
+        var count: u32 = 0;
+        for (&world.processes) |*process| {
+            if (!process.pasta) continue;
+            if (process.state == .command or process.state == .zombie) count += 1;
+        }
+        return count;
+    }
+
+    /// A SIGKILL of zbx itself: the kernel kills what asked to die with it (the container's PID
+    /// 1, after `die_with_parent`, the keeper and pasta), and init reaps them.
+    pub fn kill_supervisor(world: *World) void {
+        for (world.processes[1..]) |*process| {
+            if (process.state != .command) continue;
+            if (process.pasta) {
+                world.pasta_ends(process, .{ .signaled = constants.signal_kill });
+            } else if (process.keeper) {
+                world.keeper_ends(process, .{ .signaled = constants.signal_kill });
+            } else if (process.die_with_parent) {
+                process.exit = .{ .signaled = constants.signal_kill };
+                process.state = .zombie;
+                world.process_died(process.pid);
+            }
+        }
+        for (world.processes[1..]) |*process| {
+            if (process.state == .zombie) process.state = .reaped; // Init reaps them.
+        }
+    }
+
+    /// Reads a pipe end without running any child: what is there, an end of file, or nothing
+    /// yet (a timeout, since the model has no time of its own).
+    pub fn read_pipe_timed(world: *World, handle: host.Handle, buffer: []u8) ?u32 {
+        const index = end_index(handle);
+        assert(index % 2 == 0); // The read end.
+        assert(world.processes[world.current].holds[index]);
+        const pipe = &world.pipes[index / 2];
+        if (pipe.consumed == pipe.written) {
+            return if (world.writer_exists(index / 2)) null else 0;
+        }
+        const available = pipe.written - pipe.consumed;
+        const count: u32 = @min(available, @as(u32, @intCast(buffer.len)));
+        @memcpy(buffer[0..count], pipe.data[pipe.consumed..][0..count]);
+        pipe.consumed += count;
+        return count;
+    }
+
     pub fn run_helper(
         world: *World,
         request: host.ExecRequest,
@@ -1153,7 +1409,9 @@ pub const World = struct {
     ) HelperRun {
         world.helper_runs += 1;
         const program = std.fs.path.basename(request.path);
-        if (std.mem.eql(u8, program, "pasta")) return pasta_version(output);
+        if (std.mem.eql(u8, program, "pasta")) {
+            return pasta_version(world.pasta_version_line, output);
+        }
         const is_uid = std.mem.eql(u8, program, "newuidmap");
         if (!is_uid) assert(std.mem.eql(u8, program, "newgidmap"));
         const refused = if (is_uid)
@@ -1183,11 +1441,10 @@ pub const World = struct {
     }
 
     /// What `pasta --version` prints: one line, as the project's snapshots name themselves.
-    fn pasta_version(output: []u8) HelperRun {
-        const text = "pasta 2024_09_06.6b38f07\n";
+    fn pasta_version(text: []const u8, output: []u8) HelperRun {
         assert(output.len >= text.len);
         @memcpy(output[0..text.len], text);
-        return .{ .status = .{ .exited = 0 }, .len = text.len };
+        return .{ .status = .{ .exited = 0 }, .len = @intCast(text.len) };
     }
 
     /// The caller's own id to 0, then ranges inside what it was given, each of three numbers.
@@ -1527,6 +1784,10 @@ fn unused_process() Process {
         .exec_envp_len = 0,
         .holds = @splat(false),
         .keeper = false,
+        .pasta = false,
+        .pasta_target = 0,
+        .ports = undefined,
+        .ports_count = 0,
     };
 }
 

@@ -74,7 +74,10 @@ const help_text =
     \\  --pids <n>      limit on processes and threads, as in 64
     \\  --cpus <n>      limit on CPU time, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
-    \\  --net <mode>    none (the default: a network of its own, only lo) or host (share the host's)
+    \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
+    \\                  or user (the network through pasta, as the user: apt install passt)
+    \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
+    \\                  implies --net user)
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
@@ -199,9 +202,17 @@ pub const RunArgs = struct {
     all: bool = false,
     /// `--read-only`: the rootfs is mounted read-only, with a tmpfs at /tmp and /run.
     read_only: bool = false,
-    /// `--net` and `--publish`, as typed. No `--net` is `none`, and the run says so when it fails.
+    /// `--net` as typed. No `--net` is `none` (unless `--publish` was given, which implies
+    /// `user`), and a run with neither says so when it fails.
     net: ?[]const u8 = null,
-    publish: ?[]const u8 = null,
+    /// The `--publish` values, parsed as each was read (a bad one is refused there, E0600).
+    publish: [constants.publish_count_max]runtime_spec.Publish = undefined,
+    publish_count: u32 = 0,
+
+    pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
+        assert(run_args.publish_count <= constants.publish_count_max);
+        return run_args.publish[0..run_args.publish_count];
+    }
 };
 
 /// The options of `run` that take a value, before the `--`.
@@ -671,6 +682,7 @@ fn take_run_option(
             break :blk args[next];
         },
     };
+    if (option == .publish) return take_publish(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -680,7 +692,7 @@ fn take_run_option(
         .timeout => &run_args.timeout,
         .grace => &run_args.grace,
         .net => &run_args.net,
-        .publish => &run_args.publish,
+        .publish => unreachable, // Repeatable: `take_publish` above.
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
@@ -708,8 +720,7 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     if (!has_default) assert(run_args.command.len > 0);
 }
 
-/// The network mode `--net` names; null for any other word. `user` is a mode, but not yet one a
-/// run can have (`network_unavailable`).
+/// The network mode `--net` names; null for any other word.
 const NetWord = enum { none, host, user };
 
 fn net_word_named(value: []const u8) ?NetWord {
@@ -718,14 +729,72 @@ fn net_word_named(value: []const u8) ?NetWord {
     return std.meta.stringToEnum(NetWord, value);
 }
 
-/// `--net` takes none, host or user; `--publish` and `--net user` need pasta, which comes with
-/// a later part of this milestone, and are refused with a code that says so.
+/// `--net` takes none, host or user. `--publish` implies `user`: with an explicit `none` or
+/// `host` it names a forward into a network the container does not get, which is refused.
 fn check_network_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
     assert(diag.code == null);
-    if (run_args.publish) |value| return network_unavailable(diag, "--publish", value);
+    assert(run_args.publish_count <= constants.publish_count_max);
     const value = run_args.net orelse return;
     const word = net_word_named(value) orelse return bad_net_value(diag, value);
-    if (word == .user) return network_unavailable(diag, "--net user", value);
+    if (run_args.publish_count == 0) return;
+    if (word == .user) return;
+    var storage: [runtime_spec.publish_text_bytes_max]u8 = undefined;
+    const first = run_args.publish[0].text(&storage);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    if (word == .none) {
+        diag.cause("--publish forwards a host port into the container's own network, " ++
+            "and --net none gives it none", .{});
+    } else {
+        diag.cause("--publish forwards a host port into the container's own network, " ++
+            "and --net host shares the host's instead", .{});
+    }
+    diag.context("cmd", "run", .{});
+    diag.context("arg", "--net {s} --publish {s}", .{ value, first });
+    diag.fix(.{
+        .sentence = "drop --net: --publish implies --net user",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    return error.UnexpectedArgument;
+}
+
+/// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
+fn take_publish(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.publish_count <= constants.publish_count_max);
+    const parsed = switch (runtime_spec.parse_publish(value)) {
+        .ok => |publish| publish,
+        .problem => |problem| return bad_publish(diag, value, problem.sentence()),
+    };
+    if (run_args.publish_count == constants.publish_count_max) {
+        return bad_publish(diag, value, "--publish is given more than 16 times");
+    }
+    for (run_args.publish_slice()) |earlier| {
+        if (earlier.host == parsed.host) {
+            return bad_publish(diag, value, "that host port is already published");
+        }
+    }
+    run_args.publish[run_args.publish_count] = parsed;
+    run_args.publish_count += 1;
+    assert(runtime_spec.publish_problem(.user, run_args.publish_slice()) == null);
+}
+
+/// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
+fn bad_publish(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(reason.len > 0);
+    comptime assert(constants.publish_count_max == 16); // The sentence above says so.
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0600);
+    diag.while_("reading the command line", .{});
+    diag.cause("--publish '{s}': {s}", .{ echo, reason });
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give a host port and the container's port, both 1 to 65535:",
+        .command = "zbx run --publish 8080:80 nginx",
+    });
+    return error.BadOptionValue;
 }
 
 fn bad_net_value(diag: *Diag, value: []const u8) ParseError {
@@ -739,26 +808,7 @@ fn bad_net_value(diag: *Diag, value: []const u8) ParseError {
     diag.context("value", "{s}", .{echo});
     diag.fix(.{
         .sentence = "choose a mode:",
-        .command = "zbx run --net host alpine -- wget -qO- http://localhost",
-    });
-    return error.BadOptionValue;
-}
-
-/// ZBX-E0600: the option names a network that needs `pasta`, which this build does not drive.
-fn network_unavailable(diag: *Diag, option: []const u8, value: []const u8) ParseError {
-    assert(diag.code == null);
-    assert(option.len > 2);
-    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
-    const echo = echo_of(&storage, value);
-    diag.raise(.E0600);
-    diag.while_("reading the command line", .{});
-    diag.cause("{s} needs user-mode networking through pasta, which zbx does not drive yet", .{
-        option,
-    });
-    diag.context("arg", "{s}", .{echo});
-    diag.fix(.{
-        .sentence = "run with no network (the default), or share the host's:",
-        .command = "zbx run --net host alpine -- sh",
+        .command = "zbx run --net user alpine -- wget -qO- https://example.com",
     });
     return error.BadOptionValue;
 }
@@ -1569,6 +1619,7 @@ fn run_container(
         .workdir = prepared.workdir,
         .user = prepared.user,
         .network = network_of(&given),
+        .publish = given.publish_slice(),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
@@ -1655,16 +1706,18 @@ fn write_ran(writer: *std.Io.Writer, ran: *const Ran, tree: []const u8) bool {
     return true;
 }
 
-/// The network the flags asked for: none unless granted. `check_network_args` has refused every
-/// other value already.
+/// The network the flags asked for: none unless granted; `--publish` alone is `user`.
+/// `check_network_args` has refused every other combination already.
 fn network_of(given: *const RunArgs) runtime_spec.Network {
-    const value = given.net orelse return .none;
+    const value = given.net orelse {
+        return if (given.publish_count > 0) .user else .none;
+    };
     const word = net_word_named(value).?;
-    assert(word != .user);
+    if (given.publish_count > 0) assert(word == .user);
     return switch (word) {
         .none => .none,
         .host => .host,
-        .user => unreachable, // Refused at parse time (E0600).
+        .user => .user,
     };
 }
 
@@ -1998,6 +2051,8 @@ fn report_outcome(
         writer.end -= 3;
         // Cannot fail: three bytes were freed and a short field fits a message.
         writer.print(",\"network\":\"{s}\"}}}}\n", .{handle.network.word()}) catch unreachable;
+        writer.end -= 3;
+        write_published(&writer, handle.publish_slice());
         if (timed_out) {
             writer.end -= 3;
             writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
@@ -2021,6 +2076,23 @@ fn report_outcome(
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
+}
+
+/// `"published":[{"host":8080,"container":80}]` and the line's end, "}}\n": the forwards, in
+/// the order given, empty for a run without any. Added in M5 beside `network`; additive.
+fn write_published(writer: *std.Io.Writer, list: []const runtime_spec.Publish) void {
+    assert(list.len <= constants.publish_count_max);
+    // A forward is at most 34 bytes; sixteen of them and the member's name fit with room.
+    comptime assert(constants.publish_count_max * 40 + 32 < constants.output_bytes_max / 4);
+    writer.writeAll(",\"published\":[") catch unreachable; // Bounded above.
+    for (list, 0..) |publish, index| {
+        assert(publish.host > 0);
+        const comma: []const u8 = if (index == 0) "" else ",";
+        const format = "{s}{{\"host\":{d},\"container\":{d}}}";
+        // Cannot fail: bounded above.
+        writer.print(format, .{ comma, publish.host, publish.container }) catch unreachable;
+    }
+    writer.writeAll("]}}\n") catch unreachable; // Bounded above.
 }
 
 /// The one line a failed run without `--net` gets after the container's own output: the network
@@ -3063,16 +3135,17 @@ test "parse: run takes a tree digest or --rootfs, one of them" {
     );
 }
 
-test "parse: --net takes none or host; user, --publish and other words are refused by code" {
-    // Goal: M5's flags. Method: none and host parse to the words the run reads; `user` and
-    // `--publish` are E0600 (they arrive with pasta); any other word is E0005; none given is null
-    // (the default, which is none, and the hint's condition).
+test "parse: --net takes none, host or user; --publish is repeatable and implies user" {
+    // Goal: M5's flags. Method: each mode parses to the word the run reads; none given is null
+    // (the default, none, and the hint's condition); --publish alone is user, and with an
+    // explicit none or host is E0003; a bad word is E0005; a bad --publish is E0600.
     var invocation: Invocation = undefined;
     const base = [_][]const u8{ "run", "--rootfs", "alpine" };
-    for ([_][]const u8{ "none", "host" }) |word| {
+    for ([_][]const u8{ "none", "host", "user" }) |word| {
         const args = base ++ [_][]const u8{ "--net", word, "--", "sh" };
         try testing.expect(try parse_case(&args, &invocation) == null);
         try testing.expectEqualStrings(word, invocation.run.net.?);
+        try testing.expectEqualStrings(word, network_of(&invocation.run).word());
     }
     const inline_form = base ++ [_][]const u8{ "--net=host", "--", "sh" };
     try testing.expect(try parse_case(&inline_form, &invocation) == null);
@@ -3081,19 +3154,77 @@ test "parse: --net takes none or host; user, --publish and other words are refus
     try testing.expect(try parse_case(&plain, &invocation) == null);
     try testing.expect(invocation.run.net == null);
     try testing.expectEqual(runtime_spec.Network.none, network_of(&invocation.run));
-    const user = base ++ [_][]const u8{ "--net", "user", "--", "sh" };
-    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&user, &invocation));
-    const publish = base ++ [_][]const u8{ "--publish", "8080:80", "--", "sh" };
-    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&publish, &invocation));
-    const both = base ++ [_][]const u8{ "--net", "host", "--publish", "8080:80", "--", "sh" };
-    try testing.expectEqual(@as(?codes.Code, .E0600), try parse_case(&both, &invocation));
+    const publish = base ++ [_][]const u8{
+        "--publish", "8080:80", "--publish=8443:443", "--", "sh",
+    };
+    try testing.expect(try parse_case(&publish, &invocation) == null);
+    try testing.expectEqual(runtime_spec.Network.user, network_of(&invocation.run));
+    try testing.expectEqual(@as(usize, 2), invocation.run.publish_slice().len);
+    try testing.expectEqual(@as(u16, 8443), invocation.run.publish_slice()[1].host);
+    try testing.expectEqual(@as(u16, 443), invocation.run.publish_slice()[1].container);
+    const with_user = base ++ [_][]const u8{ "--net", "user", "--publish", "8080:80", "--", "sh" };
+    try testing.expect(try parse_case(&with_user, &invocation) == null);
+    for ([_][]const u8{ "none", "host" }) |word| {
+        const args = base ++ [_][]const u8{ "--publish", "8080:80", "--net", word, "--", "sh" };
+        try testing.expectEqual(@as(?codes.Code, .E0003), try parse_case(&args, &invocation));
+    }
+    const bad_values = [_][]const []const u8{
+        &.{"8080"}, &.{"0:80"}, &.{"80:x"}, &.{"65536:80"}, &.{ "8080:80", "8080:81" },
+    };
+    for (bad_values) |values| {
+        var args: [16][]const u8 = undefined;
+        @memcpy(args[0..base.len], &base);
+        var count: usize = base.len;
+        for (values) |value| {
+            args[count] = "--publish";
+            args[count + 1] = value;
+            count += 2;
+        }
+        args[count] = "--";
+        args[count + 1] = "sh";
+        const code = try parse_case(args[0 .. count + 2], &invocation);
+        try testing.expectEqual(@as(?codes.Code, .E0600), code);
+    }
     const bad = base ++ [_][]const u8{ "--net", "bridge", "--", "sh" };
     try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&bad, &invocation));
     const twice = base ++ [_][]const u8{ "--net", "none", "--net", "host", "--", "sh" };
     try testing.expectEqual(@as(?codes.Code, .E0003), try parse_case(&twice, &invocation));
     const last = [_][]const u8{ "run", "--rootfs", "alpine", "--net" };
     try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&last, &invocation));
+    const last_publish = [_][]const u8{ "run", "--rootfs", "alpine", "--publish" };
+    try testing.expectEqual(@as(?codes.Code, .E0005), try parse_case(&last_publish, &invocation));
     // A word that is not an option of `run` is still refused for the other commands.
     const elsewhere = [_][]const u8{ "doctor", "--net", "host" };
     try testing.expectEqual(@as(?codes.Code, .E0004), try parse_case(&elsewhere, &invocation));
+    const stop = [_][]const u8{ "stop", "web", "--publish", "8080:80" };
+    try testing.expect(try parse_case(&stop, &invocation) != null);
+}
+
+test "parse: --publish at its bound of sixteen, and one past it" {
+    // Goal: the bound of `publish_count_max`. Method: sixteen distinct forwards parse; a
+    // seventeenth is E0600.
+    var invocation: Invocation = undefined;
+    var args: [3 + 2 * (constants.publish_count_max + 1) + 2][]const u8 = undefined;
+    args[0] = "run";
+    args[1] = "--rootfs";
+    args[2] = "alpine";
+    var texts: [constants.publish_count_max + 1][16]u8 = undefined;
+    for (0..constants.publish_count_max + 1) |index| {
+        args[3 + 2 * index] = "--publish";
+        args[4 + 2 * index] = try std.fmt.bufPrint(&texts[index], "{d}:80", .{9000 + index});
+    }
+    const full = 3 + 2 * constants.publish_count_max;
+    args[full] = "--";
+    args[full + 1] = "sh";
+    try testing.expect(try parse_case(args[0 .. full + 2], &invocation) == null);
+    try testing.expectEqual(@as(u32, constants.publish_count_max), invocation.run.publish_count);
+    args[full + 2] = "--";
+    args[full + 3] = "sh";
+    const over = full + 2;
+    args[full] = "--publish";
+    args[full + 1] = args[4 + 2 * constants.publish_count_max];
+    args[over] = "--";
+    args[over + 1] = "sh";
+    const refused = try parse_case(args[0 .. over + 2], &invocation);
+    try testing.expectEqual(@as(?codes.Code, .E0600), refused);
 }

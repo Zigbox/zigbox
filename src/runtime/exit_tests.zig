@@ -114,32 +114,32 @@ test "the JSON container_exit names the reason for every way a container ends" {
         .{
             .exit = .{ .exited = 7 },
             .want = "{\"container_exit\":{\"reason\":\"exited\",\"code\":7," ++
-                "\"network\":\"none\"}}\n",
+                "\"network\":\"none\",\"published\":[]}}\n",
         },
         .{
             .exit = .{ .signaled = 15 },
             .want = "{\"container_exit\":{\"reason\":\"signal\",\"signal\":15,\"code\":143," ++
-                "\"network\":\"none\"}}\n",
+                "\"network\":\"none\",\"published\":[]}}\n",
         },
         .{
             .oom = 1,
             .exit = .{ .exited = 0 },
             .extra = &.{ "--memory", "128m" },
             .want = "{\"container_exit\":{\"reason\":\"oom\"," ++
-                "\"limit_bytes\":134217728,\"code\":137,\"network\":\"none\"}}\n",
+                "\"limit_bytes\":134217728,\"code\":137,\"network\":\"none\",\"published\":[]}}\n",
         },
         .{
             .oom = 1,
             .exit = .{ .exited = 0 },
             .want = "{\"container_exit\":{\"reason\":\"oom\",\"limit_bytes\":null," ++
-                "\"code\":137,\"network\":\"none\"}}\n",
+                "\"code\":137,\"network\":\"none\",\"published\":[]}}\n",
         },
         .{
             .pids = 1,
             .exit = .{ .exited = 2 },
             .extra = &.{ "--pids", "16" },
             .want = "{\"container_exit\":{\"reason\":\"pid_limit\",\"limit\":16,\"code\":2," ++
-                "\"network\":\"none\"}}\n",
+                "\"network\":\"none\",\"published\":[]}}\n",
         },
     };
     for (cases) |case| {

@@ -291,7 +291,7 @@ const StatFact = struct {
 };
 
 /// What the look for `pasta` found: where it is on PATH, and what `pasta --version` said.
-const PastaFact = struct {
+pub const PastaFact = struct {
     attempted: bool = false,
     found: bool = false,
     path: text_util.Bounded(constants.pasta_path_bytes_max) = .{},
@@ -556,7 +556,7 @@ fn gather_seccomp(host: Host, facts: *Facts) void {
 /// Looks for `pasta` in the directories of PATH, as a shell would, and asks the first one for its
 /// version. Nothing here fails the doctor: the evaluation decides what a missing or broken
 /// pasta means.
-fn gather_net(host: Host, facts: *Facts) void {
+pub fn gather_net(host: Host, facts: *Facts) void {
     facts.pasta = .{ .attempted = true };
     const default_path = "/usr/local/bin:/usr/bin:/bin";
     const search = host.environment("PATH", constants.path_bytes_max) orelse default_path;
@@ -1464,6 +1464,7 @@ fn evaluate_seccomp(facts: *const Facts, check: *Check) void {
 // net
 
 const pasta_install = "apt install passt";
+const pasta_version = @import("runtime/pasta.zig");
 
 /// `--net none` and `--net host` need nothing from the host, so this check never fails: a pasta
 /// that is missing, or does not run, is a warning that says how to get one.
@@ -1492,6 +1493,20 @@ fn evaluate_net(facts: *const Facts, check: *Check) void {
     if (pasta.version.len == 0) {
         check.pass("pasta at {s}", .{pasta.path.slice()});
         return;
+    }
+    // The run refuses a pasta older than the one that ends with its container (ZBX-E0602); a
+    // version with no date in it cannot be judged, and passes.
+    if (pasta_version.version_date(pasta.version.slice())) |date| {
+        if (date < constants.pasta_version_min_date) {
+            const format = "{s} at {s} is older than {s}: --net user needs a newer one ({s})";
+            check.warning(format, .{
+                pasta.version.slice(),
+                pasta.path.slice(),
+                constants.pasta_version_min,
+                pasta_install,
+            });
+            return;
+        }
     }
     check.pass("{s} at {s}", .{ pasta.version.slice(), pasta.path.slice() });
 }
@@ -1714,10 +1729,11 @@ test "snapshot: every fixture's report, its diagnostic blocks and its exit code"
 test "the healthy fixtures pass and warn does not change the exit code" {
     // Goal: pin which fixtures exit 0, so a changed policy cannot flip one unnoticed.
     const passing = [_][]const u8{
-        "ubuntu_2404",            "fedora_40",
-        "pasta_missing",          "restricted_but_working",
-        "subid_by_uid",           "no_passwd_entry",
-        "kernel_exactly_minimum", "kernel_newer_major_lower_minor",
+        "ubuntu_2404",                    "fedora_40",
+        "pasta_missing",                  "restricted_but_working",
+        "pasta_old",                      "subid_by_uid",
+        "no_passwd_entry",                "kernel_exactly_minimum",
+        "kernel_newer_major_lower_minor",
     };
     var target: HostSim = undefined;
     for (fixtures.all) |fixture| {

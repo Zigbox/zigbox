@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0600 · Zigbox</title>
-<meta name="description" content="this network mode is not available yet">
+<meta name="description" content="--publish is not a usable HOST:CONTAINER">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0600.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,11 +73,11 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0600</h1>
-<p class="summary">this network mode is not available yet</p>
+<p class="summary">--publish is not a usable HOST:CONTAINER</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>--net user and --publish give a container a network through pasta, a program that attaches to the container's network namespace and forwards its traffic as the user, with no privilege and no change to the host's firewall, routes or interfaces. This build of zbx does not drive pasta yet, so both are refused before anything starts.</p>
-<p>A container has no network by default (--net none: only the loopback interface). --net host shares the host's network instead, so a server in the container listens on the host's own ports.</p>
+<p>--publish HOST:CONTAINER forwards TCP port HOST of this machine to port CONTAINER of the container, through pasta. Both are decimal port numbers from 1 to 65535, with no protocol after them: every forward is TCP. The option may be given up to 16 times, each with its own host port.</p>
+<p>--publish gives the container a network of its own through pasta, as --net user does, so it needs no --net. The cause names what is wrong with the value; nothing was started.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0600</pre>

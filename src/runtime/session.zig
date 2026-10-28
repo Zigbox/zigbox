@@ -11,6 +11,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const child_mod = @import("child.zig");
 const diagnose = @import("diagnose.zig");
 const doctor = @import("../doctor.zig");
+const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
 const scope_mod = @import("scope.zig");
 const signals = @import("signals.zig");
@@ -57,6 +58,16 @@ const Keeper = struct {
     hold: host_mod.Handle,
 };
 
+/// pasta, from its step until `release_pasta`: its pid, and the read end of the pipe its ready
+/// line comes on (until `await_pasta` has read it).
+const Pasta = struct {
+    pid: host_mod.Pid,
+    ready: ?host_mod.Handle,
+};
+
+/// How a pasta that never became ready ended, kept for the diagnostic.
+pub const PastaEnd = diagnose.PastaEnd;
+
 pub const Session = struct {
     host: Host,
     plan: *const Plan,
@@ -77,6 +88,9 @@ pub const Session = struct {
     /// process in it, so the manager cannot remove the scope's cgroup and take its counters
     /// (`memory.events`, `pids.events`) with it before `run.zig` has read them.
     keeper: ?Keeper,
+    /// pasta, for a plan with `--net user`, while it runs; and how it ended if it failed.
+    pasta: ?Pasta,
+    pasta_end: ?PastaEnd,
     /// The first signal zbx replaced with SIGKILL because PID 1 had no handler for it.
     substituted: ?u8,
     /// The container's PID 1 as the host sees it: set when it is spawned and never cleared, so
@@ -107,6 +121,8 @@ pub const Session = struct {
         session.scope_directory = .{};
         session.scope_up = false;
         session.keeper = null;
+        session.pasta = null;
+        session.pasta_end = null;
         session.substituted = null;
         session.container_pid = 0;
         session.reaped = std.atomic.Value(bool).init(false);
@@ -161,7 +177,12 @@ pub const Session = struct {
             problem
         else
             null;
-        return .{ .helper = session.helper_end(), .scope = scope, .facts = session.facts };
+        return .{
+            .helper = session.helper_end(),
+            .scope = scope,
+            .facts = session.facts,
+            .pasta = session.pasta_end,
+        };
     }
 
     fn helper_end(session: *const Session) ?diagnose.HelperEnd {
@@ -199,6 +220,8 @@ pub const Session = struct {
             .run_newuidmap, .run_newgidmap => try session.run_helper(step),
             .spawn_keeper => try session.spawn_keeper(),
             .start_scope => try session.start_scope(),
+            .start_pasta => try session.start_pasta(),
+            .await_pasta => try session.await_pasta(),
             .release_child => try session.release_child(),
             .await_report => try session.await_report(),
             .reap => unreachable, // `wait` does it.
@@ -329,6 +352,115 @@ pub const Session = struct {
         host.signal(keeper.pid, constants.signal_kill) catch {};
         _ = host.wait_for(keeper.pid) catch {};
         assert(session.keeper == null);
+    }
+
+    /// Starts pasta for the child (`pasta.zig` has its command line): its stdout is a pipe whose
+    /// write end only pasta holds once this returns, so that its end of file means pasta ended.
+    fn start_pasta(session: *Session) host_mod.Error!void {
+        const host = session.host;
+        const plan = session.plan;
+        assert(plan.has_pasta);
+        assert(session.pasta == null);
+        const ready = try host.pipe();
+        var arguments: pasta_mod.Arguments = undefined;
+        pasta_mod.build(&arguments, plan.publish_slice(), session.pid.?);
+        const none = [_:null]?[*:0]const u8{};
+        const request: host_mod.ExecRequest = .{
+            .path = plan.text(plan.pasta_path),
+            .argv = arguments.argv_z(),
+            .envp = &none,
+        };
+        const log = plan.text(plan.pasta_log);
+        const pid = host.start_program(request, ready.write, log) catch |err| {
+            host.close(ready.read);
+            host.close(ready.write);
+            return err;
+        };
+        host.close(ready.write);
+        session.pasta = .{ .pid = pid, .ready = ready.read };
+        assert(pid != session.pid.?);
+    }
+
+    /// Reads pasta's ready line (its PID, once the interface is configured and the ports are
+    /// bound) within `pasta_ready_timeout_ms`. A pasta that ends first, says something else or
+    /// says nothing in time is a failed step: it is reaped (killed first if it still runs), and
+    /// `pasta_end` says how it went for the diagnostic.
+    fn await_pasta(session: *Session) host_mod.Error!void {
+        const host = session.host;
+        const pasta = &session.pasta.?;
+        const read_end = pasta.ready.?;
+        const read = read_ready(host, read_end, pasta.pid);
+        host.close(read_end);
+        pasta.ready = null;
+        const outcome = read catch |err| {
+            session.release_pasta(); // A pipe of ours that cannot be read: nothing to wait for.
+            return err;
+        };
+        switch (outcome) {
+            .ready => return,
+            .ended => {
+                const status = host.wait_for(pasta.pid) catch |err| {
+                    session.pasta = null; // Not ours to wait for any more, whatever happened.
+                    return err;
+                };
+                session.pasta = null;
+                session.pasta_end = .{ .exited = status };
+                return error.IoFailed;
+            },
+            .timed_out, .garbled => {
+                session.pasta_end = if (outcome == .timed_out) .timed_out else .garbled;
+                session.release_pasta();
+                return if (outcome == .timed_out) error.TimedOut else error.IoFailed;
+            },
+        }
+    }
+
+    const ReadyOutcome = enum { ready, ended, timed_out, garbled };
+
+    /// The ready pipe until a decision: a line that is `pid`, an end of file, anything else, or
+    /// the time is up. Each read returns a byte or more, an end of file or a timeout, so the
+    /// loop's bound covers a ready line read a byte at a time.
+    fn read_ready(
+        host: Host,
+        read_end: host_mod.Handle,
+        pid: host_mod.Pid,
+    ) host_mod.Error!ReadyOutcome {
+        var line: [constants.pasta_ready_line_bytes_max]u8 = undefined;
+        var length: u32 = 0;
+        const started = host.monotonic_ms();
+        for (0..constants.pasta_ready_reads_max) |_| {
+            const spent = host.monotonic_ms() -| started;
+            if (spent >= constants.pasta_ready_timeout_ms) return .timed_out;
+            const left: u32 = @intCast(constants.pasta_ready_timeout_ms - spent);
+            const count = host.read_timeout(read_end, line[length..], left) catch |err| {
+                if (err == error.TimedOut) continue;
+                return err;
+            };
+            if (count == 0) return .ended;
+            length += count;
+            assert(length <= line.len);
+            switch (pasta_mod.read_ready(line[0..length])) {
+                .pid => |found| return if (found == pid) .ready else .garbled,
+                .garbled => return .garbled,
+                .partial => {},
+            }
+        }
+        return .timed_out;
+    }
+
+    /// Ends pasta and reaps it: the container is gone or never ran, and the host's ports go with
+    /// pasta. It is killed outright (it holds nothing a clean exit would save), and it is zbx's
+    /// own child, so its pid is not reused before this reaps it. Errors are not reported: a
+    /// pasta that cannot be signalled has already ended, and one left over ends by itself once
+    /// the container's namespace is gone.
+    pub fn release_pasta(session: *Session) void {
+        const host = session.host;
+        const pasta = session.pasta orelse return;
+        session.pasta = null;
+        if (pasta.ready) |read_end| host.close(read_end);
+        host.signal(pasta.pid, constants.signal_kill) catch {};
+        _ = host.wait_for(pasta.pid) catch {};
+        assert(session.pasta == null);
     }
 
     /// Asks for the container's scope with the child's pid in it (scope.zig) and waits for the
@@ -528,6 +660,7 @@ pub const Session = struct {
             _ = host.wait_for(pid) catch {};
             session.pid = null;
         }
+        session.release_pasta();
         session.release_keeper();
         session.close_all();
         host.ignore_broken_pipe(false);

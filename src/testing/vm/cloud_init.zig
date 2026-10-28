@@ -46,6 +46,7 @@ fn base(comptime dropin: []const u8) []const u8 {
     \\package_update: true
     \\packages:
     \\  - uidmap
+    \\  - passt
     \\write_files:
     \\  - path: /etc/sysctl.d/60-zigbox-userns.conf
     \\    content: |

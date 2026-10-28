@@ -56,6 +56,8 @@ pub const Spec = struct {
     newgidmap: ?Binary = .{},
     /// `pasta` on PATH (/usr/bin/pasta): the warning of the net check goes away.
     pasta: ?Binary = null,
+    /// What that pasta says to `--version`; null: the simulator's default, a recent release.
+    pasta_version: ?[]const u8 = null,
     status: ?[]const u8 = default_status,
     seccomp: host.Error!u32 = 0,
     probes: sim.Probes = .{},
@@ -78,6 +80,7 @@ pub const Fixture = struct {
     machine: []const u8,
     seccomp: host.Error!u32,
     probes: sim.Probes,
+    pasta_version: ?[]const u8,
 
     /// Points `host_sim` at this fixture.
     pub fn apply(fixture: *const Fixture, target: *sim.HostSim) void {
@@ -90,6 +93,7 @@ pub const Fixture = struct {
         target.seccomp_result = fixture.seccomp;
         target.probes = fixture.probes;
         target.environment_variables = fixture.environment;
+        if (fixture.pasta_version) |line| target.world.pasta_version_line = line;
         const model = &target.world.bus.model;
         switch (fixture.bus) {
             .present, .no_environment => {},
@@ -179,6 +183,7 @@ pub fn build(comptime spec: Spec) Fixture {
         .machine = spec.machine,
         .seccomp = spec.seccomp,
         .probes = spec.probes,
+        .pasta_version = spec.pasta_version,
     };
 }
 
@@ -312,6 +317,12 @@ pub const all = [_]Fixture{
     build(.{ .name = "kernel_newer_major_lower_minor", .kernel = "6.0.1" }),
     // The default host without pasta: the net check warns and says how to install it.
     build(.{ .name = "pasta_missing" }),
+    // A pasta from before 2024_02_16: the run would refuse it, so the net check warns.
+    build(.{
+        .name = "pasta_old",
+        .pasta = .{ .mode = 0o100755 },
+        .pasta_version = "pasta 2023_12_30.f091893\n",
+    }),
 };
 
 /// The fixture called `name`, or null.

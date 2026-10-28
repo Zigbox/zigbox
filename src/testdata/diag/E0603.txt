@@ -1,0 +1,6 @@
+error[ZBX-E0603]: pasta failed to start
+  cause  pasta: Couldn't set up tap device in namespace
+  fix    read what pasta wrote:            cat /home/alice/.local/state/zbx/logs/web-1.pasta.log
+         or run with the host's network:   zbx run --net host alpine -- sh
+  more   zbx explain E0603 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0603.html

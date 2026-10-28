@@ -66,6 +66,13 @@ pub const Kind = enum {
     /// Asks the user's systemd manager for the container's scope and waits for its job; only in
     /// a plan built with a scope.
     start_scope,
+    /// In a plan with `--net user`: starts pasta, attached to the child's namespaces by its
+    /// pid, once the id maps are written (so that pasta is root in the container's user
+    /// namespace when it joins it). zbx's own child, killed by the kernel if zbx dies.
+    start_pasta,
+    /// ... and waits, within `pasta_ready_timeout_ms`, for pasta to report the interface
+    /// configured and the host's ports bound. Only then is the child let go.
+    await_pasta,
     release_child,
     await_report,
     reap,
@@ -144,6 +151,7 @@ pub fn side_of(kind: Kind) Side {
     const side: Side = switch (kind) {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
+        .start_pasta, .await_pasta => .parent,
         .release_child, .await_report, .reap => .parent,
         else => .child,
     };
@@ -180,6 +188,9 @@ pub const child_steps_count: u32 = 37 + 2 * constants.container_devices_count +
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
+
+/// The steps `--net user` adds to the parent's: pasta's start and the wait for it to be ready.
+pub const pasta_steps_count: u32 = 2;
 
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
@@ -263,6 +274,16 @@ pub const Input = struct {
     network: spec.Network = .none,
     /// The host's `resolv.conf`, whole lines within `etc_file_bytes_max`; read for `--net host`.
     host_resolv: []const u8 = "",
+    /// Set exactly when `network` is `user`: how pasta is started.
+    pasta: ?PastaInput = null,
+};
+
+/// What the parent needs to start pasta: its path, the file its standard error goes to (empty:
+/// nowhere, when the run has no state directory), and the forwards.
+pub const PastaInput = struct {
+    path: []const u8,
+    log: []const u8,
+    publish: []const spec.Publish,
 };
 
 /// The layers of an overlay (docs/briefs/M3-store.md, "Materialize and run"). The lower layer
@@ -307,6 +328,12 @@ pub const Plan = struct {
     /// What the container can reach, and the text of the two generated /etc files.
     network: spec.Network,
     etc_texts: [2]Text,
+    /// A plan with `--net user` starts pasta: its path, its log (empty: none) and the forwards.
+    has_pasta: bool,
+    pasta_path: Text,
+    pasta_log: Text,
+    publish: [constants.publish_count_max]spec.Publish,
+    publish_count: u32,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -344,6 +371,7 @@ pub const Plan = struct {
         plan.workdir = plan.add_text(&.{input.workdir});
         plan.build_etc_texts(input);
         plan.build_scope(input);
+        plan.build_pasta(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
@@ -377,6 +405,13 @@ pub const Plan = struct {
         assert(@intFromPtr(first_argument) >= @intFromPtr(&plan.strings[0]));
         assert(@intFromPtr(first_argument) < @intFromPtr(&plan.strings[0]) + plan.strings.len);
         assert(plan.candidates_count > 0);
+        // pasta's two steps are the last of the parent's start before the scope's, exactly in
+        // a plan for `--net user`.
+        assert(plan.has_pasta == (plan.network == .user));
+        const pasta_at = child_start - 1 - scope_steps_count * @intFromBool(plan.scoped);
+        assert((plan.steps[pasta_at - 1].kind == .await_pasta) == plan.has_pasta);
+        assert((plan.steps[pasta_at - 2].kind == .start_pasta) == plan.has_pasta);
+        if (!plan.has_pasta) assert(plan.publish_count == 0);
     }
 
     pub fn steps_expected(plan: *const Plan) u32 {
@@ -384,7 +419,8 @@ pub const Plan = struct {
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) + @intFromBool(plan.has_user);
-        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras;
+        const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
+        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -392,15 +428,39 @@ pub const Plan = struct {
     pub fn first_child(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const parent: u32 = if (plan.full) 5 else 6;
-        return parent + scope_steps_count * @intFromBool(plan.scoped);
+        const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
+        return parent + scope_steps_count * @intFromBool(plan.scoped) + pasta;
     }
 
     /// Whether the container has a network namespace of its own.
     pub fn isolated(plan: *const Plan) bool {
         assert(plan.count <= constants.plan_steps_max);
-        const result = plan.network == .none;
+        const result = plan.network.isolated();
         if (!result) assert(plan.network == .host);
+        if (plan.has_pasta) assert(result);
         return result;
+    }
+
+    pub fn publish_slice(plan: *const Plan) []const spec.Publish {
+        assert(plan.publish_count <= constants.publish_count_max);
+        if (plan.publish_count > 0) assert(plan.has_pasta);
+        return plan.publish[0..plan.publish_count];
+    }
+
+    fn build_pasta(plan: *Plan, input: *const Input) void {
+        plan.has_pasta = input.pasta != null;
+        plan.pasta_path = empty_text;
+        plan.pasta_log = empty_text;
+        plan.publish_count = 0;
+        assert(plan.has_pasta == (input.network == .user));
+        const pasta = input.pasta orelse return;
+        assert(pasta.path.len > 0);
+        assert(pasta.path[0] == '/');
+        assert(spec.publish_problem(.user, pasta.publish) == null);
+        plan.pasta_path = plan.add_text(&.{pasta.path});
+        plan.pasta_log = plan.add_text(&.{pasta.log});
+        @memcpy(plan.publish[0..pasta.publish.len], pasta.publish);
+        plan.publish_count = @intCast(pasta.publish.len);
     }
 
     fn build_etc_texts(plan: *Plan, input: *const Input) void {
@@ -487,6 +547,10 @@ pub const Plan = struct {
             .single => plan.push_direct_maps(input),
             .full => |helpers| plan.push_helper_maps(input, helpers),
         }
+        // pasta joins the namespaces as root of the user namespace, so after the maps; it is
+        // outside the scope (its memory and processes are not the container's).
+        if (plan.has_pasta) plan.push(.start_pasta, plan.pasta_path, plan.pasta_log, 0);
+        if (plan.has_pasta) plan.push(.await_pasta, empty_text, empty_text, 0);
         // The scope exists before the child may run its first step, and so before its command;
         // the keeper is forked first, so that it can be put in the scope with the child.
         if (plan.scoped) plan.push(.spawn_keeper, empty_text, empty_text, 0);
@@ -815,6 +879,30 @@ fn etc_name(index: u8) []const u8 {
 
 /// A short phrase for the step, for the cause line of a diagnostic: "mounting a fresh /proc".
 /// Formats into `buffer`, so it is for the parent only.
+/// What a step of the parent's does, for `describe`.
+fn parent_phrase(kind: Kind) []const u8 {
+    assert(side_of(kind) == .parent);
+    const phrase: []const u8 = switch (kind) {
+        .make_pipes => "creating the pipes between zbx and the container",
+        .spawn => "creating the container's namespaces",
+        .deny_setgroups => "denying setgroups in the container's user namespace",
+        .write_gid_map => "writing the container's gid map",
+        .write_uid_map => "writing the container's uid map",
+        .run_newuidmap => "running newuidmap to write the container's uid map",
+        .run_newgidmap => "running newgidmap to write the container's gid map",
+        .spawn_keeper => "starting the process that keeps the container's cgroup scope alive",
+        .start_scope => "starting the container's cgroup scope",
+        .start_pasta => "starting pasta for the container's network",
+        .await_pasta => "waiting for pasta to configure the container's network",
+        .release_child => "letting the container continue",
+        .await_report => "waiting for the container to start its command",
+        .reap => "waiting for the container to end",
+        else => unreachable, // The child's steps; asserted above.
+    };
+    assert(phrase.len > 0);
+    return phrase;
+}
+
 pub fn describe(step: *const Step, buffer: []u8) []const u8 {
     assert(buffer.len >= 128);
     const name = switch (step.kind) {
@@ -825,18 +913,10 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         else => "",
     };
     const phrase: []const u8 = switch (step.kind) {
-        .make_pipes => "creating the pipes between zbx and the container",
-        .spawn => "creating the container's namespaces",
-        .deny_setgroups => "denying setgroups in the container's user namespace",
-        .write_gid_map => "writing the container's gid map",
-        .write_uid_map => "writing the container's uid map",
-        .run_newuidmap => "running newuidmap to write the container's uid map",
-        .run_newgidmap => "running newgidmap to write the container's gid map",
-        .spawn_keeper => "starting the process that keeps the container's cgroup scope alive",
-        .start_scope => "starting the container's cgroup scope",
-        .release_child => "letting the container continue",
-        .await_report => "waiting for the container to start its command",
-        .reap => "waiting for the container to end",
+        .make_pipes, .spawn, .deny_setgroups, .write_gid_map => parent_phrase(step.kind),
+        .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
+        .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
+        .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
@@ -888,6 +968,11 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
 
 comptime {
     assert(steps_count_single <= constants.plan_steps_max);
+    // The longest plan: the single map, a scope, a read-only root, a working directory, a user
+    // and pasta.
+    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 2 +
+        pasta_steps_count;
+    assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
     assert(links.len == constants.container_links_count);

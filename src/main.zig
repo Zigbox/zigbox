@@ -156,3 +156,10 @@ test {
     _ = @import("store/image_find.zig");
     _ = @import("testing/vm/checks_m4.zig");
 }
+
+test {
+    // M5's user-mode network (`--net user`, `--publish`): pasta's command line and its readiness,
+    // and the runs that use it, in the simulator.
+    _ = @import("runtime/pasta.zig");
+    _ = @import("runtime/net_tests.zig");
+}

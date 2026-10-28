@@ -46,7 +46,14 @@ const common_files = [_]host_sim.File{
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
+    // pasta, for `--net user` (the simulator's pasta is `sim_world.World.start_program`), and
+    // the lowest port a user may bind, as Ubuntu 24.04 has it.
+    .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
+    .{ .path = "/proc/sys/net/ipv4/ip_unprivileged_port_start", .content = "1024\n" },
 };
+
+/// The path of a run's pasta log in the simulated state directory.
+pub const logs_path = "/home/alice/.local/state/zbx/logs";
 
 /// A host that can map a full range of ids: ranges for the user and setuid-root helpers.
 pub const files = common_files ++ [_]host_sim.File{
@@ -55,6 +62,11 @@ pub const files = common_files ++ [_]host_sim.File{
     .{ .path = "/usr/bin/newuidmap", .content = "", .mode = 0o104755 },
     .{ .path = "/usr/bin/newgidmap", .content = "", .mode = 0o104755 },
 };
+
+/// A host that can map a full range of ids and has no pasta (`common_files` ends with pasta and
+/// the port sysctl).
+pub const files_without_pasta = common_files[0 .. common_files.len - 2] ++
+    files[common_files.len..];
 
 /// A host with neither: the single-id map and a warning.
 pub const files_single = common_files;
@@ -150,6 +162,11 @@ pub fn sample_plan_image(
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
         .read_only = read_only,
         .network = network,
+        .pasta = if (network == .user) .{
+            .path = "/usr/bin/pasta",
+            .log = logs_path ++ "/oracle.pasta.log",
+            .publish = &.{.{ .host = 8080, .container = 80 }},
+        } else null,
         .overlay = if (image) .{
             .net = "/state/net",
             .lower = "/store/cache/b3",
@@ -227,6 +244,8 @@ pub fn leak(sim: *const HostSim, before: *const Baseline) ?[]const u8 {
     const name = sim.world.hostnames[0].slice();
     if (!std.mem.eql(u8, name, before.hostname.slice())) return "the host's hostname changed";
     if (sim.world.unreaped_children() != 0) return "a container process was left unreaped";
+    if (sim.world.pasta_alive() != 0) return "pasta was left running or unreaped";
+    if (sim.world.ports_listening() != 0) return "a published port was left listening";
     if (sim.open_count() != 0) return "a descriptor was left open";
     if (sim.world.broken_pipe_ignored) return "SIGPIPE was left ignored";
     if (sim.world.current != 0) return "the run ended in a child";
@@ -248,8 +267,8 @@ pub const Started = struct {
     /// A run of a tree from the store: the merged directory it pivoted into, which is an
     /// overlay mount where a rootfs run has a bind mount.
     merged: ?[]const u8 = null,
-    /// What the container could reach: `none` has a network namespace of its own with `lo` up
-    /// and a sysfs; `host` shares the host's and binds the host's /sys.
+    /// What the container could reach: `none` and `user` have a network namespace of their own
+    /// with `lo` up and a sysfs; `host` shares the host's and binds the host's /sys.
     network: spec_mod.Network = .none,
     /// The /sys and /etc steps all ran. A failure injected into one of them is skipped with a
     /// note, and the container then lacks what the step would have made.
@@ -278,7 +297,7 @@ pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     const hostname = sim.world.hostnames[child.uts].slice();
     if (!std.mem.eql(u8, hostname, expected.name)) return "the child's hostname is wrong";
     if (hardening(child)) |problem| return problem;
-    const isolated = expected.network == .none;
+    const isolated = expected.network.isolated();
     if (child.new_net != isolated) return "the network namespace is not as asked";
     if (child.loopback_up != isolated) return "the loopback interface is not as asked";
     return container_mounts(

@@ -234,6 +234,7 @@ pub const HostSim = struct {
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
+        .start_program = start_program,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -575,9 +576,17 @@ pub const HostSim = struct {
         timeout_ms: u32,
     ) host.Error!u32 {
         const sim = from_context(context);
-        assert(handle >= sim_world.bus_handle_base);
         assert(timeout_ms > 0);
-        return sim.read_bus(handle, buffer, true);
+        if (handle >= sim_world.bus_handle_base) return sim.read_bus(handle, buffer, true);
+        assert(handle >= sim_world.pipe_handle_base);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        // The model has no time: a pipe with nothing in it and a writer is a timeout at once,
+        // and the clock moves on by the time waited.
+        return sim.world.read_pipe_timed(handle, buffer) orelse {
+            sim.world.now_ms += timeout_ms;
+            return error.TimedOut;
+        };
     }
 
     /// The model has no time: a read that finds nothing queued is a timeout at once.
@@ -656,6 +665,22 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.world.keeper_fork_errno) |errno| return sim.model_error(errno);
         return sim.world.start_keeper(hold) orelse sim.model_error(11);
+    }
+
+    fn start_program(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        output: host.Handle,
+        log: [:0]const u8,
+    ) host.Error!host.Pid {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(output >= sim_world.pipe_handle_base);
+        assert(output < sim_world.bus_handle_base);
+        switch (sim.world.start_program(request, output, log)) {
+            .pid => |pid| return pid,
+            .errno => |errno| return sim.model_error(errno),
+        }
     }
 
     fn wait(context: *anyopaque, pid: host.Pid) host.Error!host.ExitStatus {

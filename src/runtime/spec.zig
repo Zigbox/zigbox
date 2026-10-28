@@ -36,21 +36,133 @@ pub const Limits = struct {
 
 /// How a container reaches the network (docs/briefs/M5-network.md, "The network modes"). `none`
 /// is the default: the container has a network namespace of its own with only `lo`. `host`
-/// shares the host's namespace. User-mode networking through `pasta` arrives with slice 3.
+/// shares the host's namespace. `user` is a namespace of its own that `pasta` connects to the
+/// host's network as the user, with no privilege and no change to the host's firewall.
 pub const Network = enum {
     none,
     host,
+    user,
 
     pub fn word(network: Network) []const u8 {
         const result: []const u8 = switch (network) {
             .none => "none",
             .host => "host",
+            .user => "user",
         };
         assert(result.len > 0);
         assert(std.mem.eql(u8, result, @tagName(network)));
         return result;
     }
+
+    /// Whether the container has a network namespace of its own (every mode but `host`).
+    pub fn isolated(network: Network) bool {
+        const result = network != .host;
+        if (network == .none) assert(result);
+        return result;
+    }
 };
+
+/// One `--publish HOST:CONTAINER`: a TCP port of the host forwarded to one of the container's.
+pub const Publish = struct {
+    host: u16,
+    container: u16,
+
+    /// "HOST:CONTAINER", the way it was typed and the way `pasta -t` takes it.
+    pub fn text(publish: Publish, buffer: *[publish_text_bytes_max]u8) []const u8 {
+        assert(publish.host > 0);
+        assert(publish.container > 0);
+        // Cannot fail: two numbers of at most five digits and a colon fit eleven bytes.
+        const ports = .{ publish.host, publish.container };
+        const result = std.fmt.bufPrint(buffer, "{d}:{d}", ports) catch unreachable; // Above.
+        assert(result.len >= 3);
+        return result;
+    }
+};
+
+/// The longest text of a `Publish`: "65535:65535".
+pub const publish_text_bytes_max: u32 = 11;
+
+/// Why a `--publish` value does not parse (ZBX-E0600).
+pub const PublishProblem = enum {
+    /// No colon, or more than one.
+    not_host_colon_container,
+    /// A side that is empty, or holds anything but digits.
+    not_a_number,
+    /// A port of 0, or above 65535.
+    out_of_range,
+
+    pub fn sentence(problem: PublishProblem) []const u8 {
+        const result: []const u8 = switch (problem) {
+            .not_host_colon_container => "it is not HOST:CONTAINER, two ports and a colon",
+            .not_a_number => "a port is not a number",
+            .out_of_range => "a port is outside 1 to 65535",
+        };
+        assert(result.len > 0);
+        assert(result[result.len - 1] != '.');
+        return result;
+    }
+};
+
+pub const PublishParse = union(enum) {
+    ok: Publish,
+    problem: PublishProblem,
+};
+
+/// Reads "HOST:CONTAINER". Only what `Publish.text` writes parses: decimal digits, no sign, no
+/// space, no protocol suffix (every forward is TCP), each port 1 to 65535. Leading zeros are
+/// refused too, since the text they would render back is a different one.
+pub fn parse_publish(value: []const u8) PublishParse {
+    assert(value.len <= constants.arg_bytes_max);
+    if (std.mem.count(u8, value, ":") != 1) return .{ .problem = .not_host_colon_container };
+    const colon = std.mem.indexOfScalar(u8, value, ':').?;
+    const host_port = switch (parse_port(value[0..colon])) {
+        .port => |port| port,
+        .problem => |problem| return .{ .problem = problem },
+    };
+    const container_port = switch (parse_port(value[colon + 1 ..])) {
+        .port => |port| port,
+        .problem => |problem| return .{ .problem = problem },
+    };
+    const result: Publish = .{ .host = host_port, .container = container_port };
+    assert(result.host > 0);
+    assert(result.container > 0);
+    return .{ .ok = result };
+}
+
+fn parse_port(text: []const u8) union(enum) { port: u16, problem: PublishProblem } {
+    if (text.len == 0) return .{ .problem = .not_a_number };
+    for (text) |byte| {
+        if (byte < '0' or byte > '9') return .{ .problem = .not_a_number };
+    }
+    if (text.len > 5) return .{ .problem = .out_of_range };
+    if (text[0] == '0') {
+        return .{ .problem = if (text.len == 1) .out_of_range else .not_a_number };
+    }
+    // Cannot fail: one to five decimal digits fit a u32.
+    const number = std.fmt.parseInt(u32, text, 10) catch unreachable;
+    if (number > std.math.maxInt(u16)) return .{ .problem = .out_of_range };
+    assert(number > 0);
+    return .{ .port = @intCast(number) };
+}
+
+/// What is wrong with a list of forwards as a whole: too many, or one host port twice (pasta
+/// could bind it only once).
+pub const PublishListProblem = union(enum) {
+    too_many,
+    host_port_twice: u16,
+};
+
+pub fn publish_problem(network: Network, list: []const Publish) ?PublishListProblem {
+    if (list.len > 0) assert(network == .user); // `--publish` implies `--net user`.
+    if (list.len > constants.publish_count_max) return .too_many;
+    for (list, 0..) |publish, index| {
+        assert(publish.host > 0);
+        for (list[0..index]) |earlier| {
+            if (earlier.host == publish.host) return .{ .host_port_twice = publish.host };
+        }
+    }
+    return null;
+}
 
 /// A user and group id inside the container.
 pub const User = struct {
@@ -87,6 +199,8 @@ pub const Spec = struct {
     user: ?User = null,
     /// What the container can reach. Nothing, unless granted.
     network: Network = .none,
+    /// The host's TCP ports forwarded to the container's (`--publish`); only with `user`.
+    publish: []const Publish = &.{},
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.
@@ -523,4 +637,51 @@ test "typed limits are checked against the same bounds" {
     try testing.expect(limits_problem(.{ .cpu_millis = 2_000_000 }).?.problem == error.TooLarge);
     try testing.expect(!(Limits{}).any());
     try testing.expect((Limits{ .pids = 3 }).any());
+}
+
+test "publish: HOST:CONTAINER parses, and only what renders back the same" {
+    // Goal: the parser accepts exactly the texts `Publish.text` writes. Method: valid values
+    // round-trip; each kind of bad value names its problem; the edges 1, 65535 and 65536.
+    const cases = [_][]const u8{ "8080:80", "1:1", "65535:65535", "443:8443" };
+    for (cases) |case| {
+        const parsed = parse_publish(case).ok;
+        var buffer: [publish_text_bytes_max]u8 = undefined;
+        try std.testing.expectEqualStrings(case, parsed.text(&buffer));
+    }
+    const Case = struct { text: []const u8, problem: PublishProblem };
+    const bad = [_]Case{
+        .{ .text = "8080", .problem = .not_host_colon_container },
+        .{ .text = "1:2:3", .problem = .not_host_colon_container },
+        .{ .text = "", .problem = .not_host_colon_container },
+        .{ .text = ":80", .problem = .not_a_number },
+        .{ .text = "80:", .problem = .not_a_number },
+        .{ .text = "8o:80", .problem = .not_a_number },
+        .{ .text = "+80:80", .problem = .not_a_number },
+        .{ .text = "080:80", .problem = .not_a_number },
+        .{ .text = "80:80/tcp", .problem = .not_a_number },
+        .{ .text = "0:80", .problem = .out_of_range },
+        .{ .text = "80:0", .problem = .out_of_range },
+        .{ .text = "65536:80", .problem = .out_of_range },
+        .{ .text = "999999:80", .problem = .out_of_range },
+    };
+    for (bad) |case| {
+        try std.testing.expectEqual(case.problem, parse_publish(case.text).problem);
+    }
+}
+
+test "publish list: the bound, and one host port twice" {
+    // Goal: the list checks. Method: at the bound and one past it; a repeated host port; a
+    // repeated container port, which is fine.
+    var list: [constants.publish_count_max + 1]Publish = undefined;
+    for (&list, 0..) |*publish, index| {
+        publish.* = .{ .host = @intCast(9000 + index), .container = 80 };
+    }
+    try std.testing.expect(publish_problem(.user, list[0..constants.publish_count_max]) == null);
+    try std.testing.expect(publish_problem(.user, &list).? == .too_many);
+    const twice = [_]Publish{
+        .{ .host = 8080, .container = 80 },
+        .{ .host = 8080, .container = 81 },
+    };
+    try std.testing.expectEqual(@as(u16, 8080), publish_problem(.user, &twice).?.host_port_twice);
+    try std.testing.expect(publish_problem(.none, &.{}) == null);
 }

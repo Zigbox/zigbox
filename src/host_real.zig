@@ -100,6 +100,7 @@ pub const HostReal = struct {
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
+        .start_program = start_program,
         .wait = wait,
         .signal = signal,
         .write_id_map = write_id_map,
@@ -380,6 +381,55 @@ pub const HostReal = struct {
         // caller: `keeper_main` ends it.
         if (forked == 0) keeper_main(parent, @intCast(hold));
         try check(forked);
+        assert(forked > 1);
+        assert(forked <= std.math.maxInt(i32));
+        return @intCast(forked);
+    }
+
+    /// Opens the child's stdin and stderr here, where a failure can be reported, then forks;
+    /// the child (`program_child`) makes only raw system calls before `execve`.
+    fn start_program(
+        context: *anyopaque,
+        request: host.ExecRequest,
+        stdout: host.Handle,
+        log: [:0]const u8,
+    ) host.Error!host.Pid {
+        _ = from_context(context);
+        assert(request.path.len > 0);
+        assert(stdout > 2); // A pipe's end, never one of our own standard streams.
+        const input = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try check(input);
+        const stdin_fd: i32 = @intCast(input);
+        const log_flags: linux.O = .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+            .CLOEXEC = true,
+        };
+        const null_flags: linux.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
+        const output = if (log.len > 0)
+            linux.open(log.ptr, log_flags, 0o600)
+        else
+            linux.open("/dev/null", null_flags, 0);
+        check(output) catch |err| {
+            const errno_open = errno_last;
+            _ = linux.close(stdin_fd);
+            errno_last = errno_open; // The close must not hide why the open failed.
+            return err;
+        };
+        const stderr_fd: i32 = @intCast(output);
+        const parent: i32 = linux.getpid();
+        const forked = linux.fork();
+        // In the child (result 0) only raw system calls run, and it never returns.
+        if (forked == 0) program_child(request, parent, stdin_fd, @intCast(stdout), stderr_fd);
+        const errno_fork = linux.errno(forked);
+        _ = linux.close(stdin_fd); // The child has its copies; ours would only leak.
+        _ = linux.close(stderr_fd);
+        if (errno_fork != .SUCCESS) {
+            errno_last = @backingInt(errno_fork);
+            return host.error_for_errno(errno_last);
+        }
+        errno_last = 0;
         assert(forked > 1);
         assert(forked <= std.math.maxInt(i32));
         return @intCast(forked);
@@ -1209,6 +1259,30 @@ fn wait_child(pid: i32) host.Error!host.ExitStatus {
 
 /// The forked helper: its output goes to the pipe, then it becomes the program. It never
 /// returns; a failed exec ends it with the conventional "command not found" code.
+/// The child of `start_program`: its own session, killed with its parent, the signals zbx may
+/// have blocked unblocked, its three streams, then the program. Exit code 127 is "could not run
+/// it", as a shell says, and a parent that died before the death signal was set ends it too.
+fn program_child(
+    request: host.ExecRequest,
+    parent: i32,
+    stdin_fd: i32,
+    stdout_fd: i32,
+    stderr_fd: i32,
+) noreturn {
+    _ = linux.setsid();
+    const kill: usize = @backingInt(linux.SIG.KILL);
+    const death = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), kill, 0, 0, 0);
+    if (death != 0) linux.exit_group(127);
+    if (linux.getppid() != parent) linux.exit_group(127);
+    const none: linux.sigset_t = linux.sigemptyset();
+    _ = linux.sigprocmask(linux.SIG.SETMASK, &none, null);
+    if (linux.errno(linux.dup2(stdin_fd, linux.STDIN_FILENO)) != .SUCCESS) linux.exit_group(127);
+    if (linux.errno(linux.dup2(stdout_fd, linux.STDOUT_FILENO)) != .SUCCESS) linux.exit_group(127);
+    if (linux.errno(linux.dup2(stderr_fd, linux.STDERR_FILENO)) != .SUCCESS) linux.exit_group(127);
+    _ = linux.execve(request.path.ptr, request.argv, request.envp);
+    linux.exit_group(127);
+}
+
 fn helper_child(request: host.ExecRequest, output: i32) noreturn {
     _ = linux.dup2(output, linux.STDOUT_FILENO);
     _ = linux.dup2(output, linux.STDERR_FILENO);
