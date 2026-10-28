@@ -131,6 +131,11 @@ pub fn check_write_lands_in_rootfs(
 pub fn check_exit_passes_through(streams: Streams, status: u8, expected: u8) Error!void {
     if (status != expected) return error.ExitCodeWrong;
     if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
+    // A failed run that was not given --net ends with M5's note about the network, and nothing
+    // else is on stderr.
+    const hint = "zbx: network: none (grant with --net)";
+    const stderr = std.mem.trim(u8, streams.stderr, " \r\n");
+    if (expected != 0 and std.mem.eql(u8, stderr, hint)) return;
     try expect_quiet_stderr(streams);
 }
 
@@ -309,6 +314,11 @@ test "rootfs write, exit code, Ctrl-C" {
         check_write_lands_in_rootfs("demo " ++ path ++ "\n", "demo", path),
     );
     try check_exit_passes_through(.{ .stdout = "", .stderr = "" }, 42, 42);
+    const hint: Streams = .{ .stdout = "", .stderr = "zbx: network: none (grant with --net)\n" };
+    try check_exit_passes_through(hint, 42, 42);
+    try testing.expectError(error.StderrNotEmpty, check_exit_passes_through(hint, 0, 0));
+    const other: Streams = .{ .stdout = "", .stderr = "zbx: note: something\n" };
+    try testing.expectError(error.StderrNotEmpty, check_exit_passes_through(other, 42, 42));
     try testing.expectError(
         error.ExitCodeWrong,
         check_exit_passes_through(.{ .stdout = "", .stderr = "" }, 1, 42),

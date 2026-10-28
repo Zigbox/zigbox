@@ -110,7 +110,9 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
 const zbx = H.as_demo ++ "/home/demo/zbx";
 const rootfs_dir = "/home/demo/alpine";
 const stress_dir = "/home/demo/alpine-stress";
-const run_prefix = zbx ++ " run --rootfs " ++ rootfs_dir;
+// `--net none` is the default; saying it keeps the zbx note about the network (which a failed run
+// without --net ends with) out of the lines these steps compare.
+const run_prefix = zbx ++ " run --net none --rootfs " ++ rootfs_dir;
 const app_slice = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice";
 
 fn fail_step(out: *Io.Writer, step: []const u8, what: []const u8, err: anyerror) anyerror {
@@ -281,7 +283,7 @@ fn step_memory(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     // minutes under TCG, with 128 MiB touched per restart). --oomable is its own switch for
     // "the OOM killer's victim is the answer".
     try out.print("\ndemo-m2: STEP 2: --memory 128m, stress-ng --vm 1 --vm-bytes 512m\n", .{});
-    const command = "timeout 300 " ++ zbx ++ " run --rootfs " ++ stress_dir ++
+    const command = "timeout 300 " ++ zbx ++ " run --net none --rootfs " ++ stress_dir ++
         " --memory 128m --name oom1 -- stress-ng --vm 1 --vm-bytes 512m --oomable";
     const result = try H.run_split(session, command);
     try H.show_split(out, command, result);
