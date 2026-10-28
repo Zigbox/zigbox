@@ -290,23 +290,26 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         }
         if (keep) run.addArg("--keep-overlay");
         if (reuse) run.addArg("--reuse-overlay");
-        const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
-        for (release_targets, flags) |query, flag| {
-            const exe = b.addExecutable(.{
-                .name = "zbx",
-                .root_module = zbx_module(
-                    b,
-                    options,
-                    b.resolveTargetQuery(query),
-                    .ReleaseSafe,
-                    true,
-                ),
-            });
-            run.addArg(flag);
-            run.addFileArg(exe.getEmittedBin());
-        }
+        add_release_binaries(b, options, run);
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
+    }
+}
+
+/// The shipped zbx for each release target, handed to a demo as `--zbx-<arch>`.
+fn add_release_binaries(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    run: *std.Build.Step.Run,
+) void {
+    const flags = [_][]const u8{ "--zbx-x86_64", "--zbx-aarch64" };
+    for (release_targets, flags) |query, flag| {
+        const exe = b.addExecutable(.{
+            .name = "zbx",
+            .root_module = zbx_module(b, options, b.resolveTargetQuery(query), .ReleaseSafe, true),
+        });
+        run.addArg(flag);
+        run.addFileArg(exe.getEmittedBin());
     }
 }
 
