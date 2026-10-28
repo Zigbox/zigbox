@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 60), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 62), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -174,7 +174,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 1. `zbx run alpine -- wget -qO- https://example.com` fails: `network: none (grant with --net)`.
 2. `zbx run --net user alpine -- wget -qO- https://example.com` prints the page.
 3. `zbx run --publish 8080:80 nginx` in one terminal; `curl localhost:8080` on the host returns the nginx welcome page.
-4. `ss -tlnp` on the host shows the listener owned by the presenter's user, and `sudo iptables -S` shows no rules added.
+4. `ss -tlnpe` on the host shows the listener owned by the presenter's user, and `sudo iptables -S` shows no rules added.
 
 **Acceptance criteria:**
 

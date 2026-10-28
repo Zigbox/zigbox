@@ -16,7 +16,7 @@ A container has no network unless granted, and a granted service is reachable fr
 1. `zbx run alpine -- wget -qO- https://example.com` fails, and zbx says `network: none (grant with --net)`.
 2. `zbx run --net user alpine -- wget -qO- https://example.com` prints the page.
 3. `zbx run --publish 8080:80 nginx` in one terminal; `curl localhost:8080` on the host returns the nginx welcome page.
-4. `ss -tlnp` on the host shows the listener owned by the presenter's user, and `sudo iptables -S` shows no rules added.
+4. `ss -tlnpe` on the host shows the listener owned by the presenter's user, and `sudo iptables -S` shows no rules added.
 
 Acceptance criteria:
 - No host firewall or routing changes, ever.
