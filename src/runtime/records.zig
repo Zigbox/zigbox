@@ -7,8 +7,9 @@
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
 //! skipped, never misread. Version 6 added the state volumes the run mounted (`.state`, one
 //! string of `--state` values, `NAME:PATH[:ro]`, separated by spaces), so that `zbx state ls` can
-//! say which container uses a volume; an older record has none. Version 5 added what the run could reach (`network`, `publish`) and
-//! the names, never the values, of the variables set with `-e`; an older record reads with no
+//! say which container uses a volume; an older record has none. Version 5 added what the run
+//! could reach (`network`, `publish`) and the names, never the values, of the variables set with
+//! `-e`; an older record reads with no
 //! network (unknown), no forwards and no names. Version 4 added the digest of the tree the
 //! container was started from and the path of its upper layer (both empty for a run of a plain
 //! `--rootfs` directory). Version 3 added the host pid of the container's PID 1 and of the

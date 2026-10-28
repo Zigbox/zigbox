@@ -14,7 +14,9 @@ const volume = @import("state/volume.zig");
 
 const names = [_][]const u8{ "pgdata", "0", "a.b-c_d", "web" };
 const containers = [_][]const u8{ "pg", "zbx-1a2b3c", "a", "web-1" };
-const targets = [_][]const u8{ "/var/lib/postgresql/data", "/a\"b", "/\"q\"", "/caf\xc3\xa9", "/x" };
+const targets = [_][]const u8{
+    "/var/lib/postgresql/data", "/a\"b", "/\"q\"", "/caf\xc3\xa9", "/x",
+};
 
 fn random_record(random: std.Random, record: *record_mod.Record) void {
     const created = random.uintLessThan(u64, constants.state_time_max);

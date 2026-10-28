@@ -15,10 +15,8 @@
 //!      `zbx stop` are steps 3 and 5).
 //!   7. `state rm` moves it to the trash and `state restore` brings it back.
 //!
-//! postgres needs its password variable, and `-e` arrives in slice 1 in parallel. Until then the
-//! words after `--` (which replace the image's command, not its entrypoint) start the entrypoint
-//! a second time under `env POSTGRES_HOST_AUTH_METHOD=trust`: the first entrypoint sees `env` and
-//! only `exec`s it. Slice 4's demo-m6 uses `-e`.
+//! postgres gets its password with `-e POSTGRES_PASSWORD=demo` (slice 1), and `psql` reads it
+//! from `PGPASSWORD`.
 //!
 //! Every assertion is a function of checks_state_m6.zig with a unit test.
 
@@ -39,13 +37,12 @@ const step_name = "STATE";
 
 const image = "postgres:16";
 const volume_flag = " --state pgdata:/var/lib/postgresql/data";
-const trust = " -- env POSTGRES_HOST_AUTH_METHOD=trust docker-entrypoint.sh postgres";
-const start_pg = zn ++ " run -d --name pg" ++ volume_flag ++ " --publish 5432:5432 " ++ image ++
-    trust;
-const psql = H.as_demo ++ "psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 ";
+const start_pg = zn ++ " run -d --name pg" ++ volume_flag ++ " --publish 5432:5432" ++
+    " -e POSTGRES_PASSWORD=demo " ++ image;
+const psql = H.as_demo ++ "PGPASSWORD=demo psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 ";
 const row = "kept-across-sigkill";
 const lock_file = "/home/demo/.local/share/zbx/state/pgdata/lock";
-const pg_ready = H.as_demo ++ "sh -c 'for i in $(seq 120); do " ++
+const pg_ready = H.as_demo ++ "PGPASSWORD=demo sh -c 'for i in $(seq 120); do " ++
     "pg_isready -q -h 127.0.0.1 && psql -h 127.0.0.1 -U postgres -tAc \"select 1\" " ++
     ">/dev/null 2>&1 && break; sleep 1; done; pg_isready -h 127.0.0.1'";
 /// `flock(1)` tries the volume's lock without waiting, for up to ten seconds (a supervisor

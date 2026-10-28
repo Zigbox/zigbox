@@ -44,13 +44,19 @@ pub fn check_row(output: []const u8, status: u8, row: []const u8) Error!void {
     return error.RowMissing;
 }
 
-/// `stat -c '%u %g %a'` of the data directory inside the container: postgres's 999, mode 700
-/// (its entrypoint's `chmod 700`; nothing made it 777).
+/// `stat -c '%u %g %a'` of the data directory inside the container: postgres's uid 999 (its
+/// entrypoint runs `chown postgres`, the group stays the volume's) and mode 700 (its `chmod 700`;
+/// nothing made it 777).
 pub fn check_owner(stdout: []const u8, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     var lines = std.mem.splitScalar(u8, stdout, '\n');
     while (lines.next()) |line| {
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \r\t"), "999 999 700")) return;
+        var words = std.mem.tokenizeScalar(u8, std.mem.trim(u8, line, " \r\t"), ' ');
+        const uid = words.next() orelse continue;
+        _ = words.next() orelse continue;
+        const mode = words.next() orelse continue;
+        if (words.next() != null) continue;
+        if (std.mem.eql(u8, uid, "999") and std.mem.eql(u8, mode, "700")) return;
     }
     return error.OwnerWrong;
 }
@@ -142,6 +148,8 @@ test "the row, the owner and the lock read from what the guest printed" {
     try testing.expectError(error.RowMissing, check_row("\n", 0, "kept-across-sigkill"));
     try testing.expectError(error.ExitCodeWrong, check_row("x", 2, "x"));
     try check_owner("999 999 700\n", 0);
+    try check_owner("999 0 700\n", 0); // As the guest printed it (vm run 40768184682).
+    try testing.expectError(error.OwnerWrong, check_owner("999 0 777\n", 0));
     try testing.expectError(error.OwnerWrong, check_owner("0 0 777\n", 0));
     try testing.expectError(error.OwnerWrong, check_owner("100998 100998 700\n", 0));
     try check_free("free\n");

@@ -25,12 +25,13 @@ pub const Error = m4.Error || m3.Error || error{
 };
 
 /// What each record on disk says in its `.version` line. M4 wrote image records as version 1 and
-/// M5 slice 1 writes version 2 (tags). Run records were version 4 in both; M6 writes version 5
-/// (the network, the forwards and the names of `-e`), and still reads M4's and M5's.
+/// M5 slice 1 writes version 2 (tags). Run records were version 4 in both; M6 slice 1 wrote
+/// version 5 (the network, the forwards and the names of `-e`), slice 2 version 6 (the state
+/// volumes), and this zbx still reads M4's and M5's.
 pub const image_record_version_m4: u32 = 1;
 pub const image_record_version_m5: u32 = 2;
 pub const run_record_version_old: u32 = 4;
-pub const run_record_version: u32 = 5;
+pub const run_record_version: u32 = 6;
 
 /// The image record for `manifest` (`sha256:<hex>`) in a store at `store_dir`:
 /// `<store_dir>/images/<hex>`, as `store/images.zig` names it.
@@ -307,7 +308,7 @@ test "a record's version line is read as it is written" {
     try check_record_version(old, image_record_version_m4);
     try testing.expectError(error.LineMissing, check_record_version(old, image_record_version_m5));
     try check_record_version("    .version = 4,\n", run_record_version_old);
-    try check_record_version("    .version = 5,\n", run_record_version);
+    try check_record_version("    .version = 6,\n", run_record_version);
     try testing.expectError(
         error.LineMissing,
         check_record_version("    .version = 4,\n", run_record_version),
