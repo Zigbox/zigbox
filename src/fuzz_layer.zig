@@ -68,6 +68,18 @@ fn is_hostile_name(name: []const u8) bool {
     return false;
 }
 
+/// The last part of a name as the applier reads it, which skips empty and `.` parts: the last
+/// part of `.wh.b/.wh.b/.` is `.wh.b`, so that entry is a whiteout.
+fn last_part(name: []const u8) []const u8 {
+    var last: []const u8 = "";
+    var split = std.mem.splitScalar(u8, name, '/');
+    while (split.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        last = part;
+    }
+    return last;
+}
+
 const Made = struct { hostile: bool };
 
 fn make_layer(random: std.Random, tar: *builder.Tar) Made {
@@ -100,7 +112,7 @@ fn make_layer(random: std.Random, tar: *builder.Tar) Made {
         }
         if (is_hostile_name(name)) made.hostile = true;
         // A whiteout entry is never made, whatever its kind and link say.
-        const whiteout = std.mem.startsWith(u8, std.fs.path.basename(name), ".wh.");
+        const whiteout = std.mem.startsWith(u8, last_part(name), ".wh.");
         if (kind == .hardlink and is_hostile_name(link) and !whiteout) made.hostile = true;
         tar.add(entry);
     }
