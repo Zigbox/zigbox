@@ -90,6 +90,7 @@ fn add_test_step(
         "src/testing/vm/main_m2.zig",
         "src/testing/vm/main_m3.zig",
         "src/testing/vm/main_m4.zig",
+        "src/testing/vm/main_m5.zig",
         "src/testing/vm/main_top20.zig",
         "src/main.zig",
         "src/zigbox.zig",
@@ -234,6 +235,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M4 demo, as far as it is built: pull, the lock, run by name",
     },
     .{
+        .step = "demo-m5",
+        .root = "src/testing/vm/main_m5.zig",
+        .help = "Run the M5 demo, as far as it is built: the upgrade test against M4",
+    },
+    .{
         .step = "top20",
         .root = "src/testing/vm/main_top20.zig",
         .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
@@ -289,6 +295,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
             add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m4_commit);
             run.addArgs(&.{ "--blob-cache", ".zig-cache/zbx-vm/m4-blobs.img" });
         }
+        if (std.mem.eql(u8, demo.step, "demo-m5")) {
+            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m5_commit);
+        }
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
         if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
         if (ca_file) |path| {
@@ -320,8 +329,8 @@ fn add_release_binaries(
     }
 }
 
-/// The upgrade test of demo-m3 and demo-m4: the older zbx, built from a worktree of the pinned
-/// commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
+/// The upgrade test of demo-m3, demo-m4 and demo-m5: the older zbx, built from a worktree of the
+/// pinned commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
 fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run, commit: []const u8) void {
     const builder = b.addExecutable(.{
         .name = "build_old",

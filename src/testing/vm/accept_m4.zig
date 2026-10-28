@@ -56,7 +56,7 @@ pub fn install_old(session: *Session, out: *Io.Writer) !void {
         .{session.server.port},
     );
     const result = try session.run(command, limits.command_timeout_kvm_s);
-    try H.show(out, "install the M3 zbx", result);
+    try H.show(out, "install the older zbx", result);
     if (result.status != 0) return error.InstallFailed;
 }
 

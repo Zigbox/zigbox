@@ -102,7 +102,7 @@ pub const PullDoc = struct {
 pub const Blob = struct { digest: []const u8, cache: []const u8 };
 pub const Layer = struct { digest: []const u8, size: u64, cache: []const u8 };
 
-fn parse_json(comptime T: type, arena: Allocator, text: []const u8) Error!T {
+pub fn parse_json(comptime T: type, arena: Allocator, text: []const u8) Error!T {
     // Copies: the text is the session's scratch buffer, which the next command overwrites.
     const options: std.json.ParseOptions = .{
         .ignore_unknown_fields = true,
@@ -195,12 +195,12 @@ fn find_image(images: []const DuImage, reference: []const u8) Error!DuImage {
 }
 
 /// `reference` is the newest of `tags`, or null when there are none.
-fn reference_is_newest(reference: ?[]const u8, tags: []const []const u8) bool {
+pub fn reference_is_newest(reference: ?[]const u8, tags: []const []const u8) bool {
     const text = reference orelse return tags.len == 0;
     return tags.len > 0 and std.mem.eql(u8, text, tags[tags.len - 1]);
 }
 
-fn has_tag(tags: []const []const u8, reference: []const u8) bool {
+pub fn has_tag(tags: []const []const u8, reference: []const u8) bool {
     for (tags) |tag| {
         if (std.mem.eql(u8, tag, reference)) return true;
     }
@@ -326,7 +326,7 @@ pub fn check_resume(
     return facts;
 }
 
-const LsDoc = struct {
+pub const LsDoc = struct {
     schema: []const u8,
     roots: []const struct { digest: []const u8, kind: []const u8, source: []const u8 },
     images: []const struct {

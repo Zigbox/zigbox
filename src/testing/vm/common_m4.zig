@@ -26,17 +26,29 @@ pub const rootfs_dir = "/home/demo/alpine";
 pub const store_dir = "/home/demo/.local/share/zbx/store";
 pub const state_dir = "/home/demo/.local/state/zbx";
 
-fn wrapper_text(comptime directory: []const u8, comptime with_ca: bool) []const u8 {
+/// The wrapper's text for `program` (a path in the guest): `cd` to `directory`, name the mirror,
+/// and run it.
+pub fn wrapper_for(
+    comptime directory: []const u8,
+    comptime with_ca: bool,
+    comptime program: []const u8,
+) []const u8 {
     const ca = if (with_ca) " SSL_CERT_FILE=/home/demo/ca.crt" else "";
     return "#!/bin/sh\n" ++
         "cd " ++ directory ++ " || exit 125\n" ++
         "export ZBX_REGISTRY_MIRRORS=mirror.gcr.io" ++ ca ++ "\n" ++
         // no-bus-env: the wrapper inherits the environment of its caller, which has the prefix.
-        "exec /home/demo/zbx \"$@\"\n";
+        "exec " ++ program ++ " \"$@\"\n";
+}
+
+fn wrapper_text(comptime directory: []const u8, comptime with_ca: bool) []const u8 {
+    return wrapper_for(directory, with_ca, "/home/demo/zbx");
 }
 
 pub fn fail_step(out: *Io.Writer, step: []const u8, what: []const u8, err: anyerror) anyerror {
-    try out.print("demo-m4: {s} FAILED: {s} ({s})\n", .{ step, what, @errorName(err) });
+    try out.print("{s}: {s} FAILED: {s} ({s})\n", .{
+        harness.demo_name, step, what, @errorName(err),
+    });
     return err;
 }
 
