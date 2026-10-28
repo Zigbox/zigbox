@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     add_demo_step(b, options);
     add_errors_site_steps(b);
     add_dbus_live_step(b, options);
+    add_check_step(b);
 }
 
 /// The runtime as a module named `zigbox`, for Zigcube's agent to link: another build adds this
@@ -332,4 +333,32 @@ fn add_errors_site_steps(b: *std.Build) void {
     check.addArgs(&.{ "site/errors", "--check" });
     const check_step = b.step("errors-site-check", "Fail if site/errors is stale");
     check_step.dependOn(&check.step);
+}
+
+/// `zig build check`: every gate a slice must pass, in one command, ending in the one line a
+/// report quotes (`check: PASS <commit>`). Build, test, tidy, release and the error pages run
+/// first, as dependencies; then, as root, `zig build test` again as -Dcheck-user (default tester)
+/// in a scratch worktree, because CI runs as an ordinary user. -Dcheck-user=- skips that.
+fn add_check_step(b: *std.Build) void {
+    const user = b.option([]const u8, "check-user", "User for the non-root test run, or -") orelse
+        "tester";
+    const tool = b.addExecutable(.{
+        .name = "check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/check.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    run.addArgs(&.{ b.graph.zig_exe, user });
+    run.has_side_effects = true;
+    const gates = [_][]const u8{ "install", "test", "tidy", "release", "errors-site-check" };
+    for (gates) |name| {
+        const gate = b.top_level_steps.get(name) orelse @panic(name);
+        run.step.dependOn(&gate.step);
+    }
+    const step = b.step("check", "Every gate, then the test suite as a non-root user; one line");
+    step.dependOn(&run.step);
 }
