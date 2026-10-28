@@ -35,7 +35,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - `zig build tidy` checks line length, function length and banned patterns.
 - `zig build fuzz -- <fuzzer> [seed] [iterations]` runs one seeded fuzzer; `zig build fuzz -- all [iterations]` runs every fuzzer once, each with a fresh seed.
 - `zig build demo-mN` runs milestone N's demo inside the test VM (harness in `src/testing/vm/`, written in Zig).
-- `zig build check` runs every gate (build, test, tidy, release, errors-site-check), then every fuzzer with a fresh seed (`zig build fuzz -- all`), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run. A failed fuzzer's seed is the last `fuzz:` line before the FAIL.
+- `zig build check` runs every gate (build, test, tidy, release, errors-site-check, and `harness`, which compiles every VM demo without running it), then every fuzzer with a fresh seed (`zig build fuzz -- all`), then, when run as root, `zig build test` again as the user `tester` in a scratch worktree, because CI runs as an ordinary user. It ends in one line, `check: PASS <commit>` or `check: FAIL ...`; `-Dcheck-user=-` skips the non-root run. A failed fuzzer's seed is the last `fuzz:` line before the FAIL.
 
 ## Working as the implementer subagent
 

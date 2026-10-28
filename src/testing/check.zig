@@ -1,6 +1,7 @@
 //! `check <zig> <user> <fuzz>`: the last step of `zig build check`, which has already built,
-//! tested, tidied, cross-compiled and checked the error pages when this runs (they are its
-//! dependencies, so any failure stops the build before here). It adds two gates of its own:
+//! tested, tidied, cross-compiled, checked the error pages and compiled every VM demo harness
+//! when this runs (they are its dependencies, so any failure stops the build before here). It
+//! adds two gates of its own:
 //!
 //!   - Every fuzzer, each with a fresh seed (`fuzz all`), as CI's fuzz job does: a fixed seed
 //!     run by hand found nothing CI's random ones then did. A failure prints the seed above it.
@@ -10,7 +11,7 @@
 //!
 //! Then it prints the line a report quotes:
 //!
-//!     check: PASS 1a2b3c4d5e6f (build test tidy release errors-site fuzz, test as tester)
+//!     check: PASS 1a2b3c4d5e6f (build test tidy release errors-site harness fuzz, test as tester)
 //!
 //! It also says when the build cache has grown past `cache_note_bytes`, with the command that
 //! empties it, because a full disk costs more than a rebuild.
@@ -93,7 +94,7 @@ pub fn main(init: std.process.Init) !u8 {
     else
         "";
     note_cache(gpa, io, err);
-    try err.print("check: PASS {s}{s} (build test tidy release errors-site fuzz{s})\n", .{
+    try err.print("check: PASS {s}{s} (build test tidy release errors-site harness fuzz{s})\n", .{
         commit, dirty, tail,
     });
     return 0;
