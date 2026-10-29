@@ -16,6 +16,7 @@ const diagnose = @import("diagnose.zig");
 const files = @import("files.zig");
 const image = @import("image.zig");
 const paths_mod = @import("paths.zig");
+const ports = @import("ports.zig");
 const protocol = @import("../vm_protocol.zig");
 const settings = @import("settings.zig");
 const vz = @import("vz.zig");
@@ -126,6 +127,7 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
     assert(booted_ms >= started_ms);
     log("booted in {d} ms", .{booted_ms - started_ms});
     const network_up = setup_guest(&machine, paths, diag) orelse return error.Failed;
+    if (!ports.open_agent(&machine)) log("the guest's port agent did not answer", .{});
     const ready_ms = files.now_ms();
     assert(ready_ms >= booted_ms);
     const network_word = if (network_up) "up" else "down";
@@ -384,7 +386,8 @@ pub fn run(running: *Running, paths: *const paths_mod.Paths) u8 {
             shut_down(running);
             break;
         }
-        const ready = files.wait_readable(running.listener, accept_step_ms) catch false;
+        scan_while_commands_run();
+        const ready = ports.wait(&running.machine, running.listener, accept_step_ms);
         if (!ready) continue;
         const connection = std.c.accept(running.listener, null, null);
         if (connection < 0) continue;
@@ -397,6 +400,21 @@ pub fn run(running: *Running, paths: *const paths_mod.Paths) u8 {
     }
     cleanup(paths, running);
     return constants.exit_ok;
+}
+
+var last_scan_ms: u64 = 0;
+
+/// While a command runs, the guest is asked for its ports now and then: a foreground `run
+/// --publish` opens its port in the middle of the command, with nothing to say so. (The end of a
+/// container needs no asking: the guest says it.)
+fn scan_while_commands_run() void {
+    assert(constants.vm_ports_scan_ms > 0);
+    if (commands_open() == 0) return;
+    const now = files.now_ms();
+    if (now - last_scan_ms < constants.vm_ports_scan_ms) return;
+    last_scan_ms = now;
+    _ = ports.scan(constants.vm_control_timeout_ms);
+    assert(last_scan_ms >= now);
 }
 
 fn answer(running: *Running, connection: i32) bool {
@@ -421,6 +439,24 @@ fn answer(running: *Running, connection: i32) bool {
         .connect => {
             running.last_busy_ms = files.now_ms(); // Someone is about to run a command.
             pass_connection(running, connection);
+            return false;
+        },
+        .publish => |wanted| {
+            var text: [64]u8 = undefined;
+            const verdict = switch (ports.reserve(wanted)) {
+                .ok => control.reply_ok,
+                .taken => control.reply_taken,
+                .full => control.reply_full,
+                .failed => |name| std.fmt.bufPrint(&text, "failed {s}\n", .{name}) catch
+                    control.reply_taken,
+            };
+            files.write_all(connection, verdict) catch {};
+            return false;
+        },
+        .sync => |wanted| {
+            _ = ports.scan(constants.vm_control_timeout_ms);
+            ports.forget_unseen(&wanted);
+            files.write_all(connection, control.reply_ok) catch {};
             return false;
         },
     }
@@ -495,7 +531,7 @@ fn release_ended_commands() void {
         var entry = [1]std.c.pollfd{.{ .fd = held.watch, .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&entry, 1, 0) == 0) continue;
         files.close(held.watch);
-        @import("objc.zig").release(held.object);
+        vz.release_connection(held.object);
         held.* = .{ .watch = -1, .object = null };
         assert(held.watch < 0);
     }

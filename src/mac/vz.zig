@@ -140,12 +140,25 @@ pub const Connection = struct {
     object: Id,
 };
 
+/// The machine's serial queue, kept for releasing connection objects on it (set once, by the
+/// machine that is created; the host process has one).
+var machine_queue: objc.Queue = .{ .handle = null };
+
+/// Releases a connection's framework object on the machine's queue, where the framework's objects
+/// are used, and from whichever thread the caller is on. Before a machine exists there is no
+/// queue and nothing to release.
+pub fn release_connection(object: Id) void {
+    assert(object != null);
+    assert(machine_queue.handle != null); // A connection exists only on a machine.
+    machine_queue.release_later(object);
+}
+
 /// Ends a connection the caller used itself: closes the descriptor, then releases the object.
 pub fn finish_connection(connection: Connection) void {
     assert(connection.descriptor >= 0);
     assert(connection.object != null);
     _ = std.c.close(connection.descriptor);
-    objc.release(connection.object);
+    release_connection(connection.object);
 }
 
 pub const Machine = struct {
@@ -175,6 +188,7 @@ pub const Machine = struct {
             return error.Failed;
         }
         const queue = objc.Queue.create("zbx.vm");
+        machine_queue = queue;
         const allocated = objc.send(Id, objc.class("VZVirtualMachine"), "alloc", .{});
         const machine = objc.send(Id, allocated, "initWithConfiguration:queue:", .{
             configuration, queue.handle,

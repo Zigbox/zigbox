@@ -1,0 +1,9 @@
+error[ZBX-E1017]: a published port cannot be opened on the Mac
+  while  listening on a published port on this Mac
+  cause  macOS lets only root listen on 127.0.0.1:80, a port under 1024
+  port   80
+  addr   127.0.0.1
+  fix    publish a port from 1024 up: --publish <port>:<container port>
+         or, to listen on every interface (this exposes the port on your network):   --publish 0.0.0.0:80:<container port>
+  more   zbx explain E1017
+  docs   https://zigbox.github.io/zigbox/errors/E1017.html

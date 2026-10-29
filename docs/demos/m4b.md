@@ -1,6 +1,6 @@
 # M4b demo: the thirty seconds on macOS
 
-This file is written up to the end of slice 3. Slice 5 completes it with the steps a stranger
+This file is written up to the end of slice 4. Slice 5 completes it with the steps a stranger
 can follow on a clean Mac, the cuts and the failure modes.
 
 ## What runs today (slice 2): demo steps 2 and 4
@@ -36,6 +36,26 @@ Run from a directory in your home (anything else is refused with `ZBX-E1013`).
    tag). An image whose index has no arm64 entry runs the same way without the option.
 5. `zbx vm config --disk 128G` grows the disk at the next boot; a smaller size is `ZBX-E1012`.
    A small disk fills with `ZBX-E1014` after the command's own error.
+
+## What runs today (slice 4): M5 demo steps 2 and 3 from macOS
+
+1. `zbx run --net user alpine -- wget -qO- http://example.com` fetches the page through pasta in
+   the machine.
+2. `zbx run -d --name web --publish 18080:80 nginx:alpine`, then `curl http://localhost:18080/` on
+   the Mac prints nginx's page (also on `127.0.0.1` and `[::1]`). `lsof -nP -iTCP:18080
+   -sTCP:LISTEN` shows `zbx` listening on `127.0.0.1` and `[::1]` only. The first request may
+   be reset when it comes before nginx listens in the container, as on Linux.
+3. `zbx stop web`: the port is closed at once. `zbx vm stop` closes every published port.
+4. `--publish 0.0.0.0:18085:80` listens on every interface (`*:18085`), and only then.
+5. A Mac port that is in use, or `--publish 81:80` (a port under 1024 on 127.0.0.1 needs root on
+   macOS), is `ZBX-E1017` before the container starts; `--publish 0.0.0.0:81:80` works.
+
+## Cuts and limits of slice 4
+
+- Only TCP, as on Linux. A Mac connection to a published port whose container has not started
+  listening yet is accepted and then closed, not refused.
+- What holds a taken Mac port is not looked up; the diagnostic gives the `lsof` command.
+- The guest's own diagnostics name guest paths (see slice 3).
 
 ## Cuts and limits of slice 3
 

@@ -258,6 +258,8 @@ fn wanted(path: []const u8) bool {
         "sbin/mke2fs",
         "sbin/e2fsck",
         "usr/sbin/resize2fs",
+        "usr/bin/passt",
+        "usr/bin/pasta",
     };
     for (exact) |name| {
         if (std.mem.eql(u8, name, path)) return true;

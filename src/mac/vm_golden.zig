@@ -117,6 +117,10 @@ fn rosetta_missing(diag: *Diag) void {
     diagnose.rosetta_missing(diag);
 }
 
+fn port_unavailable(diag: *Diag) void {
+    diagnose.port_unavailable(diag, 80, "127.0.0.1", "ACCES");
+}
+
 pub const cases = [_]Case{
     .{ .code = .E1001, .build = &entitlement },
     .{ .code = .E1002, .build = &start_failed },
@@ -136,6 +140,7 @@ pub const cases = [_]Case{
     .{ .code = .E1014, .build = &disk_full },
     .{ .code = .E1015, .build = &host_full },
     .{ .code = .E1016, .build = &rosetta_missing },
+    .{ .code = .E1017, .build = &port_unavailable },
 };
 
 /// True if a golden case here covers `code` (the registry's "every code has a case" test asks).

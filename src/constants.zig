@@ -754,6 +754,21 @@ pub const vm_log_tail_bytes_max: u32 = 2048;
 // The macOS VM, slice 2: forwarding commands into the VM (docs/briefs/M4b-mac.md).
 /// The vsock port of `zbx guest serve`, which runs the forwarded commands.
 pub const vm_forward_port: u32 = 1025;
+/// The guest's port forwarder (slice 4): the host keeps one connection to learn which ports are
+/// published, and opens one per Mac connection to carry its bytes.
+pub const vm_ports_port: u32 = 1026;
+/// Published ports the Mac listens on at one time, and Mac connections carried at one time.
+pub const vm_ports_max: u32 = 64;
+pub const vm_relays_max: u32 = 128;
+/// A port the client reserved and the guest never reported open is released after this long (the
+/// client died between the reservation and the command).
+pub const vm_reserve_ttl_ms: u64 = 60_000;
+/// While a command runs the host asks the guest for its ports this often, as a fallback to the
+/// guest's own news (a port that opens during a foreground `run`).
+pub const vm_ports_scan_ms: u32 = 500;
+/// A relay's buffer, and how long the guest has to connect to the published port.
+pub const vm_relay_buffer_bytes: u32 = 64 * 1024;
+pub const vm_relay_connect_ms: u32 = 5_000;
 /// The vsock address of the host (VMADDR_CID_HOST). The guest's two listeners take connections
 /// from nowhere else: with the Mac's home shared (slice 3), a container that could reach a
 /// listener would run zbx as the user outside its sandbox.
@@ -1130,6 +1145,10 @@ comptime {
     assert(forward_env_count_max * (env_name_bytes_max + 1 + env_value_bytes_max) >=
         env_value_bytes_max);
     assert(vm_forward_port != vm_guest_port);
+    assert(vm_ports_port != vm_forward_port);
+    assert(vm_ports_port != vm_guest_port);
+    assert(vm_ports_max >= publish_count_max);
+    assert(vm_relay_buffer_bytes >= 4096);
     assert(vm_subid_start + vm_subid_count > vm_subid_start);
     assert(vm_hangup_grace_ms < vm_stop_timeout_ms);
     assert(vm_idle_check_ms % vm_poll_step_ms == 0);

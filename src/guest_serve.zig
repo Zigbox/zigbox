@@ -20,6 +20,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const linux = std.os.linux;
 const constants = @import("constants.zig");
+const ports_agent = @import("guest_ports.zig");
 const protocol = @import("forward_protocol.zig");
 const protocol_vm = @import("vm_protocol.zig");
 
@@ -63,6 +64,7 @@ pub fn main(arguments: []const []const u8, environ: std.process.Environ) u8 {
         _ = linux.write(ready_fd, "1", 1);
         _ = linux.close(ready_fd);
     }
+    start_port_agent(listener);
     accept_forever(listener, &identity);
     return 0;
 }
@@ -95,6 +97,17 @@ fn ignore_child_exits() void {
         .flags = 0,
     };
     _ = linux.sigaction(.PIPE, &pipes, null);
+}
+
+/// The port agent is a process of its own beside the sessions: it ends with the machine.
+fn start_port_agent(listener: i32) void {
+    assert(listener >= 0);
+    const forked = linux.fork();
+    if (failed(forked) or forked != 0) return;
+    assert(forked == 0); // The child; the parent returned above.
+    _ = linux.close(listener);
+    ports_agent.run();
+    linux.exit_group(1); // `run` returns only when it could not start.
 }
 
 /// One session per connection, for as long as the machine lives; the bound only keeps the loop

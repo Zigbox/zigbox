@@ -12,6 +12,7 @@ const dhcp = @import("vm_dhcp.zig");
 const forward = @import("forward_protocol.zig");
 const protocol = @import("vm_protocol.zig");
 const settings = @import("mac/settings.zig");
+const vm_ports = @import("vm_ports.zig");
 
 /// Damages `text[0..length_in]` in place with one to four edits; returns the new length.
 fn damage(random: std.Random, text: []u8, length_in: usize) usize {
@@ -199,6 +200,59 @@ fn check_setup(random: std.Random) void {
     assert(std.mem.eql(u8, damaged[0..length], protocol.render_setup(&again, &accepted)));
 }
 
+fn check_ports(random: std.Random) void {
+    var set: vm_ports.PortSet = .{};
+    for (0..random.uintAtMost(u8, 5)) |_| _ = set.add(random.intRangeAtMost(u16, 1, 65535));
+    var buffer: [constants.vm_line_bytes_max]u8 = undefined;
+    var damaged: [constants.vm_line_bytes_max * 2]u8 = undefined;
+    const texts = [_][]const u8{
+        vm_ports.render_ports(&buffer, &set),
+    };
+    for (texts) |text| {
+        assert(vm_ports.parse_ports(text) != null); // Render reads back.
+        @memcpy(damaged[0..text.len], text);
+        const length = damage(random, &damaged, text.len);
+        const accepted = vm_ports.parse_ports(damaged[0..length]) orelse continue;
+        var again: [constants.vm_line_bytes_max]u8 = undefined;
+        assert(std.mem.eql(u8, damaged[0..length], vm_ports.render_ports(&again, &accepted)));
+    }
+    var sync_buffer: [constants.vm_line_bytes_max]u8 = undefined;
+    const sync = control.render_sync(&sync_buffer, &set);
+    assert(control.parse_request(sync) != null);
+    @memcpy(damaged[0..sync.len], sync);
+    const sync_length = damage(random, &damaged, sync.len);
+    if (control.parse_request(damaged[0..sync_length])) |request| switch (request) {
+        .sync => |accepted| {
+            var again: [constants.vm_line_bytes_max]u8 = undefined;
+            const rendered = control.render_sync(&again, &accepted);
+            assert(std.mem.eql(u8, damaged[0..sync_length], rendered));
+        },
+        .publish => |accepted| {
+            var again: [constants.vm_line_bytes_max]u8 = undefined;
+            const rendered = control.render_publish(&again, accepted);
+            assert(std.mem.eql(u8, damaged[0..sync_length], rendered));
+        },
+        else => {},
+    };
+    const wanted: control.Publish = .{
+        .address = .{ .kind = .v4, .v4 = random.int(u32) },
+        .port = random.intRangeAtMost(u16, 1, 65535),
+    };
+    var publish_buffer: [constants.vm_line_bytes_max]u8 = undefined;
+    const publish = control.render_publish(&publish_buffer, wanted);
+    assert(control.parse_request(publish) != null);
+    @memcpy(damaged[0..publish.len], publish);
+    const publish_length = damage(random, &damaged, publish.len);
+    if (control.parse_request(damaged[0..publish_length])) |request| switch (request) {
+        .publish => |accepted| {
+            var again: [constants.vm_line_bytes_max]u8 = undefined;
+            const rendered = control.render_publish(&again, accepted);
+            assert(std.mem.eql(u8, damaged[0..publish_length], rendered));
+        },
+        else => {},
+    };
+}
+
 pub fn fuzz_vm(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
@@ -210,6 +264,7 @@ pub fn fuzz_vm(seed: u64) void {
         check_headers(random);
         check_dhcp(random);
         check_setup(random);
+        check_ports(random);
     }
     // Random bytes: whatever parses is a record render would write.
     var noise: [96]u8 = undefined;

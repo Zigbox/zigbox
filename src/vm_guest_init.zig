@@ -17,6 +17,7 @@ const linux = std.os.linux;
 const constants = @import("constants.zig");
 const dhcp = @import("vm_dhcp.zig");
 const protocol = @import("vm_protocol.zig");
+const ports_agent = @import("guest_ports.zig");
 const storage = @import("vm_guest_storage.zig");
 
 pub const panic = std.debug.FullPanic(panic_handler);
@@ -62,6 +63,8 @@ pub fn main() void {
     reap_orphans();
     switch_root();
     for (mounts) |mount| mount_one(&mount);
+    make_tun_device();
+    open_low_ports();
     var version_buffer: [constants.vm_line_bytes_max]u8 = undefined;
     const version = read_version(&version_buffer);
     log("zbx-init: image ", version);
@@ -69,6 +72,28 @@ pub fn main() void {
     log("zbx-init: listening on vsock", "");
     serve(listener, version);
     power_off();
+}
+
+/// The Mac decides which ports a user may publish, and a port under 1024 is published by pasta
+/// from the guest's side: the guest has no reason to keep them for root.
+fn open_low_ports() void {
+    assert(mounts.len > 0);
+    const path = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+    if (!write_text(path, "0\n", 0o644)) log("zbx-init: cannot open the low ports", "");
+}
+
+/// pasta makes its tap device through /dev/net/tun, and the user it runs as must be able to open
+/// it: the kernel's own node is root-only unless it is made again with a mode.
+fn make_tun_device() void {
+    assert(mounts.len > 0);
+    _ = linux.mkdir("/dev/net", 0o755);
+    const device: u32 = (10 << 8) | 200; // The misc device `tun` has minor 200.
+    assert(device != 0);
+    _ = linux.unlink("/dev/net/tun");
+    const node = linux.mknodat(linux.AT.FDCWD, "/dev/net/tun", linux.S.IFCHR | 0o666, device);
+    if (failed(node)) log("zbx-init: cannot make /dev/net/tun", "");
+    // The umask took the write bits away from the mode given to mknod.
+    _ = linux.chmod("/dev/net/tun", 0o666);
 }
 
 /// A process whose parent ended is adopted by PID 1 (a detached container's supervisor is such
@@ -600,9 +625,27 @@ fn count_user_processes() u32 {
             at += reclen;
             const pid = std.fmt.parseInt(i32, name, 10) catch continue;
             if (pid == world.serve_pid) continue;
+            if (is_port_agent(name)) continue;
             if (owned_by_user(name)) count += 1;
         }
     }
+}
+
+/// The guest's port agent and the connections it carries: not the user's work, and a published
+/// port alone does not keep the machine up (the container behind it does).
+fn is_port_agent(pid_name: []const u8) bool {
+    assert(pid_name.len > 0);
+    var path: [32:0]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&path, "/proc/{s}/comm", .{pid_name}) catch return false;
+    const opened = linux.open(&path, .{ .ACCMODE = .RDONLY }, 0);
+    if (failed(opened)) return false;
+    const handle: i32 = @intCast(opened);
+    defer _ = linux.close(handle);
+    var comm: [16]u8 = undefined;
+    const got = linux.read(handle, &comm, comm.len);
+    if (failed(got)) return false;
+    assert(got <= comm.len);
+    return std.mem.startsWith(u8, comm[0..got], ports_agent.process_name);
 }
 
 fn owned_by_user(pid_name: []const u8) bool {

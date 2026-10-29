@@ -180,6 +180,7 @@ pub const Code = enum(u8) {
     E1014,
     E1015,
     E1016,
+    E1017,
     B0001,
 };
 
@@ -2657,6 +2658,26 @@ pub const registry = [_]Entry{
         \\Images built for linux/amd64 run in the machine through Rosetta, Apple's
         \\translator, which this Mac does not have. Install it once; the machine
         \\picks it up when it next starts, so stop it with zbx vm stop.
+        ,
+    },
+    .{
+        .code = .E1017,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a published port cannot be opened on the Mac",
+        .explanation =
+        \\--publish HOST:CONTAINER makes the container's port reachable at the
+        \\Mac's own localhost:HOST. zbx listens on that port itself, on the loopback
+        \\addresses (127.0.0.1 and ::1) unless the option names an address:
+        \\0.0.0.0:HOST:CONTAINER listens on every interface, which puts the
+        \\container on the Mac's network and is never the default.
+        \\
+        \\Another program already listens on the port, or the system refused the
+        \\listener; the cause says which. The container was not started.
+        \\
+        \\macOS lets a program that is not root listen on a port under 1024 only on
+        \\every interface, not on 127.0.0.1 alone: --publish 0.0.0.0:80:80 works
+        \\without root, and exposes the port on the Mac's network.
         ,
     },
     .{

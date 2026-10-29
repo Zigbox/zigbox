@@ -218,5 +218,6 @@ test {
     _ = @import("forward_protocol.zig");
     _ = @import("vm_dhcp.zig");
     _ = @import("vm_guest_storage.zig");
+    _ = @import("vm_ports.zig");
     _ = @import("vm_image/cpio.zig");
 }
