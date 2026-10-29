@@ -85,6 +85,7 @@ fn reap_orphans() void {
 
 fn log(prefix: []const u8, detail: []const u8) void {
     assert(prefix.len < 256);
+    assert(detail.len <= constants.vm_home_bytes_max); // A path, a word or a version.
     const newline = "\n";
     _ = linux.write(2, prefix.ptr, prefix.len);
     if (detail.len > 0) _ = linux.write(2, detail.ptr, detail.len);
@@ -425,6 +426,7 @@ fn fail_reply(word: []const u8) []const u8 {
 
 fn do_setup(setup: *const protocol.Setup) []const u8 {
     assert(setup.uid > 0);
+    assert(protocol.home_ok(setup.home)); // The request parser refused any other.
     if (world.done) {
         // The host asks again after a restart of its own; the guest is set up for its user.
         if (world.uid != setup.uid) return fail_reply("user");

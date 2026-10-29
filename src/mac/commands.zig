@@ -479,7 +479,8 @@ pub fn run_config(
     var source = loaded.source;
     if (request.cpus != null or request.memory != null or request.disk != null) {
         const disk_now = files.file_size(ctx.paths.store_disk.slice());
-        values = try apply_request(request, values, bounds, disk_now, ctx.paths.store_disk.slice(), diag);
+        const disk_path = ctx.paths.store_disk.slice();
+        values = try apply_request(request, values, bounds, disk_now, disk_path, diag);
         try settings_file.save(ctx.paths, values, diag);
         source = .settings;
     }

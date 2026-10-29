@@ -208,6 +208,7 @@ fn create_machine(request: *const Request, console: i32, diag: *Diag) ?vz.Machin
         diagnose.setup_failed(diag, "home", paths.console_log.slice());
         return null;
     };
+    assert(home.len > 1); // A path below the root: `shared_home` returns nothing for "".
     const spec: vz.BootSpec = .{
         // Cannot fail: `Paths.init` made every path shorter than the buffer.
         .kernel_path = files.terminate(&kernel, paths.kernel.slice()) catch unreachable,

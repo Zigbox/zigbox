@@ -245,7 +245,16 @@ fn resolve_inner(
         return error.Failed;
     };
     const selected = found.selected;
-    try fetch_platform_manifest(client, reference, origin, selected, found.architecture, resolved, diag);
+    const architecture_found = found.architecture;
+    try fetch_platform_manifest(
+        client,
+        reference,
+        origin,
+        selected,
+        architecture_found,
+        resolved,
+        diag,
+    );
 }
 
 fn unusable(diag: *Diag, err: manifest.ParseError, problem: *const manifest.Problem) Error {

@@ -400,7 +400,8 @@ fn fail(failure: *Failure, stage: Stage, error_object: Id) void {
 fn attach_storage(configuration: Id, spec: *const BootSpec, error_object: *Id) bool {
     assert(spec.disk_path.len > 0);
     assert(spec.home_path.len > 0);
-    const disk_class = objc.send(Id, objc.class("VZDiskImageStorageDeviceAttachment"), "alloc", .{});
+    const attachment_class = objc.class("VZDiskImageStorageDeviceAttachment");
+    const disk_class = objc.send(Id, attachment_class, "alloc", .{});
     const init_disk = "initWithURL:readOnly:error:";
     const disk = objc.send(Id, disk_class, init_disk, .{
         objc.file_url(spec.disk_path), false, error_object,
@@ -433,7 +434,8 @@ fn attach_storage(configuration: Id, spec: *const BootSpec, error_object: *Id) b
 fn share_device(tag: [:0]const u8, share: Id) Id {
     assert(tag.len > 0);
     assert(share != null);
-    const device_class = objc.send(Id, objc.class("VZVirtioFileSystemDeviceConfiguration"), "alloc", .{});
+    const configuration_class = objc.class("VZVirtioFileSystemDeviceConfiguration");
+    const device_class = objc.send(Id, configuration_class, "alloc", .{});
     const device = objc.send(Id, device_class, "initWithTag:", .{objc.string(tag)});
     objc.send(void, device, "setShare:", .{share});
     return device;

@@ -88,6 +88,8 @@ fn parse_arguments(init: std.process.Init) ?Arguments {
 }
 
 fn run(init: std.process.Init, arguments: *const Arguments) !void {
+    assert(arguments.package_count > 0); // An image without the id-map helpers cannot run a user.
+    assert(arguments.package_count <= arguments.packages.len);
     const io = init.io;
     const arena = init.arena.allocator();
     const limit: Io.Limit = .limited(file_bytes_max);
@@ -154,8 +156,9 @@ fn add_fixed(
     label: []const u8,
 ) !void {
     const directories = [_][]const u8{
-        "dev",      "etc",     "proc",          "run", "sys", "tmp", "usr", "usr/bin", "lib", "usr/lib",
-        "usr/sbin", "etc/ssl", "etc/ssl/certs", "bin", "mnt",
+        "dev",           "etc",     "proc", "run",     "sys",      "tmp",
+        "usr",           "usr/bin", "lib",  "usr/lib", "usr/sbin", "etc/ssl",
+        "etc/ssl/certs", "bin",     "mnt",
     };
     for (directories) |path| {
         try entries.append(arena, .{ .path = path, .kind = .directory, .mode = 0o755 });
@@ -285,7 +288,8 @@ fn add_packages(
                 std.mem.endsWith(u8, file.path, "/newgidmap");
             // The guest's root has no /sbin of its own: the tools go to /usr/sbin.
             const sbin = std.mem.startsWith(u8, file.path, "sbin/");
-            const path = if (sbin) try std.fmt.allocPrint(arena, "usr/{s}", .{file.path}) else file.path;
+            const moved = try std.fmt.allocPrint(arena, "usr/{s}", .{file.path});
+            const path = if (sbin) moved else file.path;
             try entries.append(arena, .{
                 .path = path,
                 .kind = if (file.kind == .symlink) .symlink else .file,

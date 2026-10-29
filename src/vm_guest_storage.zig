@@ -19,6 +19,7 @@ fn failed(result: usize) bool {
 
 fn log(prefix: []const u8, detail: []const u8) void {
     assert(prefix.len < 256);
+    assert(detail.len <= constants.vm_home_bytes_max); // A path, a code or a device name.
     const newline = "\n";
     _ = linux.write(2, prefix.ptr, prefix.len);
     if (detail.len > 0) _ = linux.write(2, detail.ptr, detail.len);
@@ -44,6 +45,7 @@ const ext_magic: u16 = 0xEF53;
 
 pub fn classify(head: []const u8) DiskState {
     assert(head.len == probe_bytes);
+    assert(probe_bytes > superblock_magic_offset + 2); // The magic is inside what is read.
     const magic = std.mem.readInt(u16, head[superblock_magic_offset..][0..2], .little);
     if (magic == ext_magic) return .ext;
     for (head) |byte| {
@@ -75,6 +77,8 @@ pub fn file_system_bytes(head: []const u8) u64 {
 
 /// The disk is bigger than the file system on it by at least a MiB: the Mac grew it.
 pub fn needs_growth(file_system: u64, device: u64) bool {
+    assert(device > 0); // A block device read to the end has a size.
+    assert(file_system > 0); // The caller skips a superblock whose size it cannot read.
     return device >= file_system +| (1 << 20);
 }
 
@@ -91,6 +95,7 @@ fn read_state() ?DiskState {
     const got = linux.pread(descriptor, &probe_buffer, probe_buffer.len, 0);
     if (failed(got)) return null;
     if (got != probe_buffer.len) return null;
+    assert(device_bytes >= probe_bytes); // The whole head was read, so the disk is that long.
     return classify(&probe_buffer);
 }
 
@@ -114,6 +119,7 @@ fn run_tool(argv: [*:null]const ?[*:0]const u8) u32 {
     defer child_exits(true);
     const forked = linux.fork();
     if (failed(forked)) return 255;
+    assert(forked != 1); // A process id is never init's.
     if (forked == 0) {
         const environment = [_:null]?[*:0]const u8{"PATH=/usr/sbin:/usr/bin:/bin"};
         _ = linux.execve(argv[0].?, argv, &environment);
@@ -131,6 +137,7 @@ fn run_tool(argv: [*:null]const ?[*:0]const u8) u32 {
 /// `e2fsck -p` repairs what is safe to repair without asking. 0 is clean and 1 is repaired; the
 /// other codes (needs a person, or a failure) refuse the disk.
 pub fn fsck_accepts(code: u32) bool {
+    assert(code <= 255); // An exit code, or the 255 that `run_tool` makes of a failure.
     return code == 0 or code == 1;
 }
 
@@ -139,11 +146,13 @@ const e2fsck_path = "/usr/sbin/e2fsck";
 const resize2fs_path = "/usr/sbin/resize2fs";
 
 fn make_file_system(uid: u32, gid: u32) bool {
+    assert(uid > 0); // The Mac user, never root.
     var owner: [48:0]u8 = @splat(0);
     // Cannot fail: two ids of ten digits fit.
     _ = std.fmt.bufPrint(&owner, "lazy_itable_init=1,nodiscard,root_owner={d}:{d}", .{
         uid, gid,
-    }) catch unreachable;
+    }) catch unreachable; // Cannot fail: two ids of ten digits fit.
+    assert(std.mem.indexOf(u8, &owner, "root_owner=") != null); // The option was not cut short.
     const argv = [_:null]?[*:0]const u8{
         mke2fs_path, "-q", "-t", "ext4", "-F",                     "-L", "zbx-store",
         "-m",        "1",  "-E", &owner, constants.vm_disk_device,
@@ -154,6 +163,7 @@ fn make_file_system(uid: u32, gid: u32) bool {
 fn check_file_system() bool {
     const argv = [_:null]?[*:0]const u8{ e2fsck_path, "-p", constants.vm_disk_device };
     const code = run_tool(&argv);
+    assert(code <= 255);
     if (!fsck_accepts(code)) log("zbx-init: e2fsck refused the disk, exit code ", code_text(code));
     return fsck_accepts(code);
 }
@@ -161,6 +171,7 @@ fn check_file_system() bool {
 var code_buffer: [12]u8 = undefined;
 
 fn code_text(code: u32) []const u8 {
+    assert(code <= 255); // Three digits at most, and the buffer holds more.
     // Cannot fail: a u32 has at most ten digits.
     return std.fmt.bufPrint(&code_buffer, "{d}", .{code}) catch unreachable;
 }
@@ -168,6 +179,7 @@ fn code_text(code: u32) []const u8 {
 /// A disk that grew gets its file system grown, before it is mounted: `resize2fs` wants a
 /// file system that `e2fsck -f` has just checked. A failure is only logged; the old size works.
 fn grow_file_system() bool {
+    assert(device_bytes > 0); // `read_state` measured the disk.
     const forced = [_:null]?[*:0]const u8{ e2fsck_path, "-f", "-p", constants.vm_disk_device };
     if (!fsck_accepts(run_tool(&forced))) return false;
     const argv = [_:null]?[*:0]const u8{ resize2fs_path, constants.vm_disk_device };
@@ -186,7 +198,7 @@ pub fn mount_disk(uid: u32, gid: u32) bool {
     };
     switch (state) {
         .other => {
-            log("zbx-init: not formatting a disk that holds something else: ", constants.vm_disk_device);
+            log("zbx-init: will not format a disk with data on it: ", constants.vm_disk_device);
             return false;
         },
         .empty => if (!make_file_system(uid, gid)) {
@@ -195,14 +207,17 @@ pub fn mount_disk(uid: u32, gid: u32) bool {
         },
         .ext => {},
     }
+    assert(state != .other); // Returned above: a disk with data of another kind is not touched.
     if (!check_file_system()) return false;
-    if (state == .ext and needs_growth(file_system_bytes(&probe_buffer), device_bytes)) {
+    const have = if (state == .ext) file_system_bytes(&probe_buffer) else 0;
+    if (have > 0 and needs_growth(have, device_bytes)) {
         // Failing to grow leaves the disk as it was, usable; it is not a reason to refuse.
         _ = grow_file_system();
     }
     _ = linux.mkdir(constants.vm_disk_mount, 0o755);
     const flags: u32 = linux.MS.NOATIME;
-    const mounted = linux.mount(constants.vm_disk_device, constants.vm_disk_mount, "ext4", flags, 0);
+    const device = constants.vm_disk_device;
+    const mounted = linux.mount(device, constants.vm_disk_mount, "ext4", flags, 0);
     if (failed(mounted)) {
         log("zbx-init: cannot mount ", constants.vm_disk_device);
         return false;
@@ -220,6 +235,7 @@ pub fn quiesce_disk() void {
 }
 
 fn own_directories(uid: u32, gid: u32) bool {
+    assert(uid > 0); // The Mac user, never root.
     const directories = [_][:0]const u8{
         constants.vm_disk_mount,
         constants.vm_disk_mount ++ "/data",
@@ -247,17 +263,20 @@ pub fn mount_home(home: [:0]const u8) bool {
 /// machine type 0x3e (EM_X86_64). The mask leaves out the ELF's OS ABI and the file type's low
 /// byte, and `F` has the kernel open Rosetta once, so that it runs in any container's root.
 pub const rosetta_rule =
-    ":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00" ++
-    ":\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff" ++
+    ":rosetta:M::" ++
+    "\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00" ++
+    "\\x02\\x00\\x3e\\x00" ++
+    ":" ++
+    "\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00" ++
+    "\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff" ++
     ":" ++ constants.vm_rosetta_mount ++ "/rosetta:F\n";
 
 /// Mounts Rosetta (when the Mac shares it) and registers it. False means there is no Rosetta in
 /// this machine, which is not a failure: only linux/amd64 images need it.
 pub fn mount_rosetta() bool {
     _ = linux.mkdir(constants.vm_rosetta_mount, 0o755);
-    if (failed(linux.mount(constants.vm_rosetta_tag, constants.vm_rosetta_mount, "virtiofs", 0, 0))) {
-        return false;
-    }
+    const tag = constants.vm_rosetta_tag;
+    if (failed(linux.mount(tag, constants.vm_rosetta_mount, "virtiofs", 0, 0))) return false;
     const registry = "/proc/sys/fs/binfmt_misc";
     if (failed(linux.mount("binfmt_misc", registry, "binfmt_misc", 0, 0))) {
         log("zbx-init: cannot mount binfmt_misc", "");

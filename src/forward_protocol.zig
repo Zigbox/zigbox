@@ -203,6 +203,9 @@ pub fn render_disk_full(buffer: *[8]u8, note: DiskFull) void {
     assert(note.free_mib <= note.total_mib);
     std.mem.writeInt(u32, buffer[0..4], note.free_mib, .little);
     std.mem.writeInt(u32, buffer[4..8], note.total_mib, .little);
+    // What is written reads back in the order parse_disk_full checks: free first, then total.
+    const written_free = std.mem.readInt(u32, buffer[0..4], .little);
+    assert(written_free <= std.mem.readInt(u32, buffer[4..8], .little));
 }
 
 /// Null for a note that says more is free than the disk holds.
@@ -212,6 +215,7 @@ pub fn parse_disk_full(bytes: *const [8]u8) ?DiskFull {
         .total_mib = std.mem.readInt(u32, bytes[4..8], .little),
     };
     if (note.free_mib > note.total_mib) return null;
+    assert(note.total_mib >= note.free_mib); // Only a possible disk is ever returned.
     return note;
 }
 
@@ -356,7 +360,8 @@ test "a disk-full note round-trips and a free size above the disk is refused" {
     // Goal: the note's two numbers. Method: a typical note, then an impossible one.
     var bytes: [8]u8 = undefined;
     render_disk_full(&bytes, .{ .free_mib = 12, .total_mib = 65536 });
-    try std.testing.expectEqual(DiskFull{ .free_mib = 12, .total_mib = 65536 }, parse_disk_full(&bytes).?);
+    const note: DiskFull = .{ .free_mib = 12, .total_mib = 65536 };
+    try std.testing.expectEqual(note, parse_disk_full(&bytes).?);
     std.mem.writeInt(u32, bytes[0..4], 65537, .little);
     try std.testing.expect(parse_disk_full(&bytes) == null);
     var header: [constants.forward_header_bytes]u8 = undefined;

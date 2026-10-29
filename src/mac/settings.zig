@@ -119,6 +119,7 @@ pub const ParseError = error{ Malformed, NewerVersion };
 /// A record in the form `render` writes, with sizes in the constants' range (the machine's own
 /// limits are checked when the VM boots, because they can change: another Mac, other memory).
 pub fn parse(text: []const u8) ParseError!Settings {
+    assert(header.len == header_v1.len); // Both versions' first lines are skipped the same way.
     if (text.len > record_bytes_max) return error.Malformed;
     if (is_other_version(text)) return error.NewerVersion;
     const version_one = std.mem.startsWith(u8, text, header_v1);
@@ -234,11 +235,21 @@ test "a size is checked at each bound and one past it" {
     try std.testing.expectEqual(Problem.memory_unaligned, check(odd, bounds).?);
     const disk_low = constants.vm_disk_bytes_min;
     const disk_high = constants.vm_disk_bytes_max;
-    try std.testing.expect(check(.{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_low }, bounds) == null);
-    try std.testing.expect(check(.{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_high }, bounds) == null);
-    const disk_small: Settings = .{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_low - (1 << 20) };
+    const at_low: Settings = .{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_low };
+    const at_high: Settings = .{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_high };
+    try std.testing.expect(check(at_low, bounds) == null);
+    try std.testing.expect(check(at_high, bounds) == null);
+    const disk_small: Settings = .{
+        .cpus = 4,
+        .memory_bytes = memory,
+        .disk_bytes = disk_low - (1 << 20),
+    };
     try std.testing.expectEqual(Problem.disk_below, check(disk_small, bounds).?);
-    const disk_big: Settings = .{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_high + (1 << 20) };
+    const disk_big: Settings = .{
+        .cpus = 4,
+        .memory_bytes = memory,
+        .disk_bytes = disk_high + (1 << 20),
+    };
     try std.testing.expectEqual(Problem.disk_above, check(disk_big, bounds).?);
     const disk_odd: Settings = .{ .cpus = 4, .memory_bytes = memory, .disk_bytes = disk_low + 1 };
     try std.testing.expectEqual(Problem.disk_unaligned, check(disk_odd, bounds).?);

@@ -267,9 +267,8 @@ pub fn disk_shrink(diag: *Diag, asked_bytes: u64, current_bytes: u64, path: []co
     diag.fix_with("give at least the current size:", "zbx vm config --disk {d}G", .{
         (current_bytes + (1 << 30) - 1) >> 30,
     });
-    diag.fix_with("to start empty with a smaller disk, move the file aside yourself:", "mv '{s}' '{s}.old'", .{
-        path, path,
-    });
+    const move = "to start empty with a smaller disk, move the file aside yourself:";
+    diag.fix_with(move, "mv '{s}' '{s}.old'", .{ path, path });
     assert(diag.fixes.count == 2);
 }
 
@@ -283,7 +282,10 @@ pub fn directory_not_shared(diag: *Diag, working: []const u8, shared: []const u8
     diag.cause("{s} is not shared with the virtual machine; only {s} is", .{ working, shared });
     diag.context("dir", "{s}", .{working});
     diag.context("shared", "{s}", .{shared});
-    diag.fix(.{ .sentence = "change into a directory in your home, then run it again:", .command = "cd ~" });
+    diag.fix(.{
+        .sentence = "change into a directory in your home, then run it again:",
+        .command = "cd ~",
+    });
     assert(diag.fixes.count == 1);
 }
 
@@ -323,9 +325,8 @@ pub fn host_volume_full(diag: *Diag, path: []const u8, free_bytes: u64, needed_b
     assert(free_bytes < needed_bytes);
     diag.raise(.E1015);
     diag.while_("preparing the virtual machine's disk", .{});
-    diag.cause("the Mac's volume has {d} MiB free, and the machine needs {d} MiB beside its disk", .{
-        free_bytes >> 20, needed_bytes >> 20,
-    });
+    const wording = "the Mac's volume has {d} MiB free; the machine needs {d} MiB beside its disk";
+    diag.cause(wording, .{ free_bytes >> 20, needed_bytes >> 20 });
     diag.context("path", "{s}", .{path});
     diag.fix(.{ .sentence = "free space on the Mac's volume, then run the command again" });
     assert(diag.fixes.count == 1);
@@ -336,12 +337,15 @@ pub fn rosetta_missing(diag: *Diag) void {
     assert(diag.code == null);
     diag.raise(.E1016);
     diag.while_("preparing to run a linux/amd64 command", .{});
-    diag.cause("Rosetta is not installed on this Mac, and linux/amd64 commands run through it", .{});
+    diag.cause("Rosetta is not installed on this Mac; linux/amd64 commands run through it", .{});
     diag.fix(.{
         .sentence = "install it once:",
         .command = "softwareupdate --install-rosetta --agree-to-license",
     });
-    diag.fix(.{ .sentence = "then stop the machine, so that it starts with Rosetta:", .command = "zbx vm stop" });
+    diag.fix(.{
+        .sentence = "then stop the machine, so that it starts with Rosetta:",
+        .command = "zbx vm stop",
+    });
     assert(diag.fixes.count == 2);
 }
 
@@ -354,7 +358,8 @@ test "a small disk is told in MiB and the bigger one is always bigger" {
     diag.reset();
     store_disk_full(&diag, 960 << 20, 0);
     try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "960 MiB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.slice()[1].command.slice(), "--disk 2G") != null);
+    const bigger = diag.fixes.slice()[1].command.slice();
+    try std.testing.expect(std.mem.indexOf(u8, bigger, "--disk 2G") != null);
     diag.reset();
     store_disk_full(&diag, 64 << 30, 1 << 20);
     try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "64 GiB") != null);

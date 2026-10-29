@@ -76,6 +76,7 @@ pub const Architecture = enum {
 /// A platform as a person writes it, `linux/amd64` or `linux/arm64`; null for anything else.
 pub fn architecture_of_platform(text: []const u8) ?Architecture {
     assert(text.len <= constants.arg_bytes_max);
+    assert(std.mem.indexOfScalar(u8, text, 0) == null); // From an argument or the environment.
     if (std.mem.eql(u8, text, "linux/amd64")) return .amd64;
     if (std.mem.eql(u8, text, "linux/arm64")) return .arm64;
     return null;
@@ -347,6 +348,7 @@ pub fn select_platform_or(
     offered: *Offered,
     problem: *Problem,
 ) ParseError!?Picked {
+    assert(document.media.is_index());
     if (try select_platform(document, wanted, offered, problem)) |selected| {
         return .{ .selected = selected, .architecture = wanted };
     }

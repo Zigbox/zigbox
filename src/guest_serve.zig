@@ -573,7 +573,8 @@ fn note_full_disk(connection: i32) void {
     assert(connection >= 0);
     assert(@sizeOf(Statfs) == 120); // The kernel writes this many bytes.
     var buffer: Statfs = undefined;
-    const result = linux.syscall2(.statfs, @intFromPtr(constants.vm_disk_mount), @intFromPtr(&buffer));
+    const path = @intFromPtr(constants.vm_disk_mount);
+    const result = linux.syscall2(.statfs, path, @intFromPtr(&buffer));
     if (failed(result)) return;
     assert(buffer.block_size > 0);
     const free = buffer.blocks_available * @as(u64, @intCast(buffer.block_size));

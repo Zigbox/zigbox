@@ -295,11 +295,13 @@ pub fn free_bytes(path: []const u8) u64 {
     const text = terminate(&terminated, path) catch return 0;
     var buffer: Statfs = undefined;
     if (statfs(text.ptr, &buffer) != 0) return 0;
+    assert(buffer.bsize > 0); // A volume has blocks of some size.
     return buffer.bavail * buffer.bsize;
 }
 
 /// The size in bytes of the file at `path`; 0 when there is none.
 pub fn file_size(path: []const u8) u64 {
+    assert(path.len > 0);
     var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
     const text = terminate(&terminated, path) catch return 0;
     var status: c.Stat = undefined;
@@ -312,6 +314,7 @@ pub fn file_size(path: []const u8) u64 {
 /// a log is at most one file of that size and one older. True if it was rotated.
 pub fn rotate_if_large(path: []const u8, old_path: []const u8, max_bytes: u64) bool {
     assert(max_bytes > 0);
+    assert(!std.mem.eql(u8, path, old_path)); // Renaming a file onto itself rotates nothing.
     if (file_size(path) < max_bytes) return false;
     var from: [constants.vm_path_bytes_max:0]u8 = undefined;
     var to: [constants.vm_path_bytes_max:0]u8 = undefined;
@@ -350,13 +353,15 @@ pub fn shared_home(buffer: *[constants.vm_path_bytes_max:0]u8) ?[:0]const u8 {
     const resolved = realpath(home, buffer) orelse return null;
     const result = std.mem.span(resolved);
     assert(result.len < buffer.len);
-    if (result.len == 0) return null;
+    if (result.len <= 1) return null; // Not the root: a share of everything is not a home.
+    assert(result[0] == '/'); // A resolved path is absolute.
     return buffer[0..result.len :0];
 }
 
 /// True when `directory` is `shared` or inside it.
 pub fn is_inside(directory: []const u8, shared: []const u8) bool {
     assert(shared.len > 0);
+    assert(shared[0] == '/'); // The shared directory is an absolute path.
     if (!std.mem.startsWith(u8, directory, shared)) return false;
     if (directory.len == shared.len) return true;
     return shared[shared.len - 1] == '/' or directory[shared.len] == '/';

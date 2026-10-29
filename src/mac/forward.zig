@@ -207,8 +207,10 @@ fn add_environment(count: *usize, name: []const u8) void {
 fn add_platform(count: *usize, value: []const u8) void {
     assert(manifest.architecture_of_platform(value) != null);
     assert(count.* <= constants.forward_env_count_max);
-    if (count.* == constants.forward_env_count_max) count.* -= 1; // The platform wins over a forwarded name.
-    const entry = std.fmt.bufPrint(&frames.values[count.*], "ZBX_PLATFORM={s}", .{value}) catch return;
+    // The platform wins over a forwarded name when the list is full.
+    if (count.* == constants.forward_env_count_max) count.* -= 1;
+    const slot = &frames.values[count.*];
+    const entry = std.fmt.bufPrint(slot, "ZBX_PLATFORM={s}", .{value}) catch return;
     frames.environment[count.*] = entry;
     count.* += 1;
 }
@@ -302,6 +304,7 @@ fn check_directory(diag: *Diag) Error!void {
     const home = files.shared_home(&home_storage) orelse return; // `forward_command` said so.
     if (c.getcwd(&frames.directory, frames.directory.len) == null) return;
     const directory = std.mem.sliceTo(&frames.directory, 0);
+    assert(directory.len > 0); // `getcwd` succeeded: at least "/".
     if (files.is_inside(directory, home)) return;
     var shown: [constants.path_bytes_max + 1]u8 = undefined;
     diagnose.directory_not_shared(diag, text_util.sanitise(&shown, directory), home);
@@ -346,12 +349,14 @@ fn take_platform(given: *const Command, platform: *?[]const u8, diag: *Diag) Err
 
 /// A linux/amd64 command needs Rosetta in the machine; any other platform does not.
 fn rosetta_refused(platform: []const u8, state: vz.RosettaState) bool {
+    assert(platform.len <= constants.arg_bytes_max);
     const architecture = manifest.architecture_of_platform(platform) orelse return false;
     return architecture == .amd64 and state != .installed;
 }
 
 fn bad_platform(diag: *Diag, value: []const u8) Error {
     assert(diag.code == null);
+    assert(manifest.architecture_of_platform(value) == null); // Only a value that failed gets here.
     var shown: [constants.arg_echo_bytes_max]u8 = undefined;
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
@@ -461,7 +466,8 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
         .exit => {
             assert(header.length == 2); // parse_header fixed the size of an exit frame.
             if (disk_note) |note| {
-                diagnose.store_disk_full(diag, @as(u64, note.total_mib) << 20, @as(u64, note.free_mib) << 20);
+                const total = @as(u64, note.total_mib) << 20;
+                diagnose.store_disk_full(diag, total, @as(u64, note.free_mib) << 20);
                 return error.Failed;
             }
             const exit = protocol.parse_exit(payload[0..2]).?; // The header fixed the size at 2.
