@@ -98,7 +98,7 @@ fn bind(session: *Session, out: *Io.Writer) !void {
     const run = zn ++ " run --name bnd1 --bind " ++ home ++ "hostdir:/mnt/h --bind " ++ home ++
         "note.txt:/mnt/n alpine -- sh -c 'cat /mnt/h/seen; touch /mnt/h/new 2>&1; " ++
         "(echo x >> /mnt/n) 2>/dev/null && echo n-writable || echo n-readonly; " ++
-        "(rm /mnt/h/seen) 2>/dev/null && echo rm-ok || echo rm-refused; true'";
+        "(rm -f /mnt/h/seen) 2>/dev/null && echo rm-ok || echo rm-refused; true'";
     const result = try common.run_shown(session, out, run);
     checks.check_bind(result.streams.stdout, result.status) catch |err| {
         return fail_step(out, step_name, "expected a bind nothing can write", err);
