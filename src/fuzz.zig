@@ -593,7 +593,9 @@ fn command_word(args: FuzzArgs) ?[]const u8 {
         const word = args.items[index];
         if (word.len > constants.arg_bytes_max) return null;
         if (std.mem.eql(u8, word, "--output") or std.mem.eql(u8, word, "-o")) {
-            index += 1; // Its value (`-o` is `state export`'s file), whatever it is, but collection stops at one that is too long.
+            // Its value (`-o` is `state export`'s file), whatever it is, but collection stops at
+            // one that is too long.
+            index += 1;
             if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return null;
             continue;
         }
