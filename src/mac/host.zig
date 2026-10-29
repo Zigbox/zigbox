@@ -253,10 +253,11 @@ fn ask_hello(machine: *vz.Machine) ?Version {
     assert(constants.vm_guest_port > 0);
     var failure: vz.Failure = .{};
     const connection = machine.connect(constants.vm_guest_port, &failure) catch return null;
-    defer files.close(connection);
-    files.write_all(connection, protocol.hello_request) catch return null;
+    defer vz.finish_connection(connection);
+    files.write_all(connection.descriptor, protocol.hello_request) catch return null;
     var line: [constants.vm_line_bytes_max]u8 = undefined;
-    const reply = files.read_line(connection, &line, answer_timeout_ms) catch return null;
+    const descriptor = connection.descriptor;
+    const reply = files.read_line(descriptor, &line, answer_timeout_ms) catch return null;
     const version = protocol.parse_hello_reply(reply) orelse return null;
     return version[0..constants.vm_image_version_bytes].*;
 }
@@ -291,11 +292,12 @@ fn setup_guest(machine: *vz.Machine, paths: *const paths_mod.Paths, diag: *Diag)
         diagnose.no_answer(diag, paths.console_log.slice(), constants.vm_control_timeout_ms);
         return null;
     };
-    defer files.close(connection);
+    defer vz.finish_connection(connection);
     var request: [constants.vm_line_bytes_max]u8 = undefined;
-    files.write_all(connection, protocol.render_setup(&request, &spec)) catch {};
+    files.write_all(connection.descriptor, protocol.render_setup(&request, &spec)) catch {};
     var line: [constants.vm_line_bytes_max]u8 = undefined;
-    const reply = files.read_line(connection, &line, constants.vm_setup_timeout_ms) catch {
+    const descriptor = connection.descriptor;
+    const reply = files.read_line(descriptor, &line, constants.vm_setup_timeout_ms) catch {
         diagnose.setup_failed(diag, "answer", paths.console_log.slice());
         return null;
     };
@@ -393,8 +395,25 @@ fn pass_connection(running: *Running, connection: i32) void {
         files.write_all(connection, "fail service\n") catch {};
         return;
     };
-    defer files.close(guest);
-    files.send_with_descriptor(connection, control.connect_ok, guest) catch {};
+    files.send_with_descriptor(connection, control.connect_ok, guest.descriptor) catch {};
+    files.close(guest.descriptor);
+    keep(guest.object); // The command is using the connection: its object must outlive it.
+}
+
+/// The framework objects of connections handed to commands. The framework closes a connection
+/// when its object is released, so each is held until `connections_kept_max` newer ones have been
+/// handed out; by then the command that had it ended. (A ring, not a leak, and not a table of
+/// who is still running: the host does not see the commands' ends.)
+const connections_kept_max: u32 = 256;
+var kept_connections: [connections_kept_max]objc_id = @splat(null);
+var kept_next: u32 = 0;
+const objc_id = @import("objc.zig").Id;
+
+fn keep(object: objc_id) void {
+    assert(kept_next < connections_kept_max);
+    if (kept_connections[kept_next]) |old| @import("objc.zig").release(old);
+    kept_connections[kept_next] = object;
+    kept_next = (kept_next + 1) % connections_kept_max;
 }
 
 /// Asks the guest every `vm_idle_check_ms` whether the user's processes run; true once none
@@ -414,10 +433,11 @@ fn guest_busy(machine: *vz.Machine) bool {
     assert(constants.vm_guest_port > 0);
     var failure: vz.Failure = .{};
     const connection = machine.connect(constants.vm_guest_port, &failure) catch return true;
-    defer files.close(connection);
-    files.write_all(connection, protocol.busy_request) catch return true;
+    defer vz.finish_connection(connection);
+    files.write_all(connection.descriptor, protocol.busy_request) catch return true;
     var line: [constants.vm_line_bytes_max]u8 = undefined;
-    const reply = files.read_line(connection, &line, answer_timeout_ms) catch return true;
+    const descriptor = connection.descriptor;
+    const reply = files.read_line(descriptor, &line, answer_timeout_ms) catch return true;
     const count = protocol.parse_busy_reply(reply) orelse return true;
     return count > 0;
 }
@@ -446,10 +466,10 @@ fn shut_down(running: *Running) void {
     assert(constants.vm_stop_timeout_ms > 0);
     var failure: vz.Failure = .{};
     if (running.machine.connect(constants.vm_guest_port, &failure)) |connection| {
-        defer files.close(connection);
-        files.write_all(connection, protocol.shutdown_request) catch {};
+        defer vz.finish_connection(connection);
+        files.write_all(connection.descriptor, protocol.shutdown_request) catch {};
         var line: [constants.vm_line_bytes_max]u8 = undefined;
-        _ = files.read_line(connection, &line, answer_timeout_ms) catch {};
+        _ = files.read_line(connection.descriptor, &line, answer_timeout_ms) catch {};
     } else |_| {}
     const deadline = files.now_ms() + constants.vm_stop_timeout_ms;
     while (files.now_ms() < deadline) {

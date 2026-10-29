@@ -113,6 +113,21 @@ pub const BootSpec = struct {
     memory_bytes: u64,
 };
 
+/// A vsock connection: the caller's copy of the descriptor and the framework's object, which must
+/// not be released while the connection is in use.
+pub const Connection = struct {
+    descriptor: i32,
+    object: Id,
+};
+
+/// Ends a connection the caller used itself: closes the descriptor, then releases the object.
+pub fn finish_connection(connection: Connection) void {
+    assert(connection.descriptor >= 0);
+    assert(connection.object != null);
+    _ = std.c.close(connection.descriptor);
+    objc.release(connection.object);
+}
+
 pub const Machine = struct {
     queue: objc.Queue,
     virtual_machine: Id,
@@ -175,8 +190,11 @@ pub const Machine = struct {
         return is_poisoned;
     }
 
-    /// Opens a vsock connection to `port` of the guest; the descriptor is the caller's to close.
-    pub fn connect(machine: *Machine, port: u32, failure: *Failure) Error!i32 {
+    /// Opens a vsock connection to `port` of the guest. The framework closes the connection when
+    /// its object is released (even if the descriptor was duplicated), so the object lives as
+    /// long as the descriptor is in use: `finish_connection` when the caller is done with it, or
+    /// the object is kept by whoever handed the descriptor on.
+    pub fn connect(machine: *Machine, port: u32, failure: *Failure) Error!Connection {
         assert(port <= 65535);
         assert(machine.virtual_machine != null);
         assert(port > 0);
@@ -187,16 +205,16 @@ pub const Machine = struct {
             failure.* = .{ .stage = .connect };
             return error.Failed;
         };
-        defer objc.release(connection);
         const descriptor = objc.send(i32, connection, "fileDescriptor", .{});
         assert(descriptor >= 0);
-        // The connection closes its descriptor when it is released; the caller keeps a copy.
+        // The caller works with a copy of the descriptor and closes it when it is done.
         const copy = std.c.dup(descriptor);
         if (copy < 0) {
+            objc.release(connection);
             failure.* = .{ .stage = .connect };
             return error.Failed;
         }
-        return copy;
+        return .{ .descriptor = copy, .object = connection };
     }
 
     /// Stops the guest at once, as pulling the plug does. Used only when a clean stop did not

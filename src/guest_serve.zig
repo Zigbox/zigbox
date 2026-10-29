@@ -196,22 +196,36 @@ const Command = struct {
 
 var command_storage: Command = undefined;
 
+/// A line on the console (the host keeps it in console.log) saying why a session ended early.
+fn note(text: []const u8) void {
+    assert(text.len < 200);
+    const prefix = "zbx guest: ";
+    _ = linux.write(2, prefix, prefix.len);
+    _ = linux.write(2, text.ptr, text.len);
+    _ = linux.write(2, "\n", 1);
+}
+
+fn end_early(why: []const u8) u8 {
+    note(why);
+    return 1;
+}
+
 fn session(connection: i32, identity: *const Identity) u8 {
     assert(@intFromPtr(identity) != 0);
     assert(@sizeOf(u64) == 8);
     const command = &command_storage;
     var header: [constants.forward_header_bytes]u8 = undefined;
-    if (!read_exact(connection, &header)) return 1;
-    const first = protocol.parse_header(&header) orelse return 1;
-    if (first.kind != .start) return 1;
-    if (!read_exact(connection, command.payload[0..first.length])) return 1;
+    if (!read_exact(connection, &header)) return end_early("no first frame");
+    const first = protocol.parse_header(&header) orelse return end_early("bad first header");
+    if (first.kind != .start) return end_early("first frame is not start");
+    if (!read_exact(connection, command.payload[0..first.length])) return end_early("short start");
     const start = protocol.parse_start(
         command.payload[0..first.length],
         &command.arguments,
         &command.environment,
-    ) orelse return 1;
-    prepare_exec(command, &start, identity) orelse return 1;
-    const child = launch(connection, command, &start) orelse return 1;
+    ) orelse return end_early("bad start frame");
+    prepare_exec(command, &start, identity) orelse return end_early("cannot prepare");
+    const child = launch(connection, command, &start) orelse return end_early("cannot launch");
     return relay(connection, &child);
 }
 
@@ -497,7 +511,27 @@ fn finish(connection: i32, child: *const Child) u8 {
     const value: u8 = if (signaled) @intCast(status & 0x7f) else @intCast((status >> 8) & 0xff);
     protocol.render_exit(&payload, .{ .signaled = signaled, .value = value });
     _ = send_frame(connection, .exit, &payload);
+    close_gracefully(connection);
     return 0;
+}
+
+/// Closes the sending side and reads what the Mac still sends until it closes its own, for a
+/// moment at most. Closing a socket that holds unread data resets the connection, and the reset
+/// can reach the Mac before it has read the exit frame (a command that ends at once, with the
+/// Mac's end-of-input frame still in flight).
+fn close_gracefully(connection: i32) void {
+    assert(connection >= 0);
+    assert(constants.vm_hangup_grace_ms > 0);
+    _ = linux.shutdown(connection, linux.SHUT.WR);
+    var scratch: [constants.forward_data_bytes_max]u8 = undefined;
+    var entry = [1]linux.pollfd{.{ .fd = connection, .events = linux.POLL.IN, .revents = 0 }};
+    var rounds: u32 = 0;
+    while (rounds < 64) : (rounds += 1) {
+        entry[0].revents = 0;
+        if (linux.poll(&entry, 1, @intCast(constants.vm_hangup_grace_ms)) == 0) return;
+        const count = linux.read(connection, &scratch, scratch.len);
+        if (failed(count) or count == 0) return;
+    }
 }
 
 /// The connection went before the command ended: the command's session gets SIGHUP, and SIGKILL
