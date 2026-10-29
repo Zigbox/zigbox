@@ -623,6 +623,7 @@ fn add_vm_image(b: *std.Build, options: *std.Build.Step.Options) VmImage {
     run.addFileArg(linux_zbx.getEmittedBin());
     if (label.len > 0) run.addArgs(&.{ "--label", label });
     run.addArgs(&.{ "--apk-cache", ".zig-cache/zbx-vm/apk" });
+    run.addArgs(&.{ "--apk-mirror", @import("vm/alpine.zon").mirror });
     inline for (@import("vm/alpine.zon").packages) |package| {
         run.addArgs(&.{ "--apk", package.name, package.url, package.sha256 });
     }

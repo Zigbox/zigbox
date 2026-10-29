@@ -5,7 +5,12 @@
 // pinned. Alpine removes a file when a package is updated in the branch: when a URL stops
 // answering, pin the new version here, deliberately, in one commit.
 // `passt` (pasta) is pinned the same way in slice 4, not here.
+//
+// Each file is fetched first from `mirror` (a GitHub release of this repository that holds the
+// same file names), then from its `url`. Both are checked against the same SHA-256, and a file
+// that fails the check is refused and the next source tried.
 .{
+    .mirror = "https://github.com/Zigbox/zigbox/releases/download/vm-deps-alpine-3.20",
     .packages = .{
         .{
             .name = "musl",

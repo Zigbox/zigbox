@@ -28,6 +28,7 @@ const Arguments = struct {
     out_initramfs: []const u8 = "",
     out_version: []const u8 = "",
     apk_cache: []const u8 = "",
+    apk_mirror: []const u8 = "",
     packages: [16]Package = undefined,
     package_count: u32 = 0,
 };
@@ -72,6 +73,7 @@ fn parse_arguments(init: std.process.Init) ?Arguments {
         }
         const value = iterator.next() orelse return null;
         if (std.mem.eql(u8, name, "--apk-cache")) result.apk_cache = value;
+        if (std.mem.eql(u8, name, "--apk-mirror")) result.apk_mirror = value;
         if (std.mem.eql(u8, name, "--kernel")) result.kernel = value;
         if (std.mem.eql(u8, name, "--kernel-sha256")) result.kernel_sha256 = value;
         if (std.mem.eql(u8, name, "--init")) result.init = value;
@@ -265,7 +267,7 @@ fn add_packages(
 ) !void {
     const arena = init.arena.allocator();
     for (arguments.packages[0..arguments.package_count]) |package| {
-        const bytes = try fetch_package(init, arguments.apk_cache, package);
+        const bytes = try fetch_package(init, arguments, package);
         for (try apk.unpack(arena, bytes)) |file| {
             if (file.kind == .directory or !wanted(file.path)) continue;
             // newuidmap and newgidmap are setuid root: they write another process's id map.
@@ -281,33 +283,62 @@ fn add_packages(
     }
 }
 
-/// The package file from the cache, downloaded if absent, and always checked against its pin.
-fn fetch_package(init: std.process.Init, cache: []const u8, package: Package) ![]const u8 {
+/// The package file from the cache, if it is there and is the pinned one; otherwise from the
+/// mirror and then from its original URL. A file that fails its SHA-256 is refused (and removed),
+/// whichever source it came from. If no source gives the pinned file, one line names the package
+/// and both URLs.
+fn fetch_package(
+    init: std.process.Init,
+    arguments: *const Arguments,
+    package: Package,
+) ![]const u8 {
     const io = init.io;
     const arena = init.arena.allocator();
-    try Io.Dir.cwd().createDirPath(io, cache);
+    try Io.Dir.cwd().createDirPath(io, arguments.apk_cache);
     const name = std.fs.path.basename(package.url);
-    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ cache, name });
-    if (Io.Dir.cwd().statFile(io, path, .{})) |_| {} else |_| {
-        const partial = try std.fmt.allocPrint(arena, "{s}.part", .{path});
-        try download(init, package.url, partial);
-        try Io.Dir.cwd().rename(partial, Io.Dir.cwd(), path, io);
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.apk_cache, name });
+    if (read_pinned(io, arena, path, package.sha256)) |bytes| return bytes;
+    const mirror_url = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.apk_mirror, name });
+    const sources = [_][]const u8{ mirror_url, package.url };
+    const partial = try std.fmt.allocPrint(arena, "{s}.part", .{path});
+    for (sources) |source| {
+        if (arguments.apk_mirror.len == 0 and source.ptr == mirror_url.ptr) continue;
+        download(init, source, partial) catch {
+            note(io, "make_image: {s}: no file at {s}\n", .{ package.name, source });
+            continue;
+        };
+        if (read_pinned(io, arena, partial, package.sha256)) |bytes| {
+            try Io.Dir.cwd().rename(partial, Io.Dir.cwd(), path, io);
+            note(io, "make_image: {s} from {s}\n", .{ package.name, source });
+            return bytes;
+        }
+        const refused = "make_image: {s}: the file at {s} is not the pinned one; refused\n";
+        note(io, refused, .{ package.name, source });
+        Io.Dir.cwd().deleteFile(io, partial) catch {};
     }
-    const bytes = try Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(file_bytes_max));
+    note(io, "make_image: cannot get {s}: neither {s} nor {s} gave the pinned file\n", .{
+        package.name, mirror_url, package.url,
+    });
+    return error.PackageUnavailable;
+}
+
+/// The file's bytes if it exists and has the SHA-256; a file that does not is removed.
+fn read_pinned(io: Io, arena: std.mem.Allocator, path: []const u8, sha256: []const u8) ?[]const u8 {
+    const limit: Io.Limit = .limited(file_bytes_max);
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, limit) catch return null;
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
-    if (!std.mem.eql(u8, &hex, package.sha256)) {
-        var buffer: [512]u8 = undefined;
-        var file_writer: Io.File.Writer = .init(.stderr(), io, &buffer);
-        try file_writer.interface.print(
-            "make_image: {s} has sha256 {s}, vm/alpine.zon says {s}\n",
-            .{ package.name, hex, package.sha256 },
-        );
-        try file_writer.interface.flush();
-        return error.PackageDigestMismatch;
-    }
-    return bytes;
+    if (std.mem.eql(u8, &hex, sha256)) return bytes;
+    Io.Dir.cwd().deleteFile(io, path) catch {};
+    return null;
+}
+
+fn note(io: Io, comptime format: []const u8, args: anytype) void {
+    var buffer: [768]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stderr(), io, &buffer);
+    file_writer.interface.print(format, args) catch return;
+    file_writer.interface.flush() catch return;
 }
 
 fn download(init: std.process.Init, url: []const u8, destination: []const u8) !void {
@@ -325,4 +356,23 @@ fn download(init: std.process.Init, url: []const u8, destination: []const u8) !v
     });
     try writer.interface.flush();
     if (result.status != .ok) return error.DownloadFailed;
+}
+
+test "read_pinned returns the pinned file and removes any other" {
+    // Goal: a file that fails its SHA-256 (a bad mirror, a damaged cache) is refused. Method: a
+    // file with the right digest, then the same path with a wrong one.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    const path = ".zig-cache/zbx-read-pinned-test";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "pinned bytes" });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("pinned bytes", &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    try std.testing.expectEqualStrings("pinned bytes", read_pinned(io, arena, path, &hex).?);
+    const wrong: [64]u8 = @splat(0x30);
+    try std.testing.expect(read_pinned(io, arena, path, &wrong) == null);
+    try std.testing.expect(read_pinned(io, arena, path, &hex) == null); // It was removed.
 }
