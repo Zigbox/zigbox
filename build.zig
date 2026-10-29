@@ -105,6 +105,7 @@ const roots = [_][]const u8{
     "src/fuzz.zig",
     "src/size_check.zig",
     "src/errors_site.zig",
+    "src/mac_release.zig",
     "src/vm_image_make.zig",
     "src/vm_image/kernel_build.zig",
     "src/macos_main.zig",
@@ -667,6 +668,49 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;
 /// a Developer ID signature and notarization are the release's job) and installs it.
+/// `zig build mac-release`: the ReleaseSafe macOS `zbx`, signed with the hardened runtime and the
+/// virtualization entitlement, zipped, and (with `-Dnotarize`) notarized; see src/mac_release.zig.
+/// `-Dsign-identity=-` signs ad hoc, for trying it; the defaults are the owner's.
+fn add_mac_release(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    target: std.Build.ResolvedTarget,
+) void {
+    const release = @import("src/mac_release.zig");
+    const identity = b.option([]const u8, "sign-identity", "mac-release: the codesign identity (default: " ++
+        release.default_identity ++ "; - is ad hoc)") orelse release.default_identity;
+    const profile = b.option([]const u8, "notary-profile", "mac-release: the notarytool keychain profile (default: " ++
+        release.default_profile ++ ")") orelse release.default_profile;
+    const notarize = b.option(bool, "notarize", "mac-release: submit the archive to Apple's notary service") orelse false;
+    const image = add_vm_image(b, options);
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/macos_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    link_macos(module, image);
+    const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+    const tool = b.addExecutable(.{
+        .name = "mac_release",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mac_release.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    run.addArg("--binary");
+    run.addArtifactArg(exe);
+    run.addArgs(&.{ "--entitlements", "vm/zbx.entitlements", "--formula", "packaging/homebrew/zigbox.rb" });
+    run.addArgs(&.{ "--out", "zig-out/mac-release", "--version", @import("build.zig.zon").version });
+    run.addArgs(&.{ "--identity", identity, "--profile", profile });
+    if (notarize) run.addArg("--notarize");
+    const step = b.step("mac-release", "Sign (hardened runtime), zip and optionally notarize the macOS zbx");
+    step.dependOn(&run.step);
+}
+
 fn add_macos_install(
     b: *std.Build,
     options: *std.Build.Step.Options,
@@ -682,6 +726,7 @@ fn add_macos_install(
     });
     link_macos(module, image);
     const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+    add_mac_release(b, options, target);
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addArtifactArg(exe);
     const signed = copy.addOutputFileArg("zbx");
