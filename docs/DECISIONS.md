@@ -5,6 +5,14 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## Local dev: zbx runs one thing; more than one is Zigcube's
+
+*Decided 2026-10-29.*
+
+- **No Compose equivalent in zbx, ever.** zbx runs one container at a time. To run more than one service, even on one laptop, install the Zigcube server (SQLite store, one agent on the same machine): "if you want to run more than one thing, do it right". Live doc rev 64 says so in Non-goals and in Part II's opening.
+- **Zigbox adds only the local primitives both need**, as a new milestone **M6b · Dev loop** before M7: writable mounts of host directories within guardrails, with ownership that round-trips; `zbx logs`; `zbx exec`; all three in the library for Zigcube's agent. Its two open questions (the guardrails, and ownership for a non-root container user) are settled when its brief is written.
+- **Zigcube's single-node path is an early target**: services reaching each other by name on one machine, a single-node form of C4's DNS and grants without WireGuard. Zigcube's session scopes it when Zigcube restarts.
+
 ## M4b · Mac: handed off to a session on the owner's Mac
 
 *Decided 2026-10-29, after M6 merged.*
