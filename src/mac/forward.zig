@@ -115,7 +115,11 @@ fn open_connection(ctx: *const commands.Context, diag: *Diag) Error!i32 {
     var attempts: u32 = 0;
     while (attempts < 2) : (attempts += 1) {
         _ = try commands.ensure_running(ctx, diag);
-        if (ask_host(ctx)) |descriptor| return descriptor;
+        assert(attempts < 2); // One retry, for a machine that stopped between the two requests.
+        if (ask_host(ctx)) |descriptor| {
+            assert(descriptor >= 0);
+            return descriptor;
+        }
         // The machine may have been stopped for being idle between the check and the request:
         // once more, which boots a fresh one.
     }
@@ -132,6 +136,8 @@ fn ask_host(ctx: *const commands.Context) ?i32 {
     const received = files.receive_with_descriptors(socket, &line) catch return null;
     if (!std.mem.eql(u8, line[0..received.length], control.connect_ok)) return null;
     if (received.descriptor_count != 2) return null;
+    assert(received.descriptors[0] >= 0); // The vsock connection.
+    assert(received.descriptors[1] >= 0); // The host's watch.
     // The second descriptor is left open for as long as this process lives: the host watches it
     // to learn that this command's client ended, and then lets the connection go.
     watch_descriptor = received.descriptors[1];
@@ -188,6 +194,7 @@ fn add_environment(count: *usize, name: []const u8) void {
     if (entry.len == 0) return;
     frames.environment[count.*] = entry;
     count.* += 1;
+    assert(count.* <= constants.forward_env_count_max);
 }
 
 /// The names the command line asks for: `-e NAME` and `--env NAME` without a value take the
@@ -222,6 +229,7 @@ fn start_frame(command: *const Command, streams: Streams) ?[]const u8 {
     var count: usize = 0;
     for (forwarded_names) |name| add_environment(&count, name);
     add_named_environment(&count, command.words);
+    assert(count <= constants.forward_env_count_max);
     var directory: []const u8 = "";
     if (c.getcwd(&frames.directory, frames.directory.len)) |_| {
         directory = std.mem.sliceTo(&frames.directory, 0);
@@ -252,6 +260,8 @@ pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) E
         diag.fix(.{ .sentence = "pass fewer or shorter arguments" });
         return error.Failed;
     };
+    if (!streams.pty) assert(streams.stderr_pipe); // Every stream is a pipe without a pty.
+    assert(payload.len > 0);
     const connection = try open_connection(ctx, diag);
     defer files.close(connection);
     try catch_signals();
@@ -290,6 +300,8 @@ fn relay(connection: i32, command: *const Command, diag: *Diag) Error!u8 {
             if (c.errno(ready) == .INTR) continue;
             return lost(command, diag, "waiting for the guest failed");
         }
+        assert(ready >= 1); // Without a timeout, poll returns for a reason.
+        assert(ready <= entries.len);
         if (entries[1].revents != 0) send_signals(connection);
         if (entries[2].revents != 0) stdin_open = forward_input(connection, &data);
         if (entries[0].revents != 0) {
@@ -305,6 +317,7 @@ fn send_signals(connection: i32) void {
     var bytes: [8]u8 = undefined;
     const count = c.read(signal_pipe[0], &bytes, bytes.len);
     if (count <= 0) return;
+    assert(count <= bytes.len);
     for (bytes[0..@intCast(count)]) |number| {
         if (number == @backingInt(c.SIG.WINCH)) {
             var payload: [4]u8 = undefined;
@@ -323,6 +336,7 @@ fn forward_input(connection: i32, data: []u8) bool {
     assert(data.len == constants.forward_data_bytes_max);
     const count = c.read(0, data.ptr, data.len);
     if (count < 0) return c.errno(count) == .INTR;
+    assert(count <= data.len);
     if (count == 0) {
         _ = send_frame(connection, .stdin_eof, &.{});
         return false;
@@ -344,6 +358,7 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
     if (header.length > payload.len) {
         return lost(command, diag, "the guest sent a frame that is too big");
     }
+    assert(header.length <= constants.forward_data_bytes_max);
     if (!read_exact(connection, payload[0..header.length])) {
         return lost(command, diag, "the guest hung up");
     }
@@ -351,6 +366,7 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
         .stdout => files.write_all(1, payload[0..header.length]) catch {},
         .stderr => files.write_all(2, payload[0..header.length]) catch {},
         .exit => {
+            assert(header.length == 2); // parse_header fixed the size of an exit frame.
             const exit = protocol.parse_exit(payload[0..2]).?; // The header fixed the size at 2.
             return if (exit.signaled) 128 +| exit.value else exit.value;
         },

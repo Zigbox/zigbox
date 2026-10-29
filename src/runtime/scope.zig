@@ -108,7 +108,8 @@ pub fn driver(host: Host, root: *Directory) Driver {
     if (text.len < 2 or text[0] != '/') return .systemd;
     root.* = .{};
     root.print("{s}", .{text});
-    assert(root.slice().len == text.len);
+    assert(root.slice().len == text.len); // Not cut: the variable fits the buffer.
+    assert(root.slice()[0] == '/');
     return .cgroupfs;
 }
 
@@ -401,6 +402,8 @@ fn cgroupfs_problem(step: CgroupStep, path: []const u8, host: Host, err: host_mo
     const io: Io = .{ .err = err, .errno = host.last_errno() };
     var result: Cgroupfs = .{ .step = step, .path = .{}, .io = io };
     result.path.print("{s}", .{path});
+    assert(result.path.slice().len > 0);
+    assert(result.io.errno < 4096);
     return .{ .cgroupfs = result };
 }
 
@@ -440,6 +443,12 @@ fn start_cgroupfs(
     }
     var files: [fallback_files_max]FileWrite = undefined;
     const count = fallback(cgroupfs_version, plan.scope_limits, &files);
+    const limits = plan.scope_limits;
+    // Under this driver every limit is a file: memory.max and its swap file, pids.max, cpu.max.
+    const expected: u32 = (if (limits.memory_bytes != null) @as(u32, 2) else 0) +
+        @intFromBool(limits.pids != null) + @intFromBool(limits.cpu_millis != null);
+    assert(count == expected);
+    assert(directory.slice().len == path.len);
     return write_cgroupfs_limits(host, path, files[0..count], problem);
 }
 
@@ -449,6 +458,7 @@ fn join_cgroup(host: Host, directory: []const u8, pid: u32, problem: *Problem) b
     var file_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
     const procs = "{s}/cgroup.procs";
     const file = std.fmt.bufPrint(&file_buffer, procs, .{directory}) catch return false;
+    assert(file.len > directory.len); // The directory and the name of the file.
     file_buffer[file.len] = 0;
     const file_z: [:0]const u8 = file_buffer[0..file.len :0];
     var number: [16]u8 = undefined;
@@ -472,8 +482,10 @@ fn write_cgroupfs_limits(
         var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
         const name = file.name;
         const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, name }) catch {
+            problem.* = cgroupfs_problem(.limit, directory, host, error.PathTooLong);
             return false;
         };
+        assert(file.value.slice().len > 0); // A limit file is never written empty.
         path_buffer[path.len] = 0;
         const path_z: [:0]const u8 = path_buffer[0..path.len :0];
         host.write_file(path_z, file.value.slice()) catch |err| {
@@ -493,6 +505,7 @@ fn write_cgroupfs_limits(
 fn cleanup_cgroupfs(host: Host, directory: []const u8, problem: *Problem) ?Cleaned {
     assert(directory.len > 0);
     assert(directory[0] == '/');
+    assert(directory.len <= constants.cgroup_path_bytes_max); // It fits the buffer below.
     var path_buffer: [constants.cgroup_path_bytes_max + 1]u8 = undefined;
     @memcpy(path_buffer[0..directory.len], directory);
     path_buffer[directory.len] = 0;
@@ -504,6 +517,7 @@ fn cleanup_cgroupfs(host: Host, directory: []const u8, problem: *Problem) ?Clean
         } else |err| {
             if (err == error.NotFound) return .already_gone;
             const busy = host.last_errno() == errno_busy;
+            assert(tries < constants.cgroup_remove_tries_max);
             if (!busy or tries + 1 == constants.cgroup_remove_tries_max) {
                 problem.* = cgroupfs_problem(.remove, directory, host, err);
                 return null;

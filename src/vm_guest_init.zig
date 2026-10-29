@@ -172,19 +172,21 @@ fn copy_directory(name: [:0]const u8) void {
         queue.next += 1;
         copy_entries(queue, directory[0..length :0]);
     }
+    assert(queue.next == queue.count); // Every directory that was found was copied.
 }
 
 fn push(queue: *Queue, parent: []const u8, name: []const u8) void {
     assert(queue.count < queue_max);
     assert(name.len > 0);
-    assert(queue.count < queue_max);
     const separator = if (std.mem.eql(u8, parent, "/")) "" else "/";
     const target = &queue.paths[queue.count];
     const text = std.fmt.bufPrint(target, "{s}{s}{s}", .{ parent, separator, name }) catch {
         fatal("a path is too long");
     };
     queue.lengths[queue.count] = @intCast(text.len);
+    assert(queue.lengths[queue.count] > 0); // A path, never nothing.
     queue.count += 1;
+    assert(queue.count <= queue_max);
 }
 
 fn make_in_new_root(source: []const u8) void {
@@ -257,9 +259,11 @@ fn copy_file(source: [*:0]const u8, destination: [*:0]const u8) void {
     const from: i32 = @intCast(input);
     defer _ = linux.close(from);
     var info: linux.Statx = undefined;
-    if (failed(linux.statx(from, "", linux.AT.EMPTY_PATH, .{ .MODE = true }, &info))) {
+    const wanted: linux.STATX = .{ .MODE = true, .SIZE = true };
+    if (failed(linux.statx(from, "", linux.AT.EMPTY_PATH, wanted, &info))) {
         fatal("cannot stat a file");
     }
+    var copied_bytes: u64 = 0;
     const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true };
     const output = linux.open(destination, flags, 0o600);
     if (failed(output)) fatal("cannot make a file");
@@ -275,7 +279,9 @@ fn copy_file(source: [*:0]const u8, destination: [*:0]const u8) void {
             if (failed(written)) fatal("cannot write a file");
             done += written;
         }
+        copied_bytes += count;
     }
+    assert(copied_bytes == info.size); // The copy is the whole file.
     _ = linux.fchmod(to, info.mode & 0o7777);
 }
 
@@ -285,6 +291,8 @@ fn copy_link(source: [*:0]const u8, destination: [*:0]const u8) void {
     var target: [path_max + 1:0]u8 = @splat(0);
     const count = linux.readlink(source, &target, path_max);
     if (failed(count)) fatal("cannot read a link");
+    assert(count >= 1); // A link to nothing is not a link.
+    assert(count <= path_max);
     _ = linux.symlink(&target, destination);
 }
 
@@ -418,6 +426,11 @@ fn do_setup(setup: *const protocol.Setup) []const u8 {
         if (world.uid != setup.uid) return fail_reply("user");
         return if (world.network_up) protocol.setup_ok_up else protocol.setup_ok_down;
     }
+    // The Mac's uid must not sit in the range the containers' ids are mapped to, or one id would
+    // mean two users.
+    const subid_end = constants.vm_subid_start + constants.vm_subid_count;
+    if (setup.uid >= constants.vm_subid_start and setup.uid < subid_end) return fail_reply("user");
+    if (setup.uid >= constants.vm_subid_start) assert(setup.uid >= subid_end);
     const time: linux.timeval = .{ .sec = @intCast(setup.seconds), .usec = 0 };
     if (failed(linux.settimeofday(&time, &.{ .minuteswest = 0, .dsttime = 0 }))) {
         return fail_reply("clock");
@@ -426,9 +439,11 @@ fn do_setup(setup: *const protocol.Setup) []const u8 {
     if (!make_user(setup)) return fail_reply("user");
     if (!make_cgroups(setup)) return fail_reply("cgroup");
     world.serve_pid = start_serve(setup) orelse return fail_reply("serve");
+    assert(world.serve_pid > 1);
     world.uid = setup.uid;
     world.gid = setup.gid;
     world.done = true;
+    assert(world.uid == setup.uid);
     return if (world.network_up) protocol.setup_ok_up else protocol.setup_ok_down;
 }
 
@@ -473,6 +488,7 @@ fn make_home(setup: *const protocol.Setup) bool {
     var end: usize = 1;
     while (end <= setup.home.len) : (end += 1) {
         if (end < setup.home.len and setup.home[end] != '/') continue;
+        assert(end <= setup.home.len); // A prefix of the home, never past it.
         @memcpy(path[0..end], setup.home[0..end]);
         path[end] = 0;
         _ = linux.mkdir(&path, 0o755);
@@ -516,6 +532,7 @@ fn start_serve(setup: *const protocol.Setup) ?i32 {
     const forked = linux.fork();
     if (failed(forked)) return null;
     if (forked == 0) exec_serve(setup, pipe[1]);
+    assert(forked > 1); // The child, which is neither this process nor init's idle task.
     _ = linux.close(pipe[1]);
     defer _ = linux.close(pipe[0]);
     var entry = [1]linux.pollfd{.{ .fd = pipe[0], .events = linux.POLL.IN, .revents = 0 }};
@@ -697,6 +714,7 @@ fn write_resolv_conf(lease: *const dhcp.Lease, mac_dns: []const u8) void {
     const count = protocol.parse_dns(mac_dns, &addresses) orelse 0;
     for (addresses[0..count]) |dns| length += append_nameserver(text[length..], dns);
     if (lease.dns orelse lease.router) |dns| length += append_nameserver(text[length..], dns);
+    assert(length <= text.len);
     if (length > 0) _ = write_text("/etc/resolv.conf", text[0..length], 0o644);
 }
 
@@ -728,6 +746,7 @@ fn udp_socket() ?i32 {
     const opened = linux.socket(linux.AF.INET, linux.SOCK.DGRAM, 0);
     if (failed(opened)) return null;
     const handle: i32 = @intCast(opened);
+    assert(handle >= 0);
     const one = std.mem.toBytes(@as(i32, 1));
     _ = linux.setsockopt(handle, linux.SOL.SOCKET, linux.SO.BROADCAST, &one, one.len);
     _ = linux.setsockopt(handle, linux.SOL.SOCKET, linux.SO.REUSEADDR, &one, one.len);
@@ -779,9 +798,12 @@ fn ask_for_lease() ?dhcp.Lease {
         transaction +%= 1;
         send_broadcast(handle, dhcp.render_discover(&packet, mac, transaction));
         const offer = wait_for(handle, mac, transaction, .offer) orelse continue;
+        assert(offer.kind == .offer);
         const request = dhcp.render_request(&packet, mac, transaction, offer.address, offer.server);
         send_broadcast(handle, request);
         const ack = wait_for(handle, mac, transaction, .ack) orelse continue;
+        assert(ack.kind == .ack);
+        assert(tries < constants.vm_dhcp_tries_max);
         return ack;
     }
     return null;

@@ -53,6 +53,8 @@ fn join(buffer: []u8, list: objc.Id) []const u8 {
         @memcpy(buffer[length + separator ..][0..address.len], address);
         length += separator + address.len;
         kept += 1;
+        assert(kept <= protocol.dns_count_max);
+        assert(length <= buffer.len);
     }
     if (kept == 0) return "-";
     return buffer[0..length];

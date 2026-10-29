@@ -120,6 +120,8 @@ pub fn parse_dns(text: []const u8, out: *[dns_count_max][4]u8) ?u32 {
         if (parts.next() != null) return null;
         count += 1;
     }
+    assert(count >= 1); // A text that is not "-" has at least one address.
+    assert(count <= dns_count_max);
     return count;
 }
 

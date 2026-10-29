@@ -55,6 +55,7 @@ pub fn render_header(buffer: *[constants.forward_header_bytes]u8, kind: Kind, le
     if (fixed_length(kind)) |fixed| assert(length == fixed);
     buffer[0] = @backingInt(kind);
     std.mem.writeInt(u32, buffer[1..5], length, .little);
+    assert(buffer[0] != 0); // Kind tags start at 1: a zero byte is not a frame.
 }
 
 pub fn parse_header(bytes: *const [constants.forward_header_bytes]u8) ?Header {
@@ -64,6 +65,7 @@ pub fn parse_header(bytes: *const [constants.forward_header_bytes]u8) ?Header {
     if (fixed_length(kind)) |fixed| {
         if (length != fixed) return null;
     }
+    assert(length <= length_max(kind)); // Only a legal length is ever returned.
     return .{ .kind = kind, .length = length };
 }
 
@@ -102,6 +104,7 @@ pub fn render_start(out: []u8, start: *const Start) ?[]const u8 {
     var size: usize = 1 + 4 + 2 + 2 + 2 + start.working_directory.len;
     for (start.arguments) |argument| size += 2 + argument.len;
     for (start.environment) |entry| size += 2 + entry.len;
+    assert(size >= 11); // Flags, size, two counts and the directory's length.
     if (size > constants.forward_start_bytes_max) return null;
     // Without a pty every stream is a pipe, stderr included.
     if (!start.pty) assert(start.stderr_pipe);
@@ -113,7 +116,8 @@ pub fn render_start(out: []u8, start: *const Start) ?[]const u8 {
     var at = put_string(out, 9, start.working_directory);
     for (start.arguments) |argument| at = put_string(out, at, argument);
     for (start.environment) |entry| at = put_string(out, at, entry);
-    assert(at == size);
+    assert(at == size); // What was written is what was counted.
+    assert(at <= constants.forward_start_bytes_max);
     return out[0..at];
 }
 
@@ -128,6 +132,7 @@ fn take_string(payload: []const u8, at: *usize) ?[]const u8 {
     const text = payload[at.* + 2 ..][0..length];
     if (std.mem.indexOfScalar(u8, text, 0) != null) return null;
     at.* += 2 + length;
+    assert(at.* <= payload.len); // One string never reads past the payload.
     return text;
 }
 
@@ -155,6 +160,7 @@ pub fn parse_start(
         if (entry[0] == '=') return null;
         environment_storage[index] = entry;
     }
+    assert(at <= payload.len);
     if (at != payload.len) return null;
     return .{
         .pty = payload[0] & 1 == 1,
@@ -176,6 +182,7 @@ pub const Exit = struct {
 pub fn render_exit(buffer: *[2]u8, exit: Exit) void {
     buffer[0] = @intFromBool(exit.signaled);
     buffer[1] = exit.value;
+    assert(buffer[0] <= 1); // parse_exit refuses anything else.
 }
 
 pub fn parse_exit(bytes: *const [2]u8) ?Exit {

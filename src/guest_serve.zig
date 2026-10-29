@@ -109,6 +109,8 @@ fn accept_forever(listener: i32, identity: *const Identity) void {
         var peer_length: u32 = @sizeOf(linux.sockaddr.vm);
         const result = linux.accept4(listener, @ptrCast(&peer), &peer_length, linux.SOCK.CLOEXEC);
         if (failed(result)) continue;
+        // The kernel fills no more than it was given.
+        assert(peer_length <= @sizeOf(linux.sockaddr.vm));
         const connection: i32 = @intCast(result);
         if (!protocol_vm.from_host(peer.cid)) {
             note("refused a connection that is not from the host");
@@ -229,6 +231,7 @@ fn session(connection: i32, identity: *const Identity) u8 {
         &command.arguments,
         &command.environment,
     ) orelse return end_early("bad start frame");
+    assert(start.arguments.len >= 1);
     prepare_exec(command, &start, identity) orelse return end_early("cannot prepare");
     const child = launch(connection, command, &start) orelse return end_early("cannot launch");
     return relay(connection, &child);
@@ -256,6 +259,7 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
         command.argv[argc] = copy_string(&command.text, &used, argument) orelse return null;
         argc += 1;
     }
+    assert(argc <= start.arguments.len + 1); // The program name and the arguments.
     command.argv[argc] = null;
     var envc: usize = 0;
     var line: [512]u8 = undefined;
@@ -283,6 +287,8 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
         command.envp[envc] = copy_string(&command.text, &used, entry) orelse return null;
         envc += 1;
     }
+    assert(envc < command.envp.len); // Room is left for the terminating null.
+    assert(used <= command.text.len);
     command.envp[envc] = null;
     // The directory: the Mac's, if the guest has it; the guest user's home if not.
     const wanted = start.working_directory;
@@ -302,6 +308,8 @@ fn copy_string(text: []u8, used: *usize, source: []const u8) ?[*:0]const u8 {
     if (used.* + source.len + 1 > text.len) return null;
     @memcpy(text[used.*..][0..source.len], source);
     text[used.* + source.len] = 0;
+    assert(text[used.* + source.len] == 0);
+    assert(used.* + source.len < text.len);
     const result: [*:0]const u8 = @ptrCast(text[used.*..].ptr);
     used.* += source.len + 1;
     return result;
@@ -330,10 +338,14 @@ fn launch(connection: i32, command: *Command, start: *const protocol.Start) ?Chi
     for (pipes[first..last]) |*pair| {
         if (failed(linux.pipe2(pair, .{ .CLOEXEC = true }))) return null;
     }
+    if (start.stderr_pipe) assert(pipes[2][0] >= 0);
+    if (!start.stderr_pipe) assert(pipes[2][0] < 0);
     const forked = linux.fork();
     if (failed(forked)) return null;
     if (forked == 0) run_child(command, slave, &pipes);
     child.pid = @intCast(forked);
+    assert(child.pid > 1); // Not this process, not init.
+    if (start.pty) assert(child.master >= 0);
     if (start.pty) _ = linux.close(slave);
     if (!start.pty) {
         _ = linux.close(pipes[0][0]);
@@ -344,7 +356,9 @@ fn launch(connection: i32, command: *Command, start: *const protocol.Start) ?Chi
     if (start.stderr_pipe) {
         _ = linux.close(pipes[2][1]);
         child.stderr_read = pipes[2][0];
+        assert(child.stderr_read >= 0);
     }
+    if (!start.pty) assert(child.stdout_read >= 0);
     const opened = linux.pidfd_open(child.pid, 0);
     if (!failed(opened)) child.pidfd = @intCast(opened);
     return child;
@@ -404,6 +418,7 @@ fn relay(connection: i32, child: *const Child) u8 {
     for (streams) |stream| {
         if (stream >= 0) open_streams += 1;
     }
+    assert(open_streams <= streams.len);
     var data: [constants.forward_data_bytes_max]u8 = undefined;
     var exited = false;
     var iterations: u32 = 0;
@@ -421,6 +436,8 @@ fn relay(connection: i32, child: *const Child) u8 {
             const entry = &entries[2 + index];
             if (entry.revents == 0) continue;
             if (!forward_output(connection, entry.fd, kinds[index], &data)) {
+                assert(streams[index] >= 0); // Only an open stream can end.
+                assert(open_streams > 0);
                 streams[index] = -1;
                 open_streams -= 1;
             }
@@ -454,6 +471,7 @@ fn forward_output(connection: i32, descriptor: i32, kind: protocol.Kind, data: [
     if (linux.errno(count) == .INTR or linux.errno(count) == .AGAIN) return true;
     if (failed(count)) return false; // A pty master says EIO when the slave is closed.
     if (count == 0) return false;
+    assert(count <= data.len); // A read gives no more than it was asked for.
     _ = send_frame(connection, kind, data[0..count]); // A gone client shows as a hangup next.
     return true;
 }
@@ -467,12 +485,17 @@ fn handle_client(connection: i32, child: *const Child) bool {
     const header = protocol.parse_header(&header_bytes) orelse return false;
     var payload: [constants.forward_data_bytes_max]u8 = undefined;
     if (header.kind == .start or header.length > payload.len) return false;
+    assert(header.length <= constants.forward_data_bytes_max);
     if (!read_exact(connection, payload[0..header.length])) return false;
     switch (header.kind) {
         .stdin => write_to_command(child, payload[0..header.length]),
         .stdin_eof => end_of_input(child),
-        .signal => _ = linux.kill(child.pid, @fromBackingInt(@intCast(payload[0]))),
+        .signal => {
+            assert(header.length == 1); // parse_header fixed the size of a signal frame.
+            _ = linux.kill(child.pid, @fromBackingInt(@intCast(payload[0])));
+        },
         .window => {
+            assert(header.length == 4);
             var size: Winsize = .{
                 .rows = std.mem.readInt(u16, payload[0..2], .little),
                 .columns = std.mem.readInt(u16, payload[2..4], .little),
@@ -503,7 +526,11 @@ fn finish(connection: i32, child: *const Child) u8 {
     assert(child.pid > 1);
     var status: u32 = 0;
     var rusage: linux.rusage = undefined;
-    _ = linux.wait4(child.pid, @ptrCast(&status), 0, &rusage);
+    // The command is waited for before anything is said about how it ended: an exit frame made
+    // from a status that was never read would report a success that did not happen.
+    const waited = linux.wait4(child.pid, @ptrCast(&status), 0, &rusage);
+    assert(!failed(waited));
+    assert(waited == child.pid);
     var payload: [2]u8 = undefined;
     const signaled = (status & 0x7f) != 0;
     const value: u8 = if (signaled) @intCast(status & 0x7f) else @intCast((status >> 8) & 0xff);
@@ -536,6 +563,7 @@ fn close_gracefully(connection: i32) void {
 fn hang_up(child: *const Child) u8 {
     assert(child.pid > 1);
     const group: i32 = -child.pid;
+    assert(group < -1); // A process group, never every process (-1) nor this one.
     _ = linux.kill(group, .HUP);
     if (child.pidfd >= 0) {
         var entry = [1]linux.pollfd{.{ .fd = child.pidfd, .events = linux.POLL.IN, .revents = 0 }};

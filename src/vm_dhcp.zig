@@ -53,6 +53,7 @@ fn put_option(out: []u8, at: usize, code: u8, value: []const u8) usize {
     out[at] = code;
     out[at + 1] = @intCast(value.len);
     @memcpy(out[at + 2 ..][0..value.len], value);
+    assert(out[at + 1] == value.len); // The length byte says what follows.
     return at + 2 + value.len;
 }
 
@@ -67,6 +68,8 @@ fn begin(out: []u8, mac: [6]u8, transaction: u32) void {
     std.mem.writeInt(u16, out[10..12], flag_broadcast, .big);
     @memcpy(out[28..34], &mac);
     @memcpy(out[fixed_bytes..][0..4], &cookie);
+    assert(out[0] == op_request);
+    assert(std.mem.eql(u8, out[fixed_bytes..][0..4], &cookie));
 }
 
 fn finish(out: []u8, at: usize) []const u8 {
@@ -84,7 +87,10 @@ pub fn render_discover(out: []u8, mac: [6]u8, transaction: u32) []const u8 {
     const kind = [1]u8{@backingInt(MessageType.discover)};
     var at = put_option(out, options_at, option_message_type, &kind);
     at = put_option(out, at, option_parameter_request, &wanted);
-    return finish(out, at);
+    const packet = finish(out, at);
+    assert(packet.len >= packet_bytes_min); // Servers drop packets shorter than that.
+    assert(packet[0] == op_request);
+    return packet;
 }
 
 /// The REQUEST packet for the address the server offered.
@@ -100,7 +106,10 @@ pub fn render_request(
     at = put_option(out, at, option_requested_address, &address);
     at = put_option(out, at, option_server_identifier, &server);
     at = put_option(out, at, option_parameter_request, &wanted);
-    return finish(out, at);
+    const packet = finish(out, at);
+    assert(packet.len >= packet_bytes_min);
+    assert(std.mem.readInt(u32, packet[4..8], .big) == transaction); // Its answer carries this.
+    return packet;
 }
 
 /// A reply to `transaction` from a server, or null.
@@ -134,6 +143,7 @@ pub fn parse_reply(packet: []const u8, mac: [6]u8, transaction: u32) ?Lease {
         if (at + 2 + length > packet.len) return null;
         const value = packet[at + 2 ..][0..length];
         at += 2 + length;
+        assert(at <= packet.len); // The option was inside the packet.
         switch (code) {
             option_message_type => {
                 if (length != 1) return null;
@@ -160,10 +170,15 @@ pub fn parse_reply(packet: []const u8, mac: [6]u8, transaction: u32) ?Lease {
             else => {},
         }
     }
+    assert(at <= packet.len);
     if (at >= packet.len) return null; // No end option: the packet is cut.
     lease.kind = kind orelse return null;
     lease.server = server orelse return null;
+    // A lease for address 0.0.0.0 is not an address: only a refusal (NAK) has none.
+    if (lease.kind != .nak and std.mem.eql(u8, &lease.address, &[4]u8{ 0, 0, 0, 0 })) return null;
     if (lease.kind != .offer and lease.kind != .ack and lease.kind != .nak) return null;
+    const none = [4]u8{ 0, 0, 0, 0 };
+    if (lease.kind != .nak) assert(!std.mem.eql(u8, &lease.address, &none));
     return lease;
 }
 
@@ -180,7 +195,10 @@ pub fn render_reply(out: []u8, mac: [6]u8, transaction: u32, lease: *const Lease
     var seconds: [4]u8 = undefined;
     std.mem.writeInt(u32, &seconds, lease.seconds, .big);
     at = put_option(out, at, option_lease_time, &seconds);
-    return finish(out, at);
+    const packet = finish(out, at);
+    assert(packet.len >= packet_bytes_min);
+    assert(packet[0] == op_reply);
+    return packet;
 }
 
 const test_mac = [6]u8{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };

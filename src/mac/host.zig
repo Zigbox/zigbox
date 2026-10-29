@@ -85,6 +85,8 @@ fn idle_timeout() u32 {
     if (value < constants.vm_idle_timeout_ms_min or value > constants.vm_idle_timeout_ms_max) {
         return constants.vm_idle_timeout_ms;
     }
+    assert(value >= constants.vm_idle_timeout_ms_min); // Read from the environment, then bounded.
+    assert(value <= constants.vm_idle_timeout_ms_max);
     return value;
 }
 
@@ -103,6 +105,7 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
         diagnose.host_locked(diag, null);
         return error.Failed;
     }
+    assert(lock.? >= 0);
     note_pid(lock.?);
     image.ensure(paths) catch {
         diagnose.directory(diag, "unpacking the VM image", paths.image_dir.slice(), files.reason());
@@ -119,9 +122,11 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
     const version = handshake(&machine, paths, diag) orelse return error.Failed;
     assert(protocol.is_version(&version));
     const booted_ms = files.now_ms();
+    assert(booted_ms >= started_ms);
     log("booted in {d} ms", .{booted_ms - started_ms});
     const network_up = setup_guest(&machine, paths, diag) orelse return error.Failed;
     const ready_ms = files.now_ms();
+    assert(ready_ms >= booted_ms);
     const network_word = if (network_up) "up" else "down";
     log("set up in {d} ms, network {s}", .{ ready_ms - booted_ms, network_word });
     return .{
@@ -282,6 +287,7 @@ fn setup_guest(machine: *vz.Machine, paths: *const paths_mod.Paths, diag: *Diag)
         diagnose.setup_failed(diag, "user", paths.console_log.slice());
         return null;
     }
+    assert(spec.uid > 0); // Refused above: the Mac user is not root.
     spec.seconds = wall_clock_seconds();
     var failure: vz.Failure = .{};
     const connection = machine.connect(constants.vm_guest_port, &failure) catch {
@@ -363,6 +369,7 @@ fn answer(running: *Running, connection: i32) bool {
     var line: [constants.vm_line_bytes_max]u8 = undefined;
     const request_line = files.read_line(connection, &line, answer_timeout_ms) catch return false;
     const request = control.parse_request(request_line) orelse return false;
+    assert(request_line.len > 0); // A request is a line.
     var reply: [constants.vm_line_bytes_max]u8 = undefined;
     switch (request) {
         .status => {
@@ -394,6 +401,9 @@ fn pass_connection(running: *Running, connection: i32) void {
     release_ended_commands();
     var failure: vz.Failure = .{};
     const slot = free_slot() orelse return refuse(connection);
+    assert(slot < commands_held_max);
+    assert(commands_held[slot].watch < 0); // The slot was free.
+    assert(commands_held[slot].object == null);
     var watch: [2]i32 = undefined;
     if (std.c.pipe(&watch) != 0) return refuse(connection);
     const guest = running.machine.connect(constants.vm_forward_port, &failure) catch {
@@ -401,11 +411,15 @@ fn pass_connection(running: *Running, connection: i32) void {
         files.close(watch[1]);
         return refuse(connection);
     };
+    assert(guest.descriptor >= 0);
+    assert(guest.object != null);
     const handed = [2]i32{ guest.descriptor, watch[1] };
     files.send_with_descriptors(connection, control.connect_ok, &handed) catch {};
     files.close(guest.descriptor);
     files.close(watch[1]); // Only the client holds the write end now.
     commands_held[slot] = .{ .watch = watch[0], .object = guest.object };
+    assert(commands_held[slot].watch >= 0);
+    assert(commands_open() >= 1);
 }
 
 fn refuse(connection: i32) void {
@@ -440,11 +454,13 @@ fn release_ended_commands() void {
     assert(commands_held_max > 0);
     for (&commands_held) |*held| {
         if (held.watch < 0) continue;
+        assert(held.object != null); // A held command has its connection's object.
         var entry = [1]std.c.pollfd{.{ .fd = held.watch, .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&entry, 1, 0) == 0) continue;
         files.close(held.watch);
         @import("objc.zig").release(held.object);
         held.* = .{ .watch = -1, .object = null };
+        assert(held.watch < 0);
     }
 }
 
@@ -467,8 +483,11 @@ fn stop_when_idle(running: *Running) bool {
     assert(running.listener >= 0);
     const now = files.now_ms();
     if (now - running.last_check_ms < constants.vm_idle_check_ms) return false;
+    assert(now >= running.last_check_ms); // The clock is monotonic.
+    assert(now >= running.last_busy_ms);
     running.last_check_ms = now;
     if (commands_open() > 0 or guest_busy(&running.machine)) running.last_busy_ms = now;
+    assert(running.last_busy_ms <= now);
     return now - running.last_busy_ms >= running.idle_timeout_ms;
 }
 
@@ -488,6 +507,7 @@ fn status_of(running: *const Running, state: control.State) control.Status {
     assert(running.listener >= 0);
     assert(running.values.cpus >= 1);
     const now = files.now_ms();
+    assert(now >= running.booted_ms); // An uptime is never negative.
     return .{
         .state = state,
         .pid = @intCast(std.c.getpid()),

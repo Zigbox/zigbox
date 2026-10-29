@@ -167,6 +167,8 @@ fn print_status(ctx: *const Context, status: ?control.Status, configured: settin
         status_json(&buffer, status, configured)
     else
         status_text(&buffer, status, configured);
+    assert(text.len > 0);
+    assert(text[text.len - 1] == '\n'); // One line, or lines, each ended.
     print(text);
 }
 
@@ -287,6 +289,7 @@ pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
     if (found == .held) found = wait_for_answer(ctx.paths);
     switch (found) {
         .answering => |status| {
+            assert(status.pid > 0); // A host that answers is a process.
             if (std.mem.eql(u8, &status.version, image.version)) return status;
             try replace(ctx, &status.version, diag);
         },
@@ -307,7 +310,12 @@ pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
         return launch_failed;
     };
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
-        .answering => |status| return status,
+        .answering => |status| {
+            assert(status.pid > 0);
+            // The host that was just started is ours.
+            assert(std.mem.eql(u8, &status.version, image.version));
+            return status;
+        },
         else => {
             diagnose.host_locked(diag, null);
             return error.Failed;
@@ -394,7 +402,9 @@ fn read_report(descriptor: i32, buffer: []u8) usize {
         const count = std.c.read(descriptor, buffer[length..].ptr, buffer.len - length);
         if (count <= 0) break;
         length += @intCast(count);
+        assert(length <= buffer.len);
     }
+    assert(length <= buffer.len);
     return length;
 }
 
