@@ -54,7 +54,7 @@ const help_text =
     \\  vm config       show the machine's size; with --cpus <n> and/or --memory <size> (2G,
     \\                  4096M) set it for the next boot (--output json: zbx schema vm-config)
     \\  vm start        start the machine now, to have it warm; it is never required
-    \\  vm stop         stop the machine
+    \\  vm stop         stop the machine (done already, and exit 0, if none runs)
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E1001
     \\  help            show this text
@@ -492,6 +492,8 @@ fn report(invocation: *const Invocation, diag: *Diag, ok: bool) RunError!void {
 
 test {
     _ = @import("mac/objc.zig");
+    _ = @import("mac/vz.zig");
+    _ = @import("mac/image.zig");
     _ = @import("mac/files.zig");
     _ = @import("mac/paths.zig");
     _ = @import("mac/settings.zig");

@@ -206,7 +206,8 @@ fn handshake(machine: *vz.Machine, paths: *const paths_mod.Paths, diag: *Diag) ?
     const deadline = files.now_ms() + constants.vm_boot_timeout_ms;
     while (files.now_ms() < deadline) {
         const state = machine.state();
-        if (state == .stopped or machine.errored()) break;
+        if (state == .stopped or state == .errored) break;
+        if (machine.poisoned()) break; // A connect timed out: the machine is not used again.
         if (ask_hello(machine)) |version| return version;
         files.sleep_ms(handshake_step_ms);
     }
@@ -233,7 +234,7 @@ pub fn run(running: *Running, paths: *const paths_mod.Paths) u8 {
     assert(paths.socket.length > 0);
     var accepted: u32 = 0;
     while (accepted < accepts_max) : (accepted += 1) {
-        if (running.machine.state() == .stopped or running.machine.errored()) {
+        if (running.machine.state() == .stopped or running.machine.state() == .errored) {
             log("the machine stopped on its own", .{});
             break;
         }
@@ -295,6 +296,7 @@ fn status_of(running: *const Running, state: control.State) control.Status {
 /// Asks the guest to power off, waits for the machine to be off, and stops it by force if it
 /// does not do so in time.
 fn shut_down(running: *Running) void {
+    if (running.machine.poisoned()) return; // The process exits next; that ends the machine.
     assert(running.values.cpus >= 1);
     assert(running.listener >= 0);
     assert(constants.vm_stop_timeout_ms > 0);

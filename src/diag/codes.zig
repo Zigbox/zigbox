@@ -2450,9 +2450,11 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "no virtual machine is running",
         .explanation =
-        \\zbx vm stop was asked to stop the virtual machine, and there is none. The
-        \\machine starts by itself when a command needs it and stops by itself
-        \\when it has been idle, so this is often exactly what you wanted.
+        \\No command uses this code now. zbx vm stop used to refuse when no virtual
+        \\machine ran; it now succeeds and prints the stopped status, because
+        \\stopping what is not running is already done. The code stays registered
+        \\because a code never changes meaning or goes away; it is for a command
+        \\that truly needs a running machine.
         \\
         \\zbx vm status says whether one is running.
         ,

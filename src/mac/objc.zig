@@ -289,6 +289,16 @@ pub const Waiter = struct {
         return .{ .semaphore = semaphore };
     }
 
+    /// Makes the waiter ready for another call. Only after the last one finished: a call that
+    /// timed out may still complete, so its waiter is not reset (the machine is poisoned).
+    pub fn reset(waiter: *Waiter) void {
+        assert(waiter.semaphore != null);
+        waiter.done = false;
+        waiter.failed = false;
+        waiter.object = null;
+        waiter.info = .{};
+    }
+
     /// Called by a handler with its `NSError` argument (nil for success) and its object, if any.
     pub fn finish(waiter: *Waiter, error_object: Id, object: Id) void {
         assert(!waiter.done);
@@ -415,6 +425,22 @@ test "a hand-built block is called with its context and signals the waiter" {
 
 extern "c" fn _Block_copy(block: *Block) *Block;
 extern "c" fn _Block_release(block: *Block) void;
+
+/// `Block_copy`, as the framework does when it keeps a handler. Used by tests.
+pub fn copy_block(block: *Block) *Block {
+    assert(block.isa != null);
+    return _Block_copy(block);
+}
+
+pub fn release_block(block: *Block) void {
+    _Block_release(block);
+}
+
+/// Calls a copied `^(NSError *)` block, as the framework does when the operation completes.
+pub fn call_error_block(block: *Block, error_object: Id) void {
+    const call: *const fn (*Block, Id) callconv(.c) void = @ptrCast(@alignCast(block.invoke));
+    call(block, error_object);
+}
 
 const QueueProbe = struct { value: u32 = 0 };
 

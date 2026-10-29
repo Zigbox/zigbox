@@ -33,12 +33,51 @@ pub const Limits = struct {
     memory_bytes_max: u64,
 };
 
-/// `VZVirtualMachineState`, the values the host looks at.
+/// `VZVirtualMachineState`, every value, so that none is mapped by a guess.
 const state_stopped: i64 = 0;
 const state_running: i64 = 1;
+const state_paused: i64 = 2;
 const state_error: i64 = 3;
+const state_starting: i64 = 4;
+const state_pausing: i64 = 5;
+const state_resuming: i64 = 6;
+const state_stopping: i64 = 7;
+const state_saving: i64 = 8;
+const state_restoring: i64 = 9;
 
-pub const State = enum { stopped, running, starting, stopping, other };
+pub const State = enum {
+    stopped,
+    running,
+    paused,
+    errored,
+    starting,
+    pausing,
+    resuming,
+    stopping,
+    saving,
+    restoring,
+    /// A value this zbx does not know (a newer macOS).
+    unknown,
+};
+
+/// Each framework state, named. The host acts on `stopped`, `errored` and `running`.
+fn state_of(value: i64) State {
+    assert(value >= -1);
+    assert(value <= std.math.maxInt(i32));
+    return switch (value) {
+        state_stopped => .stopped,
+        state_running => .running,
+        state_paused => .paused,
+        state_error => .errored,
+        state_starting => .starting,
+        state_pausing => .pausing,
+        state_resuming => .resuming,
+        state_stopping => .stopping,
+        state_saving => .saving,
+        state_restoring => .restoring,
+        else => .unknown,
+    };
+}
 
 pub fn supported() bool {
     assert(@sizeOf(Id) == 8);
@@ -109,30 +148,31 @@ pub const Machine = struct {
     pub fn start(machine: *Machine, failure: *Failure) Error!void {
         assert(constants.vm_boot_timeout_ms > 0);
         assert(machine.virtual_machine != null);
-        var call: Call = .{ .machine = machine, .operation = .start, .waiter = objc.Waiter.init() };
-        machine.queue.run(&call, &run_call);
-        try wait(&call, .start, constants.vm_boot_timeout_ms, failure);
+        const call = begin(machine, .start, 0);
+        machine.queue.run(call, &run_call);
+        try wait(call, .start, constants.vm_boot_timeout_ms, failure);
     }
 
     pub fn state(machine: *Machine) State {
         assert(machine.virtual_machine != null);
-        var call: Call = .{ .machine = machine, .operation = .state, .waiter = objc.Waiter.init() };
-        machine.queue.run(&call, &run_call);
-        return switch (call.state) {
-            state_stopped => .stopped,
-            state_running => .running,
-            4 => .starting,
-            7 => .stopping,
-            else => .other,
-        };
+        var query: StateQuery = .{ .machine = machine };
+        machine.queue.run(&query, &run_state);
+        assert(query.value >= 0);
+        return state_of(query.value);
     }
 
     /// True when the framework put the guest in its error state.
     pub fn errored(machine: *Machine) bool {
         assert(machine.virtual_machine != null);
-        var call: Call = .{ .machine = machine, .operation = .state, .waiter = objc.Waiter.init() };
-        machine.queue.run(&call, &run_call);
-        return call.state == state_error;
+        assert(!is_poisoned);
+        return machine.state() == .errored;
+    }
+
+    /// True after an operation timed out: its completion handler may still run, so the machine
+    /// is not used again. The host reports the failure and exits.
+    pub fn poisoned(machine: *const Machine) bool {
+        assert(machine.virtual_machine != null);
+        return is_poisoned;
     }
 
     /// Opens a vsock connection to `port` of the guest; the descriptor is the caller's to close.
@@ -140,14 +180,9 @@ pub const Machine = struct {
         assert(port <= 65535);
         assert(machine.virtual_machine != null);
         assert(port > 0);
-        var call: Call = .{
-            .machine = machine,
-            .operation = .connect,
-            .port = port,
-            .waiter = objc.Waiter.init(),
-        };
-        machine.queue.run(&call, &run_call);
-        try wait(&call, .connect, constants.vm_control_timeout_ms, failure);
+        const call = begin(machine, .connect, port);
+        machine.queue.run(call, &run_call);
+        try wait(call, .connect, constants.vm_control_timeout_ms, failure);
         const connection = call.waiter.object orelse {
             failure.* = .{ .stage = .connect };
             return error.Failed;
@@ -169,21 +204,71 @@ pub const Machine = struct {
     pub fn force_stop(machine: *Machine, failure: *Failure) Error!void {
         assert(constants.vm_stop_timeout_ms > 0);
         assert(machine.virtual_machine != null);
-        var call: Call = .{ .machine = machine, .operation = .stop, .waiter = objc.Waiter.init() };
-        machine.queue.run(&call, &run_call);
-        try wait(&call, .stop, constants.vm_stop_timeout_ms, failure);
+        const call = begin(machine, .stop, 0);
+        machine.queue.run(call, &run_call);
+        try wait(call, .stop, constants.vm_stop_timeout_ms, failure);
     }
 };
 
-const Operation = enum { start, state, connect, stop };
+/// The operations that finish through a completion handler.
+const Operation = enum { start, connect, stop };
 
 const Call = struct {
     machine: *Machine,
     operation: Operation,
-    port: u32 = 0,
+    port: u32,
     waiter: objc.Waiter,
-    state: i64 = -1,
 };
+
+/// The framework keeps a completion handler's block, and with it a pointer to the state the
+/// handler writes, until the handler runs, which can be after the caller gave up waiting. So that
+/// state is never on a caller's stack: there is one slot per operation, in static storage, for
+/// the life of the process. A timeout poisons the machine: the slot may still be written by the
+/// late handler, so no operation reuses it, and the host reports the failure and exits.
+var slots: [3]Call = undefined;
+var slots_ready = false;
+var is_poisoned = false;
+
+fn slot_for(operation: Operation) *Call {
+    assert(@backingInt(operation) < slots.len);
+    if (!slots_ready) {
+        for (&slots, std.enums.values(Operation)) |*made, kind| {
+            made.* = .{
+                .machine = undefined,
+                .operation = kind,
+                .port = 0,
+                .waiter = objc.Waiter.init(),
+            };
+        }
+        slots_ready = true;
+    }
+    assert(slots_ready);
+    return &slots[@backingInt(operation)];
+}
+
+/// The operation's slot, made ready for a new call. A poisoned machine is never used again.
+fn begin(machine: *Machine, operation: Operation, port: u32) *Call {
+    assert(!is_poisoned);
+    const call = slot_for(operation);
+    call.waiter.reset();
+    call.machine = machine;
+    call.port = port;
+    assert(call.operation == operation);
+    return call;
+}
+
+const StateQuery = struct {
+    machine: *Machine,
+    value: i64 = -1,
+};
+
+fn run_state(context: ?*anyopaque) callconv(.c) void {
+    assert(context != null);
+    const query: *StateQuery = @ptrCast(@alignCast(context.?));
+    assert(query.value == -1);
+    assert(query.machine.virtual_machine != null);
+    query.value = objc.send(i64, query.machine.virtual_machine, "state", .{});
+}
 
 fn run_call(context: ?*anyopaque) callconv(.c) void {
     assert(context != null);
@@ -198,7 +283,6 @@ fn run_call(context: ?*anyopaque) callconv(.c) void {
             var block = objc.error_block(&call.waiter);
             objc.send(void, machine, "stopWithCompletionHandler:", .{&block});
         },
-        .state => call.state = objc.send(i64, machine, "state", .{}),
         .connect => {
             const devices = objc.send(Id, machine, "socketDevices", .{});
             const count = objc.send(u64, devices, "count", .{});
@@ -213,8 +297,8 @@ fn run_call(context: ?*anyopaque) callconv(.c) void {
 fn wait(call: *Call, stage: Stage, timeout_ms: u32, failure: *Failure) Error!void {
     assert(call.waiter.semaphore != null);
     assert(timeout_ms > 0);
-    assert(call.operation != .state);
     if (!call.waiter.wait(timeout_ms)) {
+        is_poisoned = true;
         failure.* = .{ .stage = stage };
         return error.Timeout;
     }
@@ -222,6 +306,43 @@ fn wait(call: *Call, stage: Stage, timeout_ms: u32, failure: *Failure) Error!voi
         failure.* = .{ .stage = stage, .info = call.waiter.info, .silent = false };
         return error.Failed;
     }
+}
+
+test "a handler that runs after its wait timed out writes only into its slot" {
+    // Goal: the use-after-return this design removes. Method: take the start slot, let the wait
+    // time out (poisoning the machine), then run the handler as the framework would, later and
+    // from a copy of the block. The slot is static, so the write is safe; it must show the
+    // completion, and the machine must stay poisoned.
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    var stand_in: Machine = undefined;
+    stand_in.virtual_machine = @ptrFromInt(8);
+    const call = begin(&stand_in, .start, 0);
+    var failure: Failure = .{};
+    try std.testing.expectError(error.Timeout, wait(call, .start, 1, &failure));
+    try std.testing.expect(is_poisoned);
+    try std.testing.expect(stand_in.poisoned());
+    try std.testing.expect(!call.waiter.done);
+    var block = objc.error_block(&call.waiter);
+    const copy = objc.copy_block(&block);
+    defer objc.release_block(copy);
+    objc.call_error_block(copy, null);
+    try std.testing.expect(call.waiter.done);
+    try std.testing.expect(!call.waiter.failed);
+    is_poisoned = false; // The test's machine was not real; other tests start clean.
+}
+
+test "every framework state maps to its own name" {
+    // Goal: no state is guessed. Method: all ten values and one beyond.
+    const names = [_]State{
+        .stopped, .running,  .paused,   .errored, .starting,
+        .pausing, .resuming, .stopping, .saving,  .restoring,
+    };
+    for (names, 0..) |name, value| {
+        try std.testing.expectEqual(name, state_of(@intCast(value)));
+    }
+    try std.testing.expectEqual(State.unknown, state_of(10));
+    try std.testing.expectEqual(State.unknown, state_of(-1));
 }
 
 fn fail(failure: *Failure, stage: Stage, error_object: Id) void {

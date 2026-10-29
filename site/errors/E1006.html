@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">no virtual machine is running</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx vm stop was asked to stop the virtual machine, and there is none. The machine starts by itself when a command needs it and stops by itself when it has been idle, so this is often exactly what you wanted.</p>
+<p>No command uses this code now. zbx vm stop used to refuse when no virtual machine ran; it now succeeds and prints the stopped status, because stopping what is not running is already done. The code stays registered because a code never changes meaning or goes away; it is for a command that truly needs a running machine.</p>
 <p>zbx vm status says whether one is running.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

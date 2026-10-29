@@ -609,6 +609,12 @@ fn add_vm_image(b: *std.Build, options: *std.Build.Step.Options) VmImage {
     });
     const pinned = @import("vm/kernel/pin.zon");
     const run = b.addRunArtifact(tool);
+    // A fresh checkout has no kernel yet. Say so in one line, only to the steps that need it.
+    if (kernel_missing(b, kernel)) {
+        const missing = b.addFail("the VM kernel is missing: run `zig build vm-kernel-docker` " ++
+            "(or pass -Dvm-kernel=<path to the pinned Image>)");
+        run.step.dependOn(&missing.step);
+    }
     run.addArg("--kernel");
     run.addFileArg(kernel);
     run.addArgs(&.{ "--kernel-sha256", pinned.image_sha256, "--init" });
@@ -625,6 +631,23 @@ fn add_vm_image(b: *std.Build, options: *std.Build.Step.Options) VmImage {
 }
 
 var vm_image_made: ?VmImage = null;
+
+/// True if the kernel Image is not a file this build can read. Checked when the build is
+/// configured, relative to the directory `zig build` runs in (the repository's root).
+fn kernel_missing(b: *std.Build, kernel: std.Build.LazyPath) bool {
+    const path = switch (kernel) {
+        .src_path => |source| source.sub_path,
+        else => return false,
+    };
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch {
+        // The answer is "missing" now and may change without build.zig changing, so a cached
+        // configuration must not be reused.
+        b.graph.poisonCache();
+        return true;
+    };
+    b.dependOnFileMetadata(kernel); // Replaced or rebuilt: configure again.
+    return false;
+}
 
 /// The VM image as the three files the macOS zbx embeds, and the frameworks it needs.
 fn link_macos(module: *std.Build.Module, image: VmImage) void {

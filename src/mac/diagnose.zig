@@ -71,22 +71,33 @@ pub fn is_entitlement_text(description: []const u8) bool {
     return std.mem.indexOf(u8, description, "entitlement") != null;
 }
 
+/// `framework` is what the framework said when the entitlement is missing; null when it says
+/// virtual machines are not supported here at all. The two have different fixes: re-signing or
+/// reinstalling cannot make an Intel Mac, or a Mac inside a virtual machine, able to virtualize.
 pub fn not_allowed(diag: *Diag, framework: ?Framework) void {
     assert(diag.code == null);
     diag.raise(.E1001);
     diag.while_("checking that this Mac can run a virtual machine", .{});
-    if (framework) |said| {
-        assert(said.description.len > 0);
-        diag.cause("Virtualization.framework refused: {s}", .{said.description});
-    } else {
+    const said = framework orelse {
         diag.cause("Virtualization.framework says virtual machines are not supported here", .{});
-    }
+        diag.fix(.{ .sentence = "run zbx on an Apple silicon Mac, not inside a virtual machine" });
+        assert(diag.fixes.count == 1);
+        return;
+    };
+    assert(said.description.len > 0);
+    diag.cause("Virtualization.framework refused: {s}", .{said.description});
+    // A source build and an installed release cannot be told apart reliably from inside the
+    // binary, so both fixes are given, each saying who it is for.
     diag.fix(.{
-        .sentence = "sign this zbx with the virtualization entitlement:",
+        .sentence = "if you built zbx from source, sign it from the checkout:",
         .command = "codesign -f -s - --entitlements vm/zbx.entitlements $(which zbx)",
         .template = true,
     });
-    diag.fix(.{ .sentence = "or install a release build, which is signed already" });
+    diag.fix(.{
+        .sentence = "if you installed zbx, reinstall it, which is signed:",
+        .command = "brew reinstall zigbox",
+        .template = true,
+    });
     assert(diag.fixes.count == 2);
 }
 
@@ -250,6 +261,11 @@ test "every function raises its own code" {
     diag.reset();
     host_locked(&diag, null);
     try std.testing.expectEqual(@as(@TypeOf(diag.code.?), .E1004), diag.code.?);
+    diag.reset();
+    not_allowed(&diag, null);
+    try std.testing.expectEqual(@as(u32, 1), diag.fixes.count);
+    const command = diag.fixes.slice()[0].command.slice();
+    try std.testing.expect(std.mem.indexOf(u8, command, "brew") == null);
     try std.testing.expect(is_entitlement_text("missing the entitlement"));
     try std.testing.expect(!is_entitlement_text("out of memory"));
 }

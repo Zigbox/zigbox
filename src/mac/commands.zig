@@ -207,10 +207,8 @@ pub fn run_stop(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     assert(diag.code == null);
     const loaded = try settings_file.load(ctx.paths, host_cpus, diag);
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
-        .absent => {
-            diagnose.not_running(diag);
-            return error.Failed;
-        },
+        // Stopping what is not running is done already: the same result, exit 0.
+        .absent => {},
         .held => |pid| {
             diagnose.host_locked(diag, pid);
             return error.Failed;
