@@ -372,6 +372,8 @@ fn launch(paths: *const paths_mod.Paths, diag: *Diag) Error!void {
         return error.Failed;
     }
     defer files.close(pipe_ends[0]);
+    const old_log = paths.host_log_old.slice();
+    _ = files.rotate_if_large(paths.host_log.slice(), old_log, constants.vm_host_log_bytes_max);
     const child = std.c.fork();
     if (child < 0) {
         files.close(pipe_ends[1]);

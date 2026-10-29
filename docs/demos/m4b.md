@@ -1,6 +1,6 @@
 # M4b demo: the thirty seconds on macOS
 
-This file is written up to the end of slice 2. Slice 5 completes it with the steps a stranger
+This file is written up to the end of slice 3. Slice 5 completes it with the steps a stranger
 can follow on a clean Mac, the cuts and the failure modes.
 
 ## What runs today (slice 2): demo steps 2 and 4
@@ -18,25 +18,42 @@ entitlement; the build needs the pinned kernel first: `zig build vm-kernel-docke
    seconds: `ZBX_VM_IDLE_TIMEOUT_MS=4000 zbx run alpine -- true`, then `pgrep` after five.
    A `zbx run -d` container keeps the machine alive until it ends.
 
-## Known gap of slice 2
+## What runs today (slice 3): demo step 3, state, Rosetta
 
-- **A working directory the guest cannot see is quietly replaced with the guest user's home.**
-  A command run from a directory of the Mac starts in `/Users/<name>` of the machine, which is
-  in the machine's memory. `zbx run` then reads and writes `zbx.lock` there (W0503 says it wrote
-  `/Users/<name>/zbx.lock`, a path that does not exist on the Mac) instead of in the project.
-  From slice 3 on this must never be silent: a working directory outside what is shared with
-  the machine is refused with a one-line coded diagnostic (a new 10xx code) that says it is
-  outside what is shared and names what is shared.
+Run from a directory in your home (anything else is refused with `ZBX-E1013`).
 
-## Cuts of this slice
+1. `zbx run --rootfs ~/demo/alpine -- touch /hello`, then `ls -l ~/demo/alpine/hello` on the Mac:
+   the file is there, owned by you. A container's root writes as you; a `chown` to another id
+   inside the container succeeds and changes nothing (the share has one owner).
+2. `zbx run --state vol:/data --rootfs ~/demo/alpine -- sh -c 'echo persisted > /data/x'`, then
+   `zbx vm stop`, then the same with `cat /data/x`: it prints `persisted`. The store and the
+   state are on `~/Library/Application Support/zbx/store.img`, a sparse file (64 GiB by default,
+   `du -h` shows what it really holds); nothing of them is under `~/.local`.
+3. A second cold boot needs no pull: `zbx vm stop`, then `zbx run alpine -- true` takes about
+   one second (boot 0.25 s, setup 0.7 s, the container).
+4. `zbx run --platform linux/amd64 alpine:3.19 -- uname -m` prints `x86_64` through Rosetta
+   (`zbx pull --platform linux/amd64 alpine:3.19` first when `zbx.lock` has no entry for the
+   tag). An image whose index has no arm64 entry runs the same way without the option.
+5. `zbx vm config --disk 128G` grows the disk at the next boot; a smaller size is `ZBX-E1012`.
+   A small disk fills with `ZBX-E1014` after the command's own error.
 
-- **The store and the state live in the machine's memory** (the guest's home directory is on
-  its root tmpfs), so an image is pulled again after the machine stops, and nothing survives
-  `zbx vm stop` or the idle stop. The disk image (slice 3) fixes it.
-- **No files of the Mac are visible** to a container: `--rootfs ~/demo/alpine` and `--bind` need
-  the home directory shared with virtiofs (slice 3). The working directory is forwarded; where
-  the guest has no such directory the command starts in the guest user's home.
-- **No `--publish`** (slice 4), no Rosetta (slice 3), no `zbx doctor` of the Mac (slice 5).
+## Cuts and limits of slice 3
+
+- **Rosetta's missing diagnostic (`ZBX-E1016`) was not seen live**: this Mac has Rosetta, which
+  zbx never uninstalls. The decision is a function with a test on every platform and every state
+  of Rosetta, and the diagnostic has its golden.
+- **An image with no arm64 entry on a Mac without Rosetta** is the ordinary `ZBX-E0509` ("the
+  image offers linux/amd64"); it does not mention Rosetta. Only `--platform linux/amd64` does.
+- **`zbx.lock` decides the platform of a tag it already holds.** `zbx run --platform linux/amd64
+  alpine` with `alpine` locked as arm64 runs the locked image; pull the other platform under a
+  tag the lock does not hold, or in another project.
+- The Linux zbx's own disk diagnostics (`W0202`, `E0416`) name guest paths (`/mnt/store/...`)
+  in their fixes. `ZBX-E1014` follows them with the fix that works on a Mac.
+- `host.log` is capped when the host starts, not while it runs.
+
+## Cuts of the earlier slices that still stand
+
+- **No `--publish`** (slice 4), no `zbx doctor` of the Mac (slice 5).
 - **`zbx run -it` does not exist**: a terminal on the Mac's standard input gives the command a
   terminal, a pipe or a file gives it pipes. `zbx run alpine -- sh` is the interactive shell.
 - The helpers and the CA bundle come from Alpine 3.20 packages pinned in `vm/alpine.zon`.

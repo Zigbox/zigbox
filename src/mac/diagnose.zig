@@ -293,16 +293,26 @@ pub fn store_disk_full(diag: *Diag, size_bytes: u64, free_bytes: u64) void {
     assert(free_bytes <= size_bytes);
     diag.raise(.E1014);
     diag.while_("writing to the virtual machine's disk", .{});
-    diag.cause("the disk is {d} GiB and {d} MiB of it is free", .{
-        size_bytes >> 30, free_bytes >> 20,
-    });
+    if (size_bytes < (10 << 30)) {
+        diag.cause("the disk is {d} MiB and {d} MiB of it is free", .{
+            size_bytes >> 20, free_bytes >> 20,
+        });
+    } else {
+        diag.cause("the disk is {d} GiB and {d} MiB of it is free", .{
+            size_bytes >> 30, free_bytes >> 20,
+        });
+    }
     diag.fix(.{
         .sentence = "see what the images cost, and remove what you do not need:",
         .command = "zbx store du --by-image",
     });
-    diag.fix_with("or make the disk bigger, and stop the machine so that it applies:", "zbx vm config --disk {d}G && zbx vm stop", .{
-        @max((size_bytes >> 30) * 2, 1),
-    });
+    // Twice the size, rounded up to whole GiB: a bigger disk, not the same one.
+    const bigger = (((size_bytes + (1 << 30) - 1) >> 30)) * 2;
+    diag.fix_with(
+        "or make the disk bigger, and stop the machine so that it applies:",
+        "zbx vm config --disk {d}G && zbx vm stop",
+        .{bigger},
+    );
     assert(diag.fixes.count == 2);
 }
 
@@ -336,6 +346,19 @@ pub fn rosetta_missing(diag: *Diag) void {
 }
 
 // ---- Tests: the text of each diagnostic is in vm_golden.zig ------------------------------------
+
+test "a small disk is told in MiB and the bigger one is always bigger" {
+    // Goal: "0 GiB" never reaches a person, and the suggested size exceeds the disk. Method: a
+    // disk under 1 GiB of file system (a 1 GiB disk) and the 64 GiB one.
+    var diag: Diag = undefined;
+    diag.reset();
+    store_disk_full(&diag, 960 << 20, 0);
+    try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "960 MiB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.slice()[1].command.slice(), "--disk 2G") != null);
+    diag.reset();
+    store_disk_full(&diag, 64 << 30, 1 << 20);
+    try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "64 GiB") != null);
+}
 
 test "every function raises its own code" {
     // Goal: the code each builder raises, so that a golden cannot pass on the wrong one.

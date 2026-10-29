@@ -308,6 +308,18 @@ pub fn file_size(path: []const u8) u64 {
     return @intCast(status.size);
 }
 
+/// A log that has reached `max_bytes` is renamed to `old_path` (which replaces the one there), so
+/// a log is at most one file of that size and one older. True if it was rotated.
+pub fn rotate_if_large(path: []const u8, old_path: []const u8, max_bytes: u64) bool {
+    assert(max_bytes > 0);
+    if (file_size(path) < max_bytes) return false;
+    var from: [constants.vm_path_bytes_max:0]u8 = undefined;
+    var to: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const from_text = terminate(&from, path) catch return false;
+    const to_text = terminate(&to, old_path) catch return false;
+    return c.rename(from_text.ptr, to_text.ptr) == 0;
+}
+
 /// Makes the file at `path` exist and be at least `bytes` long, sparse: the blocks are not
 /// allocated until the guest writes them. A longer file is left as it is.
 pub fn ensure_sparse_file(path: []const u8, bytes: u64) Error!void {
@@ -367,6 +379,22 @@ pub fn host_memory_bytes() u64 {
     const result = c.sysctlbyname("hw.memsize", &bytes, &size, null, 0);
     if (result != 0 or bytes == 0) return constants.vm_memory_bytes_default;
     return bytes;
+}
+
+test "a log is rotated once it is large and left alone below that" {
+    // Goal: the host log's cap. Method: a file just under and just at the limit.
+    var name: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, "/tmp/zbx-rotate-test-{d}", .{now_ms()});
+    var old_name: [112]u8 = undefined;
+    const old = try std.fmt.bufPrint(&old_name, "{s}.1", .{path});
+    try write_file_atomically(path, "0123456789", 0o600);
+    try std.testing.expect(!rotate_if_large(path, old, 11));
+    try std.testing.expectEqual(@as(u64, 0), file_size(old));
+    try std.testing.expect(rotate_if_large(path, old, 10));
+    try std.testing.expectEqual(@as(u64, 0), file_size(path));
+    try std.testing.expectEqual(@as(u64, 10), file_size(old));
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    _ = c.unlink((try terminate(&terminated, old)).ptr);
 }
 
 test "a sparse file is made, grown and never shortened" {

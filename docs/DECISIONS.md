@@ -5,6 +5,19 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## M4b · Mac: files, storage and Rosetta (slice 3)
+
+*Decided 2026-10-29, on the slice 3 design; the disk image was approved by the owner.*
+
+- **The store lives on a disk image.** `~/Library/Application Support/zbx/store.img` is a sparse file, 64 GiB by default (1 GiB to 8 TiB), attached as a virtio block device. `zbx vm config --disk <size>` sets it, persisted with the CPUs and memory (`zbx-vm-settings/2`; version 1 is still read and means the default disk) and shown in `zbx.vm.config/1` and `zbx.vm.status/1` as additive `disk_bytes` members. The disk only grows: a smaller `--disk` than the file now is `ZBX-E1012`, whose second fix tells the person to move the file aside themselves. zbx never deletes the image.
+- **The guest formats only an empty disk.** The first 64 KiB are zeros: `mke2fs -t ext4` (owner of the root directory the Mac user). An ext superblock: `e2fsck -p` before every mount (0 and 1 are accepted, anything else refuses the disk), and a disk that grew gets `e2fsck -f` and `resize2fs` before the mount. Anything else is refused and left alone, as `ZBX-E1011` naming the disk. The tools come from the Alpine 3.20 packages `e2fsprogs`, `e2fsprogs-extra` (resize2fs), `e2fsprogs-libs`, `libcom_err`, `libblkid`, `libuuid` and `libeconf`, pinned in `vm/alpine.zon`. Before power off the guest remounts the disk read-only so that the next boot needs no journal recovery.
+- **The store and the state never land on the shared home.** The guest mounts the disk at `/mnt/store` and `zbx guest serve` sets `XDG_DATA_HOME` and `XDG_STATE_HOME` to directories on it, ignoring any XDG variable the Mac forwards.
+- **The Mac user's home is shared read-write over virtiofs** (tag `home`), mounted in the guest at the same path before the command service starts. The guest keeps its own `/etc/passwd`; the share only covers the path. Files a container writes appear on the Mac owned by the Mac user (the container's root is the guest user, whose ids are the Mac's); a `chown` to another id inside the container succeeds and changes nothing, because the share has one owner.
+- **A working directory outside the home is refused**, before the machine starts: `ZBX-E1013`, one line naming the directory and the home, fix `cd ~`. The guest no longer falls back to the user's home anywhere.
+- **Rosetta.** When Rosetta is installed the machine shares it (tag `rosetta`), and the guest registers it with `binfmt_misc` (flag `F`, so it works in any container root). `--platform linux/amd64|arm64` is read by the macOS zbx and becomes `ZBX_PLATFORM` for the Linux zbx; the guest sets `ZBX_PLATFORM_FALLBACK=linux/amd64` when Rosetta is registered, which the pull uses only when an image's index has no entry for the native platform. These are the only changes in the Linux zbx, and without the variables nothing differs. A linux/amd64 request on a Mac without Rosetta is `ZBX-E1016` with the fix `softwareupdate --install-rosetta --agree-to-license`; zbx never runs that command.
+- **A full disk is told in both places.** The host refuses to start the machine when the Mac's volume has less than 2 GiB free beside the disk file (`ZBX-E1015`); a sparse file that cannot grow would otherwise show as I/O errors in the guest. When a command fails and the guest's disk has less than 32 MiB free, the guest sends a `disk_full` frame before the exit frame and the Mac prints `ZBX-E1014` after the command's own output.
+- **`host.log` is capped** at 64 KiB: a log at that size is renamed to `host.log.1` (replacing the one there) when the next host starts.
+
 ## M4b · Mac: forwarding (slice 2)
 
 *Decided 2026-10-29, on the slice 2 design.*
