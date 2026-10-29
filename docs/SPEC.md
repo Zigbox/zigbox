@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-28 (doc rev 62), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-29 (doc rev 68), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -202,6 +202,29 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] Ownership inside the container is correct without `chmod 777` workarounds.
 - [ ] Secret mounts are read-only and excluded from `zbx commit`.
 
+### M6b · Dev loop: one service, edited live
+
+**Goal:** a developer edits code on the host and sees it run in a container, with no Docker.
+
+**Scope:** writable mounts of directories inside the project directory (the one holding zbx.lock, else the working directory), written as the container's root so that a file the container writes is the host user's, with a --user option to run as root; `zbx logs <name>`, the bounded output of a detached container, kept with its run; `zbx exec <name> -- <command>`, a process inside a running container's namespaces, under its limits and seccomp. All three in the library, for Zigcube's agent. More than one service is Zigcube's (see Non-goals). Deferred: file watching and hot reload, which are the application's own.
+
+**Demo script:**
+
+1. `zbx run -d --name web --publish 8000:8000 --mount ./site:/srv python:3.12-slim -- python -m http.server -d /srv 8000`.
+2. `curl localhost:8000/index.html` returns the page. Edit `./site/index.html` on the host; the next `curl` returns the edit.
+3. `zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'`; on the host, `ls -l site/new.txt` shows the presenter's user as its owner.
+4. `zbx logs web` shows the two requests.
+5. A writable mount outside the guardrails is refused, naming the rule.
+
+**Acceptance criteria:**
+
+- [ ] Files the container writes through a writable mount are owned by the host user. A writable mount for a container whose user is not root is refused, naming the user and the fix (run as root, or mount read-only), so no file owned by a subordinate id ever lands in the project.
+- [ ] Logs are bounded, survive the exit of the zbx that started the container, and are removed with its run record.
+- [ ] `exec` joins the container's namespaces, cgroup, capabilities and seccomp; it gains nothing the container lacks.
+- [ ] The production-readiness checklist, with an upgrade test against M6 and the agent test.
+
+**Decided:** writable mounts only under the project directory. Ownership: written as the container's root, and refused for a non-root container user. An id-mapped mount needs privilege over the host file system that a rootless zbx does not have, so zbx doctor only reports whether the kernel allows it. Mapping the image's user to the host user for the whole container (a keep-id map) would change how the store's trees are owned, and waits for a milestone of its own if real use asks for it.
+
 ### M7 · Build: hermetic and reproducible
 
 **Goal:** build images from a declared DAG of steps, so the same inputs always produce the same digest.
@@ -320,7 +343,7 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 - **Native non-Linux runtimes.** Containers run only on a Linux kernel. On macOS, zbx runs a small Linux VM for the user, invisibly (milestone M4b); there is no native macOS runtime, and no Windows support.
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
-- **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives.
+- **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
 - **Image push and private registries.** Pull-only from public registries until after M8.
 - **Dockerfile execution.** Dockerfiles are not run directly (import is stretch S4).
 - **Live migration, checkpoint/restore, GPU passthrough.**
@@ -354,7 +377,7 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 
 ## Part II · Zigcube: orchestrating Zigbox
 
-Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster.
+Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. A single-node form of C4's DNS and grants, without WireGuard, is an early target for that reason.
 
 Principles it adds on top of Part I:
 
