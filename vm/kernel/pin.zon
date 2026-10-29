@@ -1,6 +1,7 @@
 // The VM's kernel, pinned. `zig build vm-kernel` (on arm64 Ubuntu 24.04) or `zig build
 // vm-kernel-docker` (on a Mac) rebuilds it from the upstream source and the config fragment next
-// to this file, and fails unless the result has `image_sha256`.
+// to this file, and fails unless the result has `image_sha256`; `zig build vm-kernel-fetch`
+// downloads the same Image from `release_url`.
 .{
     .version = "6.18.59",
     .url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.59.tar.xz",
@@ -8,5 +9,9 @@
     .tarball_sha256 = "53a55ac9863a5547e292b8e381d4e4c2240dd1127d5428a7c44dbc550be23963",
     // The uncompressed arm64 Image this source and config produce with `toolchain`.
     .image_sha256 = "0d9b1b9340c56328b59f681cb2f17ffd0fb50e8f05ac8884336a04b1af8b1816",
+    // Where `zig build vm-kernel-fetch` gets that Image, for a machine with neither the toolchain
+    // nor Docker (a CI runner): the asset `Image` of this repository's release. The download is
+    // checked against `image_sha256`, so the release is trusted for nothing else.
+    .release_url = "https://github.com/Zigbox/zigbox/releases/download/vm-kernel-6.18.59/Image",
     .toolchain = "ubuntu:24.04 arm64, gcc 13.3.0-6ubuntu2~24.04.1, binutils 2.42",
 }

@@ -47,8 +47,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig-macos
-      # The VM's kernel is pinned and built once (docker), then cached on the runner; a runner
-      # without it fails here with the one line that names the step.
+      # The VM's kernel is pinned. A runner with neither the toolchain nor Docker downloads it
+      # from the release named in vm/kernel/pin.zon (checked against the pinned digest), once; a
+      # runner that has it already does nothing. Until the release exists this step fails with
+      # the message that says how to build the kernel instead.
+      - name: The VM kernel
+        run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
       - name: Every gate
         run: zig build check --summary all
       # Pulls Alpine and nginx (Docker Hub, through ZBX_REGISTRY_MIRRORS when the runner sets it)

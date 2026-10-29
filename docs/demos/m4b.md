@@ -58,6 +58,14 @@ and everything after step 5 of each table. `.github/workflows/mac.yml` runs `zig
 `MAC_RUNNER_LABEL`; with the variable unset a job on the hosted runner says so and the
 workflow is green.
 
+**The kernel on a runner.** `zig build vm-kernel-fetch` downloads the pinned Image from the
+release `vm-kernel-6.18.59` of this repository (the asset `Image`, named in `vm/kernel/pin.zon`),
+checks it against the pin's `image_sha256` and puts it where the build looks for it; a wrong file
+is refused and not kept. `zig build vm-kernel-docker` and `zig build vm-kernel` build it instead.
+The build's missing-kernel message names all three ways. Tried here: the 404 path (the release is
+not published yet) prints `no Image there yet ...` and exits 1, leaving the existing Image alone.
+The first real fetch waits for the release to be uploaded.
+
 **The runner.** The repository is public, so `mac.yml` does not run for a pull request from a fork
 (its `if` requires the head repository to be this one); a push to main, a manual run and a branch
 of this repository do. Run the self-hosted runner under **its own macOS user account**, not the
