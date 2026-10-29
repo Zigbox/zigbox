@@ -33,8 +33,6 @@ pub const Header = struct {
 
 /// The frame's size when the kind fixes it, else null.
 fn fixed_length(kind: Kind) ?u32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     return switch (kind) {
         .stdin_eof => 0,
         .signal => 1,
@@ -45,8 +43,6 @@ fn fixed_length(kind: Kind) ?u32 {
 }
 
 fn length_max(kind: Kind) u32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     return switch (kind) {
         .start => constants.forward_start_bytes_max,
         .stdin, .stdout, .stderr => constants.forward_data_bytes_max,
@@ -62,8 +58,6 @@ pub fn render_header(buffer: *[constants.forward_header_bytes]u8, kind: Kind, le
 }
 
 pub fn parse_header(bytes: *const [constants.forward_header_bytes]u8) ?Header {
-    assert(@intFromPtr(bytes) != 0);
-    assert(@sizeOf(u64) == 8);
     const kind = std.enums.fromInt(Kind, bytes[0]) orelse return null;
     const length = std.mem.readInt(u32, bytes[1..5], .little);
     if (length > length_max(kind)) return null;
@@ -126,8 +120,7 @@ pub fn render_start(out: []u8, start: *const Start) ?[]const u8 {
 /// Reads one string; null if the payload ends first, or the string is over its bound or has a
 /// NUL.
 fn take_string(payload: []const u8, at: *usize) ?[]const u8 {
-    assert(payload.len < 1 << 31);
-    assert(@intFromPtr(at) != 0);
+    assert(at.* <= payload.len);
     if (at.* + 2 > payload.len) return null;
     const length = std.mem.readInt(u16, payload[at.*..][0..2], .little);
     if (length > string_bytes_max) return null;
@@ -144,8 +137,6 @@ pub fn parse_start(
     arguments_storage: *[constants.args_count_max][]const u8,
     environment_storage: *[constants.forward_env_count_max][]const u8,
 ) ?Start {
-    assert(payload.len < 1 << 31);
-    assert(@intFromPtr(arguments_storage) != 0);
     if (payload.len < 9) return null;
     // Bit 0: pty. Bit 1: stderr is a pipe. No pty means stderr is a pipe, so 0 is not written.
     if (payload[0] == 0 or payload[0] > 3) return null;
@@ -183,22 +174,16 @@ pub const Exit = struct {
 };
 
 pub fn render_exit(buffer: *[2]u8, exit: Exit) void {
-    assert(@intFromPtr(buffer) != 0);
-    assert(@sizeOf(u64) == 8);
     buffer[0] = @intFromBool(exit.signaled);
     buffer[1] = exit.value;
 }
 
 pub fn parse_exit(bytes: *const [2]u8) ?Exit {
-    assert(@intFromPtr(bytes) != 0);
-    assert(@sizeOf(u64) == 8);
     if (bytes[0] > 1) return null;
     return .{ .signaled = bytes[0] == 1, .value = bytes[1] };
 }
 
 pub fn render_window(buffer: *[4]u8, rows: u16, columns: u16) void {
-    assert(@intFromPtr(buffer) != 0);
-    assert(rows <= std.math.maxInt(u16));
     std.mem.writeInt(u16, buffer[0..2], rows, .little);
     std.mem.writeInt(u16, buffer[2..4], columns, .little);
 }
@@ -206,8 +191,6 @@ pub fn render_window(buffer: *[4]u8, rows: u16, columns: u16) void {
 /// The environment variable names that never come from the Mac: they would change where the guest
 /// puts things or what the guest's programs load.
 pub fn environment_name_allowed(name: []const u8) bool {
-    assert(name.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
     if (name.len == 0 or name.len > constants.env_name_bytes_max) return false;
     for (name) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;

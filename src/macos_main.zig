@@ -116,7 +116,6 @@ const Invocation = struct {
 
     fn mode(invocation: *const Invocation) render.Mode {
         assert(@backingInt(invocation.command) <= @backingInt(Command.version));
-        assert(invocation.report_fd >= -1);
         if (invocation.json) return .json;
         if (invocation.verbose) return .verbose;
         return .text;
@@ -159,7 +158,6 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 /// options, names one of its commands. The global options are read for this process's own
 /// reports (`--output json`, `-v`) and also stay in the command line the guest sees.
 fn forwarded(words: []const []const u8, invocation: *Invocation) bool {
-    assert(@intFromPtr(invocation) != 0);
     assert(words.len <= constants.args_count_max);
     var index: usize = 0;
     while (index < words.len) : (index += 1) {
@@ -216,8 +214,7 @@ fn forward_command(words: []const []const u8, invocation: *const Invocation, dia
 }
 
 fn fail(diag: *Diag, invocation: *const Invocation) u8 {
-    assert(@intFromPtr(diag) != 0);
-    assert(@intFromPtr(invocation) != 0);
+    assert(invocation.report_fd >= -1);
     return fail_in(diag, invocation, .standard);
 }
 

@@ -25,8 +25,6 @@ comptime {
 
 /// True for exactly the text an image version is: lowercase hex digits, no more, no fewer.
 pub fn is_version(text: []const u8) bool {
-    assert(text.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
     if (text.len != constants.vm_image_version_bytes) return false;
     for (text) |byte| {
         const hex = (byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f');
@@ -49,8 +47,6 @@ pub fn render_hello_reply(buffer: []u8, version: []const u8) []const u8 {
 
 /// The version in a guest's answer; null for anything `render_hello_reply` does not write.
 pub fn parse_hello_reply(line: []const u8) ?[]const u8 {
-    assert(line.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
     if (line.len != reply_prefix.len + constants.vm_image_version_bytes + 1) return null;
     if (!std.mem.startsWith(u8, line, reply_prefix)) return null;
     if (line[line.len - 1] != '\n') return null;

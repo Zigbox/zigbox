@@ -20,7 +20,6 @@ extern "c" fn CFRelease(object: ?*anyopaque) void;
 /// The resolvers as the `dns` field of the setup line: "a.b.c.d,e.f.g.h", or "-" if there are
 /// none. Written into `buffer`.
 pub fn resolvers(buffer: []u8) []const u8 {
-    assert(buffer.len < 1 << 31);
     assert(buffer.len >= 64);
     const pool = objc.Pool.push();
     defer pool.pop();
@@ -37,8 +36,6 @@ pub fn resolvers(buffer: []u8) []const u8 {
 }
 
 fn join(buffer: []u8, list: objc.Id) []const u8 {
-    assert(buffer.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
     const count = objc.send(u64, list, "count", .{});
     var length: usize = 0;
     var kept: u32 = 0;

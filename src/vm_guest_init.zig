@@ -74,7 +74,6 @@ pub fn main() void {
 /// a process), and a zombie that nobody waits for is a process for ever. PID 1 does not wait for
 /// anything itself, so the kernel is told to reap every child of its own that ends.
 fn reap_orphans() void {
-    assert(@sizeOf(usize) == 8);
     const action: linux.Sigaction = .{
         .handler = .{ .handler = linux.SIG.IGN },
         .mask = linux.sigemptyset(),
@@ -84,7 +83,6 @@ fn reap_orphans() void {
 }
 
 fn log(prefix: []const u8, detail: []const u8) void {
-    assert(prefix.len < 1 << 31);
     assert(prefix.len < 256);
     const newline = "\n";
     _ = linux.write(2, prefix.ptr, prefix.len);
@@ -160,8 +158,8 @@ var directory_buffer: [8192]u8 align(8) = undefined;
 /// Copies `/<name>` into `/newroot/<name>`: directories, files with their modes (setuid bits
 /// too) and symlinks, breadth first with a queue of directories, so there is no recursion.
 fn copy_directory(name: [:0]const u8) void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
+    assert(name.len > 0);
+    assert(name[0] != '/');
     const queue = &copy_queue;
     queue.count = 0;
     queue.next = 0;
@@ -177,7 +175,8 @@ fn copy_directory(name: [:0]const u8) void {
 }
 
 fn push(queue: *Queue, parent: []const u8, name: []const u8) void {
-    assert(@intFromPtr(queue) != 0);
+    assert(queue.count < queue_max);
+    assert(name.len > 0);
     assert(queue.count < queue_max);
     const separator = if (std.mem.eql(u8, parent, "/")) "" else "/";
     const target = &queue.paths[queue.count];
@@ -189,24 +188,21 @@ fn push(queue: *Queue, parent: []const u8, name: []const u8) void {
 }
 
 fn make_in_new_root(source: []const u8) void {
-    assert(source.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(source.len > 0);
     var path: [path_max + 16:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&path, "/newroot/{s}", .{source}) catch fatal("a path is too long");
     _ = linux.mkdir(&path, 0o755);
 }
 
 fn destination_of(buffer: *[path_max + 16:0]u8, source: []const u8) [*:0]const u8 {
-    assert(@intFromPtr(buffer) != 0);
-    assert(source.len < 1 << 31);
     buffer.* = @splat(0);
     _ = std.fmt.bufPrint(buffer, "/newroot{s}", .{source}) catch fatal("a path is too long");
     return buffer;
 }
 
 fn copy_entries(queue: *Queue, directory: [:0]const u8) void {
-    assert(@intFromPtr(queue) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(queue.next <= queue.count);
+    assert(directory.len > 0);
     const opened = linux.open(directory, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
     if (failed(opened)) fatal("cannot read a directory");
     const handle: i32 = @intCast(opened);
@@ -232,8 +228,8 @@ const dt_reg: u8 = 8;
 const dt_lnk: u8 = 10;
 
 fn copy_entry(queue: *Queue, directory: []const u8, name: []const u8, kind: u8) void {
-    assert(@intFromPtr(queue) != 0);
-    assert(directory.len < 1 << 31);
+    assert(queue.count <= queue_max);
+    assert(name.len > 0);
     var source: [path_max + 1:0]u8 = @splat(0);
     const separator = if (std.mem.eql(u8, directory, "/")) "" else "/";
     _ = std.fmt.bufPrint(&source, "{s}{s}{s}", .{ directory, separator, name }) catch {
@@ -254,8 +250,8 @@ fn copy_entry(queue: *Queue, directory: []const u8, name: []const u8, kind: u8) 
 }
 
 fn copy_file(source: [*:0]const u8, destination: [*:0]const u8) void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
+    assert(source[0] == '/');
+    assert(destination[0] == '/');
     const input = linux.open(source, .{ .ACCMODE = .RDONLY }, 0);
     if (failed(input)) fatal("cannot read a file");
     const from: i32 = @intCast(input);
@@ -284,8 +280,8 @@ fn copy_file(source: [*:0]const u8, destination: [*:0]const u8) void {
 }
 
 fn copy_link(source: [*:0]const u8, destination: [*:0]const u8) void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
+    assert(source[0] == '/');
+    assert(destination[0] == '/');
     var target: [path_max + 1:0]u8 = @splat(0);
     const count = linux.readlink(source, &target, path_max);
     if (failed(count)) fatal("cannot read a link");
@@ -405,7 +401,7 @@ fn read_line(connection: i32, buffer: *[constants.vm_line_bytes_max]u8) ?usize {
 // ---- Setup ---------------------------------------------------------------------------------
 
 fn fail_reply(word: []const u8) []const u8 {
-    assert(word.len < 1 << 31);
+    assert(word.len < 16);
     assert(word.len > 0);
     log("zbx-init: setup failed: ", word);
     if (std.mem.eql(u8, word, "clock")) return "fail clock\n";
@@ -416,7 +412,6 @@ fn fail_reply(word: []const u8) []const u8 {
 }
 
 fn do_setup(setup: *const protocol.Setup) []const u8 {
-    assert(@intFromPtr(setup) != 0);
     assert(setup.uid > 0);
     if (world.done) {
         // The host asks again after a restart of its own; the guest is set up for its user.
@@ -438,7 +433,7 @@ fn do_setup(setup: *const protocol.Setup) []const u8 {
 }
 
 fn write_text(path: [:0]const u8, text: []const u8, mode: u32) bool {
-    assert(text.len < 1 << 31);
+    assert(path[0] == '/');
     assert(path.len > 0);
     const opened = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, mode);
     if (failed(opened)) return false;
@@ -448,8 +443,8 @@ fn write_text(path: [:0]const u8, text: []const u8, mode: u32) bool {
 }
 
 fn make_user(setup: *const protocol.Setup) bool {
-    assert(@intFromPtr(setup) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(protocol.name_ok(setup.name));
+    assert(protocol.home_ok(setup.home));
     var text: [1024]u8 = undefined;
     const passwd = std.fmt.bufPrint(
         &text,
@@ -472,8 +467,8 @@ fn make_user(setup: *const protocol.Setup) bool {
 
 /// The home directory, and its parents, made by root and given to the user.
 fn make_home(setup: *const protocol.Setup) bool {
-    assert(@intFromPtr(setup) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(protocol.home_ok(setup.home));
+    assert(setup.uid > 0);
     var path: [constants.vm_home_bytes_max + 1:0]u8 = @splat(0);
     var end: usize = 1;
     while (end <= setup.home.len) : (end += 1) {
@@ -492,8 +487,7 @@ fn make_home(setup: *const protocol.Setup) bool {
 /// and the processes of the guest's own service live in a leaf beside the containers' cgroups
 /// (a cgroup that has controllers enabled for its children may hold no process itself).
 fn make_cgroups(setup: *const protocol.Setup) bool {
-    assert(@intFromPtr(setup) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(setup.uid > 0);
     const controllers = "+cpu +memory +pids";
     const root = constants.vm_cgroup_root;
     if (!write_text("/sys/fs/cgroup/cgroup.subtree_control", controllers, 0o644)) return false;
@@ -515,8 +509,8 @@ fn make_cgroups(setup: *const protocol.Setup) bool {
 
 /// Forks `zbx guest serve` as the user, in the leaf cgroup, and waits for it to listen.
 fn start_serve(setup: *const protocol.Setup) ?i32 {
-    assert(@intFromPtr(setup) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(protocol.name_ok(setup.name));
+    assert(setup.uid > 0);
     var pipe: [2]i32 = undefined;
     if (failed(linux.pipe2(&pipe, .{ .CLOEXEC = false }))) return null;
     const forked = linux.fork();
@@ -534,8 +528,8 @@ fn start_serve(setup: *const protocol.Setup) ?i32 {
 }
 
 fn exec_serve(setup: *const protocol.Setup, ready_fd: i32) noreturn {
-    assert(@intFromPtr(setup) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(ready_fd >= 0);
+    assert(setup.uid > 0);
     var pid_text: [16:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&pid_text, "{d}", .{linux.getpid()}) catch unreachable; // A pid is short.
     const procs = constants.vm_cgroup_root ++ "/main/cgroup.procs";
@@ -561,8 +555,6 @@ fn exec_serve(setup: *const protocol.Setup, ready_fd: i32) noreturn {
 /// The processes owned by the user or by an id of the range its containers map to, not counting
 /// the guest's service. The host stops the machine when this has been zero for the idle time.
 fn count_user_processes() u32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     if (!world.done) return 0;
     const opened = linux.open("/proc", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
     if (failed(opened)) return 0;
@@ -585,8 +577,7 @@ fn count_user_processes() u32 {
 }
 
 fn owned_by_user(pid_name: []const u8) bool {
-    assert(pid_name.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(pid_name.len > 0);
     var path: [32:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&path, "/proc/{s}", .{pid_name}) catch return false;
     var info: linux.Statx = undefined;
@@ -628,7 +619,7 @@ const Route = extern struct {
 };
 
 fn ifreq_for(name: []const u8) Ifreq {
-    assert(name.len < 1 << 31);
+    assert(name.len > 0);
     assert(name.len < 16);
     var request: Ifreq = .{ .name = @splat(0), .data = @splat(0) };
     @memcpy(request.name[0..name.len], name);
@@ -636,8 +627,6 @@ fn ifreq_for(name: []const u8) Ifreq {
 }
 
 fn sockaddr_in(bytes: dhcp.Address) [16]u8 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     var result: [16]u8 = @splat(0);
     std.mem.writeInt(u16, result[0..2], 2, .little); // AF_INET
     @memcpy(result[4..8], &bytes);
@@ -645,8 +634,8 @@ fn sockaddr_in(bytes: dhcp.Address) [16]u8 {
 }
 
 fn set_up(control: i32, name: []const u8) bool {
-    assert(name.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(control >= 0);
+    assert(name.len > 0);
     var request = ifreq_for(name);
     if (failed(linux.ioctl(control, siocgifflags, @intFromPtr(&request)))) return false;
     const flags = std.mem.readInt(u16, request.data[0..2], .little) | iff_up;
@@ -657,8 +646,7 @@ fn set_up(control: i32, name: []const u8) bool {
 /// Loopback up, then DHCP on the first virtio NIC. True if the machine has an address, a route
 /// and a resolver when this returns.
 fn bring_up_network(mac_dns: []const u8) bool {
-    assert(mac_dns.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(mac_dns.len > 0);
     const opened = linux.socket(linux.AF.INET, linux.SOCK.DGRAM, 0);
     if (failed(opened)) return false;
     const control: i32 = @intCast(opened);
@@ -676,8 +664,8 @@ fn bring_up_network(mac_dns: []const u8) bool {
 }
 
 fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
-    assert(@intFromPtr(lease) != 0);
-    assert(mac_dns.len < 1 << 31);
+    assert(control >= 0);
+    assert(mac_dns.len > 0);
     var note: [32]u8 = undefined;
     const a = lease.address;
     const quad = "{d}.{d}.{d}.{d}";
@@ -702,8 +690,7 @@ fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
 /// The Mac's resolvers first, then the one the DHCP server named. The NAT's gateway does not
 /// always answer DNS, and the Mac's resolvers are reachable through the NAT.
 fn write_resolv_conf(lease: *const dhcp.Lease, mac_dns: []const u8) void {
-    assert(@intFromPtr(lease) != 0);
-    assert(mac_dns.len < 1 << 31);
+    assert(mac_dns.len > 0);
     var text: [256]u8 = undefined;
     var length: usize = 0;
     var addresses: [protocol.dns_count_max][4]u8 = undefined;
@@ -714,8 +701,7 @@ fn write_resolv_conf(lease: *const dhcp.Lease, mac_dns: []const u8) void {
 }
 
 fn append_nameserver(out: []u8, dns: dhcp.Address) usize {
-    assert(out.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(out.len > 0);
     const written = std.fmt.bufPrint(out, "nameserver {d}.{d}.{d}.{d}\n", .{
         dns[0], dns[1], dns[2], dns[3],
     }) catch return 0;
@@ -723,8 +709,6 @@ fn append_nameserver(out: []u8, dns: dhcp.Address) usize {
 }
 
 fn read_mac() ?[6]u8 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const address_path = "/sys/class/net/" ++ interface_name ++ "/address";
     const opened = linux.open(address_path, .{ .ACCMODE = .RDONLY }, 0);
     if (failed(opened)) return null;
@@ -741,8 +725,6 @@ fn read_mac() ?[6]u8 {
 }
 
 fn udp_socket() ?i32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const opened = linux.socket(linux.AF.INET, linux.SOCK.DGRAM, 0);
     if (failed(opened)) return null;
     const handle: i32 = @intCast(opened);
@@ -760,8 +742,8 @@ fn udp_socket() ?i32 {
 }
 
 fn send_broadcast(handle: i32, packet: []const u8) void {
-    assert(packet.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(handle >= 0);
+    assert(packet.len >= 300);
     const port = std.mem.nativeToBig(u16, 67);
     const server: linux.sockaddr.in = .{ .port = port, .addr = 0xffff_ffff };
     const size = @sizeOf(linux.sockaddr.in);
@@ -770,8 +752,7 @@ fn send_broadcast(handle: i32, packet: []const u8) void {
 
 /// Waits up to `vm_dhcp_wait_ms` for a reply of `wanted` kind to this client.
 fn wait_for(handle: i32, mac: [6]u8, transaction: u32, wanted: dhcp.MessageType) ?dhcp.Lease {
-    assert(transaction <= std.math.maxInt(u32));
-    assert(@sizeOf(u64) == 8);
+    assert(handle >= 0);
     var packet: [constants.vm_dhcp_packet_bytes_max]u8 = undefined;
     var entry = [1]linux.pollfd{.{ .fd = handle, .events = linux.POLL.IN, .revents = 0 }};
     var waited: u32 = 0;
@@ -788,8 +769,6 @@ fn wait_for(handle: i32, mac: [6]u8, transaction: u32, wanted: dhcp.MessageType)
 }
 
 fn ask_for_lease() ?dhcp.Lease {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const mac = read_mac() orelse return null;
     const handle = udp_socket() orelse return null;
     defer _ = linux.close(handle);

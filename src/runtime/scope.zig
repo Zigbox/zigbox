@@ -100,7 +100,6 @@ pub const Driver = enum { systemd, cgroupfs };
 pub const cgroupfs_version: u32 = 1;
 
 pub fn driver(host: Host, root: *Directory) Driver {
-    assert(@intFromPtr(root) != 0);
     var buffer: [constants.dbus_socket_path_bytes_max]u8 = undefined;
     var problem: Problem = undefined;
     if (bus_path(host, &buffer, &problem) != null) return .systemd;
@@ -126,7 +125,6 @@ pub fn bus_path(
     buffer: *[constants.dbus_socket_path_bytes_max]u8,
     problem: *Problem,
 ) ?[]const u8 {
-    assert(@intFromPtr(buffer) != 0);
     assert(buffer.len == constants.dbus_socket_path_bytes_max);
     if (host.environment("DBUS_SESSION_BUS_ADDRESS", constants.dbus_address_bytes_max)) |address| {
         return auth.socket_path(buffer, address) catch |err| {
@@ -160,7 +158,6 @@ pub fn bus_path(
 /// refused for lack of permission, or authentication on it fails, and it is not this user's own
 /// socket (`/run/user/<uid>/bus`), that one is tried, once. `via` says which one worked.
 fn open_bus(host: Host, conn: *client.Connection, problem: *Problem, via: *Via) bool {
-    assert(@intFromPtr(conn) != 0);
     assert(host.uid() != std.math.maxInt(u32));
     var path_buffer: [constants.dbus_socket_path_bytes_max]u8 = undefined;
     const path = bus_path(host, &path_buffer, problem) orelse return false;
@@ -289,7 +286,6 @@ pub fn request_for(plan: *const plan_mod.Plan, pid: u32, keeper_pid: u32) system
 /// would get a pid fewer than `--pids` says (and `pids.events` would count refusals one fork
 /// early).
 fn tasks_max(limits: spec.Limits) ?u64 {
-    assert(@sizeOf(usize) == 8);
     const pids = limits.pids orelse return null;
     assert(pids >= constants.limit_pids_min);
     return @as(u64, pids) + constants.scope_keeper_tasks;
@@ -297,7 +293,6 @@ fn tasks_max(limits: spec.Limits) ?u64 {
 
 /// `CPUQuotaPerSecUSec`: microseconds of CPU per second, 1000 for each thousandth of a CPU.
 fn cpu_quota(limits: spec.Limits) ?u64 {
-    assert(@sizeOf(usize) == 8);
     const millis = limits.cpu_millis orelse return null;
     assert(millis >= constants.limit_cpu_millis_min);
     return @as(u64, millis) * 1000;
@@ -402,8 +397,7 @@ pub fn start(
 const Members = struct { pid: u32, keeper_pid: u32 };
 
 fn cgroupfs_problem(step: CgroupStep, path: []const u8, host: Host, err: host_mod.Error) Problem {
-    assert(path.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(path.len > 0);
     const io: Io = .{ .err = err, .errno = host.last_errno() };
     var result: Cgroupfs = .{ .step = step, .path = .{}, .io = io };
     result.path.print("{s}", .{path});
@@ -450,7 +444,7 @@ fn start_cgroupfs(
 }
 
 fn join_cgroup(host: Host, directory: []const u8, pid: u32, problem: *Problem) bool {
-    assert(directory.len < 1 << 31);
+    assert(directory.len > 0);
     assert(pid > 1);
     var file_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
     const procs = "{s}/cgroup.procs";
@@ -472,8 +466,8 @@ fn write_cgroupfs_limits(
     files: []const FileWrite,
     problem: *Problem,
 ) bool {
-    assert(directory.len < 1 << 31);
-    assert(@intFromPtr(problem) != 0);
+    assert(directory.len > 0);
+    assert(files.len <= fallback_files_max);
     for (files) |file| {
         var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
         const name = file.name;
@@ -712,7 +706,6 @@ fn cgroup_directory(
 /// The path on the line `0::<path>` of a `/proc/<pid>/cgroup`, or null if there is none or it is
 /// not an absolute path without a `..`.
 pub fn unified_path(text: []const u8) ?[]const u8 {
-    assert(text.len < 1 << 31);
     assert(text.len <= 1024);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {

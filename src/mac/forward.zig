@@ -46,8 +46,6 @@ fn on_signal(signal: c.SIG) callconv(.c) void {
 const caught = [_]c.SIG{ .INT, .TERM, .HUP, .QUIT, .WINCH };
 
 fn catch_signals() Error!void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     if (c.pipe(&signal_pipe) != 0) return error.Failed;
     for (signal_pipe) |descriptor| {
         const flags = c.fcntl(descriptor, c.F.GETFL);
@@ -63,8 +61,6 @@ fn catch_signals() Error!void {
 
 /// The Linux number of a signal this process caught, or null for the window change.
 fn guest_signal(number: u8) ?u8 {
-    assert(number <= std.math.maxInt(u8));
-    assert(@sizeOf(u64) == 8);
     return switch (number) {
         @backingInt(c.SIG.INT) => 2,
         @backingInt(c.SIG.TERM) => 15,
@@ -77,8 +73,6 @@ fn guest_signal(number: u8) ?u8 {
 const Size = struct { rows: u16, columns: u16 };
 
 fn terminal_size() Size {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     var size: c.winsize = undefined;
     for ([_]i32{ 1, 0, 2 }) |descriptor| {
         if (ioctl(descriptor, tiocgwinsz, &size) == 0 and size.col > 0) {
@@ -94,8 +88,6 @@ const Terminal = struct {
     raw: bool,
 
     fn enter(pty: bool) Terminal {
-        assert(@sizeOf(usize) == 8);
-        assert(@sizeOf(u64) == 8);
         var saved: c.termios = undefined;
         // Raw mode only with a pty: otherwise the Mac's terminal keeps its line editing.
         const raw_wanted = pty and c.tcgetattr(0, &saved) == 0;
@@ -108,8 +100,6 @@ const Terminal = struct {
     }
 
     fn leave(terminal: *const Terminal) void {
-        assert(@intFromPtr(terminal) != 0);
-        assert(@sizeOf(u64) == 8);
         // NOW, not a drain: a terminal that has stopped reading (flow control) must not keep
         // this process from ending.
         if (terminal.raw) _ = c.tcsetattr(0, .NOW, &terminal.saved);
@@ -134,8 +124,7 @@ fn open_connection(ctx: *const commands.Context, diag: *Diag) Error!i32 {
 }
 
 fn ask_host(ctx: *const commands.Context) ?i32 {
-    assert(@intFromPtr(ctx) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(ctx.paths.socket.length > 0);
     const socket = files.connect_unix(ctx.paths.socket.slice()) catch return null;
     defer files.close(socket);
     files.write_all(socket, control.connect_request) catch return null;
@@ -174,8 +163,8 @@ var frames: Frames = undefined;
 var watch_descriptor: i32 = -1;
 
 fn send_frame(descriptor: i32, kind: protocol.Kind, payload: []const u8) bool {
-    assert(payload.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
+    assert(payload.len <= constants.forward_start_bytes_max);
     var header: [constants.forward_header_bytes]u8 = undefined;
     protocol.render_header(&header, kind, @intCast(payload.len));
     files.write_all(descriptor, &header) catch return false;
@@ -186,8 +175,7 @@ fn send_frame(descriptor: i32, kind: protocol.Kind, payload: []const u8) bool {
 
 /// Adds `NAME=value` for a name this process has set, if there is room.
 fn add_environment(count: *usize, name: []const u8) void {
-    assert(@intFromPtr(count) != 0);
-    assert(name.len < 1 << 31);
+    assert(count.* <= constants.forward_env_count_max);
     if (count.* == constants.forward_env_count_max) return;
     if (!protocol.environment_name_allowed(name)) return;
     if (name.len > constants.env_name_bytes_max) return;
@@ -205,8 +193,7 @@ fn add_environment(count: *usize, name: []const u8) void {
 /// The names the command line asks for: `-e NAME` and `--env NAME` without a value take the
 /// variable from the environment of the process that runs `zbx`, which is this one.
 fn add_named_environment(count: *usize, words: []const []const u8) void {
-    assert(@intFromPtr(count) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(count.* <= constants.forward_env_count_max);
     var index: usize = 0;
     while (index + 1 < words.len) : (index += 1) {
         const word = words[index];
@@ -277,7 +264,7 @@ pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) E
 }
 
 fn lost(command: *const Command, diag: *Diag, what: []const u8) Error {
-    assert(@intFromPtr(command) != 0);
+    assert(command.words.len > 0);
     assert(what.len > 0);
     diagnose.connection_lost(diag, what);
     return error.Failed;
@@ -286,8 +273,8 @@ fn lost(command: *const Command, diag: *Diag, what: []const u8) Error {
 /// Standard input to the guest, its output and error to ours, signals both ways, until the exit
 /// frame (the command's code) or the end of the connection (a failure).
 fn relay(connection: i32, command: *const Command, diag: *Diag) Error!u8 {
-    assert(@intFromPtr(command) != 0);
-    assert(@intFromPtr(diag) != 0);
+    assert(connection >= 0);
+    assert(signal_pipe[0] >= 0);
     var data: [constants.forward_data_bytes_max]u8 = undefined;
     var stdin_open = true;
     var turns: u64 = 0;
@@ -313,8 +300,8 @@ fn relay(connection: i32, command: *const Command, diag: *Diag) Error!u8 {
 }
 
 fn send_signals(connection: i32) void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(signal_pipe[0] >= 0);
     var bytes: [8]u8 = undefined;
     const count = c.read(signal_pipe[0], &bytes, bytes.len);
     if (count <= 0) return;
@@ -332,8 +319,8 @@ fn send_signals(connection: i32) void {
 
 /// True while standard input has more.
 fn forward_input(connection: i32, data: []u8) bool {
-    assert(data.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(data.len == constants.forward_data_bytes_max);
     const count = c.read(0, data.ptr, data.len);
     if (count < 0) return c.errno(count) == .INTR;
     if (count == 0) {
@@ -346,8 +333,8 @@ fn forward_input(connection: i32, data: []u8) bool {
 
 /// Reads one frame of the guest's; the command's exit code if it was the exit frame.
 fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
-    assert(@intFromPtr(command) != 0);
-    assert(@intFromPtr(diag) != 0);
+    assert(connection >= 0);
+    assert(command.words.len > 0);
     var header_bytes: [constants.forward_header_bytes]u8 = undefined;
     if (!read_exact(connection, &header_bytes)) return lost(command, diag, "the guest hung up");
     const header = protocol.parse_header(&header_bytes) orelse {
@@ -373,8 +360,7 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
 }
 
 fn read_exact(descriptor: i32, buffer: []u8) bool {
-    assert(buffer.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
     var done: usize = 0;
     while (done < buffer.len) {
         const count = c.read(descriptor, buffer[done..].ptr, buffer.len - done);

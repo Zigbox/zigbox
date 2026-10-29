@@ -82,7 +82,7 @@ pub fn probe(paths: *const paths_mod.Paths, timeout_ms: u32) Probe {
 /// No answer on the socket: either nobody is there (a killed host leaves a socket file but not
 /// the lock, because the kernel drops the lock with the process) or somebody is, and is silent.
 fn lock_probe(paths: *const paths_mod.Paths) Probe {
-    assert(@intFromPtr(paths) != 0);
+    assert(paths.lock.length > 0);
     assert(paths.lock.length > 0);
     const taken = files.lock_exclusive(paths.lock.slice()) catch return .absent;
     if (taken) |descriptor| {
@@ -113,12 +113,13 @@ fn wait_gone(paths: *const paths_mod.Paths, limit_ms: u32) bool {
 /// Writes into a buffer the caller sized for the longest document; a short one is a bug.
 fn put(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) void {
     assert(writer.end <= writer.buffer.len);
+    assert(writer.end <= writer.buffer.len);
     // Cannot fail: every caller's buffer holds the longest document its format can make.
     writer.print(format, args) catch unreachable;
 }
 
 fn put_all(writer: *std.Io.Writer, text: []const u8) void {
-    assert(@intFromPtr(writer) != 0);
+    assert(writer.end <= writer.buffer.len);
     assert(writer.end <= writer.buffer.len);
     // Cannot fail: same.
     writer.writeAll(text) catch unreachable;
@@ -146,7 +147,6 @@ const another_release = "another release's (zbx vm stop replaces it)";
 
 /// A host of another release runs: what can be said of it without reading its answer.
 fn print_other(ctx: *const Context) void {
-    assert(@intFromPtr(ctx) != 0);
     assert(ctx.paths.socket.length > 0);
     const text = "{{\"schema\":\"zbx.vm.status/1\",\"state\":\"running\",\"image_version\":" ++
         "\"{s}\",\"vm_image_version\":null,\"image_match\":false,\"pid\":null,\"cpus\":null," ++
@@ -313,7 +313,6 @@ pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
 }
 
 fn print_network_warning(ctx: *const Context) void {
-    assert(@intFromPtr(ctx) != 0);
     assert(ctx.paths.socket.length > 0);
     var warning: Diag = undefined;
     warning.reset();
@@ -322,7 +321,7 @@ fn print_network_warning(ctx: *const Context) void {
 }
 
 fn wait_for_answer(paths: *const paths_mod.Paths) Probe {
-    assert(@intFromPtr(paths) != 0);
+    assert(paths.socket.length > 0);
     assert(paths.socket.length > 0);
     const deadline = files.now_ms() + constants.vm_boot_timeout_ms;
     var found: Probe = .{ .held = null };
@@ -433,7 +432,6 @@ pub const ConfigRequest = struct {
 
 /// What this Mac allows: the constants, the framework's limits and the Mac's CPUs and memory.
 pub fn bounds_here(host_cpus: u32) settings.Bounds {
-    assert(host_cpus <= std.math.maxInt(u32));
     assert(host_cpus >= 1);
     const limits = vz.limits();
     const framework: settings.Bounds = .{

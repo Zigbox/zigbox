@@ -48,7 +48,7 @@ pub const Lease = struct {
 };
 
 fn put_option(out: []u8, at: usize, code: u8, value: []const u8) usize {
-    assert(out.len < 1 << 31);
+    assert(at + 2 + value.len <= out.len);
     assert(value.len <= 255);
     out[at] = code;
     out[at + 1] = @intCast(value.len);
@@ -57,7 +57,7 @@ fn put_option(out: []u8, at: usize, code: u8, value: []const u8) usize {
 }
 
 fn begin(out: []u8, mac: [6]u8, transaction: u32) void {
-    assert(out.len < 1 << 31);
+    assert(out.len >= packet_bytes_min);
     assert(out.len >= constants.vm_dhcp_packet_bytes_max);
     @memset(out[0..packet_bytes_min], 0);
     out[0] = op_request;
@@ -70,8 +70,8 @@ fn begin(out: []u8, mac: [6]u8, transaction: u32) void {
 }
 
 fn finish(out: []u8, at: usize) []const u8 {
-    assert(out.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(at < out.len);
+    assert(out.len >= packet_bytes_min);
     out[at] = option_end;
     return out[0..@max(at + 1, packet_bytes_min)];
 }
@@ -80,8 +80,6 @@ const wanted = [_]u8{ option_subnet_mask, option_router, option_dns, option_leas
 
 /// The DISCOVER packet.
 pub fn render_discover(out: []u8, mac: [6]u8, transaction: u32) []const u8 {
-    assert(out.len < 1 << 31);
-    assert(transaction <= std.math.maxInt(u32));
     begin(out, mac, transaction);
     const kind = [1]u8{@backingInt(MessageType.discover)};
     var at = put_option(out, options_at, option_message_type, &kind);
@@ -97,8 +95,6 @@ pub fn render_request(
     address: Address,
     server: Address,
 ) []const u8 {
-    assert(out.len < 1 << 31);
-    assert(transaction <= std.math.maxInt(u32));
     begin(out, mac, transaction);
     var at = put_option(out, options_at, option_message_type, &.{@backingInt(MessageType.request)});
     at = put_option(out, at, option_requested_address, &address);
@@ -109,8 +105,6 @@ pub fn render_request(
 
 /// A reply to `transaction` from a server, or null.
 pub fn parse_reply(packet: []const u8, mac: [6]u8, transaction: u32) ?Lease {
-    assert(packet.len < 1 << 31);
-    assert(transaction <= std.math.maxInt(u32));
     if (packet.len < options_at + 1 or packet.len > constants.vm_dhcp_packet_bytes_max) return null;
     if (packet[0] != op_reply) return null;
     if (std.mem.readInt(u32, packet[4..8], .big) != transaction) return null;
@@ -175,8 +169,6 @@ pub fn parse_reply(packet: []const u8, mac: [6]u8, transaction: u32) ?Lease {
 
 /// The packet a server would send, for tests and the fuzzer.
 pub fn render_reply(out: []u8, mac: [6]u8, transaction: u32, lease: *const Lease) []const u8 {
-    assert(out.len < 1 << 31);
-    assert(transaction <= std.math.maxInt(u32));
     begin(out, mac, transaction);
     out[0] = op_reply;
     @memcpy(out[16..20], &lease.address);

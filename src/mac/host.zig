@@ -38,7 +38,6 @@ fn on_signal(signal: std.c.SIG) callconv(.c) void {
 
 /// Routes the signals above to `on_signal` and ignores SIGPIPE (a client that left).
 pub fn install_signal_handlers() void {
-    assert(@sizeOf(usize) == 8);
     const handler: std.c.Sigaction = .{
         .handler = .{ .handler = on_signal },
         .mask = std.mem.zeroes(std.c.sigset_t),
@@ -78,8 +77,6 @@ const Running = struct {
 /// The idle timeout: the constant, or the number of milliseconds in the environment variable
 /// `ZBX_VM_IDLE_TIMEOUT_MS` (for tests, so that the stop can be seen in seconds).
 fn idle_timeout() u32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const text = std.c.getenv(constants.vm_idle_timeout_variable) orelse {
         return constants.vm_idle_timeout_ms;
     };
@@ -142,7 +139,7 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
 
 /// The pid goes into the lock file so that a process that finds the lock held can name the holder.
 fn note_pid(lock: i32) void {
-    assert(@sizeOf(usize) == 8);
+    assert(lock >= 0);
     assert(lock >= 0);
     var text: [24]u8 = undefined;
     // Cannot fail: a pid is at most ten digits and the buffer holds 24 bytes.
@@ -249,7 +246,6 @@ fn handshake(machine: *vz.Machine, paths: *const paths_mod.Paths, diag: *Diag) ?
 }
 
 fn ask_hello(machine: *vz.Machine) ?Version {
-    assert(@intFromPtr(machine) != 0);
     assert(constants.vm_guest_port > 0);
     var failure: vz.Failure = .{};
     const connection = machine.connect(constants.vm_guest_port, &failure) catch return null;
@@ -477,8 +473,6 @@ fn stop_when_idle(running: *Running) bool {
 }
 
 fn guest_busy(machine: *vz.Machine) bool {
-    assert(@intFromPtr(machine) != 0);
-    assert(constants.vm_guest_port > 0);
     var failure: vz.Failure = .{};
     const connection = machine.connect(constants.vm_guest_port, &failure) catch return true;
     defer vz.finish_connection(connection);

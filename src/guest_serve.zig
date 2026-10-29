@@ -56,6 +56,7 @@ pub fn main(arguments: []const []const u8, environ: std.process.Environ) u8 {
         .name = environ.getPosix("USER") orelse return 2,
         .home = environ.getPosix("HOME") orelse return 2,
     };
+    if (identity.home.len == 0 or identity.name.len == 0) return 2;
     const listener = listen_on_vsock() orelse return 2;
     ignore_child_exits();
     if (ready_fd >= 0) {
@@ -67,8 +68,6 @@ pub fn main(arguments: []const []const u8, environ: std.process.Environ) u8 {
 }
 
 fn listen_on_vsock() ?i32 {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const opened = linux.socket(linux.AF.VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (failed(opened)) return null;
     const listener: i32 = @intCast(opened);
@@ -84,8 +83,6 @@ fn listen_on_vsock() ?i32 {
 
 /// Children of this process are not waited for: a session that ends leaves no zombie.
 fn ignore_child_exits() void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
     const action: linux.Sigaction = .{
         .handler = .{ .handler = linux.SIG.IGN },
         .mask = linux.sigemptyset(),
@@ -103,8 +100,8 @@ fn ignore_child_exits() void {
 /// One session per connection, for as long as the machine lives; the bound only keeps the loop
 /// finite on paper.
 fn accept_forever(listener: i32, identity: *const Identity) void {
-    assert(@intFromPtr(identity) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(listener >= 0);
+    assert(identity.home.len > 0);
     const accepts_max: u64 = 1 << 40;
     var accepted: u64 = 0;
     while (accepted < accepts_max) : (accepted += 1) {
@@ -142,8 +139,7 @@ fn accept_forever(listener: i32, identity: *const Identity) void {
 // ---- Reading and writing frames --------------------------------------------------------------
 
 fn read_exact(descriptor: i32, buffer: []u8) bool {
-    assert(buffer.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
     var done: usize = 0;
     while (done < buffer.len) {
         const count = linux.read(descriptor, buffer[done..].ptr, buffer.len - done);
@@ -156,8 +152,7 @@ fn read_exact(descriptor: i32, buffer: []u8) bool {
 }
 
 fn write_all(descriptor: i32, bytes: []const u8) bool {
-    assert(bytes.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
     var done: usize = 0;
     while (done < bytes.len) {
         const count = linux.write(descriptor, bytes[done..].ptr, bytes.len - done);
@@ -173,15 +168,14 @@ fn write_all(descriptor: i32, bytes: []const u8) bool {
 }
 
 fn wait_writable(descriptor: i32) void {
-    assert(@sizeOf(usize) == 8);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
     var entry = [1]linux.pollfd{.{ .fd = descriptor, .events = linux.POLL.OUT, .revents = 0 }};
     _ = linux.poll(&entry, 1, 100);
 }
 
 fn send_frame(connection: i32, kind: protocol.Kind, payload: []const u8) bool {
-    assert(payload.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(payload.len <= constants.forward_data_bytes_max);
     var header: [constants.forward_header_bytes]u8 = undefined;
     protocol.render_header(&header, kind, @intCast(payload.len));
     if (!write_all(connection, &header)) return false;
@@ -207,6 +201,7 @@ var command_storage: Command = undefined;
 
 /// A line on the console (the host keeps it in console.log) saying why a session ended early.
 fn note(text: []const u8) void {
+    assert(text.len > 0);
     assert(text.len < 200);
     const prefix = "zbx guest: ";
     _ = linux.write(2, prefix, prefix.len);
@@ -215,13 +210,14 @@ fn note(text: []const u8) void {
 }
 
 fn end_early(why: []const u8) u8 {
+    assert(why.len > 0);
     note(why);
     return 1;
 }
 
 fn session(connection: i32, identity: *const Identity) u8 {
-    assert(@intFromPtr(identity) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(identity.name.len > 0);
     const command = &command_storage;
     var header: [constants.forward_header_bytes]u8 = undefined;
     if (!read_exact(connection, &header)) return end_early("no first frame");
@@ -250,8 +246,8 @@ const Child = struct {
 
 /// Builds the NUL-terminated argv and environment of the command in `command.text`.
 fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *const Identity) ?void {
-    assert(@intFromPtr(command) != 0);
-    assert(@intFromPtr(start) != 0);
+    assert(start.arguments.len > 0);
+    assert(identity.home.len > 0);
     var used: usize = 0;
     var argc: usize = 0;
     command.argv[argc] = copy_string(&command.text, &used, "zbx") orelse return null;
@@ -301,8 +297,8 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
 }
 
 fn copy_string(text: []u8, used: *usize, source: []const u8) ?[*:0]const u8 {
-    assert(text.len < 1 << 31);
-    assert(@intFromPtr(used) != 0);
+    assert(used.* <= text.len);
+    assert(std.mem.indexOfScalar(u8, source, 0) == null);
     if (used.* + source.len + 1 > text.len) return null;
     @memcpy(text[used.*..][0..source.len], source);
     text[used.* + source.len] = 0;
@@ -313,8 +309,7 @@ fn copy_string(text: []u8, used: *usize, source: []const u8) ?[*:0]const u8 {
 
 /// Forks the command with a pty or with pipes. In the parent, the ends it keeps.
 fn launch(connection: i32, command: *Command, start: *const protocol.Start) ?Child {
-    assert(@intFromPtr(command) != 0);
-    assert(@intFromPtr(start) != 0);
+    if (!start.pty) assert(start.stderr_pipe);
     _ = connection;
     var child: Child = .{
         .pid = 0,
@@ -356,8 +351,7 @@ fn launch(connection: i32, command: *Command, start: *const protocol.Start) ?Chi
 }
 
 fn open_pty(slave_out: *i32, rows: u16, columns: u16) ?i32 {
-    assert(@intFromPtr(slave_out) != 0);
-    assert(rows <= std.math.maxInt(u16));
+    assert(slave_out.* == -1);
     const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true };
     const opened = linux.open("/dev/ptmx", flags, 0);
     if (failed(opened)) return null;
@@ -379,8 +373,6 @@ fn open_pty(slave_out: *i32, rows: u16, columns: u16) ?i32 {
 /// In the forked child: its own session, the terminal or pipes as its standard streams, then
 /// `zbx`. Never returns.
 fn run_child(command: *Command, slave: i32, pipes: *[3][2]i32) noreturn {
-    assert(@intFromPtr(command) != 0);
-    assert(@intFromPtr(pipes) != 0);
     _ = linux.setsid();
     if (slave >= 0) {
         _ = linux.ioctl(slave, tiocsctty, 0);
@@ -404,8 +396,8 @@ fn run_child(command: *Command, slave: i32, pipes: *[3][2]i32) noreturn {
 /// The streams of one command and the connection, until the command has ended and been
 /// reported, or the connection is gone.
 fn relay(connection: i32, child: *const Child) u8 {
-    assert(@intFromPtr(child) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(child.pid > 1);
     var open_streams: u32 = 0;
     var streams = [2]i32{ child.stdout_read, child.stderr_read };
     if (child.master >= 0) streams = .{ child.master, child.stderr_read };
@@ -445,8 +437,6 @@ fn relay(connection: i32, child: *const Child) u8 {
 
 /// True if no stream has data waiting (the command is gone, so nothing will add any).
 fn drained(streams: *const [2]i32) bool {
-    assert(@intFromPtr(streams) != 0);
-    assert(@sizeOf(u64) == 8);
     for (streams) |stream| {
         if (stream < 0) continue;
         var entry = [1]linux.pollfd{.{ .fd = stream, .events = linux.POLL.IN, .revents = 0 }};
@@ -458,8 +448,8 @@ fn drained(streams: *const [2]i32) bool {
 
 /// Sends what `descriptor` has as one frame. False when the stream has ended.
 fn forward_output(connection: i32, descriptor: i32, kind: protocol.Kind, data: []u8) bool {
-    assert(data.len < 1 << 31);
-    assert(@sizeOf(u64) == 8);
+    assert(descriptor >= 0);
+    assert(data.len > 0);
     const count = linux.read(descriptor, data.ptr, data.len);
     if (linux.errno(count) == .INTR or linux.errno(count) == .AGAIN) return true;
     if (failed(count)) return false; // A pty master says EIO when the slave is closed.
@@ -470,8 +460,8 @@ fn forward_output(connection: i32, descriptor: i32, kind: protocol.Kind, data: [
 
 /// Reads one frame from the Mac and acts on it. False when the connection is gone or broken.
 fn handle_client(connection: i32, child: *const Child) bool {
-    assert(@intFromPtr(child) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(child.pid > 1);
     var header_bytes: [constants.forward_header_bytes]u8 = undefined;
     if (!read_exact(connection, &header_bytes)) return false;
     const header = protocol.parse_header(&header_bytes) orelse return false;
@@ -495,15 +485,11 @@ fn handle_client(connection: i32, child: *const Child) bool {
 }
 
 fn write_to_command(child: *const Child, bytes: []const u8) void {
-    assert(@intFromPtr(child) != 0);
-    assert(bytes.len < 1 << 31);
     const target = if (child.master >= 0) child.master else child.stdin_write;
     if (target >= 0) _ = write_all(target, bytes);
 }
 
 fn end_of_input(child: *const Child) void {
-    assert(@intFromPtr(child) != 0);
-    assert(@sizeOf(u64) == 8);
     if (child.master >= 0) {
         _ = write_all(child.master, "\x04"); // The terminal's end of file.
     } else if (child.stdin_write >= 0) {
@@ -513,8 +499,8 @@ fn end_of_input(child: *const Child) void {
 
 /// The command ended: say how, and leave.
 fn finish(connection: i32, child: *const Child) u8 {
-    assert(@intFromPtr(child) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(connection >= 0);
+    assert(child.pid > 1);
     var status: u32 = 0;
     var rusage: linux.rusage = undefined;
     _ = linux.wait4(child.pid, @ptrCast(&status), 0, &rusage);
@@ -533,7 +519,6 @@ fn finish(connection: i32, child: *const Child) u8 {
 /// Mac's end-of-input frame still in flight).
 fn close_gracefully(connection: i32) void {
     assert(connection >= 0);
-    assert(constants.vm_hangup_grace_ms > 0);
     _ = linux.shutdown(connection, linux.SHUT.WR);
     var scratch: [constants.forward_data_bytes_max]u8 = undefined;
     var entry = [1]linux.pollfd{.{ .fd = connection, .events = linux.POLL.IN, .revents = 0 }};
@@ -549,8 +534,7 @@ fn close_gracefully(connection: i32) void {
 /// The connection went before the command ended: the command's session gets SIGHUP, and SIGKILL
 /// after a grace period if it is still there.
 fn hang_up(child: *const Child) u8 {
-    assert(@intFromPtr(child) != 0);
-    assert(@sizeOf(u64) == 8);
+    assert(child.pid > 1);
     const group: i32 = -child.pid;
     _ = linux.kill(group, .HUP);
     if (child.pidfd >= 0) {
