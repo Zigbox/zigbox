@@ -10,8 +10,10 @@
 //!   `--state`.
 //! STATE (state_m6.zig, M6 slice 2): the acceptance checks of state volumes with postgres: a
 //!   second writer refused, the owner inside, the lock free after each exit path, `state rm` and
-//!   `state restore`. Slice 3's MOUNTS part (secret, bind, tmpfs, export) joins here when it
-//!   moves from demo-m5, and the agent test of M6 after it.
+//!   `state restore`.
+//! MOUNTS (mounts_m6.zig, slice 3): secret, bind, tmpfs and `state export`.
+//! AGENT (agent_m6.zig, slice 4): the spec's five steps and the state commands again, by JSON
+//!   only (`--output json`, `zbx schema`, `zbx explain`); what it cannot read is a `FINDING`.
 //!
 //! `zig build demo-m6 -Daccel=tcg` for software emulation.
 
@@ -29,6 +31,7 @@ const upgrade = @import("upgrade_m6.zig");
 const spec = @import("spec_m6.zig");
 const state = @import("state_m6.zig");
 const mounts = @import("mounts_m6.zig");
+const agent = @import("agent_m6.zig");
 
 const Session = session_mod.Session;
 const H = harness;
@@ -110,6 +113,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     spec.step_spec,
     state.step_state,
     mounts.step_mounts,
+    agent.run_agent,
 };
 
 fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !void {
@@ -126,5 +130,6 @@ test {
     _ = @import("spec_m6.zig");
     _ = @import("state_m6.zig");
     _ = @import("mounts_m6.zig");
+    _ = @import("agent_m6.zig");
     _ = @import("upgrade_m6.zig");
 }

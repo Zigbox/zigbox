@@ -123,7 +123,8 @@ const Counter = struct {
     fn call(context: *anyopaque, path: []const u8, kind: fs_mod.FileKind) void {
         const counter: *Counter = @ptrCast(@alignCast(context));
         counter.seen += 1;
-        std.debug.assert(path.len > 0);
+        // The path inside the volume, not the host's (`root` is where the volume sits).
+        std.debug.assert(std.mem.eql(u8, path, "/pipe"));
         std.debug.assert(kind == .fifo);
     }
 };

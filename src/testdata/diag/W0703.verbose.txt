@@ -1,8 +1,7 @@
 warning[ZBX-W0703]: a file was left out of the export
   while  exporting a state volume
-  cause  /home/alice/.local/share/zbx/state/pgdata/data/pipe is a fifo, which
-         the archive does not keep
-  path   /home/alice/.local/share/zbx/state/pgdata/data/pipe
+  cause  /pipe is a fifo, which the archive does not keep
+  path   /pipe
   fix    nothing to do: the archive holds every other file
   more   zbx explain W0703
   docs   https://zigbox.github.io/zigbox/errors/W0703.html

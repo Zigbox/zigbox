@@ -751,9 +751,11 @@ fn export_summary(
     } else {
         var raw: [32]u8 = undefined;
         var packed_size: [32]u8 = undefined;
-        writer.print("{s}: exported {d} files ({s}) to {s}, {s} compressed\n", .{
+        const noun: []const u8 = if (totals.files == 1) "file" else "files";
+        writer.print("{s}: exported {d} {s} ({s}) to {s}, {s} compressed\n", .{
             name,
             totals.files,
+            noun,
             size_words(&raw, totals.bytes),
             file,
             size_words(&packed_size, totals.archive_bytes),

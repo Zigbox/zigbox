@@ -320,7 +320,9 @@ const Walk = struct {
             .symlink => try walk.symlink_entry(length, &found),
             .char_device, .block_device, .fifo, .socket => {
                 walk.totals.skipped += 1;
-                walk.skip.call(walk.skip.context, walk.ws.path[0..length], found.kind);
+                // The note names the path inside the volume (`/p`), not the host's layout.
+                const inside = walk.ws.path[walk.root_len..length];
+                walk.skip.call(walk.skip.context, inside, found.kind);
             },
         }
     }

@@ -164,6 +164,9 @@ pub fn check_skip_note(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (std.mem.count(u8, streams.stderr, "warning[ZBX-W0703]") != 1) return error.RefusalWrong;
     if (!contains(streams.stderr, "fifo")) return error.RefusalWrong;
+    // The path inside the volume (`/p`), never the host's layout.
+    if (!contains(streams.stderr, "cause  /p is a fifo")) return error.RefusalWrong;
+    if (contains(streams.stderr, ".local/share")) return error.RefusalWrong;
 }
 
 /// `tar -tzvf` of a volume with a symlink, a hard link, a directory of mode 750, a file with a
@@ -273,9 +276,15 @@ test "an archive: owners as the container sees them, content, links, and refusal
     try testing.expectError(error.ExitCodeWrong, check_export_in_use(refused, 0, "pgw"));
     const note: Streams = .{
         .stdout = "",
-        .stderr = "warning[ZBX-W0703]: a file was left out\n  cause  /x/p is a fifo\n",
+        .stderr = "warning[ZBX-W0703]: a file was left out\n  cause  /p is a fifo\n",
     };
     try check_skip_note(note, 0);
+    const host_path: Streams = .{
+        .stdout = "",
+        .stderr = "warning[ZBX-W0703]: a file was left out\n" ++
+            "  cause  /home/demo/.local/share/zbx/state/lk/data/p is a fifo\n",
+    };
+    try testing.expectError(error.RefusalWrong, check_skip_note(host_path, 0));
     try testing.expectError(
         error.RefusalWrong,
         check_skip_note(.{ .stdout = "", .stderr = "" }, 0),

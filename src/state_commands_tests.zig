@@ -280,7 +280,7 @@ test "export writes a gzip tar of the volume with the container's owners, to a f
     try ran_pg();
     const out = "/home/alice/pgdata.tar.gz";
     try testing.expectEqual(@as(u8, 0), command(&.{ "state", "export", "pgdata", "-o", out }));
-    try testing.expect(contains(sim.stdout(), "pgdata: exported 1 files"));
+    try testing.expect(contains(sim.stdout(), "pgdata: exported 1 file ("));
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     try testing.expect(files.kind_of(out ++ ".zbx-part") == null);
     const archive = files.content_of(out).?;
