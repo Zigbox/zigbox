@@ -104,7 +104,7 @@ pub fn entry_has_any(
 
 /// A refusal read from JSON: the process status is `exit`, nothing is on stdout, one diagnostic
 /// on stderr has `code`, is an error blamed on the user, names `volume` in its `context`, and has
-/// a fix with a command.
+/// a fix.
 pub fn check_refusal(
     arena: Allocator,
     streams: Streams,
@@ -124,13 +124,20 @@ pub fn check_refusal(
     const named = member(found.context, "volume") orelse return error.RefusalWrong;
     if (named != .string or !std.mem.eql(u8, named.string, volume)) return error.RefusalWrong;
     if (found.fixes.len == 0) return error.FixWrong;
-    if (found.fixes[0].command == null) return error.FixWrong;
     return found;
 }
 
+/// The first fix of the refusal that is a command to run, if any (E0710's is a sentence only).
+pub fn fix_command(found: agent_json.Diagnostic) ?[]const u8 {
+    for (found.fixes) |fix| {
+        if (fix.command) |command| return command;
+    }
+    return null;
+}
+
 /// The container that holds the volume, if the refusal's `context` names it: a `holder` member,
-/// or a `container` member. E0706's context names the volume only (a finding), so the agent
-/// learns the holder from `state ls`.
+/// or a `container` member. E0706's context has `holder` (the golden's text shows an older shape
+/// than the binary prints; the fixture below is the binary's).
 pub fn holder_in_context(found: agent_json.Diagnostic) ?[]const u8 {
     if (string_of(found.context, "holder")) |holder| return holder;
     return string_of(found.context, "container");
@@ -417,23 +424,25 @@ test "state rm, restore and export are read from their documents" {
 }
 
 const e0706 = "{\"code\":\"ZBX-E0706\",\"severity\":\"error\",\"blame\":\"user\"," ++
-    "\"summary\":\"the state volume is in use\",\"causes\":[\"pg (process 4242) holds the " ++
-    "volume pgdata for writing\"],\"while\":[\"taking the state volume pgdata\"]," ++
-    "\"context\":{\"volume\":\"pgdata\"},\"fixes\":[{\"sentence\":\"stop the container that " ++
-    "holds it, then run again:\",\"command\":\"zbx stop pg\"},{\"sentence\":\"or, if this run " ++
-    "only reads it, mount it with NAME:PATH:ro\",\"command\":null}],\"docs\":" ++
+    "\"summary\":\"the state volume is in use\",\"causes\":[\"the container pg is writing to " ++
+    "the volume pgdata, so it is not free to write\"],\"while\":[\"taking the state volume " ++
+    "pgdata\"],\"context\":{\"volume\":\"pgdata\",\"holder\":\"pg\"},\"fixes\":" ++
+    "[{\"sentence\":\"stop the container that holds it, then run again:\",\"command\":" ++
+    "\"zbx stop pg\"},{\"sentence\":\"or, if this run only reads it, mount it with " ++
+    "NAME:PATH:ro\",\"command\":null}],\"docs\":" ++
     "\"https://zigbox.github.io/zigbox/errors/E0706.html\"," ++
     "\"omitted\":{\"causes\":0,\"while\":0,\"context\":0,\"fixes\":0}}\n";
 
-test "a refusal is read from its code and context, and the holder is not in the context" {
-    // Goal: the agent reads E0706 by code and learns what the context offers. Method: the
-    // golden's line; a wrong exit status, code and volume; a line with a holder member; a
-    // second diagnostic; text on stdout.
+test "a refusal is read from its code and context, with the holder in the context" {
+    // Goal: the agent reads E0706 by code and learns the holder from the context. Method: the
+    // line the binary printed in the VM; a wrong exit status, code and volume; a second
+    // diagnostic; text on stdout; a line without the holder; a sentence-only fix (E0710).
     var state = scratch();
     defer state.deinit();
     const arena = state.allocator();
     const found = try check_refusal(arena, captured("", e0706), 125, 125, "ZBX-E0706", "pgdata");
-    try testing.expect(holder_in_context(found) == null);
+    try testing.expectEqualStrings("pg", holder_in_context(found).?);
+    try testing.expectEqualStrings("zbx stop pg", fix_command(found).?);
     try testing.expect(trash_in_context(found) == null);
     const status = check_refusal(arena, captured("", e0706), 1, 125, "ZBX-E0706", "pgdata");
     try testing.expectError(error.ExitCodeWrong, status);
@@ -446,20 +455,16 @@ test "a refusal is read from its code and context, and the holder is not in the 
     const two = captured("", e0706 ++ e0706);
     const twice = check_refusal(arena, two, 125, 125, "ZBX-E0706", "pgdata");
     try testing.expectError(error.RefusalWrong, twice);
-    const with_holder = try std.mem.replaceOwned(
-        u8,
-        arena,
-        e0706,
-        "\"context\":{\"volume\":\"pgdata\"}",
-        "\"context\":{\"volume\":\"pgdata\",\"holder\":\"pg\"}",
-    );
-    const named = captured("", with_holder);
-    const better = try check_refusal(arena, named, 125, 125, "ZBX-E0706", "pgdata");
-    try testing.expectEqualStrings("pg", holder_in_context(better).?);
-    const stop_pg = "\"command\":\"zbx stop pg\"";
-    const bare = try std.mem.replaceOwned(u8, arena, e0706, stop_pg, "\"command\":null");
-    const no_fix = check_refusal(arena, captured("", bare), 125, 125, "ZBX-E0706", "pgdata");
-    try testing.expectError(error.FixWrong, no_fix);
+    const bare_text = try std.mem.replaceOwned(u8, arena, e0706, ",\"holder\":\"pg\"", "");
+    const bare = try check_refusal(arena, captured("", bare_text), 125, 125, "ZBX-E0706", "pgdata");
+    try testing.expect(holder_in_context(bare) == null);
+    const e0710 = "{\"code\":\"ZBX-E0710\",\"severity\":\"error\",\"blame\":\"user\"," ++
+        "\"summary\":\"s\",\"causes\":[\"c\"],\"while\":[\"w\"],\"context\":{\"volume\":" ++
+        "\"agentold\",\"trash\":\"agentold@1000000000\"},\"fixes\":[{\"sentence\":\"copy " ++
+        "its files out by hand first\",\"command\":null}],\"docs\":\"d\",\"omitted\":{}}\n";
+    const late = try check_refusal(arena, captured("", e0710), 1, 1, "ZBX-E0710", "agentold");
+    try testing.expect(fix_command(late) == null);
+    try testing.expectEqualStrings("agentold@1000000000", trash_in_context(late).?);
 }
 
 test "the skip warning names the path inside the volume" {

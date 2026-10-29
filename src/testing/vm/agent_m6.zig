@@ -253,9 +253,10 @@ fn step_second_writer(session: *Session, out: *Io.Writer) !void {
     if (!std.mem.eql(u8, listed.holder.?, container)) {
         return fail_step(out, step, "expected state ls to name the holder", error.StateWrong);
     }
-    if (json_m6.holder_in_context(found) == null) {
-        try finding(out, "ZBX-E0706's context names the volume and not the holder: the holder " ++
-            "is in the cause text and the fix's command, so the agent reads it from state ls");
+    // The context names the holder, and the first fix is the command that stops it.
+    const holder = json_m6.holder_in_context(found) orelse "";
+    if (!std.mem.eql(u8, holder, container) or json_m6.fix_command(found) == null) {
+        return fail_step(out, step, "expected the holder in the context", error.RefusalWrong);
     }
 }
 
@@ -439,6 +440,10 @@ fn step_expired(session: *Session, out: *Io.Writer) !void {
     const named = json_m6.trash_in_context(found) orelse "";
     if (!std.mem.eql(u8, named, trash.entry)) {
         return fail_step(out, step, "expected the context to name the entry", error.RefusalWrong);
+    }
+    if (json_m6.fix_command(found) == null) {
+        try finding(out, "ZBX-E0710's only fix is a sentence (copy the files out by hand): " ++
+            "there is no command the agent can run, so it can only report it");
     }
     try explain(session, out, found);
     const none = za ++ " --output json state restore agentnone";
