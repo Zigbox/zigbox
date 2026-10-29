@@ -230,6 +230,13 @@ fn prepare_cgroup_refuses(sim: *HostSim) void {
     sim.world.add_node(base ++ "/zbx-web-1.scope/memory.max", .dir);
 }
 
+/// The macOS VM's host: no user bus, a delegated cgroup directory, and a limit file that cannot
+/// be written.
+fn prepare_cgroupfs_refuses(sim: *HostSim) void {
+    sim_run.init_cgroupfs(sim, 1);
+    sim.world.add_node(sim_run.cgroup_root ++ "/zbx-web-1.scope/memory.max", .dir);
+}
+
 fn prepare_proc_refused(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.faults.fail_step = step_of(.mount_proc);
@@ -976,6 +983,15 @@ const base_cases = [_]Case{
         .code = .E0307,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--pids", "64", "--", "/bin/sh" },
         .prepare = prepare_no_bus,
+        .exit = 125,
+    },
+    .{
+        .code = .E0309,
+        .args = &.{
+            "run",      "--rootfs", "/srv/alpine", "--name",  "web-1",
+            "--memory", "64m",      "--",          "/bin/sh",
+        },
+        .prepare = prepare_cgroupfs_refuses,
         .exit = 125,
     },
     .{

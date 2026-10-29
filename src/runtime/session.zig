@@ -495,6 +495,8 @@ pub const Session = struct {
             },
             .bus_retried, .no_address, .bad_address, .scope_left => false,
             .no_cgroup_path, .cgroup_write => true,
+            // The cgroup exists unless making it was what failed.
+            .cgroupfs => |failure| failure.step != .make,
         };
         session.scope_problem = problem;
         return error.IoFailed;

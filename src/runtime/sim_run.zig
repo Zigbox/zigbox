@@ -282,7 +282,33 @@ pub fn leak(sim: *const HostSim, before: *const Baseline) ?[]const u8 {
     if (sim.world.bus.scope_count() > before.scopes_allowed) {
         return "a cgroup scope was left behind";
     }
+    if (cgroupfs_directories(sim) > 0) return "a cgroup directory was left behind";
     return null;
+}
+
+/// The delegated cgroup directory the cgroupfs driver makes its cgroups in (tests set
+/// `ZBX_CGROUP_ROOT` to it), and its environment: a user with no bus.
+pub const cgroup_root = "/sys/fs/cgroup/zbx";
+pub const env_cgroupfs = [_]host_sim.EnvironmentVariable{
+    .{ .name = "HOME", .value = home_path },
+    .{ .name = "ZBX_CGROUP_ROOT", .value = cgroup_root },
+};
+
+/// A host of the macOS VM: no user bus, a delegated cgroup directory to make cgroups in.
+pub fn init_cgroupfs(sim: *HostSim, seed: u64) void {
+    init(sim, seed);
+    sim.world.add_node(cgroup_root, .dir);
+    sim.environment_variables = &env_cgroupfs;
+}
+
+/// How many cgroups of containers are below the delegated directory.
+pub fn cgroupfs_directories(sim: *const HostSim) u32 {
+    var count: u32 = 0;
+    for (sim.world.nodes[0..sim.world.nodes_count]) |*node| {
+        const inside = node.path.under(cgroup_root) and !node.path.eql(cgroup_root);
+        if (inside) count += 1;
+    }
+    return count;
 }
 
 /// What a container whose command started must look like to the model.

@@ -1162,7 +1162,21 @@ pub const World = struct {
         file.path = real;
         @memcpy(file.content[0..bytes.len], bytes);
         file.len = @intCast(bytes.len);
+        world.note_cgroup_join(real.slice(), bytes);
         return null;
+    }
+
+    /// A pid written to a cgroup's `cgroup.procs` while that process is still waiting for its
+    /// go-ahead is a container put in its cgroup before it can run (the cgroupfs driver's
+    /// ordering guarantee; the bus driver's is noted when the scope starts).
+    fn note_cgroup_join(world: *World, path: []const u8, bytes: []const u8) void {
+        if (!std.mem.endsWith(u8, path, "/cgroup.procs")) return;
+        const pid = std.fmt.parseInt(u32, bytes, 10) catch return;
+        for (&world.processes) |*process| {
+            if (process.pid == pid and process.state == .pending) {
+                world.scope_started_before_child_ran = true;
+            }
+        }
     }
 
     /// Whether the path is on a tmpfs the current process mounted (the container's /dev): a full
