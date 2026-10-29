@@ -137,9 +137,13 @@ fn ask_host(ctx: *const commands.Context) ?i32 {
     defer files.close(socket);
     files.write_all(socket, control.connect_request) catch return null;
     var line: [constants.vm_line_bytes_max]u8 = undefined;
-    const received = files.receive_with_descriptor(socket, &line) catch return null;
+    const received = files.receive_with_descriptors(socket, &line) catch return null;
     if (!std.mem.eql(u8, line[0..received.length], control.connect_ok)) return null;
-    return received.descriptor;
+    if (received.descriptor_count != 2) return null;
+    // The second descriptor is left open for as long as this process lives: the host watches it
+    // to learn that this command's client ended, and then lets the connection go.
+    watch_descriptor = received.descriptors[1];
+    return received.descriptors[0];
 }
 
 // ---- The command ---------------------------------------------------------------------------
@@ -162,6 +166,9 @@ const Frames = struct {
 };
 
 var frames: Frames = undefined;
+
+/// The write end of the pipe the host watches (see `ask_host`); never closed before exit.
+var watch_descriptor: i32 = -1;
 
 fn send_frame(descriptor: i32, kind: protocol.Kind, payload: []const u8) bool {
     assert(payload.len < 1 << 31);

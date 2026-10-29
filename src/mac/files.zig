@@ -324,7 +324,7 @@ test "a socket path at the limit works and one past it is refused" {
     try std.testing.expectError(error.TooLong, socket_address(at_limit ++ "a"));
 }
 
-// ---- Passing a descriptor over a Unix socket -------------------------------------------------
+// ---- Passing descriptors over a Unix socket ----------------------------------------------------
 
 const Iovec = extern struct { base: ?*anyopaque, length: usize };
 const MessageHeader = extern struct {
@@ -339,44 +339,58 @@ const MessageHeader = extern struct {
 const ControlHeader = extern struct { length: u32, level: i32, kind: i32 };
 const socket_level: i32 = 0xffff;
 const rights_kind: i32 = 1;
-/// The control message of one descriptor: its header (12 bytes) and the descriptor (4).
-const control_bytes: u32 = 16;
+/// The most descriptors one message carries here.
+pub const descriptors_max: u32 = 2;
+const control_header_bytes: u32 = 12;
 
 extern "c" fn sendmsg(socket: i32, message: *const MessageHeader, flags: i32) isize;
 extern "c" fn recvmsg(socket: i32, message: *MessageHeader, flags: i32) isize;
 
+/// A control message: its header and up to two descriptors.
 const Control = extern struct {
     header: ControlHeader,
-    descriptor: i32,
+    descriptors: [descriptors_max]i32,
 };
 
-/// Sends `bytes` and, with them, one open descriptor. The receiver gets its own copy of it.
-pub fn send_with_descriptor(socket: i32, bytes: []const u8, descriptor: i32) Error!void {
+fn control_length(count: u32) u32 {
+    assert(count >= 1);
+    assert(count <= descriptors_max);
+    return control_header_bytes + count * @sizeOf(i32);
+}
+
+/// Sends `bytes` and, with them, open descriptors (one or two). The receiver gets its own copies.
+pub fn send_with_descriptors(socket: i32, bytes: []const u8, descriptors: []const i32) Error!void {
     assert(socket >= 0);
-    assert(descriptor >= 0);
     assert(bytes.len > 0);
-    comptime assert(@sizeOf(Control) == control_bytes);
+    assert(descriptors.len >= 1);
+    assert(descriptors.len <= descriptors_max);
     var vector: Iovec = .{ .base = @constCast(bytes.ptr), .length = bytes.len };
+    const length = control_length(@intCast(descriptors.len));
     var control: Control = .{
-        .header = .{ .length = control_bytes, .level = socket_level, .kind = rights_kind },
-        .descriptor = descriptor,
+        .header = .{ .length = length, .level = socket_level, .kind = rights_kind },
+        .descriptors = @splat(-1),
     };
+    for (descriptors, 0..) |descriptor, index| {
+        assert(descriptor >= 0);
+        control.descriptors[index] = descriptor;
+    }
     const message: MessageHeader = .{
         .vectors = &vector,
         .vector_count = 1,
         .control = &control,
-        .control_length = control_bytes,
+        .control_length = length,
     };
     if (sendmsg(socket, &message, 0) < 0) return fail();
 }
 
 pub const Received = struct {
     length: u32,
-    descriptor: ?i32,
+    descriptors: [descriptors_max]i32,
+    descriptor_count: u32,
 };
 
-/// Reads what the peer sent in one message, and the descriptor that came with it, if any.
-pub fn receive_with_descriptor(socket: i32, buffer: []u8) Error!Received {
+/// Reads what the peer sent in one message, and the descriptors that came with it.
+pub fn receive_with_descriptors(socket: i32, buffer: []u8) Error!Received {
     assert(socket >= 0);
     assert(buffer.len > 0);
     var vector: Iovec = .{ .base = buffer.ptr, .length = buffer.len };
@@ -385,41 +399,60 @@ pub fn receive_with_descriptor(socket: i32, buffer: []u8) Error!Received {
         .vectors = &vector,
         .vector_count = 1,
         .control = &control,
-        .control_length = control_bytes,
+        .control_length = control_length(descriptors_max),
     };
     const count = recvmsg(socket, &message, 0);
     if (count < 0) return fail();
-    const got_descriptor = message.control_length >= control_bytes and
-        control.header.level == socket_level and control.header.kind == rights_kind;
-    return .{
+    var result: Received = .{
         .length = @intCast(count),
-        .descriptor = if (got_descriptor) control.descriptor else null,
+        .descriptors = @splat(-1),
+        .descriptor_count = 0,
     };
+    const has_control = message.control_length >= control_header_bytes and
+        control.header.level == socket_level and control.header.kind == rights_kind;
+    if (!has_control) return result;
+    const present = (control.header.length - control_header_bytes) / @sizeOf(i32);
+    result.descriptor_count = @min(present, descriptors_max);
+    for (0..result.descriptor_count) |index| result.descriptors[index] = control.descriptors[index];
+    return result;
 }
 
-test "a descriptor passed over a Unix socket is a working copy" {
-    // Goal: the hand-off the client relies on. Method: a socket pair; send a pipe's read end
-    // with a line; write to the pipe and read it through the received descriptor.
+test "descriptors passed over a Unix socket are working copies" {
+    // Goal: the hand-off the client relies on. Method: a socket pair; send a pipe's read end and a
+    // second pipe's write end with a line; use both received descriptors; and a message without
+    // descriptors says so.
     var pair: [2]i32 = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &pair));
     defer close(pair[0]);
     defer close(pair[1]);
-    var pipe_ends: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&pipe_ends));
-    defer close(pipe_ends[1]);
-    try send_with_descriptor(pair[0], "ok\n", pipe_ends[0]);
-    close(pipe_ends[0]);
+    var first: [2]i32 = undefined;
+    var second: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&first));
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&second));
+    defer close(first[1]);
+    defer close(second[0]);
+    try send_with_descriptors(pair[0], "ok\n", &.{ first[0], second[1] });
+    close(first[0]);
+    close(second[1]);
     var line: [16]u8 = undefined;
-    const received = try receive_with_descriptor(pair[1], &line);
+    const received = try receive_with_descriptors(pair[1], &line);
     try std.testing.expectEqualStrings("ok\n", line[0..received.length]);
-    const copy = received.descriptor.?;
-    defer close(copy);
-    try write_all(pipe_ends[1], "data");
+    try std.testing.expectEqual(@as(u32, 2), received.descriptor_count);
+    const reader = received.descriptors[0];
+    const writer = received.descriptors[1];
+    defer close(reader);
+    try write_all(first[1], "data");
     var data: [8]u8 = undefined;
-    try std.testing.expectEqual(@as(isize, 4), c.read(copy, &data, data.len));
+    try std.testing.expectEqual(@as(isize, 4), c.read(reader, &data, data.len));
     try std.testing.expectEqualStrings("data", data[0..4]);
-    // A message without a descriptor says so.
+    // The writer received is a working end of the second pipe: when it closes, the read end
+    // sees the end of file (the peer's death, as the host watches it).
+    try write_all(writer, "x");
+    close(writer);
+    try std.testing.expectEqual(@as(isize, 1), c.read(second[0], &data, data.len));
+    try std.testing.expectEqual(@as(isize, 0), c.read(second[0], &data, data.len));
     try write_all(pair[0], "no\n");
-    const plain = try receive_with_descriptor(pair[1], &line);
-    try std.testing.expect(plain.descriptor == null);
+    const plain = try receive_with_descriptors(pair[1], &line);
+    try std.testing.expectEqual(@as(u32, 0), plain.descriptor_count);
+    try std.testing.expectEqual(@as(i32, -1), plain.descriptors[0]);
 }

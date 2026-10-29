@@ -339,6 +339,7 @@ pub fn run(running: *Running, paths: *const paths_mod.Paths) u8 {
             shut_down(running);
             break;
         }
+        release_ended_commands();
         if (stop_when_idle(running)) {
             log("idle for {d} ms; stopping", .{running.idle_timeout_ms});
             shut_down(running);
@@ -386,34 +387,81 @@ fn answer(running: *Running, connection: i32) bool {
 }
 
 /// Opens a vsock connection to the guest's command service and hands the descriptor to the
-/// client with the answer, so that the data never passes through this process.
+/// client with the answer, so that the data never passes through this process. A second
+/// descriptor goes with it, the write end of a pipe this process watches: when the client ends,
+/// by any means, the pipe closes, and the connection's framework object is released (the
+/// framework closes a connection when its object is released, which is how the guest sees the
+/// client go, and why the object must not be released earlier).
 fn pass_connection(running: *Running, connection: i32) void {
     assert(connection >= 0);
     assert(running.listener >= 0);
+    release_ended_commands();
     var failure: vz.Failure = .{};
+    const slot = free_slot() orelse return refuse(connection);
+    var watch: [2]i32 = undefined;
+    if (std.c.pipe(&watch) != 0) return refuse(connection);
     const guest = running.machine.connect(constants.vm_forward_port, &failure) catch {
-        files.write_all(connection, "fail service\n") catch {};
-        return;
+        files.close(watch[0]);
+        files.close(watch[1]);
+        return refuse(connection);
     };
-    files.send_with_descriptor(connection, control.connect_ok, guest.descriptor) catch {};
+    const handed = [2]i32{ guest.descriptor, watch[1] };
+    files.send_with_descriptors(connection, control.connect_ok, &handed) catch {};
     files.close(guest.descriptor);
-    keep(guest.object); // The command is using the connection: its object must outlive it.
+    files.close(watch[1]); // Only the client holds the write end now.
+    commands_held[slot] = .{ .watch = watch[0], .object = guest.object };
 }
 
-/// The framework objects of connections handed to commands. The framework closes a connection
-/// when its object is released, so each is held until `connections_kept_max` newer ones have been
-/// handed out; by then the command that had it ended. (A ring, not a leak, and not a table of
-/// who is still running: the host does not see the commands' ends.)
-const connections_kept_max: u32 = 256;
-var kept_connections: [connections_kept_max]objc_id = @splat(null);
-var kept_next: u32 = 0;
-const objc_id = @import("objc.zig").Id;
+fn refuse(connection: i32) void {
+    assert(connection >= 0);
+    assert(commands_held_max > 0);
+    files.write_all(connection, "fail service\n") catch {};
+}
 
-fn keep(object: objc_id) void {
-    assert(kept_next < connections_kept_max);
-    if (kept_connections[kept_next]) |old| @import("objc.zig").release(old);
-    kept_connections[kept_next] = object;
-    kept_next = (kept_next + 1) % connections_kept_max;
+/// A command the host is looking after: its connection's object, kept alive, and the read end of
+/// the pipe whose write end the client holds.
+const Held = struct {
+    watch: i32,
+    object: objc_id,
+};
+
+const objc_id = @import("objc.zig").Id;
+const commands_held_max: u32 = 64;
+var commands_held: [commands_held_max]Held = @splat(.{ .watch = -1, .object = null });
+
+fn free_slot() ?u32 {
+    assert(commands_held.len == commands_held_max);
+    assert(commands_held_max <= 256);
+    for (commands_held, 0..) |held, index| {
+        if (held.watch < 0) return @intCast(index);
+    }
+    return null;
+}
+
+/// Releases the connections of the commands whose client has ended.
+fn release_ended_commands() void {
+    assert(commands_held.len == commands_held_max);
+    assert(commands_held_max > 0);
+    for (&commands_held) |*held| {
+        if (held.watch < 0) continue;
+        var entry = [1]std.c.pollfd{.{ .fd = held.watch, .events = std.c.POLL.IN, .revents = 0 }};
+        if (std.c.poll(&entry, 1, 0) == 0) continue;
+        files.close(held.watch);
+        @import("objc.zig").release(held.object);
+        held.* = .{ .watch = -1, .object = null };
+    }
+}
+
+/// How many commands the host looks after (a command that has just ended counts until the next
+/// look).
+fn commands_open() u32 {
+    assert(commands_held.len == commands_held_max);
+    assert(commands_held_max > 0);
+    var count: u32 = 0;
+    for (commands_held) |held| {
+        if (held.watch >= 0) count += 1;
+    }
+    return count;
 }
 
 /// Asks the guest every `vm_idle_check_ms` whether the user's processes run; true once none
@@ -424,7 +472,7 @@ fn stop_when_idle(running: *Running) bool {
     const now = files.now_ms();
     if (now - running.last_check_ms < constants.vm_idle_check_ms) return false;
     running.last_check_ms = now;
-    if (guest_busy(&running.machine)) running.last_busy_ms = now;
+    if (commands_open() > 0 or guest_busy(&running.machine)) running.last_busy_ms = now;
     return now - running.last_busy_ms >= running.idle_timeout_ms;
 }
 
