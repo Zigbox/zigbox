@@ -141,6 +141,49 @@ test "redaction: the check can fail, because --no-redact leaves the secrets in" 
     );
 }
 
+// ---- The variables of -e -------------------------------------------------------------------
+
+const given_marker = "bundle-given-value-NU-88";
+const copied_marker = "bundle-copied-value-XI-99";
+
+test "-e: a bundle holds the names that were set, never a value, with redaction on or off" {
+    // Goal: M6's rule that a value is never stored, where a bundle would show it. Method: really
+    // run a container with `-e SECRET_ONE=<marker>` and `-e COPY_ME` (a variable zbx's own
+    // environment has), make the bundle through the command line, and search every byte. The
+    // given value is in nothing, even with --no-redact (it was never kept); the copied value is
+    // zbx's own variable, redacted like every value of its environment, and shown only when the
+    // user asked for no redaction. The record names both variables.
+    for ([_]bool{ true, false }) |redact| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 41);
+        sim.world.now = 1_792_873_384;
+        sim.environment_variables = &.{
+            .{ .name = "HOME", .value = sim_run.home_path },
+            .{ .name = "COPY_ME", .value = copied_marker },
+        };
+        const start = [_][:0]const u8{ "zbx", "run", "-e", "SECRET_ONE=" ++ given_marker } ++
+            [_][:0]const u8{ "-e", "COPY_ME", "--rootfs", sim_run.rootfs_path, "--name" } ++
+            [_][:0]const u8{ "leak-1", "--", "sh" };
+        try testing.expectEqual(@as(u8, 0), run_args(&sim, &start));
+        const flags: []const [:0]const u8 = if (redact)
+            &.{ "zbx", "bundle", "leak-1" }
+        else
+            &.{ "zbx", "bundle", "leak-1", "--no-redact" };
+        try testing.expectEqual(@as(u8, 0), run_args(&sim, flags));
+        var plain: [constants.bundle_stage_bytes_max * 2]u8 = undefined;
+        const tar = try bundle_bytes(&sim, &plain);
+        try testing.expect(std.mem.indexOf(u8, tar, given_marker) == null);
+        const copied_shown = std.mem.indexOf(u8, tar, copied_marker) != null;
+        try testing.expectEqual(!redact, copied_shown);
+        const record = member(tar, "run-record.zon").?;
+        const names = ".env_names = \"SECRET_ONE COPY_ME\",";
+        try testing.expect(std.mem.indexOf(u8, record, names) != null);
+        // The names of zbx's own environment are in the bundle, as they always were.
+        const environment = member(tar, "environment.txt").?;
+        try testing.expect(std.mem.indexOf(u8, environment, "COPY_ME=") != null);
+    }
+}
+
 // ---- The golden manifest -------------------------------------------------------------------
 
 /// `text` with the version of this build replaced, so a release does not change the golden.

@@ -17,6 +17,7 @@ const diag_fuzz = @import("fuzz_diag.zig");
 const diagnostic_fuzz = @import("fuzz_diagnostic.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
+const state_fuzz = @import("fuzz_state.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
 const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
@@ -53,6 +54,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
+    .{ .name = "state", .run_iteration = state_fuzz.fuzz_state },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
     .{ .name = "dbus", .run_iteration = dbus_fuzz.fuzz_dbus },
     .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
@@ -207,8 +209,11 @@ fn random_args(
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     // M5's network options, their good values and some that are not.
     const net_words = [_][]const u8{
-        "--net",   "user",  "host", "none", "--publish",
-        "8080:80", "80:80", "8080", "0:1",  "--net=user",
+        "--net",   "user",   "host",     "none",         "--publish",
+        "8080:80", "80:80",  "8080",     "0:1",          "--net=user",
+        // M6's other mounts and the export.
+        "--tmpfs", "--bind", "--secret", "/scratch:64m", "/srv/a:/data",
+        "-o",      "state",  "export",   "pgdata",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -280,7 +285,17 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
         assert(code == environment_code);
         return;
     }
-    const fails = diag_fuzz.find_fail_lines(sim.stdout());
+    // The text report marks a failure with a FAIL line; the JSON report (`--output json`) is one
+    // document whose failing checks say so, and holds no such line.
+    const is_document = std.mem.startsWith(u8, sim.stdout(), "{\"schema\":\"zbx.doctor/1\"");
+    var fails = diag_fuzz.find_fail_lines(sim.stdout());
+    if (is_document) {
+        assert(fails.count == 0);
+        fails = diag_fuzz.find_diagnostics(sim.stderr());
+        const marked = std.mem.count(u8, sim.stdout(), "\"status\":\"fail\"");
+        // A write fault can cut the document short; whole, it names every failure.
+        if (!faulted) assert(marked == fails.count);
+    }
     // A write fault can cut a diagnostic short, and then the exit code is the environment's
     // whatever the blame was; without a fault the diagnostics are whole and blame decides.
     if (faulted and code == environment_code) {
@@ -315,6 +330,8 @@ fn check_cli_run(args: FuzzArgs, sim: *const HostSim, code: u8, faulted: bool) v
 fn fuzz_cli(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
+    check_env_options(random);
+    check_mount_options(random);
 
     var short: [constants.args_count_max + 2][16]u8 = undefined;
     var long: [constants.arg_bytes_max + 8]u8 = undefined;
@@ -355,8 +372,217 @@ fn fuzz_cli(seed: u64) void {
     }
 }
 
+/// The `-e` option as the command line reads it (M6). Builds `run` lines of `-e`/`--env` options
+/// from names of every shape, and compares `cli.parse` with an oracle that states the rules on
+/// its own: a name is a letter or underscore and then letters, digits and underscores, at most
+/// 64 bytes; a name is set once; at most 16 are given; the first option that breaks a rule is
+/// ZBX-E0010, and the text of that diagnostic never holds a value (a marker is in every value).
+/// When the line is accepted, the settings read back are the ones given, in order, and a value
+/// is the bytes after the first `=`.
+const env_marker = "zbx-fuzz-value-marker";
+
+const EnvName = struct { text: []const u8, good: bool };
+
+const env_names = [_]EnvName{
+    .{ .text = "A", .good = true },
+    .{ .text = "B_1", .good = true },
+    .{ .text = "_x", .good = true },
+    .{ .text = "NAME_0123456789", .good = true },
+    .{ .text = repeat_text('n', constants.env_name_bytes_max), .good = true },
+    .{ .text = repeat_text('n', constants.env_name_bytes_max + 1), .good = false },
+    .{ .text = "1bad", .good = false },
+    .{ .text = "a-b", .good = false },
+    .{ .text = "a b", .good = false },
+    .{ .text = "", .good = false },
+};
+
+const repeat_text = test_util.repeat;
+
+fn env_oracle_name_ok(text: []const u8) bool {
+    if (text.len == 0 or text.len > 64) return false;
+    for (text, 0..) |byte, index| {
+        const word = (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_';
+        const digit = byte >= '0' and byte <= '9';
+        if (!word and !(digit and index > 0)) return false;
+    }
+    return true;
+}
+
+fn check_env_options(random: std.Random) void {
+    const options_max = constants.run_env_count_max + 2;
+    var words: [constants.args_count_max][]const u8 = undefined;
+    var texts: [options_max][constants.env_name_bytes_max + 8 + env_marker.len]u8 = undefined;
+    var given: [options_max]EnvName = undefined;
+    var with_value: [options_max]bool = undefined;
+    var count: usize = 0;
+    words[count] = "run";
+    count += 1;
+    const options = random.uintAtMost(usize, options_max);
+    // The oracle: the index of the first option that breaks a rule, if any.
+    var first_bad: ?usize = null;
+    for (0..options) |index| {
+        const pick = env_names[random.uintLessThan(usize, env_names.len)];
+        assert(pick.good == env_oracle_name_ok(pick.text)); // The table says what the oracle says.
+        given[index] = pick;
+        with_value[index] = random.boolean();
+        const used = if (with_value[index])
+            std.fmt.bufPrint(&texts[index], "{s}={s}=x", .{ pick.text, env_marker }) catch
+                unreachable // The buffer holds the longest name, a marker and three bytes.
+        else
+            std.fmt.bufPrint(&texts[index], "{s}", .{pick.text}) catch
+                unreachable; // The same buffer holds a name alone.
+        words[count] = if (random.boolean()) "-e" else "--env";
+        words[count + 1] = used;
+        count += 2;
+        if (first_bad != null) continue;
+        const repeated = for (given[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.text, pick.text)) break true;
+        } else false;
+        if (!pick.good or repeated or index == constants.run_env_count_max) first_bad = index;
+    }
+    words[count] = "--rootfs";
+    words[count + 1] = "/srv/x";
+    words[count + 2] = "--";
+    words[count + 3] = "sh";
+    count += 4;
+
+    var invocation: cli.Invocation = undefined;
+    var diag: diag_fuzz.Diag = undefined;
+    diag.reset();
+    cli.parse(words[0..count], &invocation, &diag) catch {
+        assert(first_bad != null);
+        assert(diag.code.? == .E0010);
+        var carried: [constants.diag_carry_bytes_max]u8 = undefined;
+        assert(std.mem.indexOf(u8, diag.encode(&carried), env_marker) == null);
+        return;
+    };
+    assert(first_bad == null);
+    assert(diag.code == null);
+    const settings = invocation.run.env_slice();
+    assert(settings.len == options);
+    for (settings, given[0..options], with_value[0..options]) |setting, pick, valued| {
+        assert(std.mem.eql(u8, setting.name, pick.text));
+        assert((setting.value != null) == valued);
+        if (setting.value) |value| assert(std.mem.eql(u8, value, env_marker ++ "=x"));
+    }
+}
+
+/// The other mounts as the command line reads them (M6 slice 3). Builds `run` lines of `--tmpfs`,
+/// `--bind`, `--secret` and `--state` options from values of every shape, and compares
+/// `cli.parse` with an oracle that states the rules on its own: the first option that is not a
+/// mount is ZBX-E0012 (or E0705/E0005 for `--state`), the first good one whose target is at, in
+/// or over an earlier target, or that is the ninth, is ZBX-E0013. When the line is accepted the
+/// mounts read back are the ones given, in order.
+const MountValue = struct {
+    flag: []const u8,
+    text: []const u8,
+    target: []const u8,
+    good: bool,
+};
+
+const mount_values = [_]MountValue{
+    .{ .flag = "--tmpfs", .text = "/scratch", .target = "/scratch", .good = true },
+    .{ .flag = "--tmpfs", .text = "/scratch:64m", .target = "/scratch", .good = true },
+    .{ .flag = "--tmpfs", .text = "/t:4096", .target = "/t", .good = true },
+    .{ .flag = "--tmpfs", .text = "/t:4095", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "/t:2t", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "relative", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "/dev/shm", .target = "", .good = false },
+    .{ .flag = "--tmpfs", .text = "", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/a:/data", .target = "/data", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a:/data/sub", .target = "/data/sub", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a:/database", .target = "/database", .good = true },
+    .{ .flag = "--bind", .text = "/srv/a", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/../a:/x", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "a:/x", .target = "", .good = false },
+    .{ .flag = "--bind", .text = "/srv/a:/x:ro", .target = "", .good = false },
+    .{ .flag = "--secret", .text = "/srv/k:/run/key", .target = "/run/key", .good = true },
+    .{ .flag = "--secret", .text = "/srv/k:/run", .target = "/run", .good = true },
+    .{ .flag = "--secret", .text = "/srv/k:/etc/hosts", .target = "", .good = false },
+    .{ .flag = "--secret", .text = "/srv/k:/proc", .target = "", .good = false },
+    .{ .flag = "--state", .text = "pg:/var/lib/pg", .target = "/var/lib/pg", .good = true },
+};
+
+fn mounts_meet(target: []const u8, other: []const u8) bool {
+    if (std.mem.eql(u8, target, other)) return true;
+    const short = @min(target.len, other.len);
+    if (!std.mem.eql(u8, target[0..short], other[0..short])) return false;
+    const longer = if (target.len > other.len) target else other;
+    return longer[short] == '/';
+}
+
+fn check_mount_options(random: std.Random) void {
+    const options_max = constants.mounts_max + 2;
+    var words: [constants.args_count_max][]const u8 = undefined;
+    var given: [options_max]MountValue = undefined;
+    var count: usize = 0;
+    words[count] = "run";
+    count += 1;
+    const options = random.uintAtMost(usize, options_max);
+    var first_bad: ?usize = null;
+    var bad_code: codes.Code = .E0012;
+    var targets: [options_max][]const u8 = undefined;
+    var accepted: usize = 0;
+    var mounts_given: usize = 0;
+    var state_given = false;
+    for (0..options) |index| {
+        var pick = mount_values[random.uintLessThan(usize, mount_values.len)];
+        // A volume is named once in a run; another `--state` would be another diagnostic.
+        if (std.mem.eql(u8, pick.flag, "--state") and state_given) pick = mount_values[0];
+        state_given = state_given or std.mem.eql(u8, pick.flag, "--state");
+        given[index] = pick;
+        words[count] = pick.flag;
+        words[count + 1] = pick.text;
+        count += 2;
+        if (first_bad != null) continue;
+        if (!pick.good) {
+            first_bad = index;
+            bad_code = .E0012;
+            continue;
+        }
+        const is_state = std.mem.eql(u8, pick.flag, "--state");
+        const too_many = !is_state and mounts_given == constants.mounts_max;
+        var meets = false;
+        for (targets[0..accepted]) |earlier| meets = meets or mounts_meet(pick.target, earlier);
+        if (too_many or meets) {
+            first_bad = index;
+            bad_code = .E0013;
+            continue;
+        }
+        targets[accepted] = pick.target;
+        accepted += 1;
+        if (!is_state) mounts_given += 1;
+    }
+    words[count] = "--rootfs";
+    words[count + 1] = "/srv/x";
+    words[count + 2] = "--";
+    words[count + 3] = "sh";
+    count += 4;
+
+    var invocation: cli.Invocation = undefined;
+    var diag: diag_fuzz.Diag = undefined;
+    diag.reset();
+    cli.parse(words[0..count], &invocation, &diag) catch {
+        assert(first_bad != null);
+        assert(diag.code.? == bad_code);
+        return;
+    };
+    assert(first_bad == null);
+    assert(diag.code == null);
+    assert(invocation.run.mounts_slice().len == mounts_given);
+    assert(invocation.run.state_slice().len == @intFromBool(state_given));
+    var at: usize = 0;
+    for (given[0..options]) |pick| {
+        if (std.mem.eql(u8, pick.flag, "--state")) continue;
+        const read = invocation.run.mounts_slice()[at];
+        assert(std.mem.eql(u8, read.target, pick.target));
+        assert(std.mem.eql(u8, read.kind.flag(), pick.flag));
+        at += 1;
+    }
+}
+
 /// The command word of the command line, stated independently of `cli.scan_options`: the first
-/// word that is not an option, where `--output` takes the next word as its value. Null if
+/// word that is not an option, where `--output` and `-o` take the next word as their value. Null if
 /// collection stops before one.
 fn command_word(args: FuzzArgs) ?[]const u8 {
     var index: u32 = 1;
@@ -366,8 +592,10 @@ fn command_word(args: FuzzArgs) ?[]const u8 {
     while (index < seen_max) : (index += 1) {
         const word = args.items[index];
         if (word.len > constants.arg_bytes_max) return null;
-        if (std.mem.eql(u8, word, "--output")) {
-            index += 1; // Its value, whatever it is, but collection stops at one that is too long.
+        if (std.mem.eql(u8, word, "--output") or std.mem.eql(u8, word, "-o")) {
+            // Its value (`-o` is `state export`'s file), whatever it is, but collection stops at
+            // one that is too long.
+            index += 1;
             if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return null;
             continue;
         }
@@ -660,17 +888,28 @@ fn check_doctor_cli(
         // The one-shot fault landed after the gather, on a write: stdout or one block did not
         // reach its stream, and the exit code is the environment's whatever else happened.
         assert(code == constants.exit_environment);
-        assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), sim.stdout()));
+        if (json) {
+            // Written in pieces: whatever reached stdout is the start of the document.
+            const start = "{\"schema\":\"zbx.doctor/1\",";
+            assert(std.mem.startsWith(u8, start, sim.stdout()) or
+                std.mem.startsWith(u8, sim.stdout(), start));
+        } else {
+            assert(std.mem.startsWith(u8, doctor.render(report, false, &buffer), sim.stdout()));
+        }
         return;
     }
-    assert(std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer)));
     assert(code == report.exit_code());
-    const fails = diag_fuzz.find_fail_lines(sim.stdout());
     const blocks = diag_fuzz.find_diagnostics(sim.stderr());
-    assert(fails.unregistered == 0);
     assert(blocks.unregistered == 0);
-    assert(fails.count == blocks.count);
-    assert(std.mem.eql(codes.Code, fails.in_order(), blocks.in_order()));
+    if (json) {
+        check_doctor_document(sim.stdout(), report, &blocks);
+    } else {
+        assert(std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer)));
+        const fails = diag_fuzz.find_fail_lines(sim.stdout());
+        assert(fails.unregistered == 0);
+        assert(fails.count == blocks.count);
+        assert(std.mem.eql(codes.Code, fails.in_order(), blocks.in_order()));
+    }
     var index: u32 = 0;
     for (&report.checks) |*check| {
         if (check.status != .fail) continue;
@@ -680,6 +919,54 @@ fn check_doctor_cli(
     assert(index == blocks.count);
     if (blocks.count == 0) assert(sim.stderr().len == 0);
     if (json) assert(every_line_is_json(sim.stderr()));
+}
+
+/// The `zbx.doctor/1` document says what the report says: every check with its status and
+/// detail, a code exactly for the checks that are not ok (a failure's is the one on stderr, a
+/// warning's the check's `W` code), and `ok` only if nothing failed.
+fn check_doctor_document(
+    text: []const u8,
+    report: *const doctor.Report,
+    blocks: anytype,
+) void {
+    assert(text.len > 0);
+    assert(text[text.len - 1] == '\n');
+    assert(std.mem.count(u8, text, "\n") == 1);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch {
+        unreachable; // The document is JSON whatever the host looked like.
+    };
+    const document = parsed.object;
+    assert(std.mem.eql(u8, document.get("schema").?.string, "zbx.doctor/1"));
+    const checks = document.get("checks").?.array.items;
+    assert(checks.len == report.checks.len);
+    var failed: u32 = 0;
+    for (checks, &report.checks) |item, *check| {
+        const object = item.object;
+        assert(std.mem.eql(u8, object.get("id").?.string, @tagName(check.id)));
+        assert(std.mem.eql(u8, object.get("status").?.string, @tagName(check.status)));
+        assert(std.mem.eql(u8, object.get("detail").?.string, check.detail.slice()));
+        if (check.status == .ok) {
+            assert(object.get("code") == null);
+            assert(object.get("diagnostic") == null);
+            continue;
+        }
+        const expected = check.diag.code.?;
+        assert(std.mem.eql(u8, object.get("code").?.string, codes.full_name(expected)));
+        const diagnostic = object.get("diagnostic").?.object;
+        assert(std.mem.eql(u8, diagnostic.get("code").?.string, codes.full_name(expected)));
+        if (check.status == .warn) {
+            assert(expected == doctor.warning_code_of(check.id).?);
+            assert(std.mem.eql(u8, diagnostic.get("severity").?.string, "warning"));
+            continue;
+        }
+        assert(blocks.codes[failed] == expected_code(check.id));
+        failed += 1;
+    }
+    assert(failed == blocks.count);
+    assert(document.get("ok").?.bool == (failed == 0));
 }
 
 fn every_line_is_json(text: []const u8) bool {

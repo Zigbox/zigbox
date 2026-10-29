@@ -138,10 +138,13 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         try testing.expectEqual(case.code, run(&sim, &json));
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "\n"));
         try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"container_exit\":{"));
-        var number_text: [64]u8 = undefined;
+        var number_text: [128]u8 = undefined;
         // The container_exit object ends with the code; the line goes on with what ran.
-        const format = "\"code\":{d},\"network\":\"none\",\"published\":[]}},\"ran\":{{";
-        const code_text = try std.fmt.bufPrint(&number_text, format, .{case.code});
+        // The hint is the container's own non-zero exit with the default network.
+        const failed = case.status == .exited and case.code != 0;
+        const member: []const u8 = if (failed) ",\"hint\":\"network_none\"" else "";
+        const format = "\"code\":{d},\"network\":\"none\"{s},\"published\":[]}},\"ran\":{{";
+        const code_text = try std.fmt.bufPrint(&number_text, format, .{ case.code, member });
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), code_text) != null);
         const ran = "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n";
         try testing.expect(std.mem.endsWith(u8, sim.stderr(), ran));
@@ -678,7 +681,7 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
     try testing.expectEqual(@as(u8, 42), run(&sim, &args));
     var parsed: records.Parsed = undefined;
     try records.parse(record_text(&sim, "rec-1").?, &parsed);
-    try testing.expectEqual(@as(u32, 4), parsed.version);
+    try testing.expectEqual(constants.record_version, parsed.version);
     try testing.expectEqual(@as(u64, 1_760_000_100), parsed.started);
     try testing.expectEqual(@as(?u64, 1_760_000_100), parsed.ended);
     try testing.expectEqual(records.Exit{ .exited = 42 }, parsed.exit);
@@ -917,6 +920,22 @@ test "the no-network hint: only for a failed run that was not given --net, and n
     try testing.expectEqual(@as(u8, 1), run(&sim, &json));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"network\":\"none\"") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "grant with") == null);
+    // The hint is a member of container_exit, after the network and before the forwards.
+    const member = "\"network\":\"none\",\"hint\":\"network_none\",\"published\":[]}";
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), member) != null);
+
+    // An explicit `--net none` carries none, in JSON as in text; so does a success.
+    sim_run.init(&sim, 22);
+    sim.world.command_exit = .{ .exited = 1 };
+    const explicit_json = [_][:0]const u8{
+        "zbx", "--output", "json", "run", "--net", "none", "--rootfs", rootfs, "--", "sh",
+    };
+    try testing.expectEqual(@as(u8, 1), run(&sim, &explicit_json));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"network\":\"none\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "hint") == null);
+    sim_run.init(&sim, 22);
+    try testing.expectEqual(@as(u8, 0), run(&sim, &json));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "hint") == null);
 }
 
 test "a generated file that cannot be made is a note, and the run goes on" {
@@ -944,4 +963,78 @@ test "a generated file that cannot be made is a note, and the run goes on" {
     const table = &sim.world.tables[sim.world.processes[1].table];
     try testing.expect(!table.has(.bind_file, rootfs ++ "/etc/hosts"));
     try testing.expect(table.has(.bind_file, rootfs ++ "/etc/resolv.conf"));
+}
+
+const value_marker = "value-marker-ZETA-42";
+const copied_marker = "copied-marker-ETA-77";
+
+test "-e sets, copies and replaces: the container gets the values, nothing else sees them" {
+    // Goal: M6 slice 1's `-e`. Method: a host with TERM and a variable to copy; `-e NAME=VALUE`,
+    // `-e NAME` and `-e TERM=dumb` (which replaces the default TERM). The command's environment
+    // has all three, once; the record names them and holds no value; zbx writes no value on
+    // stdout, stderr or into any file; the same in JSON mode.
+    const records = @import("records.zig");
+    for ([_]bool{ false, true }) |json| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 31);
+        sim.environment_variables = &.{
+            .{ .name = "HOME", .value = "/home/alice" },
+            .{ .name = "TERM", .value = "xterm" },
+            .{ .name = "COPY_ME", .value = copied_marker },
+        };
+        const flags = [_][:0]const u8{ "run", "-e", "APP=a=" ++ value_marker, "-e", "COPY_ME" } ++
+            [_][:0]const u8{ "--env=TERM=dumb", "--rootfs", rootfs, "--name", "env-1", "--", "sh" };
+        const text_args = [_][:0]const u8{"zbx"} ++ flags;
+        const json_args = [_][:0]const u8{ "zbx", "--output", "json" } ++ flags;
+        if (json) {
+            try testing.expectEqual(@as(u8, 0), run(&sim, &json_args));
+        } else {
+            try testing.expectEqual(@as(u8, 0), run(&sim, &text_args));
+        }
+        const envp = sim.world.processes[1].envp();
+        try testing.expect(std.mem.indexOf(u8, envp, "APP=a=" ++ value_marker ++ "\n") != null);
+        try testing.expect(std.mem.indexOf(u8, envp, "COPY_ME=" ++ copied_marker ++ "\n") != null);
+        try testing.expect(std.mem.indexOf(u8, envp, "TERM=dumb\n") != null);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, envp, "TERM="));
+        const record = record_text(&sim, "env-1").?;
+        const names = ".env_names = \"APP COPY_ME TERM\",";
+        try testing.expect(std.mem.indexOf(u8, record, names) != null);
+        var parsed: records.Parsed = undefined;
+        try records.parse(record, &parsed);
+        try testing.expectEqual(@as(u8, 3), parsed.env_names_count);
+        for ([_][]const u8{ value_marker, copied_marker }) |marker| {
+            try testing.expect(std.mem.indexOf(u8, record, marker) == null);
+            try testing.expect(std.mem.indexOf(u8, sim.stderr(), marker) == null);
+            try testing.expect(std.mem.indexOf(u8, sim.stdout(), marker) == null);
+            for (sim.world.written[0..sim.world.written_count]) |*file| {
+                try testing.expect(std.mem.indexOf(u8, file.content[0..file.len], marker) == null);
+            }
+        }
+    }
+}
+
+test "-e replaces a variable of the image, and an unset -e NAME is refused before anything starts" {
+    // Goal: the other two rules. Method: `-e PATH=/x` replaces the default PATH in place (one
+    // PATH in the environment); `-e NOT_SET` is ZBX-E0011 with exit 125, no container, no
+    // record, and the message names the variable only.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 32);
+    const replace = [_][:0]const u8{ "zbx", "run", "-e", "PATH=/x", "--rootfs", rootfs, "--" } ++
+        [_][:0]const u8{"/bin/sh"};
+    try testing.expectEqual(@as(u8, 0), run(&sim, &replace));
+    const envp = sim.world.processes[1].envp();
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, envp, "PATH="));
+    try testing.expect(std.mem.indexOf(u8, envp, "PATH=/x\n") != null);
+
+    sim_run.init(&sim, 33);
+    sim.environment_variables = &.{.{ .name = "HOME", .value = "/home/alice" }};
+    const unset = [_][:0]const u8{ "zbx", "run", "-e", "NOT_SET", "-e", "A=" ++ value_marker } ++
+        [_][:0]const u8{ "--rootfs", rootfs, "--name", "env-2", "--", "sh" };
+    try testing.expectEqual(@as(u8, 125), run(&sim, &unset));
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0011]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "NOT_SET") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), value_marker) == null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(record_text(&sim, "env-2") == null);
+    try testing.expect(sim.world.processes[1].state == .unused);
 }

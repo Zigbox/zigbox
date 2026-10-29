@@ -1,0 +1,5 @@
+error[ZBX-E0707]: no state volume with that name
+  cause  there is no state volume called pgdata
+  fix    list the volumes and the trash:   zbx state ls
+  more   zbx explain E0707 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0707.html

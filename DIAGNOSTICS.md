@@ -10,7 +10,7 @@ When something goes wrong, the user should see a short, designed explanation: wh
 2. **Layered detail.** The default is a few lines. `--verbose` adds the full cause chain and context. A bundle adds everything else. Nobody has to read past the layer they need.
 3. **Blame correctly.** A diagnostic says whether the problem is the user's input, the host or environment, an external service (a registry, the store), or a bug in our code. Only the last one asks for a bug report.
 4. **Name the real cause, not the last symptom.** "Permission denied" is a symptom. "AppArmor restricts unprivileged user namespaces on this host" is a cause.
-5. **Fixes are runnable.** Where a fix is a command, print the command.
+5. **Fixes are runnable.** Where a fix is a command, print the command. Say what it needs: a fix that needs root, and a fix that is a template, are marked so in JSON, and a reader (an agent) never runs a template.
 6. **Same model everywhere.** CLI output, JSON output, the Zigcube API, and `zcube why` all render the same diagnostic structure. A failure on a remote node looks the same as a local one.
 7. **Diagnostics are tested.** Their text is part of the product and has golden tests like any other output.
 
@@ -63,7 +63,7 @@ A bug's internal message (the panic text or the broken invariant) means nothing 
 | `causes` | yes, at least one | The cause chain, innermost real cause last. |
 | `while` | no | What was being done when it failed (the `while` lines), outermost first. JSON always carries the array, empty if there are none. |
 | `context` | no | Key–value pairs (container, image, digest, node, pid, path). |
-| `fixes` | yes unless `internal` | Each fix is a sentence and optionally a command. |
+| `fixes` | yes unless `internal` | Each fix is a sentence and optionally a command. A command that needs administrator rights carries `"needs_root":true`, and one that is an example to adapt rather than to run as written carries `"template":true`. Both are in the JSON only when true. |
 | `docs` | automatic | Generated from the code (see Codes). |
 | `omitted` | automatic | How many causes, `while` lines, context pairs and fixes were dropped because they exceeded the collector's fixed bounds. Verbose output says "(N more not shown)"; JSON always carries the counts, zero included. |
 | `saved` | bug only | The absolute path of the bundle written for this bug. JSON key `saved`, absent when no bundle was written. |
@@ -86,7 +86,7 @@ A bug's internal message (the panic text or the broken invariant) means nothing 
 | JSON | `--output json` | the full diagnostic object on stderr, one JSON object per line, for scripts and CI |
 | Bundle | `zbx bundle`, `zcube bundle`, or automatic on `bug` | everything below |
 
-A command may report several diagnostics (`zbx doctor` reports one per failing check). They come in order: in text, blocks are separated by a blank line; in JSON, each is one object per line. The exit code is decided by the blame of the diagnostics.
+A command may report several diagnostics (`zbx doctor` reports one per failing check). They come in order: in text, blocks are separated by a blank line; in JSON, each is one object per line. With `--output json`, `zbx doctor` also prints its report on stdout as one `zbx.doctor/1` document: every check with its status, and for a warning (a `W` code) or a failure its code and its diagnostic, so a script reads the net warning without parsing the text. The exit code is decided by the blame of the diagnostics.
 
 Exit codes: `1` user, `2` environment, `3` external, `70` internal (EX_SOFTWARE).
 

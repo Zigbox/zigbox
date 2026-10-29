@@ -23,11 +23,17 @@ const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
 const runtime = @import("runtime/run.zig");
+const run_env = @import("run_env.zig");
 const runtime_spec = @import("runtime/spec.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
+const state_commands = @import("state_commands.zig");
+const volume = @import("state/volume.zig");
+const mounts = @import("runtime/mounts.zig");
+const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
+const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
@@ -45,11 +51,13 @@ const help_text =
     \\commands:
     \\  run             run a command in a container whose root is a tree or a directory (see below)
     \\  bundle          collect a redacted diagnostic bundle for a run (see below)
-    \\  doctor          check that this host can run zbx (a diagnostic per failing check)
+    \\  doctor          check that this host can run zbx (a diagnostic per failing check;
+    \\                  --output json: the report as a document, see zbx schema doctor)
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
@@ -78,9 +86,23 @@ const help_text =
     \\                  or user (the network through pasta, as the user: apt install passt)
     \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
     \\                  implies --net user)
+    \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
+    \\                  =<value> that value, without it zbx's own (an error if unset there).
+    \\                  A value is never stored or printed; zbx ps and a bundle show the name
     \\  -d, --detach    start the container and return; zbx ps and zbx stop find it again
     \\  --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
     \\  --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
+    \\  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
+    \\                  8); the first use makes it, empty. One run writes a volume at a time;
+    \\                  with :ro it is mounted read-only and shared with other readers
+    \\  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
+    \\                  size; k, m or g). Its pages count against --memory
+    \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
+    \\                  <host> that does not exist is an error, never made (repeatable)
+    \\  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
+    \\                  owned by the container's root. Its contents are never stored or
+    \\                  printed, and the mount point is left out of zbx commit (repeatable).
+    \\                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\stop:
@@ -100,6 +122,17 @@ const help_text =
     \\  zbx store gc --trash     list the trash
     \\  zbx store restore <id>   put a gc's trash back
     \\  a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+    \\
+    \\state:
+    \\  zbx state ls             each volume: size, created, last used, last container, in use by
+    \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
+    \\  zbx state restore <name> bring the newest trash of <name> back
+    \\  zbx state export <name> [-o <file>]   write the volume as a gzip-compressed tar, owners as
+    \\                           the container sees them (999, not the host's ids), to <file>
+    \\                           or standard output (never a terminal); refused while a run
+    \\                           writes the volume
+    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
+    \\  touches them, and nothing but state rm removes one
     \\
     \\pull:
     \\  zbx pull [--resolve-only] <reference>
@@ -153,6 +186,7 @@ pub const Command = enum {
     schema,
     stop,
     store,
+    state,
     version,
 };
 
@@ -208,6 +242,33 @@ pub const RunArgs = struct {
     /// The `--publish` values, parsed as each was read (a bad one is refused there, E0600).
     publish: [constants.publish_count_max]runtime_spec.Publish = undefined,
     publish_count: u32 = 0,
+    /// The `-e` options, each read as it came (a bad one is refused there, E0010). A value stays
+    /// in the argument it came in and is never copied; `run_env.resolve` merges them at the start.
+    env: [constants.run_env_count_max]run_env.Setting = undefined,
+    env_count: u32 = 0,
+
+    /// The `--state` values, parsed as each was read (`take_state`).
+    state: [constants.state_volumes_max]volume.Mount = undefined,
+    state_count: u32 = 0,
+
+    /// The `--tmpfs`, `--bind` and `--secret` values, parsed as each was read (`take_mount`).
+    mounts: [constants.mounts_max]mounts.Mount = undefined,
+    mounts_count: u32 = 0,
+
+    pub fn mounts_slice(run_args: *const RunArgs) []const mounts.Mount {
+        assert(run_args.mounts_count <= constants.mounts_max);
+        return run_args.mounts[0..run_args.mounts_count];
+    }
+
+    pub fn env_slice(run_args: *const RunArgs) []const run_env.Setting {
+        assert(run_args.env_count <= constants.run_env_count_max);
+        return run_args.env[0..run_args.env_count];
+    }
+
+    pub fn state_slice(run_args: *const RunArgs) []const volume.Mount {
+        assert(run_args.state_count <= constants.state_volumes_max);
+        return run_args.state[0..run_args.state_count];
+    }
 
     pub fn publish_slice(run_args: *const RunArgs) []const runtime_spec.Publish {
         assert(run_args.publish_count <= constants.publish_count_max);
@@ -226,9 +287,13 @@ const RunOption = enum {
     grace,
     net,
     publish,
+    state,
+    tmpfs,
+    bind,
+    secret,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 8);
+        assert(@backingInt(option) <= 12);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -240,6 +305,10 @@ const RunOption = enum {
             .grace => "--grace",
             .net => "--net",
             .publish => "--publish",
+            .state => "--state",
+            .tmpfs => "--tmpfs",
+            .bind => "--bind",
+            .secret => "--secret",
         };
     }
 };
@@ -263,6 +332,14 @@ pub const StoreArgs = struct {
     by_image: bool = false,
 };
 
+/// What `state` was given: the subcommand and the volume's name (`rm`, `restore`).
+pub const StateArgs = struct {
+    action: state_commands.Action,
+    operand: ?[]const u8,
+    /// `state export -o FILE`; null writes the archive to standard output.
+    out: ?[]const u8 = null,
+};
+
 /// What `pull` was given besides its reference.
 pub const PullArgs = struct {
     resolve_only: bool = false,
@@ -281,6 +358,8 @@ pub const Invocation = struct {
     store: StoreArgs,
     /// Set only when `command` is `pull`.
     pull: PullArgs,
+    /// Set only when `command` is `state`.
+    state: StateArgs,
 };
 
 pub const ParseError = error{
@@ -323,6 +402,9 @@ const Token = union(enum) {
     run_option_next: RunOption,
     /// The same with the value after an `=`.
     run_option_inline: struct { option: RunOption, value: []const u8 },
+    /// `-e` and `--env`, whose value is the next argument, and `--env=<value>`: `run`'s.
+    env_next,
+    env_inline: []const u8,
     /// `--read-only` and `-d`: options of `run` without a value; `--all` is `ps`'s.
     read_only,
     detach,
@@ -339,6 +421,8 @@ const Token = union(enum) {
     no_redact,
     /// `--resolve-only`: `pull`'s.
     resolve_only,
+    /// `-o`, whose value is the next argument: `state export`'s file.
+    out_next,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -348,7 +432,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 9);
+    assert(std.enums.values(RunOption).len == 13);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -372,6 +456,11 @@ fn classify(argument: []const u8) Token {
     }
     if (run_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--")) return .separator;
+    if (std.mem.eql(u8, argument, "-e")) return .env_next;
+    if (std.mem.eql(u8, argument, "--env")) return .env_next;
+    if (std.mem.startsWith(u8, argument, "--env=")) {
+        return .{ .env_inline = argument["--env=".len..] };
+    }
     if (std.mem.eql(u8, argument, "--read-only")) return .read_only;
     if (std.mem.eql(u8, argument, "-d")) return .detach;
     if (std.mem.eql(u8, argument, "--detach")) return .detach;
@@ -383,6 +472,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
+    if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -418,6 +508,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "stop")) found = .stop;
     if (std.mem.eql(u8, name, "store")) found = .store;
+    if (std.mem.eql(u8, name, "state")) found = .state;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -429,7 +520,7 @@ fn operands_count(command: Command) u32 {
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .lock => 1,
-        .store => 2,
+        .store, .state => 2,
     };
     assert(count <= 2);
     return count;
@@ -458,17 +549,17 @@ pub fn scan_options(args: []const []const u8) Options {
                     index += 1;
                 }
             },
-            .run_option_next => {
+            .run_option_next, .env_next => {
                 if (is_run and index + 1 < args.len) index += 1;
             },
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next => {
+            .confirm_next, .out_next => {
                 if (index + 1 < args.len) index += 1;
             },
             .confirm_inline, .trash, .resolve_only, .by_image => {},
-            .run_option_inline, .unknown_option, .last, .no_redact => {},
+            .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
@@ -496,6 +587,7 @@ pub fn parse(
     var bundle_args: BundleArgs = .{};
     var pull_args: PullArgs = .{};
     var gc_args: GcArgs = .{};
+    var export_file: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -509,10 +601,8 @@ pub fn parse(
                 index += 1;
                 try check_output_value(diag, args[index]);
             },
-            .run_option_next, .run_option_inline => {
-                const is_stop = count > 0 and command_named(operands[0]) == .stop;
-                if (!is_run and !is_stop) return unknown_option(diag, argument);
-                try take_run_option(diag, &run_args, args, &index, is_run);
+            .run_option_next, .run_option_inline, .env_next, .env_inline => {
+                try take_run_or_env(diag, &run_args, operands[0..count], args, &index);
             },
             .all => try take_all_option(diag, &run_args, operands[0..count], argument),
             .separator => {
@@ -534,6 +624,7 @@ pub fn parse(
                 bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
             },
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
+            .out_next => try take_out_option(diag, &export_file, operands[0..count], args, &index),
             .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -549,6 +640,8 @@ pub fn parse(
     invocation.pull = pull_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+    invocation.state.out = export_file;
+    if (export_file != null) assert(invocation.state.action == .@"export"); // `-o` is its own.
 }
 
 /// `--all`, which only `ps` takes.
@@ -562,6 +655,26 @@ fn take_all_option(
     if (operands.len == 0) return unknown_option(diag, argument);
     if (command_named(operands[0]) != .ps) return unknown_option(diag, argument);
     run_args.all = true;
+}
+
+/// `-o FILE`, which only `state export` takes.
+fn take_out_option(
+    diag: *Diag,
+    export_file: *?[]const u8,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(classify(args[index.*]) == .out_next);
+    const argument = args[index.*];
+    const is_export = operands.len >= 2 and command_named(operands[0]) == .state and
+        std.mem.eql(u8, operands[1], "export");
+    if (!is_export) return unknown_option(diag, argument);
+    if (export_file.* != null) return unexpected_argument(diag, .state, argument);
+    if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
+    index.* += 1;
+    export_file.* = args[index.*];
 }
 
 /// `--resolve-only`, which only `pull` takes.
@@ -683,6 +796,10 @@ fn take_run_option(
         },
     };
     if (option == .publish) return take_publish(diag, run_args, value);
+    if (option == .state) return take_state(diag, run_args, value);
+    if (option == .tmpfs) return take_mount(diag, run_args, .tmpfs, value);
+    if (option == .bind) return take_mount(diag, run_args, .bind, value);
+    if (option == .secret) return take_mount(diag, run_args, .secret, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -693,9 +810,71 @@ fn take_run_option(
         .grace => &run_args.grace,
         .net => &run_args.net,
         .publish => unreachable, // Repeatable: `take_publish` above.
+        .state => unreachable, // Repeatable: `take_state` above.
+        .tmpfs, .bind, .secret => unreachable, // Repeatable: `take_mount` above.
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
     slot.* = value;
+}
+
+/// A value option of `run` (`stop` takes two of them), or `-e`: the command decides which are
+/// allowed, and any other command refuses the option as unknown.
+fn take_run_or_env(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    const first: ?Command = if (operands.len > 0) command_named(operands[0]) else null;
+    const is_run = first != null and first.? == .run;
+    const is_stop = first != null and first.? == .stop;
+    switch (classify(argument)) {
+        .env_next, .env_inline => {
+            if (!is_run) return unknown_option(diag, argument);
+            try take_env(diag, run_args, args, index);
+        },
+        else => {
+            if (!is_run and !is_stop) return unknown_option(diag, argument);
+            try take_run_option(diag, run_args, args, index, is_run);
+        },
+    }
+}
+
+/// One `-e`, `--env` or `--env=`: the value is the next argument unless it came after an `=`.
+/// A missing value is `ZBX-E0005`, like every option's. Nothing here echoes the variable's value.
+fn take_env(
+    diag: *Diag,
+    run_args: *RunArgs,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    assert(diag.code == null);
+    const argument = args[index.*];
+    const text: []const u8 = switch (classify(argument)) {
+        .env_inline => |value| value,
+        else => blk: {
+            const next = index.* + 1;
+            if (next == args.len) return missing_option_value(diag, "--env");
+            if (classify(args[next]) == .separator) return missing_option_value(diag, "--env");
+            index.* = next;
+            break :blk args[next];
+        },
+    };
+    switch (run_env.parse(text, run_args.env_slice())) {
+        .ok => |setting| {
+            run_args.env[run_args.env_count] = setting;
+            run_args.env_count += 1;
+        },
+        .problem => |problem| {
+            run_env.refuse_text(diag, problem.kind, problem.name);
+            return error.BadOptionValue;
+        },
+    }
+    assert(run_args.env_count <= constants.run_env_count_max);
 }
 
 /// `run` needs a rootfs and a command: the two things a user is most likely to forget.
@@ -754,6 +933,7 @@ fn check_network_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
     diag.fix(.{
         .sentence = "drop --net: --publish implies --net user",
         .command = "zbx run --publish 8080:80 nginx",
+        .template = true,
     });
     return error.UnexpectedArgument;
 }
@@ -779,6 +959,76 @@ fn take_publish(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!v
     assert(runtime_spec.publish_problem(.user, run_args.publish_slice()) == null);
 }
 
+/// One `--state NAME:PATH[:ro]`: parsed now, and checked against the ones before it, so that the
+/// diagnostic quotes the value that is wrong. A bad name is ZBX-E0705; anything else E0005.
+fn take_state(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.state_count <= constants.state_volumes_max);
+    const mount = switch (volume.parse_mount(value)) {
+        .ok => |found| found,
+        .problem => |problem| switch (problem) {
+            .no_target => {
+                state_diagnose.bad_value(diag, value, "a volume needs a path: NAME:PATH");
+                return error.BadOptionValue;
+            },
+            .name => |name_problem| {
+                const colon = std.mem.indexOfScalar(u8, value, ':').?; // `no_target` otherwise.
+                state_diagnose.bad_name(diag, value[0..colon], name_problem);
+                return error.BadOptionValue;
+            },
+            .target => |target_problem| {
+                state_diagnose.bad_value(diag, value, target_problem.sentence());
+                return error.BadOptionValue;
+            },
+        },
+    };
+    if (run_args.state_count == constants.state_volumes_max) {
+        state_diagnose.bad_value(diag, value, state_diagnose.list_sentence(.too_many));
+        return error.BadOptionValue;
+    }
+    run_args.state[run_args.state_count] = mount;
+    if (volume.list_problem(run_args.state[0 .. run_args.state_count + 1])) |problem| {
+        state_diagnose.bad_value(diag, value, state_diagnose.list_sentence(problem));
+        return error.BadOptionValue;
+    }
+    // A mount given before it may hold the same path.
+    if (mounts.conflict(mount.target, &.{}, run_args.mounts_slice())) |found| {
+        mounts_diagnose.conflict(diag, "--state", value, mounts.conflict_sentence(found));
+        return error.BadOptionValue;
+    }
+    run_args.state_count += 1;
+}
+
+/// One `--tmpfs`, `--bind` or `--secret`: parsed now, and checked against the state volumes and
+/// the mounts before it, so that the diagnostic quotes the value that is wrong. A value that is
+/// not a mount is ZBX-E0012; one that meets another, or one too many, ZBX-E0013.
+fn take_mount(
+    diag: *Diag,
+    run_args: *RunArgs,
+    kind: mounts.Kind,
+    value: []const u8,
+) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.mounts_count <= constants.mounts_max);
+    const mount = switch (mounts.parse(kind, value)) {
+        .ok => |found| found,
+        .problem => |problem| {
+            mounts_diagnose.bad_value(diag, kind, value, problem.sentence());
+            return error.BadOptionValue;
+        },
+    };
+    if (run_args.mounts_count == constants.mounts_max) {
+        mounts_diagnose.conflict(diag, kind.flag(), value, mounts.too_many_sentence);
+        return error.BadOptionValue;
+    }
+    if (mounts.conflict(mount.target, run_args.state_slice(), run_args.mounts_slice())) |found| {
+        mounts_diagnose.conflict(diag, kind.flag(), value, mounts.conflict_sentence(found));
+        return error.BadOptionValue;
+    }
+    run_args.mounts[run_args.mounts_count] = mount;
+    run_args.mounts_count += 1;
+}
+
 /// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
 fn bad_publish(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
     assert(diag.code == null);
@@ -793,6 +1043,7 @@ fn bad_publish(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
     diag.fix(.{
         .sentence = "give a host port and the container's port, both 1 to 65535:",
         .command = "zbx run --publish 8080:80 nginx",
+        .template = true,
     });
     return error.BadOptionValue;
 }
@@ -809,6 +1060,7 @@ fn bad_net_value(diag: *Diag, value: []const u8) ParseError {
     diag.fix(.{
         .sentence = "choose a mode:",
         .command = "zbx run --net user alpine -- wget -qO- https://example.com",
+        .template = true,
     });
     return error.BadOptionValue;
 }
@@ -841,9 +1093,11 @@ fn resolve(
 ) ParseError!void {
     assert(operands.len <= constants.args_count_max);
     invocation.store = .{ .action = .ls, .operand = null }; // Only `store` and `commit` set it.
+    invocation.state = .{ .action = .ls, .operand = null }; // Only `state` sets it.
     if (operands.len == 0) return missing_command(diag, args.len);
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
     if (command == .store) return resolve_store(operands, invocation, diag);
+    if (command == .state) return resolve_state(operands, invocation, diag);
     defer if (invocation.command == .commit) {
         invocation.store = .{ .action = .commit, .operand = invocation.operand };
     };
@@ -923,6 +1177,53 @@ fn resolve_store(
         .second = if (given == 2) operands[3] else null,
     };
     assert((invocation.store.operand != null) == (given >= 1));
+}
+
+/// `state` takes a subcommand, and for `rm` and `restore` a volume's name.
+fn resolve_state(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .state);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    if (operands.len == 1) {
+        return state_usage(diag, "'state' needs a subcommand: ls, rm, export or restore");
+    }
+    const action = std.meta.stringToEnum(state_commands.Action, operands[1]) orelse {
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a state subcommand; they are ls, rm, export and restore", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    };
+    const wanted: usize = if (action == .ls) 0 else 1;
+    const given: usize = operands.len - 2;
+    if (given > wanted) return unexpected_argument(diag, .state, operands[2 + wanted]);
+    if (given < wanted) {
+        return state_usage(diag, switch (action) {
+            .rm => "'state rm' needs the name of the volume to remove",
+            .@"export" => "'state export' needs the name of the volume to export",
+            else => "'state restore' needs the name of the volume to bring back",
+        });
+    }
+    invocation.command = .state;
+    invocation.operand = null;
+    invocation.state = .{ .action = action, .operand = if (given == 1) operands[2] else null };
+    assert((invocation.state.operand != null) == (action != .ls));
+}
+
+fn state_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "state", .{});
+    diag.fix(.{ .sentence = "see the volumes and the trash:", .command = "zbx state ls" });
+    return error.MissingArgument;
 }
 
 const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
@@ -1034,7 +1335,11 @@ fn both_roots(diag: *Diag, digest: []const u8) ParseError {
     diag.context("cmd", "run", .{});
     diag.context("arg", "{s}", .{echo});
     diag.fix(
-        .{ .sentence = "give one of them:", .command = "zbx run --rootfs ./alpine -- /bin/sh" },
+        .{
+            .sentence = "give one of them:",
+            .command = "zbx run --rootfs ./alpine -- /bin/sh",
+            .template = true,
+        },
     );
     return error.UnexpectedArgument;
 }
@@ -1061,6 +1366,7 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix(.{
             .sentence = "put the command after '--', and give each option once:",
             .command = "zbx run --rootfs ./alpine -- /bin/sh",
+            .template = true,
         });
     } else if (command == .bundle) {
         diag.fix(
@@ -1090,7 +1396,11 @@ fn missing_pull(diag: *Diag, missing: Missing) void {
     assert(diag.code != null);
     assert(missing == .reference);
     diag.cause("'pull' needs the reference of the image to pull", .{});
-    diag.fix(.{ .sentence = "name an image:", .command = "zbx pull alpine:3.20" });
+    diag.fix(.{
+        .sentence = "name an image:",
+        .command = "zbx pull alpine:3.20",
+        .template = true,
+    });
 }
 
 /// What `lock` lacks: its subcommand.
@@ -1098,6 +1408,21 @@ fn missing_lock(diag: *Diag) void {
     assert(diag.code != null);
     diag.cause("'lock' needs a subcommand: show", .{});
     diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+}
+
+/// `run` with neither a tree nor `--rootfs`.
+fn missing_root(diag: *Diag) void {
+    diag.cause("'run' needs the digest of a tree, or --rootfs <dir>, to use as the root", .{});
+    diag.fix(.{
+        .sentence = "name a tree of the store (they are listed by zbx store ls):",
+        .command = "zbx run b3:2f9c4a1d7e03 -- /bin/sh",
+        .template = true,
+    });
+    diag.fix(.{
+        .sentence = "or a root filesystem directory:",
+        .command = "zbx run --rootfs ./alpine -- /bin/sh",
+        .template = true,
+    });
 }
 
 fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError {
@@ -1124,20 +1449,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
                 .command = "zbx explain E0001",
             });
         },
-        .rootfs => {
-            diag.cause(
-                "'run' needs the digest of a tree, or --rootfs <dir>, to use as the root",
-                .{},
-            );
-            diag.fix(.{
-                .sentence = "name a tree of the store (they are listed by zbx store ls):",
-                .command = "zbx run b3:2f9c4a1d7e03 -- /bin/sh",
-            });
-            diag.fix(.{
-                .sentence = "or a root filesystem directory:",
-                .command = "zbx run --rootfs ./alpine -- /bin/sh",
-            });
-        },
+        .rootfs => missing_root(diag),
         .target => {
             diag.cause("'bundle' needs --last or the name of a run", .{});
             diag.fix(
@@ -1163,6 +1475,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(.{
                 .sentence = "put the command after '--':",
                 .command = "zbx run --rootfs ./alpine -- /bin/sh",
+                .template = true,
             });
         },
     }
@@ -1174,13 +1487,18 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 /// `--rootfs` or `--name` with no value after it.
 fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     assert(diag.code == null);
-    assert(option.len > 2);
+    assert(option.len >= 2);
     diag.raise(.E0005);
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
+    const export_option = std.mem.eql(u8, option, "-o");
     diag.fix(.{
         .sentence = "give it a value:",
-        .command = "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
+        .command = if (export_option)
+            "zbx state export pgdata -o pgdata.tar.gz"
+        else
+            "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
+        .template = true,
     });
     assert(diag.code.? == .E0005);
     return error.BadOptionValue;
@@ -1281,6 +1599,11 @@ pub const Storage = struct {
     pull: pull_commands.Workspace,
     /// `run` by an image's name: the lookup and the settings (`run_image.zig`).
     run_image: run_image.Workspace,
+    /// The container's environment: the image's variables with the `-e` options merged over them
+    /// (`run_env.zig`).
+    run_env: run_env.Storage,
+    /// The state commands' memory: the listing, the records, the size walk.
+    state: state_commands.Workspace,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
@@ -1383,6 +1706,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .pull => return run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
+        .state => return run_state(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -1496,6 +1820,30 @@ fn run_store(
     };
 }
 
+/// `zbx state ...`: the parent decides, the file work runs in the store's child.
+fn run_state(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .state);
+    assert(diag.code == null);
+    const mode = invocation.options.mode();
+    const output: state_commands.Output = .{
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+        .json = invocation.options.output == .json,
+    };
+    const args: state_commands.Args = .{
+        .action = invocation.state.action,
+        .operand = invocation.state.operand,
+        .out = invocation.state.out,
+    };
+    return state_commands.run(host, args, output, &storage.handle.facts, &storage.state, diag) catch
+        return error.CommandFailed;
+}
+
 const Times = struct { timeout_ms: u32, grace_ms: u32 };
 
 /// `--timeout` (0: none) and `--grace` as milliseconds, or `ZBX-E0401` for the first bad one.
@@ -1592,6 +1940,8 @@ fn run_container(
     assert(invocation.command == .run);
     const given = invocation.run;
     const times = try times_of(&given, diag);
+    // An unset `-e NAME` is found before an image is pulled for the run.
+    run_env.check_set(host, given.env_slice(), diag) catch return error.StartFailed;
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
@@ -1608,6 +1958,8 @@ fn run_container(
             };
         }
     }
+    const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
+    const environment = reached catch return error.StartFailed;
     const container: runtime_spec.Spec = .{
         .rootfs = given.rootfs orelse "", // check_run_args refused neither or both.
         .image = if (invocation.operand != null) prepared.tree else null,
@@ -1615,11 +1967,14 @@ fn run_container(
         .command = prepared.command,
         .limits = try limits_of(&given, diag),
         .read_only = given.read_only,
-        .env = prepared.env,
+        .env = environment.env,
+        .env_names = environment.names,
         .workdir = prepared.workdir,
         .user = prepared.user,
         .network = network_of(&given),
         .publish = given.publish_slice(),
+        .state = given.state_slice(),
+        .mounts = given.mounts_slice(),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
@@ -1819,7 +2174,7 @@ fn run_detached(
         .parent => {
             host.close(pipe.write);
             defer host.close(pipe.read);
-            return relay(host, pipe.read, invocation.options, ran, diag);
+            return relay(host, pipe.read, invocation.options, container, ran, diag);
         },
         .supervisor => {
             host.close(pipe.read);
@@ -1913,6 +2268,7 @@ fn relay(
     host: Host,
     fd: host_mod.Handle,
     options: Options,
+    container: *const runtime_spec.Spec,
     ran: *const Ran,
     diag: *Diag,
 ) RunError!u8 {
@@ -1934,7 +2290,9 @@ fn relay(
                 host.write_all(.stderr, body[1..length]) catch {};
                 return body[0];
             },
-            frame_started => return print_started(host, options, body[0..length], ran, diag),
+            frame_started => {
+                return print_started(host, options, body[0..length], container, ran, diag);
+            },
             else => break,
         }
     }
@@ -1946,6 +2304,7 @@ fn print_started(
     host: Host,
     options: Options,
     text: []const u8,
+    container: *const runtime_spec.Spec,
     ran: *const Ran,
     diag: *Diag,
 ) RunError!u8 {
@@ -1969,13 +2328,38 @@ fn print_started(
         } else {
             bundle.write_json_string(&writer, scope) catch unreachable; // Same.
         }
-        writer.writeAll(",\"detached\":true}}\n") catch unreachable; // Same.
+        writer.writeAll(",\"detached\":true") catch unreachable; // Same.
+        write_reach(&writer, container);
+        writer.writeAll("}}\n") catch unreachable; // Same.
         append_ran(&writer, ran, tree);
     } else {
         writer.print("{s}\n", .{name}) catch unreachable; // Same bound.
     }
     try print(host, writer.buffered(), diag);
     return constants.exit_ok;
+}
+
+/// `"network":"user","published":[...],"env":[...]` inside the `container` object of a detached
+/// run's document: what the container can reach and the names (never the values) of the
+/// variables set with `-e`. Added in M6; additive.
+fn write_reach(writer: *std.Io.Writer, container: *const runtime_spec.Spec) void {
+    assert(container.publish.len <= constants.publish_count_max);
+    assert(container.env_names.len <= constants.run_env_count_max);
+    // Cannot fail: sixteen forwards and sixteen names fit the buffer the caller sized.
+    writer.print(",\"network\":\"{s}\"", .{container.network.word()}) catch unreachable;
+    writer.writeAll(",\"published\":[") catch unreachable; // Same.
+    for (container.publish, 0..) |forward, index| {
+        const comma: []const u8 = if (index == 0) "" else ",";
+        const format = "{s}{{\"host\":{d},\"container\":{d}}}";
+        const ports = .{ comma, forward.host, forward.container };
+        writer.print(format, ports) catch unreachable; // Same.
+    }
+    writer.writeAll("],\"env\":[") catch unreachable; // Same.
+    for (container.env_names, 0..) |name, index| {
+        if (index > 0) writer.writeByte(',') catch unreachable; // Same.
+        bundle.write_json_string(writer, name) catch unreachable; // Same.
+    }
+    writer.writeAll("]") catch unreachable; // Same.
 }
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
@@ -2051,6 +2435,10 @@ fn report_outcome(
         writer.end -= 3;
         // Cannot fail: three bytes were freed and a short field fits a message.
         writer.print(",\"network\":\"{s}\"}}}}\n", .{handle.network.word()}) catch unreachable;
+        if (network_hint_applies(handle.network, network_given, reason)) {
+            writer.end -= 3;
+            writer.writeAll(",\"hint\":\"network_none\"}}\n") catch unreachable; // Three freed.
+        }
         writer.end -= 3;
         write_published(&writer, handle.publish_slice());
         if (timed_out) {
@@ -2095,10 +2483,27 @@ fn write_published(writer: *std.Io.Writer, list: []const runtime_spec.Publish) v
     writer.writeAll("]}}\n") catch unreachable; // Bounded above.
 }
 
+/// Whether a run's failure may have been the network: it ran with the default (none, and no
+/// `--net` given, so an explicit `--net none` never) and the container's own process exited with
+/// a non-zero code. A signal, a timeout or a limit has its own line. Text mode prints it as a
+/// note, JSON mode as `"hint":"network_none"` in `container_exit`; the exit code stays the
+/// container's either way.
+fn network_hint_applies(
+    network: runtime_spec.Network,
+    network_given: bool,
+    reason: *const runtime.ExitReason,
+) bool {
+    if (network_given) return false;
+    if (network != .none) return false;
+    const code = switch (reason.*) {
+        .exited => |value| value,
+        else => return false,
+    };
+    return code != constants.exit_ok;
+}
+
 /// The one line a failed run without `--net` gets after the container's own output: the network
-/// was none, and here is the flag. Only after the container's own exit with a code. A note,
-/// not a diagnostic: the exit code is the container's.
-/// Never for an explicit `--net none`.
+/// was none, and here is the flag.
 fn write_network_hint(
     writer: *std.Io.Writer,
     network: runtime_spec.Network,
@@ -2106,14 +2511,7 @@ fn write_network_hint(
     reason: *const runtime.ExitReason,
 ) void {
     assert(writer.buffer.len >= constants.output_bytes_max / 2);
-    if (network_given) return;
-    if (network != .none) return;
-    // Only the container's own non-zero exit: a signal, a timeout or a limit has its own line.
-    const code = switch (reason.*) {
-        .exited => |value| value,
-        else => return,
-    };
-    if (code == constants.exit_ok) return;
+    if (!network_hint_applies(network, network_given, reason)) return;
     // Cannot fail: a short line into a buffer that holds a message.
     writer.writeAll("zbx: network: none (grant with --net)\n") catch unreachable;
 }
@@ -2247,7 +2645,8 @@ fn write_container_exit(writer: *std.Io.Writer, reason: *const runtime.ExitReaso
 fn run_doctor(host: Host, options: Options, facts: *doctor.Facts, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     var report: doctor.Report = undefined;
-    try doctor.run(host, facts, &report, diag);
+    const format: doctor.Format = if (options.output == .json) .json else .text;
+    try doctor.run(host, facts, &report, format, diag);
     const mode = options.mode();
     const color = mode != .json and host.color_enabled(.stderr);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -2323,6 +2722,8 @@ pub fn fail(host: Host, diag: *Diag, options: Options) u8 {
 const testing = std.testing;
 const HostSim = @import("host_sim.zig").HostSim;
 const repeat = @import("test_util.zig").repeat;
+const test_util = @import("test_util.zig");
+const doctor_fixtures = @import("doctor_fixtures.zig");
 
 const SliceIterator = struct {
     items: []const [:0]const u8,
@@ -2639,18 +3040,73 @@ test "snapshot: doctor on a host with no readable files fails four checks, exit 
     try testing.expectEqualStrings(blocks, sim.stderr());
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, sim.stderr(), "error[ZBX-E01"));
 
-    // The options apply to the blocks and not to the report on stdout.
+    // -v changes the blocks and not the report on stdout; --output json changes both: stdout is
+    // the zbx.doctor/1 document, stderr is one diagnostic object per failing check, as before.
     const stdout = try testing.allocator.dupe(u8, sim.stdout());
     defer testing.allocator.free(stdout);
     const as_json = [_][:0]const u8{ "zbx", "doctor", "--output", "json" };
     try testing.expectEqual(@as(u8, 2), try run_case(&sim, &as_json));
-    try testing.expectEqualStrings(stdout, sim.stdout());
+    const head = "{\"schema\":\"zbx.doctor/1\",\"ok\":false,";
+    try testing.expect(std.mem.startsWith(u8, sim.stdout(), head));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stdout(), "\n"));
+    try testing.expect(try test_util.json_is_valid(sim.stdout()));
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, sim.stderr(), "\n"));
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-E0101\""));
     try testing.expectEqual(@as(u8, 2), try run_case(&sim, &.{ "zbx", "-v", "doctor" }));
     try testing.expectEqualStrings(stdout, sim.stdout());
     const while_line = "  while  running the userns check of zbx doctor\n";
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), while_line) != null);
+}
+
+test "doctor --output json: every check with its status, a code for a failure or a warning" {
+    // Goal: an agent reads the doctor without the text report (M5's agent test, finding 5).
+    // Method: a healthy host whose only finding is the net warning (no pasta), and one with an
+    // old pasta; the document, parsed, has the seven checks in order, the codes only where a
+    // check is not ok, the warning's diagnostic with its fix marked as needing root, and nothing
+    // on stderr (a warning is not a failure: the exit code is 0).
+    const cases = [_]struct { fixture: []const u8, detail: []const u8 }{
+        .{ .fixture = "pasta_missing", .detail = "pasta not found" },
+        .{ .fixture = "pasta_old", .detail = "is older than" },
+    };
+    for (cases) |case| {
+        var sim: HostSim = undefined;
+        const fixture = doctor_fixtures.find(case.fixture).?;
+        sim.init(1, fixture.files);
+        fixture.apply(&sim);
+        var iterator: SliceIterator = .{ .items = &.{ "zbx", "--output", "json", "doctor" } };
+        try testing.expectEqual(@as(u8, 0), run_from_iterator(sim.interface(), &iterator));
+        try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+        try testing.expect(try test_util.json_is_valid(sim.stdout()));
+        var parsed = try parse_json(sim.stdout());
+        defer parsed.deinit();
+        const document = parsed.value.object;
+        try testing.expectEqualStrings("zbx.doctor/1", document.get("schema").?.string);
+        try testing.expect(document.get("ok").?.bool);
+        const checks = document.get("checks").?.array.items;
+        const ids = [_][]const u8{ "kernel", "userns", "cgroup", "overlay", "subid", "seccomp" } ++
+            [_][]const u8{"net"};
+        try testing.expectEqual(ids.len, checks.len);
+        for (checks, ids) |check, id| {
+            try testing.expectEqualStrings(id, check.object.get("id").?.string);
+            const status = check.object.get("status").?.string;
+            try testing.expect(check.object.get("detail").?.string.len > 0);
+            if (!std.mem.eql(u8, id, "net")) {
+                try testing.expectEqualStrings("ok", status);
+                try testing.expect(check.object.get("code") == null);
+                continue;
+            }
+            try testing.expectEqualStrings("warn", status);
+            try testing.expectEqualStrings("ZBX-W0102", check.object.get("code").?.string);
+            const detail = check.object.get("detail").?.string;
+            try testing.expect(std.mem.indexOf(u8, detail, case.detail) != null);
+            const diagnostic = check.object.get("diagnostic").?.object;
+            try testing.expectEqualStrings("ZBX-W0102", diagnostic.get("code").?.string);
+            try testing.expectEqualStrings("warning", diagnostic.get("severity").?.string);
+            const fix = diagnostic.get("fixes").?.array.items[0].object;
+            try testing.expect(fix.get("needs_root").?.bool);
+            try testing.expect(fix.get("template") == null);
+        }
+    }
 }
 
 test "a failing stdout is E0009 on stderr and exit 2; a failing stderr is exit 2 alone" {
@@ -2808,6 +3264,18 @@ fn parse_json(bytes: []const u8) !std.json.Parsed(std.json.Value) {
 }
 
 fn running_container(sim: *HostSim, name: []const u8) !void {
+    return running_container_with(sim, name, .{});
+}
+
+/// What a test container can reach, for the records of `ps`: the default is nothing.
+const Reach = struct {
+    network: runtime_spec.Network = .none,
+    publish: []const runtime_spec.Publish = &.{},
+    env: []const runtime_spec.Label = &.{},
+    env_names: []const []const u8 = &.{},
+};
+
+fn running_container_with(sim: *HostSim, name: []const u8, reach: Reach) !void {
     sim_run.init(sim, 4);
     sim.world.command_runs_ms = 3_600_000;
     var diag: Diag = undefined;
@@ -2816,6 +3284,10 @@ fn running_container(sim: *HostSim, name: []const u8) !void {
         .rootfs = sim_run.rootfs_path,
         .name = name,
         .command = &.{ "/bin/sh", "-c", "sleep 1000" },
+        .network = reach.network,
+        .publish = reach.publish,
+        .env = reach.env,
+        .env_names = reach.env_names,
     };
     const options: runtime.StartOptions = .{ .detached = true };
     try runtime.start(sim.interface(), &container, options, &test_storage.handle, &diag);
@@ -2902,6 +3374,130 @@ test "ps lists a running container in text and in JSON that matches the schema's
     _ = runtime.wait(&test_storage.handle);
 }
 
+test "parse: -e, --env and --env= take NAME=VALUE or NAME; every misuse is a usage error" {
+    // Goal: the option's grammar. Method: the three spellings; the settings read back; a value
+    // that holds '='; each refusal with its code; `-e` outside `run` and after `--`.
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "run", "-e", "A=b=c", "--env", "B", "--env=C=", "--rootfs", "r" } ++
+        [_][]const u8{ "--", "-e", "X" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    const settings = invocation.run.env_slice();
+    try testing.expectEqual(@as(usize, 3), settings.len);
+    try testing.expectEqualStrings("A", settings[0].name);
+    try testing.expectEqualStrings("b=c", settings[0].value.?);
+    try testing.expectEqualStrings("B", settings[1].name);
+    try testing.expect(settings[1].value == null);
+    try testing.expectEqualStrings("", settings[2].value.?);
+    // After `--` the words are the command's, whatever they look like.
+    try testing.expectEqual(@as(usize, 2), invocation.run.command.len);
+
+    const tail = [_][]const u8{ "--rootfs", "r", "--", "x" };
+    const bad_name = [_][]const u8{ "run", "-e", "1a=b" } ++ tail;
+    try testing.expectEqual(codes.Code.E0010, (try parse_case(&bad_name, &invocation)).?);
+    const twice = [_][]const u8{ "run", "-e", "A=1", "-e", "A" } ++ tail;
+    try testing.expectEqual(codes.Code.E0010, (try parse_case(&twice, &invocation)).?);
+    const empty = [_][]const u8{ "run", "-e", "" } ++ tail;
+    try testing.expectEqual(codes.Code.E0010, (try parse_case(&empty, &invocation)).?);
+    try testing.expectEqual(codes.Code.E0005, (try parse_case(&.{ "run", "-e" }, &invocation)).?);
+    const before = [_][]const u8{ "run", "-e", "--", "x" };
+    try testing.expectEqual(codes.Code.E0005, (try parse_case(&before, &invocation)).?);
+    const outside = [_][]const u8{ "ps", "-e", "A" };
+    try testing.expectEqual(codes.Code.E0004, (try parse_case(&outside, &invocation)).?);
+    const first = [_][]const u8{ "-e", "A", "run" };
+    try testing.expectEqual(codes.Code.E0004, (try parse_case(&first, &invocation)).?);
+    // The count bound: sixteen are taken, a seventeenth is refused.
+    var many: [2 * constants.run_env_count_max + 2 + tail.len][]const u8 = undefined;
+    var names: [constants.run_env_count_max + 1][4]u8 = undefined;
+    many[0] = "run";
+    for (&names, 0..) |*name, index| {
+        name.* = .{ 'V', 'A' + @as(u8, @intCast(index)), 0, 0 };
+    }
+    for (0..constants.run_env_count_max) |index| {
+        many[1 + 2 * index] = "-e";
+        many[2 + 2 * index] = names[index][0..2];
+    }
+    const at = 1 + 2 * constants.run_env_count_max;
+    @memcpy(many[at..][0..tail.len], &tail);
+    const full = many[0 .. at + tail.len];
+    try testing.expect(try parse_case(full, &invocation) == null);
+    try testing.expectEqual(@as(u32, constants.run_env_count_max), invocation.run.env_count);
+    var over: [many.len + 2][]const u8 = undefined;
+    @memcpy(over[0..at], many[0..at]);
+    over[at] = "-e";
+    over[at + 1] = names[constants.run_env_count_max][0..2];
+    @memcpy(over[at + 2 ..][0..tail.len], &tail);
+    const refused = try parse_case(over[0 .. at + 2 + tail.len], &invocation);
+    try testing.expectEqual(codes.Code.E0010, refused.?);
+}
+
+test "ps --output json says the network, the forwards and the names of -e, never a value" {
+    // Goal: M5's agent test, finding 3, and the names-only rule of -e. Method: a running
+    // container with a forward and a variable; the JSON has the three members and no value; a
+    // container with none has the empty forms; a record of M5 (no such fields) has a null network.
+    var sim: HostSim = undefined;
+    const forward = [_]runtime_spec.Publish{.{ .host = 8080, .container = 80 }};
+    const variables = [_]runtime_spec.Label{.{ .key = "A_B", .value = "value-marker-31" }};
+    const names = [_][]const u8{"A_B"};
+    try running_container_with(&sim, "web-1", .{
+        .network = .user,
+        .publish = &forward,
+        .env = &variables,
+        .env_names = &names,
+    });
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "value-marker-31") == null);
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    const one = parsed.value.object.get("containers").?.array.items[0].object;
+    try testing.expectEqualStrings("user", one.get("network").?.string);
+    const published = one.get("published").?.array.items;
+    try testing.expectEqual(@as(usize, 1), published.len);
+    try testing.expectEqual(@as(i64, 8080), published[0].object.get("host").?.integer);
+    try testing.expectEqual(@as(i64, 80), published[0].object.get("container").?.integer);
+    const env = one.get("env").?.array.items;
+    try testing.expectEqual(@as(usize, 1), env.len);
+    try testing.expectEqualStrings("A_B", env[0].string);
+    _ = runtime.wait(&test_storage.handle);
+
+    try running_container(&sim, "web-2");
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "ps", "--output", "json" }));
+    const bare = try parse_json(sim.stdout());
+    defer bare.deinit();
+    const none = bare.value.object.get("containers").?.array.items[0].object;
+    try testing.expectEqualStrings("none", none.get("network").?.string);
+    try testing.expectEqual(@as(usize, 0), none.get("published").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), none.get("env").?.array.items.len);
+    _ = runtime.wait(&test_storage.handle);
+
+    // A record M5 wrote: no network is known, which is null and not "none".
+    sim_run.init(&sim, 5);
+    const old = sim_run.sample_view("old-1", 1_760_000_000);
+    sim.world.add_node(sim_run.runs_path, .dir);
+    var text: [constants.record_bytes_max]u8 = undefined;
+    const rendered = @import("runtime/records.zig").render(&old, &text);
+    var kept: [constants.record_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&kept);
+    var lines = std.mem.splitScalar(u8, rendered, '\n');
+    while (lines.next()) |line| {
+        const v5 = std.mem.startsWith(u8, line, "    .network = ") or
+            std.mem.startsWith(u8, line, "    .publish = ") or
+            std.mem.startsWith(u8, line, "    .env_names = ");
+        if (v5) continue;
+        const current = std.mem.eql(u8, line, "    .version = 5,");
+        const text_line = if (current) "    .version = 4," else line;
+        try writer.print("{s}\n", .{text_line});
+    }
+    const old_path = sim_run.runs_path ++ "/old-1.zon";
+    try testing.expect(sim.world.write_file(old_path, writer.buffered()) == null);
+    const listing = [_][]const u8{ "ps", "--all", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &listing));
+    const older = try parse_json(sim.stdout());
+    defer older.deinit();
+    const entry = older.value.object.get("containers").?.array.items[0].object;
+    try testing.expect(entry.get("network").? == .null);
+    try testing.expectEqual(@as(usize, 0), entry.get("published").?.array.items.len);
+}
+
 test "stop ends a running container, says so in text and JSON, and is a no-op the second time" {
     var sim: HostSim = undefined;
     try running_container(&sim, "web-1");
@@ -2960,6 +3556,12 @@ const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
 const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
 
+const test_container: runtime_spec.Spec = .{
+    .rootfs = "/srv/root",
+    .name = "web-1",
+    .command = &.{"sh"},
+};
+
 fn framed(sim: *HostSim, frames: []const Frame) !host_mod.Handle {
     const host = sim.interface();
     const pipe = try host.pipe();
@@ -2979,7 +3581,8 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     diag.reset();
     const options: Options = .{ .runs_container = true };
     const host = sim.interface();
-    try testing.expectEqual(@as(u8, 0), try relay(host, read, options, &test_ran, &diag));
+    const shown = try relay(host, read, options, &test_container, &test_ran, &diag);
+    try testing.expectEqual(@as(u8, 0), shown);
     sim.interface().close(read);
     try testing.expectEqualStrings("web-1\n", sim.stdout());
     try testing.expectEqualStrings("zbx: warning: something\n", sim.stderr());
@@ -2988,12 +3591,30 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     const bare: Frame = .{ .tag = frame_started, .head = null, .body = "web-1 502 -" };
     const again = try framed(&sim, &.{bare});
     const json: Options = .{ .runs_container = true, .output = .json };
-    try testing.expectEqual(@as(u8, 0), try relay(sim.interface(), again, json, &test_ran, &diag));
+    const printed = try relay(sim.interface(), again, json, &test_container, &test_ran, &diag);
+    try testing.expectEqual(@as(u8, 0), printed);
     sim.interface().close(again);
     const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
-        "\"pid\":502,\"scope\":null,\"detached\":true},\"ran\":{\"kind\":\"rootfs\"," ++
+        "\"pid\":502,\"scope\":null,\"detached\":true,\"network\":\"none\"," ++
+        "\"published\":[],\"env\":[]},\"ran\":{\"kind\":\"rootfs\"," ++
         "\"path\":\"/srv/root\"}}\n";
     try testing.expectEqualStrings(expected, sim.stdout());
+
+    // A published port and the names of the variables set with -e are in the document.
+    sim_run.init(&sim, 7);
+    const published = [_]runtime_spec.Publish{.{ .host = 8080, .container = 80 }};
+    const names = [_][]const u8{ "A_B", "C" };
+    var reaching = test_container;
+    reaching.network = .user;
+    reaching.publish = &published;
+    reaching.env_names = &names;
+    const third = try framed(&sim, &.{bare});
+    const reached = try relay(sim.interface(), third, json, &reaching, &test_ran, &diag);
+    try testing.expectEqual(@as(u8, 0), reached);
+    sim.interface().close(third);
+    const member = "\"network\":\"user\",\"published\":[{\"host\":8080,\"container\":80}]," ++
+        "\"env\":[\"A_B\",\"C\"]},\"ran\"";
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), member) != null);
 }
 
 test "run -d: a failed start passes the supervisor's diagnostic and code through" {
@@ -3005,7 +3626,8 @@ test "run -d: a failed start passes the supervisor's diagnostic and code through
     diag.reset();
     const options: Options = .{ .runs_container = true };
     const host = sim.interface();
-    try testing.expectEqual(@as(u8, 126), try relay(host, read, options, &test_ran, &diag));
+    const failed = try relay(host, read, options, &test_container, &test_ran, &diag);
+    try testing.expectEqual(@as(u8, 126), failed);
     sim.interface().close(read);
     try testing.expectEqualStrings("zbx: refused\n", sim.stderr());
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
@@ -3024,7 +3646,7 @@ test "run -d: a supervisor that ends without a report, or sends nonsense, is E04
         var diag: Diag = undefined;
         diag.reset();
         const options: Options = .{ .runs_container = true };
-        const failed = relay(host, pipe.read, options, &test_ran, &diag);
+        const failed = relay(host, pipe.read, options, &test_container, &test_ran, &diag);
         try testing.expectError(error.CommandFailed, failed);
         host.close(pipe.read);
         try testing.expectEqual(codes.Code.E0405, diag.code.?);

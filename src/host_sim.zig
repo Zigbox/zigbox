@@ -243,6 +243,7 @@ pub const HostSim = struct {
         .pivot_root = pivot_root,
         .change_directory = change_directory,
         .make_directory = make_directory,
+        .remove_directory = remove_directory,
         .create_file = create_file,
         .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
@@ -743,6 +744,12 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.make_directory(path, exist_ok)) |errno| return sim.model_error(errno);
+    }
+
+    fn remove_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.remove_directory(path)) |errno| return sim.model_error(errno);
     }
 
     fn create_file(context: *anyopaque, path: [:0]const u8, exist_ok: bool) host.Error!void {

@@ -1,0 +1,5 @@
+error[ZBX-E0709]: no state volume with that name in the trash
+  cause  the trash holds no volume called pgdata
+  fix    list the volumes and the trash:   zbx state ls
+  more   zbx explain E0709 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0709.html

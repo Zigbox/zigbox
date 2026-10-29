@@ -203,6 +203,13 @@ pub const MountKind = enum {
     /// An overlayfs mount on `target`. `source` is the mount data (`userxattr,lowerdir=...`):
     /// the kernel reads it as text, so it is the one request whose source is not a path.
     overlay,
+    /// Moves the mount at `source` (a mount point) to `target` (`MS_MOVE`), with what is mounted
+    /// below it. A state volume is bound in the container's /dev first and moved into the new
+    /// root after it is entered, so that its target is read as the container reads it.
+    move,
+    /// A tmpfs of the user's asking (`--tmpfs`): nosuid, nodev, noexec, owned by the container's
+    /// root. `source` is the mount data (`mode=1777,size=<bytes>`), as for the overlay.
+    user_tmpfs,
 };
 
 pub const MountRequest = struct {
@@ -367,6 +374,8 @@ pub const VTable = struct {
     change_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
     make_directory: *const fn (context: *anyopaque, path: [:0]const u8, exist_ok: bool) Error!void,
     create_file: *const fn (context: *anyopaque, path: [:0]const u8, exist_ok: bool) Error!void,
+    /// Removes an empty directory (`rmdir`).
+    remove_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!void,
     /// Brings the loopback interface `lo` up in the caller's network namespace: one ioctl on a
     /// throwaway socket. In a namespace of the container's own, `lo` is down until this runs.
     bring_up_loopback: *const fn (context: *anyopaque) Error!void,
@@ -798,7 +807,7 @@ pub const Host = struct {
         assert(request.target.len > 0);
         assert(request.target[request.target.len] == 0);
         switch (request.kind) {
-            .bind_tree, .bind_file, .overlay => assert(request.source != null),
+            .bind_tree, .bind_file, .overlay, .move, .user_tmpfs => assert(request.source != null),
             else => assert(request.source == null),
         }
         try host.vtable.mount(host.context, request);
@@ -834,6 +843,13 @@ pub const Host = struct {
         assert(path.len > 0);
         assert(path[path.len] == 0);
         try host.vtable.make_directory(host.context, path, exist_ok);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn remove_directory(host: Host, path: [:0]const u8) Error!void {
+        assert(path.len > 0);
+        assert(path[path.len] == 0);
+        try host.vtable.remove_directory(host.context, path);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

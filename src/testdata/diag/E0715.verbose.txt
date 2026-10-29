@@ -1,0 +1,9 @@
+error[ZBX-E0715]: can't write the archive
+  while  exporting the state volume pgdata
+  cause  writing the archive to /nowhere/pgdata.tar.gz failed: no such file or
+         directory (ENOENT)
+  volume pgdata
+  file   /nowhere/pgdata.tar.gz
+  fix    free space, or write somewhere else with -o <file>
+  more   zbx explain E0715
+  docs   https://zigbox.github.io/zigbox/errors/E0715.html

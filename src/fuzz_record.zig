@@ -11,6 +11,8 @@ const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const records = @import("runtime/records.zig");
 const spec_mod = @import("runtime/spec.zig");
+const volume = @import("state/volume.zig");
+const mounts_mod = @import("runtime/mounts.zig");
 
 const text_bytes_max = constants.record_bytes_max;
 
@@ -82,6 +84,104 @@ fn damage(random: std.Random, text: []u8, length_in: usize) usize {
     return length;
 }
 
+/// A random set of M6's fields: the network, forwards (only with `user`, host ports distinct)
+/// and names of `-e` (POSIX, distinct), all in the caller's storage.
+const Reach = struct {
+    network: spec_mod.Network,
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    publish_count: u32,
+    names: [constants.run_env_count_max][]const u8,
+    names_count: u32,
+    storage: [constants.run_env_count_max][8]u8,
+};
+
+fn random_reach(random: std.Random, reach: *Reach) void {
+    reach.network = random.enumValue(spec_mod.Network);
+    reach.publish_count = 0;
+    if (reach.network == .user) {
+        const wanted = random.uintAtMost(u32, constants.publish_count_max);
+        while (reach.publish_count < wanted) {
+            const host = random.intRangeAtMost(u16, 1, 65535);
+            const taken = for (reach.publish[0..reach.publish_count]) |earlier| {
+                if (earlier.host == host) break true;
+            } else false;
+            if (taken) continue;
+            const container = random.intRangeAtMost(u16, 1, 65535);
+            reach.publish[reach.publish_count] = .{ .host = host, .container = container };
+            reach.publish_count += 1;
+        }
+    }
+    reach.names_count = random.uintAtMost(u32, constants.run_env_count_max);
+    for (0..reach.names_count) |at| {
+        // "V0" to "V15" and the letters of the alphabet: distinct, and valid.
+        const text = std.fmt.bufPrint(&reach.storage[at], "V{d}", .{at}) catch
+            unreachable; // "V" and at most two digits fit eight bytes.
+        reach.names[at] = text;
+    }
+}
+
+/// Up to `state_volumes_max` mounts a run could have: distinct names, targets apart, some
+/// read-only, and targets with bytes the writer escapes.
+fn random_mounts(
+    random: std.Random,
+    out: *[constants.state_volumes_max]volume.Mount,
+) []volume.Mount {
+    const mount_names = [_][]const u8{ "pgdata", "a", "0.x", "cache_1", "v-4", "b", "c", "d" };
+    const targets = [_][]const u8{
+        "/var/lib/postgresql/data", "/t1", "/a\"b", "/\"q\"", "/x/y/z", "/caf\xc3\xa9", "/t\\7",
+        "/data",
+    };
+    const count = random.uintAtMost(usize, constants.state_volumes_max);
+    for (out[0..count], 0..) |*mount, index| {
+        mount.* = .{
+            .name = mount_names[index],
+            .target = targets[index],
+            .read_only = random.boolean(),
+        };
+    }
+    assert(volume.list_problem(out[0..count]) == null);
+    return out[0..count];
+}
+
+/// Up to `mounts_max` other mounts a run could have: targets apart from each other and from the
+/// state volumes' (`random_mounts`), of every kind, with paths holding bytes the writer escapes.
+fn random_extra_mounts(
+    random: std.Random,
+    out: *[constants.mounts_max]mounts_mod.Mount,
+) []mounts_mod.Mount {
+    const targets = [_][]const u8{
+        "/m0", "/m1/x", "/m\"q", "/\xc3\xa9/m", "/m4", "/run/secrets/k", "/m6", "/m7",
+    };
+    const sources = [_][]const u8{ "/srv/a", "/s\"q\"", "/b\\c", "/caf\xc3\xa9", "/srv/d/e" };
+    const count = random.uintAtMost(usize, constants.mounts_max);
+    for (out[0..count], 0..) |*mount, index| {
+        const kind = random.enumValue(mounts_mod.Kind);
+        mount.* = .{
+            .kind = kind,
+            .source = if (kind == .tmpfs) "" else sources[random.uintLessThan(usize, sources.len)],
+            .target = targets[index],
+            .size_bytes = if (kind == .tmpfs) random.intRangeAtMost(
+                u64,
+                constants.tmpfs_mount_bytes_min,
+                constants.tmpfs_mount_bytes_max,
+            ) else 0,
+        };
+    }
+    return out[0..count];
+}
+
+/// The other mounts read back as they were written.
+fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.mounts_count == view.mounts.len);
+    for (view.mounts, 0..) |mount, index| {
+        const back = parsed.mount_at(@intCast(index));
+        assert(back.kind == mount.kind);
+        assert(std.mem.eql(u8, back.source, mount.source));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.size_bytes == mount.size_bytes);
+    }
+}
+
 fn check_round_trip(random: std.Random) void {
     var rootfs_bytes: [constants.rootfs_bytes_max]u8 = undefined;
     const rootfs = random_text(random, &rootfs_bytes);
@@ -89,6 +189,10 @@ fn check_round_trip(random: std.Random) void {
     var words: [4][]const u8 = undefined;
     const count = random.intRangeAtMost(usize, 1, 4);
     for (words[0..count], 0..) |*word, at| word.* = random_text(random, &words_bytes[at]);
+    var reach: Reach = undefined;
+    random_reach(random, &reach);
+    var mounts: [constants.state_volumes_max]volume.Mount = undefined;
+    var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -108,6 +212,11 @@ fn check_round_trip(random: std.Random) void {
         .scope = if (random.boolean()) "zbx-web-1.scope" else "",
         .detached = random.boolean(),
         .timed_out = random.boolean(),
+        .network = reach.network,
+        .publish = reach.publish[0..reach.publish_count],
+        .env_names = reach.names[0..reach.names_count],
+        .state = random_mounts(random, &mounts),
+        .mounts = random_extra_mounts(random, &extra),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -126,6 +235,21 @@ fn check_round_trip(random: std.Random) void {
     assert(std.mem.eql(u8, parsed.scope_slice(), view.scope));
     assert(parsed.detached == view.detached);
     assert(parsed.timed_out == view.timed_out);
+    assert(parsed.network.? == view.network);
+    assert(parsed.publish_count == view.publish.len);
+    for (view.publish, parsed.publish_slice()) |wanted, found| assert(std.meta.eql(wanted, found));
+    assert(parsed.env_names_count == view.env_names.len);
+    for (view.env_names, 0..) |wanted, at| {
+        assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
+    }
+    assert(parsed.state_count == view.state.len);
+    for (view.state, 0..) |mount, index| {
+        const back = parsed.state_mount(@intCast(index));
+        assert(std.mem.eql(u8, back.name, mount.name));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.read_only == mount.read_only);
+    }
+    check_mounts_back(&view, &parsed);
     check_damaged(random, text);
 }
 
@@ -143,12 +267,65 @@ fn check_damaged(random: std.Random, text: []const u8) void {
     assert(parsed.name_len > 0);
     assert(spec_mod.name_problem(parsed.name_slice()) == null);
     assert(parsed.rootfs_len <= constants.rootfs_bytes_max);
+    check_reach_accepted(&parsed);
+    rerender(&parsed);
+}
+
+/// What a damaged record that still parses holds can be written again: the fields with bounds
+/// `render` asserts (the name, the scope, the reach, the state volumes) go into a view and are
+/// rendered, and read back the same.
+fn rerender(parsed: *const records.Parsed) void {
+    var mounts: [constants.state_volumes_max]volume.Mount = undefined;
+    for (mounts[0..parsed.state_count], 0..) |*mount, index| {
+        mount.* = parsed.state_mount(@intCast(index));
+    }
+    var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
+    for (extra[0..parsed.mounts_count], 0..) |*mount, index| {
+        mount.* = parsed.mount_at(@intCast(index));
+    }
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
+    const view: records.View = .{
+        .name = parsed.name_slice(),
+        .rootfs = parsed.rootfs_slice(),
+        .command = &.{"sh"},
+        .labels = &.{},
+        .started = parsed.started,
+        .ended = parsed.ended,
+        .exit = parsed.exit,
+        .ids = parsed.ids orelse .single,
+        .zbx_version = "0.0.0",
+        .scope = parsed.scope_slice(),
+        .network = parsed.network orelse .none,
+        .publish = if (parsed.network != null) parsed.publish_slice() else &.{},
+        .env_names = words[0..parsed.env_names_count],
+        .state = mounts[0..parsed.state_count],
+        .mounts = extra[0..parsed.mounts_count],
+    };
+    var buffer: [text_bytes_max]u8 = undefined;
+    var again: records.Parsed = undefined;
+    records.parse(records.render(&view, &buffer), &again) catch unreachable; // Written: reads.
+    assert(again.state_count == parsed.state_count);
+    assert(again.mounts_count == parsed.mounts_count);
+}
+
+/// What `render` asserts about M6's fields, which `parse` must have refused to break.
+fn check_reach_accepted(parsed: *const records.Parsed) void {
+    assert(parsed.publish_count <= constants.publish_count_max);
+    assert(parsed.env_names_count <= constants.run_env_count_max);
+    if (parsed.publish_count > 0) assert(parsed.network.? == .user);
+    if (parsed.network) |network| {
+        assert(spec_mod.publish_problem(network, parsed.publish_slice()) == null);
+    }
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
+    assert(spec_mod.env_names_problem(words[0..parsed.env_names_count]) == null);
 }
 
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = "    .version = 4,\n";
+    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{constants.record_version});
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

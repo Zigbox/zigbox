@@ -74,10 +74,15 @@ pub fn bad_reference(diag: *Diag, text: []const u8, err: reference_mod.Error) vo
         ),
     }
     diag.context("ref", "{s}", .{echo});
-    diag.fix(.{ .sentence = "write it as name[:tag]:", .command = "zbx pull alpine:3.20" });
+    diag.fix(.{
+        .sentence = "write it as name[:tag]:",
+        .command = "zbx pull alpine:3.20",
+        .template = true,
+    });
     diag.fix(.{
         .sentence = "or with a registry:",
         .command = "zbx pull ghcr.io/owner/image:v1",
+        .template = true,
     });
     assert(diag.code.? == .E0501);
 }
@@ -98,6 +103,7 @@ pub fn bad_mirror(diag: *Diag, entry: []const u8) void {
     diag.fix(.{
         .sentence = "write the list as host[:port],host[:port]:",
         .command = "ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20",
+        .template = true,
     });
     assert(diag.code.? == .E0514);
 }
@@ -293,6 +299,7 @@ pub fn rate_limited(diag: *Diag, url: []const u8, retry_after: ?[]const u8) void
     diag.fix(.{
         .sentence = "or ask a mirror of Docker Hub first, for example:",
         .command = "ZBX_REGISTRY_MIRRORS=mirror.gcr.io zbx pull alpine:3.20",
+        .template = true,
     });
 }
 

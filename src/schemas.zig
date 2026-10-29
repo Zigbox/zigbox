@@ -10,51 +10,115 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-/// The diagnostic object, as `zbx explain`, the renderer and DIAGNOSTICS.md describe it.
-const diagnostic_definition =
-    \\"diagnostic":{"type":"object","required":["code","severity","blame","summary","causes",
-    \\"docs"],
-    \\"properties":{"code":{"type":"string","pattern":"^ZBX-[EWB][0-9]{4}$"},
+/// The members of the diagnostic object, as `zbx explain`, the renderer and DIAGNOSTICS.md
+/// describe it. Inline text (no `$ref`), shared by every schema that holds a diagnostic.
+const diagnostic_properties =
+    \\"code":{"type":"string","pattern":"^ZBX-[EWB][0-9]{4}$"},
     \\"severity":{"enum":["error","warning","bug"]},"blame":{"enum":["user","environment",
     \\"external","internal","bug"]},
     \\"summary":{"type":"string"},"causes":{"type":"array","items":{"type":"string"}},
     \\"while":{"type":"array","items":{"type":"string"}},"context":{"type":"object"},
-    \\"fixes":{"type":"array","items":{"type":"object"}},"docs":{"type":"string"}}}
+    \\"fixes":{"type":"array","items":{"type":"object","properties":{
+    \\"sentence":{"type":"string"},"command":{"type":["string","null"]},
+    \\"needs_root":{"type":"boolean","description":"M6: only when true; the command needs root"},
+    \\"template":{"type":"boolean",
+    \\"description":"M6: only when true; an example to adapt, not to run as written"}}}},
+    \\"docs":{"type":"string"},"saved":{"type":"string"},"omitted":{"type":"object"}
 ;
 
+const diagnostic_required =
+    \\"required":["code","severity","blame","summary","causes","docs"]
+;
+
+/// The diagnostic as one object schema, for a member that holds one (a doctor check's).
+const diagnostic_object =
+    \\{"type":"object",
+++ diagnostic_required ++
+    \\,"properties":{
+++ diagnostic_properties ++ "}}";
+
+/// The old `$defs` entry, kept so that a reader of the path `$defs.diagnostic` still finds it.
+const diagnostic_definition = "\"diagnostic\":" ++ diagnostic_object;
+
+/// What `container_exit` holds (the value of the member of that name).
+const container_exit_object =
+    \\{"type":"object","required":["reason","code"],
+    \\"properties":{"reason":{"enum":["exited","signal","oom","pid_limit"]},
+    \\"code":{"type":"integer","minimum":0,"maximum":255},"signal":{"type":"integer"},
+    \\"limit_bytes":{"type":["integer","null"]},"limit":{"type":["integer","null"]},
+    \\"network":{"enum":["none","host","user"]},
+    \\"hint":{"enum":["network_none"],
+    \\"description":"M6: the failure may be the network: default network, no --net, exit != 0"},
+    \\"published":{"type":"array","description":"--publish: TCP host ports forwarded (M5)",
+    \\"items":{"type":"object","required":["host","container"],
+    \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
+    \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
+    \\"timed_out":{"type":"boolean"}}}
+;
+
+const ran_object =
+    \\{"type":"object","description":"what the run ran","required":["kind"],
+    \\"properties":{"kind":{"enum":["image","tree","rootfs"]},
+    \\"reference":{"type":"string","description":"image: the name as typed"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$","description":"image"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"image and tree"},
+    \\"path":{"type":"string","description":"rootfs: the directory as typed"}}}
+;
+
+/// The `container` of a detached run's document. `network`, `published` and `env` are M6's.
+const detached_container_object =
+    \\{"type":"object","required":["name","pid","detached"],
+    \\"properties":{"name":{"type":"string"},
+    \\"pid":{"type":"integer"},"scope":{"type":["string","null"]},"detached":{"const":true},
+    \\"network":{"enum":["none","host","user"],"description":"M6: what the container can reach"},
+    \\"published":{"type":"array","description":"M6: --publish, as in container_exit",
+    \\"items":{"type":"object","required":["host","container"],
+    \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
+    \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
+    \\"env":{"type":"array","items":{"type":"string"},
+    \\"description":"M6: names of the variables set with -e; a value is never shown"}}}
+;
+
+/// `zbx schema run`: ONE object schema with no `$ref`, which an agent can follow without a
+/// resolver. The members of the three documents a run can print (a diagnostic, the
+/// `container_exit` line, the detached document) are all listed under `properties`, and `oneOf`
+/// says which members tell the kinds apart. `$defs` is the older form of the same text, kept
+/// so that no reader of it breaks. Nothing in this text refers to anything else.
 const run_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/run/1","version":1,
     \\"title":"zbx run --output json",
     \\"description":"stderr: diagnostics, then container_exit. With -d, stdout: detached.",
-    \\"oneOf":[{"$ref":"#/$defs/diagnostic"},{"$ref":"#/$defs/container_exit"},
-    \\{"$ref":"#/$defs/detached"}],
+    \\"$comment":"One object schema, no $ref: oneOf names the members that tell them apart.",
+    \\"type":"object",
+    \\"properties":{
+++ diagnostic_properties ++
+    \\,"container_exit":
+++ container_exit_object ++
+    \\,"schema":{"const":"zbx.run/1"},"container":
+++ detached_container_object ++
+    \\,"ran":
+++ ran_object ++
+    \\},
+    \\"oneOf":[{
+++ diagnostic_required ++
+    \\},{"required":["container_exit"]},{"required":["schema","container"]}],
     \\"$defs":{
 ++ diagnostic_definition ++
     \\,"container_exit":{"type":"object","required":["container_exit"],
-    \\"properties":{"container_exit":{"type":"object",
-    \\"required":["reason","code"],"properties":{"reason":{"enum":["exited","signal","oom",
-    \\"pid_limit"]},
-    \\"code":{"type":"integer","minimum":0,"maximum":255},"signal":{"type":"integer"},
-    \\"limit_bytes":{"type":["integer","null"]},"limit":{"type":["integer","null"]},
-    \\"network":{"enum":["none","host","user"]},
-    \\"published":{"type":"array","description":"--publish: TCP host ports forwarded (M5)",
-    \\"items":{"type":"object","required":["host","container"],
-    \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
-    \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
-    \\"timed_out":{"type":"boolean"}}},"ran":{"$ref":"#/$defs/ran"}}},
-    \\"ran":{"type":"object","description":"what the run ran","required":["kind"],
-    \\"properties":{"kind":{"enum":["image","tree","rootfs"]},
-    \\"reference":{"type":"string","description":"image: the name as typed"},
-    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$","description":"image"},
-    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"image and tree"},
-    \\"path":{"type":"string","description":"rootfs: the directory as typed"}}},
-    \\"detached":{"type":"object","required":["schema","container"],
-    \\"properties":{"schema":{"const":"zbx.run/1"},
-    \\"container":{"type":"object","required":["name","pid","detached"],
-    \\"properties":{"name":{"type":"string"},
-    \\"pid":{"type":"integer"},"scope":{"type":["string","null"]},"detached":{"const":true}}},
-    \\"ran":{"$ref":"#/$defs/ran"}}}}}
+    \\"properties":{"container_exit":
+++ container_exit_object ++
+    \\,"ran":
+++ ran_object ++
+    \\}},
+    \\"ran":
+++ ran_object ++
+    \\,"detached":{"type":"object","required":["schema","container"],
+    \\"properties":{"schema":{"const":"zbx.run/1"},"container":
+++ detached_container_object ++
+    \\,"ran":
+++ ran_object ++
+    \\}}}}
 ;
 
 const ps_schema =
@@ -81,7 +145,15 @@ const ps_schema =
     \\"labels":{"type":"array","items":{"type":"object","required":["key","value"],
     \\"properties":{"key":{"type":"string"},"value":{"type":"string"}}}},
     \\"limits":{"type":"object","properties":{"memory_bytes":{"type":["integer","null"]},
-    \\"pids":{"type":["integer","null"]},"cpu_millis":{"type":["integer","null"]}}}}}}}}
+    \\"pids":{"type":["integer","null"]},"cpu_millis":{"type":["integer","null"]}}},
+    \\"network":{"enum":["none","host","user",null],
+    \\"description":"M6: what the container can reach; null for a record of an older zbx"},
+    \\"published":{"type":"array","description":"M6: --publish, as in zbx run",
+    \\"items":{"type":"object","required":["host","container"],
+    \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
+    \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
+    \\"env":{"type":"array","items":{"type":"string"},
+    \\"description":"M6: names of the variables set with -e; a value is never kept"}}}}}}
 ;
 
 const stop_schema =
@@ -104,12 +176,34 @@ const bundle_schema =
     \\"type":"object","required":["bundle"],"properties":{"bundle":{"type":"string"}}}
 ;
 
+/// `zbx schema doctor`: stdout is the `zbx.doctor/1` report; stderr carries the diagnostic of
+/// each failing check, as before (M6 added the report; the diagnostics did not change). One
+/// object schema without `$ref`, like `run`'s.
 const doctor_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/doctor/1","version":1,
     \\"title":"zbx doctor --output json",
-    \\"description":"stderr: a diagnostic per failing check, in order. Exit 0, or 2 on failure.",
-    \\"$ref":"#/$defs/diagnostic","$defs":{
+    \\"description":"stdout: the report. stderr: a diagnostic per failing check. Exit 0, or 2.",
+    \\"$comment":"One object schema, no $ref: oneOf names the members that tell them apart.",
+    \\"type":"object",
+    \\"properties":{
+++ diagnostic_properties ++
+    \\,"schema":{"const":"zbx.doctor/1"},"ok":{"type":"boolean",
+    \\"description":"no check failed; a warning does not change it"},
+    \\"checks":{"type":"array","description":"every check, in the order of the text report",
+    \\"items":{"type":"object","required":["id","status","detail"],
+    \\"properties":{"id":{"enum":["kernel","userns","cgroup","overlay","subid","seccomp","net"]},
+    \\"status":{"enum":["ok","warn","fail"]},"detail":{"type":"string",
+    \\"description":"the line of the text report"},
+    \\"code":{"type":"string","pattern":"^ZBX-[EW][0-9]{4}$",
+    \\"description":"only for warn and fail: the code of the diagnostic"},
+    \\"diagnostic":
+++ diagnostic_object ++
+    \\}}}},
+    \\"oneOf":[{"required":["schema","ok","checks"]},{
+++ diagnostic_required ++
+    \\}],
+    \\"$defs":{
 ++ diagnostic_definition ++ "}}";
 
 const store_import_schema =
@@ -326,6 +420,70 @@ const store_restore_schema =
     \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"}}}
 ;
 
+const state_ls_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-ls/1","version":1,
+    \\"title":"zbx state ls --output json",
+    \\"description":"stdout: the state volumes by name, and the trash of zbx state rm",
+    \\"type":"object","required":["schema","directory","volumes","trash","truncated"],
+    \\"properties":{"schema":{"const":"zbx.state.ls/1"},"directory":{"type":"string"},
+    \\"volumes":{"type":"array","items":{"type":"object","required":["name","bytes",
+    \\"disk_bytes","files","record","created","last_used","last_container","last_path",
+    \\"last_read_only","in_use","used_by"],
+    \\"properties":{"name":{"type":"string","pattern":"^[a-z0-9][a-z0-9._-]{0,62}$"},
+    \\"bytes":{"type":["integer","null"],"description":"files and symlinks, hard links once"},
+    \\"disk_bytes":{"type":["integer","null"],"description":"space on the disk; null: not counted"},
+    \\"files":{"type":["integer","null"]},
+    \\"record":{"enum":["ok","missing","unreadable"],"description":"state.zon"},
+    \\"created":{"type":["integer","null"]},"last_used":{"type":["integer","null"]},
+    \\"last_container":{"type":["string","null"]},"last_path":{"type":["string","null"]},
+    \\"last_read_only":{"type":["boolean","null"]},
+    \\"in_use":{"type":"boolean","description":"a running container mounts it"},
+    \\"used_by":{"type":"array","items":{"type":"object","required":["container","read_only"],
+    \\"properties":{"container":{"type":"string"},"read_only":{"type":"boolean"}}}}}}},
+    \\"trash":{"type":"array","items":{"type":"object","required":["name","entry","removed",
+    \\"expires","expired"],"properties":{"name":{"type":"string"},"entry":{"type":"string"},
+    \\"removed":{"type":"integer"},"expires":{"type":"integer"},"expired":{"type":"boolean"}}}},
+    \\"truncated":{"type":"boolean","description":"more volumes or trash than are listed"}}}
+;
+
+const state_rm_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-rm/1","version":1,
+    \\"title":"zbx state rm --output json",
+    \\"description":"stdout: the volume moved to the trash",
+    \\"type":"object","required":["schema","name","entry","removed","expires","emptied"],
+    \\"properties":{"schema":{"const":"zbx.state.rm/1"},"name":{"type":"string"},
+    \\"entry":{"type":"string","description":"its name in the trash: <name>@<removed>"},
+    \\"removed":{"type":"integer"},"expires":{"type":"integer"},
+    \\"emptied":{"type":"integer","description":"expired trash emptied now"}}}
+;
+
+const state_restore_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-restore/1","version":1,
+    \\"title":"zbx state restore --output json",
+    \\"description":"stdout: the volume brought back from the trash",
+    \\"type":"object","required":["schema","name","entry","removed"],
+    \\"properties":{"schema":{"const":"zbx.state.restore/1"},"name":{"type":"string"},
+    \\"entry":{"type":"string"},"removed":{"type":"integer"}}}
+;
+
+const state_export_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/state-export/1","version":1,
+    \\"title":"zbx state export -o FILE --output json",
+    \\"description":"stdout, only when -o names a file (else the archive is stdout)",
+    \\"type":"object","required":["schema","name","file","directories","files","symlinks",
+    \\"hard_links","skipped","bytes","archive_bytes"],
+    \\"properties":{"schema":{"const":"zbx.state.export/1"},"name":{"type":"string"},
+    \\"file":{"type":"string"},"directories":{"type":"integer"},"files":{"type":"integer"},
+    \\"symlinks":{"type":"integer"},"hard_links":{"type":"integer"},
+    \\"skipped":{"type":"integer","description":"devices, sockets and fifos left out"},
+    \\"bytes":{"type":"integer","description":"the files' bytes before compression"},
+    \\"archive_bytes":{"type":"integer"}}}
+;
+
 const pull_resolve_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/pull-resolve/1","version":1,
@@ -439,12 +597,16 @@ const table = [_]Entry{
     .{ .command = "pull", .text = pull_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
+    .{ .command = "state-ls", .text = state_ls_schema },
+    .{ .command = "state-rm", .text = state_rm_schema },
+    .{ .command = "state-restore", .text = state_restore_schema },
+    .{ .command = "state-export", .text = state_export_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 19);
+    assert(table.len == 23);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -473,5 +635,43 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 19), table.len);
+    try testing.expectEqual(@as(usize, 23), table.len);
+}
+
+test "run and doctor are one object schema without a $ref, as an agent can follow it" {
+    // Goal: M5's agent test, finding 6. Method: the text has no `$ref`; the top level is an
+    // object schema whose `oneOf` alternatives are lists of required members (the form the
+    // agent's checker follows); every member they require is listed under `properties`; and the
+    // members M6 added to the documents are there, with the flags of a fix.
+    for ([_][]const u8{ "run", "doctor" }) |command| {
+        const text = of(command).?;
+        try testing.expect(std.mem.indexOf(u8, text, "\"$ref\"") == null);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        try testing.expectEqualStrings("object", root.get("type").?.string);
+        const properties = root.get("properties").?.object;
+        for (root.get("oneOf").?.array.items) |alternative| {
+            try testing.expectEqual(@as(u32, 1), alternative.object.count());
+            for (alternative.object.get("required").?.array.items) |name| {
+                try testing.expect(properties.get(name.string) != null);
+            }
+        }
+        const fixes = properties.get("fixes").?.object.get("items").?.object;
+        const flags = fixes.get("properties").?.object;
+        try testing.expect(flags.get("needs_root") != null);
+        try testing.expect(flags.get("template") != null);
+    }
+    const run_text = of("run").?;
+    for ([_][]const u8{ "\"hint\"", "network_none", "\"env\"", "\"detached\"" }) |part| {
+        try testing.expect(std.mem.indexOf(u8, run_text, part) != null);
+    }
+    const doctor_text = of("doctor").?;
+    for ([_][]const u8{ "zbx.doctor/1", "\"checks\"", "\"diagnostic\"", "ZBX-[EW]" }) |part| {
+        try testing.expect(std.mem.indexOf(u8, doctor_text, part) != null);
+    }
+    const ps_text = of("ps").?;
+    for ([_][]const u8{ "\"network\"", "\"published\"", "\"env\"" }) |part| {
+        try testing.expect(std.mem.indexOf(u8, ps_text, part) != null);
+    }
 }

@@ -5,9 +5,17 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 4 added the digest of the tree the container was started from
-//! and the path of its upper layer (both empty for a run of a plain `--rootfs` directory).
-//! Version 3 added the host pid of the container's PID 1 and of the
+//! skipped, never misread. Version 7 added the other mounts of the run (`.mounts`, one string of
+//! `kind:...` values separated by spaces, `mounts.text`): a secret's host path is in it, its
+//! bytes never are; an older record has none. Version 6 added the state volumes the run mounted
+//! (`.state`, one
+//! string of `--state` values, `NAME:PATH[:ro]`, separated by spaces), so that `zbx state ls` can
+//! say which container uses a volume; an older record has none. Version 5 added what the run
+//! could reach (`network`, `publish`) and the names, never the values, of the variables set with
+//! `-e`; an older record reads with no
+//! network (unknown), no forwards and no names. Version 4 added the digest of the tree the
+//! container was started from and the path of its upper layer (both empty for a run of a plain
+//! `--rootfs` directory). Version 3 added the host pid of the container's PID 1 and of the
 //! supervisor that waits for it (what re-adoption looks for). Version 2 added the limits, the
 //! scope's name, why the run ended (`EndReason`) and whether it was detached; a version 1
 //! record reads with no limits, no scope, not detached, and the reason its exit implies. Unknown
@@ -26,11 +34,14 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const codes = @import("../diag/codes.zig");
 const spec_mod = @import("spec.zig");
+const volume = @import("../state/volume.zig");
+const mounts_mod = @import("mounts.zig");
 
 const Host = host_mod.Host;
 
 const labels_bytes_max = constants.labels_count_max *
     (constants.label_key_bytes_max + constants.label_value_bytes_max + 2);
+const env_names_bytes_max = constants.run_env_count_max * (constants.env_name_bytes_max + 1);
 
 pub const IdsMode = enum { single, full };
 
@@ -92,6 +103,15 @@ pub const View = struct {
     /// overlay; empty for a run of a directory.
     tree: []const u8 = "",
     upper: []const u8 = "",
+    /// Version 5: what the container could reach, the forwards of `--publish` (only with
+    /// `user`), and the names of the variables set with `-e`. A value is never in a record.
+    network: spec_mod.Network = .none,
+    publish: []const spec_mod.Publish = &.{},
+    env_names: []const []const u8 = &.{},
+    /// Version 6: the state volumes the run mounted.
+    state: []const volume.Mount = &.{},
+    /// Version 7: the other mounts (`--tmpfs`, `--bind`, `--secret`).
+    mounts: []const mounts_mod.Mount = &.{},
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -191,7 +211,81 @@ fn write_scope_fields(writer: *std.Io.Writer, view: *const View) void {
     write_bytes(writer, ",\n    .upper = ");
     write_string(writer, view.upper);
     write_bytes(writer, ",\n");
+    write_network_fields(writer, view);
 }
+
+/// The fields version 5 added: the network, the forwards as the text typed, the `-e` names.
+fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
+    assert(spec_mod.publish_problem(view.network, view.publish) == null);
+    assert(spec_mod.env_names_problem(view.env_names) == null);
+    write_format(writer, "    .network = .{s},\n", .{@tagName(view.network)});
+    write_bytes(writer, "    .publish = .{");
+    for (view.publish, 0..) |forward, index| {
+        var storage: [spec_mod.publish_text_bytes_max]u8 = undefined;
+        write_bytes(writer, if (index == 0) " \"" else ", \"");
+        write_bytes(writer, forward.text(&storage));
+        write_bytes(writer, "\"");
+    }
+    // The names are one string, separated by spaces (a POSIX name has none): two strings in a row
+    // would read to the bundle's redactor as a secret name and its value.
+    write_bytes(writer, " },\n    .env_names = \"");
+    for (view.env_names, 0..) |name, index| {
+        if (index > 0) write_bytes(writer, " ");
+        write_bytes(writer, name);
+    }
+    write_bytes(writer, "\",\n");
+    write_state(writer, view.state);
+    write_mounts(writer, view.state, view.mounts);
+}
+
+/// `.mounts = "bind:/srv:/data tmpfs:/scratch:67108864",`: one string, for the same reason.
+fn write_mounts(
+    writer: *std.Io.Writer,
+    state: []const volume.Mount,
+    mounts: []const mounts_mod.Mount,
+) void {
+    assert(mounts_mod.list_problem(state, mounts) == null);
+    var text: [mounts_text_bytes_max]u8 = undefined;
+    var used: usize = 0;
+    for (mounts, 0..) |*mount, index| {
+        var buffer: [constants.mount_value_bytes_max]u8 = undefined;
+        const value = mounts_mod.text(mount, &buffer);
+        if (index > 0) {
+            text[used] = ' ';
+            used += 1;
+        }
+        @memcpy(text[used..][0..value.len], value);
+        used += value.len;
+    }
+    write_bytes(writer, "    .mounts = ");
+    write_string(writer, text[0..used]);
+    write_bytes(writer, ",\n");
+}
+
+const mounts_text_bytes_max = constants.mounts_max * (constants.mount_value_bytes_max + 1);
+
+/// `.state = "pgdata:/var/lib/postgresql/data cfg:/etc/app:ro",`: one string, as `env_names` is
+/// (a target holds no space), so that the bundle's redactor never reads two strings in a row.
+fn write_state(writer: *std.Io.Writer, mounts: []const volume.Mount) void {
+    assert(volume.list_problem(mounts) == null);
+    var text: [state_text_bytes_max]u8 = undefined;
+    var used: usize = 0;
+    for (mounts, 0..) |*mount, index| {
+        var buffer: [constants.state_value_bytes_max]u8 = undefined;
+        const value = volume.mount_text(mount, &buffer);
+        if (index > 0) {
+            text[used] = ' ';
+            used += 1;
+        }
+        @memcpy(text[used..][0..value.len], value);
+        used += value.len;
+    }
+    write_bytes(writer, "    .state = ");
+    write_string(writer, text[0..used]);
+    write_bytes(writer, ",\n");
+}
+
+const state_text_bytes_max = constants.state_volumes_max * (constants.state_value_bytes_max + 1);
 
 fn write_limit(writer: *std.Io.Writer, name: []const u8, value: anytype) void {
     assert(name.len > 0);
@@ -266,7 +360,10 @@ comptime {
     const scope = 4 * constants.scope_name_bytes_max + 160; // The name and the version 2 lines.
     const store_strings = constants.store_digest_text_bytes + constants.containers_path_bytes_max;
     const store = 4 * store_strings + 64;
-    const total = strings + command + labels + diagnostic + scope + store + 512;
+    const network = constants.publish_count_max * 16 +
+        4 * constants.run_env_count_max * (constants.env_name_bytes_max + 4) + 128;
+    const state = 4 * state_text_bytes_max + 32;
+    const total = strings + command + labels + diagnostic + scope + store + network + state + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -311,6 +408,62 @@ pub const Parsed = struct {
     labels: [labels_bytes_max]u8,
     labels_len: u16,
     labels_count: u8,
+    /// Version 5: null for an older record, which did not say what the container could reach.
+    network: ?spec_mod.Network,
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    publish_count: u8,
+    /// The names of the `-e` variables, each followed by a NUL. Never a value.
+    env_names: [env_names_bytes_max]u8,
+    env_names_len: u16,
+    env_names_count: u8,
+    /// Version 6: the state volumes, each as `--state` takes it, followed by a NUL.
+    state: [state_text_bytes_max]u8,
+    state_len: u16,
+    state_count: u8,
+    /// Version 7: the other mounts, each as `mounts.text` writes it, followed by a NUL.
+    mounts: [mounts_text_bytes_max]u8,
+    mounts_len: u16,
+    mounts_count: u8,
+
+    /// The `index`th other mount the run made; its strings point into this record.
+    pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
+        assert(index < parsed.mounts_count);
+        assert(parsed.mounts_len > 0);
+        var parts = std.mem.splitScalar(u8, parsed.mounts[0..parsed.mounts_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |value| : (at += 1) {
+            if (at == index) return mounts_mod.parse_text(value).?; // `parse_mounts` checked each.
+        }
+        unreachable; // The count says it is there.
+    }
+
+    /// The `index`th state volume the run mounted.
+    pub fn state_mount(parsed: *const Parsed, index: u32) volume.Mount {
+        assert(index < parsed.state_count);
+        assert(parsed.state_len > 0);
+        var parts = std.mem.splitScalar(u8, parsed.state[0..parsed.state_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |text| : (at += 1) {
+            if (at == index) return volume.parse_mount(text).ok; // `parse_state` checked each.
+        }
+        unreachable; // The count says it is there.
+    }
+
+    pub fn publish_slice(parsed: *const Parsed) []const spec_mod.Publish {
+        assert(parsed.publish_count <= constants.publish_count_max);
+        return parsed.publish[0..parsed.publish_count];
+    }
+
+    /// The `index`th name of the `-e` variables.
+    pub fn env_name(parsed: *const Parsed, index: u32) []const u8 {
+        assert(index < parsed.env_names_count);
+        var parts = std.mem.splitScalar(u8, parsed.env_names[0..parsed.env_names_len], 0);
+        var at: u32 = 0;
+        while (parts.next()) |name| : (at += 1) {
+            if (at == index) return name;
+        }
+        unreachable; // The count says it is there.
+    }
 
     /// The `index`th word of the command.
     pub fn command_word(parsed: *const Parsed, index: u32) []const u8 {
@@ -466,6 +619,14 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.command_words = 0;
     out.labels_len = 0;
     out.labels_count = 0;
+    out.network = null;
+    out.publish_count = 0;
+    out.env_names_len = 0;
+    out.env_names_count = 0;
+    out.state_len = 0;
+    out.state_count = 0;
+    out.mounts_len = 0;
+    out.mounts_count = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -493,6 +654,40 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     if (!have_start) return error.Malformed;
     if (!has_reason) out.reason = reason_of(out.exit);
     if (spec_mod.name_problem(out.name_slice()) != null) return error.Malformed;
+    try check_network_fields(out);
+    try check_mounts(out);
+}
+
+/// What `render` asserts about the mounts: the state volumes and the other mounts together are a
+/// list a run may have.
+fn check_mounts(out: *const Parsed) ParseError!void {
+    var state: [constants.state_volumes_max]volume.Mount = undefined;
+    for (0..out.state_count) |at| state[at] = out.state_mount(@intCast(at));
+    var mounts: [constants.mounts_max]mounts_mod.Mount = undefined;
+    for (0..out.mounts_count) |at| mounts[at] = out.mount_at(@intCast(at));
+    if (mounts_mod.list_problem(state[0..out.state_count], mounts[0..out.mounts_count]) != null) {
+        return error.Malformed;
+    }
+}
+
+/// What `render` asserts about the version 5 fields, so that a damaged file cannot read as valid
+/// and crash the next write: forwards only with `user`, none twice; names unique and POSIX.
+fn check_network_fields(out: *const Parsed) ParseError!void {
+    // The names first: they do not depend on the network, and a record that has lost its
+    // `.network` line must not carry names past the check that `render` asserts.
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..out.env_names_count) |at| words[at] = out.env_name(@intCast(at));
+    if (spec_mod.env_names_problem(words[0..out.env_names_count]) != null) {
+        return error.Malformed;
+    }
+    const network = out.network orelse {
+        // A record that does not say the network does not say forwards either.
+        if (out.publish_count > 0) return error.Malformed;
+        return;
+    };
+    // `publish_problem` asserts the implication, so a damaged file is refused before it.
+    if (out.publish_count > 0 and network != .user) return error.Malformed;
+    if (spec_mod.publish_problem(network, out.publish_slice()) != null) return error.Malformed;
 }
 
 fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!void {
@@ -578,6 +773,15 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
         out.upper_len = @intCast(length);
         return true;
     }
+    if (std.mem.eql(u8, key, "network")) {
+        const name = std.mem.trimStart(u8, value, ".");
+        out.network = std.meta.stringToEnum(spec_mod.Network, name) orelse return false;
+        return true;
+    }
+    if (std.mem.eql(u8, key, "publish")) return parse_publish_list(value, out);
+    if (std.mem.eql(u8, key, "env_names")) return parse_env_names(value, out);
+    if (std.mem.eql(u8, key, "state")) return parse_state(value, out);
+    if (std.mem.eql(u8, key, "mounts")) return parse_mounts(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
@@ -625,6 +829,91 @@ fn parse_command(value: []const u8, out: *Parsed) bool {
         out.command_len += @intCast(length + 1);
         out.command_words += 1;
         if (out.command_words == constants.command_words_count_max) break;
+    }
+    return true;
+}
+
+/// `.{ "8080:80", ... }`: the forwards, each as `--publish` typed it.
+fn parse_publish_list(value: []const u8, out: *Parsed) bool {
+    out.publish_count = 0; // A repeated field: the later one wins.
+    var at: usize = 0;
+    while (next_literal(value, at)) |found| : (at = found.next) {
+        if (out.publish_count == constants.publish_count_max) return false;
+        var text: [spec_mod.publish_text_bytes_max + 1]u8 = undefined;
+        const length = parse_string(found.literal, &text) orelse return false;
+        const forward = switch (spec_mod.parse_publish(text[0..length])) {
+            .ok => |parsed| parsed,
+            .problem => return false,
+        };
+        out.publish[out.publish_count] = forward;
+        out.publish_count += 1;
+    }
+    return true;
+}
+
+/// `"NAME NAME"`: the names of the `-e` variables, kept NUL-separated.
+fn parse_env_names(value: []const u8, out: *Parsed) bool {
+    out.env_names_len = 0; // A repeated field: the later one wins.
+    out.env_names_count = 0;
+    var text: [env_names_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var names_split = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (names_split.next()) |name| {
+        if (out.env_names_count == constants.run_env_count_max) return false;
+        const room = out.env_names[out.env_names_len..];
+        if (room.len < name.len + 1) return false;
+        @memcpy(room[0..name.len], name);
+        room[name.len] = 0;
+        out.env_names_len += @intCast(name.len + 1);
+        out.env_names_count += 1;
+    }
+    return true;
+}
+
+/// `"NAME:PATH NAME:PATH:ro"`: each a mount `--state` would take, and together a list a run may
+/// have (what `write_state` asserts), so that a record that reads can be written again.
+fn parse_state(value: []const u8, out: *Parsed) bool {
+    out.state_len = 0; // A repeated field: the later one wins.
+    out.state_count = 0;
+    var text: [state_text_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var mounts: [constants.state_volumes_max]volume.Mount = undefined;
+    var parts = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (parts.next()) |part| {
+        if (out.state_count == constants.state_volumes_max) return false;
+        if (part.len > constants.state_value_bytes_max) return false;
+        const room = out.state[out.state_len..];
+        assert(room.len > part.len); // The room holds every value at its bound.
+        @memcpy(room[0..part.len], part);
+        room[part.len] = 0;
+        const parsed = volume.parse_mount(room[0..part.len]);
+        if (parsed != .ok) return false;
+        mounts[out.state_count] = parsed.ok;
+        out.state_len += @intCast(part.len + 1);
+        out.state_count += 1;
+    }
+    return volume.list_problem(mounts[0..out.state_count]) == null;
+}
+
+/// `"VALUE VALUE"`: each a mount `mounts.text` writes; whether they go together is `check_mounts`.
+fn parse_mounts(value: []const u8, out: *Parsed) bool {
+    out.mounts_len = 0; // A repeated field: the later one wins.
+    out.mounts_count = 0;
+    var text: [mounts_text_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var parts = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (parts.next()) |part| {
+        if (out.mounts_count == constants.mounts_max) return false;
+        if (mounts_mod.parse_text(part) == null) return false;
+        const room = out.mounts[out.mounts_len..];
+        assert(room.len > part.len); // The room holds every value at its bound.
+        @memcpy(room[0..part.len], part);
+        room[part.len] = 0;
+        out.mounts_len += @intCast(part.len + 1);
+        out.mounts_count += 1;
     }
     return true;
 }
@@ -1040,11 +1329,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 4,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 7,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(@as(u32, 4), parsed.version);
+        try testing.expectEqual(constants.record_version, parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -1082,7 +1371,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 5,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 8,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1267,7 +1556,8 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "    .tree = ")) continue;
         if (std.mem.startsWith(u8, line, "    .upper = ")) continue;
-        const fixed = if (std.mem.eql(u8, line, "    .version = 4,")) "    .version = 3," else line;
+        const now = std.fmt.comptimePrint("    .version = {d},", .{constants.record_version});
+        const fixed = if (std.mem.eql(u8, line, now)) "    .version = 3," else line;
         @memcpy(old[length..][0..fixed.len], fixed);
         old[length + fixed.len] = '\n';
         length += fixed.len + 1;
@@ -1277,4 +1567,305 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     try testing.expectEqual(@as(usize, 0), parsed.tree_slice().len);
     try testing.expectEqual(@as(usize, 0), parsed.upper_slice().len);
     try testing.expectEqualStrings("web-1", parsed.name_slice());
+}
+
+/// A run record exactly as the M5 release wrote it (version 4), captured from that release's
+/// own writer (commit 1fb59e1, `records.render`), not from the code above.
+const record_written_by_m5 =
+    \\.{
+    \\    .version = 4,
+    \\    .name = "web-1",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh", "-c", "echo \\"hi\\"\\n" },
+    \\    .command_truncated = false,
+    \\    .labels = .{ .{ "app", "web" } },
+    \\    .started = 1760000000,
+    \\    .ended = 1760000042,
+    \\    .exit = .{ .exited = 3 },
+    \\    .ids = .full,
+    \\    .reason = .exited,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "b3:abababababababababababababababababababababababababababababababab",
+    \\    .upper = "",
+    \\    .zbx = "0.0.0",
+    \\}
+    \\
+;
+
+test "a version 4 record, as M5 wrote it, reads with no network, forwards or names" {
+    // Goal: the next release reads the last one's records (REVIEW.md). Method: the text M5's
+    // writer produced; the fields version 5 added are unknown, not zero.
+    var parsed: Parsed = undefined;
+    try parse(record_written_by_m5, &parsed);
+    try testing.expectEqual(@as(u32, 4), parsed.version);
+    try testing.expectEqualStrings("web-1", parsed.name_slice());
+    try testing.expect(parsed.network == null);
+    try testing.expectEqual(@as(usize, 0), parsed.publish_slice().len);
+    try testing.expectEqual(@as(u8, 0), parsed.env_names_count);
+    try testing.expectEqual(@as(usize, 1), @as(usize, parsed.labels_count));
+}
+
+test "a record without a network line still has its names checked" {
+    // Goal: the names of -e are refused when bad even where the record has no `.network` line, as
+    // M5's records do and a damaged one may (the record fuzzer, seed 8823082759703440891, found a
+    // bad name passing because the check sat after the early return for no network).
+    // Method: M5's real text with a name `-e` could never set added.
+    var text: [constants.record_bytes_max]u8 = undefined;
+    const end = std.mem.lastIndexOf(u8, record_written_by_m5, "}").?;
+    const damaged = try std.fmt.bufPrint(&text, "{s}    .env_names = \"9BAD\",\n}}\n", .{
+        record_written_by_m5[0..end],
+    });
+    var parsed: Parsed = undefined;
+    try testing.expectError(error.Malformed, parse(damaged, &parsed));
+    const good = try std.fmt.bufPrint(&text, "{s}    .env_names = \"GOOD\",\n}}\n", .{
+        record_written_by_m5[0..end],
+    });
+    try parse(good, &parsed);
+    try testing.expectEqual(@as(u8, 1), parsed.env_names_count);
+}
+
+test "version 5 keeps the network, the forwards and the names of -e, and never a value" {
+    // Goal: the new fields round-trip and nothing else about -e is in the text. Method: render
+    // with a forward and two names; parse back; search the text for a marker no field holds.
+    var view = sample_view();
+    const forward = [_]spec_mod.Publish{
+        .{ .host = 8080, .container = 80 },
+        .{ .host = 1, .container = 2 },
+    };
+    const variables = [_][]const u8{ "POSTGRES_PASSWORD", "_x9" };
+    view.network = .user;
+    view.publish = &forward;
+    view.env_names = &variables;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    try testing.expect(std.mem.indexOf(u8, text, "    .network = .user,\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, ".publish = .{ \"8080:80\", \"1:2\" },") != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(?spec_mod.Network, .user), parsed.network);
+    try testing.expectEqual(@as(usize, 2), parsed.publish_slice().len);
+    try testing.expectEqual(@as(u16, 8080), parsed.publish_slice()[0].host);
+    try testing.expectEqual(@as(u8, 2), parsed.env_names_count);
+    try testing.expectEqualStrings("POSTGRES_PASSWORD", parsed.env_name(0));
+    try testing.expectEqualStrings("_x9", parsed.env_name(1));
+    // The record of a run with none of them says so.
+    const bare = render(&sample_view(), &buffer);
+    try parse(bare, &parsed);
+    try testing.expectEqual(@as(?spec_mod.Network, .none), parsed.network);
+    try testing.expectEqual(@as(u8, 0), parsed.env_names_count);
+}
+
+test "version 5 fields that render never writes are Malformed, not a crash later" {
+    // Goal: parse accepts only what render can write (REVIEW.md). Method: each damage of the
+    // three fields on top of a good record.
+    var view = sample_view();
+    const forward = [_]spec_mod.Publish{.{ .host = 8080, .container = 80 }};
+    view.network = .user;
+    view.publish = &forward;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const good = render(&view, &buffer);
+    var parsed: Parsed = undefined;
+    try parse(good, &parsed);
+    const damages = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = ".network = .user", .to = ".network = .none" }, // A forward without `user`.
+        .{ .from = ".network = .user", .to = ".network = .other" },
+        .{ .from = "\"8080:80\"", .to = "\"8080:80\", \"8080:81\"" }, // A host port twice.
+        .{ .from = "\"8080:80\"", .to = "\"0:80\"" },
+        .{ .from = "\"8080:80\"", .to = "\"8080\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"A A\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"1x\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"a=b\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \"A  B\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = \" A\"" },
+        .{ .from = ".env_names = \"\"", .to = ".env_names = .{ \"A\" }" },
+    };
+    for (damages) |damage| {
+        var copy: [constants.record_bytes_max]u8 = undefined;
+        const length = std.mem.replacementSize(u8, good, damage.from, damage.to);
+        _ = std.mem.replace(u8, good, damage.from, damage.to, &copy);
+        try testing.expectError(error.Malformed, parse(copy[0..length], &parsed));
+    }
+    // Too many names: one past the bound.
+    var many: [constants.run_env_count_max + 1][]const u8 = undefined;
+    var storage: [constants.run_env_count_max + 1][4]u8 = undefined;
+    for (&many, &storage, 0..) |*word, *bytes, index| {
+        word.* = std.fmt.bufPrint(bytes, "V{d}", .{index}) catch unreachable; // Short.
+    }
+    var text: [constants.record_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    const head = ".{\n    .name = \"x\",\n    .started = 5,\n    .network = .none,\n" ++
+        "    .env_names = \"";
+    try writer.writeAll(head);
+    for (many, 0..) |word, index| {
+        try writer.print("{s}{s}", .{ if (index == 0) "" else " ", word });
+    }
+    try writer.writeAll("\",\n}\n");
+    try testing.expectError(error.Malformed, parse(writer.buffered(), &parsed));
+}
+
+/// A run record exactly as M6 slice 1 wrote it (version 5), captured from that commit's own
+/// writer (82c1f70, `records.render` of `sample_view` with a forward and an `-e` name), not from
+/// the code above.
+const record_written_by_m6_slice_1 =
+    \\.{
+    \\    .version = 5,
+    \\    .name = "web-1",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh", "-c", "echo \"hi\"\n" },
+    \\    .command_truncated = false,
+    \\    .labels = .{ .{ "app", "web" } },
+    \\    .started = 1760000000,
+    \\    .ended = null,
+    \\    .exit = .running,
+    \\    .ids = .full,
+    \\    .reason = .none,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "",
+    \\    .upper = "",
+    \\    .network = .user,
+    \\    .publish = .{ "5432:5432" },
+    \\    .env_names = "POSTGRES_PASSWORD",
+    \\    .zbx = "0.0.0",
+    \\}
+    \\
+;
+
+test "version 6 keeps the state volumes; versions 4 and 5, as written, read with none" {
+    // Goal: the field this version adds round-trips as one string (two strings in a row would
+    // read to the bundle's redactor as a secret's name and value), a list a run could not have
+    // is refused, and the records the two releases before wrote read. Method: render, parse;
+    // edits of the field; then the captured texts.
+    var view: View = sample_view();
+    const mounts = [_]volume.Mount{
+        .{ .name = "pgdata", .target = "/var/lib/postgresql/data", .read_only = false },
+        .{ .name = "cfg", .target = "/etc/app", .read_only = true },
+    };
+    view.state = &mounts;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    const line = "    .state = \"pgdata:/var/lib/postgresql/data cfg:/etc/app:ro\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, line) != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(constants.record_version, parsed.version);
+    try testing.expectEqual(@as(u8, 2), parsed.state_count);
+    try testing.expectEqualStrings("pgdata", parsed.state_mount(0).name);
+    try testing.expectEqualStrings("/etc/app", parsed.state_mount(1).target);
+    try testing.expect(parsed.state_mount(1).read_only);
+    const bad = [_][]const u8{
+        "    .state = \"pgdata\",\n",
+        "    .state = \"a:/x a:/y\",\n",
+        "    .state = \"a:/x b:/x/y\",\n",
+        "    .state = \"Bad:/x\",\n",
+        "    .state = \"a:/x  b:/y\",\n",
+        "    .state = \"a:/x b:/y c:/z d:/w e:/v f:/u g:/t h:/s i:/r\",\n",
+    };
+    for (bad) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, line, edit);
+        _ = std.mem.replace(u8, text, line, edit, &edited);
+        try testing.expectError(error.Malformed, parse(edited[0..size], &parsed));
+    }
+    try parse(record_written_by_m6_slice_1, &parsed);
+    try testing.expectEqual(@as(u32, 5), parsed.version);
+    try testing.expectEqual(@as(u8, 0), parsed.state_count);
+    try testing.expectEqualStrings("POSTGRES_PASSWORD", parsed.env_name(0));
+    try parse(record_written_by_m5, &parsed);
+    try testing.expectEqual(@as(u32, 4), parsed.version);
+    try testing.expectEqual(@as(u8, 0), parsed.state_count);
+}
+
+/// The record version 6 (slice 2 of M6) wrote for a run with a state volume: the renderer then
+/// differed from this one in the version number and in having no `.mounts` line.
+const record_written_by_m6_slice_2 =
+    \\.{
+    \\    .version = 6,
+    \\    .name = "pg",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh" },
+    \\    .labels = .{},
+    \\    .started = 1700000000,
+    \\    .ended = null,
+    \\    .exit = .running,
+    \\    .ids = .full,
+    \\    .reason = .none,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "",
+    \\    .upper = "",
+    \\    .network = .none,
+    \\    .publish = .{ },
+    \\    .env_names = "",
+    \\    .state = "pgdata:/var/lib/postgresql/data",
+    \\    .zbx = "0.6.0",
+    \\}
+    \\
+;
+
+test "version 7 keeps the other mounts; a version 6 record reads with none" {
+    // Goal: the field this version adds round-trips as one string (the secret's path is in it,
+    // never its bytes), a list a run could not have is refused, and the record of the release
+    // before reads. Method: render, parse; edits of the field; then the version 6 text.
+    var view: View = sample_view();
+    const state = [_]volume.Mount{.{ .name = "pg", .target = "/data", .read_only = false }};
+    const extra = [_]mounts_mod.Mount{
+        .{ .kind = .tmpfs, .source = "", .target = "/scratch", .size_bytes = 8 << 20 },
+        .{ .kind = .bind, .source = "/srv/site", .target = "/site", .size_bytes = 0 },
+        .{ .kind = .secret, .source = "/run/key", .target = "/run/secrets/key", .size_bytes = 0 },
+    };
+    view.state = &state;
+    view.mounts = &extra;
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    const line = "    .mounts = \"tmpfs:/scratch:8388608 bind:/srv/site:/site " ++
+        "secret:/run/key:/run/secrets/key\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, line) != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(u8, 3), parsed.mounts_count);
+    try testing.expectEqual(mounts_mod.Kind.secret, parsed.mount_at(2).kind);
+    try testing.expectEqualStrings("/run/key", parsed.mount_at(2).source);
+    try testing.expectEqual(@as(u64, 8 << 20), parsed.mount_at(0).size_bytes);
+    const bad = [_][]const u8{
+        "    .mounts = \"tmpfs:/scratch\",\n",
+        "    .mounts = \"tmpfs:/scratch:100\",\n",
+        "    .mounts = \"bind:/a:/b bind:/c:/b\",\n",
+        "    .mounts = \"bind:/a:/b/c tmpfs:/b:4096\",\n",
+        "    .mounts = \"bind:/a:/data\",\n",
+        "    .mounts = \"bind:/a:/b  bind:/c:/d\",\n",
+        "    .mounts = \"other:/a:/b\",\n",
+        "    .mounts = \"bind:/a:/b:/c\",\n",
+        "    .mounts = \"tmpfs:/a:4096 tmpfs:/b:4096 tmpfs:/c:4096 tmpfs:/d:4096 tmpfs:/e:4096 " ++
+            "tmpfs:/f:4096 tmpfs:/g:4096 tmpfs:/h:4096 tmpfs:/i:4096\",\n",
+    };
+    for (bad) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, line, edit);
+        _ = std.mem.replace(u8, text, line, edit, &edited);
+        try testing.expectError(error.Malformed, parse(edited[0..size], &parsed));
+    }
+    try parse(record_written_by_m6_slice_2, &parsed);
+    try testing.expectEqual(@as(u32, 6), parsed.version);
+    try testing.expectEqual(@as(u8, 0), parsed.mounts_count);
+    try testing.expectEqual(@as(u8, 1), parsed.state_count);
 }

@@ -18,6 +18,8 @@ const client = @import("../dbus/client.zig");
 const codes = @import("../diag/codes.zig");
 const pasta_mod = @import("pasta.zig");
 const plan_mod = @import("plan.zig");
+const mounts_diagnose = @import("mounts_diagnose.zig");
+const state_diagnose = @import("../state/diagnose.zig");
 const records = @import("records.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
@@ -102,10 +104,12 @@ pub fn rootfs_unusable(diag: *Diag, rootfs: []const u8, fault: RootfsFault) void
     diag.fix(.{
         .sentence = "unpack a root filesystem into a directory:",
         .command = "mkdir alpine && tar -xzf alpine-minirootfs-*.tar.gz -C alpine",
+        .template = true,
     });
     diag.fix(.{
         .sentence = "then name that directory:",
         .command = "zbx run --rootfs ./alpine -- /bin/sh",
+        .template = true,
     });
     assert(diag.code.? == .E0201);
     assert(diag.fixes.count == 2);
@@ -129,6 +133,7 @@ pub fn name_invalid(diag: *Diag, name: []const u8, problem: spec.NameProblem) vo
     diag.fix(.{
         .sentence = "a valid name looks like this:",
         .command = "zbx run --name web-1 --rootfs ./alpine -- /bin/sh",
+        .template = true,
     });
     assert(diag.code.? == .E0206);
     assert(diag.causes.count == 1);
@@ -180,6 +185,27 @@ pub fn step_failed(
     const step = &plan.steps[failure.step];
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
+    if (plan_mod.is_state(step.kind)) {
+        const volume = plan.state_of(step);
+        state_diagnose.mount_failed(
+            diag,
+            operation,
+            volume.name,
+            volume.target,
+            failure.err,
+            failure.errno,
+        );
+        starting(diag, info);
+        step_context(diag, plan, failure.step);
+        return;
+    }
+    if (plan_mod.is_mount(step.kind)) {
+        const names = plan.mount_of(step);
+        mounts_diagnose.mount_failed(diag, operation, names, failure.err, failure.errno);
+        starting(diag, info);
+        step_context(diag, plan, failure.step);
+        return;
+    }
     switch (step.kind) {
         .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
@@ -238,6 +264,7 @@ fn overlay_failed(diag: *Diag, operation: []const u8, failure: Failure) void {
         .{
             .sentence = "or run a directory instead:",
             .command = "zbx run --rootfs ./alpine -- sh",
+            .template = true,
         },
     );
     assert(diag.code.? == .E0425);
@@ -549,7 +576,11 @@ pub fn limit_invalid(
         .pids => "zbx run --rootfs ./alpine --pids 64 -- /bin/sh",
         .cpus => "zbx run --rootfs ./alpine --cpus 0.5 -- /bin/sh",
     };
-    diag.fix(.{ .sentence = "a valid limit looks like this:", .command = example });
+    diag.fix(.{
+        .sentence = "a valid limit looks like this:",
+        .command = example,
+        .template = true,
+    });
     assert(diag.code.? == .E0306);
     assert(diag.causes.count == 1);
 }
@@ -620,6 +651,7 @@ fn problem_fixes(diag: *Diag, code: codes.Code, scope_name: []const u8) void {
             diag.fix(.{
                 .sentence = "choose another name:",
                 .command = "zbx run --name <other-name> ...",
+                .template = true,
             });
             diag.fix_with("or stop the other unit:", "systemctl --user stop {s}", .{scope_name});
         },
@@ -772,6 +804,7 @@ pub fn cannot_signal(diag: *Diag, name: []const u8, pid: u32, failure: Failure) 
     diag.fix(.{
         .sentence = "look at the process:",
         .command = "ps -o pid,user,stat,args -p <pid>",
+        .template = true,
     });
     assert(diag.code.? == .E0403);
 }
@@ -788,6 +821,7 @@ pub fn did_not_stop(diag: *Diag, name: []const u8, pid: u32, waited_ms: u32) voi
     diag.fix(.{
         .sentence = "see what it is waiting for:",
         .command = "ps -o pid,stat,wchan -p <pid>",
+        .template = true,
     });
     assert(diag.code.? == .E0404);
 }
@@ -818,6 +852,7 @@ pub fn supervisor_failed(diag: *Diag, fault: SupervisorFault) void {
     diag.fix(.{
         .sentence = "run it in the foreground to see the failure:",
         .command = "zbx run ...",
+        .template = true,
     });
     assert(diag.code.? == .E0405);
 }
@@ -966,6 +1001,7 @@ pub fn publish_list_invalid(diag: *Diag, problem: spec.PublishListProblem) void 
     diag.fix(.{
         .sentence = "publish each host port once:",
         .command = "zbx run --publish 8080:80 nginx",
+        .template = true,
     });
     assert(diag.code.? == .E0600);
 }
@@ -984,6 +1020,7 @@ pub fn pasta_missing(diag: *Diag, network: spec.Network) void {
     diag.fix(.{
         .sentence = "or run with the host's network:",
         .command = "zbx run --net host alpine -- sh",
+        .template = true,
     });
     assert(diag.fixes.count == 2);
 }
@@ -1035,6 +1072,7 @@ pub fn pasta_port_refused(
     diag.fix(.{
         .sentence = "publish a higher host port:",
         .command = "zbx run --publish 8080:80 nginx",
+        .template = true,
     });
     diag.fix(.{
         .sentence = "or let users bind from 80 up, as root:",
@@ -1109,6 +1147,7 @@ fn pasta_not_ready(
     diag.fix(.{
         .sentence = "or run with the host's network:",
         .command = "zbx run --net host alpine -- sh",
+        .template = true,
     });
     assert(diag.code.? == .E0603);
 }
@@ -1131,6 +1170,7 @@ fn pasta_port_in_use(diag: *Diag, plan: *const Plan, port: ?u16, line: []const u
     diag.fix(.{
         .sentence = "or publish another host port:",
         .command = "zbx run --publish 8081:80 nginx",
+        .template = true,
     });
     assert(diag.fixes.count == 2);
 }

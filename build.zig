@@ -91,6 +91,7 @@ fn add_test_step(
         "src/testing/vm/main_m3.zig",
         "src/testing/vm/main_m4.zig",
         "src/testing/vm/main_m5.zig",
+        "src/testing/vm/main_m6.zig",
         "src/testing/vm/main_top20.zig",
         "src/main.zig",
         "src/zigbox.zig",
@@ -240,6 +241,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M5 demo, as far as it is built: the upgrade test against M4",
     },
     .{
+        .step = "demo-m6",
+        .root = "src/testing/vm/main_m6.zig",
+        .help = "Run the M6 demo, as far as it is built: the five steps, upgrade from M5",
+    },
+    .{
         .step = "top20",
         .root = "src/testing/vm/main_top20.zig",
         .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
@@ -267,6 +273,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
     const only = b.option([]const u8, "only", only_help);
     const ca_help = "demos: a CA bundle the guest trusts, for a host that inspects TLS";
     const ca_file = b.option(std.Build.LazyPath, "ca-file", ca_help);
+    // `zig build test` only compiles what a test reaches, and a demo's steps are reached through
+    // its `parts` list, not a test: compiling every harness is a gate of its own (`check`).
+    const harness = b.step("harness", "Compile every VM demo harness, without running it");
 
     for (demos) |demo| {
         const is_top20 = std.mem.eql(u8, demo.step, "top20");
@@ -278,6 +287,7 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
                 .optimize = .ReleaseSafe,
             }),
         });
+        harness.dependOn(&vm.step);
         // The top-20 run tells a seccomp refusal from another EPERM by the allowlist itself.
         if (is_top20) {
             vm.root_module.addAnonymousImport("seccomp_policy", .{
@@ -297,6 +307,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         }
         if (std.mem.eql(u8, demo.step, "demo-m5")) {
             add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m5_commit);
+        }
+        if (std.mem.eql(u8, demo.step, "demo-m6")) {
+            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m6_commit);
         }
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
         if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
@@ -329,7 +342,7 @@ fn add_release_binaries(
     }
 }
 
-/// The upgrade test of demo-m3, demo-m4 and demo-m5: the older zbx, built from a worktree of the
+/// The upgrade test of demo-m3 to demo-m6: the older zbx, built from a worktree of the
 /// pinned commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
 fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run, commit: []const u8) void {
     const builder = b.addExecutable(.{
@@ -411,7 +424,9 @@ fn add_check_step(b: *std.Build, fuzz: *std.Build.Step.Compile) void {
     run.addArgs(&.{ b.graph.zig_exe, user });
     run.addArtifactArg(fuzz);
     run.has_side_effects = true;
-    const gates = [_][]const u8{ "install", "test", "tidy", "release", "errors-site-check" };
+    const gates = [_][]const u8{
+        "install", "test", "tidy", "release", "errors-site-check", "harness",
+    };
     for (gates) |name| {
         const gate = b.top_level_steps.get(name) orelse @panic(name);
         run.step.dependOn(&gate.step);

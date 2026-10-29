@@ -1,0 +1,5 @@
+warning[ZBX-W0702]: a state volume's size could not be counted
+  cause  a file or directory in it could not be read
+  fix    count it by hand from the user's namespace (zbx explain W0702)
+  more   zbx explain W0702 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0702.html

@@ -1,0 +1,5 @@
+warning[ZBX-W0102]: --net user is not available
+  cause  pasta not found: --net user and --publish need it (apt install passt)
+  fix    install pasta (Debian, Ubuntu):   sudo apt install passt
+  more   zbx explain W0102 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0102.html

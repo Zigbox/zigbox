@@ -59,6 +59,8 @@ const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
+const volumes_mod = @import("volumes.zig");
+const mounts_mod = @import("mounts.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -202,6 +204,8 @@ pub const Handle = struct {
     image_workspace: ?*image_mod.Workspace,
     command: []const []const u8,
     labels: []const Label,
+    /// The names (never the values) of the `-e` variables, for the record.
+    env_names: []const []const u8,
     started: u64,
     mapping: records.IdsMode,
     /// Where the record goes; null if there is nowhere (a warning said so).
@@ -229,6 +233,12 @@ pub const Handle = struct {
     end_reason: records.EndReason,
     /// Why `wait` returned `.lost`.
     lost_diag: Diag,
+    /// The state volumes, held from before the container is created until it has ended.
+    volumes: volumes_mod.Held,
+    /// The other mounts (they point into the `Spec`, like the command) and what the host showed
+    /// of each.
+    mounts: []const mounts_mod.Mount,
+    mount_inputs: [constants.mounts_max]plan_mod.MountInput,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -305,19 +315,29 @@ pub fn start(
     handle.pasta_log = .{};
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
+    handle.volumes.count = 0;
+    handle.mounts = container.mounts;
     handle.command = container.command;
     handle.labels = container.labels;
+    handle.env_names = container.env_names;
     try choose_name(host, container.name, handle, diag);
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
     try check_network(host, container, handle, diag);
+    mounts_mod.resolve(host, container.state, container.mounts, &handle.mount_inputs, diag) catch
+        return error.StartFailed;
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
     const scope_input = try prepare_scope(handle, container.limits, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
+    // The volumes last, so that nothing above can fail with them held; from here every way out
+    // of `start` that is not a running container lets them go.
+    volumes_mod.take(host, container.state, handle.name_slice(), &handle.volumes, diag) catch
+        return error.StartFailed;
+    errdefer volumes_mod.release(host, &handle.volumes);
     build_plan(host, container, choice, scope_input, handle);
     // Namespace setup must happen before any thread exists (docs/SPEC.md, M1 acceptance).
     if (builtin.mode == .debug) assert_single_threaded(host);
@@ -374,6 +394,8 @@ fn build_plan(
             .log = handle.pasta_log.slice(),
             .publish = handle.publish_slice(),
         } else null,
+        .state = handle.volumes.input_slice(),
+        .mounts = handle.mount_inputs[0..handle.mounts.len],
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -452,6 +474,7 @@ pub fn wait(handle: *Handle) ExitReason {
         });
         save_record(handle, .lost, host.time_now(), &handle.lost_diag);
         finish_scope(handle); // `abandon` ended the container.
+        volumes_mod.release(host, &handle.volumes);
         handle.ended = .lost;
         return .lost;
     };
@@ -482,6 +505,8 @@ pub fn wait(handle: *Handle) ExitReason {
     };
     save_record(handle, exit, host.time_now(), null);
     finish_scope(handle);
+    // The container is reaped: its volumes are free for the next run.
+    volumes_mod.release(host, &handle.volumes);
     handle.ended = reason;
     return reason;
 }
@@ -620,6 +645,8 @@ fn check_command(container: *const Spec, diag: *Diag) Error!void {
         diagnose.env_too_big(diag, index);
         return error.StartFailed;
     }
+    // The caller (cli.zig) built `env_names` from the options it already checked.
+    assert(spec_mod.env_names_problem(container.env_names) == null);
     if (spec_mod.workdir_problem(container.workdir)) {
         diagnose.workdir_unusable(diag);
         return error.StartFailed;
@@ -927,7 +954,12 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .supervisor = handle.host.own_pid(),
         .tree = if (handle.has_image) handle.image.tree_text() else "",
         .upper = if (writable_layers) handle.image.upper.text() else "",
+        .network = handle.network,
+        .publish = handle.publish_slice(),
+        .env_names = handle.env_names,
         .zbx_version = build_options.version,
+        .state = handle.volumes.mount_slice(),
+        .mounts = handle.mounts,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

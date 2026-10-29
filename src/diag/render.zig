@@ -462,8 +462,9 @@ test "json rendering: one line, every field, escapes, null for a fix without a c
             "\"while\":[\"starting container \\\"web-1\\\"\",\"setting up namespaces\"]," ++
             "\"context\":{\"path\":\"C:\\\\x\"}," ++
             "\"fixes\":[{\"sentence\":\"allow zbx only:\"," ++
-            "\"command\":\"sudo zbx doctor --fix apparmor\"}," ++
-            "{\"sentence\":\"or system-wide:\",\"command\":\"sudo sysctl a.b=0\"}," ++
+            "\"command\":\"sudo zbx doctor --fix apparmor\",\"needs_root\":true}," ++
+            "{\"sentence\":\"or system-wide:\",\"command\":\"sudo sysctl a.b=0\"," ++
+            "\"needs_root\":true}," ++
             "{\"sentence\":\"or read the docs\",\"command\":null}]," ++
             "\"docs\":\"https://zigbox.github.io/zigbox/errors/E0001.html\"," ++
             "\"omitted\":{\"causes\":0,\"while\":0,\"context\":0,\"fixes\":0}}\n",

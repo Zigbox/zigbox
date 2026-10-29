@@ -1,0 +1,6 @@
+error[ZBX-E0706]: the state volume is in use
+  cause  pg (process 4242) holds the volume pgdata for writing
+  fix    stop the container that holds it, then run again:   zbx stop pg
+         or, if this run only reads it, mount it with NAME:PATH:ro
+  more   zbx explain E0706 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0706.html

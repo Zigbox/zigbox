@@ -33,12 +33,18 @@ pub const Code = enum(u8) {
     E0007,
     E0008,
     E0009,
+    E0010,
+    E0011,
+    E0012,
+    E0013,
     E0101,
     E0102,
     E0103,
     E0104,
     E0105,
     E0106,
+    W0101,
+    W0102,
     E0201,
     E0202,
     E0203,
@@ -48,6 +54,8 @@ pub const Code = enum(u8) {
     E0207,
     E0208,
     E0209,
+    E0210,
+    E0211,
     W0201,
     W0202,
     W0203,
@@ -137,7 +145,21 @@ pub const Code = enum(u8) {
     E0702,
     E0703,
     E0704,
+    E0705,
+    E0706,
+    E0707,
+    E0708,
+    E0709,
+    E0710,
+    E0711,
+    E0712,
+    E0713,
+    E0714,
+    E0715,
+    E0716,
     W0701,
+    W0702,
+    W0703,
     B0001,
 };
 
@@ -283,6 +305,79 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0010,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't use this -e option",
+        .explanation =
+        \\"zbx run -e NAME=VALUE" sets a variable in the container, and "-e NAME"
+        \\copies it from zbx's own environment. The option you gave is neither: the
+        \\name must be a letter or underscore followed by letters, digits and
+        \\underscores (at most 64 of them), a name may be set once, and a run takes
+        \\at most 16 of them. The image's own variables and yours together are at
+        \\most 64.
+        \\
+        \\zbx never prints or stores a value, so the message names the variable only.
+        \\The run record, "zbx ps" and a bundle list the names that -e set, never
+        \\what they were set to. Remember that your shell, and the process list of
+        \\this machine while zbx runs, can still show the command line: "-e NAME"
+        \\with the value in the environment keeps it off both.
+        ,
+    },
+    .{
+        .code = .E0011,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "-e names a variable that is not set",
+        .explanation =
+        \\"-e NAME", with no "=", copies the variable NAME from the environment of
+        \\the zbx command into the container. NAME is not set there (or its value is
+        \\longer than 4096 bytes, more than a container can take), so there is
+        \\nothing to copy and zbx did not start the container.
+        \\
+        \\Give the value on the command line ("-e NAME=VALUE"), or set the variable
+        \\for this one command: NAME=VALUE zbx run -e NAME ... A value is never
+        \\printed or stored by zbx.
+        ,
+    },
+    .{
+        .code = .E0012,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --tmpfs, --bind or --secret value",
+        .explanation =
+        \\--tmpfs takes PATH or PATH:SIZE, an empty tmpfs gone at exit (64 MiB
+        \\without a size; SIZE is bytes, or a number with k, m or g, from 4096
+        \\bytes to 1 TiB). --bind takes HOST:PATH, a host directory or file
+        \\mounted read-only. --secret takes HOST_FILE:PATH, a host file copied
+        \\into the container's memory, mode 0400, read-only, owned by the
+        \\container's root.
+        \\
+        \\Every path is absolute, with parts that are names (no empty, "." or ".."
+        \\part), at most 256 bytes, and holds no ':', space or control character.
+        \\A path in the container may not be "/", nor /proc, /sys, /dev or below
+        \\them, nor /etc/hosts, /etc/hostname or /etc/resolv.conf: zbx mounts
+        \\those itself. The cause names the part that is wrong.
+        \\
+        \\    zbx run --tmpfs /scratch:128m --bind /srv/site:/srv nginx
+        ,
+    },
+    .{
+        .code = .E0013,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "mounts that cannot go together",
+        .explanation =
+        \\One run's mounts (--state, --tmpfs, --bind and --secret) each have a
+        \\path in the container, and no path may be the same as another's, inside
+        \\it, or hold it: a mount inside another would be made in the outer one.
+        \\At most 8 of --tmpfs, --bind and --secret may be given in one run, and 8
+        \\--state.
+        \\
+        \\Give each mount its own place, or drop one.
+        ,
+    },
+    .{
         .code = .E0101,
         .severity = .@"error",
         .blame = .environment,
@@ -392,6 +487,40 @@ pub const registry = [_]Entry{
         \\Use a kernel with seccomp enabled; every mainstream distribution kernel has
         \\it. If the two answers disagree, run "zbx doctor" again, and report it if it
         \\repeats. If a file could not be read, the cause says so.
+        ,
+    },
+    .{
+        .code = .W0101,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "user namespaces work, but only for unconfined users",
+        .explanation =
+        \\zbx doctor created a user namespace, so zbx works for this process. The host
+        \\also sets kernel.apparmor_restrict_unprivileged_userns = 1, which refuses
+        \\the same call to processes that no AppArmor profile confines. The check
+        \\passed because this process runs under a profile that allows it.
+        \\
+        \\Run from a terminal or another service, zbx may meet the refusal as
+        \\ZBX-E0101. To allow user namespaces system-wide, set the sysctl to 0 as
+        \\root; "zbx doctor" shows the same host as a failure when this process is
+        \\not confined by a permissive profile.
+        ,
+    },
+    .{
+        .code = .W0102,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "--net user is not available",
+        .explanation =
+        \\--net user and --publish connect a container to the network through pasta
+        \\(from the passt project), and the net check of zbx doctor found it missing,
+        \\unable to report its version, or older than zbx can use. Nothing else
+        \\depends on it: --net none (the default) and --net host run without pasta,
+        \\so this is a warning and "zbx doctor" still exits 0.
+        \\
+        \\Install a current passt (Debian and Ubuntu: apt install passt; Fedora:
+        \\dnf install passt). A run that asks for --net user without it is refused
+        \\as ZBX-E0601 (missing) or ZBX-E0602 (too old) before anything starts.
         ,
     },
     .{
@@ -562,6 +691,40 @@ pub const registry = [_]Entry{
         \\the mount point: make both directories as the rootfs's owner (mkdir -p
         \\<rootfs>/tmp <rootfs>/run) and run again. Otherwise the kernel refused the
         \\mount or the remount; the cause says why.
+        ,
+    },
+    .{
+        .code = .E0210,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --bind or --secret source can't be used",
+        .explanation =
+        \\A --bind source is a directory or a regular file on the host, and a
+        \\--secret source is one regular file. The cause says what is wrong with
+        \\the path you gave: it does not exist, cannot be looked at, or is another
+        \\kind of file (a socket, a device). zbx never makes a source: a bind is
+        \\read-only, and what a container writes belongs in a state volume
+        \\(--state).
+        \\
+        \\Check the path, or make the file first, then run again.
+        ,
+    },
+    .{
+        .code = .E0211,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up a --tmpfs, --bind or --secret mount",
+        .explanation =
+        \\A mount is made before the container's command starts. A bind or a
+        \\secret is staged in the container's own /dev, made read-only, and moved
+        \\onto its path once the container's root is entered (so the path is read
+        \\as the container reads it); a tmpfs is mounted on its path. One of those
+        \\steps failed; the cause names it and what the kernel said.
+        \\
+        \\A secret is copied by the container's root, so the file must be readable
+        \\by you and at most 65536 bytes. With --read-only the path must already
+        \\exist in the image: nothing can be made in a read-only root. zbx doctor
+        \\shows what this host allows.
         ,
     },
     .{
@@ -1967,6 +2130,187 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0705,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid state volume name",
+        .explanation =
+        \\A state volume's name is a directory name under the state directory, never
+        \\a path: lowercase letters, digits, '.', '-' and '_', starting with a letter
+        \\or a digit, at most 63 bytes. "pgdata", "web.cache" and "db_2" are names;
+        \\"PgData", ".hidden" and "a/b" are not.
+        \\
+        \\--state takes NAME:PATH, or NAME:PATH:ro to mount it read-only:
+        \\    zbx run --state pgdata:/var/lib/postgresql/data postgres:16
+        ,
+    },
+    .{
+        .code = .E0706,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the state volume is in use",
+        .explanation =
+        \\A state volume has one writer at a time. A run that mounts it read-write
+        \\holds it for its whole life, from before its command starts until it ends
+        \\(a clean exit, zbx stop, --timeout, a killed container or a killed zbx all
+        \\let it go). A run that mounts it with :ro shares it with other readers,
+        \\never with a writer. zbx state rm needs it free as well.
+        \\
+        \\The cause names the container that holds it. Stop that container first
+        \\(zbx stop <name>), or mount the volume read-only with NAME:PATH:ro if
+        \\reading is all this run needs.
+        ,
+    },
+    .{
+        .code = .E0707,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no state volume with that name",
+        .explanation =
+        \\There is no state volume of that name in the state directory
+        \\($XDG_DATA_HOME/zbx/state, or ~/.local/share/zbx/state). A volume is made
+        \\only by the first run that names it with --state, and removed only by zbx
+        \\state rm, after which zbx state restore brings it back for a week.
+        \\
+        \\zbx state ls lists the volumes, and the trash.
+        ,
+    },
+    .{
+        .code = .E0708,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a state volume with that name exists already",
+        .explanation =
+        \\zbx state restore puts a removed volume back under its name, and a volume
+        \\of that name was made again since it was removed (a run named it with
+        \\--state). Restoring would replace the new one, so nothing was changed.
+        \\
+        \\Remove the new volume first if it is not needed (zbx state rm <name>,
+        \\which moves it to the trash too), then restore the old one.
+        ,
+    },
+    .{
+        .code = .E0709,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no state volume with that name in the trash",
+        .explanation =
+        \\zbx state restore brings back a volume that zbx state rm moved to the trash.
+        \\The trash has no volume of that name: it was never removed, the name is
+        \\misspelled, or its trash was emptied by a later zbx state rm after it
+        \\expired.
+        \\
+        \\zbx state ls lists the volumes and what the trash holds.
+        ,
+    },
+    .{
+        .code = .E0710,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the state volume's trash has expired",
+        .explanation =
+        \\What zbx state rm moves to the trash is kept for 7 days, as what zbx store
+        \\gc moves is; after that the next zbx state rm empties it. This volume was
+        \\removed longer ago than that, so it is not restored: an expired trash is
+        \\due to go, and bringing it back would make the expiry a matter of luck.
+        \\
+        \\Its files are still in the trash directory until then
+        \\(<state>/.trash/<name>@<seconds>), and can be copied out by hand from the
+        \\user's namespace: unshare --map-auto --map-root-user, then cp -a.
+        ,
+    },
+    .{
+        .code = .E0711,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't make or read the state directory",
+        .explanation =
+        \\State volumes live in $XDG_DATA_HOME/zbx/state, or ~/.local/share/zbx/state
+        \\when that is not set, beside the store. Either neither variable names an
+        \\absolute directory, or a directory or file there could not be made, read
+        \\or written; the cause names the path and what the system said. A full
+        \\disk and a directory owned by another user are the usual reasons.
+        \\
+        \\Set HOME, or point XDG_DATA_HOME at a directory you own with room.
+        ,
+    },
+    .{
+        .code = .E0712,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read a state volume's record",
+        .explanation =
+        \\Each volume has a small record, <state>/<name>/state.zon: when it was made,
+        \\when it was last used and by which container. This one is damaged, or was
+        \\written by a newer zbx, which this one does not misread.
+        \\
+        \\Use the zbx that wrote it, or move the record aside: the volume's files in
+        \\<state>/<name>/data are not touched, and the next run writes a new record.
+        ,
+    },
+    .{
+        .code = .E0713,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't mount a state volume in the container",
+        .explanation =
+        \\A state volume is bound into the container before its command starts: its
+        \\data directory is made by the container's root, bound in the container's
+        \\/dev, then moved onto its path once the container's root is entered, so
+        \\that the path is read as the container reads it. One of those steps
+        \\failed; the cause names it and what the kernel said.
+        \\
+        \\With --read-only the path must already exist in the image: nothing can be
+        \\made in a read-only root. zbx doctor shows what this host allows.
+        ,
+    },
+    .{
+        .code = .E0714,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "won't write the archive to a terminal",
+        .explanation =
+        \\zbx state export writes a gzip-compressed tar archive: binary data a
+        \\terminal would show as noise. Standard output is a terminal, so nothing
+        \\was read.
+        \\
+        \\Name a file with -o, or redirect the output:
+        \\    zbx state export pgdata -o pgdata.tar.gz
+        \\    zbx state export pgdata > pgdata.tar.gz
+        ,
+    },
+    .{
+        .code = .E0715,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't write the archive",
+        .explanation =
+        \\The archive could not be written: the file named with -o cannot be made,
+        \\the disk is full, or the output was closed. The cause says which. A file
+        \\that was started is removed again; nothing partial is left.
+        \\
+        \\Free space, or write somewhere else with -o.
+        ,
+    },
+    .{
+        .code = .E0716,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the state volume to export it",
+        .explanation =
+        \\Exporting reads every file of the volume in the user's namespace, where
+        \\files of the container's users can be read. The read stopped: a file or
+        \\directory could not be read, one changed while it was read, the tree is
+        \\deeper than 64 directories, a path is longer than 4095 bytes, or it has
+        \\more entries or more files with several names than one export keeps
+        \\(4194304 and 16384). The cause says which.
+        \\
+        \\Nothing is written for a stopped export when -o names a file. A volume
+        \\that a container is still changing cannot be read consistently: stop it
+        \\first.
+        ,
+    },
+    .{
         .code = .W0701,
         .severity = .warning,
         .blame = .user,
@@ -1978,6 +2322,34 @@ pub const registry = [_]Entry{
         \\
         \\Leave --no-redact out and the values are replaced by [redacted:<kind>],
         \\which is what you want for a bug report.
+        ,
+    },
+    .{
+        .code = .W0702,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "a state volume's size could not be counted",
+        .explanation =
+        \\zbx state ls counts a volume's size in the user's namespace, where files of
+        \\the container's users can be read, each file with several names once. The
+        \\count stopped for this volume (a file could not be read, the tree is deeper
+        \\than 64 directories, or it has more names or hard links than one listing
+        \\keeps), so its size is shown as unknown. The rest of the listing is right.
+        \\
+        \\du -sh in the user's namespace counts it by hand:
+        \\    unshare --map-auto --map-root-user du -sh <state>/<name>/data
+        ,
+    },
+    .{
+        .code = .W0703,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "a file was left out of the export",
+        .explanation =
+        \\A state volume can hold files a tar archive of this kind does not keep:
+        \\devices, sockets and fifos. Each one is skipped with this note (the
+        \\first 16; the rest are counted). The archive holds everything else, and
+        \\is complete without them.
         ,
     },
     .{
@@ -2122,6 +2494,8 @@ pub fn can_end_run(code: Code) bool {
         .E0001, .E0002, .E0007 => false,
         .E0101, .E0102, .E0103, .E0104, .E0105, .E0106 => false,
         .E0702, .E0703, .E0704 => false,
+        .E0707, .E0708, .E0709, .E0710, .W0702 => false,
+        .E0714, .E0715, .E0716, .W0703 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
         .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,

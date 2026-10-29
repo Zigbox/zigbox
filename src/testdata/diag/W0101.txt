@@ -1,0 +1,6 @@
+warning[ZBX-W0101]: user namespaces work, but only for unconfined users
+  cause  this host restricts unprivileged user namespaces through AppArmor
+         (kernel.apparmor_restrict_unprivileged_userns = 1)
+  fix    allow them system-wide:   sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+  more   zbx explain W0101 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0101.html

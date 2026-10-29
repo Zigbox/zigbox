@@ -381,7 +381,7 @@ fn step_upgrade(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     };
     _ = try expect_exit(session, out, step, zbx ++ " ps --all", 0);
     _ = try expect_exit(session, out, step, zbx ++ dir ++ " --name new1 -- true", 0);
-    try record_version(session, out, "new1", 4);
+    try record_version(session, out, "new1", checks_m3.record_version_written);
     try record_version(session, out, "old1", 3);
     const again = try expect_exit(session, out, step, listing, 0);
     const all = [_][]const u8{ "old1", "old2", "old3", "new1" };

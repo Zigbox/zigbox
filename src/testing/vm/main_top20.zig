@@ -32,12 +32,22 @@ const probe_file = "/tmp/top20-probe";
 const image_timeout_s: u32 = 900;
 const strace_log = "/tmp/top20-strace.log";
 
-const Entry = struct { ref: []const u8, known: []const u8, probe: []const u8 };
+const Entry = struct {
+    ref: []const u8,
+    known: []const u8,
+    probe: []const u8,
+    env: []const u8,
+};
 
 const images = blk: {
     var all: [list.images.len]Entry = undefined;
     for (list.images, 0..) |entry, index| {
-        all[index] = .{ .ref = entry.ref, .known = entry.known, .probe = entry.probe };
+        all[index] = .{
+            .ref = entry.ref,
+            .known = entry.known,
+            .probe = entry.probe,
+            .env = entry.env,
+        };
     }
     break :blk all;
 };
@@ -297,7 +307,7 @@ fn try_image(
         return result;
     }
     const probe = checks_top20.parse_probe(entry.probe);
-    const run = try run_command(arena, entry.ref, probe);
+    const run = try run_command(arena, entry, probe);
     const ran = try split_long(session, run);
     try H.show_split(out, run, ran);
     const stderr = try arena.dupe(u8, ran.streams.stderr);
@@ -326,6 +336,12 @@ fn try_image(
     return result;
 }
 
+/// The flags and reference of a run: `-e NAME=VALUE` when the entry has an `env`, then the image.
+fn image_with_env(arena: std.mem.Allocator, entry: Entry) ![]const u8 {
+    if (entry.env.len == 0) return entry.ref;
+    return std.fmt.allocPrint(arena, "-e {s} {s}", .{ entry.env, entry.ref });
+}
+
 /// The command for one image's default run. A server with a probe runs in the background with its
 /// port published on a high host port (`checks_top20.published_port`, M5's `--publish`), and the
 /// guest asks it there, on 127.0.0.1, every 2 s until it answers, the container ends or
@@ -333,9 +349,10 @@ fn try_image(
 /// the command's. An image without a probe shares the host's network, as in M5 slice 2.
 fn run_command(
     arena: std.mem.Allocator,
-    ref: []const u8,
+    entry: Entry,
     probe: ?checks_top20.ProbeSpec,
 ) ![]const u8 {
+    const ref = try image_with_env(arena, entry);
     const plain = z ++ " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null";
     const spec = probe orelse return std.fmt.allocPrint(arena, plain, .{ref});
     const host_port = checks_top20.published_port(spec.port);
@@ -397,19 +414,43 @@ fn reason_of(
 fn find_seccomp(session: *Session, out: *Io.Writer, entry: Entry, traced: bool) ![]const u8 {
     if (!traced) return "unchecked";
     const arena = session.scratch_allocator();
+    const ref = try image_with_env(arena, entry);
     const command = try std.fmt.allocPrint(
         arena,
         "strace -f -o " ++ strace_log ++ " -e status=failed " ++ z ++
             " run --net host --timeout " ++ run_timeout_ms ++ " {s} </dev/null >/dev/null 2>&1; " ++
             "grep -h ' = -1 EPERM' " ++ strace_log ++
             " | sed -E 's/^[0-9]+ +//; s/\\(.*//' | sort -u | tr '\\n' ' '",
-        .{entry.ref},
+        .{ref},
     );
     const traced_run = try session.run(command, image_timeout_s * 2);
     try H.show(out, "strace: the syscalls that returned EPERM", traced_run);
     const out_buffer = try arena.alloc(u8, 256);
     const names = checks_top20.seccomp_suspects(traced_run.output, &allowed, out_buffer);
     return names;
+}
+
+test "the three databases get their password variable, and the others none" {
+    // Goal: the entrypoints of postgres, mysql and mariadb refuse to start without a root
+    // password, so the run must carry `-e NAME=VALUE`; no other entry has one. Method: the
+    // command text of each entry.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var with_env: u32 = 0;
+    for (images) |entry| {
+        const text = try image_with_env(arena, entry);
+        if (entry.env.len == 0) {
+            try std.testing.expectEqualStrings(entry.ref, text);
+            continue;
+        }
+        with_env += 1;
+        try std.testing.expect(std.mem.startsWith(u8, text, "-e "));
+        try std.testing.expect(std.mem.endsWith(u8, text, entry.ref));
+        try std.testing.expect(std.mem.indexOf(u8, entry.env, "PASSWORD=") != null);
+        try std.testing.expect(entry.probe.len > 0); // A database is asked on its port.
+    }
+    try std.testing.expectEqual(@as(u32, 3), with_env);
 }
 
 test {

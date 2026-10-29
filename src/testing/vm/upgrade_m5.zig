@@ -83,7 +83,7 @@ fn old_makes(session: *Session, out: *Io.Writer) !Made {
 }
 
 /// The image's record file has `.version = <version>,`.
-fn expect_record_version(
+pub fn expect_record_version(
     session: *Session,
     out: *Io.Writer,
     pull: m4.PullDoc,
@@ -168,7 +168,7 @@ fn run_image(session: *Session, out: *Io.Writer, made: Made) !void {
     };
 }
 
-/// M4's run record is listed beside this binary's own, and both are version 4.
+/// M4's run record (version 4) is listed beside this binary's own (version 5).
 fn read_run_records(session: *Session, out: *Io.Writer) !void {
     _ = try expect_exit(session, out, step, z ++ " run " ++ reference ++ " --name up2 -- true", 0);
     const listed = try expect_exit(session, out, step, z ++ " --output json ps --all", 0);
@@ -176,14 +176,15 @@ fn read_run_records(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step, "expected ps --all to list M4's record and the new one", err);
     };
     const names = [_][]const u8{ "up1", "up2" };
-    for (names) |name| {
+    const versions = [_]u32{ checks.run_record_version_old, checks.run_record_version };
+    for (names, versions) |name, version| {
         const command = try common.format(session, "grep -h version {s}/runs/{s}.zon", .{
             common.state_dir, name,
         });
         const record = try session.run(command, limits.command_timeout_kvm_s);
         try H.show(out, command, record);
-        checks.check_record_version(record.output, checks.run_record_version) catch |err| {
-            return fail_step(out, step, "expected a version 4 run record", err);
+        checks.check_record_version(record.output, version) catch |err| {
+            return fail_step(out, step, "expected the run record of its own version", err);
         };
     }
 }
@@ -232,7 +233,7 @@ fn expect_tags(
     };
 }
 
-fn pull_json(
+pub fn pull_json(
     session: *Session,
     out: *Io.Writer,
     program: []const u8,

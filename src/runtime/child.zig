@@ -112,6 +112,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
     const plan = child.plan;
     assert(plan_mod.side_of(step.kind) == .child);
     const target = plan.text(step.target);
+    if (plan_mod.is_state(step.kind)) return run_state_step(host, plan, step, target);
+    if (plan_mod.is_mount(step.kind)) return run_mount_step(host, plan, step, target);
     switch (step.kind) {
         .die_with_parent => try host.die_with_parent(),
         .await_release => try await_release(child),
@@ -155,10 +157,63 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .detach_old_root => try host.unmount_detach(target),
         .seal_descriptors => try host.seal_descriptors(),
         .exec => try exec(child, state),
+        // Handled by `run_state_step` and `run_mount_step` above.
+        .make_state_data, .make_state_stage, .bind_state, .remount_state => unreachable,
+        .make_state_target, .move_state, .remove_state_stage => unreachable,
+        .make_mount_stage_dir, .make_mount_stage_file, .copy_secret => unreachable,
+        .bind_mount_dir, .bind_mount_file, .remount_mount, .remount_mount_tree => unreachable,
+        .make_mount_target_dir, .make_mount_target_file, .move_mount => unreachable,
+        .remove_mount_stage_dir, .remove_mount_stage_file, .mount_user_tmpfs => unreachable,
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => unreachable,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
+    }
+}
+
+fn run_state_step(
+    host: Host,
+    plan: *const Plan,
+    step: *const Step,
+    target: [:0]const u8,
+) host_mod.Error!void {
+    assert(plan_mod.is_state(step.kind));
+    switch (step.kind) {
+        // The container's root makes the volume's `data` in its own user namespace, so that it
+        // is the owner as the container sees it; an existing one is the volume's files.
+        .make_state_data => try host.make_directory(target, true),
+        .make_state_stage => try host.make_directory(target, false),
+        .bind_state => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .remount_state => try mount(host, .remount_readonly, target, null),
+        .make_state_target => try make_parents(host, target),
+        .move_state => try mount(host, .move, target, plan.text(step.source)),
+        .remove_state_stage => try host.remove_directory(target),
+        else => unreachable, // `is_state` said so.
+    }
+}
+
+fn run_mount_step(
+    host: Host,
+    plan: *const Plan,
+    step: *const Step,
+    target: [:0]const u8,
+) host_mod.Error!void {
+    assert(plan_mod.is_mount(step.kind));
+    switch (step.kind) {
+        .make_mount_stage_dir => try host.make_directory(target, false),
+        .make_mount_stage_file => try host.create_file(target, false),
+        .copy_secret => try copy_secret(host, plan.text(step.source), target),
+        .bind_mount_dir => try mount(host, .bind_tree, target, plan.text(step.source)),
+        .bind_mount_file => try mount(host, .bind_file, target, plan.text(step.source)),
+        .remount_mount => try mount(host, .remount_readonly, target, null),
+        .remount_mount_tree => try mount(host, .remount_readonly_tree, target, null),
+        .make_mount_target_dir => try make_parents(host, target),
+        .make_mount_target_file => try make_file_target(host, target),
+        .move_mount => try mount(host, .move, target, plan.text(step.source)),
+        .remove_mount_stage_dir => try host.remove_directory(target),
+        .remove_mount_stage_file => try host.remove_file(target),
+        .mount_user_tmpfs => try mount(host, .user_tmpfs, target, plan.text(step.source)),
+        else => unreachable, // `is_mount` said so.
     }
 }
 
@@ -172,10 +227,44 @@ fn unstage(host: Host, target: [:0]const u8) host_mod.Error!void {
     };
 }
 
-/// Makes the directory and the ones above it that are missing, then goes there. The prefixes
-/// are cut from the path in a buffer on the stack: the child formats nothing and allocates
-/// nothing.
+/// Copies the host's file `source` to `target` (a new file in the container's /dev) with mode
+/// 0400. The child is the container's root, so the copy is owned by it. The copy is the only
+/// place the bytes are kept: this buffer, on the child's stack, is wiped when it is done.
+fn copy_secret(host: Host, source: [:0]const u8, target: [:0]const u8) host_mod.Error!void {
+    assert(source.len > 0);
+    assert(target.len > 0);
+    var bytes: [constants.secret_bytes_max]u8 = undefined;
+    defer std.crypto.secureZero(u8, &bytes);
+    const content = try host.read_file(source, &bytes);
+    assert(content.len <= constants.secret_bytes_max);
+    try host.write_file_mode(target, content, 0o400);
+}
+
+/// Makes the file `target` and the directories above it that are missing; a file that is there
+/// is left as it is (the mount covers it).
+fn make_file_target(host: Host, target: [:0]const u8) host_mod.Error!void {
+    assert(target.len > 1);
+    assert(target[0] == '/');
+    const slash = std.mem.lastIndexOfScalar(u8, target, '/').?;
+    if (slash > 0) {
+        var parent: [constants.path_bytes_max + 1]u8 = undefined;
+        if (slash >= parent.len) return error.PathTooLong;
+        @memcpy(parent[0..slash], target[0..slash]);
+        parent[slash] = 0;
+        try make_parents(host, parent[0..slash :0]);
+    }
+    try host.create_file(target, true);
+}
+
+/// Makes the directory and the ones above it that are missing, then goes there.
 fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
+    try make_parents(host, path);
+    try host.change_directory(path);
+}
+
+/// Makes the directory and the ones above it that are missing. The prefixes are cut from the
+/// path in a buffer on the stack: the child formats nothing and allocates nothing.
+fn make_parents(host: Host, path: [:0]const u8) host_mod.Error!void {
     assert(path.len > 0);
     assert(path[0] == '/');
     var prefix: [constants.path_bytes_max + 1]u8 = undefined;
@@ -188,7 +277,6 @@ fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
         prefix[at] = 0;
         if (at > 1) try host.make_directory(prefix[0..at :0], true);
     }
-    try host.change_directory(path);
 }
 
 fn mount(
@@ -199,7 +287,9 @@ fn mount(
 ) host_mod.Error!void {
     assert(target.len > 0);
     assert(target[0] != 0);
-    assert((source != null) == (kind == .bind_tree or kind == .bind_file or kind == .overlay));
+    const has_source = kind == .bind_tree or kind == .bind_file or kind == .overlay or
+        kind == .move or kind == .user_tmpfs;
+    assert((source != null) == has_source);
     try host.mount(.{ .kind = kind, .target = target, .source = source });
 }
 

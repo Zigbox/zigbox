@@ -1,0 +1,5 @@
+error[ZBX-E0211]: can't set up a --tmpfs, --bind or --secret mount
+  cause  binding the file failed: no such file or directory (ENOENT)
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0211 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0211.html

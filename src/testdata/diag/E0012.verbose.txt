@@ -1,0 +1,7 @@
+error[ZBX-E0012]: not a valid --tmpfs, --bind or --secret value
+  while  reading the command line
+  cause  --tmpfs 'data': the path in the container must be absolute
+  arg    data
+  fix    mounts look like this:   zbx run --tmpfs /scratch:128m --bind /srv/site:/srv nginx
+  more   zbx explain E0012
+  docs   https://zigbox.github.io/zigbox/errors/E0012.html

@@ -199,6 +199,7 @@ pub fn no_command(diag: *Diag, name: []const u8) void {
     diag.cause("the image sets no entrypoint and no command, and none was given", .{});
     diag.context("image", "{s}", .{echo});
     diag.fix_with("say what to run:", "zbx run '{s}' -- <command> [arguments]", .{echo});
+    diag.mark_last_fix_template();
 }
 
 /// ZBX-E0526: `zbx lock show` found no `zbx.lock`. `directory` is where one would be made.
@@ -213,6 +214,7 @@ pub fn no_lock(diag: *Diag, directory: []const u8) void {
     diag.fix(.{
         .sentence = "pull an image from the project directory; that makes the lock:",
         .command = "zbx pull alpine:3.20",
+        .template = true,
     });
 }
 

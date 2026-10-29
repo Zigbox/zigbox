@@ -1,0 +1,5 @@
+error[ZBX-E0210]: a --bind or --secret source can't be used
+  cause  --bind /srv/missing: it does not exist
+  fix    zbx never makes a source: make it, or check the spelling
+  more   zbx explain E0210 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0210.html

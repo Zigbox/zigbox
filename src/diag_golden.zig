@@ -20,6 +20,7 @@ const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const run = @import("runtime/run.zig");
+const doctor = @import("doctor.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const plan_mod = @import("runtime/plan.zig");
 const sim_run = @import("runtime/sim_run.zig");
@@ -49,6 +50,10 @@ const Case = struct {
     warning: bool = false,
     /// The exit code the case must end with.
     exit: u8,
+    /// A doctor warning: the text report never prints its block (a warning changes nothing for
+    /// the user of the text), so the golden is the diagnostic that the check holds, rendered in
+    /// each mode, and `--output json` shows it in the `zbx.doctor/1` document.
+    from_report: bool = false,
 };
 
 /// The index of the first step of `kind` in a plan for a host that maps a full range of ids.
@@ -584,7 +589,8 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 }
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
-const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases;
+const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
+    mount_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -630,6 +636,31 @@ const base_cases = [_]Case{
         .args = &publish_args("80:80"),
         .prepare = prepare_container,
         .exit = 125,
+    },
+    .{
+        .code = .E0010,
+        .args = &.{ "run", "-e", "1bad=marker-value-1", "--rootfs", "/srv/alpine", "--", "sh" },
+        .exit = 125,
+    },
+    .{
+        .code = .E0011,
+        .args = &.{ "run", "-e", "UNSET_VARIABLE", "--rootfs", "/srv/alpine", "--", "sh" },
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .W0101,
+        .args = &.{"doctor"},
+        .fixture = "restricted_but_working",
+        .exit = 0,
+        .from_report = true,
+    },
+    .{
+        .code = .W0102,
+        .args = &.{"doctor"},
+        .fixture = "pasta_missing",
+        .exit = 0,
+        .from_report = true,
     },
     .{ .code = .E0101, .args = &.{"doctor"}, .fixture = "ubuntu_2404_restricted", .exit = 2 },
     .{ .code = .E0102, .args = &.{"doctor"}, .fixture = "old_kernel", .exit = 2 },
@@ -1028,6 +1059,205 @@ const bundle_cases = [_]Case{
     },
 };
 
+// ---- State volumes (M6) --------------------------------------------------------------------
+
+const state_root = sim_run.state_root;
+const pg_target = "pgdata:/var/lib/postgresql/data";
+/// When the golden state's trash entry was made: two minutes before the simulated clock.
+const trash_removed: u64 = 1_760_000_000 - 120;
+
+fn prepare_state_world(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim_run.prepare_state(sim, &golden_files, &.{"pgdata"});
+}
+
+fn prepare_state_volume(sim: *HostSim) void {
+    prepare_state_world(sim);
+    golden_files.put_dir(state_root, 0o755);
+    golden_files.put_dir(state_root ++ "/pgdata", 0o755);
+    golden_files.put_dir(state_root ++ "/pgdata/data", 0o700);
+}
+
+fn prepare_state_held(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    // The descriptor stays open for the whole case, as the other run would keep it.
+    const path = state_root ++ "/pgdata/lock";
+    golden_lock = golden_files.interface().lock(path, true, "4242 pg") catch {
+        unreachable; // The volume's directory is there and nothing else holds the lock.
+    };
+}
+
+fn prepare_state_trash(sim: *HostSim) void {
+    prepare_state_world(sim);
+    golden_files.put_dir(state_root, 0o755);
+    golden_files.put_dir(state_root ++ "/.trash", 0o755);
+    golden_files.put_dir(state_root ++ "/.trash/pgdata@1759999880", 0o755);
+}
+
+fn prepare_state_restore_over(sim: *HostSim) void {
+    prepare_state_trash(sim);
+    golden_files.put_dir(state_root ++ "/pgdata", 0o755);
+}
+
+fn prepare_state_expired(sim: *HostSim) void {
+    prepare_state_trash(sim);
+    sim.world.now = trash_removed + 8 * 24 * 60 * 60;
+}
+
+fn prepare_state_no_home(sim: *HostSim) void {
+    prepare_state_world(sim);
+    sim.environment_variables = &.{};
+}
+
+fn prepare_state_record_newer(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_file(state_root ++ "/pgdata/state.zon", 0o644, ".{\n    .version = 9,\n}\n");
+}
+
+/// The container's model has no directory for the volume, so the child's first state step
+/// (making `data`) fails.
+fn prepare_state_unmountable(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    sim_run.prepare_state(sim, &golden_files, &.{});
+}
+
+fn prepare_state_unreadable(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_dir(state_root ++ "/pgdata/data/base", 0o700);
+    golden_files.set_unreadable(state_root ++ "/pgdata/data/base");
+}
+
+const state_run = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine", "--name", "web-1" };
+
+const state_cases = [_]Case{
+    .{
+        .code = .E0705,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", "PgData:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0706,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_held,
+        .exit = 125,
+    },
+    .{
+        .code = .E0707,
+        .args = &.{ "state", "rm", "pgdata" },
+        .prepare = prepare_state_world,
+        .exit = 1,
+    },
+    .{
+        .code = .E0708,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_restore_over,
+        .exit = 1,
+    },
+    .{
+        .code = .E0709,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_world,
+        .exit = 1,
+    },
+    .{
+        .code = .E0710,
+        .args = &.{ "state", "restore", "pgdata" },
+        .prepare = prepare_state_expired,
+        .exit = 1,
+    },
+    .{ .code = .E0711, .args = &.{ "state", "ls" }, .prepare = prepare_state_no_home, .exit = 2 },
+    .{
+        .code = .E0712,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_record_newer,
+        .exit = 125,
+    },
+    .{
+        .code = .E0713,
+        .args = &(state_run ++ [_][:0]const u8{ "--state", pg_target, "--", "/bin/sh" }),
+        .prepare = prepare_state_unmountable,
+        .exit = 125,
+    },
+    .{
+        .code = .W0702,
+        .args = &.{ "state", "ls" },
+        .prepare = prepare_state_unreadable,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
+// ---- The other mounts and the export (M6 slice 3) ---------------------------------------
+
+fn prepare_export_terminal(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    sim.terminal = true;
+    sim.no_color_value = true;
+}
+
+fn prepare_export_fifo(sim: *HostSim) void {
+    prepare_state_volume(sim);
+    golden_files.put_file(state_root ++ "/pgdata/data/PG_VERSION", 0o600, "16\n");
+    golden_files.put(state_root ++ "/pgdata/data/pipe", .fifo, 0o600, .{ 0, 0 }, "");
+}
+
+const mount_cases = [_]Case{
+    .{
+        .code = .E0012,
+        .args = &(state_run ++ [_][:0]const u8{ "--tmpfs", "data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0013,
+        .args = &(state_run ++ [_][:0]const u8{
+            "--tmpfs", "/scratch", "--tmpfs", "/scratch/in", "--", "/bin/sh",
+        }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0210,
+        .args = &(state_run ++ [_][:0]const u8{ "--bind", "/srv/missing:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0211,
+        .args = &(state_run ++ [_][:0]const u8{ "--bind", "/srv/file:/data", "--", "/bin/sh" }),
+        .prepare = prepare_state_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0714,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_export_terminal,
+        .exit = 1,
+    },
+    .{
+        .code = .E0715,
+        .args = &.{ "state", "export", "pgdata", "-o", "/nowhere/pgdata.tar.gz" },
+        .prepare = prepare_state_volume,
+        .exit = 2,
+    },
+    .{
+        .code = .E0716,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_state_unreadable,
+        .exit = 2,
+    },
+    .{
+        .code = .W0703,
+        .args = &.{ "state", "export", "pgdata" },
+        .prepare = prepare_export_fifo,
+        .prints = true,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
 // ---- The registry's codes ------------------------------------------------------------------
 
 /// One test registry and the wire to it, for the cases below (the cases run one at a time).
@@ -1397,6 +1627,28 @@ fn block_of(stderr: []const u8, code: codes.Code, style: Style) []const u8 {
     unreachable; // The case's fixture is chosen to raise this code.
 }
 
+var golden_facts: doctor.Facts = undefined;
+
+/// The diagnostic of the warning `case` names, as the doctor's check holds it, rendered in
+/// the mode `style` stands for.
+fn warning_block(sim: *HostSim, case: *const Case, style: Style, buffer: []u8) []const u8 {
+    const fixture = fixtures.find(case.fixture.?).?;
+    sim.init(1, fixture.files);
+    fixture.apply(sim);
+    var report: doctor.Report = undefined;
+    doctor.inspect(sim.interface(), &golden_facts, &report);
+    const mode: render.Mode = switch (style) {
+        .default => .text,
+        .verbose => .verbose,
+        .json => .json,
+    };
+    for (&report.checks) |*check| {
+        if (check.status != .warn) continue;
+        if (check.diag.code.? == case.code) return render.render(&check.diag, mode, false, buffer);
+    }
+    unreachable; // The case's fixture is chosen to warn with this code.
+}
+
 test "golden: every code in default, verbose and JSON output" {
     // Goal: the text of each diagnostic is part of the product. Method: trigger each code
     // through run_from_iterator (the E01xx ones by a doctor fixture) and compare stderr, or the
@@ -1413,6 +1665,15 @@ test "golden: every code in default, verbose and JSON output" {
             @embedFile("testdata/diag/" ++ name ++ ".json.txt"),
         };
         for (std.enums.values(Style), expected) |style, golden| {
+            if (case.from_report) {
+                var storage: [constants.output_bytes_max]u8 = undefined;
+                const block = warning_block(&sim, &case, style, &storage);
+                testing.expectEqualStrings(golden, block) catch |err| {
+                    std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+                    return err;
+                };
+                continue;
+            }
             const code = try run_style(&sim, &case, style);
             const shown = if (case.fixture == null) sim.stderr() else block_of(
                 sim.stderr(),
@@ -1435,9 +1696,13 @@ test "golden: every code in default, verbose and JSON output" {
             } else if (case.fixture == null) {
                 try testing.expectEqual(@as(usize, 0), sim.stdout().len);
             } else {
-                var tag: [16]u8 = undefined;
-                const line_end = try std.fmt.bufPrint(&tag, "  [{s}]\n", .{full});
-                try testing.expect(std.mem.indexOf(u8, sim.stdout(), line_end) != null);
+                // Text: the code ends the FAIL line. JSON: the check carries it, in the document.
+                var tag: [40]u8 = undefined;
+                const mark = if (style == .json)
+                    try std.fmt.bufPrint(&tag, "\"code\":\"{s}\",\"diagnostic\"", .{full})
+                else
+                    try std.fmt.bufPrint(&tag, "  [{s}]\n", .{full});
+                try testing.expect(std.mem.indexOf(u8, sim.stdout(), mark) != null);
             }
             try testing.expect(std.mem.indexOf(u8, sim.stderr(), full) != null);
             if (style == .json) {

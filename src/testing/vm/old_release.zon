@@ -9,4 +9,8 @@
     // The same for `demo-m5`: the merge of PR #10, the merged M4. Its `zbx` pulls alpine:3.20,
     // runs it and commits; M5's `zbx` has to read the store, the records and the lock it leaves.
     .m5_commit = "cd5adbc",
+    // The same for `demo-m6`: fd48d38, the merge of PR #11, the merged M5. Its `zbx` pulls
+    // alpine:3.20, runs it with `--net user`, commits and pulls postgres:16; M6's `zbx` has to read
+    // the store, the version-2 image records, the lock and the version-4 run records it leaves.
+    .m6_commit = "fd48d38",
 }

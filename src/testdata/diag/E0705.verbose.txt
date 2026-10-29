@@ -1,0 +1,8 @@
+error[ZBX-E0705]: not a valid state volume name
+  while  reading the command line
+  cause  the volume name 'PgData' may hold only lowercase letters, digits, '.',
+         '-' and '_'
+  name   PgData
+  fix    name it in lowercase letters and digits, for example:   zbx run --state pgdata:/var/lib/postgresql/data postgres:16
+  more   zbx explain E0705
+  docs   https://zigbox.github.io/zigbox/errors/E0705.html

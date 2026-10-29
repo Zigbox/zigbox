@@ -1,0 +1,5 @@
+error[ZBX-E0711]: can't make or read the state directory
+  cause  neither XDG_DATA_HOME nor HOME names an absolute directory
+  fix    set HOME, or point XDG_DATA_HOME at a directory you own
+  more   zbx explain E0711 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0711.html

@@ -5,11 +5,13 @@ usage: zbx [options] <command>
 commands:
   run             run a command in a container whose root is a tree or a directory (see below)
   bundle          collect a redacted diagnostic bundle for a run (see below)
-  doctor          check that this host can run zbx (a diagnostic per failing check)
+  doctor          check that this host can run zbx (a diagnostic per failing check;
+                  --output json: the report as a document, see zbx schema doctor)
   ps              list the containers (--all: the ones that ended too)
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   schema <cmd>    print the JSON schema of a command's output
@@ -38,9 +40,23 @@ run:
                   or user (the network through pasta, as the user: apt install passt)
   --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
                   implies --net user)
+  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
+                  =<value> that value, without it zbx's own (an error if unset there).
+                  A value is never stored or printed; zbx ps and a bundle show the name
   -d, --detach    start the container and return; zbx ps and zbx stop find it again
   --timeout <ms>  stop the container when it has run this long (SIGTERM, then SIGKILL)
   --grace <ms>    time between SIGTERM and SIGKILL (default 10000)
+  --state <name>:<path>[:ro]   mount the state volume <name> at <path> (repeatable, up to
+                  8); the first use makes it, empty. One run writes a volume at a time;
+                  with :ro it is mounted read-only and shared with other readers
+  --tmpfs <path>[:<size>]   an empty tmpfs at <path>, gone at exit (repeatable; 64m without a
+                  size; k, m or g). Its pages count against --memory
+  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
+                  <host> that does not exist is an error, never made (repeatable)
+  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
+                  owned by the container's root. Its contents are never stored or
+                  printed, and the mount point is left out of zbx commit (repeatable).
+                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
   --              ends the options; everything after it is the command, as typed
 
 stop:
@@ -60,6 +76,17 @@ store:
   zbx store gc --trash     list the trash
   zbx store restore <id>   put a gc's trash back
   a digest is b3: and 64 hex digits, or any unique prefix of 12 or more hex digits
+
+state:
+  zbx state ls             each volume: size, created, last used, last container, in use by
+  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
+  zbx state restore <name> bring the newest trash of <name> back
+  zbx state export <name> [-o <file>]   write the volume as a gzip-compressed tar, owners as
+                           the container sees them (999, not the host's ids), to <file>
+                           or standard output (never a terminal); refused while a run
+                           writes the volume
+  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
+  touches them, and nothing but state rm removes one
 
 pull:
   zbx pull [--resolve-only] <reference>

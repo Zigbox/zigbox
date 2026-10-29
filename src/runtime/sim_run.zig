@@ -21,6 +21,17 @@ const HostSim = host_sim.HostSim;
 
 pub const rootfs_path = "/srv/alpine";
 pub const regular_file_path = "/srv/file";
+pub const mount_dir_path = "/srv/data";
+pub const mount_file_path = "/srv/note";
+pub const secret_path = "/srv/key";
+pub const secret_marker = "secret-marker-THETA-91";
+
+/// The container model's view of the host paths above, which the child binds from.
+pub fn add_mount_sources(sim: *HostSim) void {
+    sim.world.add_node(mount_dir_path, .dir);
+    sim.world.add_node(mount_file_path, .file);
+    sim.world.add_node(secret_path, .file);
+}
 
 pub const home_path = "/home/alice";
 pub const runs_path = "/home/alice/.local/state/zbx/runs";
@@ -46,6 +57,11 @@ const common_files = [_]host_sim.File{
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
+    // What `--bind` and `--secret` of the tests and the fuzzers mount (M6): a directory, a file
+    // and a file with a marker in it that must reach nothing but the container.
+    .{ .path = mount_dir_path, .content = "", .mode = 0o040755 },
+    .{ .path = mount_file_path, .content = "a note\n", .mode = 0o100644 },
+    .{ .path = secret_path, .content = secret_marker ++ "\n", .mode = 0o100600 },
     // pasta, for `--net user` (the simulator's pasta is `sim_world.World.start_program`), and
     // the lowest port a user may bind, as Ubuntu 24.04 has it.
     .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
@@ -145,6 +161,19 @@ pub fn sample_plan_image(
     image: bool,
     network: spec_mod.Network,
 ) void {
+    sample_plan_mounts(plan, full, scoped, read_only, image, network, &.{});
+}
+
+/// Like `sample_plan_image`, with other mounts.
+pub fn sample_plan_mounts(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -162,6 +191,7 @@ pub fn sample_plan_image(
         .scope = if (scoped) .{ .version = 255, .limits = .{} } else null,
         .read_only = read_only,
         .network = network,
+        .mounts = mounts,
         .pasta = if (network == .user) .{
             .path = "/usr/bin/pasta",
             .log = logs_path ++ "/oracle.pasta.log",
@@ -410,3 +440,31 @@ test "tables_equal compares counts, order of content and privacy" {
     sim.world.tables[0].count -= 1;
     try std.testing.expect(leak(&sim, &before) != null);
 }
+
+/// The user's state directory in the simulated host (`XDG_DATA_HOME` unset, HOME as above).
+pub const state_root = "/home/alice/.local/share/zbx/state";
+
+/// Gives the simulator a file tree for the state directory (`tree`, which the caller owns),
+/// with the user's data directory's parents, and puts the volumes `names` in the container
+/// model: their directories, where the container's child makes `data` (the two models are
+/// separate; on a real host they are one file system).
+pub fn prepare_state(sim: *HostSim, tree: *SimFs, names: []const []const u8) void {
+    tree.init(1);
+    sim.store_fs = tree;
+    const parents = [_][]const u8{
+        "/home",
+        "/home/alice",
+        "/home/alice/.local",
+        "/home/alice/.local/share",
+        "/home/alice/.local/share/zbx",
+    };
+    for (parents) |parent| tree.put_dir(parent, 0o755);
+    var path: [constants.sim_path_bytes_max]u8 = undefined;
+    for (names) |name| {
+        const text = std.fmt.bufPrint(&path, state_root ++ "/{s}", .{name}) catch
+            unreachable; // Test names are short.
+        sim.world.add_node(text, .dir);
+    }
+}
+
+const SimFs = @import("../store/fs_sim.zig").SimFs;

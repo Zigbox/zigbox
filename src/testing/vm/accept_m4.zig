@@ -118,7 +118,7 @@ fn read_old_store(session: *Session, out: *Io.Writer, parent: []const u8, child:
     try read_run_records(session, out);
 }
 
-/// The older zbx's run record is listed and read, and this zbx's own is the same version.
+/// The older zbx's run record (version 4) is listed and read beside this zbx's own (version 5).
 fn read_run_records(session: *Session, out: *Io.Writer) !void {
     const step = "UPGRADE";
     _ = try expect_exit(session, out, step, z ++ " run --rootfs " ++ common.rootfs_dir ++
@@ -128,14 +128,15 @@ fn read_run_records(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step, "expected ps --all to list the old record and the new", err);
     };
     const names = [_][]const u8{ "up1", "up2" };
-    for (names) |name| {
+    const versions = [_]u32{ 4, m3.record_version_written };
+    for (names, versions) |name, version| {
         const command = try common.format(session, "grep -h version {s}/runs/{s}.zon", .{
             common.state_dir, name,
         });
         const record = try session.run(command, limits.command_timeout_kvm_s);
         try H.show(out, command, record);
-        m3.check_record_version(record.output, 4) catch |err| {
-            return fail_step(out, step, "expected a version 4 record", err);
+        m3.check_record_version(record.output, version) catch |err| {
+            return fail_step(out, step, "expected the record of its own version", err);
         };
     }
 }
