@@ -5,7 +5,7 @@
 // disk: mke2fs, e2fsck, resize2fs and the libraries they link. The hashes were taken from the files on dl-cdn.alpinelinux.org when they were
 // pinned. Alpine removes a file when a package is updated in the branch: when a URL stops
 // answering, pin the new version here, deliberately, in one commit.
-// `passt` (pasta) is pinned the same way in slice 4, not here.
+// `passt` (pasta, which `--net user` and `--publish` run) is pinned the same way.
 //
 // Each file is fetched first from `mirror` (a GitHub release of this repository that holds the
 // same file names), then from its `url`. Both are checked against the same SHA-256, and a file
@@ -72,6 +72,11 @@
             .name = "libeconf",
             .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libeconf-0.6.3-r0.apk",
             .sha256 = "796e421d403e0430e73455f817083233ed81ac77f18c8beda5c10150615626ff",
+        },
+        .{
+            .name = "passt",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/community/aarch64/passt-2024.11.21-r0.apk",
+            .sha256 = "c376038c931b8eb37a9a0cbbce5c39cbb0421deaff55cddff7221f88b387483e",
         },
     },
 }

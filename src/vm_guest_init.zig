@@ -62,6 +62,7 @@ pub fn main() void {
     reap_orphans();
     switch_root();
     for (mounts) |mount| mount_one(&mount);
+    make_tun_device();
     var version_buffer: [constants.vm_line_bytes_max]u8 = undefined;
     const version = read_version(&version_buffer);
     log("zbx-init: image ", version);
@@ -69,6 +70,20 @@ pub fn main() void {
     log("zbx-init: listening on vsock", "");
     serve(listener, version);
     power_off();
+}
+
+/// pasta makes its tap device through /dev/net/tun, and the user it runs as must be able to open
+/// it: the kernel's own node is root-only unless it is made again with a mode.
+fn make_tun_device() void {
+    assert(mounts.len > 0);
+    _ = linux.mkdir("/dev/net", 0o755);
+    const device: u32 = (10 << 8) | 200; // The misc device `tun` has minor 200.
+    assert(device != 0);
+    _ = linux.unlink("/dev/net/tun");
+    const node = linux.mknodat(linux.AT.FDCWD, "/dev/net/tun", linux.S.IFCHR | 0o666, device);
+    if (failed(node)) log("zbx-init: cannot make /dev/net/tun", "");
+    // The umask took the write bits away from the mode given to mknod.
+    _ = linux.chmod("/dev/net/tun", 0o666);
 }
 
 /// A process whose parent ended is adopted by PID 1 (a detached container's supervisor is such
