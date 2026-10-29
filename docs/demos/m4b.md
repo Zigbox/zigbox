@@ -58,6 +58,14 @@ and everything after step 5 of each table. `.github/workflows/mac.yml` runs `zig
 `MAC_RUNNER_LABEL`; with the variable unset a job on the hosted runner says so and the
 workflow is green.
 
+**The runner.** The repository is public, so `mac.yml` does not run for a pull request from a fork
+(its `if` requires the head repository to be this one); a push to main, a manual run and a branch
+of this repository do. Run the self-hosted runner under **its own macOS user account**, not the
+owner's: the machine it starts, its `store.img`, `~/Library/Application Support/zbx` and its
+keychain are then separate from the owner's. It needs **no keychain access**: nothing in the
+workflow signs with Developer ID (the macOS `zbx` is signed ad hoc by `zig build`), and the
+release is the owner's, from their own session.
+
 Recorded: `zig build demo-mac` on the owner's Mac (macOS 26, Apple silicon), run by the
 implementer on 2026-10-29: `demo-mac: PASSED, 19 steps`.
 

@@ -1,8 +1,8 @@
 # The macOS job: `zig build check` on an Apple silicon Mac, and the M1 to M4 demos and M4b's steps
 # 2 to 4 driven through the macOS zbx inside its virtual machine. It needs a self-hosted runner
 # (Virtualization.framework does not run on GitHub's hosted macOS runners), so it runs only when
-# the repository variable MAC_RUNNER_LABEL names one; with the variable unset the job is skipped
-# with a note, not failed. This workflow imports no certificate and holds no secret: the macOS zbx
+# the repository variable MAC_RUNNER_LABEL names one, and never for a pull request from a fork
+# (the repository is public); in both cases the job is skipped with a note saying which, not failed. This workflow imports no certificate and holds no secret: the macOS zbx
 # is signed ad hoc by `zig build`, and the release (Developer ID, notarization) is the owner's,
 # from their own session (docs/demos/m4b.md, "Releasing").
 name: mac
@@ -21,16 +21,27 @@ permissions:
   contents: read
 
 jobs:
+  # The repository is public, and a pull request from a fork runs the fork's code: it must never
+  # reach a self-hosted runner. Only pushes to main, manual runs, and pull requests from branches
+  # of this repository (people with write access) run on it.
   skipped:
-    name: macOS job skipped (no runner label)
-    if: ${{ vars.MAC_RUNNER_LABEL == '' }}
+    name: macOS job skipped
+    if: ${{ vars.MAC_RUNNER_LABEL == '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "::notice::The macOS job did not run. Set the repository variable MAC_RUNNER_LABEL to the label of a self-hosted Apple silicon runner to enable it."
+      - name: Say why
+        env:
+          NO_LABEL: ${{ vars.MAC_RUNNER_LABEL == '' }}
+        run: |
+          if [ "${NO_LABEL}" = "true" ]; then
+            echo "::notice::The macOS job did not run: the repository variable MAC_RUNNER_LABEL is not set. Set it to the label of a self-hosted Apple silicon runner to enable the job."
+          else
+            echo "::notice::The macOS job did not run: this pull request comes from a fork, and a fork's code does not run on the self-hosted runner."
+          fi
 
   mac:
     name: check and demos on macOS
-    if: ${{ vars.MAC_RUNNER_LABEL != '' }}
+    if: ${{ vars.MAC_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ${{ vars.MAC_RUNNER_LABEL }}
     timeout-minutes: 60
     steps:
