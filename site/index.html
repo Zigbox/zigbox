@@ -224,10 +224,10 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-10-28",
+  updated: "2026-10-29",
   sisterUrl: "../zigcube/", // Zigcube site
-  stage: "Pre-alpha · M6 in progress",
-  stageStatus: "wip",
+  stage: "Pre-alpha · M6 shipped",
+  stageStatus: "done",
 };
 // status: "done" | "wip" | "plan"
 const MILESTONES = [
@@ -259,8 +259,11 @@ const MILESTONES = [
   {id:"M5", name:"Network", status:"done", slices:{green:4, total:4, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40751616386", date:"2026-10-28"}, goal:"No network unless granted; a granted service is reachable from the host.",
    demo:[["$","zbx run alpine -- wget -qO- https://example.com"],["","wget: bad address 'example.com'"],["","zbx: network: none (grant with --net)"],["","(exit 1)"],["$","zbx run --net user alpine -- wget -qO- https://example.com"],["","<!doctype html><html lang=en><head>…<title>Example Domain</title>…"],["$","zbx run -d --name spec-nginx --publish 8080:80 nginx"],["","spec-nginx"],["$","curl -fsS http://localhost:8080/"],["","<title>Welcome to nginx!</title>"],["","…    (the rest of nginx's welcome page)"],["$","ss -tlnpe   (as the demo user; the 8080 line)"],["","LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    uid:1000 ino:15622 sk:4 …"],["#","iptables -S   (before step 1, and after step 3)"],["","-P INPUT ACCEPT"],["","-P FORWARD ACCEPT"],["","-P OUTPUT ACCEPT"],["","(the same three lines both times)"],["$","zbx stop spec-nginx"],["","spec-nginx stopped, exit code 0"],["","(port 8080: no listener left)"]]},
-  {id:"M6", name:"State", status:"wip", slices:{green:3, total:4, note:"slices green in CI; slice 4 in CI"}, goal:"Data that must outlive a container is named, typed and listed.",
-   demo:[["$","zbx state ls"],["","NAME    SIZE    LAST USED BY"],["","pgdata  48 MB   postgres:16 (2 min ago)"]]},
+  // M6's demo below is output recorded by demo-m6 in CI (Ubuntu 24.04 VM, KVM), trimmed where marked
+  // (the state ls columns are narrowed). "$" lines ran as the unprivileged user demo.
+  {id:"M6", name:"State", status:"done", slices:{green:4, total:4, note:"slices green in CI; demo passed with KVM"},
+   recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40807149521", date:"2026-10-29"}, goal:"Data that must outlive a container is named, typed and listed.",
+   demo:[["$","zbx run -d --name pg --state pgdata:/var/lib/postgresql/data --publish 5432:5432 -e POSTGRES_PASSWORD=demo postgres:16"],["","pg"],["$","psql -h 127.0.0.1 -U postgres -c \"create table t (v text)\" -c \"insert into t values ('kept-across-sigkill')\""],["","CREATE TABLE"],["","INSERT 0 1"],["$","kill -KILL <pid of pg>   (then the same zbx run -d … again)"],["","killed"],["$","psql -h 127.0.0.1 -U postgres -tAc \"select v from t\""],["","kept-across-sigkill"],["$","zbx state ls"],["","NAME           SIZE  CREATED              LAST USED            LAST CONTAINER  IN USE BY"],["","pgdata     38.5 MiB  2026-10-29 02:41:28  2026-10-29 02:41:31  pg              pg"],["","…    (one more volume, from the upgrade test)"],["$","zbx run -d --name pgtmp --publish 5432:5432 -e POSTGRES_PASSWORD=demo postgres:16   (no --state)"],["","…    (create table t, insert 'ephemeral-row', stop, run again)"],["$","psql -h 127.0.0.1 -U postgres -tAc \"select v from t\""],["","ERROR:  relation \"t\" does not exist"],["","(exit 1)"]]},
   {id:"M7", name:"Build", status:"plan", goal:"Hermetic builds from a declared step DAG: same inputs, same digest.",
    demo:[["$","zbx build"],["","fetch-deps   cached   0.1s"],["","compile      rebuilt  4.2s   (src/main.zig changed)"],["","package      rebuilt  0.3s"],["","image b3:51aa…9c03"],["$","ssh vm2 'cd demo && zbx build --quiet'"],["","image b3:51aa…9c03   identical"]]},
   {id:"M8", name:"Trust", status:"plan", goal:"Refuse to run anything that cannot be traced to a trusted key and a recorded build.",
