@@ -124,7 +124,7 @@ fn tmpfs(session: *Session, out: *Io.Writer) !void {
     const run = zn ++ " run --name tmp1 --tmpfs /scratch:8m alpine -- sh -c " ++
         "'df -k /scratch | tail -1; stat -c %a /scratch; mount | grep \" /scratch \"; " ++
         "echo hi > /scratch/f; cat /scratch/f; " ++
-        "dd if=/dev/zero of=/scratch/big bs=1M count=9 2>&1 | tail -1'";
+        "dd if=/dev/zero of=/scratch/big bs=1M count=9 2>&1 | grep \"No space\"'";
     const result = try common.run_shown(session, out, run);
     checks.check_tmpfs(result.streams.stdout, result.status, "8192") catch |err| {
         return fail_step(out, step_name, "expected an 8 MiB tmpfs, mode 1777, noexec", err);
