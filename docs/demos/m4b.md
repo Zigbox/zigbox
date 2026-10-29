@@ -18,6 +18,16 @@ entitlement; the build needs the pinned kernel first: `zig build vm-kernel-docke
    seconds: `ZBX_VM_IDLE_TIMEOUT_MS=4000 zbx run alpine -- true`, then `pgrep` after five.
    A `zbx run -d` container keeps the machine alive until it ends.
 
+## Known gap of slice 2
+
+- **A working directory the guest cannot see is quietly replaced with the guest user's home.**
+  A command run from a directory of the Mac starts in `/Users/<name>` of the machine, which is
+  in the machine's memory. `zbx run` then reads and writes `zbx.lock` there (W0503 says it wrote
+  `/Users/<name>/zbx.lock`, a path that does not exist on the Mac) instead of in the project.
+  From slice 3 on this must never be silent: a working directory outside what is shared with
+  the machine is refused with a one-line coded diagnostic (a new 10xx code) that says it is
+  outside what is shared and names what is shared.
+
 ## Cuts of this slice
 
 - **The store and the state live in the machine's memory** (the guest's home directory is on

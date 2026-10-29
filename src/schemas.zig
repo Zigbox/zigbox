@@ -594,6 +594,8 @@ const vm_status_schema =
     \\"cpus":{"type":["integer","null"],"description":"of the running machine"},
     \\"memory_bytes":{"type":["integer","null"],"description":"of the running machine"},
     \\"uptime_ms":{"type":["integer","null"],"description":"since the guest answered"},
+    \\"network":{"enum":["up","down",null],
+    \\"description":"M4b slice 2: whether the guest got an address by DHCP; null when stopped"},
     \\"configured":{"type":"object","required":["cpus","memory_bytes"],
     \\"description":"what the next boot uses (zbx vm config)",
     \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"}}},

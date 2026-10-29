@@ -190,6 +190,7 @@ fn status_text(buffer: []u8, status: ?control.Status, configured: settings.Setti
         running.cpus, running.memory_bytes >> 20,
     });
     put(&writer, "  pid      {d}\n", .{running.pid});
+    put(&writer, "  network  {s}\n", .{if (running.network_up) "up" else "down"});
     const seconds = running.uptime_ms / 1000;
     put(&writer, "  uptime   {d}.{d} s\n", .{ seconds, running.uptime_ms % 1000 / 100 });
     const differs = configured.cpus != running.cpus or
@@ -211,9 +212,11 @@ fn status_json(buffer: []u8, status: ?control.Status, configured: settings.Setti
         put(&writer, "\"image_match\":{},\"pid\":{d},", .{ match, running.pid });
         put(&writer, "\"cpus\":{d},\"memory_bytes\":{d},", .{ running.cpus, running.memory_bytes });
         put(&writer, "\"uptime_ms\":{d},", .{running.uptime_ms});
+        put(&writer, "\"network\":\"{s}\",", .{if (running.network_up) "up" else "down"});
     } else {
         put_all(&writer, "\"vm_image_version\":null,\"image_match\":null,\"pid\":null,");
         put_all(&writer, "\"cpus\":null,\"memory_bytes\":null,\"uptime_ms\":null,");
+        put_all(&writer, "\"network\":null,");
     }
     put(&writer, "\"configured\":{{\"cpus\":{d},\"memory_bytes\":{d}}},", .{
         configured.cpus, configured.memory_bytes,
@@ -579,4 +582,36 @@ test "status text and JSON name the state, the image and the configured size" {
     try std.testing.expect(std.mem.indexOf(u8, text, "vm: running") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "uptime   1.5 s") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "at the next boot") != null);
+}
+
+test "the status document is exactly what the schema describes, network included" {
+    // Goal: a golden for zbx.vm.status/1 with the network member (additive, null when stopped).
+    // Method: a fixed running status with the network up and down, and the stopped one.
+    var buffer: [1024]u8 = undefined;
+    const configured: settings.Settings = .{ .cpus = 4, .memory_bytes = 2 << 30 };
+    const base: control.Status = .{
+        .state = .running,
+        .pid = 9,
+        .cpus = 4,
+        .memory_bytes = 2 << 30,
+        .version = "0123456789abcdef".*,
+        .network_up = true,
+        .uptime_ms = 1530,
+    };
+    const up = status_json(&buffer, base, configured);
+    const expected_head = "{\"schema\":\"zbx.vm.status/1\",\"state\":\"running\",";
+    try std.testing.expect(std.mem.startsWith(u8, up, expected_head));
+    const tail = "\"vm_image_version\":\"0123456789abcdef\",\"image_match\":false,\"pid\":9," ++
+        "\"cpus\":4,\"memory_bytes\":2147483648,\"uptime_ms\":1530,\"network\":\"up\"," ++
+        "\"configured\":{\"cpus\":4,\"memory_bytes\":2147483648},\"idle_timeout_ms\":300000}\n";
+    try std.testing.expect(std.mem.endsWith(u8, up, tail));
+    var down = base;
+    down.network_up = false;
+    var other: [1024]u8 = undefined;
+    const down_json = status_json(&other, down, configured);
+    try std.testing.expect(std.mem.indexOf(u8, down_json, "\"network\":\"down\"") != null);
+    const stopped = status_json(&other, null, configured);
+    try std.testing.expect(std.mem.indexOf(u8, stopped, "\"network\":null") != null);
+    const test_util = @import("../test_util.zig");
+    try std.testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, up, "\n")));
 }
