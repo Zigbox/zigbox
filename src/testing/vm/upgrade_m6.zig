@@ -7,7 +7,7 @@
 //!     verify` finds no damage; `lock show` reads M5's `zbx.lock` with both entries;
 //!   - the images run by tag, by manifest digest and (the commit) by tree digest, alpine with
 //!     the default `--net none`;
-//!   - M5's run record (version 4, no network) is listed beside this binary's own (version 6) by
+//!   - M5's run record (version 4, no network) is listed beside this binary's own (version 7) by
 //!     `ps --all`, in text and as JSON;
 //!   - postgres runs with a new `--state` volume on M5's store, published on port 15432 (the spec
 //!     part uses 5432); `psql` writes a row; `state ls` shows the volume in use; `zbx stop`
@@ -171,7 +171,7 @@ fn run_postgres_image(session: *Session, out: *Io.Writer, pull: m4.PullDoc) !voi
     }
 }
 
-/// M5's run record (version 4) is listed beside this binary's own (version 6).
+/// M5's run record (version 4) is listed beside this binary's own (version 7).
 fn read_run_records(session: *Session, out: *Io.Writer) !void {
     const run = z ++ " run --name m6up2 " ++ alpine ++ " -- true";
     _ = try expect_exit(session, out, step, run, 0);
