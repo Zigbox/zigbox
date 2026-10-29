@@ -56,6 +56,22 @@ pub fn sign_arguments(identity: []const u8, entitlements: []const u8, binary: []
     return out[0..words.len];
 }
 
+/// The `CDHash=` line of `codesign -dvvv` output: the identity of the signed code.
+pub fn cdhash_of(output: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "CDHash=")) return line["CDHash=".len..];
+    }
+    return null;
+}
+
+/// The one line said when `codesign` cannot use the key: it is a failure of the session, not of
+/// the script or the certificate.
+pub const keychain_message =
+    "mac_release: codesign cannot use the signing key (errSecInternalComponent). Run the release " ++
+    "from a logged-in graphical session with an unlocked login keychain (your own Terminal, or a " ++
+    "runner with that keychain unlocked), never from an ssh or sandboxed session.\n";
+
 /// Fills `@VERSION@`, `@URL@` and `@SHA256@` in the formula template.
 pub fn fill_formula(
     arena: std.mem.Allocator,
@@ -124,6 +140,56 @@ fn exec(io: Io, log: *Io.Writer, argv: []const []const u8) !void {
     return error.CommandFailed;
 }
 
+/// Runs `codesign` to sign; its words are shown, and a key it cannot use is said in one line.
+fn sign(io: Io, arena: std.mem.Allocator, log: *Io.Writer, argv: []const []const u8) !void {
+    try log.print("mac_release: {s}", .{argv[0]});
+    for (argv[1..]) |word| try log.print(" {s}", .{word});
+    try log.print("\n", .{});
+    const result = try std.process.run(arena, io, .{ .argv = argv });
+    try log.writeAll(result.stderr);
+    try log.writeAll(result.stdout);
+    switch (result.term) {
+        .exited => |code| if (code == 0) return,
+        else => {},
+    }
+    if (std.mem.indexOf(u8, result.stderr, "errSecInternalComponent") != null) {
+        try log.writeAll(keychain_message);
+        return error.KeychainUnavailable;
+    }
+    return error.CommandFailed;
+}
+
+fn cdhash_at(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const result = try std.process.run(arena, io, .{
+        .argv = &.{ "/usr/bin/codesign", "-dvvv", path },
+    });
+    const found = cdhash_of(result.stderr) orelse return error.NoCodeDirectoryHash;
+    return arena.dupe(u8, found);
+}
+
+/// The binary and the one inside the archive are the same signed code: their CDHash is equal.
+fn same_code(
+    io: Io,
+    arena: std.mem.Allocator,
+    log: *Io.Writer,
+    binary: []const u8,
+    archive: []const u8,
+    out: []const u8,
+) !void {
+    const check = try std.fmt.allocPrint(arena, "{s}/check", .{out});
+    try Io.Dir.cwd().createDirPath(io, check);
+    try exec(io, log, &.{ "/usr/bin/ditto", "-x", "-k", archive, check });
+    const inside = try std.fmt.allocPrint(arena, "{s}/zbx", .{check});
+    const first = try cdhash_at(io, arena, binary);
+    const second = try cdhash_at(io, arena, inside);
+    if (!std.mem.eql(u8, first, second)) {
+        try log.print("mac_release: the archive holds other code than the binary ({s} and {s})\n", .{ first, second });
+        return error.ArchiveDiffers;
+    }
+    try log.print("mac_release: the archive's zbx has the binary's CDHash {s}\n", .{first});
+    try Io.Dir.cwd().deleteTree(io, check);
+}
+
 /// Whether the keychain has a notary profile of this name: `notarytool history` exits 0 with one.
 fn profile_exists(io: Io, profile: []const u8) bool {
     const argv = [_][]const u8{
@@ -161,6 +227,8 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
         }
     }
     const dir = Io.Dir.cwd();
+    // One run, one set of files: nothing of an earlier run stays beside this one's.
+    dir.deleteTree(io, arguments.out) catch {};
     try dir.createDirPath(io, arguments.out);
     // The archive holds the binary alone, at its top: it is made from this directory's contents.
     const stage = try std.fmt.allocPrint(arena, "{s}/stage", .{arguments.out});
@@ -172,7 +240,7 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
     var argv: [14][]const u8 = undefined;
     argv[0] = "/usr/bin/codesign";
     @memcpy(argv[1 .. 1 + tail.len], tail);
-    try exec(io, log, argv[0 .. 1 + tail.len]);
+    try sign(io, arena, log, argv[0 .. 1 + tail.len]);
     try exec(io, log, &.{ "/usr/bin/codesign", "--verify", "--strict", "--verbose=2", signed });
     try exec(io, log, &.{ "/usr/bin/codesign", "-d", "--entitlements", "-", signed });
 
@@ -180,6 +248,7 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
     const name = archive_name(&name_buffer, arguments.version);
     const archive = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.out, name });
     try exec(io, log, &.{ "/usr/bin/ditto", "-c", "-k", "--norsrc", stage, archive });
+    try same_code(io, arena, log, signed, archive, arguments.out);
     if (arguments.notarize) {
         try exec(io, log, &.{
             "/usr/bin/xcrun",     "notarytool",      "submit", archive,
@@ -221,6 +290,15 @@ test "the archive is named for the version and the ad-hoc identity has no timest
     try std.testing.expectEqualStrings(default_identity, real[7]);
     try std.testing.expect(is_ad_hoc("-"));
     try std.testing.expect(!is_ad_hoc(default_identity));
+}
+
+test "the CDHash is read from codesign's output, and the keychain message is one line" {
+    // Goal: the two small texts the check and the refusal depend on. Method: output as codesign
+    // writes it.
+    const output = "Executable=/x/zbx\nIdentifier=zbx\nCDHash=0123abcd\nSignature size=8970\n";
+    try std.testing.expectEqualStrings("0123abcd", cdhash_of(output).?);
+    try std.testing.expect(cdhash_of("not signed") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, keychain_message, "\n"));
 }
 
 test "the formula template is filled in all three places" {

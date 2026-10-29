@@ -106,6 +106,7 @@ const roots = [_][]const u8{
     "src/size_check.zig",
     "src/errors_site.zig",
     "src/mac_release.zig",
+    "src/testing/mac_demo.zig",
     "src/vm_image_make.zig",
     "src/vm_image/kernel_build.zig",
     "src/macos_main.zig",
@@ -668,6 +669,25 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;
 /// a Developer ID signature and notarization are the release's job) and installs it.
+/// `zig build demo-mac`: the M1 to M4 demo steps and M4b's, driven from this Mac through the macOS
+/// `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
+fn add_demo_mac(b: *std.Build) void {
+    const exe = b.addExecutable(.{
+        .name = "demo_mac",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/mac_demo.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run = b.addRunArtifact(exe);
+    run.setCwd(b.path("."));
+    run.addArgs(&.{ "--zbx", "zig-out/bin/zbx" });
+    run.step.dependOn(b.getInstallStep());
+    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS, inside the VM");
+    step.dependOn(&run.step);
+}
+
 /// `zig build mac-release`: the ReleaseSafe macOS `zbx`, signed with the hardened runtime and the
 /// virtualization entitlement, zipped, and (with `-Dnotarize`) notarized; see src/mac_release.zig.
 /// `-Dsign-identity=-` signs ad hoc, for trying it; the defaults are the owner's.
@@ -727,6 +747,7 @@ fn add_macos_install(
     link_macos(module, image);
     const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
     add_mac_release(b, options, target);
+    add_demo_mac(b);
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addArtifactArg(exe);
     const signed = copy.addOutputFileArg("zbx");
