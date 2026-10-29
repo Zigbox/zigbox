@@ -1,0 +1,6 @@
+error[ZBX-E1012]: the virtual machine's disk cannot be made smaller
+  cause  --disk is 32 GiB, but the disk is 64 GiB now and cannot be shrunk
+  fix    give at least the current size:                                     zbx vm config --disk 64G
+         to start empty with a smaller disk, move the file aside yourself:   mv '/Users/ada/Library/Application Support/zbx/store.img' '/Users/ada/Library/Application Support/zbx/store.img.old'
+  more   zbx explain E1012 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1012.html

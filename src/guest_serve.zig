@@ -196,7 +196,6 @@ const Command = struct {
     argv: [constants.args_count_max + 2:null]?[*:0]const u8 = undefined,
     envp: [constants.forward_env_count_max + 8:null]?[*:0]const u8 = undefined,
     directory: [constants.path_bytes_max + 1:0]u8 = undefined,
-    home: [constants.vm_home_bytes_max + 1:0]u8 = undefined,
 };
 
 var command_storage: Command = undefined;
@@ -275,8 +274,17 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
     const extras = [_][]const u8{
         std.fmt.bufPrint(&user, "USER={s}", .{identity.name}) catch return null,
         "ZBX_CGROUP_ROOT=" ++ constants.vm_cgroup_root,
+        // The store and the state live on the machine's disk, never on the shared home: the Mac
+        // sets no XDG path (the guest ignores any it forwards), so these decide.
+        "XDG_DATA_HOME=" ++ constants.vm_disk_mount ++ "/data",
+        "XDG_STATE_HOME=" ++ constants.vm_disk_mount ++ "/state",
     };
     for (extras) |entry| {
+        command.envp[envc] = copy_string(&command.text, &used, entry) orelse return null;
+        envc += 1;
+    }
+    if (rosetta_ready()) {
+        const entry = "ZBX_PLATFORM_FALLBACK=linux/amd64";
         command.envp[envc] = copy_string(&command.text, &used, entry) orelse return null;
         envc += 1;
     }
@@ -290,16 +298,18 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
     assert(envc < command.envp.len); // Room is left for the terminating null.
     assert(used <= command.text.len);
     command.envp[envc] = null;
-    // The directory: the Mac's, if the guest has it; the guest user's home if not.
+    // The directory is the Mac's, as given: the Mac refuses a command outside the shared home
+    // before it gets here, and the guest does not run the command anywhere else.
     const wanted = start.working_directory;
-    const fits = wanted.len > 0 and wanted.len < command.directory.len;
-    const length = if (fits) wanted.len else @min(identity.home.len, command.directory.len - 1);
-    const source = if (fits) wanted else identity.home[0..length];
-    @memcpy(command.directory[0..length], source);
-    command.directory[length] = 0;
-    const home_length = @min(identity.home.len, command.home.len - 1);
-    @memcpy(command.home[0..home_length], identity.home[0..home_length]);
-    command.home[home_length] = 0;
+    if (wanted.len == 0 or wanted.len >= command.directory.len) return null;
+    @memcpy(command.directory[0..wanted.len], wanted);
+    command.directory[wanted.len] = 0;
+}
+
+/// True when init mounted Rosetta and registered it: an image with no arm64 build may then be
+/// run as linux/amd64.
+fn rosetta_ready() bool {
+    return !failed(linux.access(constants.vm_rosetta_mount ++ "/rosetta", 0o1));
 }
 
 fn copy_string(text: []u8, used: *usize, source: []const u8) ?[*:0]const u8 {
@@ -398,7 +408,13 @@ fn run_child(command: *Command, slave: i32, pipes: *[3][2]i32) noreturn {
         _ = linux.dup2(pipes[1][1], 1);
     }
     if (pipes[2][1] >= 0) _ = linux.dup2(pipes[2][1], 2);
-    if (failed(linux.chdir(&command.directory))) _ = linux.chdir(&command.home);
+    if (failed(linux.chdir(&command.directory))) {
+        // The Mac checked that the directory is inside the shared home; it is gone or unreadable
+        // since. The command does not run somewhere else.
+        const message = "zbx guest: the working directory is not available in the machine\n";
+        _ = linux.write(2, message, message.len);
+        linux.exit_group(125);
+    }
     _ = linux.execve(program_path, &command.argv, &command.envp);
     const message = "zbx guest: cannot run /usr/bin/zbx\n";
     _ = linux.write(2, message, message.len);
@@ -534,10 +550,41 @@ fn finish(connection: i32, child: *const Child) u8 {
     var payload: [2]u8 = undefined;
     const signaled = (status & 0x7f) != 0;
     const value: u8 = if (signaled) @intCast(status & 0x7f) else @intCast((status >> 8) & 0xff);
+    if (status != 0) note_full_disk(connection);
     protocol.render_exit(&payload, .{ .signaled = signaled, .value = value });
     _ = send_frame(connection, .exit, &payload);
     close_gracefully(connection);
     return 0;
+}
+
+/// The head of the kernel's `struct statfs` on 64-bit machines.
+const Statfs = extern struct {
+    kind: i64,
+    block_size: i64,
+    blocks: u64,
+    blocks_free: u64,
+    blocks_available: u64,
+    rest: [10]u64,
+};
+
+/// After a command failed: if the store disk has less than `vm_disk_full_bytes` free, say so to
+/// the Mac, which turns it into the diagnostic for a full disk.
+fn note_full_disk(connection: i32) void {
+    assert(connection >= 0);
+    assert(@sizeOf(Statfs) == 120); // The kernel writes this many bytes.
+    var buffer: Statfs = undefined;
+    const result = linux.syscall2(.statfs, @intFromPtr(constants.vm_disk_mount), @intFromPtr(&buffer));
+    if (failed(result)) return;
+    assert(buffer.block_size > 0);
+    const free = buffer.blocks_available * @as(u64, @intCast(buffer.block_size));
+    const total = buffer.blocks * @as(u64, @intCast(buffer.block_size));
+    if (free >= constants.vm_disk_full_bytes) return;
+    var payload: [8]u8 = undefined;
+    protocol.render_disk_full(&payload, .{
+        .free_mib = @intCast(free >> 20),
+        .total_mib = @intCast(@min(total >> 20, std.math.maxInt(u32))),
+    });
+    _ = send_frame(connection, .disk_full, &payload);
 }
 
 /// Closes the sending side and reads what the Mac still sends until it closes its own, for a

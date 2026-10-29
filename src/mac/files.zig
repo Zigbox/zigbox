@@ -273,6 +273,58 @@ pub fn host_cpus() u32 {
     return @intCast(count);
 }
 
+/// The head of macOS's `struct statfs` (64-bit inodes, the default), then room for the rest of
+/// it (two path buffers of 1024 bytes and reserved words): 2168 bytes in all.
+const Statfs = extern struct {
+    bsize: u32,
+    iosize: i32,
+    blocks: u64,
+    bfree: u64,
+    bavail: u64,
+    files: u64,
+    ffree: u64,
+    rest: [2168 - 48]u8,
+};
+
+extern "c" fn statfs(path: [*:0]const u8, buffer: *Statfs) c_int;
+
+/// What an ordinary user may still write on the volume that holds `path`; 0 if it cannot be told.
+pub fn free_bytes(path: []const u8) u64 {
+    assert(@sizeOf(Statfs) == 2168);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return 0;
+    var buffer: Statfs = undefined;
+    if (statfs(text.ptr, &buffer) != 0) return 0;
+    return buffer.bavail * buffer.bsize;
+}
+
+/// The size in bytes of the file at `path`; 0 when there is none.
+pub fn file_size(path: []const u8) u64 {
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return 0;
+    var status: c.Stat = undefined;
+    if (c.stat(text.ptr, &status) != 0) return 0;
+    assert(status.size >= 0);
+    return @intCast(status.size);
+}
+
+/// Makes the file at `path` exist and be at least `bytes` long, sparse: the blocks are not
+/// allocated until the guest writes them. A longer file is left as it is.
+pub fn ensure_sparse_file(path: []const u8, bytes: u64) Error!void {
+    assert(bytes > 0);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return error.TooLong;
+    const flags: c.O = .{ .ACCMODE = .RDWR, .CREAT = true };
+    const descriptor = c.open(text.ptr, flags, @as(c.mode_t, 0o600));
+    if (descriptor < 0) return fail();
+    defer close(descriptor);
+    var status: c.Stat = undefined;
+    if (c.fstat(descriptor, &status) != 0) return fail();
+    assert(status.size >= 0);
+    if (@as(u64, @intCast(status.size)) >= bytes) return;
+    if (c.ftruncate(descriptor, @intCast(bytes)) != 0) return fail();
+}
+
 pub fn host_memory_bytes() u64 {
     assert(@sizeOf(u64) == 8);
     var bytes: u64 = 0;
@@ -280,6 +332,23 @@ pub fn host_memory_bytes() u64 {
     const result = c.sysctlbyname("hw.memsize", &bytes, &size, null, 0);
     if (result != 0 or bytes == 0) return constants.vm_memory_bytes_default;
     return bytes;
+}
+
+test "a sparse file is made, grown and never shortened" {
+    // Goal: the disk file takes no room until written and is never cut. Method: a file in the
+    // system temp directory, made, grown, then asked for less.
+    var name: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, "/tmp/zbx-sparse-test-{d}", .{now_ms()});
+    try std.testing.expectEqual(@as(u64, 0), file_size(path));
+    try ensure_sparse_file(path, 1 << 30);
+    try std.testing.expectEqual(@as(u64, 1 << 30), file_size(path));
+    try ensure_sparse_file(path, 2 << 30);
+    try std.testing.expectEqual(@as(u64, 2 << 30), file_size(path));
+    try ensure_sparse_file(path, 1 << 30);
+    try std.testing.expectEqual(@as(u64, 2 << 30), file_size(path));
+    try std.testing.expect(free_bytes("/tmp") > 0);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    _ = c.unlink((try terminate(&terminated, path)).ptr);
 }
 
 test "make_directories makes a chain and is the same twice" {

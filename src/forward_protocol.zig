@@ -24,6 +24,8 @@ pub const Kind = enum(u8) {
     signal = 6,
     window = 7,
     exit = 8,
+    /// From the guest, before `exit`: the command failed and the store disk is nearly full.
+    disk_full = 9,
 };
 
 pub const Header = struct {
@@ -38,6 +40,7 @@ fn fixed_length(kind: Kind) ?u32 {
         .signal => 1,
         .window => 4,
         .exit => 2,
+        .disk_full => 8,
         else => null,
     };
 }
@@ -190,6 +193,28 @@ pub fn parse_exit(bytes: *const [2]u8) ?Exit {
     return .{ .signaled = bytes[0] == 1, .value = bytes[1] };
 }
 
+/// The store disk's room, in MiB, as the guest saw it when a command failed.
+pub const DiskFull = struct {
+    free_mib: u32,
+    total_mib: u32,
+};
+
+pub fn render_disk_full(buffer: *[8]u8, note: DiskFull) void {
+    assert(note.free_mib <= note.total_mib);
+    std.mem.writeInt(u32, buffer[0..4], note.free_mib, .little);
+    std.mem.writeInt(u32, buffer[4..8], note.total_mib, .little);
+}
+
+/// Null for a note that says more is free than the disk holds.
+pub fn parse_disk_full(bytes: *const [8]u8) ?DiskFull {
+    const note: DiskFull = .{
+        .free_mib = std.mem.readInt(u32, bytes[0..4], .little),
+        .total_mib = std.mem.readInt(u32, bytes[4..8], .little),
+    };
+    if (note.free_mib > note.total_mib) return null;
+    return note;
+}
+
 pub fn render_window(buffer: *[4]u8, rows: u16, columns: u16) void {
     std.mem.writeInt(u16, buffer[0..2], rows, .little);
     std.mem.writeInt(u16, buffer[2..4], columns, .little);
@@ -325,6 +350,20 @@ test "exit and window payloads round-trip" {
     var window: [4]u8 = undefined;
     render_window(&window, 50, 132);
     try std.testing.expectEqual(@as(u16, 132), std.mem.readInt(u16, window[2..4], .little));
+}
+
+test "a disk-full note round-trips and a free size above the disk is refused" {
+    // Goal: the note's two numbers. Method: a typical note, then an impossible one.
+    var bytes: [8]u8 = undefined;
+    render_disk_full(&bytes, .{ .free_mib = 12, .total_mib = 65536 });
+    try std.testing.expectEqual(DiskFull{ .free_mib = 12, .total_mib = 65536 }, parse_disk_full(&bytes).?);
+    std.mem.writeInt(u32, bytes[0..4], 65537, .little);
+    try std.testing.expect(parse_disk_full(&bytes) == null);
+    var header: [constants.forward_header_bytes]u8 = undefined;
+    render_header(&header, .disk_full, 8);
+    try std.testing.expectEqual(Kind.disk_full, parse_header(&header).?.kind);
+    std.mem.writeInt(u32, header[1..5], 7, .little);
+    try std.testing.expect(parse_header(&header) == null);
 }
 
 test "environment names: the guest's own are never taken from the Mac" {

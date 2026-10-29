@@ -83,11 +83,29 @@ fn resolve_reference(
     client.* = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
     const mirrors = host.environment("ZBX_REGISTRY_MIRRORS", constants.registry_mirrors_bytes_max);
     client.mirrors = mirrors orelse "";
+    choose_platform(host, client);
     client_mod.resolve(client, &workspace.reference, &workspace.resolved, diag) catch {
         return error.Failed;
     };
     assert(diag.code == null);
     assert(workspace.resolved.layer_count <= constants.registry_layers_max);
+}
+
+/// `ZBX_PLATFORM` (`linux/amd64` or `linux/arm64`) replaces the machine's platform, and
+/// `ZBX_PLATFORM_FALLBACK` names one to use when an image has none for it. The macOS zbx sets
+/// them in the virtual machine (`--platform`, and Rosetta); a value that is not one of the two
+/// is ignored, because nothing but zbx sets them.
+fn choose_platform(host: Host, client: *client_mod.Client) void {
+    assert(client.fallback == null);
+    const limit: u32 = 32;
+    if (host.environment("ZBX_PLATFORM", limit)) |text| {
+        if (manifest.architecture_of_platform(text)) |architecture| {
+            client.architecture = architecture;
+        }
+    }
+    if (host.environment("ZBX_PLATFORM_FALLBACK", limit)) |text| {
+        client.fallback = manifest.architecture_of_platform(text);
+    }
 }
 
 pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) Error!void {

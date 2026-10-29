@@ -154,8 +154,8 @@ fn add_fixed(
     label: []const u8,
 ) !void {
     const directories = [_][]const u8{
-        "dev",     "etc",           "proc", "run", "sys", "tmp", "usr", "usr/bin", "lib", "usr/lib",
-        "etc/ssl", "etc/ssl/certs", "bin",  "mnt",
+        "dev",      "etc",     "proc",          "run", "sys", "tmp", "usr", "usr/bin", "lib", "usr/lib",
+        "usr/sbin", "etc/ssl", "etc/ssl/certs", "bin", "mnt",
     };
     for (directories) |path| {
         try entries.append(arena, .{ .path = path, .kind = .directory, .mode = 0o755 });
@@ -252,12 +252,22 @@ fn wanted(path: []const u8) bool {
         "usr/bin/newgidmap",
         "etc/ssl/certs/ca-certificates.crt",
         "etc/ssl/cert.pem",
+        "sbin/mke2fs",
+        "sbin/e2fsck",
+        "usr/sbin/resize2fs",
     };
     for (exact) |name| {
         if (std.mem.eql(u8, name, path)) return true;
     }
-    return std.mem.startsWith(u8, path, "usr/lib/libbsd.so") or
-        std.mem.startsWith(u8, path, "usr/lib/libmd.so");
+    const library_prefixes = [_][]const u8{
+        "usr/lib/libbsd.so", "usr/lib/libmd.so", "usr/lib/libeconf.so", "lib/libe2p.so",
+        "lib/libext2fs.so",  "lib/libss.so",     "lib/libcom_err.so",   "lib/libblkid.so",
+        "lib/libuuid.so",
+    };
+    for (library_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
+    return false;
 }
 
 fn add_packages(
@@ -273,8 +283,11 @@ fn add_packages(
             // newuidmap and newgidmap are setuid root: they write another process's id map.
             const setuid = std.mem.endsWith(u8, file.path, "/newuidmap") or
                 std.mem.endsWith(u8, file.path, "/newgidmap");
+            // The guest's root has no /sbin of its own: the tools go to /usr/sbin.
+            const sbin = std.mem.startsWith(u8, file.path, "sbin/");
+            const path = if (sbin) try std.fmt.allocPrint(arena, "usr/{s}", .{file.path}) else file.path;
             try entries.append(arena, .{
-                .path = file.path,
+                .path = path,
                 .kind = if (file.kind == .symlink) .symlink else .file,
                 .mode = if (setuid) file.mode | 0o4000 else file.mode,
                 .data = file.data,

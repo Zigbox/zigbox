@@ -709,6 +709,26 @@ pub const vm_cpus_min: u32 = 1;
 pub const vm_cpus_max: u32 = 64;
 pub const vm_memory_bytes_min: u64 = 512 << 20;
 pub const vm_memory_bytes_max: u64 = 256 << 30;
+/// The store disk (slice 3): a sparse file on the Mac that the guest formats as ext4. It costs
+/// the Mac only what the guest writes. The default is generous because it is only a ceiling; the
+/// least holds a few images; the most is far past what a Mac's volume has.
+pub const vm_disk_bytes_default: u64 = 64 << 30;
+pub const vm_disk_bytes_min: u64 = 1 << 30;
+pub const vm_disk_bytes_max: u64 = 8 << 40;
+/// The Mac's volume must have this much free room beside the disk file's current size, or the
+/// machine is not started: a full volume would show up as I/O errors inside the guest.
+pub const vm_disk_host_free_bytes_min: u64 = 2 << 30;
+/// The guest reports a full disk when less than this is free after a command failed.
+pub const vm_disk_full_bytes: u64 = 32 << 20;
+/// Where the guest mounts the disk, and the directories on it that zbx's XDG paths point to.
+pub const vm_disk_mount = "/mnt/store";
+pub const vm_disk_device = "/dev/vda";
+/// The home directory share: the tag the guest mounts it by.
+pub const vm_home_tag = "home";
+pub const vm_rosetta_tag = "rosetta";
+pub const vm_rosetta_mount = "/mnt/rosetta";
+/// The size at which the host's log is renamed to `host.log.1` and started afresh.
+pub const vm_host_log_bytes_max: u64 = 64 << 10;
 /// The VM stops after this long without a command to run (enforced from slice 2).
 pub const vm_idle_timeout_ms: u32 = 5 * 60 * 1000;
 /// From the start of the host process to the guest's answer on vsock.
@@ -1090,6 +1110,11 @@ comptime {
     assert(vm_cpus_default <= vm_cpus_max);
     assert(vm_memory_bytes_min <= vm_memory_bytes_default);
     assert(vm_memory_bytes_default <= vm_memory_bytes_max);
+    assert(vm_disk_bytes_min <= vm_disk_bytes_default);
+    assert(vm_disk_bytes_default <= vm_disk_bytes_max);
+    assert(vm_disk_bytes_min % (1 << 20) == 0);
+    assert(vm_disk_bytes_max % (1 << 20) == 0);
+    assert(vm_disk_full_bytes < vm_disk_bytes_min);
     assert(vm_memory_bytes_max % (1 << 20) == 0); // Whole MiB: the framework counts in them.
     assert(vm_memory_bytes_min % (1 << 20) == 0);
     assert(vm_poll_step_ms < vm_control_timeout_ms);

@@ -1,0 +1,7 @@
+error[ZBX-E1016]: Rosetta is not installed on this Mac
+  cause  Rosetta is not installed on this Mac, and linux/amd64 commands run
+         through it
+  fix    install it once:                                         softwareupdate --install-rosetta --agree-to-license
+         then stop the machine, so that it starts with Rosetta:   zbx vm stop
+  more   zbx explain E1016 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1016.html

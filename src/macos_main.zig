@@ -55,14 +55,18 @@ const help_text =
     \\  for example: zbx run alpine -- cat /etc/os-release
     \\  The command line, the working directory, the terminal (with its size), standard input,
     \\  output and error, and these signals are forwarded: INT, TERM, HUP, QUIT. If zbx dies,
-    \\  the command gets a hangup. A pull and the store live in the machine's memory until the
-    \\  disk image of the next release.
+    \\  the command gets a hangup. The machine mounts your home directory at the same path, and a
+    \\  command runs in the directory you ran zbx in, which must be inside your home (otherwise
+    \\  zbx refuses). Images, state and records live on the machine's disk, a sparse file that
+    \\  survives zbx vm stop; zbx never deletes it.
+    \\  --platform linux/amd64   run an image built for x86-64 through Rosetta (needs Rosetta)
     \\
     \\commands that look after the machine:
     \\  vm status       is the machine running, from which image, with how many CPUs and how
     \\                  much memory (--output json: see zbx schema vm-status)
-    \\  vm config       show the machine's size; with --cpus <n> and/or --memory <size> (2G,
-    \\                  4096M) set it for the next boot (--output json: zbx schema vm-config)
+    \\  vm config       show the machine's size; with --cpus <n>, --memory <size> (2G, 4096M)
+    \\                  and/or --disk <size> (64G; it only grows) set it for the next boot
+    \\                  (--output json: zbx schema vm-config)
     \\  vm start        start the machine now, to have it warm; it is never required
     \\  vm stop         stop the machine (done already, and exit 0, if none runs)
     \\
@@ -112,6 +116,8 @@ const Invocation = struct {
     json: bool = false,
     cpus: ?[]const u8 = null,
     memory: ?[]const u8 = null,
+    disk: ?[]const u8 = null,
+    platform: ?[]const u8 = null,
     report_fd: i32 = -1,
 
     fn mode(invocation: *const Invocation) render.Mode {
@@ -239,6 +245,7 @@ const ParseError = error{Usage};
 fn parse(words: []const []const u8, invocation: *Invocation, diag: *Diag) ParseError!void {
     assert(invocation.cpus == null);
     assert(invocation.memory == null);
+    assert(invocation.disk == null);
     assert(words.len <= constants.args_count_max);
     assert(diag.code == null);
     var operands: [4][]const u8 = undefined;
@@ -254,11 +261,15 @@ fn parse(words: []const []const u8, invocation: *Invocation, diag: *Diag) ParseE
             invocation.json = try output_is_json(diag, words[index]);
         } else if (std.mem.startsWith(u8, word, "--output=")) {
             invocation.json = try output_is_json(diag, word["--output=".len..]);
-        } else if (std.mem.eql(u8, word, "--cpus") or std.mem.eql(u8, word, "--memory")) {
+        } else if (std.mem.eql(u8, word, "--cpus") or std.mem.eql(u8, word, "--memory") or
+            std.mem.eql(u8, word, "--disk"))
+        {
             index += 1;
             if (index == words.len) return bad_value(diag, word, "a value");
             const value = words[index];
-            if (word[2] == 'c') invocation.cpus = value else invocation.memory = value;
+            if (word[2] == 'c') invocation.cpus = value;
+            if (word[2] == 'm') invocation.memory = value;
+            if (word[2] == 'd') invocation.disk = value;
         } else if (std.mem.eql(u8, word, "--report-fd")) {
             index += 1;
             if (index == words.len) return bad_value(diag, word, "a descriptor");
@@ -312,8 +323,11 @@ fn choose_vm(operands: []const []const u8, invocation: *Invocation, diag: *Diag)
         if (!std.mem.eql(u8, operands[0], name)) continue;
         invocation.command = command;
         if (operands.len > 1) return unexpected(diag, operands[1]);
-        const sizing = invocation.cpus != null or invocation.memory != null;
-        const sizing_option: []const u8 = if (invocation.cpus != null) "--cpus" else "--memory";
+        const sizing = invocation.cpus != null or invocation.memory != null or
+            invocation.disk != null;
+        const sizing_option: []const u8 = if (invocation.cpus != null)
+            "--cpus"
+        else if (invocation.memory != null) "--memory" else "--disk";
         if (sizing and command != .vm_config) return unknown_option(diag, sizing_option);
         return;
     }
@@ -506,7 +520,7 @@ fn sizing_of(invocation: *const Invocation) commands.ConfigRequest {
     assert(@sizeOf(commands.ConfigRequest) > 0);
     assert(invocation.command == .vm_config);
     assert(invocation.report_fd >= -1);
-    return .{ .cpus = invocation.cpus, .memory = invocation.memory };
+    return .{ .cpus = invocation.cpus, .memory = invocation.memory, .disk = invocation.disk };
 }
 
 fn image_version() []const u8 {

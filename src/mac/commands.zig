@@ -441,6 +441,7 @@ fn exec_host(paths: *const paths_mod.Paths, report_fd: i32) noreturn {
 pub const ConfigRequest = struct {
     cpus: ?[]const u8 = null,
     memory: ?[]const u8 = null,
+    disk: ?[]const u8 = null,
 };
 
 /// What this Mac allows: the constants, the framework's limits and the Mac's CPUs and memory.
@@ -469,8 +470,9 @@ pub fn run_config(
     const bounds = bounds_here(host_cpus);
     var values = loaded.values;
     var source = loaded.source;
-    if (request.cpus != null or request.memory != null) {
-        values = try apply_request(request, values, bounds, diag);
+    if (request.cpus != null or request.memory != null or request.disk != null) {
+        const disk_now = files.file_size(ctx.paths.store_disk.slice());
+        values = try apply_request(request, values, bounds, disk_now, ctx.paths.store_disk.slice(), diag);
         try settings_file.save(ctx.paths, values, diag);
         source = .settings;
     }
@@ -485,6 +487,8 @@ fn apply_request(
     request: ConfigRequest,
     current: settings.Settings,
     bounds: settings.Bounds,
+    disk_now: u64,
+    disk_path: []const u8,
     diag: *Diag,
 ) Error!settings.Settings {
     assert(bounds.memory_bytes_min <= bounds.memory_bytes_max);
@@ -503,11 +507,28 @@ fn apply_request(
             return error.Failed;
         };
     }
+    if (request.disk) |text| {
+        values.disk_bytes = spec.parse_size(text, 1, 1 << 50) catch {
+            diagnose.size_out_of_range(diag, .not_a_size, "--disk", text, bounds);
+            return error.Failed;
+        };
+    }
     if (settings.check(values, bounds)) |problem| {
-        const memory_problem = problem != .cpus_below and problem != .cpus_above;
-        const option: []const u8 = if (memory_problem) "--memory" else "--cpus";
-        const given = (if (memory_problem) request.memory else request.cpus) orelse "";
+        const option: []const u8 = switch (problem) {
+            .cpus_below, .cpus_above => "--cpus",
+            .disk_below, .disk_above, .disk_unaligned => "--disk",
+            else => "--memory",
+        };
+        const given = (if (option[2] == 'c') request.cpus else if (option[2] == 'd')
+            request.disk
+        else
+            request.memory) orelse "";
         diagnose.size_out_of_range(diag, problem, option, given, bounds);
+        return error.Failed;
+    }
+    // The disk file only grows: the file system on it cannot be shrunk without losing data.
+    if (request.disk != null and values.disk_bytes < disk_now) {
+        diagnose.disk_shrink(diag, values.disk_bytes, disk_now, disk_path);
         return error.Failed;
     }
     return values;

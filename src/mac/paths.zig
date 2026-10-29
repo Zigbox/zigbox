@@ -2,6 +2,7 @@
 //!
 //!     ~/Library/Application Support/zbx/vm-settings    the size set by `zbx vm config`
 //!     ~/Library/Application Support/zbx/vm/<version>/  the unpacked kernel and initramfs
+//!     ~/Library/Application Support/zbx/store.img      the store disk (sparse; never deleted)
 //!     ~/Library/Application Support/zbx/vm/control.sock, host.lock, console.log, host.log
 //!
 //! Pure: the home directory is an argument, so tests use a directory of their own.
@@ -34,6 +35,8 @@ pub const Paths = struct {
     console_log: Text = .{},
     host_log: Text = .{},
     settings: Text = .{},
+    store_disk: Text = .{},
+    host_log_old: Text = .{},
     image_dir: Text = .{},
     kernel: Text = .{},
     initramfs: Text = .{},
@@ -51,6 +54,8 @@ pub const Paths = struct {
         try paths.console_log.set("{s}/console.log", .{vm_dir});
         try paths.host_log.set("{s}/host.log", .{vm_dir});
         try paths.settings.set("{s}/vm-settings", .{base});
+        try paths.store_disk.set("{s}/store.img", .{base});
+        try paths.host_log_old.set("{s}/host.log.1", .{vm_dir});
         try paths.image_dir.set("{s}/{s}", .{ vm_dir, version });
         const image_dir = paths.image_dir.slice();
         try paths.kernel.set("{s}/Image", .{image_dir});
@@ -71,6 +76,10 @@ test "paths nest below the home directory and a long home is refused" {
     try std.testing.expectEqualStrings(
         "/Users/ada/Library/Application Support/zbx/vm/0123456789abcdef/Image",
         paths.kernel.slice(),
+    );
+    try std.testing.expectEqualStrings(
+        "/Users/ada/Library/Application Support/zbx/store.img",
+        paths.store_disk.slice(),
     );
     try std.testing.expectEqualStrings(
         "/Users/ada/Library/Application Support/zbx/vm-settings",

@@ -60,6 +60,9 @@ pub const Client = struct {
     workspace: *Workspace,
     /// What this machine runs, from its `uname`; null for a machine this build has no images for.
     architecture: ?manifest.Architecture,
+    /// A platform the machine runs through a translator (Rosetta in the macOS VM): used for an
+    /// image whose index has no entry for `architecture`. Null on a plain Linux machine.
+    fallback: ?manifest.Architecture,
     machine: []const u8,
     token_len: u32,
     /// The mirrors for docker.io, comma separated (`ZBX_REGISTRY_MIRRORS`); empty for none.
@@ -80,6 +83,7 @@ pub const Client = struct {
             .net = wire,
             .workspace = workspace,
             .architecture = manifest.architecture_of_machine(machine),
+            .fallback = null,
             .machine = machine,
             .token_len = 0,
             .mirrors = "",
@@ -228,13 +232,20 @@ fn resolve_inner(
     }
     resolved.index_digest = top.digest;
     var offered: manifest.Offered = .{};
-    const picked = manifest.select_platform(&document, architecture, &offered, &problem);
+    const picked = manifest.select_platform_or(
+        &document,
+        architecture,
+        client.fallback,
+        &offered,
+        &problem,
+    );
     const chosen = picked catch |err| return unusable(diag, err, &problem);
-    const selected = chosen orelse {
+    const found = chosen orelse {
         diagnose.no_platform(diag, architecture, client.machine, &offered);
         return error.Failed;
     };
-    try fetch_platform_manifest(client, reference, origin, selected, architecture, resolved, diag);
+    const selected = found.selected;
+    try fetch_platform_manifest(client, reference, origin, selected, found.architecture, resolved, diag);
 }
 
 fn unusable(diag: *Diag, err: manifest.ParseError, problem: *const manifest.Problem) Error {

@@ -73,6 +73,14 @@ pub const Architecture = enum {
     }
 };
 
+/// A platform as a person writes it, `linux/amd64` or `linux/arm64`; null for anything else.
+pub fn architecture_of_platform(text: []const u8) ?Architecture {
+    assert(text.len <= constants.arg_bytes_max);
+    if (std.mem.eql(u8, text, "linux/amd64")) return .amd64;
+    if (std.mem.eql(u8, text, "linux/arm64")) return .arm64;
+    return null;
+}
+
 /// The platform of a machine as `uname` names it; null for one this build does not run on.
 pub fn architecture_of_machine(machine: []const u8) ?Architecture {
     assert(machine.len < constants.uname_field_bytes);
@@ -323,6 +331,33 @@ pub fn select_platform(
     return found;
 }
 
+/// What `select_platform_or` chose: the entry, and the architecture it is for.
+pub const Picked = struct {
+    selected: Selected,
+    architecture: Architecture,
+};
+
+/// `select_platform` for `wanted`; when the index has none and `fallback` is another platform
+/// (the machine can run it through a translator), the entry for that. `offered` lists the index
+/// once, whichever was chosen.
+pub fn select_platform_or(
+    document: *const Document,
+    wanted: Architecture,
+    fallback: ?Architecture,
+    offered: *Offered,
+    problem: *Problem,
+) ParseError!?Picked {
+    if (try select_platform(document, wanted, offered, problem)) |selected| {
+        return .{ .selected = selected, .architecture = wanted };
+    }
+    const other = fallback orelse return null;
+    if (other == wanted) return null;
+    var scratch: Offered = .{}; // The same entries again: the first list is the one reported.
+    const selected = (try select_platform(document, other, &scratch, problem)) orelse return null;
+    assert(scratch.total == offered.total);
+    return .{ .selected = selected, .architecture = other };
+}
+
 fn descriptor_digest(descriptor: DescriptorJson, problem: *Problem) ParseError!Sha256 {
     assert(problem.text.len == 0);
     const text = descriptor.digest orelse {
@@ -552,6 +587,37 @@ test "platform selection: the host's entry, variants, attestations and the offer
     const only_arm = index_prefix ++ arm_entry ++ "]}";
     try testing.expect((try select_in(only_arm, .amd64, &offered)) == null);
     try testing.expectEqual(@as(u32, 1), offered.total);
+}
+
+test "a platform that is not native is chosen only when the native one is missing" {
+    // Goal: the fallback (images with no arm64 build, run through Rosetta) never replaces a
+    // native entry. Method: an index with both, one with only amd64, one with neither.
+    var storage: [constants.registry_json_arena_bytes]u8 = undefined;
+    var problem: Problem = .{};
+    const both = index_prefix ++ select_entries ++ "]}";
+    const only_amd = index_prefix ++ entry_of(zero, 30, "amd64", "linux", "") ++ "]}";
+    const neither = index_prefix ++ arm_entry ++ "]}";
+    const bodies = [_][]const u8{ both, only_amd, neither };
+    const expected = [_]?Architecture{ .arm64, .amd64, null };
+    const missing_natively = [_]bool{ false, true, true };
+    for (bodies, expected, missing_natively) |body, want, missing| {
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        const document = try parse_document(fixed.allocator(), body, media_oci_index, &problem);
+        var offered: Offered = .{};
+        const picked = try select_platform_or(&document, .arm64, .amd64, &offered, &problem);
+        if (want) |architecture| {
+            try testing.expectEqual(architecture, picked.?.architecture);
+        } else {
+            try testing.expect(picked == null);
+        }
+        offered = .{};
+        const without = try select_platform_or(&document, .arm64, null, &offered, &problem);
+        try testing.expectEqual(missing, without == null);
+    }
+    try testing.expectEqual(Architecture.amd64, architecture_of_platform("linux/amd64").?);
+    try testing.expectEqual(Architecture.arm64, architecture_of_platform("linux/arm64").?);
+    try testing.expect(architecture_of_platform("linux/arm") == null);
+    try testing.expect(architecture_of_platform("amd64") == null);
 }
 
 const amd_platform = ",\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}";
