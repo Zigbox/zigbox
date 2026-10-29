@@ -1,0 +1,6 @@
+warning[ZBX-W1002]: the virtual machine has no network
+  while  setting up the virtual machine's network
+  cause  the guest got no answer to its DHCP request on the NAT network
+  fix    a pull will fail until it has one; try a fresh machine:   zbx vm stop
+  more   zbx explain W1002
+  docs   https://zigbox.github.io/zigbox/errors/W1002.html

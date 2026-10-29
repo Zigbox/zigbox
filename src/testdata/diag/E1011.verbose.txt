@@ -1,0 +1,8 @@
+error[ZBX-E1011]: the virtual machine could not be set up for this user
+  while  setting up the virtual machine for this user
+  cause  the guest could not set up its cgroup
+  log    /Users/ada/Library/Application Support/zbx/vm/console.log
+  fix    stop the machine; the next command starts a fresh one:   zbx vm stop
+         read how far the guest got:                              tail -n 20 '/Users/ada/Library/Application Support/zbx/vm/console.log'
+  more   zbx explain E1011
+  docs   https://zigbox.github.io/zigbox/errors/E1011.html

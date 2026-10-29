@@ -15,6 +15,7 @@ const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const explain = @import("diag/explain.zig");
 const files = @import("mac/files.zig");
+const forward = @import("mac/forward.zig");
 const host = @import("mac/host.zig");
 const objc = @import("mac/objc.zig");
 const panic_report = @import("diag/panic.zig");
@@ -46,15 +47,26 @@ const help_text =
     \\usage: zbx [options] <command>
     \\
     \\On a Mac, containers run in a small Linux virtual machine that zbx starts by itself when a
-    \\command needs it and stops when it has been idle. These commands look after the machine:
+    \\command needs it and stops when it has been idle (5 minutes with nothing running).
     \\
-    \\commands:
+    \\commands that run in the machine, with the options, output, exit codes and JSON of the
+    \\Linux zbx (the machine's zbx is the same program):
+    \\  run, ps, stop, commit, store, state, lock, pull, bundle, doctor
+    \\  for example: zbx run alpine -- cat /etc/os-release
+    \\  The command line, the working directory, the terminal (with its size), standard input,
+    \\  output and error, and these signals are forwarded: INT, TERM, HUP, QUIT. If zbx dies,
+    \\  the command gets a hangup. A pull and the store live in the machine's memory until the
+    \\  disk image of the next release.
+    \\
+    \\commands that look after the machine:
     \\  vm status       is the machine running, from which image, with how many CPUs and how
     \\                  much memory (--output json: see zbx schema vm-status)
     \\  vm config       show the machine's size; with --cpus <n> and/or --memory <size> (2G,
     \\                  4096M) set it for the next boot (--output json: zbx schema vm-config)
     \\  vm start        start the machine now, to have it warm; it is never required
     \\  vm stop         stop the machine (done already, and exit 0, if none runs)
+    \\
+    \\other commands:
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E1001
     \\  help            show this text
@@ -64,8 +76,13 @@ const help_text =
     \\  -v, --verbose   show the full cause chain and context of a failure
     \\  --output json   write each result to stdout, and each failure to stderr, as JSON
     \\
+    \\environment: ZBX_VM_IDLE_TIMEOUT_MS (milliseconds, 500 or more) replaces the idle time, for
+    \\a machine started by the command that has it set; TERM, NO_COLOR, LANG, LC_ALL,
+    \\HTTP_PROXY, HTTPS_PROXY, NO_PROXY and ZBX_REGISTRY_MIRRORS go to the command, and so does
+    \\any variable named by -e NAME.
+    \\
     \\exit codes: 0 ok, 1 usage error, 2 this Mac cannot run the machine, 3 an external service,
-    \\70 a bug
+    \\70 a bug; run exits with the command's own code, and 125 when zbx or the machine failed
     \\
 ;
 
@@ -106,7 +123,7 @@ const Invocation = struct {
     }
 };
 
-/// The names of Linux `zbx` commands this build does not forward yet.
+/// The Linux `zbx` commands: forwarded into the VM, whole, to the zbx that runs there.
 const linux_commands = [_][]const u8{
     "run", "ps", "stop", "commit", "store", "state", "lock", "pull", "bundle", "doctor",
 };
@@ -129,13 +146,82 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     diag.reset();
     var invocation: Invocation = .{};
     panic_report.configure(&panic_report.state, .text, .standard);
+    if (forwarded(words[0..count], &invocation)) {
+        return forward_command(words[0..count], &invocation, &diag);
+    }
     parse(words[0..count], &invocation, &diag) catch return fail(&diag, &invocation);
     panic_report.configure(&panic_report.state, invocation.mode(), .standard);
     dispatch(&invocation, &diag) catch return fail(&diag, &invocation);
     return constants.exit_ok;
 }
 
+/// True if the command line is one for the Linux zbx in the VM: its first operand, past the global
+/// options, names one of its commands. The global options are read for this process's own
+/// reports (`--output json`, `-v`) and also stay in the command line the guest sees.
+fn forwarded(words: []const []const u8, invocation: *Invocation) bool {
+    assert(@intFromPtr(invocation) != 0);
+    assert(words.len <= constants.args_count_max);
+    var index: usize = 0;
+    while (index < words.len) : (index += 1) {
+        const word = words[index];
+        if (std.mem.eql(u8, word, "-v") or std.mem.eql(u8, word, "--verbose")) {
+            invocation.verbose = true;
+        } else if (std.mem.eql(u8, word, "--output")) {
+            index += 1;
+            invocation.json = index < words.len and std.mem.eql(u8, words[index], "json");
+        } else if (std.mem.eql(u8, word, "--output=json")) {
+            invocation.json = true;
+        } else if (!std.mem.startsWith(u8, word, "-")) {
+            for (linux_commands) |name| {
+                if (std.mem.eql(u8, name, word)) return true;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+fn forward_command(words: []const []const u8, invocation: *const Invocation, diag: *Diag) u8 {
+    assert(words.len > 0);
+    assert(diag.code == null);
+    panic_report.configure(&panic_report.state, invocation.mode(), .container_run);
+    var paths: paths_mod.Paths = .{};
+    const home = std.c.getenv("HOME") orelse "";
+    if (std.mem.len(home) == 0 or home[0] != '/') {
+        diagnose_home(diag);
+        return fail(diag, invocation);
+    }
+    paths.init(std.mem.span(home), image_version()) catch {
+        diagnose_home(diag);
+        return fail(diag, invocation);
+    };
+    const context: commands.Context = .{
+        .paths = &paths,
+        .json = invocation.json,
+        .mode = invocation.mode(),
+        .color = false,
+    };
+    var is_run = false;
+    for (words) |word| {
+        if (std.mem.startsWith(u8, word, "-")) continue;
+        is_run = std.mem.eql(u8, word, "run");
+        break;
+    }
+    const command: forward.Command = .{ .words = words, .json = invocation.json, .is_run = is_run };
+    return forward.run(&context, &command, diag) catch {
+        return fail_in(diag, invocation, if (is_run) .container_run else .standard);
+    };
+}
+
 fn fail(diag: *Diag, invocation: *const Invocation) u8 {
+    assert(@intFromPtr(diag) != 0);
+    assert(@intFromPtr(invocation) != 0);
+    return fail_in(diag, invocation, .standard);
+}
+
+fn fail_in(diag: *Diag, invocation: *const Invocation, scope: codes.ExitScope) u8 {
     assert(invocation.report_fd >= -1);
     assert(constants.output_bytes_max > 0);
     if (diag.code == null) {
@@ -146,7 +232,7 @@ fn fail(diag: *Diag, invocation: *const Invocation) u8 {
     const color = !invocation.json and std.c.isatty(2) == 1 and std.c.getenv("NO_COLOR") == null;
     const text = render.render(diag, invocation.mode(), color, &buffer);
     files.write_all(2, text) catch return constants.exit_environment;
-    return diag.exit_code();
+    return diag.exit_code_in(scope);
 }
 
 // ---- The command line ----------------------------------------------------------------
@@ -324,12 +410,6 @@ fn unknown_command(diag: *Diag, word: []const u8) ParseError {
     const echo = text_util.sanitise(&buffer, word);
     diag.raise(.E0001);
     diag.while_("reading the command line", .{});
-    for (linux_commands) |name| {
-        if (!std.mem.eql(u8, name, word)) continue;
-        diag.cause("'{s}' is a zbx command that the macOS build does not forward yet", .{echo});
-        diag.fix(.{ .sentence = "see what this build does:", .command = "zbx help" });
-        return error.Usage;
-    }
     diag.cause("'{s}' is not a zbx command", .{echo});
     diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
     return error.Usage;
@@ -493,6 +573,8 @@ fn report(invocation: *const Invocation, diag: *Diag, ok: bool) RunError!void {
 test {
     _ = @import("mac/objc.zig");
     _ = @import("mac/vz.zig");
+    _ = @import("mac/forward.zig");
+    _ = @import("mac/dns.zig");
     _ = @import("mac/image.zig");
     _ = @import("mac/files.zig");
     _ = @import("mac/paths.zig");
@@ -501,6 +583,8 @@ test {
     _ = @import("mac/diagnose.zig");
     _ = @import("mac/commands.zig");
     _ = @import("vm_protocol.zig");
+    _ = @import("forward_protocol.zig");
+    _ = @import("vm_dhcp.zig");
     _ = @import("schemas.zig");
     _ = @import("mac/vm_golden.zig");
 }

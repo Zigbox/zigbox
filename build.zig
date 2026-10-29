@@ -622,6 +622,10 @@ fn add_vm_image(b: *std.Build, options: *std.Build.Step.Options) VmImage {
     run.addArg("--zbx");
     run.addFileArg(linux_zbx.getEmittedBin());
     if (label.len > 0) run.addArgs(&.{ "--label", label });
+    run.addArgs(&.{ "--apk-cache", ".zig-cache/zbx-vm/apk" });
+    inline for (@import("vm/alpine.zon").packages) |package| {
+        run.addArgs(&.{ "--apk", package.name, package.url, package.sha256 });
+    }
     run.addArg("--out-initramfs");
     const initramfs = run.addOutputFileArg("initramfs.cpio");
     run.addArg("--out-version");
@@ -657,6 +661,7 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
     module.linkSystemLibrary("objc", .{});
     module.linkFramework("Foundation", .{});
     module.linkFramework("Virtualization", .{});
+    module.linkFramework("SystemConfiguration", .{});
 }
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;

@@ -380,6 +380,10 @@ fn configure(configuration: Id, spec: *const BootSpec) void {
     objc.send(void, configuration, "setSerialPorts:", .{objc.array(&.{port})});
     const socket = objc.new("VZVirtioSocketDeviceConfiguration");
     objc.send(void, configuration, "setSocketDevices:", .{objc.array(&.{socket})});
+    // The NAT network: the guest asks for an address by DHCP and reaches the Mac's network.
+    const nic = objc.new("VZVirtioNetworkDeviceConfiguration");
+    objc.send(void, nic, "setAttachment:", .{objc.new("VZNATNetworkDeviceAttachment")});
+    objc.send(void, configuration, "setNetworkDevices:", .{objc.array(&.{nic})});
     const entropy = objc.new("VZVirtioEntropyDeviceConfiguration");
     objc.send(void, configuration, "setEntropyDevices:", .{objc.array(&.{entropy})});
 }

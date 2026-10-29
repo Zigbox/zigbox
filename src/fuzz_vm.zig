@@ -8,6 +8,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const control = @import("mac/control.zig");
+const dhcp = @import("vm_dhcp.zig");
+const forward = @import("forward_protocol.zig");
 const protocol = @import("vm_protocol.zig");
 const settings = @import("mac/settings.zig");
 
@@ -73,6 +75,7 @@ fn check_status(random: std.Random) void {
         .cpus = random.intRangeAtMost(u32, 1, constants.vm_cpus_max),
         .memory_bytes = random.int(u64),
         .version = random_version(random),
+        .network_up = random.boolean(),
         .uptime_ms = random.uintLessThan(u64, 1 << 40),
     };
     var buffer: [constants.vm_line_bytes_max]u8 = undefined;
@@ -84,6 +87,8 @@ fn check_status(random: std.Random) void {
     const parsed = control.parse_reply(damaged[0..length]) orelse return;
     switch (parsed) {
         .stopping => assert(std.mem.eql(u8, damaged[0..length], control.render_stopping())),
+        // Another release's line: it starts with the family and ends in a newline, nothing more.
+        .other_format => assert(std.mem.startsWith(u8, damaged[0..length], "zbx-vm-host/")),
         .status => |accepted| {
             var again: [constants.vm_line_bytes_max]u8 = undefined;
             assert(std.mem.eql(u8, damaged[0..length], control.render_status(&again, &accepted)));
@@ -104,6 +109,94 @@ fn check_hello(random: std.Random) void {
     assert(std.mem.eql(u8, damaged[0..length], protocol.render_hello_reply(&again, accepted)));
 }
 
+const words = [_][]const u8{ "run", "alpine", "--", "cat", "/etc/os-release", "-e", "A=b", "" };
+
+fn check_forward(random: std.Random) void {
+    var arguments: [constants.args_count_max][]const u8 = undefined;
+    const argument_count = random.intRangeAtMost(usize, 1, 8);
+    for (arguments[0..argument_count]) |*argument| {
+        argument.* = words[random.uintLessThan(usize, words.len)];
+    }
+    const environment = [_][]const u8{ "TERM=xterm", "NO_COLOR=1" };
+    const start: forward.Start = .{
+        .terminal = random.boolean(),
+        .rows = random.int(u16),
+        .columns = random.int(u16),
+        .working_directory = if (random.boolean()) "/Users/ada/project" else "",
+        .arguments = arguments[0..argument_count],
+        .environment = environment[0..random.uintAtMost(usize, environment.len)],
+    };
+    var payload: [constants.forward_start_bytes_max]u8 = undefined;
+    const text = forward.render_start(&payload, &start).?;
+    var parsed_arguments: [constants.args_count_max][]const u8 = undefined;
+    var parsed_environment: [constants.forward_env_count_max][]const u8 = undefined;
+    const back = forward.parse_start(text, &parsed_arguments, &parsed_environment).?;
+    assert(back.arguments.len == start.arguments.len); // Render reads back.
+    var damaged: [constants.forward_start_bytes_max * 2]u8 = undefined;
+    @memcpy(damaged[0..text.len], text);
+    const length = damage(random, &damaged, text.len);
+    const accepted = forward.parse_start(
+        damaged[0..length],
+        &parsed_arguments,
+        &parsed_environment,
+    ) orelse return;
+    var again: [constants.forward_start_bytes_max]u8 = undefined;
+    assert(std.mem.eql(u8, damaged[0..length], forward.render_start(&again, &accepted).?));
+}
+
+fn check_headers(random: std.Random) void {
+    var bytes: [constants.forward_header_bytes]u8 = undefined;
+    random.bytes(&bytes);
+    bytes[0] %= 10;
+    const header = forward.parse_header(&bytes) orelse return;
+    var again: [constants.forward_header_bytes]u8 = undefined;
+    forward.render_header(&again, header.kind, header.length);
+    assert(std.mem.eql(u8, &bytes, &again)); // Accepted headers are exactly what render writes.
+}
+
+fn check_dhcp(random: std.Random) void {
+    const mac = [6]u8{ 2, 1, 2, 3, 4, 5 };
+    var packet: [constants.vm_dhcp_packet_bytes_max]u8 = undefined;
+    const lease: dhcp.Lease = .{
+        .kind = .offer,
+        .address = .{ 10, 0, 0, random.int(u8) },
+        .server = .{ 10, 0, 0, 1 },
+        .mask = .{ 255, 255, 255, 0 },
+        .router = if (random.boolean()) .{ 10, 0, 0, 1 } else null,
+        .dns = if (random.boolean()) .{ 10, 0, 0, 1 } else null,
+        .seconds = random.int(u32),
+    };
+    const text = dhcp.render_reply(&packet, mac, 7, &lease);
+    assert(std.meta.eql(lease, dhcp.parse_reply(text, mac, 7).?)); // Render reads back.
+    var damaged: [constants.vm_dhcp_packet_bytes_max * 2]u8 = undefined;
+    @memcpy(damaged[0..text.len], text);
+    const length = damage(random, &damaged, text.len);
+    const accepted = dhcp.parse_reply(damaged[0..length], mac, 7) orelse return;
+    assert(accepted.kind != .discover);
+    assert(accepted.kind != .request);
+}
+
+fn check_setup(random: std.Random) void {
+    const names = [_][]const u8{ "ada", "a-b.c_d", "x" };
+    const setup: protocol.Setup = .{
+        .seconds = random.int(u40),
+        .uid = random.intRangeAtMost(u32, 1, 70000),
+        .gid = random.int(u16),
+        .name = names[random.uintLessThan(usize, names.len)],
+        .home = "/Users/ada",
+        .dns = if (random.boolean()) "-" else "192.168.1.1,10.0.0.2",
+    };
+    var buffer: [constants.vm_line_bytes_max]u8 = undefined;
+    const text = protocol.render_setup(&buffer, &setup);
+    assert(protocol.parse_setup(text) != null); // Render reads back.
+    var damaged: [constants.vm_line_bytes_max * 2]u8 = undefined;
+    @memcpy(damaged[0..text.len], text);
+    const length = damage(random, &damaged, text.len);
+    const accepted = protocol.parse_setup(damaged[0..length]) orelse return;
+    var again: [constants.vm_line_bytes_max]u8 = undefined;
+    assert(std.mem.eql(u8, damaged[0..length], protocol.render_setup(&again, &accepted)));
+}
+
 pub fn fuzz_vm(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
@@ -111,6 +204,10 @@ pub fn fuzz_vm(seed: u64) void {
         check_settings(random);
         check_status(random);
         check_hello(random);
+        check_forward(random);
+        check_headers(random);
+        check_dhcp(random);
+        check_setup(random);
     }
     // Random bytes: whatever parses is a record render would write.
     var noise: [96]u8 = undefined;

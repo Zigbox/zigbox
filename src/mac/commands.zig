@@ -35,6 +35,8 @@ pub const Probe = union(enum) {
     /// No host: nothing listens and nobody holds the lock.
     absent,
     answering: control.Status,
+    /// A host of another release, whose answer this one cannot read.
+    other_format,
     /// Somebody holds the lock and does not answer (starting up, or stuck), with its pid if known.
     held: ?u32,
 };
@@ -73,12 +75,14 @@ pub fn probe(paths: *const paths_mod.Paths, timeout_ms: u32) Probe {
     switch (parsed) {
         .status => |status| return .{ .answering = status },
         .stopping => return .{ .held = null },
+        .other_format => return .other_format,
     }
 }
 
 /// No answer on the socket: either nobody is there (a killed host leaves a socket file but not
 /// the lock, because the kernel drops the lock with the process) or somebody is, and is silent.
 fn lock_probe(paths: *const paths_mod.Paths) Probe {
+    assert(@intFromPtr(paths) != 0);
     assert(paths.lock.length > 0);
     const taken = files.lock_exclusive(paths.lock.slice()) catch return .absent;
     if (taken) |descriptor| {
@@ -114,6 +118,7 @@ fn put(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) void 
 }
 
 fn put_all(writer: *std.Io.Writer, text: []const u8) void {
+    assert(@intFromPtr(writer) != 0);
     assert(writer.end <= writer.buffer.len);
     // Cannot fail: same.
     writer.writeAll(text) catch unreachable;
@@ -129,11 +134,29 @@ pub fn run_status(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
         .absent => print_status(ctx, null, loaded.values),
         .answering => |status| print_status(ctx, status, loaded.values),
+        .other_format => print_other(ctx),
         .held => |pid| {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
     }
+}
+
+const another_release = "another release's (zbx vm stop replaces it)";
+
+/// A host of another release runs: what can be said of it without reading its answer.
+fn print_other(ctx: *const Context) void {
+    assert(@intFromPtr(ctx) != 0);
+    assert(ctx.paths.socket.length > 0);
+    const text = "{{\"schema\":\"zbx.vm.status/1\",\"state\":\"running\",\"image_version\":" ++
+        "\"{s}\",\"vm_image_version\":null,\"image_match\":false,\"pid\":null,\"cpus\":null," ++
+        "\"memory_bytes\":null,\"uptime_ms\":null,\"configured\":null,\"idle_timeout_ms\":{d}}}\n";
+    var buffer: [512]u8 = undefined;
+    const written = if (ctx.json)
+        std.fmt.bufPrint(&buffer, text, .{ image.version, constants.vm_idle_timeout_ms })
+    else
+        std.fmt.bufPrint(&buffer, "vm: running\n  image    {s}\n", .{another_release});
+    print(written catch unreachable); // Cannot fail: both texts fit 512 bytes.
 }
 
 fn print_status(ctx: *const Context, status: ?control.Status, configured: settings.Settings) void {
@@ -213,7 +236,7 @@ pub fn run_stop(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
-        .answering => try request_stop(ctx.paths, diag),
+        .answering, .other_format => try request_stop(ctx.paths, diag),
     }
     print_status(ctx, null, loaded.values);
 }
@@ -241,6 +264,17 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     assert(host_cpus >= 1);
     assert(diag.code == null);
     const loaded = try settings_file.load(ctx.paths, host_cpus, diag);
+    const status = try ensure_running(ctx, diag);
+    print_status(ctx, status, loaded.values);
+    if (!status.network_up) print_network_warning(ctx);
+}
+
+/// Makes sure a machine of this image runs, starting it if it does not, and returns its status.
+/// Two commands racing to start it start one: the host holds the lock, the other's host process
+/// says so and ends, and that command finds the winner answering.
+pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
+    assert(ctx.paths.vm_dir.length > 0);
+    assert(diag.code == null);
     files.make_directories(ctx.paths.vm_dir.slice()) catch {
         const doing = "making the VM directory";
         diagnose.directory(diag, doing, ctx.paths.vm_dir.slice(), files.reason());
@@ -250,20 +284,27 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     if (found == .held) found = wait_for_answer(ctx.paths);
     switch (found) {
         .answering => |status| {
-            if (std.mem.eql(u8, &status.version, image.version)) {
-                return print_status(ctx, status, loaded.values);
-            }
-            try replace(ctx, &status, diag);
+            if (std.mem.eql(u8, &status.version, image.version)) return status;
+            try replace(ctx, &status.version, diag);
         },
+        .other_format => try replace(ctx, "another release", diag),
         .held => |pid| {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
         .absent => {},
     }
-    try launch(ctx.paths, diag);
+    launch(ctx.paths, diag) catch |launch_failed| {
+        // A host that lost the race to another says so; the winner is what this command needs.
+        const winner = wait_for_answer(ctx.paths);
+        if (winner == .answering) {
+            diag.reset();
+            return winner.answering;
+        }
+        return launch_failed;
+    };
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
-        .answering => |status| print_status(ctx, status, loaded.values),
+        .answering => |status| return status,
         else => {
             diagnose.host_locked(diag, null);
             return error.Failed;
@@ -271,7 +312,17 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     }
 }
 
+fn print_network_warning(ctx: *const Context) void {
+    assert(@intFromPtr(ctx) != 0);
+    assert(ctx.paths.socket.length > 0);
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.no_network(&warning);
+    print_diag_warning(ctx, &warning);
+}
+
 fn wait_for_answer(paths: *const paths_mod.Paths) Probe {
+    assert(@intFromPtr(paths) != 0);
     assert(paths.socket.length > 0);
     const deadline = files.now_ms() + constants.vm_boot_timeout_ms;
     var found: Probe = .{ .held = null };
@@ -284,13 +335,12 @@ fn wait_for_answer(paths: *const paths_mod.Paths) Probe {
 }
 
 /// A machine of another image version is not driven: say so (W1001), stop it, go on.
-fn replace(ctx: *const Context, status: *const control.Status, diag: *Diag) Error!void {
-    assert(status.version.len == constants.vm_image_version_bytes);
-    assert(status.pid > 0);
+fn replace(ctx: *const Context, running_version: []const u8, diag: *Diag) Error!void {
+    assert(running_version.len > 0);
     assert(diag.code == null);
     var warning: Diag = undefined;
     warning.reset();
-    diagnose.replacing(&warning, &status.version, image.version);
+    diagnose.replacing(&warning, running_version, image.version);
     print_diag_warning(ctx, &warning);
     try request_stop(ctx.paths, diag);
 }
@@ -383,6 +433,7 @@ pub const ConfigRequest = struct {
 
 /// What this Mac allows: the constants, the framework's limits and the Mac's CPUs and memory.
 pub fn bounds_here(host_cpus: u32) settings.Bounds {
+    assert(host_cpus <= std.math.maxInt(u32));
     assert(host_cpus >= 1);
     const limits = vz.limits();
     const framework: settings.Bounds = .{
@@ -519,6 +570,7 @@ test "status text and JSON name the state, the image and the configured size" {
         .cpus = 2,
         .memory_bytes = 1 << 30,
         .version = image.version.*,
+        .network_up = true,
         .uptime_ms = 1530,
     };
     const live = status_json(&buffer, running, configured);

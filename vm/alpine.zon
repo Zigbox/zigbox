@@ -1,0 +1,36 @@
+// What the VM's initramfs takes from Alpine Linux 3.20 (aarch64), pinned by URL and the SHA-256 of
+// each .apk: newuidmap and newgidmap (the package `shadow-subids` in 3.20; later releases call it
+// `shadow-uidmap`), the C library their loader needs, the libraries they link, and Mozilla's CA
+// bundle for TLS. The hashes were taken from the files on dl-cdn.alpinelinux.org when they were
+// pinned. Alpine removes a file when a package is updated in the branch: when a URL stops
+// answering, pin the new version here, deliberately, in one commit.
+// `passt` (pasta) is pinned the same way in slice 4, not here.
+.{
+    .packages = .{
+        .{
+            .name = "musl",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/musl-1.2.5-r4.apk",
+            .sha256 = "71d53cd568d014bf71fa3f76819ddcd68d4f2ec5d9e9203e8ad4dd44667b9e9f",
+        },
+        .{
+            .name = "libmd",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libmd-1.1.0-r0.apk",
+            .sha256 = "48ef621c994f1ed7a56b6ecac6534a0dff889e067384e5863a742adf73b3b2c2",
+        },
+        .{
+            .name = "libbsd",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libbsd-0.12.2-r0.apk",
+            .sha256 = "5685d7302b4bbb5665e6ad3e59c61e4cfa69bd2c78911f4fae5d2439b0088eba",
+        },
+        .{
+            .name = "shadow-subids",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/community/aarch64/shadow-subids-4.15.1-r0.apk",
+            .sha256 = "a542ad23da42e686df8fa2a4b19ef58e5b99698b2a1571e54ca49750fa25e2e9",
+        },
+        .{
+            .name = "ca-certificates-bundle",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/ca-certificates-bundle-20261020-r0.apk",
+            .sha256 = "5bc874de833464f185771142446a0dcce293f1d4b94ded177eebb9fdc4f8c879",
+        },
+    },
+}

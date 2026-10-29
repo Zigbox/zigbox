@@ -269,3 +269,63 @@ test "every function raises its own code" {
     try std.testing.expect(is_entitlement_text("missing the entitlement"));
     try std.testing.expect(!is_entitlement_text("out of memory"));
 }
+
+/// W1002: the guest got no address by DHCP. Containers that need no network still run.
+pub fn no_network(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.W1002);
+    diag.while_("setting up the virtual machine's network", .{});
+    diag.cause("the guest got no answer to its DHCP request on the NAT network", .{});
+    diag.fix(.{
+        .sentence = "a pull will fail until it has one; try a fresh machine:",
+        .command = "zbx vm stop",
+    });
+    assert(diag.fixes.count == 1);
+}
+
+/// E1011: the guest could not finish its setup; `word` is the step it names.
+pub fn setup_failed(diag: *Diag, word: []const u8, console_log: []const u8) void {
+    assert(diag.code == null);
+    assert(word.len > 0);
+    diag.raise(.E1011);
+    diag.while_("setting up the virtual machine for this user", .{});
+    diag.cause("the guest could not set up its {s}", .{word});
+    diag.context("log", "{s}", .{console_log});
+    diag.fix(.{
+        .sentence = "stop the machine; the next command starts a fresh one:",
+        .command = "zbx vm stop",
+    });
+    diag.fix_with("read how far the guest got:", "tail -n 20 '{s}'", .{console_log});
+    assert(diag.fixes.count == 2);
+}
+
+/// E1010: the guest's command service did not take the connection.
+pub fn service_silent(diag: *Diag, console_log: []const u8) void {
+    assert(diag.code == null);
+    assert(console_log.len > 0);
+    diag.raise(.E1010);
+    diag.while_("connecting to the virtual machine's command service", .{});
+    diag.cause("nothing answered on vsock port {d} of the guest", .{constants.vm_forward_port});
+    diag.context("log", "{s}", .{console_log});
+    diag.fix(.{
+        .sentence = "stop the machine; the next command starts a fresh one:",
+        .command = "zbx vm stop",
+    });
+    diag.fix_with("read how far the guest got:", "tail -n 20 '{s}'", .{console_log});
+    assert(diag.fixes.count == 2);
+}
+
+/// E1009: the connection to the guest ended before the command had.
+pub fn connection_lost(diag: *Diag, what: []const u8) void {
+    assert(diag.code == null);
+    assert(what.len > 0);
+    diag.raise(.E1009);
+    diag.while_("running the command in the virtual machine", .{});
+    diag.cause("the connection to the virtual machine ended: {s}", .{what});
+    diag.fix(.{ .sentence = "see whether the machine runs:", .command = "zbx vm status" });
+    diag.fix(.{
+        .sentence = "a container that was detached may still run; list them:",
+        .command = "zbx ps",
+    });
+    assert(diag.fixes.count == 2);
+}

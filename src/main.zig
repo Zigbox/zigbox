@@ -6,6 +6,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const constants = @import("constants.zig");
+const guest_serve = @import("guest_serve.zig");
 const host_real = @import("host_real.zig");
 const panic_report = @import("diag/panic.zig");
 const HostReal = host_real.HostReal;
@@ -41,12 +42,33 @@ var storage: cli.Storage = undefined;
 var gc_tables: [constants.store_gc_tables_bytes]u8 align(8) = @splat(0);
 
 pub fn main(init: std.process.Init.Minimal) u8 {
+    if (guest_command(init)) |code| return code;
     var real: HostReal = .{ .environ = init.environ };
     var iterator = init.args.iterate();
     storage.gc_tables = &gc_tables;
     const code = cli.run_with(real.interface(), &iterator, &storage);
     assert(real.open_count == 0); // Every file the CLI opened was closed.
     return code;
+}
+
+/// `zbx guest serve`, the forwarding mode the macOS VM's init starts (guest_serve.zig). It is not
+/// a command a user types, so it is not in `help`, and it is decided here, before the command
+/// line parser: it takes no part in the container runtime.
+fn guest_command(init: std.process.Init.Minimal) ?u8 {
+    var iterator = init.args.iterate();
+    _ = iterator.next();
+    const first = iterator.next() orelse return null;
+    if (!std.mem.eql(u8, first, "guest")) return null;
+    var words: [4][]const u8 = undefined;
+    words[0] = first;
+    var count: usize = 1;
+    while (iterator.next()) |word| {
+        if (count == words.len) return 2;
+        words[count] = word;
+        count += 1;
+    }
+    if (count < 2) return 2;
+    return guest_serve.main(words[0..count], init.environ);
 }
 
 test {
@@ -193,5 +215,7 @@ test {
     _ = @import("mac/diagnose.zig");
     _ = @import("mac/vm_golden.zig");
     _ = @import("vm_protocol.zig");
+    _ = @import("forward_protocol.zig");
+    _ = @import("vm_dhcp.zig");
     _ = @import("vm_image/cpio.zig");
 }

@@ -7,7 +7,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const Kind = enum { directory, file, character_device };
+pub const Kind = enum { directory, file, character_device, symlink };
 
 pub const Entry = struct {
     path: []const u8,
@@ -25,6 +25,7 @@ const trailer = "TRAILER!!!";
 const type_directory: u32 = 0o040000;
 const type_file: u32 = 0o100000;
 const type_character: u32 = 0o020000;
+const type_symlink: u32 = 0o120000;
 
 fn pad4(length: usize) usize {
     return (4 - length % 4) % 4;
@@ -40,11 +41,12 @@ pub fn append(
     assert(entry.path.len > 0);
     assert(entry.path[0] != '/');
     assert(entry.mode <= 0o7777);
-    if (entry.kind != .file) assert(entry.data.len == 0);
+    if (entry.kind != .file and entry.kind != .symlink) assert(entry.data.len == 0);
     const type_bits: u32 = switch (entry.kind) {
         .directory => type_directory,
         .file => type_file,
         .character_device => type_character,
+        .symlink => type_symlink,
     };
     const links: u32 = if (entry.kind == .directory) 2 else 1;
     const name_size = entry.path.len + 1;

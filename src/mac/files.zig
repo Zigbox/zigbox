@@ -323,3 +323,103 @@ test "a socket path at the limit works and one past it is refused" {
     _ = try socket_address(at_limit);
     try std.testing.expectError(error.TooLong, socket_address(at_limit ++ "a"));
 }
+
+// ---- Passing a descriptor over a Unix socket -------------------------------------------------
+
+const Iovec = extern struct { base: ?*anyopaque, length: usize };
+const MessageHeader = extern struct {
+    name: ?*anyopaque = null,
+    name_length: u32 = 0,
+    vectors: ?*Iovec,
+    vector_count: i32,
+    control: ?*anyopaque,
+    control_length: u32,
+    flags: i32 = 0,
+};
+const ControlHeader = extern struct { length: u32, level: i32, kind: i32 };
+const socket_level: i32 = 0xffff;
+const rights_kind: i32 = 1;
+/// The control message of one descriptor: its header (12 bytes) and the descriptor (4).
+const control_bytes: u32 = 16;
+
+extern "c" fn sendmsg(socket: i32, message: *const MessageHeader, flags: i32) isize;
+extern "c" fn recvmsg(socket: i32, message: *MessageHeader, flags: i32) isize;
+
+const Control = extern struct {
+    header: ControlHeader,
+    descriptor: i32,
+};
+
+/// Sends `bytes` and, with them, one open descriptor. The receiver gets its own copy of it.
+pub fn send_with_descriptor(socket: i32, bytes: []const u8, descriptor: i32) Error!void {
+    assert(socket >= 0);
+    assert(descriptor >= 0);
+    assert(bytes.len > 0);
+    comptime assert(@sizeOf(Control) == control_bytes);
+    var vector: Iovec = .{ .base = @constCast(bytes.ptr), .length = bytes.len };
+    var control: Control = .{
+        .header = .{ .length = control_bytes, .level = socket_level, .kind = rights_kind },
+        .descriptor = descriptor,
+    };
+    const message: MessageHeader = .{
+        .vectors = &vector,
+        .vector_count = 1,
+        .control = &control,
+        .control_length = control_bytes,
+    };
+    if (sendmsg(socket, &message, 0) < 0) return fail();
+}
+
+pub const Received = struct {
+    length: u32,
+    descriptor: ?i32,
+};
+
+/// Reads what the peer sent in one message, and the descriptor that came with it, if any.
+pub fn receive_with_descriptor(socket: i32, buffer: []u8) Error!Received {
+    assert(socket >= 0);
+    assert(buffer.len > 0);
+    var vector: Iovec = .{ .base = buffer.ptr, .length = buffer.len };
+    var control: Control = undefined;
+    var message: MessageHeader = .{
+        .vectors = &vector,
+        .vector_count = 1,
+        .control = &control,
+        .control_length = control_bytes,
+    };
+    const count = recvmsg(socket, &message, 0);
+    if (count < 0) return fail();
+    const got_descriptor = message.control_length >= control_bytes and
+        control.header.level == socket_level and control.header.kind == rights_kind;
+    return .{
+        .length = @intCast(count),
+        .descriptor = if (got_descriptor) control.descriptor else null,
+    };
+}
+
+test "a descriptor passed over a Unix socket is a working copy" {
+    // Goal: the hand-off the client relies on. Method: a socket pair; send a pipe's read end
+    // with a line; write to the pipe and read it through the received descriptor.
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &pair));
+    defer close(pair[0]);
+    defer close(pair[1]);
+    var pipe_ends: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&pipe_ends));
+    defer close(pipe_ends[1]);
+    try send_with_descriptor(pair[0], "ok\n", pipe_ends[0]);
+    close(pipe_ends[0]);
+    var line: [16]u8 = undefined;
+    const received = try receive_with_descriptor(pair[1], &line);
+    try std.testing.expectEqualStrings("ok\n", line[0..received.length]);
+    const copy = received.descriptor.?;
+    defer close(copy);
+    try write_all(pipe_ends[1], "data");
+    var data: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 4), c.read(copy, &data, data.len));
+    try std.testing.expectEqualStrings("data", data[0..4]);
+    // A message without a descriptor says so.
+    try write_all(pair[0], "no\n");
+    const plain = try receive_with_descriptor(pair[1], &line);
+    try std.testing.expect(plain.descriptor == null);
+}
