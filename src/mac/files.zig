@@ -377,6 +377,51 @@ test "a directory is inside the shared one by whole path components" {
     try std.testing.expect(is_inside("/anything", "/"));
 }
 
+/// Runs a system program to its end and keeps up to `buffer.len` bytes of what it wrote to
+/// standard output and error together. Its exit code, or null if it could not run or was killed.
+/// `argv[0]` is the full path of the program; the environment is empty.
+pub fn run_program(argv: [*:null]const ?[*:0]const u8, buffer: []u8, kept: *usize) ?u8 {
+    assert(argv[0] != null);
+    assert(buffer.len > 0);
+    kept.* = 0;
+    var ends: [2]i32 = undefined;
+    if (c.pipe(&ends) != 0) return null;
+    const child = c.fork();
+    if (child < 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return null;
+    }
+    if (child == 0) {
+        _ = c.dup2(ends[1], 1);
+        _ = c.dup2(ends[1], 2);
+        close(ends[0]);
+        close(ends[1]);
+        const environment = [_:null]?[*:0]const u8{};
+        _ = c.execve(argv[0].?, argv, &environment);
+        c._exit(127);
+    }
+    close(ends[1]);
+    defer close(ends[0]);
+    var scratch: [512]u8 = undefined;
+    var guard: u32 = 0;
+    while (guard < 1 << 20) : (guard += 1) {
+        const got = c.read(ends[0], &scratch, scratch.len);
+        if (got < 0 and c.errno(got) == .INTR) continue;
+        if (got <= 0) break;
+        const room = buffer.len - kept.*;
+        const take = @min(room, @as(usize, @intCast(got)));
+        @memcpy(buffer[kept.*..][0..take], scratch[0..take]);
+        kept.* += take;
+    }
+    var status: c_int = 0;
+    if (c.waitpid(child, &status, 0) < 0) return null;
+    const raw: u32 = @bitCast(status);
+    if ((raw & 0x7f) != 0) return null; // Killed by a signal.
+    assert(kept.* <= buffer.len);
+    return @intCast((raw >> 8) & 0xff);
+}
+
 pub fn host_memory_bytes() u64 {
     assert(@sizeOf(u64) == 8);
     var bytes: u64 = 0;

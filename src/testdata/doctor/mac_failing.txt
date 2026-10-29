@@ -1,0 +1,6 @@
+FAIL entitlement  this binary is not signed  [ZBX-E1001]
+ok   vm  running, pid 4121, 4 cpus, 2048 MiB
+warn version  the machine runs image fedcba9876543210, this zbx carries 0123456789abcdef  [ZBX-W1001]
+ok   share  /Users/ada is shared with the machine at the same path
+ok   disk  412 GiB free on the Mac's volume; the disk image is 1203 MiB of 64 GiB
+warn rosetta  not installed: only linux/amd64 images need it  [ZBX-E1016]

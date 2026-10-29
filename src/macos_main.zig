@@ -15,6 +15,7 @@ const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const explain = @import("diag/explain.zig");
 const files = @import("mac/files.zig");
+const doctor = @import("mac/doctor.zig");
 const forward = @import("mac/forward.zig");
 const host = @import("mac/host.zig");
 const objc = @import("mac/objc.zig");
@@ -105,6 +106,7 @@ const Command = enum {
     vm_serve,
     schema,
     explain,
+    doctor,
     help,
     version,
 };
@@ -130,7 +132,7 @@ const Invocation = struct {
 
 /// The Linux `zbx` commands: forwarded into the VM, whole, to the zbx that runs there.
 const linux_commands = [_][]const u8{
-    "run", "ps", "stop", "commit", "store", "state", "lock", "pull", "bundle", "doctor",
+    "run", "ps", "stop", "commit", "store", "state", "lock", "pull", "bundle",
 };
 
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -157,7 +159,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     parse(words[0..count], &invocation, &diag) catch return fail(&diag, &invocation);
     panic_report.configure(&panic_report.state, invocation.mode(), .standard);
     dispatch(&invocation, &diag) catch return fail(&diag, &invocation);
-    return constants.exit_ok;
+    return exit_code;
 }
 
 /// True if the command line is one for the Linux zbx in the VM: its first operand, past the global
@@ -297,6 +299,8 @@ fn choose(operands: []const []const u8, invocation: *Invocation, diag: *Diag) Pa
     const first = operands[0];
     if (std.mem.eql(u8, first, "help")) {
         invocation.command = .help;
+    } else if (std.mem.eql(u8, first, "doctor")) {
+        invocation.command = .doctor;
     } else if (std.mem.eql(u8, first, "vm")) {
         try choose_vm(operands[1..], invocation, diag);
         return;
@@ -430,6 +434,9 @@ fn unknown_command(diag: *Diag, word: []const u8) ParseError {
 
 const RunError = error{Failed};
 
+/// What `main` returns when `dispatch` succeeds: 0, or the doctor's 2.
+var exit_code: u8 = constants.exit_ok;
+
 fn dispatch(invocation: *const Invocation, diag: *Diag) RunError!void {
     assert(diag.causes.count == 0);
     assert(diag.code == null);
@@ -439,6 +446,7 @@ fn dispatch(invocation: *const Invocation, diag: *Diag) RunError!void {
         .version => commands.print(version_text),
         .schema => try run_schema(invocation.operand.?, diag),
         .explain => try run_explain(invocation, diag),
+        .doctor => try run_doctor(invocation, diag),
         else => try run_vm(invocation, diag),
     }
 }
@@ -481,6 +489,24 @@ fn run_explain(invocation: *const Invocation, diag: *Diag) RunError!void {
     else
         explain.render(code, &buffer);
     commands.print(text);
+}
+
+fn run_doctor(invocation: *const Invocation, diag: *Diag) RunError!void {
+    assert(invocation.command == .doctor);
+    assert(diag.code == null);
+    var paths: paths_mod.Paths = .{};
+    const home = std.c.getenv("HOME") orelse "";
+    paths.init(std.mem.span(home), image_version()) catch {
+        diagnose_home(diag);
+        return error.Failed;
+    };
+    const context: commands.Context = .{
+        .paths = &paths,
+        .json = invocation.json,
+        .mode = invocation.mode(),
+        .color = false,
+    };
+    exit_code = doctor.run(&context, files.host_cpus(), diag);
 }
 
 fn run_vm(invocation: *const Invocation, diag: *Diag) RunError!void {
@@ -585,6 +611,7 @@ test {
     _ = @import("mac/objc.zig");
     _ = @import("mac/vz.zig");
     _ = @import("mac/forward.zig");
+    _ = @import("mac/doctor.zig");
     _ = @import("mac/ports.zig");
     _ = @import("vm_ports.zig");
     _ = @import("mac/dns.zig");

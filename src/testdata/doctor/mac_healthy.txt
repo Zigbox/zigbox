@@ -1,0 +1,6 @@
+ok   entitlement  signed with com.apple.security.virtualization
+ok   vm  running, pid 4121, 4 cpus, 2048 MiB
+ok   version  this zbx carries image 0123456789abcdef
+ok   share  /Users/ada is shared with the machine at the same path
+ok   disk  412 GiB free on the Mac's volume; the disk image is 1203 MiB of 64 GiB
+ok   rosetta  installed: linux/amd64 images can run
