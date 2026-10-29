@@ -673,6 +673,13 @@ fn check_mounts(out: *const Parsed) ParseError!void {
 /// What `render` asserts about the version 5 fields, so that a damaged file cannot read as valid
 /// and crash the next write: forwards only with `user`, none twice; names unique and POSIX.
 fn check_network_fields(out: *const Parsed) ParseError!void {
+    // The names first: they do not depend on the network, and a record that has lost its
+    // `.network` line must not carry names past the check that `render` asserts.
+    var words: [constants.run_env_count_max][]const u8 = undefined;
+    for (0..out.env_names_count) |at| words[at] = out.env_name(@intCast(at));
+    if (spec_mod.env_names_problem(words[0..out.env_names_count]) != null) {
+        return error.Malformed;
+    }
     const network = out.network orelse {
         // A record that does not say the network does not say forwards either.
         if (out.publish_count > 0) return error.Malformed;
@@ -681,11 +688,6 @@ fn check_network_fields(out: *const Parsed) ParseError!void {
     // `publish_problem` asserts the implication, so a damaged file is refused before it.
     if (out.publish_count > 0 and network != .user) return error.Malformed;
     if (spec_mod.publish_problem(network, out.publish_slice()) != null) return error.Malformed;
-    var words: [constants.run_env_count_max][]const u8 = undefined;
-    for (0..out.env_names_count) |at| words[at] = out.env_name(@intCast(at));
-    if (spec_mod.env_names_problem(words[0..out.env_names_count]) != null) {
-        return error.Malformed;
-    }
 }
 
 fn parse_field(line: []const u8, out: *Parsed, have_start: *bool) ParseError!void {
@@ -1608,6 +1610,25 @@ test "a version 4 record, as M5 wrote it, reads with no network, forwards or nam
     try testing.expectEqual(@as(usize, 0), parsed.publish_slice().len);
     try testing.expectEqual(@as(u8, 0), parsed.env_names_count);
     try testing.expectEqual(@as(usize, 1), @as(usize, parsed.labels_count));
+}
+
+test "a record without a network line still has its names checked" {
+    // Goal: the names of -e are refused when bad even where the record has no `.network` line, as
+    // M5's records do and a damaged one may (the record fuzzer, seed 8823082759703440891, found a
+    // bad name passing because the check sat after the early return for no network).
+    // Method: M5's real text with a name `-e` could never set added.
+    var text: [constants.record_bytes_max]u8 = undefined;
+    const end = std.mem.lastIndexOf(u8, record_written_by_m5, "}").?;
+    const damaged = try std.fmt.bufPrint(&text, "{s}    .env_names = \"9BAD\",\n}}\n", .{
+        record_written_by_m5[0..end],
+    });
+    var parsed: Parsed = undefined;
+    try testing.expectError(error.Malformed, parse(damaged, &parsed));
+    const good = try std.fmt.bufPrint(&text, "{s}    .env_names = \"GOOD\",\n}}\n", .{
+        record_written_by_m5[0..end],
+    });
+    try parse(good, &parsed);
+    try testing.expectEqual(@as(u8, 1), parsed.env_names_count);
 }
 
 test "version 5 keeps the network, the forwards and the names of -e, and never a value" {
