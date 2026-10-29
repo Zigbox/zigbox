@@ -16,7 +16,8 @@ pub const Error = up5.Error || error{
 
 /// What each record on disk says in its `.version` line. M5 wrote image records as version 2
 /// (this zbx still does) and run records as version 4. (Version 5, the network, the forwards and
-/// the names of `-e`, came with M6 slice 1; this zbx writes 6, with the state volumes.)
+/// the names of `-e`, came with M6 slice 1; version 6 added the state volumes; this zbx writes 7,
+/// with the tmpfs, bind and secret mounts.)
 pub const image_record_version = up5.image_record_version_m5;
 pub const run_record_version_m5: u32 = 4;
 pub const run_record_version = up5.run_record_version;
@@ -123,7 +124,7 @@ test "a run record of M5 and one of this zbx are listed side by side" {
 
 test "the versions are the ones the formats have" {
     try up5.check_record_version("    .version = 4,\n", run_record_version_m5);
-    try up5.check_record_version("    .version = 6,\n", run_record_version);
+    try up5.check_record_version("    .version = 7,\n", run_record_version);
     try up5.check_record_version(".version = 2,\n", image_record_version);
 }
 

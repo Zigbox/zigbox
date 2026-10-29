@@ -28,6 +28,7 @@ const old_wrapper = @import("upgrade_m5.zig");
 const upgrade = @import("upgrade_m6.zig");
 const spec = @import("spec_m6.zig");
 const state = @import("state_m6.zig");
+const mounts = @import("mounts_m6.zig");
 
 const Session = session_mod.Session;
 const H = harness;
@@ -108,6 +109,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     upgrade.step_upgrade,
     spec.step_spec,
     state.step_state,
+    mounts.step_mounts,
 };
 
 fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !void {
@@ -123,5 +125,6 @@ test {
     _ = @import("checks_upgrade_m6.zig");
     _ = @import("spec_m6.zig");
     _ = @import("state_m6.zig");
+    _ = @import("mounts_m6.zig");
     _ = @import("upgrade_m6.zig");
 }
