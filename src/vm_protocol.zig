@@ -76,6 +76,21 @@ test "the guest's answer round-trips and nothing else parses" {
 
 pub const busy_request = "busy\n";
 
+/// Whether a connection's peer is the host. The guest answers nobody else.
+pub fn from_host(peer_cid: u32) bool {
+    return peer_cid == constants.vm_host_cid;
+}
+
+test "only the host's address is the host" {
+    // Goal: the one comparison both guest listeners make. Method: the host, the guest's own
+    // address, the wildcard, the hypervisor's reserved address and the largest.
+    try std.testing.expect(from_host(2));
+    try std.testing.expect(!from_host(3));
+    try std.testing.expect(!from_host(0));
+    try std.testing.expect(!from_host(1));
+    try std.testing.expect(!from_host(0xffff_ffff));
+}
+
 /// What the host tells the guest once it is up: the Mac's wall clock (the guest has no RTC, and
 /// TLS needs the time) and the user the commands run as, with the Mac user's own name, ids and
 /// home path, so that paths and ownership read the same on both sides.

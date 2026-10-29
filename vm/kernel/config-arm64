@@ -50,6 +50,8 @@ CONFIG_HW_RANDOM_VIRTIO=y
 CONFIG_NET=y
 CONFIG_VSOCKETS=y
 CONFIG_VIRTIO_VSOCKETS=y
+# No loopback transport: the guest's listeners are for the host alone (and check the peer).
+# CONFIG_VSOCKETS_LOOPBACK is not set
 CONFIG_FUSE_FS=y
 CONFIG_VIRTIO_FS=y
 

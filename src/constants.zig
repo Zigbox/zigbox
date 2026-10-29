@@ -734,6 +734,10 @@ pub const vm_log_tail_bytes_max: u32 = 2048;
 // The macOS VM, slice 2: forwarding commands into the VM (docs/briefs/M4b-mac.md).
 /// The vsock port of `zbx guest serve`, which runs the forwarded commands.
 pub const vm_forward_port: u32 = 1025;
+/// The vsock address of the host (VMADDR_CID_HOST). The guest's two listeners take connections
+/// from nowhere else: with the Mac's home shared (slice 3), a container that could reach a
+/// listener would run zbx as the user outside its sandbox.
+pub const vm_host_cid: u32 = 2;
 /// A frame of the forwarding protocol: a kind byte, a four-byte length and the payload.
 pub const forward_header_bytes: u32 = 5;
 pub const forward_frame_bytes_max: u32 = 64 * 1024;

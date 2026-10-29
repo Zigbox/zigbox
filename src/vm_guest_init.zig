@@ -343,9 +343,16 @@ fn serve(listener: i32, version: []const u8) void {
     assert(accepts_max > 0);
     var accepted: u32 = 0;
     while (accepted < accepts_max) : (accepted += 1) {
-        const result = linux.accept(listener, null, null);
+        var peer: linux.sockaddr.vm = undefined;
+        var peer_length: u32 = @sizeOf(linux.sockaddr.vm);
+        const result = linux.accept(listener, @ptrCast(&peer), &peer_length);
         if (failed(result)) continue;
         const connection: i32 = @intCast(result);
+        if (!protocol.from_host(peer.cid)) {
+            log("zbx-init: refused a connection that is not from the host", "");
+            _ = linux.close(connection);
+            continue;
+        }
         defer _ = linux.close(connection);
         if (answer(connection, version) == .shutdown) return;
     }

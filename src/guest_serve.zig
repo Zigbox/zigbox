@@ -21,6 +21,7 @@ const assert = std.debug.assert;
 const linux = std.os.linux;
 const constants = @import("constants.zig");
 const protocol = @import("forward_protocol.zig");
+const protocol_vm = @import("vm_protocol.zig");
 
 const program_path = "/usr/bin/zbx";
 const default_path = "PATH=/usr/bin:/bin";
@@ -107,9 +108,16 @@ fn accept_forever(listener: i32, identity: *const Identity) void {
     const accepts_max: u64 = 1 << 40;
     var accepted: u64 = 0;
     while (accepted < accepts_max) : (accepted += 1) {
-        const result = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
+        var peer: linux.sockaddr.vm = undefined;
+        var peer_length: u32 = @sizeOf(linux.sockaddr.vm);
+        const result = linux.accept4(listener, @ptrCast(&peer), &peer_length, linux.SOCK.CLOEXEC);
         if (failed(result)) continue;
         const connection: i32 = @intCast(result);
+        if (!protocol_vm.from_host(peer.cid)) {
+            note("refused a connection that is not from the host");
+            _ = linux.close(connection);
+            continue;
+        }
         const child = linux.fork();
         if (failed(child)) {
             _ = linux.close(connection);
