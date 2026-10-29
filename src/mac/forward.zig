@@ -172,6 +172,9 @@ const Frames = struct {
 var frames: Frames = undefined;
 
 /// What the guest said about the store disk before the command ended, if it did.
+/// Where the command's standard output goes: ours, unless the doctor collects the guest's report.
+pub var stdout_descriptor: i32 = 1;
+
 var disk_note: ?protocol.DiskFull = null;
 
 /// The write end of the pipe the host watches (see `ask_host`); never closed before exit.
@@ -610,7 +613,7 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
         return lost(command, diag, "the guest hung up");
     }
     switch (header.kind) {
-        .stdout => files.write_all(1, payload[0..header.length]) catch {},
+        .stdout => files.write_all(stdout_descriptor, payload[0..header.length]) catch {},
         .stderr => files.write_all(2, payload[0..header.length]) catch {},
         .disk_full => {
             assert(header.length == 8); // parse_header fixed the size of the note.

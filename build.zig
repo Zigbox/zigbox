@@ -105,6 +105,9 @@ const roots = [_][]const u8{
     "src/fuzz.zig",
     "src/size_check.zig",
     "src/errors_site.zig",
+    "src/vm_image/kernel_fetch.zig",
+    "src/mac_release.zig",
+    "src/testing/mac_demo.zig",
     "src/vm_image_make.zig",
     "src/vm_image/kernel_build.zig",
     "src/macos_main.zig",
@@ -180,6 +183,7 @@ fn kernel_pin_options(b: *std.Build) *std.Build.Step.Options {
     options.addOption([]const u8, "url", pinned.url);
     options.addOption([]const u8, "tarball_sha256", pinned.tarball_sha256);
     options.addOption([]const u8, "image_sha256", pinned.image_sha256);
+    options.addOption([]const u8, "release_url", pinned.release_url);
     options.addOption([]const u8, "toolchain", pinned.toolchain);
     return options;
 }
@@ -515,6 +519,25 @@ fn add_check_step(b: *std.Build, fuzz: *std.Build.Step.Compile) void {
 /// the macOS build from here unless `-Dvm-kernel` names another.
 const vm_kernel_default = ".zig-cache/zbx-vm/kernel/Image";
 
+/// `zig build vm-kernel-fetch` downloads the pinned Image from the repository's release and
+/// checks it against the pin; see src/vm_image/kernel_fetch.zig.
+fn add_vm_kernel_fetch(b: *std.Build, pin: *std.Build.Module) void {
+    const tool = b.addExecutable(.{
+        .name = "kernel_fetch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm_image/kernel_fetch.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "build_options", .module = pin }},
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.addArgs(&.{ "--out", vm_kernel_default });
+    run.setCwd(b.path("."));
+    const description = "Download the pinned VM kernel Image (no toolchain, no Docker)";
+    b.step("vm-kernel-fetch", description).dependOn(&run.step);
+}
+
 /// `zig build vm-kernel` builds the VM's kernel on an arm64 Ubuntu host; `vm-kernel-docker` does
 /// the same inside an `ubuntu:24.04` arm64 container, as a developer convenience on a Mac (the
 /// product never uses Docker). The program is `src/vm_image/kernel_build.zig`.
@@ -535,6 +558,7 @@ fn add_vm_kernel_steps(b: *std.Build) void {
     run.addArgs(&.{ "--work", ".zig-cache/zbx-vm/kernel-build", "--out", vm_kernel_default });
     run.addArgs(&.{ "--jobs", jobs });
     run.setCwd(b.path("."));
+    add_vm_kernel_fetch(b, pin);
     const description = "Build the VM kernel Image (needs an arm64 Ubuntu 24.04 host)";
     b.step("vm-kernel", description).dependOn(&run.step);
 
@@ -611,8 +635,9 @@ fn add_vm_image(b: *std.Build, options: *std.Build.Step.Options) VmImage {
     const run = b.addRunArtifact(tool);
     // A fresh checkout has no kernel yet. Say so in one line, only to the steps that need it.
     if (kernel_missing(b, kernel)) {
-        const missing = b.addFail("the VM kernel is missing: run `zig build vm-kernel-docker` " ++
-            "(or pass -Dvm-kernel=<path to the pinned Image>)");
+        const missing = b.addFail("the VM kernel is missing: run `zig build vm-kernel-fetch` " ++
+            "(downloads it) or `zig build vm-kernel-docker` (builds it), or pass " ++
+            "-Dvm-kernel=<path to the pinned Image>");
         run.step.dependOn(&missing.step);
     }
     run.addArg("--kernel");
@@ -667,6 +692,75 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 
 /// Builds the macOS zbx, signs it ad hoc with the virtualization entitlement (good for this Mac;
 /// a Developer ID signature and notarization are the release's job) and installs it.
+/// `zig build demo-mac`: the M1 to M4 demo steps and M4b's, driven from this Mac through the macOS
+/// `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
+fn add_demo_mac(b: *std.Build) void {
+    const exe = b.addExecutable(.{
+        .name = "demo_mac",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/mac_demo.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run = b.addRunArtifact(exe);
+    run.setCwd(b.path("."));
+    run.addArgs(&.{ "--zbx", "zig-out/bin/zbx" });
+    run.step.dependOn(b.getInstallStep());
+    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS");
+    step.dependOn(&run.step);
+}
+
+/// `zig build mac-release`: the ReleaseSafe macOS `zbx`, signed with the hardened runtime and the
+/// virtualization entitlement, zipped, and (with `-Dnotarize`) notarized; see src/mac_release.zig.
+/// `-Dsign-identity=-` signs ad hoc, for trying it; the defaults are the owner's.
+fn add_mac_release(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    target: std.Build.ResolvedTarget,
+) void {
+    const release = @import("src/mac_release.zig");
+    const identity_help = "mac-release: the codesign identity (- is ad hoc); default " ++
+        release.default_identity;
+    const identity = b.option([]const u8, "sign-identity", identity_help) orelse
+        release.default_identity;
+    const profile_help = "mac-release: the notarytool keychain profile; default " ++
+        release.default_profile;
+    const profile = b.option([]const u8, "notary-profile", profile_help) orelse
+        release.default_profile;
+    const notarize_help = "mac-release: submit the archive to Apple's notary service";
+    const notarize = b.option(bool, "notarize", notarize_help) orelse false;
+    const image = add_vm_image(b, options);
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/macos_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    });
+    link_macos(module, image);
+    const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+    const tool = b.addExecutable(.{
+        .name = "mac_release",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mac_release.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    run.addArg("--binary");
+    run.addArtifactArg(exe);
+    run.addArgs(&.{ "--entitlements", "vm/zbx.entitlements" });
+    run.addArgs(&.{ "--formula", "packaging/homebrew/zigbox.rb" });
+    run.addArgs(&.{ "--out", "zig-out/mac-release" });
+    run.addArgs(&.{ "--version", @import("build.zig.zon").version });
+    run.addArgs(&.{ "--identity", identity, "--profile", profile });
+    if (notarize) run.addArg("--notarize");
+    const step = b.step("mac-release", "Sign, zip and optionally notarize the macOS zbx");
+    step.dependOn(&run.step);
+}
+
 fn add_macos_install(
     b: *std.Build,
     options: *std.Build.Step.Options,
@@ -682,6 +776,8 @@ fn add_macos_install(
     });
     link_macos(module, image);
     const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
+    add_mac_release(b, options, target);
+    add_demo_mac(b);
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addArtifactArg(exe);
     const signed = copy.addOutputFileArg("zbx");

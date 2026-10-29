@@ -112,6 +112,7 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
         diagnose.directory(diag, "unpacking the VM image", paths.image_dir.slice(), files.reason());
         return error.Failed;
     };
+    image.prune(paths);
     if (!prepare_disk(request, diag)) return error.Failed;
     const console = open_console(paths, diag) orelse return error.Failed;
     const listener = files.listen_unix(paths.socket.slice()) catch {

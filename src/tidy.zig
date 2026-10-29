@@ -104,6 +104,7 @@ const shipped_files = [_][]const u8{
     "src/mac/vz.zig",
     "src/vm_guest_init.zig",
     "src/vm_guest_storage.zig",
+    "src/mac/doctor.zig",
     "src/guest_ports.zig",
     "src/vm_ports.zig",
     "src/mac/ports.zig",

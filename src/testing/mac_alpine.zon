@@ -1,0 +1,8 @@
+.{
+    // The aarch64 Alpine minirootfs the macOS demo unpacks as a container root, pinned like the one
+    // in src/testing/vm/alpine.zon (its x86_64 twin, for the QEMU demos): the hash is the one
+    // Alpine publishes next to the file.
+    .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.10-aarch64.tar.gz",
+    .sha256 = "61ac877fdbcee6914731bc22a4ed5668ea3470f201f97a7078931c48b71bbeec",
+    .file_name = "alpine-minirootfs-3.20.10-aarch64.tar.gz",
+}
