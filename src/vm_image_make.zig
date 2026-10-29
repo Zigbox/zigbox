@@ -319,11 +319,16 @@ fn fetch_package(
     if (read_pinned(io, arena, path, package.sha256)) |bytes| return bytes;
     const mirror_url = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.apk_mirror, name });
     const sources = [_][]const u8{ mirror_url, package.url };
-    const partial = try std.fmt.allocPrint(arena, "{s}.part", .{path});
+    // Each run downloads to a name of its own: the build can run make_image more than once at
+    // the same time on one cache, and a shared partial file is then written and removed by both.
+    var suffix: [8]u8 = undefined;
+    io.random(&suffix);
+    const partial = try std.fmt.allocPrint(arena, "{s}.{x}.part", .{ path, suffix[0..] });
     for (sources) |source| {
         if (arguments.apk_mirror.len == 0 and source.ptr == mirror_url.ptr) continue;
-        download(init, source, partial) catch {
-            note(io, "make_image: {s}: no file at {s}\n", .{ package.name, source });
+        download(init, source, partial) catch |err| {
+            note(io, "make_image: {s}: no file at {s} ({t})\n", .{ package.name, source, err });
+            Io.Dir.cwd().deleteFile(io, partial) catch {};
             continue;
         };
         if (read_pinned(io, arena, partial, package.sha256)) |bytes| {
