@@ -1,0 +1,8 @@
+error[ZBX-E1001]: this zbx is not allowed to run virtual machines
+  while  checking that this Mac can run a virtual machine
+  cause  Virtualization.framework refused: The process doesn't have the
+         "com.apple.security.virtualization" entitlement.
+  fix    sign this zbx with the virtualization entitlement:   codesign -f -s - --entitlements vm/zbx.entitlements $(which zbx)
+         or install a release build, which is signed already
+  more   zbx explain E1001
+  docs   https://zigbox.github.io/zigbox/errors/E1001.html

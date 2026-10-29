@@ -1,0 +1,9 @@
+error[ZBX-E1002]: the virtual machine did not start
+  while  validating the virtual machine's configuration
+  cause  Virtualization.framework said: Invalid virtual machine configuration.
+         (VZErrorDomain 1)
+  log    /Users/ada/Library/Application Support/zbx/vm/console.log
+  fix    read how far the guest got:   tail -n 20 '/Users/ada/Library/Application Support/zbx/vm/console.log'
+         or try a smaller size:        zbx vm config --memory 1G
+  more   zbx explain E1002
+  docs   https://zigbox.github.io/zigbox/errors/E1002.html

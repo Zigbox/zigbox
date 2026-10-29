@@ -1,0 +1,7 @@
+error[ZBX-E1005]: can't make or write the VM directory
+  cause  /Users/ada/Library/Application Support/zbx/vm/0123456789abcdef: no
+         space left on device
+  fix    free space, or check that your user owns that directory
+         HOME decides where it is; it is now:   echo $HOME
+  more   zbx explain E1005 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1005.html

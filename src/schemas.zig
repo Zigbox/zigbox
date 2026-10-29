@@ -575,6 +575,52 @@ const lock_show_schema =
     \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}}}}}
 ;
 
+const vm_status_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/vm-status/1","version":1,
+    \\"title":"zbx vm status --output json (the macOS zbx)",
+    \\"description":"stdout: whether the virtual machine runs, its image and its size",
+    \\"type":"object","required":["schema","state","image_version","configured",
+    \\"idle_timeout_ms"],
+    \\"properties":{"schema":{"const":"zbx.vm.status/1"},
+    \\"state":{"enum":["stopped","starting","running","stopping"]},
+    \\"image_version":{"type":"string","pattern":"^[0-9a-f]{16}$",
+    \\"description":"the image this zbx carries"},
+    \\"vm_image_version":{"type":["string","null"],"pattern":"^[0-9a-f]{16}$",
+    \\"description":"the image the running machine booted from; null when it is stopped"},
+    \\"image_match":{"type":["boolean","null"],
+    \\"description":"false: zbx will replace the machine; null when it is stopped"},
+    \\"pid":{"type":["integer","null"],"description":"the process that owns the machine"},
+    \\"cpus":{"type":["integer","null"],"description":"of the running machine"},
+    \\"memory_bytes":{"type":["integer","null"],"description":"of the running machine"},
+    \\"uptime_ms":{"type":["integer","null"],"description":"since the guest answered"},
+    \\"configured":{"type":"object","required":["cpus","memory_bytes"],
+    \\"description":"what the next boot uses (zbx vm config)",
+    \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"}}},
+    \\"idle_timeout_ms":{"type":"integer","description":"idle time after which it stops"}}}
+;
+
+const vm_config_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/vm-config/1","version":1,
+    \\"title":"zbx vm config --output json (the macOS zbx)",
+    \\"description":"stdout: the virtual machine's size, as set or as defaulted",
+    \\"type":"object","required":["schema","cpus","memory_bytes","source","bounds",
+    \\"applies"],
+    \\"properties":{"schema":{"const":"zbx.vm.config/1"},
+    \\"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"},
+    \\"source":{"enum":["default","settings"],
+    \\"description":"settings: written by zbx vm config"},
+    \\"bounds":{"type":"object","required":["cpus_min","cpus_max","memory_bytes_min",
+    \\"memory_bytes_max"],"description":"what this Mac allows",
+    \\"properties":{"cpus_min":{"type":"integer"},"cpus_max":{"type":"integer"},
+    \\"memory_bytes_min":{"type":"integer"},"memory_bytes_max":{"type":"integer"}}},
+    \\"applies":{"enum":["next_boot","running_machine"],
+    \\"description":"running_machine: the machine runs with these values already"},
+    \\"running":{"type":["object","null"],"description":"a running machine with other values",
+    \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -601,12 +647,14 @@ const table = [_]Entry{
     .{ .command = "state-rm", .text = state_rm_schema },
     .{ .command = "state-restore", .text = state_restore_schema },
     .{ .command = "state-export", .text = state_export_schema },
+    .{ .command = "vm-status", .text = vm_status_schema },
+    .{ .command = "vm-config", .text = vm_config_schema },
 };
 
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 23);
+    assert(table.len == 25);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -635,7 +683,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 23), table.len);
+    try testing.expectEqual(@as(usize, 25), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

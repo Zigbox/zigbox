@@ -1,0 +1,6 @@
+error[ZBX-E1006]: no virtual machine is running
+  while  stopping the virtual machine
+  cause  no virtual machine is running for this user
+  fix    see what is running:   zbx vm status
+  more   zbx explain E1006
+  docs   https://zigbox.github.io/zigbox/errors/E1006.html

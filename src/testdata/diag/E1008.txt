@@ -1,0 +1,6 @@
+error[ZBX-E1008]: can't read the virtual machine's settings
+  cause  /Users/ada/Library/Application Support/zbx/vm-settings is damaged: it
+         is not a settings record this zbx writes
+  fix    write the settings again:   zbx vm config --cpus 4 --memory 2G
+  more   zbx explain E1008 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1008.html
