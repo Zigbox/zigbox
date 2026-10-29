@@ -53,7 +53,9 @@ console (`src/testing/vm/session.zig`), which a Mac has no counterpart of, so th
 shared; the table in `mac_demo.zig` takes the steps by their numbers in docs/demos/m1.md to
 m4.md. Not driven from macOS: M1 steps 2 (host `ps`), M2 steps 1 and 2 (fork bomb and OOM need
 `timeout` and a stress image), M3 steps 2 and 4 (store snapshots, a rootfs with a mode-711 root),
-and everything after step 5 of each table. `.github/workflows/mac.yml` runs `zig build check` and
+and everything after step 5 of each table. Step `m1.4` expects the hint `zbx: network: none (grant with --net)` on stderr:
+that is right, because M5 added the hint after the M1 table (which says both streams are empty) was
+written. `.github/workflows/mac.yml` runs `zig build check` and
 `zig build demo-mac` on a self-hosted runner whose label is the repository variable
 `MAC_RUNNER_LABEL`; with the variable unset a job on the hosted runner says so and the
 workflow is green.
