@@ -2664,7 +2664,7 @@ pub const registry = [_]Entry{
         .code = .E1017,
         .severity = .@"error",
         .blame = .user,
-        .summary = "a published port cannot be listened on on the Mac",
+        .summary = "a published port cannot be opened on the Mac",
         .explanation =
         \\--publish HOST:CONTAINER makes the container's port reachable at the
         \\Mac's own localhost:HOST. zbx listens on that port itself, on the loopback

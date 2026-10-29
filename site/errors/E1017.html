@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E1017 · Zigbox</title>
-<meta name="description" content="a published port cannot be listened on on the Mac">
+<meta name="description" content="a published port cannot be opened on the Mac">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E1017.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,7 +73,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E1017</h1>
-<p class="summary">a published port cannot be listened on on the Mac</p>
+<p class="summary">a published port cannot be opened on the Mac</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>--publish HOST:CONTAINER makes the container's port reachable at the Mac's own localhost:HOST. zbx listens on that port itself, on the loopback addresses (127.0.0.1 and ::1) unless the option names an address: 0.0.0.0:HOST:CONTAINER listens on every interface, which puts the container on the Mac's network and is never the default.</p>

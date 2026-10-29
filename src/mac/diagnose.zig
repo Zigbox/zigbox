@@ -373,14 +373,17 @@ pub fn port_unavailable(diag: *Diag, port: u16, address: []const u8, reason: []c
     if (reason.len == 0) {
         diag.fix_with("see what holds it:", "lsof -nP -iTCP:{d} -sTCP:LISTEN", .{port});
     }
+    const safe = "publish a port from 1024 up: --publish <port>:<container port>";
     if (std.mem.eql(u8, reason, "ACCES")) {
+        diag.fix(.{ .sentence = safe });
         diag.fix_with(
-            "to listen on every interface (this exposes the port on your network):",
+            "or, to listen on every interface (this exposes the port on your network):",
             "--publish 0.0.0.0:{d}:<container port>",
             .{port},
         );
+    } else {
+        diag.fix(.{ .sentence = "or " ++ safe });
     }
-    diag.fix(.{ .sentence = "or publish a port from 1024 up: --publish <port>:<container port>" });
     assert(diag.fixes.count >= 1);
 }
 

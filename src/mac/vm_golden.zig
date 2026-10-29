@@ -118,7 +118,7 @@ fn rosetta_missing(diag: *Diag) void {
 }
 
 fn port_unavailable(diag: *Diag) void {
-    diagnose.port_unavailable(diag, 8080, "127.0.0.1", "");
+    diagnose.port_unavailable(diag, 80, "127.0.0.1", "ACCES");
 }
 
 pub const cases = [_]Case{
