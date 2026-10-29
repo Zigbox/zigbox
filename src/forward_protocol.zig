@@ -2,7 +2,8 @@
 //! forwarded command per connection. Shared by both sides (and so free of anything but `std`).
 //!
 //! A frame is a kind byte, a four-byte little-endian length and that many bytes. The client opens
-//! with a `start` frame (command line, working directory, environment, terminal flag and size);
+//! with a `start` frame (command line, working directory, environment, which streams are
+//! terminals, and the terminal's size);
 //! after it, `stdin` and `stdin_eof` go to the guest, `stdout` and `stderr` come back, `signal`
 //! and `window` go to the guest, and `exit` ends the conversation from the guest's side.
 //!
@@ -74,7 +75,13 @@ pub fn parse_header(bytes: *const [constants.forward_header_bytes]u8) ?Header {
 
 /// The first frame's content. The slices point into the buffer `parse_start` was given.
 pub const Start = struct {
-    terminal: bool,
+    /// The command's standard input and output are a pty: the Mac's stdin and stdout are both
+    /// terminals. Otherwise they are pipes, so a redirect behaves as it does on Linux.
+    pty: bool,
+    /// The command's standard error is a pipe of its own, answered with `stderr` frames: the
+    /// Mac's stderr is not a terminal, or there is no pty. With a pty and a terminal on stderr
+    /// too, it is the pty.
+    stderr_pipe: bool,
     rows: u16,
     columns: u16,
     working_directory: []const u8,
@@ -102,7 +109,9 @@ pub fn render_start(out: []u8, start: *const Start) ?[]const u8 {
     for (start.arguments) |argument| size += 2 + argument.len;
     for (start.environment) |entry| size += 2 + entry.len;
     if (size > constants.forward_start_bytes_max) return null;
-    out[0] = @intFromBool(start.terminal);
+    // Without a pty every stream is a pipe, stderr included.
+    if (!start.pty) assert(start.stderr_pipe);
+    out[0] = @intFromBool(start.pty) | (@as(u8, @intFromBool(start.stderr_pipe)) << 1);
     std.mem.writeInt(u16, out[1..3], start.rows, .little);
     std.mem.writeInt(u16, out[3..5], start.columns, .little);
     std.mem.writeInt(u16, out[5..7], @intCast(start.arguments.len), .little);
@@ -138,7 +147,8 @@ pub fn parse_start(
     assert(payload.len < 1 << 31);
     assert(@intFromPtr(arguments_storage) != 0);
     if (payload.len < 9) return null;
-    if (payload[0] > 1) return null;
+    // Bit 0: pty. Bit 1: stderr is a pipe. No pty means stderr is a pipe, so 0 is not written.
+    if (payload[0] == 0 or payload[0] > 3) return null;
     const argument_count = std.mem.readInt(u16, payload[5..7], .little);
     const environment_count = std.mem.readInt(u16, payload[7..9], .little);
     if (argument_count == 0 or argument_count > constants.args_count_max) return null;
@@ -156,7 +166,8 @@ pub fn parse_start(
     }
     if (at != payload.len) return null;
     return .{
-        .terminal = payload[0] == 1,
+        .pty = payload[0] & 1 == 1,
+        .stderr_pipe = payload[0] & 2 == 2,
         .rows = std.mem.readInt(u16, payload[1..3], .little),
         .columns = std.mem.readInt(u16, payload[3..5], .little),
         .working_directory = directory,
@@ -217,7 +228,8 @@ const sample_environment = [_][]const u8{ "TERM=xterm-256color", "NO_COLOR=1" };
 
 fn sample() Start {
     return .{
-        .terminal = true,
+        .pty = true,
+        .stderr_pipe = false,
         .rows = 24,
         .columns = 80,
         .working_directory = "/Users/ada/project",
@@ -258,7 +270,8 @@ test "a start frame round-trips and every damage is refused" {
     var arguments: [constants.args_count_max][]const u8 = undefined;
     var environment: [constants.forward_env_count_max][]const u8 = undefined;
     const parsed = parse_start(payload, &arguments, &environment).?;
-    try std.testing.expect(parsed.terminal);
+    try std.testing.expect(parsed.pty);
+    try std.testing.expect(!parsed.stderr_pipe);
     try std.testing.expectEqual(@as(u16, 24), parsed.rows);
     try std.testing.expectEqualStrings("/Users/ada/project", parsed.working_directory);
     try std.testing.expectEqual(@as(usize, 6), parsed.arguments.len);
@@ -277,7 +290,9 @@ test "a start frame round-trips and every damage is refused" {
     damaged[6] = 0;
     try std.testing.expect(parse_start(damaged[0..payload.len], &arguments, &environment) == null);
     @memcpy(damaged[0..payload.len], payload);
-    damaged[0] = 2; // Not a flag.
+    damaged[0] = 4; // Not a flag.
+    try std.testing.expect(parse_start(damaged[0..payload.len], &arguments, &environment) == null);
+    damaged[0] = 0; // No pty and stderr in the pty: not a combination render writes.
     try std.testing.expect(parse_start(damaged[0..payload.len], &arguments, &environment) == null);
     const bad_env = [_][]const u8{"TERM"};
     var no_equals = sample();
@@ -297,7 +312,8 @@ test "a start frame is refused at the bound and one past it" {
     const fixed = 9 + 2; // Header fields and the empty directory's length.
     const fits = (constants.forward_start_bytes_max - fixed) / per_argument;
     var start: Start = .{
-        .terminal = false,
+        .pty = false,
+        .stderr_pipe = true,
         .rows = 0,
         .columns = 0,
         .working_directory = "",

@@ -118,8 +118,10 @@ fn check_forward(random: std.Random) void {
         argument.* = words[random.uintLessThan(usize, words.len)];
     }
     const environment = [_][]const u8{ "TERM=xterm", "NO_COLOR=1" };
+    const pty = random.boolean();
     const start: forward.Start = .{
-        .terminal = random.boolean(),
+        .pty = pty,
+        .stderr_pipe = !pty or random.boolean(),
         .rows = random.int(u16),
         .columns = random.int(u16),
         .working_directory = if (random.boolean()) "/Users/ada/project" else "",

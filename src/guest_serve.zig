@@ -1,7 +1,8 @@
 //! `zbx guest serve`: the Linux zbx's forwarding mode, run inside the macOS VM as the guest user
 //! (never as root) and only there. It listens on a vsock port; per connection it forks a session
 //! that reads the `start` frame (docs: forward_protocol.zig), runs `zbx <arguments>` as itself
-//! with a pty if the Mac's stdin was a terminal and pipes if not, relays the streams, signals and
+//! with a pty if the Mac's stdin and stdout were both terminals and pipes if not (stderr has a pipe
+//! of its own unless the Mac's stderr was a terminal too), relays the streams, signals and
 //! window size, and ends with an `exit` frame.
 //!
 //! It is daemon-less in the spec's sense: it lives exactly as long as the VM, started by the
@@ -316,26 +317,29 @@ fn launch(connection: i32, command: *Command, start: *const protocol.Start) ?Chi
         .pidfd = -1,
     };
     var slave: i32 = -1;
-    var pipes: [3][2]i32 = undefined;
-    if (start.terminal) {
+    var pipes: [3][2]i32 = @splat(.{ -1, -1 });
+    if (start.pty) {
         child.master = open_pty(&slave, start.rows, start.columns) orelse return null;
-    } else {
-        for (&pipes) |*pair| {
-            if (failed(linux.pipe2(pair, .{ .CLOEXEC = true }))) return null;
-        }
+    }
+    // The pipes the command's streams are: all three without a pty, only stderr's beside one.
+    const first: usize = if (start.pty) 2 else 0;
+    const last: usize = if (start.stderr_pipe) 3 else first;
+    for (pipes[first..last]) |*pair| {
+        if (failed(linux.pipe2(pair, .{ .CLOEXEC = true }))) return null;
     }
     const forked = linux.fork();
     if (failed(forked)) return null;
-    if (forked == 0) run_child(command, start.terminal, slave, &pipes);
+    if (forked == 0) run_child(command, slave, &pipes);
     child.pid = @intCast(forked);
-    if (start.terminal) {
-        _ = linux.close(slave);
-    } else {
+    if (start.pty) _ = linux.close(slave);
+    if (!start.pty) {
         _ = linux.close(pipes[0][0]);
         _ = linux.close(pipes[1][1]);
-        _ = linux.close(pipes[2][1]);
         child.stdin_write = pipes[0][1];
         child.stdout_read = pipes[1][0];
+    }
+    if (start.stderr_pipe) {
+        _ = linux.close(pipes[2][1]);
         child.stderr_read = pipes[2][0];
     }
     const opened = linux.pidfd_open(child.pid, 0);
@@ -366,11 +370,11 @@ fn open_pty(slave_out: *i32, rows: u16, columns: u16) ?i32 {
 
 /// In the forked child: its own session, the terminal or pipes as its standard streams, then
 /// `zbx`. Never returns.
-fn run_child(command: *Command, terminal: bool, slave: i32, pipes: *[3][2]i32) noreturn {
+fn run_child(command: *Command, slave: i32, pipes: *[3][2]i32) noreturn {
     assert(@intFromPtr(command) != 0);
     assert(@intFromPtr(pipes) != 0);
     _ = linux.setsid();
-    if (terminal) {
+    if (slave >= 0) {
         _ = linux.ioctl(slave, tiocsctty, 0);
         _ = linux.dup2(slave, 0);
         _ = linux.dup2(slave, 1);
@@ -378,8 +382,8 @@ fn run_child(command: *Command, terminal: bool, slave: i32, pipes: *[3][2]i32) n
     } else {
         _ = linux.dup2(pipes[0][0], 0);
         _ = linux.dup2(pipes[1][1], 1);
-        _ = linux.dup2(pipes[2][1], 2);
     }
+    if (pipes[2][1] >= 0) _ = linux.dup2(pipes[2][1], 2);
     if (failed(linux.chdir(&command.directory))) _ = linux.chdir(&command.home);
     _ = linux.execve(program_path, &command.argv, &command.envp);
     const message = "zbx guest: cannot run /usr/bin/zbx\n";
@@ -396,7 +400,7 @@ fn relay(connection: i32, child: *const Child) u8 {
     assert(@sizeOf(u64) == 8);
     var open_streams: u32 = 0;
     var streams = [2]i32{ child.stdout_read, child.stderr_read };
-    if (child.master >= 0) streams = .{ child.master, -1 };
+    if (child.master >= 0) streams = .{ child.master, child.stderr_read };
     for (streams) |stream| {
         if (stream >= 0) open_streams += 1;
     }

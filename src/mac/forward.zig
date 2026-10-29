@@ -93,12 +93,13 @@ const Terminal = struct {
     saved: c.termios,
     raw: bool,
 
-    fn enter() Terminal {
+    fn enter(pty: bool) Terminal {
         assert(@sizeOf(usize) == 8);
         assert(@sizeOf(u64) == 8);
         var saved: c.termios = undefined;
-        const terminal = c.isatty(0) == 1 and c.tcgetattr(0, &saved) == 0;
-        if (!terminal) return .{ .saved = saved, .raw = false };
+        // Raw mode only with a pty: otherwise the Mac's terminal keeps its line editing.
+        const raw_wanted = pty and c.tcgetattr(0, &saved) == 0;
+        if (!raw_wanted) return .{ .saved = saved, .raw = false };
         var raw = saved;
         cfmakeraw(&raw);
         // Output is processed by the guest's terminal, not twice.
@@ -109,7 +110,9 @@ const Terminal = struct {
     fn leave(terminal: *const Terminal) void {
         assert(@intFromPtr(terminal) != 0);
         assert(@sizeOf(u64) == 8);
-        if (terminal.raw) _ = c.tcsetattr(0, .FLUSH, &terminal.saved);
+        // NOW, not a drain: a terminal that has stopped reading (flow control) must not keep
+        // this process from ending.
+        if (terminal.raw) _ = c.tcsetattr(0, .NOW, &terminal.saved);
     }
 };
 
@@ -213,7 +216,20 @@ fn add_named_environment(count: *usize, words: []const []const u8) void {
     }
 }
 
-fn start_frame(command: *const Command, terminal: bool) ?[]const u8 {
+/// Which of the command's streams are terminals, as the Mac has them: a pty only when standard
+/// input and output both are (a redirected one must stay a pipe, as it is on Linux), and standard
+/// error a pipe of its own unless it is a terminal beside a pty.
+const Streams = struct {
+    pty: bool,
+    stderr_pipe: bool,
+
+    fn of_this_process() Streams {
+        const pty = c.isatty(0) == 1 and c.isatty(1) == 1;
+        return .{ .pty = pty, .stderr_pipe = !pty or c.isatty(2) != 1 };
+    }
+};
+
+fn start_frame(command: *const Command, streams: Streams) ?[]const u8 {
     assert(command.words.len > 0);
     assert(command.words.len <= constants.args_count_max);
     var count: usize = 0;
@@ -225,7 +241,8 @@ fn start_frame(command: *const Command, terminal: bool) ?[]const u8 {
     }
     const size = terminal_size();
     return protocol.render_start(&frames.payload, &.{
-        .terminal = terminal,
+        .pty = streams.pty,
+        .stderr_pipe = streams.stderr_pipe,
         .rows = size.rows,
         .columns = size.columns,
         .working_directory = directory,
@@ -238,8 +255,8 @@ fn start_frame(command: *const Command, terminal: bool) ?[]const u8 {
 pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) Error!u8 {
     assert(command.words.len > 0);
     assert(diag.code == null);
-    const terminal = c.isatty(0) == 1;
-    const payload = start_frame(command, terminal) orelse {
+    const streams = Streams.of_this_process();
+    const payload = start_frame(command, streams) orelse {
         diag.raise(.E0008);
         diag.while_("reading the command line", .{});
         diag.cause("the command line and environment are more than {d} bytes", .{
@@ -254,7 +271,7 @@ pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) E
     if (!send_frame(connection, .start, payload)) {
         return lost(command, diag, "the guest did not take the command");
     }
-    const screen = Terminal.enter();
+    const screen = Terminal.enter(streams.pty);
     defer screen.leave();
     return relay(connection, command, diag);
 }
