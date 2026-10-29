@@ -264,6 +264,8 @@ const MILESTONES = [
   {id:"M6", name:"State", status:"done", slices:{green:4, total:4, note:"slices green in CI; demo passed with KVM"},
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/40807149521", date:"2026-10-29"}, goal:"Data that must outlive a container is named, typed and listed.",
    demo:[["$","zbx run -d --name pg --state pgdata:/var/lib/postgresql/data --publish 5432:5432 -e POSTGRES_PASSWORD=demo postgres:16"],["","pg"],["$","psql -h 127.0.0.1 -U postgres -c \"create table t (v text)\" -c \"insert into t values ('kept-across-sigkill')\""],["","CREATE TABLE"],["","INSERT 0 1"],["$","kill -KILL <pid of pg>   (then the same zbx run -d … again)"],["","killed"],["$","psql -h 127.0.0.1 -U postgres -tAc \"select v from t\""],["","kept-across-sigkill"],["$","zbx state ls"],["","NAME           SIZE  CREATED              LAST USED            LAST CONTAINER  IN USE BY"],["","pgdata     38.5 MiB  2026-10-29 02:41:28  2026-10-29 02:41:31  pg              pg"],["","…    (one more volume, from the upgrade test)"],["$","zbx run -d --name pgtmp --publish 5432:5432 -e POSTGRES_PASSWORD=demo postgres:16   (no --state)"],["","…    (create table t, insert 'ephemeral-row', stop, run again)"],["$","psql -h 127.0.0.1 -U postgres -tAc \"select v from t\""],["","ERROR:  relation \"t\" does not exist"],["","(exit 1)"]]},
+  {id:"M4b", name:"Mac", status:"plan", goal:"From brew install zigbox to a running container on Apple Silicon, with no setup step.",
+   demo:[["$","brew install zigbox"],["$","zbx run alpine -- cat /etc/os-release"],["","NAME=\"Alpine Linux\"   (first run, VM boot included, under 5 s)"],["$","zbx run --rootfs ~/demo/alpine -- touch /hello && ls ~/demo/alpine/hello"],["","/Users/alex/demo/alpine/hello"]]},
   {id:"M6b", name:"Dev loop", status:"plan", goal:"Edit code on the host and see it run in a container; more than one service is Zigcube's.",
    demo:[["$","zbx run -d --name web --publish 8000:8000 --mount ./site:/srv python:3.12-slim -- python -m http.server -d /srv 8000"],["$","curl localhost:8000/index.html   (edit ./site/index.html, curl again: the edit)"],["$","zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'"],["$","ls -l site/new.txt"],["","-rw-r--r-- 1 alex alex 12 … site/new.txt"],["$","zbx logs web"],["","GET /index.html HTTP/1.1 200 …   (two requests)"]]},
   {id:"M7", name:"Build", status:"plan", goal:"Hermetic builds from a declared step DAG: same inputs, same digest.",
@@ -279,17 +281,17 @@ const DOCS = [
   {t:"How the store works", m:"M3", d:"Chunks, trees and digests; import, commit, diff, verify and gc."},
   {t:"Running OCI images", m:"M4", d:"Pulling from public registries, lockfiles, and tags as aliases."},
   {t:"Networking and state", m:"M5–M6", d:"Granting network access, publishing ports, and named state volumes."},
+  {t:"Local development", m:"M6b", d:"Editing code on the host with a container running it: writable project mounts, logs and exec. More than one service: run the Zigcube server."},
   {t:"Hermetic builds", m:"M7", d:"The build file, step inputs, cache keys and reproducibility checks."},
   {t:"Signing and policy", m:"M8", d:"Keys, provenance records and run policies."},
 ];
 // The technical next steps shown under "Coming next"; status comes from MILESTONES.
 const NEXT = [
-  {m:"M4", t:"OCI images, by digest", d:"Pull public images from Docker Hub and GHCR, flatten their layers (gzip, zstd, tar with whiteouts) into one store tree, honour the image config, and pin tags to digests in a project's zbx.lock."},
-  {m:"M5", t:"Networking, granted", d:"Each container gets its own network namespace with nothing in it; --net grants connectivity through pasta, and --publish maps a port. A real sysfs replaces today's read-only host /sys."},
-  {m:"M6", t:"Named state", d:"Volumes for data that must outlive a container, kept outside the content store and never collected implicitly."},
+  {m:"M6b", t:"The dev loop", d:"Writable mounts inside the project directory, written as the container's root so every file it makes is yours; zbx logs and zbx exec. One service, edited live; anything with more than one service runs under Zigcube."},
+  {m:"M4b", t:"The Mac", d:"brew install zigbox, then zbx run: a small Linux VM booted on first use through Apple's Virtualization.framework, your home folder shared into it, published ports on the Mac's localhost. Inside the VM, Zigbox is unchanged and rootless."},
   {m:"M7", t:"Hermetic builds", d:"A declared DAG of steps, each an M2-hardened container, offline by default, cached on the hash of its inputs, with timestamps normalized so the same inputs give the same digest."},
   {m:"M8", t:"Trust", d:"ed25519 signatures over tree digests, provenance from M7 builds, and a run policy that refuses what it cannot trace."},
-  {m:"C0–C2", t:"Zigcube", d:"The orchestrator: desired state in Postgres or SQLite, controllers that reconcile it, and node agents that link this runtime and fetch store chunks from peers."},
+  {m:"C0–C2", t:"Zigcube", d:"The orchestrator, and the way to run more than one service, even on one laptop: desired state in SQLite or Postgres, controllers that reconcile it, services that reach each other by name, and node agents that link this runtime."},
 ];
 // ===== Rendering =====
 const $ = s => document.querySelector(s);

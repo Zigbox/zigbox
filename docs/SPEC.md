@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-29 (doc rev 64), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-29 (doc rev 68), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -206,7 +206,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** a developer edits code on the host and sees it run in a container, with no Docker.
 
-**Scope:** writable mounts of host directories, within guardrails, with ownership that round-trips (a file the container writes is the host user's); `zbx logs <name>`, the bounded output of a detached container, kept with its run; `zbx exec <name> -- <command>`, a process inside a running container's namespaces, under its limits and seccomp. All three in the library, for Zigcube's agent. More than one service is Zigcube's (see Non-goals). Deferred: file watching and hot reload, which are the application's own.
+**Scope:** writable mounts of directories inside the project directory (the one holding zbx.lock, else the working directory), written as the container's root so that a file the container writes is the host user's, with a --user option to run as root; `zbx logs <name>`, the bounded output of a detached container, kept with its run; `zbx exec <name> -- <command>`, a process inside a running container's namespaces, under its limits and seccomp. All three in the library, for Zigcube's agent. More than one service is Zigcube's (see Non-goals). Deferred: file watching and hot reload, which are the application's own.
 
 **Demo script:**
 
@@ -218,12 +218,12 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Acceptance criteria:**
 
-- [ ] Files the container writes through a writable mount are owned by the host user, whatever user the container runs as.
+- [ ] Files the container writes through a writable mount are owned by the host user. A writable mount for a container whose user is not root is refused, naming the user and the fix (run as root, or mount read-only), so no file owned by a subordinate id ever lands in the project.
 - [ ] Logs are bounded, survive the exit of the zbx that started the container, and are removed with its run record.
 - [ ] `exec` joins the container's namespaces, cgroup, capabilities and seccomp; it gains nothing the container lacks.
 - [ ] The production-readiness checklist, with an upgrade test against M6 and the agent test.
 
-**Open questions:** the guardrails for writable mounts (only under the project directory, or anywhere the user names?), and how ownership round-trips for a container user other than root (an id-mapped mount, or a per-mount id map).
+**Decided:** writable mounts only under the project directory. Ownership: written as the container's root, and refused for a non-root container user. An id-mapped mount needs privilege over the host file system that a rootless zbx does not have, so zbx doctor only reports whether the kernel allows it. Mapping the image's user to the host user for the whole container (a keep-id map) would change how the store's trees are owned, and waits for a milestone of its own if real use asks for it.
 
 ### M7 · Build: hermetic and reproducible
 
