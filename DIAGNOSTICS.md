@@ -73,7 +73,7 @@ A bug's internal message (the panic text or the broken invariant) means nothing 
 
 - Prefix by product: `ZBX-` for Zigbox, `ZC-` for Zigcube.
 - Letter by kind: `E` error, `W` warning, `B` internal bug.
-- Four digits, grouped by subsystem. Zigbox: `00xx` CLI and general, `01xx` host and doctor, `02xx` runtime and isolation, `03xx` limits, `04xx` store, `05xx` registry and pull, `06xx` network, `07xx` state, `08xx` build, `09xx` trust and policy. Zigcube: `01xx` API and CLI, `02xx` store backends, `03xx` controllers, `04xx` scheduler, `05xx` agent, `06xx` distribution, `07xx` mesh, `08xx` trust.
+- Four digits, grouped by subsystem. Zigbox: `00xx` CLI and general, `01xx` host and doctor, `02xx` runtime and isolation, `03xx` limits, `04xx` store, `05xx` registry and pull, `06xx` network, `07xx` state, `08xx` build, `09xx` trust and policy, `10xx` the macOS VM. Zigcube: `01xx` API and CLI, `02xx` store backends, `03xx` controllers, `04xx` scheduler, `05xx` agent, `06xx` distribution, `07xx` mesh, `08xx` trust.
 - Every code is declared once in a registry (`src/diag/codes.zig`) with its summary template, blame, and a long explanation. The build fails if a code is used but not registered, registered twice, or registered without an explanation.
 - `zbx explain <code>` and `zcube explain <code>` print the long explanation offline. The same text is generated into `site/errors/<code>.html`, which is the `docs` link.
 
