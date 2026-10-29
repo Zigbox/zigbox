@@ -39,6 +39,11 @@ extern "c" fn dispatch_sync_f(
     context: ?*anyopaque,
     work: *const fn (?*anyopaque) callconv(.c) void,
 ) void;
+extern "c" fn dispatch_async_f(
+    queue: ?*anyopaque,
+    context: ?*anyopaque,
+    work: *const fn (?*anyopaque) callconv(.c) void,
+) void;
 extern "c" fn dispatch_semaphore_create(value: i64) ?*anyopaque;
 extern "c" fn dispatch_semaphore_wait(semaphore: ?*anyopaque, timeout: u64) i64;
 extern "c" fn dispatch_semaphore_signal(semaphore: ?*anyopaque) i64;
@@ -347,6 +352,11 @@ pub fn object_block(waiter: *Waiter) Block {
 
 // ---- Dispatch queues --------------------------------------------------------------------------
 
+fn release_work(context: ?*anyopaque) callconv(.c) void {
+    assert(context != null);
+    release(context);
+}
+
 const Work = fn (?*anyopaque) callconv(.c) void;
 
 /// A serial dispatch queue: the one thread of control a virtual machine's objects live on.
@@ -357,6 +367,13 @@ pub const Queue = struct {
         const handle = dispatch_queue_create(label.ptr, null);
         assert(handle != null);
         return .{ .handle = handle };
+    }
+
+    /// Releases `object` on the queue, without waiting for it.
+    pub fn release_later(queue: Queue, object: Id) void {
+        assert(queue.handle != null);
+        assert(object != null);
+        dispatch_async_f(queue.handle, object, &release_work);
     }
 
     /// Runs `work(context)` on the queue and returns when it is done.

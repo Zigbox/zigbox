@@ -339,7 +339,7 @@ fn drop_agent() void {
     assert(agent_object != null); // The connection and its object come together.
     assert(agent_fd >= 0);
     files.close(agent_fd);
-    objc.release(agent_object);
+    vz.release_connection(agent_object);
     agent_fd = -1;
     agent_object = null;
 }
@@ -422,7 +422,7 @@ fn relay_main(relay: Relay) void {
     defer {
         files.close(relay.mac);
         files.close(relay.guest);
-        objc.release(relay.object);
+        vz.release_connection(relay.object);
         _ = relays_active.fetchSub(1, .monotonic);
     }
     var answer: [ports.connect_ok.len]u8 = undefined;

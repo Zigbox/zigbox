@@ -531,7 +531,7 @@ fn release_ended_commands() void {
         var entry = [1]std.c.pollfd{.{ .fd = held.watch, .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&entry, 1, 0) == 0) continue;
         files.close(held.watch);
-        @import("objc.zig").release(held.object);
+        vz.release_connection(held.object);
         held.* = .{ .watch = -1, .object = null };
         assert(held.watch < 0);
     }
