@@ -32,14 +32,16 @@ pub const steps = [_]Step{
     .{
         .id = "m1.1",
         .what = "the shell is fed id, hostname and the release file on stdin",
-        .line = "printf 'id\\nhostname\\ncat /etc/os-release\\n' | $Z run --rootfs $R --name m1sh -- sh",
+        .line = "printf 'id\\nhostname\\ncat /etc/os-release\\n' | " ++
+            "$Z run --rootfs $R --name m1sh -- sh",
         .stdout_has = &.{ "uid=0(root)", "m1sh", "ID=alpine", "VERSION_ID=3.20." },
     },
     .{
         .id = "m1.3",
         .what = "touch /etc/hacked lands in the rootfs, owned by the user, and not on the Mac",
         .line = "$Z run --rootfs $R -- touch /etc/hacked && test -f $R/etc/hacked && " ++
-            "test \"$(stat -f %u $R/etc/hacked)\" = \"$(id -u)\" && ! test -e /etc/hacked && echo landed",
+            "test \"$(stat -f %u $R/etc/hacked)\" = \"$(id -u)\" && " ++
+            "! test -e /etc/hacked && echo landed",
         .stdout_has = &.{"landed"},
     },
     .{
@@ -102,7 +104,8 @@ pub const steps = [_]Step{
     .{
         .id = "m3.5",
         .what = "an unknown digest is ZBX-E0410, exit 125, nothing on stdout",
-        .line = "$Z run b3:0000000000000000000000000000000000000000000000000000000000000000 -- true",
+        .line = "$Z run b3:00000000000000000000000000000000" ++
+            "00000000000000000000000000000000 -- true",
         .exit = 125,
         .stderr_has = &.{"ZBX-E0410"},
     },
@@ -137,28 +140,34 @@ pub const steps = [_]Step{
     .{
         .id = "m4b.2",
         .what = "a second run is quick: the machine and the store are warm",
-        .line = "cd $W && s=$(python3 -c 'import time;print(time.time())') && $Z run alpine:3.20 -- true && " ++
+        .line = "cd $W && s=$(python3 -c 'import time;print(time.time())') && " ++
+            "$Z run alpine:3.20 -- true && " ++
             "python3 -c \"import time,sys;sys.exit(0 if time.time()-$s < 2.0 else 1)\"",
     },
     .{
         .id = "m4b.3",
         .what = "files written in the container are on the Mac, owned by the user",
-        .line = "$Z run --rootfs $R -- touch /hello && test \"$(stat -f %u $R/hello)\" = \"$(id -u)\" && echo owned",
+        .line = "$Z run --rootfs $R -- touch /hello && " ++
+            "test \"$(stat -f %u $R/hello)\" = \"$(id -u)\" && echo owned",
         .stdout_has = &.{"owned"},
     },
     .{
         .id = "m4b.3s",
         .what = "state survives zbx vm stop",
-        .line = "cd $W && $Z run --state demo:/data alpine:3.20 -- sh -c 'echo persisted > /data/x' && " ++
+        .line = "cd $W && " ++
+            "$Z run --state demo:/data alpine:3.20 -- sh -c 'echo persisted > /data/x' && " ++
             "$Z vm stop >/dev/null && $Z run --state demo:/data alpine:3.20 -- cat /data/x",
         .stdout_has = &.{"persisted"},
     },
     .{
         .id = "m4b.4",
         .what = "a published port answers on the Mac's localhost and is closed by zbx stop",
-        .line = "cd $W && $Z pull nginx:alpine >/dev/null && $Z run -d --name web --publish 18099:80 nginx:alpine >/dev/null; sleep 3; " ++
-            "curl -sS -m5 http://localhost:18099/ | grep -o 'Welcome to nginx'; $Z stop web >/dev/null; sleep 1; " ++
-            "curl -sS -m2 http://localhost:18099/ >/dev/null 2>&1 && echo STILL-OPEN || echo closed",
+        .line = "cd $W && $Z pull nginx:alpine >/dev/null && " ++
+            "$Z run -d --name web --publish 18099:80 nginx:alpine >/dev/null; sleep 3; " ++
+            "curl -sS -m5 http://localhost:18099/ | grep -o 'Welcome to nginx'; " ++
+            "$Z stop web >/dev/null; sleep 1; " ++
+            "curl -sS -m2 http://localhost:18099/ >/dev/null 2>&1 && " ++
+            "echo STILL-OPEN || echo closed",
         .stdout_has = &.{ "Welcome to nginx", "closed" },
         .stdout_lacks = &.{"STILL-OPEN"},
     },
@@ -216,8 +225,11 @@ fn run_all(init: std.process.Init, out: *Io.Writer) !u32 {
         const bad = check(step, code, result.stdout, result.stderr);
         if (bad) |reason| {
             failures += 1;
-            try out.print("FAIL {s}  {s}\n     {s}\n     exit {d}\n     stdout: {s}\n     stderr: {s}\n", .{
-                step.id, step.what, reason, code, clip(result.stdout), clip(result.stderr),
+            try out.print("FAIL {s}  {s}\n     {s}\n     exit {d}\n", .{
+                step.id, step.what, reason, code,
+            });
+            try out.print("     stdout: {s}\n     stderr: {s}\n", .{
+                clip(result.stdout), clip(result.stderr),
             });
         } else {
             try out.print("ok   {s}  {s}\n", .{ step.id, step.what });
@@ -247,13 +259,24 @@ pub fn check(step: Step, code: u8, stdout: []const u8, stderr: []const u8) ?[]co
     return null;
 }
 
-fn expand(arena: std.mem.Allocator, line: []const u8, zbx: []const u8, rootfs: []const u8, work: []const u8) ![]u8 {
+fn expand(
+    arena: std.mem.Allocator,
+    line: []const u8,
+    zbx: []const u8,
+    rootfs: []const u8,
+    work: []const u8,
+) ![]u8 {
     const first = try std.mem.replaceOwned(u8, arena, line, "$Z", zbx);
     const second = try std.mem.replaceOwned(u8, arena, first, "$R", rootfs);
     return std.mem.replaceOwned(u8, arena, second, "$W", work);
 }
 
-fn prepare_rootfs(init: std.process.Init, out: *Io.Writer, work: []const u8, rootfs: []const u8) !void {
+fn prepare_rootfs(
+    init: std.process.Init,
+    out: *Io.Writer,
+    work: []const u8,
+    rootfs: []const u8,
+) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const image = @import("vm/image.zig");

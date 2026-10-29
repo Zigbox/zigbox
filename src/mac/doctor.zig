@@ -39,16 +39,18 @@ pub const Check = struct {
     id: Id,
     status: Status = .ok,
     detail: [detail_bytes_max]u8 = undefined,
-    detail_length: usize = 0,
+    detail_length: u32 = 0,
     diag: Diag = undefined,
 
     fn say(check: *Check, comptime format: []const u8, args: anytype) void {
         const written = std.fmt.bufPrint(&check.detail, format, args) catch check.detail[0..0];
-        check.detail_length = written.len;
+        check.detail_length = @intCast(written.len);
+        assert(written.len <= detail_bytes_max);
         assert(check.detail_length > 0);
     }
 
     pub fn text(check: *const Check) []const u8 {
+        assert(check.detail_length <= detail_bytes_max);
         assert(check.detail_length > 0);
         return check.detail[0..check.detail_length];
     }
@@ -59,6 +61,8 @@ pub const Report = struct {
     checks: [6]Check = undefined,
 
     pub fn failed(report: *const Report) bool {
+        assert(report.checks.len == 6);
+        assert(std.enums.values(Id).len == report.checks.len);
         for (&report.checks) |*check| {
             if (check.status == .fail) return true;
         }
@@ -82,12 +86,14 @@ pub fn signature_of(output: []const u8, exit_code: ?u8) Signature {
 }
 
 fn executable_path(buffer: *[constants.vm_path_bytes_max:0]u8) ?[:0]const u8 {
+    assert(buffer.len == constants.vm_path_bytes_max + 1);
     var size: u32 = constants.vm_path_bytes_max;
     if (_NSGetExecutablePath(buffer, &size) != 0) return null;
     return std.mem.sliceTo(buffer, 0);
 }
 
 fn check_entitlement(check: *Check) void {
+    assert(check.detail_length == 0);
     assert(check.id == .entitlement);
     var path_storage: [constants.vm_path_bytes_max:0]u8 = undefined;
     const path = executable_path(&path_storage) orelse {
@@ -120,6 +126,7 @@ fn check_entitlement(check: *Check) void {
 /// E1001 for a binary that lacks the entitlement: the cause the framework gives for it, so that
 /// the fix is the one for a binary (sign it, or reinstall), not the one for a virtual machine.
 pub fn missing_entitlement(diag: *Diag) void {
+    assert(diag.code == null);
     diagnose.not_allowed(diag, .{
         .domain = "VZErrorDomain",
         .code = 2,
@@ -137,6 +144,7 @@ fn fail_entitlement(check: *Check, detail: []const u8) void {
 }
 
 fn check_vm(ctx: *const commands.Context, check: *Check, version: *Check) void {
+    assert(check.detail_length == 0);
     assert(check.id == .vm);
     assert(version.id == .version);
     version.say("this zbx carries image {s}", .{image.version});
@@ -172,6 +180,7 @@ fn check_vm(ctx: *const commands.Context, check: *Check, version: *Check) void {
 }
 
 fn check_share(check: *Check) void {
+    assert(check.detail_length == 0);
     assert(check.id == .share);
     var storage: [constants.vm_path_bytes_max:0]u8 = undefined;
     if (files.shared_home(&storage)) |home| {
@@ -181,10 +190,12 @@ fn check_share(check: *Check) void {
     check.status = .fail;
     check.say("$HOME is not an absolute directory that can be shared", .{});
     check.diag.reset();
-    diagnose.directory(&check.diag, "finding the directory to share", "$HOME", "cannot be resolved");
+    const doing = "finding the directory to share";
+    diagnose.directory(&check.diag, doing, "$HOME", "cannot be resolved");
 }
 
 fn check_disk(ctx: *const commands.Context, host_cpus: u32, check: *Check) void {
+    assert(check.detail_length == 0);
     assert(check.id == .disk);
     assert(host_cpus >= 1);
     const loaded = settings_file.load(ctx.paths, host_cpus, &check.diag) catch {
@@ -211,6 +222,7 @@ fn check_disk(ctx: *const commands.Context, host_cpus: u32, check: *Check) void 
 }
 
 fn check_rosetta(check: *Check) void {
+    assert(check.detail_length == 0);
     assert(check.id == .rosetta);
     const state = vz.rosetta_state();
     if (state == .installed) return check.say("installed: linux/amd64 images can run", .{});
@@ -226,6 +238,7 @@ fn check_rosetta(check: *Check) void {
 
 /// Runs every check.
 pub fn inspect(ctx: *const commands.Context, host_cpus: u32, report: *Report) void {
+    assert(report.checks.len == 6);
     assert(host_cpus >= 1);
     for (&report.checks, 0..) |*check, index| {
         check.* = .{ .id = @fromBackingInt(@intCast(index)) };
@@ -240,20 +253,24 @@ pub fn inspect(ctx: *const commands.Context, host_cpus: u32, report: *Report) vo
 }
 
 fn label_of(status: Status) []const u8 {
-    return switch (status) {
+    const label: []const u8 = switch (status) {
         .ok => "ok  ",
         .warn => "warn",
         .fail => "FAIL",
     };
+    assert(label.len == 4); // The columns after the label line up.
+    return label;
 }
 
 /// The text report: a line per check, the code of a warning or failure after it.
 pub fn render_text(report: *const Report, buffer: []u8) []const u8 {
+    assert(report.checks[0].id == .entitlement);
     assert(buffer.len >= constants.output_bytes_max);
     var writer: std.Io.Writer = .fixed(buffer);
     for (&report.checks) |*check| {
+        const head = .{ label_of(check.status), @tagName(check.id), check.text() };
         // Cannot fail: six lines of at most 300 bytes fit the output buffer.
-        writer.print("{s} {s}  {s}", .{ label_of(check.status), @tagName(check.id), check.text() }) catch unreachable;
+        writer.print("{s} {s}  {s}", head) catch unreachable;
         if (check.status != .ok) {
             const name = codes.full_name(check.diag.code.?);
             writer.print("  [{s}]", .{name}) catch unreachable; // Same.
@@ -264,6 +281,7 @@ pub fn render_text(report: *const Report, buffer: []u8) []const u8 {
 }
 
 fn json_string(writer: *std.Io.Writer, text: []const u8) !void {
+    assert(text.len <= detail_bytes_max);
     try writer.writeByte('"');
     for (text) |byte| {
         switch (byte) {
@@ -282,12 +300,13 @@ var diag_buffer: [constants.output_bytes_max]u8 = undefined;
 /// The `zbx.doctor/1` document; `guest` is the guest doctor's own JSON document, or null. Written
 /// without the guest member when there is none.
 pub fn render_json(report: *const Report, guest: ?[]const u8, buffer: []u8) []const u8 {
+    assert(report.checks[0].id == .entitlement);
     assert(buffer.len >= constants.output_bytes_max);
     var writer: std.Io.Writer = .fixed(buffer);
     // Cannot fail: six checks with a detail and a diagnostic each fit the output buffer.
     writer.print("{{\"schema\":\"zbx.doctor/1\",\"ok\":{s},\"checks\":[", .{
         if (report.failed()) "false" else "true",
-    }) catch unreachable;
+    }) catch unreachable; // Cannot fail: the buffer holds the whole document.
     for (&report.checks, 0..) |*check, index| {
         if (index > 0) writer.writeAll(",") catch unreachable; // Same.
         writer.print("{{\"id\":\"{s}\",\"status\":\"{s}\",\"detail\":", .{
@@ -310,11 +329,11 @@ pub fn render_json(report: *const Report, guest: ?[]const u8, buffer: []u8) []co
 
 /// The guest's doctor, when the machine runs: its JSON document (kept in `buffer`), or null.
 fn guest_json(ctx: *const commands.Context, buffer: []u8, diag: *Diag) ?[]const u8 {
+    assert(forward.stdout_descriptor == 1); // Nobody has redirected the output.
     assert(buffer.len > 0);
     var path: [constants.vm_path_bytes_max + 1:0]u8 = @splat(0);
-    const written = std.fmt.bufPrint(&path, "{s}/doctor-guest.tmp", .{ctx.paths.base.slice()}) catch {
-        return null;
-    };
+    const base = ctx.paths.base.slice();
+    const written = std.fmt.bufPrint(&path, "{s}/doctor-guest.tmp", .{base}) catch return null;
     const name: [:0]const u8 = path[0..written.len :0];
     const flags: std.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
     const descriptor = std.c.open(name.ptr, flags, @as(std.c.mode_t, 0o600));
@@ -340,6 +359,7 @@ const guest_heading =
 /// Runs the doctor. The report goes to stdout, a diagnostic per failing or warning check to
 /// stderr. Returns the exit code.
 pub fn run(ctx: *const commands.Context, host_cpus: u32, diag: *Diag) u8 {
+    assert(ctx.paths.base.length > 0);
     assert(host_cpus >= 1);
     assert(diag.code == null);
     var report: Report = .{};
@@ -428,7 +448,13 @@ test "golden: the macOS doctor's report, healthy and failing, as text and as JSO
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const healthy = fixture(false);
     const failing = fixture(true);
-    const cases = [_]struct { report: *const Report, text: []const u8, json: []const u8, guest: ?[]const u8 }{
+    const Case = struct {
+        report: *const Report,
+        text: []const u8,
+        json: []const u8,
+        guest: ?[]const u8,
+    };
+    const cases = [_]Case{
         .{
             .report = &healthy,
             .text = @embedFile("../testdata/doctor/mac_healthy.txt"),

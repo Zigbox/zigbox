@@ -25,6 +25,7 @@ comptime {
 /// Makes sure the image's directory holds exactly this binary's kernel and initramfs: a missing,
 /// short or damaged file (an interrupted unpack, a changed byte) is written again.
 pub fn ensure(paths: *const paths_mod.Paths) files.Error!void {
+    assert(paths.image_dir.length > 0);
     assert(protocol.is_version(version));
     try files.make_directories(paths.image_dir.slice());
     try ensure_file(paths.kernel.slice(), kernel_bytes);
@@ -68,11 +69,13 @@ pub fn newest(old: []const Old) ?usize {
     for (old, 0..) |entry, index| {
         if (best == null or entry.changed > old[best.?].changed) best = index;
     }
+    if (best) |index| assert(index < old.len);
     return best;
 }
 
 /// Lists the names in `path` into `out`; returns how many were kept (the rest are dropped).
 fn list_directory(path: []const u8, names: *[old_images_max + 8][255:0]u8) usize {
+    assert(path.len > 0);
     var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
     const text = files.terminate(&terminated, path) catch return 0;
     const handle = opendir(text.ptr) orelse return 0;
@@ -94,6 +97,7 @@ fn list_directory(path: []const u8, names: *[old_images_max + 8][255:0]u8) usize
 /// only the files directly in them are removed: store.img, vm-settings and everything else in the
 /// Library directory are never touched, and a directory holding anything else stays.
 pub fn prune(paths: *const paths_mod.Paths) void {
+    assert(paths.vm_dir.length > 0);
     assert(protocol.is_version(version));
     var names: [old_images_max + 8][255:0]u8 = undefined;
     const count = list_directory(paths.vm_dir.slice(), &names);
@@ -105,7 +109,10 @@ pub fn prune(paths: *const paths_mod.Paths) void {
         if (!protocol.is_version(text[0..constants.vm_image_version_bytes])) continue;
         if (std.mem.eql(u8, text, version)) continue;
         if (old_count == old.len) break;
-        old[old_count] = .{ .name = text[0..constants.vm_image_version_bytes].*, .changed = changed_time(paths, text) };
+        old[old_count] = .{
+            .name = text[0..constants.vm_image_version_bytes].*,
+            .changed = changed_time(paths, text),
+        };
         old_count += 1;
     }
     const keep = newest(old[0..old_count]);
@@ -116,8 +123,10 @@ pub fn prune(paths: *const paths_mod.Paths) void {
 }
 
 fn changed_time(paths: *const paths_mod.Paths, name: []const u8) i64 {
+    assert(name.len > 0);
     var buffer: [constants.vm_path_bytes_max]u8 = undefined;
-    const path = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ paths.vm_dir.slice(), name }) catch return 0;
+    const vm_dir = paths.vm_dir.slice();
+    const path = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ vm_dir, name }) catch return 0;
     var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
     const text = files.terminate(&terminated, path) catch return 0;
     var status: std.c.Stat = undefined;
@@ -126,14 +135,17 @@ fn changed_time(paths: *const paths_mod.Paths, name: []const u8) i64 {
 }
 
 fn remove_image_directory(paths: *const paths_mod.Paths, name: []const u8) void {
+    assert(paths.vm_dir.length > 0);
     assert(name.len == constants.vm_image_version_bytes);
     var directory: [constants.vm_path_bytes_max]u8 = undefined;
-    const base = std.fmt.bufPrint(&directory, "{s}/{s}", .{ paths.vm_dir.slice(), name }) catch return;
+    const vm_dir = paths.vm_dir.slice();
+    const base = std.fmt.bufPrint(&directory, "{s}/{s}", .{ vm_dir, name }) catch return;
     var names: [old_images_max + 8][255:0]u8 = undefined;
     const count = list_directory(base, &names);
     for (names[0..count]) |*entry| {
         var buffer: [constants.vm_path_bytes_max]u8 = undefined;
-        const file = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ base, std.mem.sliceTo(entry, 0) }) catch continue;
+        const leaf = std.mem.sliceTo(entry, 0);
+        const file = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ base, leaf }) catch continue;
         var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
         const text = files.terminate(&terminated, file) catch continue;
         _ = std.c.unlink(text.ptr);
@@ -145,6 +157,7 @@ fn remove_image_directory(paths: *const paths_mod.Paths, name: []const u8) void 
 
 /// True if the file at `path` holds exactly `expected`, compared in chunks.
 pub fn matches(path: []const u8, expected: []const u8) bool {
+    assert(expected.len > 0);
     var chunk: [64 * 1024]u8 = undefined;
     var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
     const text = files.terminate(&terminated, path) catch return false;
@@ -179,13 +192,16 @@ test "the newest older image is kept and the rest are removed, and nothing else 
     const base = try std.fmt.bufPrint(&home, "/tmp/zbx-prune-test-{d}", .{files.now_ms()});
     var paths: paths_mod.Paths = .{};
     try paths.init(base, version);
-    const names = [_][]const u8{ "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc", "not-a-version" };
+    const names = [_][]const u8{
+        "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc", "not-a-version",
+    };
     for (names) |name| {
         var directory: [constants.vm_path_bytes_max]u8 = undefined;
         const path = try std.fmt.bufPrint(&directory, "{s}/{s}", .{ paths.vm_dir.slice(), name });
         try files.make_directories(path);
         var file: [constants.vm_path_bytes_max]u8 = undefined;
-        try files.write_file_atomically(try std.fmt.bufPrint(&file, "{s}/Image", .{path}), "x", 0o600);
+        const image_file = try std.fmt.bufPrint(&file, "{s}/Image", .{path});
+        try files.write_file_atomically(image_file, "x", 0o600);
     }
     try ensure(&paths);
     try files.write_file_atomically(paths.settings.slice(), "keep", 0o600);
@@ -193,7 +209,8 @@ test "the newest older image is kept and the rest are removed, and nothing else 
     var survivors: usize = 0;
     for (names) |name| {
         var directory: [constants.vm_path_bytes_max]u8 = undefined;
-        const path = try std.fmt.bufPrint(&directory, "{s}/{s}/Image", .{ paths.vm_dir.slice(), name });
+        const vm_dir = paths.vm_dir.slice();
+        const path = try std.fmt.bufPrint(&directory, "{s}/{s}/Image", .{ vm_dir, name });
         if (files.file_size(path) > 0) survivors += 1;
     }
     // One old version (the newest by time, whichever the clock says), and the stray directory.

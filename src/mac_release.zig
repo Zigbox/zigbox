@@ -4,8 +4,9 @@
 //!   1. copy the binary to a staging directory in the output directory;
 //!   2. `codesign` it with the hardened runtime, a secure timestamp and `vm/zbx.entitlements`;
 //!   3. `codesign --verify --strict` and `codesign -d --entitlements -`, shown;
-//!   4. `ditto` the binary, alone at the top of the archive, into `zbx-<version>-macos-arm64.zip` (a zip, because `notarytool` takes a zip
-//!      and Homebrew unpacks one; a bare Mach-O cannot be stapled, so it travels in an archive);
+//!   4. `ditto` the binary, alone at the top of the archive, into
+//!      `zbx-<version>-macos-arm64.zip` (a zip, because `notarytool` takes a zip and Homebrew
+//!      unpacks one; a bare Mach-O cannot be stapled, so it travels in an archive);
 //!   5. with `--notarize`: `xcrun notarytool submit --keychain-profile <profile> --wait`. No
 //!      profile, or one the keychain does not have, is refused before anything is submitted;
 //!   6. write `<archive>.sha256` and the Homebrew formula with the version, URL and hash filled.
@@ -45,7 +46,12 @@ pub fn is_ad_hoc(identity: []const u8) bool {
 }
 
 /// The words `codesign` is run with, after the program name.
-pub fn sign_arguments(identity: []const u8, entitlements: []const u8, binary: []const u8, out: *[12][]const u8) []const []const u8 {
+pub fn sign_arguments(
+    identity: []const u8,
+    entitlements: []const u8,
+    binary: []const u8,
+    out: *[12][]const u8,
+) []const []const u8 {
     assert(identity.len > 0);
     const timestamp: []const u8 = if (is_ad_hoc(identity)) "--timestamp=none" else "--timestamp";
     const words = [_][]const u8{
@@ -68,9 +74,10 @@ pub fn cdhash_of(output: []const u8) ?[]const u8 {
 /// The one line said when `codesign` cannot use the key: it is a failure of the session, not of
 /// the script or the certificate.
 pub const keychain_message =
-    "mac_release: codesign cannot use the signing key (errSecInternalComponent). Run the release " ++
-    "from a logged-in graphical session with an unlocked login keychain (your own Terminal, or a " ++
-    "runner with that keychain unlocked), never from an ssh or sandboxed session.\n";
+    "mac_release: codesign cannot use the signing key (errSecInternalComponent). " ++
+    "Run the release from a logged-in graphical session with an unlocked login keychain " ++
+    "(your own Terminal, or a runner with that keychain unlocked), " ++
+    "never from an ssh or sandboxed session.\n";
 
 /// Fills `@VERSION@`, `@URL@` and `@SHA256@` in the formula template.
 pub fn fill_formula(
@@ -183,7 +190,8 @@ fn same_code(
     const first = try cdhash_at(io, arena, binary);
     const second = try cdhash_at(io, arena, inside);
     if (!std.mem.eql(u8, first, second)) {
-        try log.print("mac_release: the archive holds other code than the binary ({s} and {s})\n", .{ first, second });
+        const said = "mac_release: the archive holds other code than the binary ({s} and {s})\n";
+        try log.print(said, .{ first, second });
         return error.ArchiveDiffers;
     }
     try log.print("mac_release: the archive's zbx has the binary's CDHash {s}\n", .{first});
@@ -208,24 +216,32 @@ fn profile_exists(io: Io, profile: []const u8) bool {
     };
 }
 
+/// Refused before anything is built or signed: a release that cannot be notarized is not worth
+/// signing for.
+fn check_notarization(io: Io, arguments: *const Arguments, log: *Io.Writer) !void {
+    assert(arguments.notarize);
+    // Refused before anything is built or signed: a release that cannot be notarized is not
+    // worth signing for.
+    if (arguments.profile.len == 0 or is_ad_hoc(arguments.identity)) {
+        try log.print("mac_release: notarization needs a signing identity and a keychain " ++
+            "profile (--profile, default {s}); " ++
+            "an ad-hoc signature cannot be notarized\n", .{default_profile});
+        return error.NotarizationRefused;
+    }
+    if (!profile_exists(io, arguments.profile)) {
+        try log.print("mac_release: the keychain has no notary profile '{s}'. Store one " ++
+            "with: xcrun notarytool store-credentials {s} (it asks for the Apple ID and " ++
+            "an app-specific password, or an API key, and keeps them in the keychain)\n", .{
+            arguments.profile, arguments.profile,
+        });
+        return error.NotarizationRefused;
+    }
+}
+
 fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !void {
     const io = init.io;
     const arena = init.arena.allocator();
-    if (arguments.notarize) {
-        // Refused before anything is built or signed: a release that cannot be notarized is not
-        // worth signing for.
-        if (arguments.profile.len == 0 or is_ad_hoc(arguments.identity)) {
-            try log.print("mac_release: notarization needs a signing identity and a keychain " ++
-                "profile (--profile, default {s}); an ad-hoc signature cannot be notarized\n", .{default_profile});
-            return error.NotarizationRefused;
-        }
-        if (!profile_exists(io, arguments.profile)) {
-            try log.print("mac_release: the keychain has no notary profile '{s}'. Store one " ++
-                "with: xcrun notarytool store-credentials {s} (it asks for the Apple ID and " ++
-                "an app-specific password, or an API key, and keeps them in the keychain)\n", .{ arguments.profile, arguments.profile });
-            return error.NotarizationRefused;
-        }
-    }
+    if (arguments.notarize) try check_notarization(io, arguments, log);
     const dir = Io.Dir.cwd();
     // One run, one set of files: nothing of an earlier run stays beside this one's.
     dir.deleteTree(io, arguments.out) catch {};
@@ -260,6 +276,19 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
         try log.print("mac_release: notarized; the ticket is not stapled (a bare binary has no " ++
             "place for one)\n", .{});
     }
+    try write_checksum_and_formula(io, arena, log, arguments, archive, name);
+}
+
+/// The archive's sha256 beside it, and the formula with the version, URL and hash filled in.
+fn write_checksum_and_formula(
+    io: Io,
+    arena: std.mem.Allocator,
+    log: *Io.Writer,
+    arguments: *const Arguments,
+    archive: []const u8,
+    name: []const u8,
+) !void {
+    const dir = Io.Dir.cwd();
     const bytes = try dir.readFileAlloc(io, archive, arena, .limited(1 << 30));
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -268,11 +297,13 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
     const sum_line = try std.fmt.allocPrint(arena, "{s}  {s}\n", .{ &hex, name });
     try dir.writeFile(io, .{ .sub_path = sum_path, .data = sum_line });
     const template = try dir.readFileAlloc(io, arguments.formula, arena, .limited(1 << 20));
-    const url = try std.fmt.allocPrint(arena, "{s}/v{s}/{s}", .{ release_url, arguments.version, name });
+    const tag = arguments.version;
+    const url = try std.fmt.allocPrint(arena, "{s}/v{s}/{s}", .{ release_url, tag, name });
     const formula = try fill_formula(arena, template, arguments.version, url, &hex);
     const formula_path = try std.fmt.allocPrint(arena, "{s}/zigbox.rb", .{arguments.out});
     try dir.writeFile(io, .{ .sub_path = formula_path, .data = formula });
-    try log.print("mac_release: {s}\nmac_release: sha256 {s}\nmac_release: formula {s}\n", .{ archive, &hex, formula_path });
+    try log.print("mac_release: {s}\nmac_release: sha256 {s}\n", .{ archive, &hex });
+    try log.print("mac_release: formula {s}\n", .{formula_path});
 }
 
 test "the archive is named for the version and the ad-hoc identity has no timestamp" {
@@ -306,7 +337,9 @@ test "the formula template is filled in all three places" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const filled = try fill_formula(arena_state.allocator(), "@VERSION@ @URL@ @SHA256@ @VERSION@", "1.2.3", "https://x/y.zip", sha);
+    const template = "@VERSION@ @URL@ @SHA256@ @VERSION@";
+    const arena = arena_state.allocator();
+    const filled = try fill_formula(arena, template, "1.2.3", "https://x/y.zip", sha);
     try std.testing.expectEqualStrings("1.2.3 https://x/y.zip " ++ sha ++ " 1.2.3", filled);
     try std.testing.expect(std.mem.indexOfScalar(u8, filled, '@') == null);
 }

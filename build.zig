@@ -684,7 +684,7 @@ fn add_demo_mac(b: *std.Build) void {
     run.setCwd(b.path("."));
     run.addArgs(&.{ "--zbx", "zig-out/bin/zbx" });
     run.step.dependOn(b.getInstallStep());
-    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS, inside the VM");
+    const step = b.step("demo-mac", "Run the M1 to M4 and M4b demo steps from macOS");
     step.dependOn(&run.step);
 }
 
@@ -697,11 +697,16 @@ fn add_mac_release(
     target: std.Build.ResolvedTarget,
 ) void {
     const release = @import("src/mac_release.zig");
-    const identity = b.option([]const u8, "sign-identity", "mac-release: the codesign identity (default: " ++
-        release.default_identity ++ "; - is ad hoc)") orelse release.default_identity;
-    const profile = b.option([]const u8, "notary-profile", "mac-release: the notarytool keychain profile (default: " ++
-        release.default_profile ++ ")") orelse release.default_profile;
-    const notarize = b.option(bool, "notarize", "mac-release: submit the archive to Apple's notary service") orelse false;
+    const identity_help = "mac-release: the codesign identity (- is ad hoc); default " ++
+        release.default_identity;
+    const identity = b.option([]const u8, "sign-identity", identity_help) orelse
+        release.default_identity;
+    const profile_help = "mac-release: the notarytool keychain profile; default " ++
+        release.default_profile;
+    const profile = b.option([]const u8, "notary-profile", profile_help) orelse
+        release.default_profile;
+    const notarize_help = "mac-release: submit the archive to Apple's notary service";
+    const notarize = b.option(bool, "notarize", notarize_help) orelse false;
     const image = add_vm_image(b, options);
     const module = b.createModule(.{
         .root_source_file = b.path("src/macos_main.zig"),
@@ -723,11 +728,13 @@ fn add_mac_release(
     run.setCwd(b.path("."));
     run.addArg("--binary");
     run.addArtifactArg(exe);
-    run.addArgs(&.{ "--entitlements", "vm/zbx.entitlements", "--formula", "packaging/homebrew/zigbox.rb" });
-    run.addArgs(&.{ "--out", "zig-out/mac-release", "--version", @import("build.zig.zon").version });
+    run.addArgs(&.{ "--entitlements", "vm/zbx.entitlements" });
+    run.addArgs(&.{ "--formula", "packaging/homebrew/zigbox.rb" });
+    run.addArgs(&.{ "--out", "zig-out/mac-release" });
+    run.addArgs(&.{ "--version", @import("build.zig.zon").version });
     run.addArgs(&.{ "--identity", identity, "--profile", profile });
     if (notarize) run.addArg("--notarize");
-    const step = b.step("mac-release", "Sign (hardened runtime), zip and optionally notarize the macOS zbx");
+    const step = b.step("mac-release", "Sign, zip and optionally notarize the macOS zbx");
     step.dependOn(&run.step);
 }
 
