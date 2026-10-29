@@ -13,11 +13,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const c = std.c;
 const commands = @import("commands.zig");
-const constants = @import("../constants.zig");
 const control = @import("control.zig");
+const constants = @import("../constants.zig");
 const diagnose = @import("diagnose.zig");
 const files = @import("files.zig");
 const manifest = @import("../registry/manifest.zig");
+const ports = @import("../vm_ports.zig");
 const protocol = @import("../forward_protocol.zig");
 const text_util = @import("../text.zig");
 const vz = @import("vz.zig");
@@ -164,6 +165,8 @@ const Frames = struct {
     names: [constants.forward_env_count_max][constants.env_name_bytes_max + 1:0]u8 = undefined,
     values: [constants.forward_env_count_max][1024]u8 = undefined,
     directory: [constants.path_bytes_max + 1]u8 = undefined,
+    /// `--publish=HOST:CONTAINER` made from `--publish=ADDRESS:HOST:CONTAINER`.
+    publish_text: [constants.publish_count_max][64]u8 = undefined,
 };
 
 var frames: Frames = undefined;
@@ -271,7 +274,10 @@ pub fn run(ctx: *const commands.Context, given: *const Command, diag: *Diag) Err
     assert(diag.code == null);
     try check_directory(diag);
     var platform: ?[]const u8 = null;
-    const command = try take_platform(given, &platform, diag);
+    var command = try take_platform(given, &platform, diag);
+    var reserved: ports.PortSet = .{};
+    defer if (reserved.count > 0) release_ports(ctx, &reserved);
+    try reserve_ports(ctx, &command, &reserved, diag);
     const streams = Streams.of_this_process();
     const payload = start_frame(&command, streams, platform) orelse {
         diag.raise(.E0008);
@@ -293,6 +299,153 @@ pub fn run(ctx: *const commands.Context, given: *const Command, diag: *Diag) Err
     const screen = Terminal.enter(streams.pty);
     defer screen.leave();
     return relay(connection, &command, diag);
+}
+
+/// A `--publish` value with the Mac address it names, if it names one.
+pub const Publication = struct {
+    address: control.Address,
+    port: u16,
+    /// The value for the Linux zbx: `HOST:CONTAINER`.
+    rest: []const u8,
+    /// The address as the user wrote it (for the message), or "127.0.0.1" when none.
+    shown: []const u8,
+};
+
+/// Reads `[ADDRESS:]HOST:CONTAINER`. Null for anything else, which is left for the Linux zbx to
+/// accept or refuse (`ZBX-E0600`) as it does on Linux.
+pub fn read_publication(value: []const u8) ?Publication {
+    assert(value.len <= constants.arg_bytes_max);
+    const first = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+    const host = ports.port_of(value[0..first]) orelse blk: {
+        break :blk null;
+    };
+    if (host) |port| {
+        // `HOST:CONTAINER`, and a third part would be left to the Linux zbx to refuse.
+        if (std.mem.indexOfScalarPos(u8, value, first + 1, ':') != null) return null;
+        return .{
+            .address = .{ .kind = .loopback },
+            .port = port,
+            .rest = value,
+            .shown = "127.0.0.1",
+        };
+    }
+    const second = std.mem.indexOfScalarPos(u8, value, first + 1, ':') orelse return null;
+    if (std.mem.indexOfScalarPos(u8, value, second + 1, ':') != null) return null;
+    const port = ports.port_of(value[first + 1 .. second]) orelse return null;
+    const address = read_address(value[0..first]) orelse return null;
+    return .{
+        .address = address,
+        .port = port,
+        .rest = value[first + 1 ..],
+        .shown = value[0..first],
+    };
+}
+
+fn read_address(text: []const u8) ?control.Address {
+    assert(text.len < constants.arg_bytes_max);
+    if (std.mem.eql(u8, text, "localhost")) return .{ .kind = .loopback };
+    var parts = std.mem.splitScalar(u8, text, '.');
+    var value: u32 = 0;
+    var count: u32 = 0;
+    while (parts.next()) |part| : (count += 1) {
+        if (count == 4) return null;
+        if (part.len == 0 or part.len > 3) return null;
+        if (part.len > 1 and part[0] == '0') return null;
+        const octet = std.fmt.parseInt(u8, part, 10) catch return null;
+        value = (value << 8) | octet;
+    }
+    if (count != 4) return null;
+    if (value == 0) return .{ .kind = .any };
+    if (value == 0x7f000001) return .{ .kind = .loopback };
+    return .{ .kind = .v4, .v4 = value };
+}
+
+/// Reserves, on the Mac, every port the command publishes, and takes a Mac address out of the
+/// `--publish` values (the Linux zbx knows only `HOST:CONTAINER`). A port that cannot be
+/// listened on is `ZBX-E1017`, before the container exists.
+fn reserve_ports(
+    ctx: *const commands.Context,
+    command: *Command,
+    reserved: *ports.PortSet,
+    diag: *Diag,
+) Error!void {
+    assert(command.words.len <= constants.args_count_max);
+    assert(reserved.count == 0);
+    var past_separator = false;
+    var index: usize = 0;
+    var rewritten: usize = 0;
+    while (index < command.words.len) : (index += 1) {
+        const word = command.words[index];
+        if (std.mem.eql(u8, word, "--")) past_separator = true;
+        if (past_separator) break;
+        const joined = std.mem.startsWith(u8, word, "--publish=");
+        if (!joined and !std.mem.eql(u8, word, "--publish")) continue;
+        const slot = if (joined) index else index + 1;
+        if (slot >= command.words.len) break;
+        const value = if (joined) word["--publish=".len..] else command.words[slot];
+        const found = read_publication(value) orelse continue;
+        if (rewritten < constants.publish_count_max) {
+            const text = if (joined)
+                std.fmt.bufPrint(&frames.publish_text[rewritten], "--publish={s}", .{found.rest})
+            else
+                std.fmt.bufPrint(&frames.publish_text[rewritten], "{s}", .{found.rest});
+            frames.arguments[slot] = text catch continue;
+            rewritten += 1;
+        }
+        try reserve_one(ctx, found, reserved, diag);
+        if (!joined) index += 1;
+    }
+}
+
+fn reserve_one(
+    ctx: *const commands.Context,
+    found: Publication,
+    reserved: *ports.PortSet,
+    diag: *Diag,
+) Error!void {
+    assert(found.shown.len > 0);
+    assert(found.port > 0);
+    _ = try commands.ensure_running(ctx, diag);
+    var line: [64]u8 = undefined;
+    const wanted: control.Publish = .{ .address = found.address, .port = found.port };
+    const request = control.render_publish(&line, wanted);
+    var reply: [constants.vm_line_bytes_max]u8 = undefined;
+    const answer = ask_control(ctx, request, &reply) orelse {
+        diagnose.service_silent(diag, ctx.paths.console_log.slice());
+        return error.Failed;
+    };
+    if (std.mem.eql(u8, answer, control.reply_ok)) {
+        _ = reserved.add(found.port);
+        return;
+    }
+    var why: []const u8 = "";
+    if (std.mem.eql(u8, answer, control.reply_full)) why = "full";
+    const failed_prefix = "failed ";
+    if (std.mem.startsWith(u8, answer, failed_prefix)) {
+        why = std.mem.trimEnd(u8, answer[failed_prefix.len..], "\n");
+    }
+    diagnose.port_unavailable(diag, found.port, found.shown, why);
+    return error.Failed;
+}
+
+/// One request line to the host process and its one-line answer.
+fn ask_control(ctx: *const commands.Context, request: []const u8, reply: []u8) ?[]const u8 {
+    assert(reply.len >= 16);
+    assert(request.len > 0);
+    const socket = files.connect_unix(ctx.paths.socket.slice()) catch return null;
+    defer files.close(socket);
+    files.write_all(socket, request) catch return null;
+    return files.read_line(socket, reply, constants.vm_control_timeout_ms * 2) catch null;
+}
+
+/// The command is over: the host closes the ports it never saw published, and keeps the others
+/// for as long as the guest reports them.
+fn release_ports(ctx: *const commands.Context, reserved: *const ports.PortSet) void {
+    assert(reserved.count > 0); // Only a command that reserved a port syncs.
+    var line: [constants.vm_line_bytes_max]u8 = undefined;
+    var reply: [constants.vm_line_bytes_max]u8 = undefined;
+    assert(reserved.count <= constants.vm_ports_max);
+    _ = ask_control(ctx, control.render_sync(&line, reserved), &reply);
 }
 
 /// The machine shares the home directory and nothing else: a command whose working directory is
@@ -499,6 +652,32 @@ test "a Linux signal number is given for the signals zbx forwards, and none for 
     try std.testing.expectEqual(@as(?u8, 3), guest_signal(@backingInt(c.SIG.QUIT)));
     try std.testing.expectEqual(@as(?u8, null), guest_signal(@backingInt(c.SIG.WINCH)));
     try std.testing.expectEqual(@as(?u8, null), guest_signal(0));
+}
+
+test "a --publish value names a Mac address only when it has three parts" {
+    // Goal: the default is the loopback, 0.0.0.0 is only what the user wrote, and a form the
+    // Linux zbx refuses is left for it to refuse. Method: each form.
+    const plain = read_publication("8080:80").?;
+    try std.testing.expectEqual(control.Address.Kind.loopback, plain.address.kind);
+    try std.testing.expectEqual(@as(u16, 8080), plain.port);
+    try std.testing.expectEqualStrings("8080:80", plain.rest);
+    const all = read_publication("0.0.0.0:8080:80").?;
+    try std.testing.expectEqual(control.Address.Kind.any, all.address.kind);
+    try std.testing.expectEqualStrings("8080:80", all.rest);
+    const local = read_publication("127.0.0.1:8080:80").?;
+    try std.testing.expectEqual(control.Address.Kind.loopback, local.address.kind);
+    const named = read_publication("localhost:1:2").?;
+    try std.testing.expectEqual(control.Address.Kind.loopback, named.address.kind);
+    const one = read_publication("192.168.1.5:9000:90").?;
+    try std.testing.expectEqual(control.Address.Kind.v4, one.address.kind);
+    try std.testing.expectEqual(@as(u32, 0xc0a80105), one.address.v4);
+    const refused = [_][]const u8{
+        "",                  "80",                "a:b",
+        "8080:80:1",         "300.1.1.1:8080:80", "1.2.3:8080:80",
+        "1.2.3.4.5:8080:80", "01.2.3.4:8080:80",  "0.0.0.0:0:80",
+        "0.0.0.0:99999:80",  "host:8080:80",      "[::1]:8080:80",
+    };
+    for (refused) |value| try std.testing.expect(read_publication(value) == null);
 }
 
 test "only linux/amd64 needs Rosetta, and only when it is not installed" {

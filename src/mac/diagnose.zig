@@ -349,6 +349,41 @@ pub fn rosetta_missing(diag: *Diag) void {
     assert(diag.fixes.count == 2);
 }
 
+/// E1017: the Mac cannot listen on a published port. `reason` is empty when another program holds
+/// it; otherwise the system's word for what failed (or `full`, for the host's own limit).
+pub fn port_unavailable(diag: *Diag, port: u16, address: []const u8, reason: []const u8) void {
+    assert(diag.code == null);
+    assert(port > 0);
+    assert(address.len > 0);
+    diag.raise(.E1017);
+    diag.while_("listening on a published port on this Mac", .{});
+    if (reason.len == 0) {
+        diag.cause("port {d} is already in use on this Mac, by another program", .{port});
+    } else if (std.mem.eql(u8, reason, "full")) {
+        diag.cause("this Mac already listens on {d} published ports, the most it carries", .{
+            constants.vm_ports_max,
+        });
+    } else if (std.mem.eql(u8, reason, "ACCES")) {
+        diag.cause("macOS lets only root listen on {s}:{d}, a port under 1024", .{ address, port });
+    } else {
+        diag.cause("this Mac would not let zbx listen on {s}:{d}: {s}", .{ address, port, reason });
+    }
+    diag.context("port", "{d}", .{port});
+    diag.context("addr", "{s}", .{address});
+    if (reason.len == 0) {
+        diag.fix_with("see what holds it:", "lsof -nP -iTCP:{d} -sTCP:LISTEN", .{port});
+    }
+    if (std.mem.eql(u8, reason, "ACCES")) {
+        diag.fix_with(
+            "to listen on every interface (this exposes the port on your network):",
+            "--publish 0.0.0.0:{d}:<container port>",
+            .{port},
+        );
+    }
+    diag.fix(.{ .sentence = "or publish a port from 1024 up: --publish <port>:<container port>" });
+    assert(diag.fixes.count >= 1);
+}
+
 // ---- Tests: the text of each diagnostic is in vm_golden.zig ------------------------------------
 
 test "a small disk is told in MiB and the bigger one is always bigger" {

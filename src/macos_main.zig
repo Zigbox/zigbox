@@ -585,6 +585,8 @@ test {
     _ = @import("mac/objc.zig");
     _ = @import("mac/vz.zig");
     _ = @import("mac/forward.zig");
+    _ = @import("mac/ports.zig");
+    _ = @import("vm_ports.zig");
     _ = @import("mac/dns.zig");
     _ = @import("mac/image.zig");
     _ = @import("mac/files.zig");

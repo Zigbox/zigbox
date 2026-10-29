@@ -1,0 +1,6 @@
+error[ZBX-E1017]: a published port cannot be listened on on the Mac
+  cause  port 8080 is already in use on this Mac, by another program
+  fix    see what holds it:   lsof -nP -iTCP:8080 -sTCP:LISTEN
+         or publish a port from 1024 up: --publish <port>:<container port>
+  more   zbx explain E1017 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1017.html
