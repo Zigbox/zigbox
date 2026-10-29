@@ -598,7 +598,8 @@ const vm_status_schema =
     \\"description":"M4b slice 2: whether the guest got an address by DHCP; null when stopped"},
     \\"configured":{"type":"object","required":["cpus","memory_bytes"],
     \\"description":"what the next boot uses (zbx vm config)",
-    \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"}}},
+    \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"},
+    \\"disk_bytes":{"type":"integer","description":"M4b slice 3: the store disk's size"}}},
     \\"idle_timeout_ms":{"type":"integer","description":"idle time after which it stops"}}}
 ;
 
@@ -611,12 +612,14 @@ const vm_config_schema =
     \\"applies"],
     \\"properties":{"schema":{"const":"zbx.vm.config/1"},
     \\"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"},
+    \\"disk_bytes":{"type":"integer","description":"M4b slice 3: the store disk; it only grows"},
     \\"source":{"enum":["default","settings"],
     \\"description":"settings: written by zbx vm config"},
     \\"bounds":{"type":"object","required":["cpus_min","cpus_max","memory_bytes_min",
     \\"memory_bytes_max"],"description":"what this Mac allows",
     \\"properties":{"cpus_min":{"type":"integer"},"cpus_max":{"type":"integer"},
-    \\"memory_bytes_min":{"type":"integer"},"memory_bytes_max":{"type":"integer"}}},
+    \\"memory_bytes_min":{"type":"integer"},"memory_bytes_max":{"type":"integer"},
+    \\"disk_bytes_min":{"type":"integer"},"disk_bytes_max":{"type":"integer"}}},
     \\"applies":{"enum":["next_boot","running_machine"],
     \\"description":"running_machine: the machine runs with these values already"},
     \\"running":{"type":["object","null"],"description":"a running machine with other values",

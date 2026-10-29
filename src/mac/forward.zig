@@ -17,7 +17,10 @@ const constants = @import("../constants.zig");
 const control = @import("control.zig");
 const diagnose = @import("diagnose.zig");
 const files = @import("files.zig");
+const manifest = @import("../registry/manifest.zig");
 const protocol = @import("../forward_protocol.zig");
+const text_util = @import("../text.zig");
+const vz = @import("vz.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 
 pub const Error = error{Failed};
@@ -165,6 +168,9 @@ const Frames = struct {
 
 var frames: Frames = undefined;
 
+/// What the guest said about the store disk before the command ended, if it did.
+var disk_note: ?protocol.DiskFull = null;
+
 /// The write end of the pipe the host watches (see `ask_host`); never closed before exit.
 var watch_descriptor: i32 = -1;
 
@@ -197,6 +203,16 @@ fn add_environment(count: *usize, name: []const u8) void {
     assert(count.* <= constants.forward_env_count_max);
 }
 
+/// `ZBX_PLATFORM=<value>` for the Linux zbx in the machine; room is always kept for it.
+fn add_platform(count: *usize, value: []const u8) void {
+    assert(manifest.architecture_of_platform(value) != null);
+    assert(count.* <= constants.forward_env_count_max);
+    if (count.* == constants.forward_env_count_max) count.* -= 1; // The platform wins over a forwarded name.
+    const entry = std.fmt.bufPrint(&frames.values[count.*], "ZBX_PLATFORM={s}", .{value}) catch return;
+    frames.environment[count.*] = entry;
+    count.* += 1;
+}
+
 /// The names the command line asks for: `-e NAME` and `--env NAME` without a value take the
 /// variable from the environment of the process that runs `zbx`, which is this one.
 fn add_named_environment(count: *usize, words: []const []const u8) void {
@@ -223,12 +239,13 @@ const Streams = struct {
     }
 };
 
-fn start_frame(command: *const Command, streams: Streams) ?[]const u8 {
+fn start_frame(command: *const Command, streams: Streams, platform: ?[]const u8) ?[]const u8 {
     assert(command.words.len > 0);
     assert(command.words.len <= constants.args_count_max);
     var count: usize = 0;
     for (forwarded_names) |name| add_environment(&count, name);
     add_named_environment(&count, command.words);
+    if (platform) |value| add_platform(&count, value);
     assert(count <= constants.forward_env_count_max);
     var directory: []const u8 = "";
     if (c.getcwd(&frames.directory, frames.directory.len)) |_| {
@@ -247,11 +264,14 @@ fn start_frame(command: *const Command, streams: Streams) ?[]const u8 {
 }
 
 /// Runs `command` in the VM. Returns the command's exit code; a failure is in `diag`.
-pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) Error!u8 {
-    assert(command.words.len > 0);
+pub fn run(ctx: *const commands.Context, given: *const Command, diag: *Diag) Error!u8 {
+    assert(given.words.len > 0);
     assert(diag.code == null);
+    try check_directory(diag);
+    var platform: ?[]const u8 = null;
+    const command = try take_platform(given, &platform, diag);
     const streams = Streams.of_this_process();
-    const payload = start_frame(command, streams) orelse {
+    const payload = start_frame(&command, streams, platform) orelse {
         diag.raise(.E0008);
         diag.while_("reading the command line", .{});
         diag.cause("the command line and environment are more than {d} bytes", .{
@@ -266,11 +286,80 @@ pub fn run(ctx: *const commands.Context, command: *const Command, diag: *Diag) E
     defer files.close(connection);
     try catch_signals();
     if (!send_frame(connection, .start, payload)) {
-        return lost(command, diag, "the guest did not take the command");
+        return lost(&command, diag, "the guest did not take the command");
     }
     const screen = Terminal.enter(streams.pty);
     defer screen.leave();
-    return relay(connection, command, diag);
+    return relay(connection, &command, diag);
+}
+
+/// The machine shares the home directory and nothing else: a command whose working directory is
+/// elsewhere would run somewhere other than where it was asked to, so it is refused (and the
+/// machine is not even started for it).
+fn check_directory(diag: *Diag) Error!void {
+    assert(diag.code == null);
+    var home_storage: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const home = files.shared_home(&home_storage) orelse return; // `forward_command` said so.
+    if (c.getcwd(&frames.directory, frames.directory.len) == null) return;
+    const directory = std.mem.sliceTo(&frames.directory, 0);
+    if (files.is_inside(directory, home)) return;
+    var shown: [constants.path_bytes_max + 1]u8 = undefined;
+    diagnose.directory_not_shared(diag, text_util.sanitise(&shown, directory), home);
+    return error.Failed;
+}
+
+/// Takes `--platform <linux/amd64|linux/arm64>` (before the `--` of a `run`) out of the command
+/// line: the Linux zbx in the machine does not know the option, and gets `ZBX_PLATFORM` instead.
+/// Refuses a platform Rosetta would be needed for when this Mac has none.
+fn take_platform(given: *const Command, platform: *?[]const u8, diag: *Diag) Error!Command {
+    assert(given.words.len <= constants.args_count_max);
+    assert(platform.* == null);
+    var kept: usize = 0;
+    var index: usize = 0;
+    var past_separator = false;
+    while (index < given.words.len) : (index += 1) {
+        const word = given.words[index];
+        if (!past_separator and std.mem.eql(u8, word, "--")) past_separator = true;
+        const is_option = !past_separator and std.mem.eql(u8, word, "--platform");
+        const joined = !past_separator and std.mem.startsWith(u8, word, "--platform=");
+        if (!is_option and !joined) {
+            frames.arguments[kept] = word;
+            kept += 1;
+            continue;
+        }
+        const value = if (joined) word["--platform=".len..] else blk: {
+            index += 1;
+            break :blk if (index < given.words.len) given.words[index] else "";
+        };
+        if (manifest.architecture_of_platform(value) == null) return bad_platform(diag, value);
+        platform.* = value;
+    }
+    if (platform.*) |value| {
+        if (rosetta_refused(value, vz.rosetta_state())) {
+            diagnose.rosetta_missing(diag);
+            return error.Failed;
+        }
+    }
+    assert(kept <= given.words.len);
+    return .{ .words = frames.arguments[0..kept], .json = given.json, .is_run = given.is_run };
+}
+
+/// A linux/amd64 command needs Rosetta in the machine; any other platform does not.
+fn rosetta_refused(platform: []const u8, state: vz.RosettaState) bool {
+    const architecture = manifest.architecture_of_platform(platform) orelse return false;
+    return architecture == .amd64 and state != .installed;
+}
+
+fn bad_platform(diag: *Diag, value: []const u8) Error {
+    assert(diag.code == null);
+    var shown: [constants.arg_echo_bytes_max]u8 = undefined;
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("--platform takes linux/amd64 or linux/arm64, not '{s}'", .{
+        text_util.sanitise(&shown, value),
+    });
+    diag.fix(.{ .sentence = "see the options:", .command = "zbx help" });
+    return error.Failed;
 }
 
 fn lost(command: *const Command, diag: *Diag, what: []const u8) Error {
@@ -365,8 +454,16 @@ fn take_frame(connection: i32, command: *const Command, diag: *Diag) Error!?u8 {
     switch (header.kind) {
         .stdout => files.write_all(1, payload[0..header.length]) catch {},
         .stderr => files.write_all(2, payload[0..header.length]) catch {},
+        .disk_full => {
+            assert(header.length == 8); // parse_header fixed the size of the note.
+            disk_note = protocol.parse_disk_full(payload[0..8]);
+        },
         .exit => {
             assert(header.length == 2); // parse_header fixed the size of an exit frame.
+            if (disk_note) |note| {
+                diagnose.store_disk_full(diag, @as(u64, note.total_mib) << 20, @as(u64, note.free_mib) << 20);
+                return error.Failed;
+            }
             const exit = protocol.parse_exit(payload[0..2]).?; // The header fixed the size at 2.
             return if (exit.signaled) 128 +| exit.value else exit.value;
         },
@@ -396,6 +493,17 @@ test "a Linux signal number is given for the signals zbx forwards, and none for 
     try std.testing.expectEqual(@as(?u8, 3), guest_signal(@backingInt(c.SIG.QUIT)));
     try std.testing.expectEqual(@as(?u8, null), guest_signal(@backingInt(c.SIG.WINCH)));
     try std.testing.expectEqual(@as(?u8, null), guest_signal(0));
+}
+
+test "only linux/amd64 needs Rosetta, and only when it is not installed" {
+    // Goal: the refusal for a Mac without Rosetta (which cannot be provoked on one that has it).
+    // Method: every platform against every state of Rosetta.
+    const states = [_]vz.RosettaState{ .not_supported, .not_installed, .installed };
+    for (states) |state| {
+        try std.testing.expectEqual(state != .installed, rosetta_refused("linux/amd64", state));
+        try std.testing.expect(!rosetta_refused("linux/arm64", state));
+        try std.testing.expect(!rosetta_refused("windows/amd64", state));
+    }
 }
 
 test "named environment: only -e NAME without a value, only allowed names" {

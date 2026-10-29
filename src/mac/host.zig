@@ -111,6 +111,7 @@ pub fn boot(request: *const Request, diag: *Diag) error{Failed}!Running {
         diagnose.directory(diag, "unpacking the VM image", paths.image_dir.slice(), files.reason());
         return error.Failed;
     };
+    if (!prepare_disk(request, diag)) return error.Failed;
     const console = open_console(paths, diag) orelse return error.Failed;
     const listener = files.listen_unix(paths.socket.slice()) catch {
         const doing = "opening the control socket";
@@ -170,6 +171,30 @@ fn open_console(paths: *const paths_mod.Paths, diag: *Diag) ?i32 {
     return descriptor;
 }
 
+/// The store disk: the Mac's volume must have room beside it, and the file exists and is as big
+/// as the setting says. It is created sparse and only ever grown, never touched otherwise.
+fn prepare_disk(request: *const Request, diag: *Diag) bool {
+    assert(request.values.disk_bytes >= constants.vm_disk_bytes_min);
+    assert(diag.code == null);
+    const paths = request.paths;
+    const doing = "preparing the virtual machine's disk";
+    files.make_directories(paths.base.slice()) catch {
+        diagnose.directory(diag, doing, paths.base.slice(), files.reason());
+        return false;
+    };
+    const free = files.free_bytes(paths.base.slice());
+    if (free < constants.vm_disk_host_free_bytes_min) {
+        const needed = constants.vm_disk_host_free_bytes_min;
+        diagnose.host_volume_full(diag, paths.store_disk.slice(), free, needed);
+        return false;
+    }
+    files.ensure_sparse_file(paths.store_disk.slice(), request.values.disk_bytes) catch {
+        diagnose.directory(diag, doing, paths.store_disk.slice(), files.reason());
+        return false;
+    };
+    return true;
+}
+
 fn create_machine(request: *const Request, console: i32, diag: *Diag) ?vz.Machine {
     assert(request.values.memory_bytes >= constants.vm_memory_bytes_min);
     assert(console >= 0);
@@ -177,6 +202,12 @@ fn create_machine(request: *const Request, console: i32, diag: *Diag) ?vz.Machin
     const paths = request.paths;
     var kernel: [constants.vm_path_bytes_max:0]u8 = undefined;
     var initramfs: [constants.vm_path_bytes_max:0]u8 = undefined;
+    var disk: [constants.vm_path_bytes_max:0]u8 = undefined;
+    var home_storage: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const home = files.shared_home(&home_storage) orelse {
+        diagnose.setup_failed(diag, "home", paths.console_log.slice());
+        return null;
+    };
     const spec: vz.BootSpec = .{
         // Cannot fail: `Paths.init` made every path shorter than the buffer.
         .kernel_path = files.terminate(&kernel, paths.kernel.slice()) catch unreachable,
@@ -186,6 +217,10 @@ fn create_machine(request: *const Request, console: i32, diag: *Diag) ?vz.Machin
         .console_descriptor = console,
         .cpus = request.values.cpus,
         .memory_bytes = request.values.memory_bytes,
+        // Cannot fail: `Paths.init` made every path shorter than the buffer.
+        .disk_path = files.terminate(&disk, paths.store_disk.slice()) catch unreachable,
+        .home_path = home,
+        .rosetta = vz.rosetta_state() == .installed,
     };
     var failure: vz.Failure = .{};
     var machine = vz.Machine.create(&spec, &failure) catch |err| {
@@ -273,14 +308,15 @@ fn setup_guest(machine: *vz.Machine, paths: *const paths_mod.Paths, diag: *Diag)
         return null;
     };
     const name = std.mem.span(entry.name orelse "");
-    const home_text = std.c.getenv("HOME") orelse "";
+    var home_storage: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const home_text = files.shared_home(&home_storage) orelse "";
     var dns_buffer: [64]u8 = undefined;
     var spec: protocol.Setup = .{
         .seconds = wall_clock_seconds(),
         .uid = entry.uid,
         .gid = entry.gid,
         .name = name,
-        .home = std.mem.span(home_text),
+        .home = home_text,
         .dns = dns.resolvers(&dns_buffer),
     };
     if (!protocol.name_ok(spec.name) or !protocol.home_ok(spec.home) or spec.uid == 0) {

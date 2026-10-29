@@ -176,10 +176,12 @@ fn status_text(buffer: []u8, status: ?control.Status, configured: settings.Setti
     assert(configured.cpus >= 1);
     assert(buffer.len >= 512);
     var writer: std.Io.Writer = .fixed(buffer);
-    const next_boot = "  config   {d} cpus, {d} MiB at the next boot\n";
+    const next_boot = "  config   {d} cpus, {d} MiB, {d} GiB disk at the next boot\n";
     const running = status orelse {
         put(&writer, "vm: stopped\n  image    {s}\n", .{image.version});
-        put(&writer, next_boot, .{ configured.cpus, configured.memory_bytes >> 20 });
+        put(&writer, next_boot, .{
+            configured.cpus, configured.memory_bytes >> 20, configured.disk_bytes >> 30,
+        });
         return writer.buffered();
     };
     const same: []const u8 = if (std.mem.eql(u8, &running.version, image.version))
@@ -197,7 +199,9 @@ fn status_text(buffer: []u8, status: ?control.Status, configured: settings.Setti
     put(&writer, "  uptime   {d}.{d} s\n", .{ seconds, running.uptime_ms % 1000 / 100 });
     const differs = configured.cpus != running.cpus or
         configured.memory_bytes != running.memory_bytes;
-    if (differs) put(&writer, next_boot, .{ configured.cpus, configured.memory_bytes >> 20 });
+    if (differs) put(&writer, next_boot, .{
+        configured.cpus, configured.memory_bytes >> 20, configured.disk_bytes >> 30,
+    });
     return writer.buffered();
 }
 
@@ -220,9 +224,10 @@ fn status_json(buffer: []u8, status: ?control.Status, configured: settings.Setti
         put_all(&writer, "\"cpus\":null,\"memory_bytes\":null,\"uptime_ms\":null,");
         put_all(&writer, "\"network\":null,");
     }
-    put(&writer, "\"configured\":{{\"cpus\":{d},\"memory_bytes\":{d}}},", .{
+    put(&writer, "\"configured\":{{\"cpus\":{d},\"memory_bytes\":{d},", .{
         configured.cpus, configured.memory_bytes,
     });
+    put(&writer, "\"disk_bytes\":{d}}},", .{configured.disk_bytes});
     put(&writer, "\"idle_timeout_ms\":{d}}}\n", .{constants.vm_idle_timeout_ms});
     return writer.buffered();
 }
@@ -552,14 +557,18 @@ fn print_config(
         false;
     if (ctx.json) {
         put(&writer, "{{\"schema\":\"zbx.vm.config/1\",\"cpus\":{d},", .{values.cpus});
-        put(&writer, "\"memory_bytes\":{d},\"source\":\"{s}\",", .{
-            values.memory_bytes, @tagName(source),
+        put(&writer, "\"memory_bytes\":{d},\"disk_bytes\":{d},", .{
+            values.memory_bytes, values.disk_bytes,
         });
+        put(&writer, "\"source\":\"{s}\",", .{@tagName(source)});
         put(&writer, "\"bounds\":{{\"cpus_min\":{d},\"cpus_max\":{d},", .{
             bounds.cpus_min, bounds.cpus_max,
         });
-        put(&writer, "\"memory_bytes_min\":{d},\"memory_bytes_max\":{d}}},", .{
+        put(&writer, "\"memory_bytes_min\":{d},\"memory_bytes_max\":{d},", .{
             bounds.memory_bytes_min, bounds.memory_bytes_max,
+        });
+        put(&writer, "\"disk_bytes_min\":{d},\"disk_bytes_max\":{d}}},", .{
+            bounds.disk_bytes_min, bounds.disk_bytes_max,
         });
         put(&writer, "\"applies\":\"{s}\",", .{if (differs) "next_boot" else "running_machine"});
         if (differs) {
@@ -571,12 +580,15 @@ fn print_config(
             put_all(&writer, "\"running\":null}\n");
         }
     } else {
-        put(&writer, "vm config: {d} cpus, {d} MiB ({s})\n", .{
-            values.cpus, values.memory_bytes >> 20, @tagName(source),
+        put(&writer, "vm config: {d} cpus, {d} MiB, {d} GiB disk ({s})\n", .{
+            values.cpus, values.memory_bytes >> 20, values.disk_bytes >> 30, @tagName(source),
         });
         put(&writer, "  allowed  {d} to {d} cpus, ", .{ bounds.cpus_min, bounds.cpus_max });
-        put(&writer, "{d} to {d} MiB\n", .{
+        put(&writer, "{d} to {d} MiB, ", .{
             bounds.memory_bytes_min >> 20, bounds.memory_bytes_max >> 20,
+        });
+        put(&writer, "disk {d} to {d} GiB (it only grows)\n", .{
+            bounds.disk_bytes_min >> 30, bounds.disk_bytes_max >> 30,
         });
         if (differs) {
             put_all(&writer, "  note     the running machine keeps its size; ");
@@ -634,7 +646,8 @@ test "the status document is exactly what the schema describes, network included
     try std.testing.expect(std.mem.startsWith(u8, up, expected_head));
     const tail = "\"vm_image_version\":\"0123456789abcdef\",\"image_match\":false,\"pid\":9," ++
         "\"cpus\":4,\"memory_bytes\":2147483648,\"uptime_ms\":1530,\"network\":\"up\"," ++
-        "\"configured\":{\"cpus\":4,\"memory_bytes\":2147483648},\"idle_timeout_ms\":300000}\n";
+        "\"configured\":{\"cpus\":4,\"memory_bytes\":2147483648,\"disk_bytes\":68719476736}," ++
+        "\"idle_timeout_ms\":300000}\n";
     try std.testing.expect(std.mem.endsWith(u8, up, tail));
     var down = base;
     down.network_up = false;

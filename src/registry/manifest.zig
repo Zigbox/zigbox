@@ -594,9 +594,9 @@ test "a platform that is not native is chosen only when the native one is missin
     // native entry. Method: an index with both, one with only amd64, one with neither.
     var storage: [constants.registry_json_arena_bytes]u8 = undefined;
     var problem: Problem = .{};
-    const both = index_prefix ++ select_entries ++ "]}";
-    const only_amd = index_prefix ++ entry_of(zero, 30, "amd64", "linux", "") ++ "]}";
-    const neither = index_prefix ++ arm_entry ++ "]}";
+    const both = comptime index_prefix ++ select_entries ++ "]}";
+    const only_amd = comptime index_prefix ++ entry_of(zero, 30, "amd64", "linux", "") ++ "]}";
+    const neither = comptime index_prefix ++ arm_entry ++ "]}";
     const bodies = [_][]const u8{ both, only_amd, neither };
     const expected = [_]?Architecture{ .arm64, .amd64, null };
     const missing_natively = [_]bool{ false, true, true };

@@ -325,6 +325,41 @@ pub fn ensure_sparse_file(path: []const u8, bytes: u64) Error!void {
     if (c.ftruncate(descriptor, @intCast(bytes)) != 0) return fail();
 }
 
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+
+/// The directory the machine shares with the guest: the user's home, with symbolic links
+/// resolved, because a working directory comes from `getcwd` in that form. Null when `$HOME` is
+/// unset, is not absolute or cannot be resolved.
+pub fn shared_home(buffer: *[constants.vm_path_bytes_max:0]u8) ?[:0]const u8 {
+    const home = c.getenv("HOME") orelse return null;
+    const text = std.mem.span(home);
+    if (text.len == 0 or text[0] != '/') return null;
+    // `realpath` writes at most PATH_MAX bytes, NUL included: the buffer has 1025.
+    const resolved = realpath(home, buffer) orelse return null;
+    const result = std.mem.span(resolved);
+    assert(result.len < buffer.len);
+    if (result.len == 0) return null;
+    return buffer[0..result.len :0];
+}
+
+/// True when `directory` is `shared` or inside it.
+pub fn is_inside(directory: []const u8, shared: []const u8) bool {
+    assert(shared.len > 0);
+    if (!std.mem.startsWith(u8, directory, shared)) return false;
+    if (directory.len == shared.len) return true;
+    return shared[shared.len - 1] == '/' or directory[shared.len] == '/';
+}
+
+test "a directory is inside the shared one by whole path components" {
+    // Goal: /Users/ada2 is not inside /Users/ada. Method: the boundary cases.
+    try std.testing.expect(is_inside("/Users/ada", "/Users/ada"));
+    try std.testing.expect(is_inside("/Users/ada/src/x", "/Users/ada"));
+    try std.testing.expect(!is_inside("/Users/ada2", "/Users/ada"));
+    try std.testing.expect(!is_inside("/Users", "/Users/ada"));
+    try std.testing.expect(!is_inside("/private/tmp", "/Users/ada"));
+    try std.testing.expect(is_inside("/anything", "/"));
+}
+
 pub fn host_memory_bytes() u64 {
     assert(@sizeOf(u64) == 8);
     var bytes: u64 = 0;

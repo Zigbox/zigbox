@@ -17,6 +17,7 @@ const linux = std.os.linux;
 const constants = @import("constants.zig");
 const dhcp = @import("vm_dhcp.zig");
 const protocol = @import("vm_protocol.zig");
+const storage = @import("vm_guest_storage.zig");
 
 pub const panic = std.debug.FullPanic(panic_handler);
 
@@ -92,6 +93,7 @@ fn log(prefix: []const u8, detail: []const u8) void {
 
 fn power_off() noreturn {
     assert(version_path.len > 0);
+    storage.quiesce_disk();
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .POWER_OFF, null);
     // The kernel did not power off; PID 1 may not return, so wait for the host to stop us.
@@ -415,6 +417,8 @@ fn fail_reply(word: []const u8) []const u8 {
     if (std.mem.eql(u8, word, "clock")) return "fail clock\n";
     if (std.mem.eql(u8, word, "user")) return "fail user\n";
     if (std.mem.eql(u8, word, "cgroup")) return "fail cgroup\n";
+    if (std.mem.eql(u8, word, "disk")) return "fail disk\n";
+    if (std.mem.eql(u8, word, "home")) return "fail home\n";
     if (std.mem.eql(u8, word, "serve")) return "fail serve\n";
     return "fail setup\n";
 }
@@ -437,6 +441,12 @@ fn do_setup(setup: *const protocol.Setup) []const u8 {
     }
     world.network_up = bring_up_network(setup.dns);
     if (!make_user(setup)) return fail_reply("user");
+    if (!storage.mount_disk(setup.uid, setup.gid)) return fail_reply("disk");
+    var home: [constants.vm_home_bytes_max + 1:0]u8 = @splat(0);
+    @memcpy(home[0..setup.home.len], setup.home);
+    if (!storage.mount_home(home[0..setup.home.len :0])) return fail_reply("home");
+    // Rosetta is optional: without it only linux/amd64 images cannot run.
+    if (!storage.mount_rosetta()) log("zbx-init: no Rosetta in this machine", "");
     if (!make_cgroups(setup)) return fail_reply("cgroup");
     world.serve_pid = start_serve(setup) orelse return fail_reply("serve");
     assert(world.serve_pid > 1);

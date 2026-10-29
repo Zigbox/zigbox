@@ -596,6 +596,7 @@ test {
     _ = @import("vm_protocol.zig");
     _ = @import("forward_protocol.zig");
     _ = @import("vm_dhcp.zig");
+    _ = @import("vm_guest_storage.zig");
     _ = @import("schemas.zig");
     _ = @import("mac/vm_golden.zig");
 }

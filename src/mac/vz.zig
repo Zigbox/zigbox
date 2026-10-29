@@ -111,7 +111,27 @@ pub const BootSpec = struct {
     console_descriptor: i32,
     cpus: u32,
     memory_bytes: u64,
+    /// The store disk: a file the guest sees as a virtio block device (`/dev/vda`).
+    disk_path: [:0]const u8,
+    /// The Mac user's home, shared read-write under the tag `home`.
+    home_path: [:0]const u8,
+    /// Whether to share Rosetta under the tag `rosetta`; only when it is installed.
+    rosetta: bool,
 };
+
+/// Whether Rosetta for Linux can be shared with a guest on this Mac.
+pub const RosettaState = enum { not_supported, not_installed, installed };
+
+/// `VZLinuxRosettaDirectoryShare.availability`, every value of `VZLinuxRosettaAvailability`.
+pub fn rosetta_state() RosettaState {
+    const value = objc.send(i64, objc.class("VZLinuxRosettaDirectoryShare"), "availability", .{});
+    assert(value >= 0);
+    return switch (value) {
+        1 => .not_installed,
+        2 => .installed,
+        else => .not_supported,
+    };
+}
 
 /// A vsock connection: the caller's copy of the descriptor and the framework's object, which must
 /// not be released while the connection is in use.
@@ -143,8 +163,12 @@ pub const Machine = struct {
         const pool = objc.Pool.push();
         defer pool.pop();
         const configuration = objc.new("VZVirtualMachineConfiguration");
-        configure(configuration, spec);
         var error_object: Id = null;
+        configure(configuration, spec);
+        if (!attach_storage(configuration, spec, &error_object)) {
+            fail(failure, .configure, error_object);
+            return error.Failed;
+        }
         const valid = objc.send(bool, configuration, "validateWithError:", .{&error_object});
         if (!valid) {
             fail(failure, .validate, error_object);
@@ -369,6 +393,50 @@ fn fail(failure: *Failure, stage: Stage, error_object: Id) void {
     if (error_object == null) return;
     objc.error_info(error_object, &failure.info);
     failure.silent = false;
+}
+
+/// The store disk, the shared home and (when asked) Rosetta. False with `error_object` set when
+/// the framework refuses one of them (a missing file, a Rosetta that went away).
+fn attach_storage(configuration: Id, spec: *const BootSpec, error_object: *Id) bool {
+    assert(spec.disk_path.len > 0);
+    assert(spec.home_path.len > 0);
+    const disk_class = objc.send(Id, objc.class("VZDiskImageStorageDeviceAttachment"), "alloc", .{});
+    const init_disk = "initWithURL:readOnly:error:";
+    const disk = objc.send(Id, disk_class, init_disk, .{
+        objc.file_url(spec.disk_path), false, error_object,
+    });
+    if (disk == null) return false;
+    const block_class = objc.send(Id, objc.class("VZVirtioBlockDeviceConfiguration"), "alloc", .{});
+    const block = objc.send(Id, block_class, "initWithAttachment:", .{disk});
+    objc.send(void, configuration, "setStorageDevices:", .{objc.array(&.{block})});
+    const directory_class = objc.send(Id, objc.class("VZSharedDirectory"), "alloc", .{});
+    const directory = objc.send(Id, directory_class, "initWithURL:readOnly:", .{
+        objc.file_url(spec.home_path), false,
+    });
+    const single_class = objc.send(Id, objc.class("VZSingleDirectoryShare"), "alloc", .{});
+    const single = objc.send(Id, single_class, "initWithDirectory:", .{directory});
+    const home = share_device(constants.vm_home_tag, single);
+    if (!spec.rosetta) {
+        objc.send(void, configuration, "setDirectorySharingDevices:", .{objc.array(&.{home})});
+        return true;
+    }
+    const rosetta_class = objc.send(Id, objc.class("VZLinuxRosettaDirectoryShare"), "alloc", .{});
+    const rosetta = objc.send(Id, rosetta_class, "initWithError:", .{error_object});
+    if (rosetta == null) return false;
+    const translator = share_device(constants.vm_rosetta_tag, rosetta);
+    const devices = objc.array(&.{ home, translator });
+    objc.send(void, configuration, "setDirectorySharingDevices:", .{devices});
+    return true;
+}
+
+/// A virtio-fs device that offers `share` to the guest under `tag`.
+fn share_device(tag: [:0]const u8, share: Id) Id {
+    assert(tag.len > 0);
+    assert(share != null);
+    const device_class = objc.send(Id, objc.class("VZVirtioFileSystemDeviceConfiguration"), "alloc", .{});
+    const device = objc.send(Id, device_class, "initWithTag:", .{objc.string(tag)});
+    objc.send(void, device, "setShare:", .{share});
+    return device;
 }
 
 /// Fills the configuration: boot loader, CPUs, memory, platform, console, vsock, entropy.
