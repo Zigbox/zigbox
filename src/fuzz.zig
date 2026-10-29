@@ -582,7 +582,7 @@ fn check_mount_options(random: std.Random) void {
 }
 
 /// The command word of the command line, stated independently of `cli.scan_options`: the first
-/// word that is not an option, where `--output` takes the next word as its value. Null if
+/// word that is not an option, where `--output` and `-o` take the next word as their value. Null if
 /// collection stops before one.
 fn command_word(args: FuzzArgs) ?[]const u8 {
     var index: u32 = 1;
@@ -592,8 +592,8 @@ fn command_word(args: FuzzArgs) ?[]const u8 {
     while (index < seen_max) : (index += 1) {
         const word = args.items[index];
         if (word.len > constants.arg_bytes_max) return null;
-        if (std.mem.eql(u8, word, "--output")) {
-            index += 1; // Its value, whatever it is, but collection stops at one that is too long.
+        if (std.mem.eql(u8, word, "--output") or std.mem.eql(u8, word, "-o")) {
+            index += 1; // Its value (`-o` is `state export`'s file), whatever it is, but collection stops at one that is too long.
             if (index < seen_max and args.items[index].len > constants.arg_bytes_max) return null;
             continue;
         }
