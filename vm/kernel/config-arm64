@@ -1,0 +1,114 @@
+# Zigbox VM kernel: Linux 6.18 longterm, arm64, for Apple's Virtualization.framework.
+#
+# Applied over `make ARCH=arm64 allnoconfig` (KCONFIG_ALLCONFIG), so every option is built in
+# and nothing else exists. The driver (src/vm_image/kernel_build.zig) fails the build when an
+# option named here does not end up as written in the final .config: allnoconfig drops an option
+# whose dependencies are missing, silently, and this file lists the dependencies too.
+#
+# It already carries what the later slices of milestone M4b need (the file share, the disk, the
+# network, Rosetta, pasta, the containers' own isolation), so the kernel is rebuilt rarely.
+
+# ---- The machine: Virtualization.framework's generic arm64 guest, devices on PCI ------------
+CONFIG_64BIT=y
+CONFIG_ARM64=y
+CONFIG_ARM64_4K_PAGES=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=16
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_OF=y
+CONFIG_ARM_GIC_V3=y
+CONFIG_ARM_ARCH_TIMER=y
+CONFIG_ARM_PSCI_FW=y
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+CONFIG_PCI_HOST_COMMON=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+
+# ---- The console (hvc0), a PL011 as a fallback, a terminal for the containers ----------------
+CONFIG_TTY=y
+CONFIG_HVC_DRIVER=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_UNIX98_PTYS=y
+
+# ---- Devices of the later slices: disk, network, random, memory, vsock, file share -----------
+CONFIG_BLOCK=y
+CONFIG_BLK_DEV=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
+CONFIG_VIRTIO_NET=y
+CONFIG_TUN=y
+CONFIG_VIRTIO_BALLOON=y
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y
+CONFIG_NET=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_FUSE_FS=y
+CONFIG_VIRTIO_FS=y
+
+# ---- Networking for the containers (pasta, the NAT) --------------------------------------------
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_UNIX=y
+CONFIG_PACKET=y
+
+# ---- File systems -----------------------------------------------------------------------------
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
+CONFIG_OVERLAY_FS=y
+CONFIG_FILE_LOCKING=y
+CONFIG_FHANDLE=y
+
+# ---- Starting programs ------------------------------------------------------------------------
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_BINFMT_MISC=y
+
+# ---- What the containers' isolation needs: namespaces, cgroup v2, seccomp ---------------------
+CONFIG_MULTIUSER=y
+CONFIG_SYSVIPC=y
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_IPC_NS=y
+CONFIG_UTS_NS=y
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_FAIR_GROUP_SCHED=y
+CONFIG_CFS_BANDWIDTH=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+
+# ---- What every program expects of the kernel -------------------------------------------------
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_AIO=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_SHMEM=y
+CONFIG_INOTIFY_USER=y
