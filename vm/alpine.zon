@@ -1,0 +1,77 @@
+// What the VM's initramfs takes from Alpine Linux 3.20 (aarch64), pinned by URL and the SHA-256 of
+// each .apk: newuidmap and newgidmap (the package `shadow-subids` in 3.20; later releases call it
+// `shadow-uidmap`), the C library their loader needs, the libraries they link, and Mozilla's CA
+// bundle for TLS, and (slice 3 of M4b) the ext2/3/4 tools that format, check and grow the store
+// disk: mke2fs, e2fsck, resize2fs and the libraries they link. The hashes were taken from the files on dl-cdn.alpinelinux.org when they were
+// pinned. Alpine removes a file when a package is updated in the branch: when a URL stops
+// answering, pin the new version here, deliberately, in one commit.
+// `passt` (pasta) is pinned the same way in slice 4, not here.
+//
+// Each file is fetched first from `mirror` (a GitHub release of this repository that holds the
+// same file names), then from its `url`. Both are checked against the same SHA-256, and a file
+// that fails the check is refused and the next source tried.
+.{
+    .mirror = "https://github.com/Zigbox/zigbox/releases/download/vm-deps-alpine-3.20",
+    .packages = .{
+        .{
+            .name = "musl",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/musl-1.2.5-r4.apk",
+            .sha256 = "71d53cd568d014bf71fa3f76819ddcd68d4f2ec5d9e9203e8ad4dd44667b9e9f",
+        },
+        .{
+            .name = "libmd",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libmd-1.1.0-r0.apk",
+            .sha256 = "48ef621c994f1ed7a56b6ecac6534a0dff889e067384e5863a742adf73b3b2c2",
+        },
+        .{
+            .name = "libbsd",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libbsd-0.12.2-r0.apk",
+            .sha256 = "5685d7302b4bbb5665e6ad3e59c61e4cfa69bd2c78911f4fae5d2439b0088eba",
+        },
+        .{
+            .name = "shadow-subids",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/community/aarch64/shadow-subids-4.15.1-r0.apk",
+            .sha256 = "a542ad23da42e686df8fa2a4b19ef58e5b99698b2a1571e54ca49750fa25e2e9",
+        },
+        .{
+            .name = "ca-certificates-bundle",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/ca-certificates-bundle-20261020-r0.apk",
+            .sha256 = "5bc874de833464f185771142446a0dcce293f1d4b94ded177eebb9fdc4f8c879",
+        },
+        .{
+            .name = "e2fsprogs",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/e2fsprogs-1.47.0-r5.apk",
+            .sha256 = "610f68cc46a63fd60124c85adf09b8ccd80e97f9d624b641aaa2006139e76fca",
+        },
+        .{
+            .name = "e2fsprogs-extra",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/e2fsprogs-extra-1.47.0-r5.apk",
+            .sha256 = "4b45a618f0a2f9e712ab2efdc605c35f2f3f89ff9d22d61ddff2912d9fa7a38f",
+        },
+        .{
+            .name = "e2fsprogs-libs",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/e2fsprogs-libs-1.47.0-r5.apk",
+            .sha256 = "16d1de6bacdbe102d900c12f6dbf92863ec67a035d0e0d1ca6e0c0b9196f96d4",
+        },
+        .{
+            .name = "libcom_err",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libcom_err-1.47.0-r5.apk",
+            .sha256 = "fcfaf6d0ab9c4074d765f298f2b7b14c162709e55b79740635f1990f9f69c865",
+        },
+        .{
+            .name = "libblkid",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libblkid-2.40.1-r1.apk",
+            .sha256 = "b35ad19ff31a4ea9c6a7dcf10975cc76a3c36bc999c4a44fe3d5bda996853bc7",
+        },
+        .{
+            .name = "libuuid",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libuuid-2.40.1-r1.apk",
+            .sha256 = "bd27a657687ab32604f0d5d5760d8c51645caf5563f3aef37254ded79c7629d2",
+        },
+        .{
+            .name = "libeconf",
+            .url = "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libeconf-0.6.3-r0.apk",
+            .sha256 = "796e421d403e0430e73455f817083233ed81ac77f18c8beda5c10150615626ff",
+        },
+    },
+}

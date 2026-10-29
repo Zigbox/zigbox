@@ -273,6 +273,110 @@ pub fn host_cpus() u32 {
     return @intCast(count);
 }
 
+/// The head of macOS's `struct statfs` (64-bit inodes, the default), then room for the rest of
+/// it (two path buffers of 1024 bytes and reserved words): 2168 bytes in all.
+const Statfs = extern struct {
+    bsize: u32,
+    iosize: i32,
+    blocks: u64,
+    bfree: u64,
+    bavail: u64,
+    files: u64,
+    ffree: u64,
+    rest: [2168 - 48]u8,
+};
+
+extern "c" fn statfs(path: [*:0]const u8, buffer: *Statfs) c_int;
+
+/// What an ordinary user may still write on the volume that holds `path`; 0 if it cannot be told.
+pub fn free_bytes(path: []const u8) u64 {
+    assert(@sizeOf(Statfs) == 2168);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return 0;
+    var buffer: Statfs = undefined;
+    if (statfs(text.ptr, &buffer) != 0) return 0;
+    assert(buffer.bsize > 0); // A volume has blocks of some size.
+    return buffer.bavail * buffer.bsize;
+}
+
+/// The size in bytes of the file at `path`; 0 when there is none.
+pub fn file_size(path: []const u8) u64 {
+    assert(path.len > 0);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return 0;
+    var status: c.Stat = undefined;
+    if (c.stat(text.ptr, &status) != 0) return 0;
+    assert(status.size >= 0);
+    return @intCast(status.size);
+}
+
+/// A log that has reached `max_bytes` is renamed to `old_path` (which replaces the one there), so
+/// a log is at most one file of that size and one older. True if it was rotated.
+pub fn rotate_if_large(path: []const u8, old_path: []const u8, max_bytes: u64) bool {
+    assert(max_bytes > 0);
+    assert(!std.mem.eql(u8, path, old_path)); // Renaming a file onto itself rotates nothing.
+    if (file_size(path) < max_bytes) return false;
+    var from: [constants.vm_path_bytes_max:0]u8 = undefined;
+    var to: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const from_text = terminate(&from, path) catch return false;
+    const to_text = terminate(&to, old_path) catch return false;
+    return c.rename(from_text.ptr, to_text.ptr) == 0;
+}
+
+/// Makes the file at `path` exist and be at least `bytes` long, sparse: the blocks are not
+/// allocated until the guest writes them. A longer file is left as it is.
+pub fn ensure_sparse_file(path: []const u8, bytes: u64) Error!void {
+    assert(bytes > 0);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const text = terminate(&terminated, path) catch return error.TooLong;
+    const flags: c.O = .{ .ACCMODE = .RDWR, .CREAT = true };
+    const descriptor = c.open(text.ptr, flags, @as(c.mode_t, 0o600));
+    if (descriptor < 0) return fail();
+    defer close(descriptor);
+    var status: c.Stat = undefined;
+    if (c.fstat(descriptor, &status) != 0) return fail();
+    assert(status.size >= 0);
+    if (@as(u64, @intCast(status.size)) >= bytes) return;
+    if (c.ftruncate(descriptor, @intCast(bytes)) != 0) return fail();
+}
+
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+
+/// The directory the machine shares with the guest: the user's home, with symbolic links
+/// resolved, because a working directory comes from `getcwd` in that form. Null when `$HOME` is
+/// unset, is not absolute or cannot be resolved.
+pub fn shared_home(buffer: *[constants.vm_path_bytes_max:0]u8) ?[:0]const u8 {
+    const home = c.getenv("HOME") orelse return null;
+    const text = std.mem.span(home);
+    if (text.len == 0 or text[0] != '/') return null;
+    // `realpath` writes at most PATH_MAX bytes, NUL included: the buffer has 1025.
+    const resolved = realpath(home, buffer) orelse return null;
+    const result = std.mem.span(resolved);
+    assert(result.len < buffer.len);
+    if (result.len <= 1) return null; // Not the root: a share of everything is not a home.
+    assert(result[0] == '/'); // A resolved path is absolute.
+    return buffer[0..result.len :0];
+}
+
+/// True when `directory` is `shared` or inside it.
+pub fn is_inside(directory: []const u8, shared: []const u8) bool {
+    assert(shared.len > 0);
+    assert(shared[0] == '/'); // The shared directory is an absolute path.
+    if (!std.mem.startsWith(u8, directory, shared)) return false;
+    if (directory.len == shared.len) return true;
+    return shared[shared.len - 1] == '/' or directory[shared.len] == '/';
+}
+
+test "a directory is inside the shared one by whole path components" {
+    // Goal: /Users/ada2 is not inside /Users/ada. Method: the boundary cases.
+    try std.testing.expect(is_inside("/Users/ada", "/Users/ada"));
+    try std.testing.expect(is_inside("/Users/ada/src/x", "/Users/ada"));
+    try std.testing.expect(!is_inside("/Users/ada2", "/Users/ada"));
+    try std.testing.expect(!is_inside("/Users", "/Users/ada"));
+    try std.testing.expect(!is_inside("/private/tmp", "/Users/ada"));
+    try std.testing.expect(is_inside("/anything", "/"));
+}
+
 pub fn host_memory_bytes() u64 {
     assert(@sizeOf(u64) == 8);
     var bytes: u64 = 0;
@@ -280,6 +384,39 @@ pub fn host_memory_bytes() u64 {
     const result = c.sysctlbyname("hw.memsize", &bytes, &size, null, 0);
     if (result != 0 or bytes == 0) return constants.vm_memory_bytes_default;
     return bytes;
+}
+
+test "a log is rotated once it is large and left alone below that" {
+    // Goal: the host log's cap. Method: a file just under and just at the limit.
+    var name: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, "/tmp/zbx-rotate-test-{d}", .{now_ms()});
+    var old_name: [112]u8 = undefined;
+    const old = try std.fmt.bufPrint(&old_name, "{s}.1", .{path});
+    try write_file_atomically(path, "0123456789", 0o600);
+    try std.testing.expect(!rotate_if_large(path, old, 11));
+    try std.testing.expectEqual(@as(u64, 0), file_size(old));
+    try std.testing.expect(rotate_if_large(path, old, 10));
+    try std.testing.expectEqual(@as(u64, 0), file_size(path));
+    try std.testing.expectEqual(@as(u64, 10), file_size(old));
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    _ = c.unlink((try terminate(&terminated, old)).ptr);
+}
+
+test "a sparse file is made, grown and never shortened" {
+    // Goal: the disk file takes no room until written and is never cut. Method: a file in the
+    // system temp directory, made, grown, then asked for less.
+    var name: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, "/tmp/zbx-sparse-test-{d}", .{now_ms()});
+    try std.testing.expectEqual(@as(u64, 0), file_size(path));
+    try ensure_sparse_file(path, 1 << 30);
+    try std.testing.expectEqual(@as(u64, 1 << 30), file_size(path));
+    try ensure_sparse_file(path, 2 << 30);
+    try std.testing.expectEqual(@as(u64, 2 << 30), file_size(path));
+    try ensure_sparse_file(path, 1 << 30);
+    try std.testing.expectEqual(@as(u64, 2 << 30), file_size(path));
+    try std.testing.expect(free_bytes("/tmp") > 0);
+    var terminated: [constants.vm_path_bytes_max:0]u8 = undefined;
+    _ = c.unlink((try terminate(&terminated, path)).ptr);
 }
 
 test "make_directories makes a chain and is the same twice" {
@@ -322,4 +459,137 @@ test "a socket path at the limit works and one past it is refused" {
     const at_limit = "/" ++ repeat('a', constants.vm_socket_path_bytes_max - 1);
     _ = try socket_address(at_limit);
     try std.testing.expectError(error.TooLong, socket_address(at_limit ++ "a"));
+}
+
+// ---- Passing descriptors over a Unix socket ----------------------------------------------------
+
+const Iovec = extern struct { base: ?*anyopaque, length: usize };
+const MessageHeader = extern struct {
+    name: ?*anyopaque = null,
+    name_length: u32 = 0,
+    vectors: ?*Iovec,
+    vector_count: i32,
+    control: ?*anyopaque,
+    control_length: u32,
+    flags: i32 = 0,
+};
+const ControlHeader = extern struct { length: u32, level: i32, kind: i32 };
+const socket_level: i32 = 0xffff;
+const rights_kind: i32 = 1;
+/// The most descriptors one message carries here.
+pub const descriptors_max: u32 = 2;
+const control_header_bytes: u32 = 12;
+
+extern "c" fn sendmsg(socket: i32, message: *const MessageHeader, flags: i32) isize;
+extern "c" fn recvmsg(socket: i32, message: *MessageHeader, flags: i32) isize;
+
+/// A control message: its header and up to two descriptors.
+const Control = extern struct {
+    header: ControlHeader,
+    descriptors: [descriptors_max]i32,
+};
+
+fn control_length(count: u32) u32 {
+    assert(count >= 1);
+    assert(count <= descriptors_max);
+    return control_header_bytes + count * @sizeOf(i32);
+}
+
+/// Sends `bytes` and, with them, open descriptors (one or two). The receiver gets its own copies.
+pub fn send_with_descriptors(socket: i32, bytes: []const u8, descriptors: []const i32) Error!void {
+    assert(socket >= 0);
+    assert(bytes.len > 0);
+    assert(descriptors.len >= 1);
+    assert(descriptors.len <= descriptors_max);
+    var vector: Iovec = .{ .base = @constCast(bytes.ptr), .length = bytes.len };
+    const length = control_length(@intCast(descriptors.len));
+    var control: Control = .{
+        .header = .{ .length = length, .level = socket_level, .kind = rights_kind },
+        .descriptors = @splat(-1),
+    };
+    for (descriptors, 0..) |descriptor, index| {
+        assert(descriptor >= 0);
+        control.descriptors[index] = descriptor;
+    }
+    const message: MessageHeader = .{
+        .vectors = &vector,
+        .vector_count = 1,
+        .control = &control,
+        .control_length = length,
+    };
+    if (sendmsg(socket, &message, 0) < 0) return fail();
+}
+
+pub const Received = struct {
+    length: u32,
+    descriptors: [descriptors_max]i32,
+    descriptor_count: u32,
+};
+
+/// Reads what the peer sent in one message, and the descriptors that came with it.
+pub fn receive_with_descriptors(socket: i32, buffer: []u8) Error!Received {
+    assert(socket >= 0);
+    assert(buffer.len > 0);
+    var vector: Iovec = .{ .base = buffer.ptr, .length = buffer.len };
+    var control: Control = undefined;
+    var message: MessageHeader = .{
+        .vectors = &vector,
+        .vector_count = 1,
+        .control = &control,
+        .control_length = control_length(descriptors_max),
+    };
+    const count = recvmsg(socket, &message, 0);
+    if (count < 0) return fail();
+    var result: Received = .{
+        .length = @intCast(count),
+        .descriptors = @splat(-1),
+        .descriptor_count = 0,
+    };
+    const has_control = message.control_length >= control_header_bytes and
+        control.header.level == socket_level and control.header.kind == rights_kind;
+    if (!has_control) return result;
+    const present = (control.header.length - control_header_bytes) / @sizeOf(i32);
+    result.descriptor_count = @min(present, descriptors_max);
+    for (0..result.descriptor_count) |index| result.descriptors[index] = control.descriptors[index];
+    return result;
+}
+
+test "descriptors passed over a Unix socket are working copies" {
+    // Goal: the hand-off the client relies on. Method: a socket pair; send a pipe's read end and a
+    // second pipe's write end with a line; use both received descriptors; and a message without
+    // descriptors says so.
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &pair));
+    defer close(pair[0]);
+    defer close(pair[1]);
+    var first: [2]i32 = undefined;
+    var second: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&first));
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&second));
+    defer close(first[1]);
+    defer close(second[0]);
+    try send_with_descriptors(pair[0], "ok\n", &.{ first[0], second[1] });
+    close(first[0]);
+    close(second[1]);
+    var line: [16]u8 = undefined;
+    const received = try receive_with_descriptors(pair[1], &line);
+    try std.testing.expectEqualStrings("ok\n", line[0..received.length]);
+    try std.testing.expectEqual(@as(u32, 2), received.descriptor_count);
+    const reader = received.descriptors[0];
+    const writer = received.descriptors[1];
+    defer close(reader);
+    try write_all(first[1], "data");
+    var data: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 4), c.read(reader, &data, data.len));
+    try std.testing.expectEqualStrings("data", data[0..4]);
+    // The writer received is a working end of the second pipe: when it closes, the read end
+    // sees the end of file (the peer's death, as the host watches it).
+    try write_all(writer, "x");
+    close(writer);
+    try std.testing.expectEqual(@as(isize, 1), c.read(second[0], &data, data.len));
+    try std.testing.expectEqual(@as(isize, 0), c.read(second[0], &data, data.len));
+    try write_all(pair[0], "no\n");
+    const plain = try receive_with_descriptors(pair[1], &line);
+    try std.testing.expectEqual(@as(u32, 0), plain.descriptor_count);
+    try std.testing.expectEqual(@as(i32, -1), plain.descriptors[0]);
 }

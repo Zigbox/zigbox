@@ -35,6 +35,8 @@ pub const Probe = union(enum) {
     /// No host: nothing listens and nobody holds the lock.
     absent,
     answering: control.Status,
+    /// A host of another release, whose answer this one cannot read.
+    other_format,
     /// Somebody holds the lock and does not answer (starting up, or stuck), with its pid if known.
     held: ?u32,
 };
@@ -73,12 +75,14 @@ pub fn probe(paths: *const paths_mod.Paths, timeout_ms: u32) Probe {
     switch (parsed) {
         .status => |status| return .{ .answering = status },
         .stopping => return .{ .held = null },
+        .other_format => return .other_format,
     }
 }
 
 /// No answer on the socket: either nobody is there (a killed host leaves a socket file but not
 /// the lock, because the kernel drops the lock with the process) or somebody is, and is silent.
 fn lock_probe(paths: *const paths_mod.Paths) Probe {
+    assert(paths.lock.length > 0);
     assert(paths.lock.length > 0);
     const taken = files.lock_exclusive(paths.lock.slice()) catch return .absent;
     if (taken) |descriptor| {
@@ -109,11 +113,13 @@ fn wait_gone(paths: *const paths_mod.Paths, limit_ms: u32) bool {
 /// Writes into a buffer the caller sized for the longest document; a short one is a bug.
 fn put(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) void {
     assert(writer.end <= writer.buffer.len);
+    assert(writer.end <= writer.buffer.len);
     // Cannot fail: every caller's buffer holds the longest document its format can make.
     writer.print(format, args) catch unreachable;
 }
 
 fn put_all(writer: *std.Io.Writer, text: []const u8) void {
+    assert(writer.end <= writer.buffer.len);
     assert(writer.end <= writer.buffer.len);
     // Cannot fail: same.
     writer.writeAll(text) catch unreachable;
@@ -129,11 +135,28 @@ pub fn run_status(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
         .absent => print_status(ctx, null, loaded.values),
         .answering => |status| print_status(ctx, status, loaded.values),
+        .other_format => print_other(ctx),
         .held => |pid| {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
     }
+}
+
+const another_release = "another release's (zbx vm stop replaces it)";
+
+/// A host of another release runs: what can be said of it without reading its answer.
+fn print_other(ctx: *const Context) void {
+    assert(ctx.paths.socket.length > 0);
+    const text = "{{\"schema\":\"zbx.vm.status/1\",\"state\":\"running\",\"image_version\":" ++
+        "\"{s}\",\"vm_image_version\":null,\"image_match\":false,\"pid\":null,\"cpus\":null," ++
+        "\"memory_bytes\":null,\"uptime_ms\":null,\"configured\":null,\"idle_timeout_ms\":{d}}}\n";
+    var buffer: [512]u8 = undefined;
+    const written = if (ctx.json)
+        std.fmt.bufPrint(&buffer, text, .{ image.version, constants.vm_idle_timeout_ms })
+    else
+        std.fmt.bufPrint(&buffer, "vm: running\n  image    {s}\n", .{another_release});
+    print(written catch unreachable); // Cannot fail: both texts fit 512 bytes.
 }
 
 fn print_status(ctx: *const Context, status: ?control.Status, configured: settings.Settings) void {
@@ -144,6 +167,8 @@ fn print_status(ctx: *const Context, status: ?control.Status, configured: settin
         status_json(&buffer, status, configured)
     else
         status_text(&buffer, status, configured);
+    assert(text.len > 0);
+    assert(text[text.len - 1] == '\n'); // One line, or lines, each ended.
     print(text);
 }
 
@@ -151,10 +176,12 @@ fn status_text(buffer: []u8, status: ?control.Status, configured: settings.Setti
     assert(configured.cpus >= 1);
     assert(buffer.len >= 512);
     var writer: std.Io.Writer = .fixed(buffer);
-    const next_boot = "  config   {d} cpus, {d} MiB at the next boot\n";
+    const next_boot = "  config   {d} cpus, {d} MiB, {d} GiB disk at the next boot\n";
     const running = status orelse {
         put(&writer, "vm: stopped\n  image    {s}\n", .{image.version});
-        put(&writer, next_boot, .{ configured.cpus, configured.memory_bytes >> 20 });
+        put(&writer, next_boot, .{
+            configured.cpus, configured.memory_bytes >> 20, configured.disk_bytes >> 30,
+        });
         return writer.buffered();
     };
     const same: []const u8 = if (std.mem.eql(u8, &running.version, image.version))
@@ -167,11 +194,14 @@ fn status_text(buffer: []u8, status: ?control.Status, configured: settings.Setti
         running.cpus, running.memory_bytes >> 20,
     });
     put(&writer, "  pid      {d}\n", .{running.pid});
+    put(&writer, "  network  {s}\n", .{if (running.network_up) "up" else "down"});
     const seconds = running.uptime_ms / 1000;
     put(&writer, "  uptime   {d}.{d} s\n", .{ seconds, running.uptime_ms % 1000 / 100 });
     const differs = configured.cpus != running.cpus or
         configured.memory_bytes != running.memory_bytes;
-    if (differs) put(&writer, next_boot, .{ configured.cpus, configured.memory_bytes >> 20 });
+    if (differs) put(&writer, next_boot, .{
+        configured.cpus, configured.memory_bytes >> 20, configured.disk_bytes >> 30,
+    });
     return writer.buffered();
 }
 
@@ -188,13 +218,16 @@ fn status_json(buffer: []u8, status: ?control.Status, configured: settings.Setti
         put(&writer, "\"image_match\":{},\"pid\":{d},", .{ match, running.pid });
         put(&writer, "\"cpus\":{d},\"memory_bytes\":{d},", .{ running.cpus, running.memory_bytes });
         put(&writer, "\"uptime_ms\":{d},", .{running.uptime_ms});
+        put(&writer, "\"network\":\"{s}\",", .{if (running.network_up) "up" else "down"});
     } else {
         put_all(&writer, "\"vm_image_version\":null,\"image_match\":null,\"pid\":null,");
         put_all(&writer, "\"cpus\":null,\"memory_bytes\":null,\"uptime_ms\":null,");
+        put_all(&writer, "\"network\":null,");
     }
-    put(&writer, "\"configured\":{{\"cpus\":{d},\"memory_bytes\":{d}}},", .{
+    put(&writer, "\"configured\":{{\"cpus\":{d},\"memory_bytes\":{d},", .{
         configured.cpus, configured.memory_bytes,
     });
+    put(&writer, "\"disk_bytes\":{d}}},", .{configured.disk_bytes});
     put(&writer, "\"idle_timeout_ms\":{d}}}\n", .{constants.vm_idle_timeout_ms});
     return writer.buffered();
 }
@@ -213,7 +246,7 @@ pub fn run_stop(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
-        .answering => try request_stop(ctx.paths, diag),
+        .answering, .other_format => try request_stop(ctx.paths, diag),
     }
     print_status(ctx, null, loaded.values);
 }
@@ -241,6 +274,17 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     assert(host_cpus >= 1);
     assert(diag.code == null);
     const loaded = try settings_file.load(ctx.paths, host_cpus, diag);
+    const status = try ensure_running(ctx, diag);
+    print_status(ctx, status, loaded.values);
+    if (!status.network_up) print_network_warning(ctx);
+}
+
+/// Makes sure a machine of this image runs, starting it if it does not, and returns its status.
+/// Two commands racing to start it start one: the host holds the lock, the other's host process
+/// says so and ends, and that command finds the winner answering.
+pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
+    assert(ctx.paths.vm_dir.length > 0);
+    assert(diag.code == null);
     files.make_directories(ctx.paths.vm_dir.slice()) catch {
         const doing = "making the VM directory";
         diagnose.directory(diag, doing, ctx.paths.vm_dir.slice(), files.reason());
@@ -250,20 +294,33 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     if (found == .held) found = wait_for_answer(ctx.paths);
     switch (found) {
         .answering => |status| {
-            if (std.mem.eql(u8, &status.version, image.version)) {
-                return print_status(ctx, status, loaded.values);
-            }
-            try replace(ctx, &status, diag);
+            assert(status.pid > 0); // A host that answers is a process.
+            if (std.mem.eql(u8, &status.version, image.version)) return status;
+            try replace(ctx, &status.version, diag);
         },
+        .other_format => try replace(ctx, "another release", diag),
         .held => |pid| {
             diagnose.host_locked(diag, pid);
             return error.Failed;
         },
         .absent => {},
     }
-    try launch(ctx.paths, diag);
+    launch(ctx.paths, diag) catch |launch_failed| {
+        // A host that lost the race to another says so; the winner is what this command needs.
+        const winner = wait_for_answer(ctx.paths);
+        if (winner == .answering) {
+            diag.reset();
+            return winner.answering;
+        }
+        return launch_failed;
+    };
     switch (probe(ctx.paths, constants.vm_control_timeout_ms)) {
-        .answering => |status| print_status(ctx, status, loaded.values),
+        .answering => |status| {
+            assert(status.pid > 0);
+            // The host that was just started is ours.
+            assert(std.mem.eql(u8, &status.version, image.version));
+            return status;
+        },
         else => {
             diagnose.host_locked(diag, null);
             return error.Failed;
@@ -271,7 +328,16 @@ pub fn run_start(ctx: *const Context, host_cpus: u32, diag: *Diag) Error!void {
     }
 }
 
+fn print_network_warning(ctx: *const Context) void {
+    assert(ctx.paths.socket.length > 0);
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.no_network(&warning);
+    print_diag_warning(ctx, &warning);
+}
+
 fn wait_for_answer(paths: *const paths_mod.Paths) Probe {
+    assert(paths.socket.length > 0);
     assert(paths.socket.length > 0);
     const deadline = files.now_ms() + constants.vm_boot_timeout_ms;
     var found: Probe = .{ .held = null };
@@ -284,13 +350,12 @@ fn wait_for_answer(paths: *const paths_mod.Paths) Probe {
 }
 
 /// A machine of another image version is not driven: say so (W1001), stop it, go on.
-fn replace(ctx: *const Context, status: *const control.Status, diag: *Diag) Error!void {
-    assert(status.version.len == constants.vm_image_version_bytes);
-    assert(status.pid > 0);
+fn replace(ctx: *const Context, running_version: []const u8, diag: *Diag) Error!void {
+    assert(running_version.len > 0);
     assert(diag.code == null);
     var warning: Diag = undefined;
     warning.reset();
-    diagnose.replacing(&warning, &status.version, image.version);
+    diagnose.replacing(&warning, running_version, image.version);
     print_diag_warning(ctx, &warning);
     try request_stop(ctx.paths, diag);
 }
@@ -307,6 +372,8 @@ fn launch(paths: *const paths_mod.Paths, diag: *Diag) Error!void {
         return error.Failed;
     }
     defer files.close(pipe_ends[0]);
+    const old_log = paths.host_log_old.slice();
+    _ = files.rotate_if_large(paths.host_log.slice(), old_log, constants.vm_host_log_bytes_max);
     const child = std.c.fork();
     if (child < 0) {
         files.close(pipe_ends[1]);
@@ -342,7 +409,9 @@ fn read_report(descriptor: i32, buffer: []u8) usize {
         const count = std.c.read(descriptor, buffer[length..].ptr, buffer.len - length);
         if (count <= 0) break;
         length += @intCast(count);
+        assert(length <= buffer.len);
     }
+    assert(length <= buffer.len);
     return length;
 }
 
@@ -379,6 +448,7 @@ fn exec_host(paths: *const paths_mod.Paths, report_fd: i32) noreturn {
 pub const ConfigRequest = struct {
     cpus: ?[]const u8 = null,
     memory: ?[]const u8 = null,
+    disk: ?[]const u8 = null,
 };
 
 /// What this Mac allows: the constants, the framework's limits and the Mac's CPUs and memory.
@@ -407,8 +477,10 @@ pub fn run_config(
     const bounds = bounds_here(host_cpus);
     var values = loaded.values;
     var source = loaded.source;
-    if (request.cpus != null or request.memory != null) {
-        values = try apply_request(request, values, bounds, diag);
+    if (request.cpus != null or request.memory != null or request.disk != null) {
+        const disk_now = files.file_size(ctx.paths.store_disk.slice());
+        const disk_path = ctx.paths.store_disk.slice();
+        values = try apply_request(request, values, bounds, disk_now, disk_path, diag);
         try settings_file.save(ctx.paths, values, diag);
         source = .settings;
     }
@@ -423,6 +495,8 @@ fn apply_request(
     request: ConfigRequest,
     current: settings.Settings,
     bounds: settings.Bounds,
+    disk_now: u64,
+    disk_path: []const u8,
     diag: *Diag,
 ) Error!settings.Settings {
     assert(bounds.memory_bytes_min <= bounds.memory_bytes_max);
@@ -441,11 +515,28 @@ fn apply_request(
             return error.Failed;
         };
     }
+    if (request.disk) |text| {
+        values.disk_bytes = spec.parse_size(text, 1, 1 << 50) catch {
+            diagnose.size_out_of_range(diag, .not_a_size, "--disk", text, bounds);
+            return error.Failed;
+        };
+    }
     if (settings.check(values, bounds)) |problem| {
-        const memory_problem = problem != .cpus_below and problem != .cpus_above;
-        const option: []const u8 = if (memory_problem) "--memory" else "--cpus";
-        const given = (if (memory_problem) request.memory else request.cpus) orelse "";
+        const option: []const u8 = switch (problem) {
+            .cpus_below, .cpus_above => "--cpus",
+            .disk_below, .disk_above, .disk_unaligned => "--disk",
+            else => "--memory",
+        };
+        const given = (if (option[2] == 'c') request.cpus else if (option[2] == 'd')
+            request.disk
+        else
+            request.memory) orelse "";
         diagnose.size_out_of_range(diag, problem, option, given, bounds);
+        return error.Failed;
+    }
+    // The disk file only grows: the file system on it cannot be shrunk without losing data.
+    if (request.disk != null and values.disk_bytes < disk_now) {
+        diagnose.disk_shrink(diag, values.disk_bytes, disk_now, disk_path);
         return error.Failed;
     }
     return values;
@@ -469,14 +560,18 @@ fn print_config(
         false;
     if (ctx.json) {
         put(&writer, "{{\"schema\":\"zbx.vm.config/1\",\"cpus\":{d},", .{values.cpus});
-        put(&writer, "\"memory_bytes\":{d},\"source\":\"{s}\",", .{
-            values.memory_bytes, @tagName(source),
+        put(&writer, "\"memory_bytes\":{d},\"disk_bytes\":{d},", .{
+            values.memory_bytes, values.disk_bytes,
         });
+        put(&writer, "\"source\":\"{s}\",", .{@tagName(source)});
         put(&writer, "\"bounds\":{{\"cpus_min\":{d},\"cpus_max\":{d},", .{
             bounds.cpus_min, bounds.cpus_max,
         });
-        put(&writer, "\"memory_bytes_min\":{d},\"memory_bytes_max\":{d}}},", .{
+        put(&writer, "\"memory_bytes_min\":{d},\"memory_bytes_max\":{d},", .{
             bounds.memory_bytes_min, bounds.memory_bytes_max,
+        });
+        put(&writer, "\"disk_bytes_min\":{d},\"disk_bytes_max\":{d}}},", .{
+            bounds.disk_bytes_min, bounds.disk_bytes_max,
         });
         put(&writer, "\"applies\":\"{s}\",", .{if (differs) "next_boot" else "running_machine"});
         if (differs) {
@@ -488,12 +583,15 @@ fn print_config(
             put_all(&writer, "\"running\":null}\n");
         }
     } else {
-        put(&writer, "vm config: {d} cpus, {d} MiB ({s})\n", .{
-            values.cpus, values.memory_bytes >> 20, @tagName(source),
+        put(&writer, "vm config: {d} cpus, {d} MiB, {d} GiB disk ({s})\n", .{
+            values.cpus, values.memory_bytes >> 20, values.disk_bytes >> 30, @tagName(source),
         });
         put(&writer, "  allowed  {d} to {d} cpus, ", .{ bounds.cpus_min, bounds.cpus_max });
-        put(&writer, "{d} to {d} MiB\n", .{
+        put(&writer, "{d} to {d} MiB, ", .{
             bounds.memory_bytes_min >> 20, bounds.memory_bytes_max >> 20,
+        });
+        put(&writer, "disk {d} to {d} GiB (it only grows)\n", .{
+            bounds.disk_bytes_min >> 30, bounds.disk_bytes_max >> 30,
         });
         if (differs) {
             put_all(&writer, "  note     the running machine keeps its size; ");
@@ -519,6 +617,7 @@ test "status text and JSON name the state, the image and the configured size" {
         .cpus = 2,
         .memory_bytes = 1 << 30,
         .version = image.version.*,
+        .network_up = true,
         .uptime_ms = 1530,
     };
     const live = status_json(&buffer, running, configured);
@@ -529,4 +628,37 @@ test "status text and JSON name the state, the image and the configured size" {
     try std.testing.expect(std.mem.indexOf(u8, text, "vm: running") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "uptime   1.5 s") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "at the next boot") != null);
+}
+
+test "the status document is exactly what the schema describes, network included" {
+    // Goal: a golden for zbx.vm.status/1 with the network member (additive, null when stopped).
+    // Method: a fixed running status with the network up and down, and the stopped one.
+    var buffer: [1024]u8 = undefined;
+    const configured: settings.Settings = .{ .cpus = 4, .memory_bytes = 2 << 30 };
+    const base: control.Status = .{
+        .state = .running,
+        .pid = 9,
+        .cpus = 4,
+        .memory_bytes = 2 << 30,
+        .version = "0123456789abcdef".*,
+        .network_up = true,
+        .uptime_ms = 1530,
+    };
+    const up = status_json(&buffer, base, configured);
+    const expected_head = "{\"schema\":\"zbx.vm.status/1\",\"state\":\"running\",";
+    try std.testing.expect(std.mem.startsWith(u8, up, expected_head));
+    const tail = "\"vm_image_version\":\"0123456789abcdef\",\"image_match\":false,\"pid\":9," ++
+        "\"cpus\":4,\"memory_bytes\":2147483648,\"uptime_ms\":1530,\"network\":\"up\"," ++
+        "\"configured\":{\"cpus\":4,\"memory_bytes\":2147483648,\"disk_bytes\":68719476736}," ++
+        "\"idle_timeout_ms\":300000}\n";
+    try std.testing.expect(std.mem.endsWith(u8, up, tail));
+    var down = base;
+    down.network_up = false;
+    var other: [1024]u8 = undefined;
+    const down_json = status_json(&other, down, configured);
+    try std.testing.expect(std.mem.indexOf(u8, down_json, "\"network\":\"down\"") != null);
+    const stopped = status_json(&other, null, configured);
+    try std.testing.expect(std.mem.indexOf(u8, stopped, "\"network\":null") != null);
+    const test_util = @import("../test_util.zig");
+    try std.testing.expect(try test_util.json_is_valid(std.mem.trimEnd(u8, up, "\n")));
 }

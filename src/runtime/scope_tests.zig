@@ -335,3 +335,96 @@ test "the user's own bus address is used when the environment has one" {
     try testing.expectEqual(@as(u32, 1), sim.world.bus.scopes_started);
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
 }
+
+// ---- The cgroupfs driver (the macOS VM: no systemd) -------------------------------------------
+
+const limited_run = [_][:0]const u8{
+    "zbx",    "run", "--rootfs", rootfs,  "--memory", "128m", "--pids", "64",
+    "--cpus", "0.5", "--name",   "web-1", "--",       "sh",
+};
+
+test "without a bus and with a delegated directory, a run makes its own cgroup and removes it" {
+    // Goal: the cgroupfs driver's whole run. Method: a host with ZBX_CGROUP_ROOT and no bus; the
+    // limits are written as files of the container's cgroup, the container and the keeper were
+    // moved in before the container ran, no warning is printed, and the cgroup is gone after.
+    var sim: HostSim = undefined;
+    sim_run.init_cgroupfs(&sim, 40);
+    const before = sim_run.baseline(&sim);
+    try testing.expectEqual(@as(u8, 0), run(&sim, &limited_run));
+    if (sim.stderr().len > 0) std.debug.print("{s}\n", .{sim.stderr()});
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqual(@as(u32, 0), sim.world.bus.connections); // No bus was asked.
+    const directory = sim_run.cgroup_root ++ "/zbx-web-1.scope";
+    const world = &sim.world;
+    try testing.expectEqualStrings("134217728", world.read_written(directory ++ "/memory.max").?);
+    try testing.expectEqualStrings("65", world.read_written(directory ++ "/pids.max").?);
+    try testing.expectEqualStrings("50000 100000", world.read_written(directory ++ "/cpu.max").?);
+    try testing.expect(world.read_written(directory ++ "/cgroup.procs") != null);
+    try testing.expect(sim.world.scope_started_before_child_ran);
+    try expect_leak_free(&sim, &before); // Including: no cgroup directory left behind.
+}
+
+test "a systemd host is untouched by the variable: with a bus the bus is used" {
+    // Goal: behaviour on a host with systemd is unchanged. Method: both the bus's address and the
+    // variable; the scope comes from the bus and no directory is made.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 41);
+    sim.world.add_node(sim_run.cgroup_root, .dir);
+    const both = [_]host_sim.EnvironmentVariable{
+        .{ .name = "HOME", .value = sim_run.home_path },
+        .{ .name = "XDG_RUNTIME_DIR", .value = "/run/user/1000" },
+        .{ .name = "ZBX_CGROUP_ROOT", .value = sim_run.cgroup_root },
+    };
+    sim.environment_variables = &both;
+    try testing.expectEqual(@as(u8, 0), run(&sim, &limited_run));
+    try testing.expectEqual(@as(u32, 1), sim.world.bus.scopes_started);
+    try testing.expectEqual(@as(u32, 0), sim_run.cgroupfs_directories(&sim));
+}
+
+test "a fault at any call of a cgroupfs run is coded or clean, and its cgroup goes or is reported" {
+    // Goal: ENOSPC, EPERM and a plain I/O error on mkdir, write and rmdir, and a crash between
+    // steps (the one-shot fault fails the n-th host call, whichever it is). Method: count the
+    // calls of a good run, then fail each call in turn with each error; the run must end 0, or
+    // 125 with one coded diagnostic, and the cgroup directory must be gone or the
+    // warning W0302 must say it is not (the other leaks a fault can cause are the run's, and
+    // are the same under the bus driver).
+    var counting: HostSim = undefined;
+    sim_run.init_cgroupfs(&counting, 42);
+    try testing.expectEqual(@as(u8, 0), run(&counting, &limited_run));
+    const calls = counting.call_count;
+    try testing.expect(calls > 10);
+    const Error = @import("../host.zig").Error;
+    const errors = [_]Error{ error.NoSpace, error.AccessDenied, error.IoFailed };
+    var sim: HostSim = undefined;
+    for (errors) |err| {
+        var index: u32 = 0;
+        while (index < calls) : (index += 1) {
+            sim_run.init_cgroupfs(&sim, 42);
+            sim.faults.fail_call_index = index;
+            sim.faults.fail_call_error = err;
+            const code = run(&sim, &limited_run);
+            testing.expect(code == 0 or code >= 125) catch |failure| {
+                const words = "call {d} failing with {s}: exit {d}\n";
+                std.debug.print(words, .{ index, @errorName(err), code });
+                return failure;
+            };
+            const diagnosed = std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E") != null;
+            if (code == 125) try testing.expect(diagnosed);
+            // A cgroup is removed, or the failure to remove it was said (a warning).
+            const left = sim_run.cgroupfs_directories(&sim);
+            const warned = std.mem.indexOf(u8, sim.stderr(), "ZBX-W0302") != null;
+            if (left > 0) try testing.expect(warned);
+        }
+    }
+}
+
+test "the cgroupfs steps each have a code: make and join are E0309, a leftover is W0302" {
+    // Goal: the three ways the driver fails are reported by the coded diagnostics the registry
+    // describes. Method: the delegated directory is missing (make), is read-only for the user
+    // (made by a fault on the make step) and cannot be removed (a fault at the last call).
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 43); // The directory does not exist: its parent is missing.
+    sim.environment_variables = &sim_run.env_cgroupfs;
+    try testing.expectEqual(@as(u8, 125), run(&sim, &limited_run));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0309]: ") != null);
+}

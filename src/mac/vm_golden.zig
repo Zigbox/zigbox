@@ -78,6 +78,45 @@ fn replacing(diag: *Diag) void {
     diagnose.replacing(diag, "fedcba9876543210", "0123456789abcdef");
 }
 
+fn lost(diag: *Diag) void {
+    diagnose.connection_lost(diag, "the guest hung up");
+}
+
+fn silent(diag: *Diag) void {
+    diagnose.service_silent(diag, "/Users/ada/Library/Application Support/zbx/vm/console.log");
+}
+
+fn setup_failed(diag: *Diag) void {
+    const log = "/Users/ada/Library/Application Support/zbx/vm/console.log";
+    diagnose.setup_failed(diag, "cgroup", log);
+}
+
+fn no_network(diag: *Diag) void {
+    diagnose.no_network(diag);
+}
+
+fn disk_shrink(diag: *Diag) void {
+    const path = "/Users/ada/Library/Application Support/zbx/store.img";
+    diagnose.disk_shrink(diag, 32 << 30, 64 << 30, path);
+}
+
+fn not_shared(diag: *Diag) void {
+    diagnose.directory_not_shared(diag, "/private/tmp/build", "/Users/ada");
+}
+
+fn disk_full(diag: *Diag) void {
+    diagnose.store_disk_full(diag, 64 << 30, 12 << 20);
+}
+
+fn host_full(diag: *Diag) void {
+    const path = "/Users/ada/Library/Application Support/zbx/store.img";
+    diagnose.host_volume_full(diag, path, 700 << 20, 2 << 30);
+}
+
+fn rosetta_missing(diag: *Diag) void {
+    diagnose.rosetta_missing(diag);
+}
+
 pub const cases = [_]Case{
     .{ .code = .E1001, .build = &entitlement },
     .{ .code = .E1002, .build = &start_failed },
@@ -88,6 +127,15 @@ pub const cases = [_]Case{
     .{ .code = .E1007, .build = &out_of_range },
     .{ .code = .E1008, .build = &unreadable },
     .{ .code = .W1001, .build = &replacing },
+    .{ .code = .E1009, .build = &lost },
+    .{ .code = .E1010, .build = &silent },
+    .{ .code = .E1011, .build = &setup_failed },
+    .{ .code = .W1002, .build = &no_network },
+    .{ .code = .E1012, .build = &disk_shrink },
+    .{ .code = .E1013, .build = &not_shared },
+    .{ .code = .E1014, .build = &disk_full },
+    .{ .code = .E1015, .build = &host_full },
+    .{ .code = .E1016, .build = &rosetta_missing },
 };
 
 /// True if a golden case here covers `code` (the registry's "every code has a case" test asks).
@@ -148,7 +196,8 @@ test "the diagnostics blame who the registry says" {
     for (cases) |case| {
         const entry = codes.entry(case.code);
         const is_warning = entry.severity == .warning;
-        try std.testing.expectEqual(case.code == .W1001, is_warning);
+        const warns = case.code == .W1001 or case.code == .W1002;
+        try std.testing.expectEqual(warns, is_warning);
         try std.testing.expect(entry.blame != .internal);
     }
     try std.testing.expectEqual(codes.Blame.user, codes.entry(.E1006).blame);

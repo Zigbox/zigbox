@@ -377,6 +377,9 @@ pub const dbus_error_text_bytes_max: u32 = 160;
 /// A cgroup directory below /sys/fs/cgroup, and the files written in it by the fallback.
 pub const cgroup_path_bytes_max: u32 = 256;
 pub const cgroup_file_bytes_max: u32 = 24;
+/// The cgroupfs driver removes a container's cgroup, trying again while the kernel says it is busy.
+pub const cgroup_remove_tries_max: u32 = 20;
+pub const cgroup_remove_wait_ms: u32 = 10;
 
 // Limits (`--memory`, `--pids`, `--cpus`): what a user may ask for. Past either end is a
 // diagnostic naming the bound.
@@ -706,6 +709,26 @@ pub const vm_cpus_min: u32 = 1;
 pub const vm_cpus_max: u32 = 64;
 pub const vm_memory_bytes_min: u64 = 512 << 20;
 pub const vm_memory_bytes_max: u64 = 256 << 30;
+/// The store disk (slice 3): a sparse file on the Mac that the guest formats as ext4. It costs
+/// the Mac only what the guest writes. The default is generous because it is only a ceiling; the
+/// least holds a few images; the most is far past what a Mac's volume has.
+pub const vm_disk_bytes_default: u64 = 64 << 30;
+pub const vm_disk_bytes_min: u64 = 1 << 30;
+pub const vm_disk_bytes_max: u64 = 8 << 40;
+/// The Mac's volume must have this much free room beside the disk file's current size, or the
+/// machine is not started: a full volume would show up as I/O errors inside the guest.
+pub const vm_disk_host_free_bytes_min: u64 = 2 << 30;
+/// The guest reports a full disk when less than this is free after a command failed.
+pub const vm_disk_full_bytes: u64 = 32 << 20;
+/// Where the guest mounts the disk, and the directories on it that zbx's XDG paths point to.
+pub const vm_disk_mount = "/mnt/store";
+pub const vm_disk_device = "/dev/vda";
+/// The home directory share: the tag the guest mounts it by.
+pub const vm_home_tag = "home";
+pub const vm_rosetta_tag = "rosetta";
+pub const vm_rosetta_mount = "/mnt/rosetta";
+/// The size at which the host's log is renamed to `host.log.1` and started afresh.
+pub const vm_host_log_bytes_max: u64 = 64 << 10;
 /// The VM stops after this long without a command to run (enforced from slice 2).
 pub const vm_idle_timeout_ms: u32 = 5 * 60 * 1000;
 /// From the start of the host process to the guest's answer on vsock.
@@ -727,6 +750,49 @@ pub const vm_path_bytes_max: u32 = 1024;
 pub const vm_image_file_bytes_max: u64 = 256 << 20;
 /// The lines of the host's log shown after a host that died before it answered.
 pub const vm_log_tail_bytes_max: u32 = 2048;
+
+// The macOS VM, slice 2: forwarding commands into the VM (docs/briefs/M4b-mac.md).
+/// The vsock port of `zbx guest serve`, which runs the forwarded commands.
+pub const vm_forward_port: u32 = 1025;
+/// The vsock address of the host (VMADDR_CID_HOST). The guest's two listeners take connections
+/// from nowhere else: with the Mac's home shared (slice 3), a container that could reach a
+/// listener would run zbx as the user outside its sandbox.
+pub const vm_host_cid: u32 = 2;
+/// A frame of the forwarding protocol: a kind byte, a four-byte length and the payload.
+pub const forward_header_bytes: u32 = 5;
+pub const forward_frame_bytes_max: u32 = 64 * 1024;
+/// The most data one stdin, stdout or stderr frame carries.
+pub const forward_data_bytes_max: u32 = 16 * 1024;
+/// The command line, working directory and environment of the first frame.
+pub const forward_start_bytes_max: u32 = 60 * 1024;
+pub const forward_env_count_max: u32 = 32;
+/// Commands the guest runs at one time for one Mac user.
+pub const forward_sessions_max: u32 = 16;
+/// The guest user: the Mac user's name, ids and home, and the range of ids it may map.
+pub const vm_user_name_bytes_max: u32 = 32;
+pub const vm_home_bytes_max: u32 = 255;
+pub const vm_subid_start: u32 = 100_000;
+pub const vm_subid_count: u32 = 65_536;
+/// From the guest to a closed connection to the command it ran: SIGHUP, then SIGKILL this long
+/// after.
+pub const vm_hangup_grace_ms: u32 = 2_000;
+/// How often the host asks the guest whether anything runs, and the environment variable that
+/// replaces `vm_idle_timeout_ms` (tests; milliseconds).
+pub const vm_idle_check_ms: u32 = 1_000;
+/// What the variable may say: not so small that the machine stops between two commands of a
+/// script, not so big that it never does.
+pub const vm_idle_timeout_ms_min: u32 = 500;
+pub const vm_idle_timeout_ms_max: u32 = 24 * 60 * 60 * 1000;
+pub const vm_idle_timeout_variable = "ZBX_VM_IDLE_TIMEOUT_MS";
+/// The delegated cgroup subtree the guest's init makes for the guest user.
+pub const vm_cgroup_root = "/sys/fs/cgroup/zbx";
+pub const cgroup_root_variable = "ZBX_CGROUP_ROOT";
+/// DHCP in the guest: tries, and the wait for each answer.
+pub const vm_dhcp_tries_max: u32 = 10;
+pub const vm_dhcp_wait_ms: u32 = 500;
+pub const vm_dhcp_packet_bytes_max: u32 = 1500;
+/// The guest's setup line (time, user, home) and the host's wait for the guest to finish it.
+pub const vm_setup_timeout_ms: u32 = 20_000;
 
 comptime {
     // Four distinct failure classes, none colliding with success, and the internal code is the
@@ -1044,6 +1110,11 @@ comptime {
     assert(vm_cpus_default <= vm_cpus_max);
     assert(vm_memory_bytes_min <= vm_memory_bytes_default);
     assert(vm_memory_bytes_default <= vm_memory_bytes_max);
+    assert(vm_disk_bytes_min <= vm_disk_bytes_default);
+    assert(vm_disk_bytes_default <= vm_disk_bytes_max);
+    assert(vm_disk_bytes_min % (1 << 20) == 0);
+    assert(vm_disk_bytes_max % (1 << 20) == 0);
+    assert(vm_disk_full_bytes < vm_disk_bytes_min);
     assert(vm_memory_bytes_max % (1 << 20) == 0); // Whole MiB: the framework counts in them.
     assert(vm_memory_bytes_min % (1 << 20) == 0);
     assert(vm_poll_step_ms < vm_control_timeout_ms);
@@ -1054,4 +1125,18 @@ comptime {
     assert(vm_idle_timeout_ms > vm_boot_timeout_ms);
     assert(vm_socket_path_bytes_max < vm_path_bytes_max);
     assert(vm_guest_port > 0);
+    assert(forward_header_bytes + forward_data_bytes_max <= forward_frame_bytes_max);
+    assert(forward_start_bytes_max < forward_frame_bytes_max);
+    assert(forward_env_count_max * (env_name_bytes_max + 1 + env_value_bytes_max) >=
+        env_value_bytes_max);
+    assert(vm_forward_port != vm_guest_port);
+    assert(vm_subid_start + vm_subid_count > vm_subid_start);
+    assert(vm_hangup_grace_ms < vm_stop_timeout_ms);
+    assert(vm_idle_check_ms % vm_poll_step_ms == 0);
+    assert(vm_dhcp_packet_bytes_max >= 576); // The least an IP host must accept.
+    assert(vm_setup_timeout_ms < vm_boot_timeout_ms);
+    assert(vm_idle_timeout_ms_min < vm_idle_timeout_ms);
+    assert(vm_idle_timeout_ms <= vm_idle_timeout_ms_max);
+    assert(vm_idle_timeout_ms_min >= vm_idle_check_ms / 2);
+    assert(vm_user_name_bytes_max + vm_home_bytes_max + 64 <= vm_line_bytes_max);
 }

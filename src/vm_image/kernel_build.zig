@@ -240,6 +240,16 @@ fn verify_options(
     var lines = std.mem.splitScalar(u8, wanted, '\n');
     var checked: u32 = 0;
     while (lines.next()) |line| {
+        if (is_not_set_line(line)) {
+            // "Not set" holds if the final config says so, or has no such option at all (an
+            // option whose dependencies are missing is left out of the file).
+            checked += 1;
+            if (set_in(final, line["# ".len .. line.len - " is not set".len])) {
+                try log.print("kernel_build: set, but the fragment says it is not: {s}\n", .{line});
+                missing += 1;
+            }
+            continue;
+        }
         if (!std.mem.startsWith(u8, line, "CONFIG_")) continue;
         checked += 1;
         assert(checked <= options_max);
@@ -251,6 +261,23 @@ fn verify_options(
     }
     assert(checked > 0);
     return missing;
+}
+
+/// `# CONFIG_X is not set`.
+fn is_not_set_line(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "# CONFIG_") and std.mem.endsWith(u8, line, " is not set");
+}
+
+/// True if the final config has `<name>=` at the start of a line.
+fn set_in(final: []const u8, name: []const u8) bool {
+    assert(std.mem.startsWith(u8, name, "CONFIG_"));
+    var lines = std.mem.splitScalar(u8, final, '\n');
+    while (lines.next()) |line| {
+        if (line.len > name.len and std.mem.startsWith(u8, line, name) and line[name.len] == '=') {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn compile(
@@ -323,4 +350,23 @@ test "verify_options finds a missing option and accepts a present one" {
     const missing = try verify_options(arena, wanted, final, &sink.writer);
     try std.testing.expectEqual(@as(u32, 1), missing);
     try std.testing.expect(std.mem.indexOf(u8, sink.written(), "CONFIG_B=y") != null);
+}
+
+test "verify_options accepts an option that is not set, and refuses one that is" {
+    // Goal: the check for "# CONFIG_X is not set" lines. Method: the option set, listed as not set
+    // and left out of the file.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var sink: Io.Writer.Allocating = .init(arena);
+    const wanted = "# CONFIG_LOOP is not set\n";
+    const writer = &sink.writer;
+    const listed = try verify_options(arena, wanted, "# CONFIG_LOOP is not set\n", writer);
+    try std.testing.expectEqual(@as(u32, 0), listed);
+    const absent = try verify_options(arena, wanted, "CONFIG_A=y\n", writer);
+    try std.testing.expectEqual(@as(u32, 0), absent);
+    const set = try verify_options(arena, wanted, "CONFIG_LOOP=y\n", writer);
+    try std.testing.expectEqual(@as(u32, 1), set);
+    const longer = try verify_options(arena, wanted, "CONFIG_LOOP_X=y\n", writer);
+    try std.testing.expectEqual(@as(u32, 0), longer);
 }

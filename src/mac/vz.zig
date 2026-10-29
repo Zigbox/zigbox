@@ -111,7 +111,42 @@ pub const BootSpec = struct {
     console_descriptor: i32,
     cpus: u32,
     memory_bytes: u64,
+    /// The store disk: a file the guest sees as a virtio block device (`/dev/vda`).
+    disk_path: [:0]const u8,
+    /// The Mac user's home, shared read-write under the tag `home`.
+    home_path: [:0]const u8,
+    /// Whether to share Rosetta under the tag `rosetta`; only when it is installed.
+    rosetta: bool,
 };
+
+/// Whether Rosetta for Linux can be shared with a guest on this Mac.
+pub const RosettaState = enum { not_supported, not_installed, installed };
+
+/// `VZLinuxRosettaDirectoryShare.availability`, every value of `VZLinuxRosettaAvailability`.
+pub fn rosetta_state() RosettaState {
+    const value = objc.send(i64, objc.class("VZLinuxRosettaDirectoryShare"), "availability", .{});
+    assert(value >= 0);
+    return switch (value) {
+        1 => .not_installed,
+        2 => .installed,
+        else => .not_supported,
+    };
+}
+
+/// A vsock connection: the caller's copy of the descriptor and the framework's object, which must
+/// not be released while the connection is in use.
+pub const Connection = struct {
+    descriptor: i32,
+    object: Id,
+};
+
+/// Ends a connection the caller used itself: closes the descriptor, then releases the object.
+pub fn finish_connection(connection: Connection) void {
+    assert(connection.descriptor >= 0);
+    assert(connection.object != null);
+    _ = std.c.close(connection.descriptor);
+    objc.release(connection.object);
+}
 
 pub const Machine = struct {
     queue: objc.Queue,
@@ -128,8 +163,12 @@ pub const Machine = struct {
         const pool = objc.Pool.push();
         defer pool.pop();
         const configuration = objc.new("VZVirtualMachineConfiguration");
-        configure(configuration, spec);
         var error_object: Id = null;
+        configure(configuration, spec);
+        if (!attach_storage(configuration, spec, &error_object)) {
+            fail(failure, .configure, error_object);
+            return error.Failed;
+        }
         const valid = objc.send(bool, configuration, "validateWithError:", .{&error_object});
         if (!valid) {
             fail(failure, .validate, error_object);
@@ -175,8 +214,11 @@ pub const Machine = struct {
         return is_poisoned;
     }
 
-    /// Opens a vsock connection to `port` of the guest; the descriptor is the caller's to close.
-    pub fn connect(machine: *Machine, port: u32, failure: *Failure) Error!i32 {
+    /// Opens a vsock connection to `port` of the guest. The framework closes the connection when
+    /// its object is released (even if the descriptor was duplicated), so the object lives as
+    /// long as the descriptor is in use: `finish_connection` when the caller is done with it, or
+    /// the object is kept by whoever handed the descriptor on.
+    pub fn connect(machine: *Machine, port: u32, failure: *Failure) Error!Connection {
         assert(port <= 65535);
         assert(machine.virtual_machine != null);
         assert(port > 0);
@@ -187,16 +229,16 @@ pub const Machine = struct {
             failure.* = .{ .stage = .connect };
             return error.Failed;
         };
-        defer objc.release(connection);
         const descriptor = objc.send(i32, connection, "fileDescriptor", .{});
         assert(descriptor >= 0);
-        // The connection closes its descriptor when it is released; the caller keeps a copy.
+        // The caller works with a copy of the descriptor and closes it when it is done.
         const copy = std.c.dup(descriptor);
         if (copy < 0) {
+            objc.release(connection);
             failure.* = .{ .stage = .connect };
             return error.Failed;
         }
-        return copy;
+        return .{ .descriptor = copy, .object = connection };
     }
 
     /// Stops the guest at once, as pulling the plug does. Used only when a clean stop did not
@@ -353,6 +395,52 @@ fn fail(failure: *Failure, stage: Stage, error_object: Id) void {
     failure.silent = false;
 }
 
+/// The store disk, the shared home and (when asked) Rosetta. False with `error_object` set when
+/// the framework refuses one of them (a missing file, a Rosetta that went away).
+fn attach_storage(configuration: Id, spec: *const BootSpec, error_object: *Id) bool {
+    assert(spec.disk_path.len > 0);
+    assert(spec.home_path.len > 0);
+    const attachment_class = objc.class("VZDiskImageStorageDeviceAttachment");
+    const disk_class = objc.send(Id, attachment_class, "alloc", .{});
+    const init_disk = "initWithURL:readOnly:error:";
+    const disk = objc.send(Id, disk_class, init_disk, .{
+        objc.file_url(spec.disk_path), false, error_object,
+    });
+    if (disk == null) return false;
+    const block_class = objc.send(Id, objc.class("VZVirtioBlockDeviceConfiguration"), "alloc", .{});
+    const block = objc.send(Id, block_class, "initWithAttachment:", .{disk});
+    objc.send(void, configuration, "setStorageDevices:", .{objc.array(&.{block})});
+    const directory_class = objc.send(Id, objc.class("VZSharedDirectory"), "alloc", .{});
+    const directory = objc.send(Id, directory_class, "initWithURL:readOnly:", .{
+        objc.file_url(spec.home_path), false,
+    });
+    const single_class = objc.send(Id, objc.class("VZSingleDirectoryShare"), "alloc", .{});
+    const single = objc.send(Id, single_class, "initWithDirectory:", .{directory});
+    const home = share_device(constants.vm_home_tag, single);
+    if (!spec.rosetta) {
+        objc.send(void, configuration, "setDirectorySharingDevices:", .{objc.array(&.{home})});
+        return true;
+    }
+    const rosetta_class = objc.send(Id, objc.class("VZLinuxRosettaDirectoryShare"), "alloc", .{});
+    const rosetta = objc.send(Id, rosetta_class, "initWithError:", .{error_object});
+    if (rosetta == null) return false;
+    const translator = share_device(constants.vm_rosetta_tag, rosetta);
+    const devices = objc.array(&.{ home, translator });
+    objc.send(void, configuration, "setDirectorySharingDevices:", .{devices});
+    return true;
+}
+
+/// A virtio-fs device that offers `share` to the guest under `tag`.
+fn share_device(tag: [:0]const u8, share: Id) Id {
+    assert(tag.len > 0);
+    assert(share != null);
+    const configuration_class = objc.class("VZVirtioFileSystemDeviceConfiguration");
+    const device_class = objc.send(Id, configuration_class, "alloc", .{});
+    const device = objc.send(Id, device_class, "initWithTag:", .{objc.string(tag)});
+    objc.send(void, device, "setShare:", .{share});
+    return device;
+}
+
 /// Fills the configuration: boot loader, CPUs, memory, platform, console, vsock, entropy.
 fn configure(configuration: Id, spec: *const BootSpec) void {
     assert(spec.cpus >= 1);
@@ -380,6 +468,10 @@ fn configure(configuration: Id, spec: *const BootSpec) void {
     objc.send(void, configuration, "setSerialPorts:", .{objc.array(&.{port})});
     const socket = objc.new("VZVirtioSocketDeviceConfiguration");
     objc.send(void, configuration, "setSocketDevices:", .{objc.array(&.{socket})});
+    // The NAT network: the guest asks for an address by DHCP and reaches the Mac's network.
+    const nic = objc.new("VZVirtioNetworkDeviceConfiguration");
+    objc.send(void, nic, "setAttachment:", .{objc.new("VZNATNetworkDeviceAttachment")});
+    objc.send(void, configuration, "setNetworkDevices:", .{objc.array(&.{nic})});
     const entropy = objc.new("VZVirtioEntropyDeviceConfiguration");
     objc.send(void, configuration, "setEntropyDevices:", .{objc.array(&.{entropy})});
 }

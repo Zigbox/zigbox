@@ -1,0 +1,6 @@
+error[ZBX-E1013]: the working directory is not shared with the virtual machine
+  cause  /private/tmp/build is not shared with the virtual machine; only
+         /Users/ada is
+  fix    change into a directory in your home, then run it again:   cd ~
+  more   zbx explain E1013 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1013.html

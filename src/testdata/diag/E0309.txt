@@ -1,0 +1,8 @@
+error[ZBX-E0309]: can't make the container's cgroup
+  cause  a cgroup of this name is there already, left by a run that did not end
+         cleanly, or by another container with the same name
+  fix    choose another name:                           zbx run --name <other-name> ...
+         see who owns the delegated cgroup directory:   ls -ld $ZBX_CGROUP_ROOT
+         in the macOS virtual machine, stop it:         zbx vm stop
+  more   zbx explain E0309 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0309.html

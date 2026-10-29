@@ -1,0 +1,7 @@
+error[ZBX-E1009]: the connection to the virtual machine was lost
+  while  running the command in the virtual machine
+  cause  the connection to the virtual machine ended: the guest hung up
+  fix    see whether the machine runs:                             zbx vm status
+         a container that was detached may still run; list them:   zbx ps
+  more   zbx explain E1009
+  docs   https://zigbox.github.io/zigbox/errors/E1009.html

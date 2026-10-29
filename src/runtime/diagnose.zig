@@ -659,6 +659,21 @@ fn problem_fixes(diag: *Diag, code: codes.Code, scope_name: []const u8) void {
             .sentence = "see what the manager logged:",
             .command = "journalctl --user -n 20",
         }),
+        .E0309 => {
+            diag.fix(.{
+                .sentence = "choose another name:",
+                .command = "zbx run --name <other-name> ...",
+                .template = true,
+            });
+            diag.fix(.{
+                .sentence = "see who owns the delegated cgroup directory:",
+                .command = "ls -ld $ZBX_CGROUP_ROOT",
+            });
+            diag.fix(.{
+                .sentence = "in the macOS virtual machine, stop it:",
+                .command = "zbx vm stop",
+            });
+        },
         else => diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" }),
     }
 }
@@ -720,7 +735,12 @@ pub fn scope_not_cleaned(diag: *Diag, unit: []const u8, problem: *const scope_mo
     diag.while_("making sure the container's scope {s} is gone", .{unit});
     scope_text.problem_causes(diag, problem);
     diag.context("scope", "{s}", .{unit});
-    diag.fix_with("remove it by hand:", "systemctl --user stop {s}", .{unit});
+    switch (problem.*) {
+        .cgroupfs => |failure| {
+            diag.fix_with("remove it by hand:", "rmdir {s}", .{failure.path.slice()});
+        },
+        else => diag.fix_with("remove it by hand:", "systemctl --user stop {s}", .{unit}),
+    }
     assert(diag.code.? == .W0302);
     assert(diag.causes.count >= 1);
 }

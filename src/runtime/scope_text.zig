@@ -37,6 +37,7 @@ pub fn problem_code(problem: *const scope_mod.Problem) codes.Code {
         // whether the user's own bus can be had.
         .bus_retried => |retried| return bus_code(&retried.failure),
         .scope_left => return .W0302,
+        .cgroupfs => |failure| return if (failure.step == .remove) .W0302 else .E0309,
     }
 }
 
@@ -94,6 +95,7 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
             diag.cause("the scope started but its cgroup could not be found, so a limit " ++
                 "this systemd cannot set itself was not applied", .{});
         },
+        .cgroupfs => |failure| cgroupfs_causes(diag, &failure),
         .cgroup_write => |written| {
             var operation: [64]u8 = undefined;
             const text = std.fmt.bufPrint(&operation, "writing {s} in the scope", .{
@@ -122,6 +124,7 @@ pub fn cleanup_note(name: []const u8, how: scope_mod.Cleaned, buffer: []u8) []co
             "scope {s} was still there at the end; stopped with StopUnit",
             .{name},
         ),
+        .removed => std.fmt.bufPrint(buffer, "cgroup {s} removed when the run ended", .{name}),
     };
     return result catch buffer[0..0];
 }
@@ -246,4 +249,30 @@ fn no_bus_reason(errno: u16) []const u8 {
             "su or sudo may name another user's bus",
         else => "the user bus cannot be reached from this process",
     };
+}
+
+/// The cgroupfs driver's failure: what it was doing and the kernel's reason last, then why the
+/// reason is likely.
+fn cgroupfs_causes(diag: *Diag, failure: *const scope_mod.Cgroupfs) void {
+    assert(diag.code != null);
+    assert(failure.path.len > 0);
+    var operation: [constants.cgroup_path_bytes_max + 64]u8 = undefined;
+    const doing = switch (failure.step) {
+        .make => "making the container's cgroup",
+        .join => "moving the container into its cgroup",
+        .limit => "writing a limit in the container's cgroup",
+        .remove => "removing the container's cgroup",
+    };
+    const where = failure.path.slice();
+    const text = std.fmt.bufPrint(&operation, "{s}: {s}", .{ doing, where }) catch doing;
+    errors.cause_host_error(diag, text, failure.io.err, failure.io.errno);
+    if (failure.step == .remove) return;
+    const errno_exists: u16 = 17;
+    if (failure.step == .make and failure.io.errno == errno_exists) {
+        diag.cause("a cgroup of this name is there already, left by a run that did not end " ++
+            "cleanly, or by another container with the same name", .{});
+        return;
+    }
+    diag.cause("the cgroup directory in ZBX_CGROUP_ROOT is not one this user can make cgroups " ++
+        "in, or its controllers are not enabled for them", .{});
 }

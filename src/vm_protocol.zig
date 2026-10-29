@@ -5,6 +5,9 @@
 //!
 //!     host:  hello\n                     guest: zbx-vm/1 <image version>\n
 //!     host:  shutdown\n                  guest: bye\n   (then it syncs and powers off)
+//!     host:  setup <seconds> <uid> <gid> <name> <home> <dns>\n
+//!                                        guest: ok net=up\n | ok net=down\n | fail <word>\n
+//!     host:  busy\n                      guest: busy <count>\n   (0: nothing runs for the user)
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -65,4 +68,210 @@ test "the guest's answer round-trips and nothing else parses" {
     try std.testing.expect(parse_hello_reply("zbx-vm/1 0123456789abcdef") == null);
     try std.testing.expect(parse_hello_reply("zbx-vm/1 0123456789abcdef\n\n") == null);
     try std.testing.expect(parse_hello_reply("") == null);
+}
+
+pub const busy_request = "busy\n";
+
+/// Whether a connection's peer is the host. The guest answers nobody else.
+pub fn from_host(peer_cid: u32) bool {
+    return peer_cid == constants.vm_host_cid;
+}
+
+test "only the host's address is the host" {
+    // Goal: the one comparison both guest listeners make. Method: the host, the guest's own
+    // address, the wildcard, the hypervisor's reserved address and the largest.
+    try std.testing.expect(from_host(2));
+    try std.testing.expect(!from_host(3));
+    try std.testing.expect(!from_host(0));
+    try std.testing.expect(!from_host(1));
+    try std.testing.expect(!from_host(0xffff_ffff));
+}
+
+/// What the host tells the guest once it is up: the Mac's wall clock (the guest has no RTC, and
+/// TLS needs the time) and the user the commands run as, with the Mac user's own name, ids and
+/// home path, so that paths and ownership read the same on both sides.
+pub const Setup = struct {
+    seconds: u64,
+    uid: u32,
+    gid: u32,
+    name: []const u8,
+    home: []const u8,
+    /// The Mac's own resolvers (IPv4), "a.b.c.d,e.f.g.h", or "-" for none. The NAT's gateway is
+    /// not always a resolver, so the guest asks the ones the Mac asks.
+    dns: []const u8,
+};
+
+pub const dns_count_max: u32 = 3;
+
+/// The addresses in a `dns` field: "-" is none; otherwise up to three dotted quads, comma
+/// separated, none with a leading zero. Null for anything else.
+pub fn parse_dns(text: []const u8, out: *[dns_count_max][4]u8) ?u32 {
+    if (std.mem.eql(u8, text, "-")) return 0;
+    var count: u32 = 0;
+    var entries = std.mem.splitScalar(u8, text, ',');
+    while (entries.next()) |entry| {
+        if (count == dns_count_max) return null;
+        var parts = std.mem.splitScalar(u8, entry, '.');
+        for (0..4) |index| {
+            const part = parts.next() orelse return null;
+            const value = parse_number(u8, part) orelse return null;
+            out[count][index] = value;
+        }
+        if (parts.next() != null) return null;
+        count += 1;
+    }
+    assert(count >= 1); // A text that is not "-" has at least one address.
+    assert(count <= dns_count_max);
+    return count;
+}
+
+/// A name that is safe as a /etc/passwd field and as an argument: letters, digits, `_`, `.`, `-`,
+/// not starting with `-`.
+pub fn name_ok(name: []const u8) bool {
+    if (name.len == 0 or name.len > constants.vm_user_name_bytes_max) return false;
+    if (name[0] == '-') return false;
+    for (name) |byte| {
+        const plain = std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '.' or byte == '-';
+        if (!plain) return false;
+    }
+    return true;
+}
+
+/// An absolute path with no byte that would break a passwd line or a protocol line.
+pub fn home_ok(home: []const u8) bool {
+    if (home.len < 2 or home.len > constants.vm_home_bytes_max) return false;
+    if (home[0] != '/') return false;
+    for (home) |byte| {
+        if (byte <= ' ' or byte == ':' or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+pub fn render_setup(buffer: []u8, setup: *const Setup) []const u8 {
+    assert(name_ok(setup.name));
+    assert(home_ok(setup.home));
+    assert(setup.uid > 0);
+    assert(buffer.len >= constants.vm_line_bytes_max);
+    // Cannot fail: the name and the home are bounded so that the line fits (constants.zig).
+    var addresses: [dns_count_max][4]u8 = undefined;
+    assert(parse_dns(setup.dns, &addresses) != null);
+    return std.fmt.bufPrint(buffer, "setup {d} {d} {d} {s} {s} {s}\n", .{
+        setup.seconds, setup.uid, setup.gid, setup.name, setup.home, setup.dns,
+    }) catch unreachable; // Cannot fail: the bounds above keep the line within the buffer.
+}
+
+pub fn parse_setup(line: []const u8) ?Setup {
+    if (line.len == 0 or line.len > constants.vm_line_bytes_max) return null;
+    if (line[line.len - 1] != '\n') return null;
+    var words = std.mem.splitScalar(u8, line[0 .. line.len - 1], ' ');
+    if (!std.mem.eql(u8, words.next() orelse return null, "setup")) return null;
+    const seconds = parse_number(u64, words.next() orelse return null) orelse return null;
+    const uid = parse_number(u32, words.next() orelse return null) orelse return null;
+    const gid = parse_number(u32, words.next() orelse return null) orelse return null;
+    const name = words.next() orelse return null;
+    const home = words.next() orelse return null;
+    const dns = words.next() orelse return null;
+    if (words.next() != null) return null;
+    var addresses: [dns_count_max][4]u8 = undefined;
+    if (parse_dns(dns, &addresses) == null) return null;
+    if (uid == 0 or !name_ok(name) or !home_ok(home)) return null;
+    return .{ .seconds = seconds, .uid = uid, .gid = gid, .name = name, .home = home, .dns = dns };
+}
+
+fn parse_number(comptime T: type, text: []const u8) ?T {
+    if (text.len == 0 or text.len > 20) return null;
+    if (text.len > 1 and text[0] == '0') return null;
+    for (text) |byte| {
+        if (byte < '0' or byte > '9') return null;
+    }
+    return std.fmt.parseInt(T, text, 10) catch null;
+}
+
+/// The guest's answer to `setup`.
+pub const SetupReply = union(enum) {
+    ok: struct { network_up: bool },
+    failed,
+};
+
+pub const setup_ok_up = "ok net=up\n";
+pub const setup_ok_down = "ok net=down\n";
+pub const setup_failed_prefix = "fail ";
+
+pub fn parse_setup_reply(line: []const u8) ?SetupReply {
+    if (std.mem.eql(u8, line, setup_ok_up)) return .{ .ok = .{ .network_up = true } };
+    if (std.mem.eql(u8, line, setup_ok_down)) return .{ .ok = .{ .network_up = false } };
+    if (!std.mem.startsWith(u8, line, setup_failed_prefix)) return null;
+    if (line.len <= setup_failed_prefix.len + 1 or line[line.len - 1] != '\n') return null;
+    if (line.len > constants.vm_line_bytes_max) return null;
+    return .failed;
+}
+
+pub fn render_busy_reply(buffer: []u8, count: u32) []const u8 {
+    assert(buffer.len >= 32);
+    // Cannot fail: a u32 has at most ten digits.
+    return std.fmt.bufPrint(buffer, "busy {d}\n", .{count}) catch unreachable;
+}
+
+/// The number of the user's processes the guest counts, or null for anything but its reply.
+pub fn parse_busy_reply(line: []const u8) ?u32 {
+    const prefix = "busy ";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    if (line.len <= prefix.len + 1 or line[line.len - 1] != '\n') return null;
+    return parse_number(u32, line[prefix.len .. line.len - 1]);
+}
+
+test "a setup line round-trips and a bad name, home, id or shape is refused" {
+    // Goal: parse accepts only what render writes. Method: a good line, then each field wrong.
+    var buffer: [constants.vm_line_bytes_max]u8 = undefined;
+    const setup: Setup = .{
+        .seconds = 1761700000,
+        .uid = 501,
+        .gid = 20,
+        .name = "ada",
+        .home = "/Users/ada",
+        .dns = "192.168.1.1,10.0.0.2",
+    };
+    const line = render_setup(&buffer, &setup);
+    const expected = "setup 1761700000 501 20 ada /Users/ada 192.168.1.1,10.0.0.2\n";
+    try std.testing.expectEqualStrings(expected, line);
+    const parsed = parse_setup(line).?;
+    try std.testing.expectEqual(setup.seconds, parsed.seconds);
+    try std.testing.expectEqual(setup.uid, parsed.uid);
+    try std.testing.expectEqualStrings(setup.name, parsed.name);
+    try std.testing.expectEqualStrings(setup.home, parsed.home);
+    const bad = [_][]const u8{
+        "",
+        "setup 1 501 20 ada /Users/ada -",
+        "setup 1 0 20 ada /Users/ada -\n",
+        "setup 01 501 20 ada /Users/ada -\n",
+        "setup 1 501 20 -ada /Users/ada -\n",
+        "setup 1 501 20 a:da /Users/ada -\n",
+        "setup 1 501 20 ada Users/ada -\n",
+        "setup 1 501 20 ada /Users/a:da -\n",
+        "setup 1 501 20 ada /Users/ada - extra\n",
+        "setup 1 501 20 ada /Users/ada\n",
+        "setup 1 501 20 ada\n",
+        "setup x 501 20 ada /Users/ada -\n",
+        "setup 1 501 20 ada /Users/ada 1.2.3\n",
+        "setup 1 501 20 ada /Users/ada 1.2.3.256\n",
+        "setup 1 501 20 ada /Users/ada 01.2.3.4\n",
+        "setup 1 501 20 ada /Users/ada 1.2.3.4,1.2.3.4,1.2.3.4,1.2.3.4\n",
+        "setup 1 501 20 ada /Users/ada 1.2.3.4,\n",
+    };
+    for (bad) |text| try std.testing.expect(parse_setup(text) == null);
+}
+
+test "the setup and busy answers parse only as written" {
+    // Goal: the two answers the host reads. Method: each good form, then near misses.
+    try std.testing.expectEqual(true, parse_setup_reply(setup_ok_up).?.ok.network_up);
+    try std.testing.expectEqual(false, parse_setup_reply(setup_ok_down).?.ok.network_up);
+    try std.testing.expectEqual(SetupReply.failed, parse_setup_reply("fail clock\n").?);
+    try std.testing.expect(parse_setup_reply("fail \n") == null);
+    try std.testing.expect(parse_setup_reply("ok net=maybe\n") == null);
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(u32, 3), parse_busy_reply(render_busy_reply(&buffer, 3)).?);
+    try std.testing.expectEqual(@as(u32, 0), parse_busy_reply("busy 0\n").?);
+    try std.testing.expect(parse_busy_reply("busy 03\n") == null);
+    try std.testing.expect(parse_busy_reply("busy \n") == null);
+    try std.testing.expect(parse_busy_reply("idle\n") == null);
 }

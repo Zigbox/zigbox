@@ -68,6 +68,7 @@ pub const Code = enum(u8) {
     E0306,
     E0307,
     E0308,
+    E0309,
     W0301,
     W0302,
     E0401,
@@ -170,6 +171,15 @@ pub const Code = enum(u8) {
     E1007,
     E1008,
     W1001,
+    E1009,
+    E1010,
+    E1011,
+    W1002,
+    E1012,
+    E1013,
+    E1014,
+    E1015,
+    E1016,
     B0001,
 };
 
@@ -910,6 +920,25 @@ pub const registry = [_]Entry{
         \\
         \\The cause names the file and the kernel's reason. The controller may not
         \\be delegated to the user: "zbx doctor" shows which are (ZBX-E0103).
+        ,
+    },
+    .{
+        .code = .E0309,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't make the container's cgroup",
+        .explanation =
+        \\Where there is no systemd user manager (the macOS virtual machine), zbx
+        \\makes the container's cgroup itself: one directory per container in the
+        \\delegated cgroup v2 directory that ZBX_CGROUP_ROOT names, as runc and
+        \\Podman do. It moves the container in before it can run, and writes the
+        \\limits (memory.max, pids.max, cpu.max) there. Making the directory,
+        \\moving the container in or writing a limit failed.
+        \\
+        \\The cause names the step, the path and the kernel's reason. The directory
+        \\must belong to this user, with the controllers enabled for its children
+        \\(cgroup.subtree_control). Inside the virtual machine, zbx vm stop, and
+        \\the next command starts a fresh one.
         ,
     },
     .{
@@ -2500,6 +2529,134 @@ pub const registry = [_]Entry{
         \\
         \\Nothing is lost that the containers did not already lose by the stop of
         \\their machine; state volumes are not in the machine's memory.
+        ,
+    },
+    .{
+        .code = .E1009,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the connection to the virtual machine was lost",
+        .explanation =
+        \\zbx forwards a command into the virtual machine over one connection, and
+        \\that connection ended before the command had: the machine stopped (it
+        \\was killed, or the Mac slept), or the guest's command service died. The
+        \\command's result is unknown. A container that was started detached (zbx
+        \\run -d) is not stopped by this.
+        \\
+        \\zbx vm status says whether the machine runs; the next command starts a
+        \\fresh one if it does not. In zbx run, this is exit 125.
+        ,
+    },
+    .{
+        .code = .E1010,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the virtual machine's command service did not answer",
+        .explanation =
+        \\The machine runs, but nothing took the connection on the guest's command
+        \\port (zbx guest serve, which the guest's init starts when it sets the
+        \\machine up for the user). It may have died or never started; the
+        \\console log the diagnostic names says how far the guest got.
+        \\
+        \\zbx vm stop stops the machine; the next command starts a fresh one.
+        ,
+    },
+    .{
+        .code = .E1011,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the virtual machine could not be set up for this user",
+        .explanation =
+        \\Once the machine runs, the guest sets itself up for the Mac user: the
+        \\clock, the user and its id ranges, the delegated cgroup subtree, and the
+        \\command service. One of those steps failed; the cause names it, and the
+        \\console log has the guest's own words.
+        \\
+        \\zbx vm stop stops the machine; the next command starts a fresh one.
+        ,
+    },
+    .{
+        .code = .W1002,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the virtual machine has no network",
+        .explanation =
+        \\The guest asked for an address on the NAT network by DHCP and got none.
+        \\Containers that need no network still run; pulling an image will fail
+        \\until the machine has one. A fresh machine usually has: zbx vm stop, and
+        \\the next command starts one.
+        ,
+    },
+    .{
+        .code = .E1012,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the virtual machine's disk cannot be made smaller",
+        .explanation =
+        \\The disk is a file on the Mac that holds the images, the state and the
+        \\records of everything zbx ran in the machine, with an ext4 file system in
+        \\it. A file system cannot be shrunk without risking what is on it, so zbx
+        \\vm config --disk takes a size at least as big as the file now is, and
+        \\the disk only grows. The size applies at the next boot.
+        \\
+        \\To start over with a smaller disk, stop the machine and move the file
+        \\aside yourself; zbx never deletes it.
+        ,
+    },
+    .{
+        .code = .E1013,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the working directory is not shared with the virtual machine",
+        .explanation =
+        \\The machine sees one directory of the Mac: your home directory, at the
+        \\same path. A command runs in the directory you ran zbx in, and the
+        \\machine can only enter that directory when it is inside the home. A
+        \\command started anywhere else would run in a different place than you
+        \\asked for, so zbx refuses.
+        \\
+        \\Change into a directory below your home and run the command there.
+        ,
+    },
+    .{
+        .code = .E1014,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the virtual machine's disk is full",
+        .explanation =
+        \\Images, containers' state and zbx's records live on the machine's disk,
+        \\and it has no room left for what the command writes. The disk is a
+        \\sparse file: it takes room on the Mac only as it fills, up to the size
+        \\zbx vm config --disk sets (64 GiB unless you set another).
+        \\
+        \\Remove what you no longer need, or make the disk bigger. The new size
+        \\applies after zbx vm stop, at the next boot.
+        ,
+    },
+    .{
+        .code = .E1015,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the Mac has no room for the virtual machine's disk",
+        .explanation =
+        \\The virtual machine's disk is a sparse file on the Mac, and the Mac's
+        \\volume that holds it has too little free room left. A volume that fills
+        \\up while the machine writes would show as input and output errors in
+        \\the guest and could damage its file system, so zbx does not start the
+        \\machine.
+        \\
+        \\Free space on the Mac's volume and run the command again.
+        ,
+    },
+    .{
+        .code = .E1016,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "Rosetta is not installed on this Mac",
+        .explanation =
+        \\Images built for linux/amd64 run in the machine through Rosetta, Apple's
+        \\translator, which this Mac does not have. Install it once; the machine
+        \\picks it up when it next starts, so stop it with zbx vm stop.
         ,
     },
     .{

@@ -170,7 +170,7 @@ pub fn not_running(diag: *Diag) void {
     assert(diag.fixes.count == 1);
 }
 
-/// `option` is "--cpus" or "--memory"; `given` is what the user typed.
+/// `option` is "--cpus", "--memory" or "--disk"; `given` is what the user typed.
 pub fn size_out_of_range(
     diag: *Diag,
     problem: ?settings.Problem,
@@ -197,7 +197,14 @@ pub fn size_out_of_range(
             "{s} {s} is not a size in whole MiB, between {d} MiB and {d} MiB",
             .{ option, given, memory_range[0], memory_range[1] },
         ),
-        .not_a_size => if (std.mem.eql(u8, option, "--cpus")) diag.cause(
+        .disk_below, .disk_above, .disk_unaligned => diag.cause(
+            "--disk {s} is not a size in whole MiB between {d} GiB and {d} GiB",
+            .{ given, bounds.disk_bytes_min >> 30, bounds.disk_bytes_max >> 30 },
+        ),
+        .not_a_size => if (std.mem.eql(u8, option, "--disk")) diag.cause(
+            "--disk {s} is not a size like 64G or 200G, {d} GiB to {d} GiB",
+            .{ given, bounds.disk_bytes_min >> 30, bounds.disk_bytes_max >> 30 },
+        ) else if (std.mem.eql(u8, option, "--cpus")) diag.cause(
             "--cpus {s} is not a whole number of CPUs, {d} to {d}",
             .{ given, cpus_range[0], cpus_range[1] },
         ) else diag.cause(
@@ -247,7 +254,116 @@ pub fn replacing(diag: *Diag, running: []const u8, ours: []const u8) void {
     assert(diag.fixes.count == 1);
 }
 
+/// E1012: `--disk` asks for less than the disk file has now.
+pub fn disk_shrink(diag: *Diag, asked_bytes: u64, current_bytes: u64, path: []const u8) void {
+    assert(diag.code == null);
+    assert(asked_bytes < current_bytes);
+    diag.raise(.E1012);
+    diag.while_("setting the virtual machine's disk size", .{});
+    diag.cause("--disk is {d} GiB, but the disk is {d} GiB now and cannot be shrunk", .{
+        asked_bytes >> 30, current_bytes >> 30,
+    });
+    diag.context("path", "{s}", .{path});
+    diag.fix_with("give at least the current size:", "zbx vm config --disk {d}G", .{
+        (current_bytes + (1 << 30) - 1) >> 30,
+    });
+    const move = "to start empty with a smaller disk, move the file aside yourself:";
+    diag.fix_with(move, "mv '{s}' '{s}.old'", .{ path, path });
+    assert(diag.fixes.count == 2);
+}
+
+/// E1013: the working directory is not below the directory the machine shares.
+pub fn directory_not_shared(diag: *Diag, working: []const u8, shared: []const u8) void {
+    assert(diag.code == null);
+    assert(working.len > 0);
+    assert(shared.len > 0);
+    diag.raise(.E1013);
+    diag.while_("choosing the directory to run the command in", .{});
+    diag.cause("{s} is not shared with the virtual machine; only {s} is", .{ working, shared });
+    diag.context("dir", "{s}", .{working});
+    diag.context("shared", "{s}", .{shared});
+    diag.fix(.{
+        .sentence = "change into a directory in your home, then run it again:",
+        .command = "cd ~",
+    });
+    assert(diag.fixes.count == 1);
+}
+
+/// E1014: the guest's store disk has no room. `size_bytes` is the disk, `free_bytes` what is left.
+pub fn store_disk_full(diag: *Diag, size_bytes: u64, free_bytes: u64) void {
+    assert(diag.code == null);
+    assert(free_bytes <= size_bytes);
+    diag.raise(.E1014);
+    diag.while_("writing to the virtual machine's disk", .{});
+    if (size_bytes < (10 << 30)) {
+        diag.cause("the disk is {d} MiB and {d} MiB of it is free", .{
+            size_bytes >> 20, free_bytes >> 20,
+        });
+    } else {
+        diag.cause("the disk is {d} GiB and {d} MiB of it is free", .{
+            size_bytes >> 30, free_bytes >> 20,
+        });
+    }
+    diag.fix(.{
+        .sentence = "see what the images cost, and remove what you do not need:",
+        .command = "zbx store du --by-image",
+    });
+    // Twice the size, rounded up to whole GiB: a bigger disk, not the same one.
+    const bigger = (((size_bytes + (1 << 30) - 1) >> 30)) * 2;
+    diag.fix_with(
+        "or make the disk bigger, and stop the machine so that it applies:",
+        "zbx vm config --disk {d}G && zbx vm stop",
+        .{bigger},
+    );
+    assert(diag.fixes.count == 2);
+}
+
+/// E1015: the Mac's volume has less than the machine needs beside its disk file.
+pub fn host_volume_full(diag: *Diag, path: []const u8, free_bytes: u64, needed_bytes: u64) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    assert(free_bytes < needed_bytes);
+    diag.raise(.E1015);
+    diag.while_("preparing the virtual machine's disk", .{});
+    const wording = "the Mac's volume has {d} MiB free; the machine needs {d} MiB beside its disk";
+    diag.cause(wording, .{ free_bytes >> 20, needed_bytes >> 20 });
+    diag.context("path", "{s}", .{path});
+    diag.fix(.{ .sentence = "free space on the Mac's volume, then run the command again" });
+    assert(diag.fixes.count == 1);
+}
+
+/// E1016: a linux/amd64 command needs Rosetta, which the Mac does not have.
+pub fn rosetta_missing(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.E1016);
+    diag.while_("preparing to run a linux/amd64 command", .{});
+    diag.cause("Rosetta is not installed on this Mac; linux/amd64 commands run through it", .{});
+    diag.fix(.{
+        .sentence = "install it once:",
+        .command = "softwareupdate --install-rosetta --agree-to-license",
+    });
+    diag.fix(.{
+        .sentence = "then stop the machine, so that it starts with Rosetta:",
+        .command = "zbx vm stop",
+    });
+    assert(diag.fixes.count == 2);
+}
+
 // ---- Tests: the text of each diagnostic is in vm_golden.zig ------------------------------------
+
+test "a small disk is told in MiB and the bigger one is always bigger" {
+    // Goal: "0 GiB" never reaches a person, and the suggested size exceeds the disk. Method: a
+    // disk under 1 GiB of file system (a 1 GiB disk) and the 64 GiB one.
+    var diag: Diag = undefined;
+    diag.reset();
+    store_disk_full(&diag, 960 << 20, 0);
+    try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "960 MiB") != null);
+    const bigger = diag.fixes.slice()[1].command.slice();
+    try std.testing.expect(std.mem.indexOf(u8, bigger, "--disk 2G") != null);
+    diag.reset();
+    store_disk_full(&diag, 64 << 30, 1 << 20);
+    try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "64 GiB") != null);
+}
 
 test "every function raises its own code" {
     // Goal: the code each builder raises, so that a golden cannot pass on the wrong one.
@@ -268,4 +384,64 @@ test "every function raises its own code" {
     try std.testing.expect(std.mem.indexOf(u8, command, "brew") == null);
     try std.testing.expect(is_entitlement_text("missing the entitlement"));
     try std.testing.expect(!is_entitlement_text("out of memory"));
+}
+
+/// W1002: the guest got no address by DHCP. Containers that need no network still run.
+pub fn no_network(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.W1002);
+    diag.while_("setting up the virtual machine's network", .{});
+    diag.cause("the guest got no answer to its DHCP request on the NAT network", .{});
+    diag.fix(.{
+        .sentence = "a pull will fail until it has one; try a fresh machine:",
+        .command = "zbx vm stop",
+    });
+    assert(diag.fixes.count == 1);
+}
+
+/// E1011: the guest could not finish its setup; `word` is the step it names.
+pub fn setup_failed(diag: *Diag, word: []const u8, console_log: []const u8) void {
+    assert(diag.code == null);
+    assert(word.len > 0);
+    diag.raise(.E1011);
+    diag.while_("setting up the virtual machine for this user", .{});
+    diag.cause("the guest could not set up its {s}", .{word});
+    diag.context("log", "{s}", .{console_log});
+    diag.fix(.{
+        .sentence = "stop the machine; the next command starts a fresh one:",
+        .command = "zbx vm stop",
+    });
+    diag.fix_with("read how far the guest got:", "tail -n 20 '{s}'", .{console_log});
+    assert(diag.fixes.count == 2);
+}
+
+/// E1010: the guest's command service did not take the connection.
+pub fn service_silent(diag: *Diag, console_log: []const u8) void {
+    assert(diag.code == null);
+    assert(console_log.len > 0);
+    diag.raise(.E1010);
+    diag.while_("connecting to the virtual machine's command service", .{});
+    diag.cause("nothing answered on vsock port {d} of the guest", .{constants.vm_forward_port});
+    diag.context("log", "{s}", .{console_log});
+    diag.fix(.{
+        .sentence = "stop the machine; the next command starts a fresh one:",
+        .command = "zbx vm stop",
+    });
+    diag.fix_with("read how far the guest got:", "tail -n 20 '{s}'", .{console_log});
+    assert(diag.fixes.count == 2);
+}
+
+/// E1009: the connection to the guest ended before the command had.
+pub fn connection_lost(diag: *Diag, what: []const u8) void {
+    assert(diag.code == null);
+    assert(what.len > 0);
+    diag.raise(.E1009);
+    diag.while_("running the command in the virtual machine", .{});
+    diag.cause("the connection to the virtual machine ended: {s}", .{what});
+    diag.fix(.{ .sentence = "see whether the machine runs:", .command = "zbx vm status" });
+    diag.fix(.{
+        .sentence = "a container that was detached may still run; list them:",
+        .command = "zbx ps",
+    });
+    assert(diag.fixes.count == 2);
 }

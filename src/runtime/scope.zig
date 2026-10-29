@@ -75,7 +75,43 @@ pub const Problem = union(enum) {
     no_cgroup_path: Io,
     /// A limit systemd could not take was not written to the scope's cgroup file.
     cgroup_write: CgroupWrite,
+    /// The cgroupfs driver (no systemd): a step of the container's cgroup failed.
+    cgroupfs: Cgroupfs,
 };
+
+/// What the cgroupfs driver was doing when a call failed.
+pub const CgroupStep = enum { make, join, limit, remove };
+
+pub const Cgroupfs = struct {
+    step: CgroupStep,
+    /// The directory, or for `limit` the file.
+    path: text_util.Bounded(constants.cgroup_path_bytes_max + 32),
+    io: Io,
+};
+
+/// Which way a run gets its cgroup: from the user's systemd manager over the bus, or, in the
+/// macOS VM (no systemd), by making one child cgroup per container in a delegated cgroup v2
+/// directory named by `ZBX_CGROUP_ROOT`, as runc's and Podman's cgroupfs drivers do. The second
+/// only when there is no user bus to ask: a host with systemd behaves as it always did.
+pub const Driver = enum { systemd, cgroupfs };
+
+/// The systemd version the cgroupfs driver reports: none of the limits is a unit property there,
+/// so every one is written to a cgroup file (`fallback`).
+pub const cgroupfs_version: u32 = 1;
+
+pub fn driver(host: Host, root: *Directory) Driver {
+    var buffer: [constants.dbus_socket_path_bytes_max]u8 = undefined;
+    var problem: Problem = undefined;
+    if (bus_path(host, &buffer, &problem) != null) return .systemd;
+    const value = host.environment(constants.cgroup_root_variable, constants.cgroup_path_bytes_max);
+    const text = value orelse return .systemd;
+    if (text.len < 2 or text[0] != '/') return .systemd;
+    root.* = .{};
+    root.print("{s}", .{text});
+    assert(root.slice().len == text.len); // Not cut: the variable fits the buffer.
+    assert(root.slice()[0] == '/');
+    return .cgroupfs;
+}
 
 pub const Probe = struct {
     version: u32,
@@ -195,6 +231,14 @@ fn open_steps(conn: *client.Connection, path: []const u8, uid: u32) bool {
 /// that hangs up is an error here, not a signal, for the length of the call.
 pub fn probe(host: Host, out: *Probe, problem: *Problem) bool {
     assert(@intFromPtr(problem) != @intFromPtr(out));
+    var root: Directory = .{};
+    if (driver(host, &root) == .cgroupfs) {
+        out.version = cgroupfs_version;
+        out.version_text = .{};
+        out.version_text.print("cgroupfs {s}", .{root.slice()});
+        out.via = .{ .refused = null, .own_path = .{} };
+        return true;
+    }
     host.ignore_broken_pipe(true);
     defer host.ignore_broken_pipe(false);
     var conn: client.Connection = undefined;
@@ -321,6 +365,11 @@ pub fn start(
     assert(keeper_pid > 1);
     assert(plan.scoped);
     directory.* = .{};
+    var root: Directory = .{};
+    if (driver(host, &root) == .cgroupfs) {
+        const members: Members = .{ .pid = pid, .keeper_pid = keeper_pid };
+        return start_cgroupfs(host, plan, members, root.slice(), directory, problem);
+    }
     var conn: client.Connection = undefined;
     var via: Via = undefined;
     if (!open_bus(host, &conn, problem, &via)) return false;
@@ -343,6 +392,143 @@ pub fn start(
     }
     return write_fallback(host, directory.slice(), files[0..count], problem);
 }
+
+// ---- The cgroupfs driver --------------------------------------------------------------------
+
+const Members = struct { pid: u32, keeper_pid: u32 };
+
+fn cgroupfs_problem(step: CgroupStep, path: []const u8, host: Host, err: host_mod.Error) Problem {
+    assert(path.len > 0);
+    const io: Io = .{ .err = err, .errno = host.last_errno() };
+    var result: Cgroupfs = .{ .step = step, .path = .{}, .io = io };
+    result.path.print("{s}", .{path});
+    assert(result.path.slice().len > 0);
+    assert(result.io.errno < 4096);
+    return .{ .cgroupfs = result };
+}
+
+/// Makes `<root>/<scope name>`, moves the container and the keeper into it, and writes the
+/// limits. The child is still waiting for its go-ahead, so nothing it does happens outside the
+/// limits (the order the systemd driver keeps). `directory` is set as soon as the cgroup exists,
+/// so that cleanup finds it even when a later step fails.
+fn start_cgroupfs(
+    host: Host,
+    plan: *const plan_mod.Plan,
+    members: Members,
+    root: []const u8,
+    directory: *Directory,
+    problem: *Problem,
+) bool {
+    assert(root.len >= 2);
+    assert(members.pid != members.keeper_pid);
+    var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+    const name = plan.text(plan.scope_name);
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ root, name }) catch {
+        problem.* = cgroupfs_problem(.make, root, host, error.PathTooLong);
+        return false;
+    };
+    if (path.len >= constants.cgroup_path_bytes_max) {
+        problem.* = cgroupfs_problem(.make, root, host, error.PathTooLong);
+        return false;
+    }
+    path_buffer[path.len] = 0;
+    const path_z: [:0]const u8 = path_buffer[0..path.len :0];
+    host.make_directory(path_z, false) catch |err| {
+        problem.* = cgroupfs_problem(.make, path, host, err);
+        return false;
+    };
+    directory.print("{s}", .{path});
+    for ([_]u32{ members.pid, members.keeper_pid }) |member| {
+        if (!join_cgroup(host, path, member, problem)) return false;
+    }
+    var files: [fallback_files_max]FileWrite = undefined;
+    const count = fallback(cgroupfs_version, plan.scope_limits, &files);
+    const limits = plan.scope_limits;
+    // Under this driver every limit is a file: memory.max and its swap file, pids.max, cpu.max.
+    const expected: u32 = (if (limits.memory_bytes != null) @as(u32, 2) else 0) +
+        @intFromBool(limits.pids != null) + @intFromBool(limits.cpu_millis != null);
+    assert(count == expected);
+    assert(directory.slice().len == path.len);
+    return write_cgroupfs_limits(host, path, files[0..count], problem);
+}
+
+fn join_cgroup(host: Host, directory: []const u8, pid: u32, problem: *Problem) bool {
+    assert(directory.len > 0);
+    assert(pid > 1);
+    var file_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+    const procs = "{s}/cgroup.procs";
+    const file = std.fmt.bufPrint(&file_buffer, procs, .{directory}) catch return false;
+    assert(file.len > directory.len); // The directory and the name of the file.
+    file_buffer[file.len] = 0;
+    const file_z: [:0]const u8 = file_buffer[0..file.len :0];
+    var number: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&number, "{d}", .{pid}) catch unreachable; // A pid is short.
+    host.write_file(file_z, text) catch |err| {
+        problem.* = cgroupfs_problem(.join, file, host, err);
+        return false;
+    };
+    return true;
+}
+
+fn write_cgroupfs_limits(
+    host: Host,
+    directory: []const u8,
+    files: []const FileWrite,
+    problem: *Problem,
+) bool {
+    assert(directory.len > 0);
+    assert(files.len <= fallback_files_max);
+    for (files) |file| {
+        var path_buffer: [constants.cgroup_path_bytes_max + 32]u8 = undefined;
+        const name = file.name;
+        const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, name }) catch {
+            problem.* = cgroupfs_problem(.limit, directory, host, error.PathTooLong);
+            return false;
+        };
+        assert(file.value.slice().len > 0); // A limit file is never written empty.
+        path_buffer[path.len] = 0;
+        const path_z: [:0]const u8 = path_buffer[0..path.len :0];
+        host.write_file(path_z, file.value.slice()) catch |err| {
+            // memory.swap.max is best effort: the VM has no swap to forbid, and a kernel
+            // without swap accounting has the file absent or not writable.
+            const swap = std.mem.eql(u8, file.name, "memory.swap.max");
+            if (swap) continue;
+            problem.* = cgroupfs_problem(.limit, path, host, err);
+            return false;
+        };
+    }
+    return true;
+}
+
+/// Removes the container's cgroup. It is empty once the container and the keeper are reaped, but
+/// the kernel may take a moment to say so: EBUSY is tried again a few times.
+fn cleanup_cgroupfs(host: Host, directory: []const u8, problem: *Problem) ?Cleaned {
+    assert(directory.len > 0);
+    assert(directory[0] == '/');
+    assert(directory.len <= constants.cgroup_path_bytes_max); // It fits the buffer below.
+    var path_buffer: [constants.cgroup_path_bytes_max + 1]u8 = undefined;
+    @memcpy(path_buffer[0..directory.len], directory);
+    path_buffer[directory.len] = 0;
+    const path_z: [:0]const u8 = path_buffer[0..directory.len :0];
+    var tries: u32 = 0;
+    while (tries < constants.cgroup_remove_tries_max) : (tries += 1) {
+        if (host.remove_directory(path_z)) |_| {
+            return .removed;
+        } else |err| {
+            if (err == error.NotFound) return .already_gone;
+            const busy = host.last_errno() == errno_busy;
+            assert(tries < constants.cgroup_remove_tries_max);
+            if (!busy or tries + 1 == constants.cgroup_remove_tries_max) {
+                problem.* = cgroupfs_problem(.remove, directory, host, err);
+                return null;
+            }
+            host.sleep_ms(constants.cgroup_remove_wait_ms);
+        }
+    }
+    unreachable; // The last try returns above.
+}
+
+const errno_busy: u16 = 16;
 
 fn write_fallback(
     host: Host,
@@ -452,6 +638,8 @@ pub const Cleaned = enum {
     manager_done,
     /// The manager still had the unit; its stop job ended "done" and the cgroup went.
     stopped,
+    /// The cgroupfs driver removed the empty cgroup itself.
+    removed,
 };
 
 /// Makes sure the scope is gone once its container has ended. The manager removes a scope by
@@ -467,6 +655,11 @@ pub fn cleanup(
 ) ?Cleaned {
     assert(std.mem.endsWith(u8, name, constants.scope_suffix));
     assert(directory.len <= constants.cgroup_path_bytes_max);
+    var root: Directory = .{};
+    if (driver(host, &root) == .cgroupfs) {
+        if (directory.len == 0) return .already_gone; // The cgroup was never made.
+        return cleanup_cgroupfs(host, directory, problem);
+    }
     if (directory.len > 0 and !cgroup_exists(host, directory)) return .already_gone;
     host.ignore_broken_pipe(true);
     defer host.ignore_broken_pipe(false);

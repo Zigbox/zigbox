@@ -13,6 +13,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
+const apk = @import("vm_image/apk.zig");
 const cpio = @import("vm_image/cpio.zig");
 const constants = @import("constants.zig");
 
@@ -26,7 +27,14 @@ const Arguments = struct {
     label: []const u8 = "",
     out_initramfs: []const u8 = "",
     out_version: []const u8 = "",
+    apk_cache: []const u8 = "",
+    apk_mirror: []const u8 = "",
+    packages: [16]Package = undefined,
+    package_count: u32 = 0,
 };
+
+/// An Alpine package to take files from: its name, where it is, and the SHA-256 of the file.
+const Package = struct { name: []const u8, url: []const u8, sha256: []const u8 };
 
 pub fn main(init: std.process.Init) !u8 {
     var buffer: [512]u8 = undefined;
@@ -50,7 +58,22 @@ fn parse_arguments(init: std.process.Init) ?Arguments {
     _ = iterator.next();
     var result: Arguments = .{};
     while (iterator.next()) |name| {
+        if (std.mem.eql(u8, name, "--apk")) {
+            if (result.package_count == result.packages.len) return null;
+            const package_name = iterator.next() orelse return null;
+            const url = iterator.next() orelse return null;
+            const digest = iterator.next() orelse return null;
+            result.packages[result.package_count] = .{
+                .name = package_name,
+                .url = url,
+                .sha256 = digest,
+            };
+            result.package_count += 1;
+            continue;
+        }
         const value = iterator.next() orelse return null;
+        if (std.mem.eql(u8, name, "--apk-cache")) result.apk_cache = value;
+        if (std.mem.eql(u8, name, "--apk-mirror")) result.apk_mirror = value;
         if (std.mem.eql(u8, name, "--kernel")) result.kernel = value;
         if (std.mem.eql(u8, name, "--kernel-sha256")) result.kernel_sha256 = value;
         if (std.mem.eql(u8, name, "--init")) result.init = value;
@@ -65,6 +88,8 @@ fn parse_arguments(init: std.process.Init) ?Arguments {
 }
 
 fn run(init: std.process.Init, arguments: *const Arguments) !void {
+    assert(arguments.package_count > 0); // An image without the id-map helpers cannot run a user.
+    assert(arguments.package_count <= arguments.packages.len);
     const io = init.io;
     const arena = init.arena.allocator();
     const limit: Io.Limit = .limited(file_bytes_max);
@@ -84,6 +109,7 @@ fn run(init: std.process.Init, arguments: *const Arguments) !void {
     const zbx_binary = try Io.Dir.cwd().readFileAlloc(io, arguments.zbx, arena, limit);
     var entries: std.ArrayList(cpio.Entry) = .empty;
     try add_fixed(&entries, arena, init_binary, zbx_binary, arguments.label);
+    try add_packages(init, arguments, &entries);
     const version = version_of(kernel, entries.items);
     try entries.append(arena, .{
         .path = "etc/zbx-image-version",
@@ -130,7 +156,9 @@ fn add_fixed(
     label: []const u8,
 ) !void {
     const directories = [_][]const u8{
-        "dev", "etc", "proc", "run", "sys", "tmp", "usr", "usr/bin",
+        "dev",           "etc",     "proc", "run",     "sys",      "tmp",
+        "usr",           "usr/bin", "lib",  "usr/lib", "usr/sbin", "etc/ssl",
+        "etc/ssl/certs", "bin",     "mnt",
     };
     for (directories) |path| {
         try entries.append(arena, .{ .path = path, .kind = .directory, .mode = 0o755 });
@@ -216,4 +244,152 @@ test "the version depends on the kernel, a file's bytes and the order-free set o
     try std.testing.expect(!std.mem.eql(u8, &first, &version_of("kernel", &mode)));
     var reversed = [_]cpio.Entry{ base[1], base[0] };
     try std.testing.expectEqual(first, version_of("kernel", &reversed));
+}
+
+/// The files of each pinned Alpine package that the VM needs, and no others.
+fn wanted(path: []const u8) bool {
+    const exact = [_][]const u8{
+        "lib/ld-musl-aarch64.so.1",
+        "lib/libc.musl-aarch64.so.1",
+        "usr/bin/newuidmap",
+        "usr/bin/newgidmap",
+        "etc/ssl/certs/ca-certificates.crt",
+        "etc/ssl/cert.pem",
+        "sbin/mke2fs",
+        "sbin/e2fsck",
+        "usr/sbin/resize2fs",
+    };
+    for (exact) |name| {
+        if (std.mem.eql(u8, name, path)) return true;
+    }
+    const library_prefixes = [_][]const u8{
+        "usr/lib/libbsd.so", "usr/lib/libmd.so", "usr/lib/libeconf.so", "lib/libe2p.so",
+        "lib/libext2fs.so",  "lib/libss.so",     "lib/libcom_err.so",   "lib/libblkid.so",
+        "lib/libuuid.so",
+    };
+    for (library_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
+    return false;
+}
+
+fn add_packages(
+    init: std.process.Init,
+    arguments: *const Arguments,
+    entries: *std.ArrayList(cpio.Entry),
+) !void {
+    const arena = init.arena.allocator();
+    for (arguments.packages[0..arguments.package_count]) |package| {
+        const bytes = try fetch_package(init, arguments, package);
+        for (try apk.unpack(arena, bytes)) |file| {
+            if (file.kind == .directory or !wanted(file.path)) continue;
+            // newuidmap and newgidmap are setuid root: they write another process's id map.
+            const setuid = std.mem.endsWith(u8, file.path, "/newuidmap") or
+                std.mem.endsWith(u8, file.path, "/newgidmap");
+            // The guest's root has no /sbin of its own: the tools go to /usr/sbin.
+            const sbin = std.mem.startsWith(u8, file.path, "sbin/");
+            const moved = try std.fmt.allocPrint(arena, "usr/{s}", .{file.path});
+            const path = if (sbin) moved else file.path;
+            try entries.append(arena, .{
+                .path = path,
+                .kind = if (file.kind == .symlink) .symlink else .file,
+                .mode = if (setuid) file.mode | 0o4000 else file.mode,
+                .data = file.data,
+            });
+        }
+    }
+}
+
+/// The package file from the cache, if it is there and is the pinned one; otherwise from the
+/// mirror and then from its original URL. A file that fails its SHA-256 is refused (and removed),
+/// whichever source it came from. If no source gives the pinned file, one line names the package
+/// and both URLs.
+fn fetch_package(
+    init: std.process.Init,
+    arguments: *const Arguments,
+    package: Package,
+) ![]const u8 {
+    const io = init.io;
+    const arena = init.arena.allocator();
+    try Io.Dir.cwd().createDirPath(io, arguments.apk_cache);
+    const name = std.fs.path.basename(package.url);
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.apk_cache, name });
+    if (read_pinned(io, arena, path, package.sha256)) |bytes| return bytes;
+    const mirror_url = try std.fmt.allocPrint(arena, "{s}/{s}", .{ arguments.apk_mirror, name });
+    const sources = [_][]const u8{ mirror_url, package.url };
+    const partial = try std.fmt.allocPrint(arena, "{s}.part", .{path});
+    for (sources) |source| {
+        if (arguments.apk_mirror.len == 0 and source.ptr == mirror_url.ptr) continue;
+        download(init, source, partial) catch {
+            note(io, "make_image: {s}: no file at {s}\n", .{ package.name, source });
+            continue;
+        };
+        if (read_pinned(io, arena, partial, package.sha256)) |bytes| {
+            try Io.Dir.cwd().rename(partial, Io.Dir.cwd(), path, io);
+            note(io, "make_image: {s} from {s}\n", .{ package.name, source });
+            return bytes;
+        }
+        const refused = "make_image: {s}: the file at {s} is not the pinned one; refused\n";
+        note(io, refused, .{ package.name, source });
+        Io.Dir.cwd().deleteFile(io, partial) catch {};
+    }
+    note(io, "make_image: cannot get {s}: neither {s} nor {s} gave the pinned file\n", .{
+        package.name, mirror_url, package.url,
+    });
+    return error.PackageUnavailable;
+}
+
+/// The file's bytes if it exists and has the SHA-256; a file that does not is removed.
+fn read_pinned(io: Io, arena: std.mem.Allocator, path: []const u8, sha256: []const u8) ?[]const u8 {
+    const limit: Io.Limit = .limited(file_bytes_max);
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, limit) catch return null;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    if (std.mem.eql(u8, &hex, sha256)) return bytes;
+    Io.Dir.cwd().deleteFile(io, path) catch {};
+    return null;
+}
+
+fn note(io: Io, comptime format: []const u8, args: anytype) void {
+    var buffer: [768]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stderr(), io, &buffer);
+    file_writer.interface.print(format, args) catch return;
+    file_writer.interface.flush() catch return;
+}
+
+fn download(init: std.process.Init, url: []const u8, destination: []const u8) !void {
+    const arena = init.arena.allocator();
+    var client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
+    defer client.deinit();
+    try client.initDefaultProxies(arena, init.environ_map);
+    const file = try Io.Dir.cwd().createFile(init.io, destination, .{});
+    defer file.close(init.io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var writer = file.writer(init.io, &buffer);
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &writer.interface,
+    });
+    try writer.interface.flush();
+    if (result.status != .ok) return error.DownloadFailed;
+}
+
+test "read_pinned returns the pinned file and removes any other" {
+    // Goal: a file that fails its SHA-256 (a bad mirror, a damaged cache) is refused. Method: a
+    // file with the right digest, then the same path with a wrong one.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    const path = ".zig-cache/zbx-read-pinned-test";
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "pinned bytes" });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("pinned bytes", &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    try std.testing.expectEqualStrings("pinned bytes", read_pinned(io, arena, path, &hex).?);
+    const wrong: [64]u8 = @splat(0x30);
+    try std.testing.expect(read_pinned(io, arena, path, &wrong) == null);
+    try std.testing.expect(read_pinned(io, arena, path, &hex) == null); // It was removed.
 }
