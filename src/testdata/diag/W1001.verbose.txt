@@ -1,0 +1,7 @@
+warning[ZBX-W1001]: replacing a virtual machine of another version
+  while  checking the running virtual machine's version
+  cause  it runs image fedcba9876543210, this zbx carries 0123456789abcdef: zbx
+         stops it and starts its own
+  fix    nothing to do; to stop it by hand:   zbx vm stop
+  more   zbx explain W1001
+  docs   https://zigbox.github.io/zigbox/errors/W1001.html

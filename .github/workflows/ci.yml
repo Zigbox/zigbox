@@ -78,6 +78,7 @@ jobs:
           - run
           - record
           - state
+          - vm
           - redact
           - dbus
           - seccomp

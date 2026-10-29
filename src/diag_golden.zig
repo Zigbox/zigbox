@@ -18,6 +18,7 @@ const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
+const vm_golden = @import("mac/vm_golden.zig");
 const fixtures = @import("doctor_fixtures.zig");
 const run = @import("runtime/run.zig");
 const doctor = @import("doctor.zig");
@@ -1782,7 +1783,7 @@ test "every registered code has a case or is the panic" {
         if (item.code == .B0001) continue;
         const covered = for (cases) |case| {
             if (case.code == item.code) break true;
-        } else false;
+        } else vm_golden.covers(item.code);
         try testing.expect(covered);
     }
 }

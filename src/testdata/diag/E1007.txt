@@ -1,0 +1,6 @@
+error[ZBX-E1007]: the virtual machine's size is out of range
+  cause  --memory 64G is outside what this Mac allows: 512 MiB to 18432 MiB
+  fix    give a size in range, for example:   zbx vm config --cpus 4 --memory 2G
+         see the current values:              zbx vm config
+  more   zbx explain E1007 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1007.html

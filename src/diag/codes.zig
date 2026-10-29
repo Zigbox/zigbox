@@ -8,7 +8,8 @@
 //!
 //! Numbering: `00xx` CLI and general, `01xx` host and doctor (one code per doctor check),
 //! `02xx` runtime and isolation, `03xx` limits, `04xx` store, `05xx` registry and pull,
-//! `06xx` network, `07xx` state, `08xx` build, `09xx` trust and policy. A code is never reused
+//! `06xx` network, `07xx` state, `08xx` build, `09xx` trust and policy, `10xx` the macOS VM. A
+//! code is never reused
 //! or renumbered.
 
 const std = @import("std");
@@ -160,6 +161,15 @@ pub const Code = enum(u8) {
     W0701,
     W0702,
     W0703,
+    E1001,
+    E1002,
+    E1003,
+    E1004,
+    E1005,
+    E1006,
+    E1007,
+    E1008,
+    W1001,
     B0001,
 };
 
@@ -2353,6 +2363,146 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E1001,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "this zbx is not allowed to run virtual machines",
+        .explanation =
+        \\On a Mac, zbx runs containers in a small Linux virtual machine that it
+        \\starts through Apple's Virtualization.framework. The framework refuses a
+        \\program that does not carry the com.apple.security.virtualization
+        \\entitlement, or a Mac that cannot virtualize at all (an Intel Mac, or a
+        \\Mac inside another virtual machine without nested virtualization).
+        \\
+        \\A zbx installed from a release is signed with the entitlement already.
+        \\A zbx built from source is not: sign it with the entitlements file in
+        \\the repository (vm/zbx.entitlements). An ad-hoc signature is enough on
+        \\the Mac that built it.
+        ,
+    },
+    .{
+        .code = .E1002,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the virtual machine did not start",
+        .explanation =
+        \\Virtualization.framework refused to start the Linux virtual machine, or
+        \\the machine failed while it started. The cause gives the framework's own
+        \\words, its error domain and its code, and the step that failed
+        \\(configuring, validating or starting).
+        \\
+        \\The usual reasons are a size the framework does not allow (see zbx vm
+        \\config), too little free memory on the Mac, and a damaged VM image.
+        \\The machine's console is in the log file the diagnostic names: its last
+        \\lines say how far the guest got.
+        ,
+    },
+    .{
+        .code = .E1003,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the virtual machine did not answer in time",
+        .explanation =
+        \\The virtual machine started, but its init did not answer on the vsock
+        \\port within the time zbx allows for a boot. The kernel may have stopped
+        \\(see the console log the diagnostic names), or the Mac is too busy to
+        \\run it.
+        \\
+        \\zbx vm stop stops what is left of it; the next command starts a fresh
+        \\one. If it happens every time, send the console log with the report.
+        ,
+    },
+    .{
+        .code = .E1004,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "another process holds the virtual machine",
+        .explanation =
+        \\There is one virtual machine per user, owned by one host process that
+        \\holds a lock file in the VM directory. That lock is held, but the process
+        \\that holds it does not answer on its control socket: it is starting, hung
+        \\or stuck. A host that was killed leaves no lock behind, so this is not a
+        \\stale file.
+        \\
+        \\The cause names the process. If it is hung, end it with kill, and run the
+        \\command again.
+        ,
+    },
+    .{
+        .code = .E1005,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't make or write the VM directory",
+        .explanation =
+        \\zbx keeps the virtual machine's files in ~/Library/Application Support/
+        \\zbx/vm: the unpacked kernel and initramfs, the console log, the lock
+        \\and the control socket. A file or directory there could not be made,
+        \\read or written, or the path is too long for a Unix socket (103 bytes).
+        \\The cause names the path and what the system said.
+        \\
+        \\A full disk and a directory owned by another user are the usual
+        \\reasons. HOME decides the place.
+        ,
+    },
+    .{
+        .code = .E1006,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no virtual machine is running",
+        .explanation =
+        \\No command uses this code now. zbx vm stop used to refuse when no virtual
+        \\machine ran; it now succeeds and prints the stopped status, because
+        \\stopping what is not running is already done. The code stays registered
+        \\because a code never changes meaning or goes away; it is for a command
+        \\that truly needs a running machine.
+        \\
+        \\zbx vm status says whether one is running.
+        ,
+    },
+    .{
+        .code = .E1007,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the virtual machine's size is out of range",
+        .explanation =
+        \\zbx vm config sets how many CPUs and how much memory the virtual machine
+        \\boots with. The value is outside what this Mac allows: zbx's own limits,
+        \\Virtualization.framework's, and the Mac's CPUs and memory together. The
+        \\cause names the allowed range. Memory is in whole MiB: 2G, 4096M.
+        \\
+        \\Nothing was changed. zbx vm config with no options shows the current
+        \\values.
+        ,
+    },
+    .{
+        .code = .E1008,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the virtual machine's settings",
+        .explanation =
+        \\The file ~/Library/Application Support/zbx/vm-settings holds the size
+        \\chosen with zbx vm config. This one is damaged, or was written by a newer
+        \\zbx, which this one does not misread.
+        \\
+        \\Set the size again with zbx vm config, which writes a new file, or move
+        \\the old one aside.
+        ,
+    },
+    .{
+        .code = .W1001,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "replacing a virtual machine of another version",
+        .explanation =
+        \\A virtual machine is running from an image (kernel and initramfs) of
+        \\another version than this zbx carries, left over from before an upgrade.
+        \\zbx does not drive it: it stops it and starts one from its own image.
+        \\
+        \\Nothing is lost that the containers did not already lose by the stop of
+        \\their machine; state volumes are not in the machine's memory.
+        ,
+    },
+    .{
         .code = .B0001,
         .severity = .bug,
         .blame = .internal,
@@ -2503,6 +2653,7 @@ pub fn can_end_run(code: Code) bool {
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
+        .E1006, .E1007 => false,
         else => true,
     };
 }

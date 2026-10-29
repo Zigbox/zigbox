@@ -1,0 +1,6 @@
+error[ZBX-E1003]: the virtual machine did not answer in time
+  cause  the guest's init did not answer on vsock port 1024 within 30 s
+  fix    stop what is left of it:      zbx vm stop
+         read how far the guest got:   tail -n 20 '/Users/ada/Library/Application Support/zbx/vm/console.log'
+  more   zbx explain E1003 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1003.html

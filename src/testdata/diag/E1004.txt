@@ -1,0 +1,5 @@
+error[ZBX-E1004]: another process holds the virtual machine
+  cause  process 4121 holds the VM lock and does not answer on its socket
+  fix    end it, then run the command again:   kill 4121
+  more   zbx explain E1004 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E1004.html

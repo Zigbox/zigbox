@@ -692,6 +692,42 @@ pub const fuzz_iterations_max: u32 = 100_000_000;
 /// Each fuzzer's share of `zig build check`, with a fresh seed: a quick look, not the soak.
 pub const fuzz_check_iterations: u32 = 2_000;
 
+// The macOS VM (milestone M4b). One VM per user, started by the first command that needs it.
+/// The vsock port the guest's init listens on.
+pub const vm_guest_port: u32 = 1024;
+/// The VM's size when nothing is set: this many virtual CPUs, or half the Mac's if fewer, and
+/// this much memory.
+pub const vm_cpus_default: u32 = 4;
+pub const vm_memory_bytes_default: u64 = 2 << 30;
+/// What `zbx vm config` accepts, before Virtualization.framework's own limits and the Mac's are
+/// applied on top. The least memory is what the kernel and the initramfs need to boot and run
+/// a container; the most is far past any Mac that has Apple silicon.
+pub const vm_cpus_min: u32 = 1;
+pub const vm_cpus_max: u32 = 64;
+pub const vm_memory_bytes_min: u64 = 512 << 20;
+pub const vm_memory_bytes_max: u64 = 256 << 30;
+/// The VM stops after this long without a command to run (enforced from slice 2).
+pub const vm_idle_timeout_ms: u32 = 5 * 60 * 1000;
+/// From the start of the host process to the guest's answer on vsock.
+pub const vm_boot_timeout_ms: u32 = 30_000;
+/// From the request to stop to the VM being off; then it is stopped by force.
+pub const vm_stop_timeout_ms: u32 = 10_000;
+/// A client waiting for the host's answer on the control socket.
+pub const vm_control_timeout_ms: u32 = 5_000;
+/// Between two looks at something that has no notification (the socket, the VM's state).
+pub const vm_poll_step_ms: u32 = 20;
+/// One line of the control socket, of the guest's handshake, and of a settings record.
+pub const vm_line_bytes_max: u32 = 512;
+/// The image version: hex digits of the digest over the kernel and the initramfs.
+pub const vm_image_version_bytes: u32 = 16;
+/// A socket path on macOS is at most 103 bytes and a NUL.
+pub const vm_socket_path_bytes_max: u32 = 103;
+pub const vm_path_bytes_max: u32 = 1024;
+/// A file of the image (kernel, initramfs) is at most this big, so a damaged one is refused.
+pub const vm_image_file_bytes_max: u64 = 256 << 20;
+/// The lines of the host's log shown after a host that died before it answered.
+pub const vm_log_tail_bytes_max: u32 = 2048;
+
 comptime {
     // Four distinct failure classes, none colliding with success, and the internal code is the
     // sysexits one.
@@ -1003,4 +1039,19 @@ comptime {
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);
     assert(fuzz_check_iterations <= fuzz_iterations_default);
+
+    assert(vm_cpus_min <= vm_cpus_default);
+    assert(vm_cpus_default <= vm_cpus_max);
+    assert(vm_memory_bytes_min <= vm_memory_bytes_default);
+    assert(vm_memory_bytes_default <= vm_memory_bytes_max);
+    assert(vm_memory_bytes_max % (1 << 20) == 0); // Whole MiB: the framework counts in them.
+    assert(vm_memory_bytes_min % (1 << 20) == 0);
+    assert(vm_poll_step_ms < vm_control_timeout_ms);
+    assert(vm_stop_timeout_ms < vm_boot_timeout_ms);
+    assert(vm_boot_timeout_ms % vm_poll_step_ms == 0);
+    assert(vm_stop_timeout_ms % vm_poll_step_ms == 0);
+    assert(vm_control_timeout_ms % vm_poll_step_ms == 0);
+    assert(vm_idle_timeout_ms > vm_boot_timeout_ms);
+    assert(vm_socket_path_bytes_max < vm_path_bytes_max);
+    assert(vm_guest_port > 0);
 }

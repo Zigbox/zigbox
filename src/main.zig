@@ -181,3 +181,17 @@ test {
     _ = @import("runtime/mounts_diagnose.zig");
     _ = @import("runtime/mount_tests.zig");
 }
+
+test {
+    // The macOS VM layer's portable parts (M4b): the settings record, the control and guest
+    // protocols, the diagnostics and their goldens. They run on Linux CI too, so a change to
+    // the shared registry cannot break them unseen; the macOS-only parts (the Objective-C
+    // bridge, Virtualization.framework) are tested by `zig build test` on a Mac.
+    _ = @import("mac/settings.zig");
+    _ = @import("mac/control.zig");
+    _ = @import("mac/paths.zig");
+    _ = @import("mac/diagnose.zig");
+    _ = @import("mac/vm_golden.zig");
+    _ = @import("vm_protocol.zig");
+    _ = @import("vm_image/cpio.zig");
+}

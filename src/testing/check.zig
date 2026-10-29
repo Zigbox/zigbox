@@ -20,9 +20,14 @@
 //! gates saw and the user test did not. Build-host tool, run by build.zig from the repository root.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const scratch = ".zig-cache/zbx-check-tree";
+
+/// What a Mac's check leaves out or does differently, said in its PASS line.
+const mac_note = "linux tests compiled for aarch64-linux, not run; skipped on macOS: " ++
+    "linux tests, VM harness run, test as tester";
 const cache_note_bytes: u64 = 6 << 30;
 
 /// Runs `argv` (in `cwd` if given) with its errors on stderr; fails unless it exits 0.
@@ -82,7 +87,17 @@ pub fn main(init: std.process.Init) !u8 {
         });
         return 1;
     };
-    const as_user = !std.mem.eql(u8, user, "-") and std.os.linux.geteuid() == 0;
+    const on_macos = builtin.os.tag == .macos;
+    // On a Mac there is no `tester` user and no Linux kernel: the Linux tests are compiled for
+    // aarch64-linux (so they cannot break unseen) but run only on Linux CI.
+    if (on_macos) {
+        run(io, &.{ zig, "build", "test", "-Dtarget=aarch64-linux" }, null) catch {
+            const words = "the Linux tests do not compile";
+            try err.print("check: FAIL {s}{s} ({s})\n", .{ commit, dirty, words });
+            return 1;
+        };
+    }
+    const as_user = !on_macos and !std.mem.eql(u8, user, "-") and std.os.linux.geteuid() == 0;
     if (as_user) {
         test_as(gpa, io, zig, user) catch {
             try err.print("check: FAIL {s}{s} (zig build test as {s})\n", .{ commit, dirty, user });
@@ -94,6 +109,11 @@ pub fn main(init: std.process.Init) !u8 {
     else
         "";
     note_cache(gpa, io, err);
+    if (on_macos) {
+        const gates = "build test tidy release errors-site harness fuzz";
+        try err.print("check: PASS {s}{s} ({s}; {s})\n", .{ commit, dirty, gates, mac_note });
+        return 0;
+    }
     try err.print("check: PASS {s}{s} (build test tidy release errors-site harness fuzz{s})\n", .{
         commit, dirty, tail,
     });
