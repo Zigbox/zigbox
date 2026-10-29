@@ -111,10 +111,20 @@ fn check_entitlement(check: *Check) void {
             check.status = .warn;
             check.say("codesign could not read this binary's signature", .{});
             check.diag.reset();
-            diagnose.not_allowed(&check.diag, null);
+            missing_entitlement(&check.diag);
         },
     }
     assert(check.detail_length > 0);
+}
+
+/// E1001 for a binary that lacks the entitlement: the cause the framework gives for it, so that
+/// the fix is the one for a binary (sign it, or reinstall), not the one for a virtual machine.
+pub fn missing_entitlement(diag: *Diag) void {
+    diagnose.not_allowed(diag, .{
+        .domain = "VZErrorDomain",
+        .code = 2,
+        .description = "The process doesn't have the \"" ++ entitlement_key ++ "\" entitlement.",
+    });
 }
 
 fn fail_entitlement(check: *Check, detail: []const u8) void {
@@ -122,7 +132,7 @@ fn fail_entitlement(check: *Check, detail: []const u8) void {
     check.status = .fail;
     check.say("{s}", .{detail});
     check.diag.reset();
-    diagnose.not_allowed(&check.diag, null);
+    missing_entitlement(&check.diag);
     assert(check.diag.code.? == .E1001);
 }
 
@@ -396,7 +406,7 @@ fn fixture(failing: bool) Report {
     const entitlement = &report.checks[@backingInt(Id.entitlement)];
     entitlement.status = .fail;
     entitlement.say("this binary is not signed", .{});
-    diagnose.not_allowed(&entitlement.diag, null);
+    missing_entitlement(&entitlement.diag);
     const version = &report.checks[@backingInt(Id.version)];
     version.status = .warn;
     version.say("the machine runs image fedcba9876543210, this zbx carries 0123456789abcdef", .{});
