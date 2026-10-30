@@ -5,6 +5,15 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## Zigcube's restart: C1 includes local mode; Zigcube drives
+
+*Decided 2026-10-30.*
+
+- **C1 includes local mode** (live doc rev 76): zcube-server on SQLite with one agent on the same machine, started by one command, on Linux and macOS (the agent in the zbx machine), with services reaching each other by name where the service file grants it, a single-node form of C4 without WireGuard. C1's demo gains a step: an app and postgres on a laptop, from one file.
+- **Zigcube's own session drives the restart**, from orders written into the zigcube repository (`docs/restart.md`).
+- **The owner reviews the revised `Runtime` contract** before Zigcube builds on it; the orders carry it as a draft.
+- **A Zigbox gap the orders depend on:** pull is not in the `zigbox` library (it lives in the CLI's code), so Zigcube's agent cannot fetch an image without it. It is a Zigbox item, to be scheduled.
+
 ## M6b · Dev loop: logs for every run, 5 MiB, one implementer
 
 *Decided 2026-10-30, on the M6b brief.*

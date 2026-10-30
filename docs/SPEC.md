@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-29 (doc rev 68), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-30 (doc rev 76), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -377,7 +377,7 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 
 ## Part II · Zigcube: orchestrating Zigbox
 
-Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. A single-node form of C4's DNS and grants, without WireGuard, is an early target for that reason.
+Zigcube runs Zigbox workloads across a fleet of machines. It keeps the one idea Kubernetes got right, declared desired state reconciled by controllers against a watchable store, and rebuilds everything around it to exploit Zigbox's content-addressed images, signatures and explicit grants. Its control plane starts in parallel with Zigbox, against a fake runtime (see When Zigcube starts, below), and keeps the same demo-first contract: every C-milestone ends in a live demo on a small VM cluster. Zigcube is also how a developer runs more than one service on one machine (zbx has no Compose equivalent): zcube-server on the SQLite store with one agent on the same laptop, and services reaching each other by name. C1 includes that local mode: a single-node form of C4's DNS and grants, without WireGuard.
 
 Principles it adds on top of Part I:
 
@@ -402,7 +402,7 @@ The control plane needs no containers, so it starts on day one behind a `Runtime
 | Zigcube | Needs from Zigbox | Why |
 | --- | --- | --- |
 | C0 Loop | M2 (for the real runtime) | Exit reasons and cgroup scopes, to tell OOM from crash and re-adopt cleanly |
-| C1 Fleet | M2 | Resource fit needs real CPU and memory limits |
+| C1 Fleet | M2 | Resource fit needs real CPU and memory limits; local mode needs M5's network namespaces and published ports |
 | C2 Swarm | M3, and M4 for the demo | Peer fetch and locality are built on the chunk store |
 | C3 Rollout | M4 | Health checks and rollouts against real images |
 | C4 Mesh | M5 | Builds on Zigbox's network namespaces and grants |
@@ -437,9 +437,9 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 #### C1 · Fleet: placement and failover
 
-**Goal:** workloads spread across nodes and survive the loss of one.
+**Goal:** workloads spread across nodes and survive the loss of one; on one machine, the same server runs a developer's services, which reach each other by name.
 
-**Scope:** node registration with leases; a scheduler with resource fit (CPU, memory) and spread; node failure detection; rescheduling. `zcube get nodes`.
+**Scope:** node registration with leases; a scheduler with resource fit (CPU, memory) and spread; node failure detection; rescheduling. Local mode: zcube-server on its SQLite store with one agent on the same machine, started by one command with no database to install and no administrator step, on Linux and on macOS (where the agent runs in the zbx machine); services on one node reach each other by name when the service file grants it (a single-node form of C4's DNS and grants, without WireGuard). `zcube get nodes`.
 
 **Demo script:**
 
@@ -447,11 +447,12 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 2. Apply `hello` with `replicas = 6`. `zcube get ``replica``s -o wide` shows two per node.
 3. Power off one VM from the host. Within the lease timeout, its two replicas are marked lost and restarted on the survivors.
 4. Power it back on. It rejoins empty; `zcube why node vm3` explains why nothing moved back (no rebalancing by default).
+5. On a laptop, start local mode and apply a file with an app and postgres, the app granted `db:5432`: the app answers with data from the database, reached by the name `db`. Without the grant the connection is refused, and `zcube why` names the missing grant.
 
 **Acceptance criteria:**
 
 - [ ] Lease timeout is configurable and printed at failover.
-- [ ] A partitioned node stops its workloads when its lease expires, so a replica never runs twice for long.
+- [ ] A partitioned node stops its workloads when its lease expires, so a replica never runs twice for long. Local mode needs nothing installed beyond zbx and zcube, and its services are reachable by name only where granted.
 
 #### C2 · Swarm: store-aware distribution
 
