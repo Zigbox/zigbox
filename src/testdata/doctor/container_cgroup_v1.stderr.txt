@@ -1,6 +1,6 @@
 error[ZBX-E0103]: cgroup v2 is not set up for this user
-  cause  /sys/fs/cgroup/cgroup.controllers exists only on the unified cgroup v2
-         hierarchy, so this host runs cgroup v1 or the hybrid layout
+  cause  cgroup v2 is not mounted at /sys/fs/cgroup (this host runs cgroup v1 or
+         the hybrid layout), so zbx has no cgroup to limit a container with
   fix    check the mount (cgroup2fs is v2):   stat -fc %T /sys/fs/cgroup
          boot with systemd.unified_cgroup_hierarchy=1, or use a cgroup v2 distro
   more   zbx explain E0103 · rerun with --verbose for the full cause chain

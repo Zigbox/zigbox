@@ -57,6 +57,9 @@ const common_files = [_]host_sim.File{
     .{ .path = regular_file_path, .content = "", .mode = 0o100644 },
     .{ .path = "/etc/passwd", .content = "alice:x:1000:1000::/home/alice:/bin/bash\n" },
     .{ .path = "/proc/sys/user/max_user_namespaces", .content = "63488\n" },
+    // The root of a cgroup v2 hierarchy that offers the controllers a limit needs, as on any
+    // host with systemd. `init_hybrid` takes it away.
+    .{ .path = cgroup_root_controllers_path, .content = cgroup_root_controllers },
     // What `--bind` and `--secret` of the tests and the fuzzers mount (M6): a directory, a file
     // and a file with a marker in it that must reach nothing but the container.
     .{ .path = mount_dir_path, .content = "", .mode = 0o040755 },
@@ -67,6 +70,29 @@ const common_files = [_]host_sim.File{
     .{ .path = "/usr/bin/pasta", .content = "", .mode = 0o100755 },
     .{ .path = "/proc/sys/net/ipv4/ip_unprivileged_port_start", .content = "1024\n" },
 };
+
+const cgroup_root_controllers_path = "/sys/fs/cgroup/cgroup.controllers";
+const cgroup_root_controllers = "cpuset cpu io memory hugetlb pids rdma misc\n";
+
+/// `files` without the cgroup v2 root: a host with the cgroup v1 or hybrid layout, as a Claude
+/// Code cloud container has it (the v1 hierarchies own cpu, memory and pids; cgroup2 is mounted
+/// below /sys/fs/cgroup/unified with only hugetlb, so there is no root `cgroup.controllers`).
+pub const files_hybrid = without_path(&files, cgroup_root_controllers_path);
+
+fn without_path(
+    comptime list: []const host_sim.File,
+    comptime path: []const u8,
+) [list.len - 1]host_sim.File {
+    var result: [list.len - 1]host_sim.File = undefined;
+    var count: usize = 0;
+    for (list) |file| {
+        if (std.mem.eql(u8, file.path, path)) continue;
+        result[count] = file;
+        count += 1;
+    }
+    assert(count == result.len); // The path was in the list exactly once.
+    return result;
+}
 
 /// The path of a run's pasta log in the simulated state directory.
 pub const logs_path = "/home/alice/.local/state/zbx/logs";
@@ -94,6 +120,11 @@ pub const extra_files = [_]host_sim.File{ files[1], files[2] };
 /// shell in it, the host's own three mounts, and the user's home.
 pub fn init(sim: *HostSim, seed: u64) void {
     start(sim, seed, &files);
+}
+
+/// Like `init`, for a host with no cgroup v2 at /sys/fs/cgroup (`files_hybrid`).
+pub fn init_hybrid(sim: *HostSim, seed: u64) void {
+    start(sim, seed, &files_hybrid);
 }
 
 /// Like `init`, for a host that cannot map a full range of ids.
