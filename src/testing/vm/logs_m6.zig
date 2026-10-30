@@ -129,8 +129,8 @@ fn foreground(session: *Session, out: *Io.Writer) !void {
     // The guest's console is a terminal, which a run leaves to the container (LOGS 6); stdout
     // goes through a pipe here so that it is the log's to keep, and stderr is a file that
     // is then copied to the harness's stderr.
-    const run = zn ++ " run --name lg3 alpine -- sh -c 'echo to-stdout; echo to-stderr >&2' " ++
-        "2>/tmp/lg3.err | cat; cat /tmp/lg3.err >&2";
+    const run = "{ " ++ zn ++ " run --name lg3 alpine -- sh -c 'echo to-stdout; echo to-stderr >&2' " ++
+        "2>/tmp/lg3.err | cat; cat /tmp/lg3.err >&2; }";
     const shown = try ok(session, out, run);
     // The streams live in the session's buffer: read before the next command.
     checks.check_terminal(shown.streams) catch |err| {
