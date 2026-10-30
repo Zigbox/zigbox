@@ -126,6 +126,8 @@ const help_text =
     \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
     \\  --tail <n>      only the last n lines
     \\  --stream <s>    only stdout, or only stderr
+    \\  a stream of a foreground run that is a terminal is left to the container (editors and
+    \\  pagers need it), so it is not logged; zbx logs says so
     \\  --output json   one zbx.logs/1 object per record (a write of the container), per line
     \\
     \\store:

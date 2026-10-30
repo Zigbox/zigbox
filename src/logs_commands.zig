@@ -93,6 +93,7 @@ pub fn run_logs(host: Host, ws: *Workspace, options: Options, diag: *Diag) Error
         .from_start = skip.lines == 0,
     };
     note_dropped(ws, options, skip.lines);
+    note_terminal(ws, options);
     try show_available(host, ws, options, &show, diag);
     if (options.follow) try follow(host, ws, options, &show, diag);
     try flush(host, ws, diag);
@@ -220,6 +221,18 @@ fn note_dropped(ws: *Workspace, options: Options, skip: u64) void {
     var warning: Diag = undefined;
     warning.reset();
     diagnose.logs_dropped(&warning, options.name, dropped);
+    warn.call(warn.context, &warning);
+}
+
+/// A log that does not hold a stream because it was a terminal says so.
+fn note_terminal(ws: *Workspace, options: Options) void {
+    assert(options.name.len > 0);
+    assert(ws.reader.not_kept <= 3);
+    if (ws.reader.not_kept == 0) return;
+    const warn = options.warn orelse return;
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.log_terminal(&warning, options.name, ws.reader.not_kept);
     warn.call(warn.context, &warning);
 }
 

@@ -1,0 +1,8 @@
+warning[ZBX-W0206]: the terminal was not logged
+  while  reading the log of web-1
+  cause  this run's standard output and error went to a terminal, which zbx
+         leaves to the container, so it is not in the log
+  name   web-1
+  fix    run it detached, or with the output sent to a file or a pipe, to log it:   zbx run -d --name <name> <image>
+  more   zbx explain W0206
+  docs   https://zigbox.github.io/zigbox/errors/W0206.html

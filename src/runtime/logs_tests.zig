@@ -337,3 +337,36 @@ test "a log larger than one write of the host is shown whole" {
     try testing.expectEqual(@as(usize, 4000), sim.stdout().len);
     try testing.expectEqual(@as(u8, 'l'), sim.stdout()[0]);
 }
+
+test "a tty on stdout means no pipe on stdout; a tty on both leaves the log with a notice" {
+    // Goal: a foreground run at a terminal keeps its terminal. Method: the host says stdout is a
+    // terminal: the session makes a pipe for stderr only; then both are: no pipe at all, the
+    // container's output is not in the log, and `zbx logs` says why instead of showing nothing.
+    var sim: HostSim = undefined;
+    setup(&sim, 15);
+    sim.terminal = true;
+    sim.terminal_only = .stdout;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "tty-1",
+        .command = &.{"/bin/sh"},
+    };
+    try run.start(sim.interface(), &spec, .{ .mirror = true }, &library_handle, &diag);
+    try testing.expect(library_handle.session.output_read[0] == null);
+    try testing.expect(library_handle.session.output_read[1] != null);
+    _ = run.wait(&library_handle);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+
+    setup(&sim, 16);
+    sim.terminal = true;
+    sim.world.out_script = &chunks;
+    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(&sim, &run_args));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len); // The container had the terminal.
+    try testing.expectEqual(@as(u8, 0), logs(&sim, &.{}));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0206"));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "standard output and error") != null);
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
+}

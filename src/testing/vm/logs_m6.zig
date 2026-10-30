@@ -75,6 +75,7 @@ pub fn step_logs(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try foreground(session, out);
     try follow(session, out);
     try the_cap(session, out);
+    try terminal(session, out);
     try timer.lap(out, "logs");
 }
 
@@ -150,6 +151,25 @@ fn follow(session: *Session, out: *Io.Writer) !void {
     const followed = try ok(session, out, "timeout 50 " ++ zn ++ " logs --follow lg4");
     checks.check_follow(followed.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the three ticks, then the end", err);
+    };
+}
+
+fn terminal(session: *Session, out: *Io.Writer) !void {
+    const title = "\n{s}: LOGS 6: a run at a terminal keeps the terminal\n";
+    try out.print(title, .{H.demo_name});
+    // A pseudo-terminal on all three streams, as a user's terminal is: `script -e` ends with the
+    // command's status.
+    const inner = zn ++ " run --name lg6 alpine -- sh -c " ++
+        "\"test -t 1 && echo tty-yes || echo tty-no\"";
+    const run = "script -qec '" ++ inner ++ "' /dev/null";
+    const shown = try ok(session, out, run);
+    checks.check_tty(shown.streams.stdout) catch |err| {
+        return fail_step(out, step_name, "expected a terminal inside the container", err);
+    };
+    const log = try ok(session, out, zn ++ " logs lg6");
+    checks.check_terminal_notice(log.streams) catch |err| {
+        const what = "expected the notice that the terminal was not logged";
+        return fail_step(out, step_name, what, err);
     };
 }
 

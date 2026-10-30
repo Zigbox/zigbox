@@ -4,9 +4,13 @@
 //! The format (version 1; the constants are in `constants.zig`):
 //!
 //!   file    = header record*
-//!   header  = version (1 byte) | seven zero bytes | base (u64, little endian)
+//!   header  = version (1 byte) | not_kept (1 byte) | six zero bytes | base (u64, little endian)
 //!   record  = stream (1 byte: 1 stdout, 2 stderr) | time (5 bytes, seconds) | length (2 bytes,
 //!             1 to 4096) | crc (4 bytes: CRC-32 of the first 8 bytes and the payload) | payload
+//!
+//! `not_kept` says which streams this log does not hold because they were a terminal that the
+//! run did not interpose on (bit 0 stdout, bit 1 stderr; 0 is the usual case): `zbx logs` says so
+//! rather than show an empty log with no reason.
 //!
 //! `base` is the number of payload bytes (what the container wrote, not the record headers)
 //! that came before this file's first record, counted over everything the container ever wrote:
@@ -74,17 +78,20 @@ const record_bytes_total_max: u32 =
 
 // ---- The format ----------------------------------------------------------------------------
 
-pub fn encode_header(base: u64, out: *[constants.log_header_bytes]u8) void {
+pub fn encode_header(base: u64, not_kept: u8, out: *[constants.log_header_bytes]u8) void {
+    assert(not_kept <= 3);
     out.* = @splat(0);
     out[0] = constants.log_version;
+    out[1] = not_kept;
     std.mem.writeInt(u64, out[8..16], base, .little);
     assert(out[0] == constants.log_version);
     assert(std.mem.readInt(u64, out[8..16], .little) == base);
+    assert(out[1] == not_kept);
 }
 
 pub const HeaderResult = union(enum) {
-    /// A header this reader knows: the offset of the file's first record.
-    ok: u64,
+    /// A header this reader knows: the offset of the file's first record and the streams not kept.
+    ok: struct { base: u64, not_kept: u8 },
     /// Fewer bytes than a header: a file that was made and not yet given its header.
     short,
     /// Not a header of any version this program writes.
@@ -97,13 +104,17 @@ pub fn parse_header(bytes: []const u8) HeaderResult {
     assert(constants.log_header_bytes == 16);
     assert(bytes.len <= constants.log_read_bytes);
     if (bytes.len < constants.log_header_bytes) return .short;
-    for (bytes[1..8]) |byte| {
+    for (bytes[2..8]) |byte| {
         if (byte != 0) return .bad;
     }
+    if (bytes[1] > 3) return .bad;
     // Text or binary that is not ours has a first byte far above any version we will write.
     if (bytes[0] > constants.log_version and bytes[0] <= 32) return .newer;
     if (bytes[0] != constants.log_version) return .bad;
-    return .{ .ok = std.mem.readInt(u64, bytes[8..16], .little) };
+    return .{ .ok = .{
+        .base = std.mem.readInt(u64, bytes[8..16], .little),
+        .not_kept = bytes[1],
+    } };
 }
 
 /// Writes one record into `out` and returns its bytes. The payload is 1 to `record_bytes_max`
@@ -268,6 +279,8 @@ pub fn remove(fs: Fs, dir: *const records.Dir, name: []const u8) Error!void {
 pub const WriterOptions = struct {
     /// The most one file holds, header included. Tests make it small.
     segment_bytes_max: u32 = constants.log_segment_bytes_max,
+    /// The streams this log is not given because they are a terminal (the header says so).
+    not_kept: u8 = 0,
     /// The most one record holds; a longer write is cut into several.
     record_bytes_max: u32 = constants.log_record_bytes_max,
 };
@@ -320,7 +333,7 @@ pub const Writer = struct {
         const fs = writer.fs;
         const fd = try fs.create(writer.paths.current_text(), 0o600);
         var header: [constants.log_header_bytes]u8 = undefined;
-        encode_header(base, &header);
+        encode_header(base, writer.options.not_kept, &header);
         fs.write_all(fd, &header) catch |err| {
             fs.close(fd);
             writer.state = .failed;
@@ -410,6 +423,7 @@ pub const Cursor = struct {
     is_open: bool,
     /// The offset of the file's first record in the stream.
     base: u64,
+    not_kept: u8,
     /// The payload bytes of the records handed out so far.
     consumed: u64,
     window: [constants.log_read_bytes]u8,
@@ -431,11 +445,12 @@ pub const Cursor = struct {
             return .failed;
         };
         switch (parse_header(header[0..have])) {
-            .ok => |base| {
+            .ok => |found| {
                 cursor.fs = fs;
                 cursor.fd = fd;
                 cursor.is_open = true;
-                cursor.base = base;
+                cursor.base = found.base;
+                cursor.not_kept = found.not_kept;
                 cursor.consumed = 0;
                 cursor.window_at = 0;
                 cursor.window_len = 0;
@@ -550,6 +565,8 @@ pub const Reader = struct {
     /// The bytes of the container's output that came before the first record this reader
     /// returns, and that the cap had dropped by the time the log was opened.
     dropped_bytes: u64,
+    /// The streams the log was not given (a terminal): bit 0 stdout, bit 1 stderr.
+    not_kept: u8,
 
     /// Opens the current file first and the older one second: a rotation between the two opens
     /// shows as two files of one base (the old current, twice), never as a hole.
@@ -566,6 +583,7 @@ pub const Reader = struct {
         reader.has_older = false;
         reader.has_current = false;
         reader.dropped_bytes = 0;
+        reader.not_kept = 0;
         const now = reader.current.open(fs, reader.paths.current_text());
         const before = reader.older.open(fs, reader.paths.older_text());
         errdefer reader.close();
@@ -589,6 +607,8 @@ pub const Reader = struct {
         if (reader.has_older) reader.dropped_bytes = reader.older.base;
         if (!reader.has_older and reader.has_current) reader.dropped_bytes = reader.current.base;
         if (reader.has_older) assert(reader.dropped_bytes == reader.older.base);
+        if (reader.has_older) reader.not_kept = reader.older.not_kept;
+        if (!reader.has_older and reader.has_current) reader.not_kept = reader.current.not_kept;
         if (!reader.has_older) assert(reader.stage == .current);
     }
 
@@ -731,8 +751,9 @@ test "a record round-trips, and the parser accepts only what the encoder writes"
 test "the header: version, zero bytes, base" {
     // Goal: only a header the writer makes is accepted; a newer version is told apart.
     var header: [16]u8 = undefined;
-    encode_header(123456789012, &header);
-    try testing.expectEqual(@as(u64, 123456789012), parse_header(&header).ok);
+    encode_header(123456789012, 2, &header);
+    try testing.expectEqual(@as(u64, 123456789012), parse_header(&header).ok.base);
+    try testing.expectEqual(@as(u8, 2), parse_header(&header).ok.not_kept);
     try testing.expect(parse_header(header[0..15]) == .short);
     try testing.expect(parse_header("") == .short);
     header[3] = 1;
@@ -741,6 +762,9 @@ test "the header: version, zero bytes, base" {
     header[0] = 2;
     try testing.expect(parse_header(&header) == .newer);
     header[0] = 0;
+    try testing.expect(parse_header(&header) == .bad);
+    header[0] = 1;
+    header[1] = 4; // Only the two streams can be left out.
     try testing.expect(parse_header(&header) == .bad);
 }
 
@@ -969,7 +993,7 @@ test "a file from a newer version and a file that is not a log are told apart" {
     sim_disk.put_dir("/s/zbx", 0o755);
     sim_disk.put_dir("/s/zbx/logs", 0o755);
     var header: [16]u8 = undefined;
-    encode_header(0, &header);
+    encode_header(0, 0, &header);
     header[0] = 2;
     sim_disk.put_file("/s/zbx/logs/web.log", 0o600, &header);
     var reader: Reader = undefined;

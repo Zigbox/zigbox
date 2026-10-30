@@ -382,7 +382,9 @@ pub fn start(
     };
     collect_notes(handle);
     handle.status = .running;
-    if (capture) handle.wait_options.sink = .{ .context = handle, .call = log_sink };
+    if (capture[0] or capture[1]) {
+        handle.wait_options.sink = .{ .context = handle, .call = log_sink };
+    }
     assert(handle.session.pid != null);
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
@@ -968,22 +970,36 @@ fn reset_log(handle: *Handle, options: StartOptions) void {
 /// be read through pipes: the log is open and there is a place for it. A run with no state
 /// directory has said so already (the record's warning); one whose log cannot be made says so
 /// here, once, and the container writes where it always did.
-fn open_log(handle: *Handle, options: StartOptions) bool {
+fn open_log(handle: *Handle, options: StartOptions) [2]bool {
     assert(!handle.log_active);
-    if (!options.keep_log) return false;
-    const runs = handle.record_dir orelse return false;
-    const logs = logfile.dir_of(&runs) orelse return false;
-    handle.log.open(handle.host.log_files(), &logs, handle.name_slice(), .{}) catch |err| {
+    const none: [2]bool = .{ false, false };
+    if (!options.keep_log) return none;
+    const runs = handle.record_dir orelse return none;
+    const logs = logfile.dir_of(&runs) orelse return none;
+    // A stream that is a terminal stays the container's own: editors, pagers, colours and job
+    // control need the terminal itself, not a pipe. The log's header says which were left.
+    var capture: [2]bool = .{ true, true };
+    var not_kept: u8 = 0;
+    if (options.mirror) {
+        for ([_]host_mod.Stream{ .stdout, .stderr }, 0..) |stream, at| {
+            if (!handle.host.is_terminal(stream)) continue;
+            capture[at] = false;
+            not_kept |= @as(u8, 1) << @intCast(at);
+        }
+    }
+    const writer_options: logfile.WriterOptions = .{ .not_kept = not_kept };
+    const name = handle.name_slice();
+    handle.log.open(handle.host.log_files(), &logs, name, writer_options) catch |err| {
         const failure: diagnose.Failure = .{
             .step = 0,
             .err = err,
             .errno = handle.host.log_files().last_errno(),
         };
         warn_log_not_kept(handle, logs.text(), failure);
-        return false;
+        return none;
     };
     handle.log_active = true;
-    return true;
+    return capture;
 }
 
 fn close_log(handle: *Handle) void {

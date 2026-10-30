@@ -166,9 +166,10 @@ pub const SpawnFlags = struct {
 };
 
 /// The write ends of the pipes that carry a container's standard output and error.
+/// A stream left null stays the parent's own (a terminal that is not interposed on).
 pub const OutputPipes = struct {
-    stdout: Handle,
-    stderr: Handle,
+    stdout: ?Handle,
+    stderr: ?Handle,
 };
 
 /// The body of a spawned child. It runs in the child, on a copy of the parent's memory, and its

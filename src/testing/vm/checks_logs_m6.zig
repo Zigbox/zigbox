@@ -94,6 +94,20 @@ pub fn check_stream(output: []const u8, wanted: []const u8, other: []const u8) E
     if (contains(output, other)) return error.OutputWrong;
 }
 
+/// `zbx logs` of a run that had the terminal: nothing on stdout, and the notice (W0206) on stderr
+/// that says why, with exit 0.
+pub fn check_terminal_notice(streams: Streams) Error!void {
+    if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.OutputWrong;
+    if (!contains(streams.stderr, "warning[ZBX-W0206]")) return error.OutputWrong;
+    if (!contains(streams.stderr, "standard output and error")) return error.OutputWrong;
+}
+
+/// A run under a pseudo-terminal: the command printed `tty` because `test -t 1` held inside.
+pub fn check_tty(output: []const u8) Error!void {
+    if (!contains(output, "tty-yes")) return error.OutputWrong;
+    if (contains(output, "tty-no")) return error.OutputWrong;
+}
+
 /// `--follow` of a container that printed tick-1 to tick-3 a second apart: all three, in order,
 /// and nothing after.
 pub fn check_follow(output: []const u8) Error!void {
@@ -195,6 +209,19 @@ test "check_stream and check_follow" {
     try check_follow("tick-1\ntick-2\ntick-3\n");
     try testing.expectError(error.FollowWrong, check_follow("tick-1\ntick-2\n"));
     try testing.expectError(error.FollowWrong, check_follow(""));
+}
+
+test "check_tty and check_terminal_notice" {
+    try check_tty("tty-yes\r\n");
+    try testing.expectError(error.OutputWrong, check_tty("tty-no\n"));
+    try testing.expectError(error.OutputWrong, check_tty(""));
+    const notice = "warning[ZBX-W0206]: the terminal was not logged\n  cause  this run's " ++
+        "standard output and error went to a terminal\n";
+    try check_terminal_notice(.{ .stdout = "", .stderr = notice });
+    const noisy = check_terminal_notice(.{ .stdout = "x\n", .stderr = notice });
+    try testing.expectError(error.OutputWrong, noisy);
+    const silent = check_terminal_notice(.{ .stdout = "", .stderr = "" });
+    try testing.expectError(error.OutputWrong, silent);
 }
 
 const good_summary =

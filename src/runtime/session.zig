@@ -102,6 +102,8 @@ pub const Session = struct {
     timed_out: bool,
     /// The container's standard output and error are pipes this process reads (the log).
     capture: bool,
+    /// Which of the two streams (stdout, stderr) are pipes; the other is left as it was.
+    capture_stream: [2]bool,
     /// The read ends of those pipes, until the stream ends; and the write ends, from the pipes'
     /// making until the child has its copies.
     output_read: [2]?host_mod.Handle,
@@ -112,7 +114,7 @@ pub const Session = struct {
         host: Host,
         plan: *const Plan,
         facts: *doctor.Facts,
-        capture: bool,
+        capture: [2]bool,
     ) void {
         assert(plan.count == plan.steps_expected());
         assert(plan.candidates_count > 0);
@@ -139,7 +141,8 @@ pub const Session = struct {
         session.container_pid = 0;
         session.reaped = std.atomic.Value(bool).init(false);
         session.timed_out = false;
-        session.capture = capture;
+        session.capture = capture[0] or capture[1];
+        session.capture_stream = capture;
         session.output_read = .{ null, null };
         session.output_write = .{ null, null };
         assert(!session.open.any());
@@ -274,6 +277,7 @@ pub const Session = struct {
         assert(session.capture);
         assert(session.output_read[0] == null);
         for (0..2) |at| {
+            if (!session.capture_stream[at]) continue;
             const pipe = try session.host.pipe();
             session.output_read[at] = pipe.read;
             session.output_write[at] = pipe.write;
@@ -315,8 +319,8 @@ pub const Session = struct {
             .ipc = true,
             .net = session.plan.isolated(),
             .output = if (session.capture) .{
-                .stdout = session.output_write[0].?,
-                .stderr = session.output_write[1].?,
+                .stdout = session.output_write[0],
+                .stderr = session.output_write[1],
             } else null,
         };
         session.pid = try host.spawn(flags, child_mod.entry, &session.child);

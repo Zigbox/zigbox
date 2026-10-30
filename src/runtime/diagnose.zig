@@ -954,6 +954,29 @@ pub fn logs_dropped(diag: *Diag, name: []const u8, dropped_bytes: u64) void {
     assert(diag.code.? == .W0205);
 }
 
+/// ZBX-W0206: part of the container's output went to the terminal and is not in its log.
+pub fn log_terminal(diag: *Diag, name: []const u8, not_kept: u8) void {
+    assert(diag.code == null);
+    assert(not_kept >= 1);
+    assert(not_kept <= 3);
+    const which: []const u8 = switch (not_kept) {
+        1 => "standard output",
+        2 => "standard error",
+        else => "standard output and error",
+    };
+    diag.raise(.W0206);
+    diag.while_("reading the log of {s}", .{name});
+    diag.cause("this run's {s} went to a terminal, which zbx leaves to the container, so it is " ++
+        "not in the log", .{which});
+    diag.context("name", "{s}", .{name});
+    diag.fix(.{
+        .sentence = "run it detached, or with the output sent to a file or a pipe, to log it:",
+        .command = "zbx run -d --name <name> <image>",
+        .template = true,
+    });
+    assert(diag.code.? == .W0206);
+}
+
 /// ZBX-E0217: the container has a record and no log.
 pub fn no_log(diag: *Diag, name: []const u8) void {
     assert(diag.code == null);

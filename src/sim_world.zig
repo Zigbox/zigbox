@@ -779,8 +779,8 @@ pub const World = struct {
         child.uts = parent.uts;
         if (flags.output) |pipes| {
             child.output_ends = .{ pipes.stdout, pipes.stderr };
-            assert(parent.holds[end_index(pipes.stdout)]);
-            assert(parent.holds[end_index(pipes.stderr)]);
+            if (pipes.stdout) |handle| assert(parent.holds[end_index(handle)]);
+            if (pipes.stderr) |handle| assert(parent.holds[end_index(handle)]);
         }
         if (flags.mount) {
             const copy = @as(u8, @intCast(world.tables.len - 1));

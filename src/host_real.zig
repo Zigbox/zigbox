@@ -1124,9 +1124,12 @@ comptime {
 /// write ends. Raw system calls only. A child that cannot do it ends, and the parent sees its
 /// exit status, not a command that wrote to the wrong place.
 fn redirect_output(pipes: host.OutputPipes) void {
-    const out = linux.dup2(@intCast(pipes.stdout), 1);
-    const err = linux.dup2(@intCast(pipes.stderr), 2);
-    if (linux.errno(out) != .SUCCESS or linux.errno(err) != .SUCCESS) linux.exit_group(70);
+    if (pipes.stdout) |handle| {
+        if (linux.errno(linux.dup2(@intCast(handle), 1)) != .SUCCESS) linux.exit_group(70);
+    }
+    if (pipes.stderr) |handle| {
+        if (linux.errno(linux.dup2(@intCast(handle), 2)) != .SUCCESS) linux.exit_group(70);
+    }
 }
 
 fn clone_flags(flags: host.SpawnFlags) u64 {

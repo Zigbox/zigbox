@@ -72,6 +72,7 @@ pub const Code = enum(u8) {
     W0203,
     W0204,
     W0205,
+    W0206,
     E0301,
     E0302,
     E0303,
@@ -997,6 +998,22 @@ pub const registry = [_]Entry{
         \\Nothing is wrong with the container. To see more, have the program write
         \\less, or send its output somewhere that keeps it: a --state volume or a
         \\--mount of the project.
+        ,
+    },
+    .{
+        .code = .W0206,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the terminal was not logged",
+        .explanation =
+        \\A foreground "zbx run" at a terminal gives the container the terminal itself
+        \\for each of standard output and error that is one, so that editors, pagers,
+        \\colours and job control work. What goes to the terminal does not pass
+        \\through zbx, so it is not in the log. The log of such a run holds only the
+        \\stream that was a pipe or a file, and this warning says which is missing.
+        \\
+        \\To have the output in the log, run the container detached ("zbx run -d") or
+        \\send its output to a file or a pipe.
         ,
     },
     .{

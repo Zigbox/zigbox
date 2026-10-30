@@ -184,6 +184,47 @@ test "-e: a bundle holds the names that were set, never a value, with redaction 
     }
 }
 
+var log_disk: @import("store/fs_sim.zig").SimFs = undefined;
+
+const output_marker = "container-output-AWS-AKIAIOSFODNN7EXAMPLE-ZETA-31";
+
+test "a bundle holds no byte of a container's log, with redaction on or off" {
+    // Goal: M6b slice 2's rule that a bundle never carries a log. `zbx bundle` collects the run
+    // record, the system files, the environment's names and the doctor's report, and reads
+    // nothing under logs/; this test keeps it so. Method: a container writes a secret-shaped
+    // marker to its output, the marker is shown to be in its log (so the test can fail), and
+    // it is in no byte of the bundle.
+    for ([_]bool{ true, false }) |redact| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 51);
+        sim.world.now = 1_792_873_384;
+        log_disk.init(51);
+        log_disk.put_dir("/home", 0o755);
+        log_disk.put_dir(sim_run.home_path, 0o755);
+        sim.log_fs = &log_disk;
+        const out = [_]@import("sim_world.zig").OutChunk{
+            .{ .stream = .stdout, .bytes = output_marker ++ "\n" },
+            .{ .stream = .stderr, .bytes = "password=" ++ output_marker ++ "\n" },
+        };
+        sim.world.out_script = &out;
+        const start = [_][:0]const u8{ "zbx", "run", "--rootfs", sim_run.rootfs_path, "--name" } ++
+            [_][:0]const u8{ "out-1", "--", "sh" };
+        try testing.expectEqual(@as(u8, 0), run_args(&sim, &start));
+        const log = log_disk.content_of(sim_run.logs_path ++ "/out-1.log").?;
+        try testing.expect(std.mem.indexOf(u8, log, output_marker) != null);
+        const flags: []const [:0]const u8 = if (redact)
+            &.{ "zbx", "bundle", "out-1" }
+        else
+            &.{ "zbx", "bundle", "out-1", "--no-redact" };
+        sim.stdout_len = 0; // The run showed its output; the path is all `bundle` prints.
+        try testing.expectEqual(@as(u8, 0), run_args(&sim, flags));
+        var plain: [constants.bundle_stage_bytes_max * 2]u8 = undefined;
+        const tar = try bundle_bytes(&sim, &plain);
+        try testing.expect(std.mem.indexOf(u8, tar, output_marker) == null);
+        try testing.expect(std.mem.indexOf(u8, tar, "out-1") != null);
+    }
+}
+
 // ---- The golden manifest -------------------------------------------------------------------
 
 /// `text` with the version of this build replaced, so a release does not change the golden.

@@ -623,7 +623,7 @@ fn prepare_no_log(sim: *HostSim) void {
 fn prepare_log_newer(sim: *HostSim) void {
     prepare_no_log(sim);
     var header: [constants.log_header_bytes]u8 = undefined;
-    logfile.encode_header(0, &header);
+    logfile.encode_header(0, 0, &header);
     header[0] = 2;
     const parts = [_][]const u8{
         "/home/alice/.local",
@@ -655,6 +655,18 @@ fn prepare_log_dropped(sim: *HostSim) void {
     writer.close();
 }
 
+/// A log of a run whose terminal was not interposed on.
+fn prepare_log_terminal(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var runs: records.Dir = undefined;
+    assert(records.locate(sim.interface(), &runs));
+    const dir = logfile.dir_of(&runs).?;
+    var writer: logfile.Writer = undefined;
+    const options: logfile.WriterOptions = .{ .not_kept = 3 };
+    writer.open(golden_logs.interface(), &dir, "web-1", options) catch unreachable; // Fresh.
+    writer.close();
+}
+
 /// A run whose log disk fails every call.
 fn prepare_log_disk_down(sim: *HostSim) void {
     sim_run.init(sim, 1);
@@ -670,6 +682,13 @@ const logs_cases = [_]Case{
         .code = .W0204,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
         .prepare = prepare_log_disk_down,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0206,
+        .args = &.{ "logs", "web-1" },
+        .prepare = prepare_log_terminal,
         .warning = true,
         .exit = 0,
     },

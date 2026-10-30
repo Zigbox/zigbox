@@ -232,6 +232,8 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// With `terminal`: only this stream is one (null: both).
+    terminal_only: ?host.Stream,
     /// The errno of the most recent call, 0 if it succeeded (`Host.last_errno`).
     errno_last: u16,
     /// Whether NO_COLOR is set in the simulated environment.
@@ -277,6 +279,7 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.terminal_only = null;
         sim.errno_last = 0;
         sim.no_color_value = false;
         sim.hard_errors_injected = 0;
@@ -637,7 +640,9 @@ pub const HostSim = struct {
 
     fn is_terminal(context: *anyopaque, stream: host.Stream) bool {
         const sim = from_context(context);
-        _ = stream;
+        if (sim.terminal_only) |only| {
+            if (only != stream) return false;
+        }
         return sim.terminal;
     }
 

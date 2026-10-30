@@ -146,6 +146,13 @@ damages a file (bursts of up to four bytes, cuts, zeroed and garbage tails).
   It works on a foreground run that is still going, the same way.
 - Text mode with dropped output prints `W0205` on stderr (not with `--tail` that skips them).
 
+### Bundles
+
+`zbx bundle` collects the run record, system files, the names of the environment, and the
+doctor's report; it reads nothing under `logs/`, so a bundle never carries a log, redacted or not
+(`bundle_tests.zig` plants a secret-shaped marker in a container's output, shows it is in the
+log, and finds it in no byte of the bundle with redaction on or off).
+
 ### Removal
 
 The only code that removes a run record is the prune in `run.start` (`records.prune`); it now
@@ -159,8 +166,12 @@ files first). Tested in `runtime/logs_tests.zig`.
   pipes). A log that fails while the container runs: `W0204` once (a detached run's supervisor
   cannot say it any more after the start was reported, so it does not), the terminal still gets
   everything, a detached container's output is read and dropped so it never blocks.
-- A foreground run's standard output and error are now pipes: a program that checks `isatty`
-  (colour, line buffering) sees a pipe, as in `docker run` without `-t`. The order of the two
+- A foreground run's standard output and error are pipes, except a stream that is a terminal
+  (`is_terminal`): that stream is left to the container, so editors, pagers, colours and job
+  control work, and it is not in the log. The log's header records which streams were left
+  (`not_kept`), and `zbx logs` gives `W0206` for it. A run with stdout redirected to a file or
+  a pipe sees a pipe, as in `docker run` without `-t`. Logging an interactive run through a
+  pseudo-terminal can come with slice 3's `exec`. The order of the two
   streams is the order the pump read them (a write to each within microseconds can swap). If the
   terminal cannot be written to, that stream's pipe is closed, so the container's next write
   fails as it did before.
