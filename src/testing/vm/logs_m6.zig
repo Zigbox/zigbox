@@ -127,10 +127,13 @@ fn foreground(session: *Session, out: *Io.Writer) !void {
     });
     const run = zn ++ " run --name lg3 alpine -- sh -c 'echo to-stdout; echo to-stderr >&2'";
     const shown = try ok(session, out, run);
-    const terminal = shown.streams;
+    // The streams live in the session's buffer: read before the next command.
+    checks.check_terminal(shown.streams) catch |err| {
+        return fail_step(out, step_name, "expected the output on the terminal", err);
+    };
     const log = try ok(session, out, zn ++ " logs lg3");
-    checks.check_foreground(terminal, log.streams.stdout) catch |err| {
-        return fail_step(out, step_name, "expected the output on the terminal and in the log", err);
+    checks.check_log(log.streams.stdout) catch |err| {
+        return fail_step(out, step_name, "expected both streams, in order, in the log", err);
     };
     const only = try ok(session, out, zn ++ " logs lg3 --stream stderr");
     checks.check_stream(only.streams.stdout, "to-stderr", "to-stdout") catch |err| {

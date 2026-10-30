@@ -71,15 +71,18 @@ pub fn check_json(output: []const u8, only: ?[]const u8, min: u32) Error!void {
     if (count < min) return error.JsonWrong;
 }
 
-/// A foreground run: its output on the terminal (the two streams as the command wrote them),
-/// and the same two lines, in order, in the log.
-pub fn check_foreground(terminal: Streams, log: []const u8) Error!void {
+/// A foreground run: its output on the terminal, the two streams as the command wrote them.
+pub fn check_terminal(terminal: Streams) Error!void {
     if (!std.mem.eql(u8, std.mem.trim(u8, terminal.stdout, " \r\n"), "to-stdout")) {
         return error.OutputWrong;
     }
     if (!std.mem.eql(u8, std.mem.trim(u8, terminal.stderr, " \r\n"), "to-stderr")) {
         return error.OutputWrong;
     }
+}
+
+/// The same two lines, in order, in the log.
+pub fn check_log(log: []const u8) Error!void {
     const out = std.mem.indexOf(u8, log, "to-stdout") orelse return error.OutputWrong;
     const err = std.mem.indexOf(u8, log, "to-stderr") orelse return error.OutputWrong;
     if (out > err) return error.OutputWrong;
@@ -177,11 +180,12 @@ test "check_json wants zbx.logs/1 records of the stream asked for" {
 
 test "check_foreground wants the output on the terminal and in the log" {
     const good: Streams = .{ .stdout = "to-stdout\r\n", .stderr = "to-stderr\r\n" };
-    try check_foreground(good, "to-stdout\nto-stderr\n");
-    try testing.expectError(error.OutputWrong, check_foreground(good, "to-stderr\nto-stdout\n"));
-    try testing.expectError(error.OutputWrong, check_foreground(good, "to-stdout\n"));
+    try check_terminal(good);
+    try check_log("to-stdout\nto-stderr\n");
+    try testing.expectError(error.OutputWrong, check_log("to-stderr\nto-stdout\n"));
+    try testing.expectError(error.OutputWrong, check_log("to-stdout\n"));
     const silent: Streams = .{ .stdout = "", .stderr = "to-stderr\n" };
-    try testing.expectError(error.OutputWrong, check_foreground(silent, "to-stdout\nto-stderr\n"));
+    try testing.expectError(error.OutputWrong, check_terminal(silent));
 }
 
 test "check_stream and check_follow" {
