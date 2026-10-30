@@ -617,7 +617,7 @@ server listening uses `exec`, so nothing but the steps' requests is in the log),
 | `m6b.3` | `zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'`; `ls -l site/new.txt`; the owner is the Mac user's uid, and `find site ! -user` finds nothing |
 | `m6b.4` | `zbx logs web` has exactly two requests, both `GET /index.html` answered 200 |
 | `m6b.5` | `zbx run --mount ../outside-spec:/x` is `ZBX-E0212`, "outside the project", exit 125 |
-| `m6b.5h` | the same command line from a directory outside the home is `ZBX-E1013`, exit 1 |
+| `m6b.5h` | `zbx logs web` from a directory outside the home is `ZBX-E1013`, exit 1 |
 
 and what only the Mac has (`m6b.6` to `m6b.11`): `exec`'s exit code (7) and 125 for a container
 that does not exist; SIGINT to `zbx exec sleep 1000` within 2 s, exit 130; `exec ... tty` under
