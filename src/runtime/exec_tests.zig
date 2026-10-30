@@ -365,3 +365,29 @@ test "a --user the container lacks is E0216; a user in a container with only roo
 comptime {
     assert(@sizeOf(exec.Handle) <= constants.exec_handle_bytes_max);
 }
+
+test "a signal zbx receives reaches the command; a SIGKILL of zbx takes the command with it" {
+    // Goal: two exit paths of the wait (REVIEW.md). Method: a SIGTERM scripted to arrive while
+    // zbx waits is sent to the command as it is (it is no PID 1); then a second exec, and zbx
+    // itself killed: the command, which asked to die with zbx, is gone.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 10);
+    _ = try start_container(&sim, 10, default_spec());
+    sim.world.script[0] = constants.signal_term;
+    sim.world.script_len = 1;
+    sim.world.script_at = 0;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec = exec_spec(&.{ "/bin/sleep", "100" });
+    try exec.start(sim.interface(), &spec, .{}, &exec_handle, &diag);
+    const received_before = sim.world.received_count;
+    _ = exec.wait(&exec_handle);
+    try testing.expectEqual(received_before + 1, sim.world.received_count);
+    try testing.expectEqual(constants.signal_term, sim.world.received[received_before]);
+    try exec.start(sim.interface(), &spec, .{}, &exec_handle, &diag);
+    const pid = exec_handle.pid.?;
+    sim.world.kill_supervisor();
+    const command = sim.world.find_process(pid).?;
+    try testing.expect(command.state != .command);
+    try testing.expectEqual(sim_world.ProcessState.reaped, command.state);
+}
