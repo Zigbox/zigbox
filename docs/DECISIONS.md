@@ -5,6 +5,19 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## M6c · Authenticated pull from Amazon ECR, brought forward; push stays after M8
+
+*Decided 2026-10-30, by the owner.*
+
+- **M6b ships as it is. ECR is a milestone of its own, M6c**, after M6b. It is not folded into M6b (which is down to its Mac slice), and it does not wait for push.
+- **Pull only.** Push stays after M8, where signatures and provenance give it something to push beside an image. M6c's credential layer is written with push's scopes in mind, so push adds to it rather than replacing it.
+- **Why now:** a self-hosted Zigcube on EC2 runs images its owners keep in ECR. Without authenticated pull, gate B (self-hosted) waits on M7 and M8, which are otherwise off its path.
+- **Native, no helper programs:** zbx signs AWS requests itself (SigV4) and finds credentials in the environment, a web identity token, or EC2 instance metadata (IMDSv2). `docker-credential-*` helpers and the `aws` CLI are external programs STYLE.md does not allow. Credentials are never cached to disk.
+- Other private registries (GHCR, Docker Hub private repositories, Basic or token credentials) are not in M6c. They reuse its auth path later.
+- The live doc needs an M6c section and a narrower non-goal ("push, and private registries other than ECR pull, until after M8"). The brief is `docs/briefs/M6c-ecr.md`.
+
+
+
 ## `zbx.logs/1` describes its refusals: every document is checked against its command's schema
 
 *Decided 2026-10-30, by the owner.*
