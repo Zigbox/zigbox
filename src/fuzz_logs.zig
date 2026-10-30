@@ -118,6 +118,12 @@ fn find_at(payload: []const u8, time: u64, stream: logfile.Stream, total: u32) ?
     return null;
 }
 
+fn payload_of_records(from: u32, to: u32) u64 {
+    var size: u64 = 0;
+    for (from..to) |index| size += oracle[index].len;
+    return size;
+}
+
 fn size_of_records(from: u32, to: u32) u64 {
     var size: u64 = 0;
     for (from..to) |index| size += constants.log_record_header_bytes + oracle[index].len;
@@ -151,7 +157,7 @@ fn check_cap(random: std.Random) void {
     const found = read_log(total, true) orelse @panic("a log that was written cannot be opened");
     assert(found.count > 0);
     assert(found.first + found.count == total);
-    assert(found.dropped == size_of_records(0, found.first));
+    assert(found.dropped == payload_of_records(0, found.first));
     // Two files hold at most twice the file size, and the window starts at a file boundary.
     const size = size_of_records(found.first, total);
     assert(size <= 2 * @as(u64, segment));

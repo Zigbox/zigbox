@@ -8,9 +8,10 @@
 //!   record  = stream (1 byte: 1 stdout, 2 stderr) | time (5 bytes, seconds) | length (2 bytes,
 //!             1 to 4096) | crc (4 bytes: CRC-32 of the first 8 bytes and the payload) | payload
 //!
-//! `base` is the number of bytes of records that came before this file's first record, counted
-//! over everything the container ever wrote: the log is a window onto a stream whose start the
-//! cap may have moved. The reader reports the oldest file's `base` as `dropped_bytes`.
+//! `base` is the number of payload bytes (what the container wrote, not the record headers)
+//! that came before this file's first record, counted over everything the container ever wrote:
+//! the log is a window onto a stream whose start the cap may have moved. The reader reports the
+//! oldest file's `base` as `dropped_bytes`.
 //!
 //! Why two files, rotated, and not one file compacted: at the cap the log must forget its oldest
 //! records. Two files of half the cap do it with one `rename` (the older file is replaced by the
@@ -277,8 +278,9 @@ pub const Writer = struct {
     paths: Paths,
     /// The offset of the current file's first record in the stream.
     base: u64,
-    /// The bytes in the current file, its header included.
+    /// The bytes in the current file, its header included, and the payload bytes among them.
     size: u32,
+    payload: u64,
     options: WriterOptions,
     state: enum { closed, open, failed },
     /// Whether `fd` is a descriptor this writer still has to close.
@@ -328,6 +330,7 @@ pub const Writer = struct {
         writer.fd_open = true;
         writer.base = base;
         writer.size = constants.log_header_bytes;
+        writer.payload = 0;
         writer.state = .open;
     }
 
@@ -357,6 +360,7 @@ pub const Writer = struct {
         assert(writer.size + record.len <= writer.options.segment_bytes_max);
         try writer.fs.write_all(writer.fd, record);
         writer.size += @intCast(record.len);
+        writer.payload += payload.len;
     }
 
     /// The current file becomes the older one (replacing it: the oldest records are dropped, as
@@ -364,7 +368,7 @@ pub const Writer = struct {
     fn rotate(writer: *Writer) Error!void {
         const fs = writer.fs;
         assert(writer.state == .open);
-        const next_base = writer.base + (writer.size - constants.log_header_bytes);
+        const next_base = writer.base + writer.payload;
         // The file that is about to be the only one of its age should be whole on the disk. A
         // failed sync is not a reason to lose the log: the reader copes with a torn end.
         fs.fsync(writer.fd) catch {};
@@ -406,7 +410,7 @@ pub const Cursor = struct {
     is_open: bool,
     /// The offset of the file's first record in the stream.
     base: u64,
-    /// The bytes of records handed out so far.
+    /// The payload bytes of the records handed out so far.
     consumed: u64,
     window: [constants.log_read_bytes]u8,
     window_at: u32,
@@ -471,7 +475,7 @@ pub const Cursor = struct {
                 .record => |found| {
                     const offset = cursor.base + cursor.consumed;
                     cursor.window_at += found.size;
-                    cursor.consumed += found.size;
+                    cursor.consumed += found.payload.len;
                     return .{ .record = .{
                         .stream = found.stream,
                         .time = found.time,
@@ -838,7 +842,7 @@ test "at the cap the oldest whole file goes, and the reader says how many bytes"
     try testing.expect(got.count <= 8);
     try testing.expectEqual(@as(u32, 99), indexes[got.count - 1]);
     for (1..got.count) |at| try testing.expectEqual(indexes[at - 1] + 1, indexes[at]);
-    try testing.expectEqual(@as(u64, indexes[0]) * (12 + 24), got.dropped);
+    try testing.expectEqual(@as(u64, indexes[0]) * 24, got.dropped);
     // The disk holds two files, none over the segment size.
     const current = sim_disk.stat_of("/s/zbx/logs/web.log").?;
     const older = sim_disk.stat_of("/s/zbx/logs/web.log.1").?;

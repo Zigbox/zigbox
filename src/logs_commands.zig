@@ -159,7 +159,7 @@ fn lines_to_skip(
             .end, .damaged => break,
             .failed => break,
         };
-        end = found.offset + constants.log_record_header_bytes + found.payload.len;
+        end = found.offset + found.payload.len;
         if (!selected(options, found.stream)) continue;
         newlines += std.mem.count(u8, found.payload, "\n");
         last = found.payload[found.payload.len - 1];

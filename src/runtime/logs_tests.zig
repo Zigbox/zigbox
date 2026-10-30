@@ -205,7 +205,7 @@ test "a log over the cap starts at a whole record and says how much was dropped"
     defer parsed.deinit();
     const dropped = parsed.value.object.get("dropped_bytes").?.integer;
     try testing.expect(dropped > 0);
-    try testing.expectEqual(@as(i64, 0), @mod(dropped, 20));
+    try testing.expectEqual(@as(i64, 0), @mod(dropped, 8));
     const text = parsed.value.object.get("text").?.string;
     try testing.expect(std.mem.startsWith(u8, text, "rec"));
     var seen: u32 = 1;

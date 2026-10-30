@@ -115,7 +115,7 @@ record = stream (1 stdout, 2 stderr) | time (5 bytes, seconds) | length (2 bytes
          | crc32 (of the first 8 bytes and the payload) | payload     12 bytes + payload
 ```
 
-`base` is the offset of the file's first record in the stream of everything the container wrote.
+`base` is the number of payload bytes (what the container wrote, headers not counted) that came before the file's first record, over everything the container wrote.
 A reader stops at the first record that is short, out of range or fails its CRC (a torn tail);
 a newer version is `E0218`.
 

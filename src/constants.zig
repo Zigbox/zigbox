@@ -424,8 +424,9 @@ pub const record_time_unknown: u64 = 0;
 
 // Container logs (M6b, slice 2).
 /// The log of a container, `logs/<name>.log` beside the run record: a header, then records. The
-/// header is 16 bytes: the version, seven zero bytes, and the offset of its first record in the
-/// stream of everything the container wrote (u64, little endian). A record is a 12-byte header
+/// header is 16 bytes: the version, seven zero bytes, and the payload bytes that came before its
+/// first record in the stream of everything the container wrote (u64, little endian). A record
+/// is a 12-byte header
 /// (stream, time in seconds as 5 bytes, length as 2 bytes, CRC-32 of those 8 bytes and the
 /// payload) and its payload.
 pub const log_version: u8 = 1;
