@@ -54,7 +54,8 @@ An agent re-reads its whole context on every turn, so cost grows with context si
 - **Context ceiling.** Stop at about 250K tokens of context or 60 turns, whichever comes first. At that point, reach the next safe stopping place, commit, write the handoff note and report. The supervisor enforces this and starts a new implementer rather than extending the current one.
 - **Small fixes get new agents.** For a bug or review finding, spawn a fresh agent with the symptom and the relevant commit. Do not send it back to the agent that wrote the code.
 - **Keep noisy output out of context.** Redirect `zig build` and test output to a file and read only the failing lines. Do not paste full logs.
-- **Delegate lookups.** Send broad reads, such as searching the Zig std source, to a cheap read-only agent and keep only the answer.
+- **Delegate lookups.** Send broad reads, such as searching the Zig std source, to a read-only Haiku agent and keep only the answer.
+- **Purely mechanical work goes to Haiku** (owner, 2026-10-30). A change fully specified by a pattern (threading an argument through call sites, a rename, copying generated output into a doc, a status update, a CI tweak) is done by a Haiku subagent or session, given the exact pattern; whoever delegated checks its diff. Anything that needs judgment (design, tests, invariants, review) stays with Sonnet or the supervisor. Briefs name a slice's mechanical parts.
 
 ## README status
 
