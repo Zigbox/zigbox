@@ -852,6 +852,68 @@ test "an image's user is resolved against its own files and set before the comma
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "IMAGE") == null);
 }
 
+test "--user replaces the image's user, and a --mount needs the run's user to be root" {
+    // Goal: M6b's two flags end to end on an image that runs as app:staff (1000:50). Method: the
+    // image's own user is refused for a --mount (E0213, naming the user and both fixes, nothing
+    // made); --user 0 makes the same run work (the child stays root, the mount is writable and
+    // in the record with the user); --user 7:7 and --user app:staff set those ids; a name the
+    // image lacks is E0216 naming the image; a directory has no image to look a user up in.
+    const service = test_registry.TestRegistry.reference(.service);
+    var world: World = undefined;
+    project_world(&world, 51, "svc-1");
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &.{ "zbx", "pull", service }));
+    store_files.put_dir(project ++ "/site", 0o755);
+    world.sim.world.add_node(project ++ "/site", .dir);
+    const mount = [_][:0]const u8{ "--mount", "site:/srv" };
+    const base = [_][:0]const u8{ "zbx", "run", "--name", "svc-1" };
+
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &(base ++ mount ++ .{service})));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0213]"));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "app:staff (uid 1000, gid 50)") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--user 0") != null);
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--bind") != null);
+    try testing.expect(world.sim.world.read_written(sim_run.runs_path ++ "/svc-1.zon") == null);
+    const also = base ++ [_][:0]const u8{ "--user", "app:staff" } ++ mount ++ .{service};
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &also));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0213]"));
+    const group = base ++ [_][:0]const u8{ "--user", "0:50" } ++ mount ++ .{service};
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &group));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0213]"));
+
+    const as_root = base ++ [_][:0]const u8{ "--user", "0" } ++ mount ++ .{service};
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &as_root));
+    const child = &world.sim.world.processes[1];
+    try testing.expect(child.user_set == null);
+    const table = &world.sim.world.tables[child.table];
+    const merged = containers ++ "/svc-1/merged";
+    try testing.expect(!table.mounts[table.find(merged ++ "/srv").?].read_only);
+    const record = world.sim.world.read_written(sim_run.runs_path ++ "/svc-1.zon").?;
+    try testing.expect(std.mem.indexOf(u8, record, "mount:" ++ project ++ "/site:/srv") != null);
+    try testing.expect(std.mem.indexOf(u8, record, "    .user = \"0:0\",\n") != null);
+
+    second_container(&world, "svc-2");
+    const numbers = [_][:0]const u8{ "zbx", "run", "--name", "svc-2", "--user", "7:7", service };
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &numbers));
+    try testing.expectEqual(@as(?[2]u32, .{ 7, 7 }), world.sim.world.processes[1].user_set);
+    const record_7 = world.sim.world.read_written(sim_run.runs_path ++ "/svc-2.zon").?;
+    try testing.expect(std.mem.indexOf(u8, record_7, "    .user = \"7:7\",\n") != null);
+    second_container(&world, "svc-3");
+    const named = [_][:0]const u8{ "zbx", "run", "--name", "svc-3", "--user", "app:staff", service };
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &named));
+    try testing.expectEqual(@as(?[2]u32, .{ 1000, 50 }), world.sim.world.processes[1].user_set);
+
+    const ghost = base ++ [_][:0]const u8{ "--user", "ghost", service };
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &ghost));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0216]"));
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), service) != null);
+    const no_group = base ++ [_][:0]const u8{ "--user", "app:nogroup", service };
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &no_group));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0216]"));
+    const rootfs_user = [_][:0]const u8{ "zbx", "run", "--user", "0", "--rootfs", "/srv/alpine", "--", "sh" };
+    try testing.expectEqual(@as(u8, 125), run_text(&world, &rootfs_user));
+    try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0015]"));
+}
+
 test "an empty name or a name that is no reference is a usage or reference error, not a lookup" {
     // Goal: the operand of run is a tree digest or an image name; text that is neither is
     // refused with its own code. Method: the empty word (found by the cli fuzzer) and a name
