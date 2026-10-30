@@ -170,8 +170,17 @@ fn random_extra_mounts(
     return out[0..count];
 }
 
-/// The other mounts read back as they were written.
+/// The state volumes, the other mounts and the user read back as they were written.
 fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.state_count == view.state.len);
+    for (view.state, 0..) |mount, index| {
+        const back = parsed.state_mount(@intCast(index));
+        assert(std.mem.eql(u8, back.name, mount.name));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.read_only == mount.read_only);
+    }
+    const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
+    assert(std.meta.eql(parsed.user.?, user));
     assert(parsed.mounts_count == view.mounts.len);
     for (view.mounts, 0..) |mount, index| {
         const back = parsed.mount_at(@intCast(index));
@@ -248,16 +257,7 @@ fn check_round_trip(random: std.Random) void {
     for (view.env_names, 0..) |wanted, at| {
         assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
     }
-    assert(parsed.state_count == view.state.len);
-    for (view.state, 0..) |mount, index| {
-        const back = parsed.state_mount(@intCast(index));
-        assert(std.mem.eql(u8, back.name, mount.name));
-        assert(std.mem.eql(u8, back.target, mount.target));
-        assert(back.read_only == mount.read_only);
-    }
     check_mounts_back(&view, &parsed);
-    const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
-    assert(std.meta.eql(parsed.user.?, user));
     check_damaged(random, text);
 }
 
