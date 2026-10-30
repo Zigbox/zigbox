@@ -12,6 +12,10 @@
 //!   second writer refused, the owner inside, the lock free after each exit path, `state rm` and
 //!   `state restore`.
 //! MOUNTS (mounts_m6.zig, slice 3): secret, bind, tmpfs and `state export`.
+//! WRITABLE (writable_m6.zig, M6b slice 1; slice 4 of M6b moves it to demo-m6b): `--mount` and
+//!   `--user`: python serves a mounted directory, an edit on the host is seen, a file written
+//!   inside is the host user's, the refusals (outside the project, a link out, a user that is not
+//!   root), and that image with `--user 0`.
 //! AGENT (agent_m6.zig, slice 4): the spec's five steps and the state commands again, by JSON
 //!   only (`--output json`, `zbx schema`, `zbx explain`); what it cannot read is a `FINDING`.
 //!
@@ -31,6 +35,7 @@ const upgrade = @import("upgrade_m6.zig");
 const spec = @import("spec_m6.zig");
 const state = @import("state_m6.zig");
 const mounts = @import("mounts_m6.zig");
+const writable = @import("writable_m6.zig");
 const agent = @import("agent_m6.zig");
 
 const Session = session_mod.Session;
@@ -113,6 +118,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     spec.step_spec,
     state.step_state,
     mounts.step_mounts,
+    writable.step_writable,
     agent.run_agent,
 };
 
@@ -130,6 +136,7 @@ test {
     _ = @import("spec_m6.zig");
     _ = @import("state_m6.zig");
     _ = @import("mounts_m6.zig");
+    _ = @import("writable_m6.zig");
     _ = @import("agent_m6.zig");
     _ = @import("upgrade_m6.zig");
 }

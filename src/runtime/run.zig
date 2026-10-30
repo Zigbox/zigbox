@@ -238,7 +238,9 @@ pub const Handle = struct {
     /// The other mounts (they point into the `Spec`, like the command) and what the host showed
     /// of each.
     mounts: []const mounts_mod.Mount,
-    mount_inputs: [constants.mounts_max]plan_mod.MountInput,
+    resolution: mounts_mod.Resolution,
+    /// The user the command runs as; null is root. Kept for the record and the exit report.
+    user: ?spec_mod.User,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -316,7 +318,8 @@ pub fn start(
     handle.end_reason = .none;
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.volumes.count = 0;
-    handle.mounts = container.mounts;
+    handle.mounts = &.{};
+    handle.user = container.user;
     handle.command = container.command;
     handle.labels = container.labels;
     handle.env_names = container.env_names;
@@ -325,8 +328,7 @@ pub fn start(
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
     try check_network(host, container, handle, diag);
-    mounts_mod.resolve(host, container.state, container.mounts, &handle.mount_inputs, diag) catch
-        return error.StartFailed;
+    try resolve_mounts(host, container, handle, diag);
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
@@ -358,6 +360,22 @@ pub fn start(
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
     save_record(handle, .running, null, null);
+}
+
+/// Holds the mounts to their rules and looks at them on the host (`mounts.resolve`): the handle
+/// then keeps them with a `--mount`'s source resolved, which the plan and the record use.
+fn resolve_mounts(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) Error!void {
+    assert(handle.mounts.len == 0);
+    assert(container.mounts.len <= constants.mounts_max);
+    const writable: mounts_mod.Writable = .{
+        .project = container.project,
+        .user = container.user,
+        .user_text = container.user_text,
+    };
+    const resolution = &handle.resolution;
+    mounts_mod.resolve(host, container.state, container.mounts, writable, resolution, diag) catch
+        return error.StartFailed;
+    handle.mounts = resolution.mounts[0..container.mounts.len];
 }
 
 /// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
@@ -395,7 +413,7 @@ fn build_plan(
             .publish = handle.publish_slice(),
         } else null,
         .state = handle.volumes.input_slice(),
-        .mounts = handle.mount_inputs[0..handle.mounts.len],
+        .mounts = handle.resolution.inputs[0..handle.mounts.len],
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -960,6 +978,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .zbx_version = build_options.version,
         .state = handle.volumes.mount_slice(),
         .mounts = handle.mounts,
+        .user = handle.user,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

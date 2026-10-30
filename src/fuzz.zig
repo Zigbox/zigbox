@@ -211,11 +211,16 @@ fn random_args(
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     // M5's network options, their good values and some that are not.
     const net_words = [_][]const u8{
-        "--net",   "user",   "host",     "none",         "--publish",
-        "8080:80", "80:80",  "8080",     "0:1",          "--net=user",
+        "--net",   "user",      "host",      "none",         "--publish",
+        "8080:80", "80:80",     "8080",      "0:1",          "--net=user",
         // M6's other mounts and the export.
-        "--tmpfs", "--bind", "--secret", "/scratch:64m", "/srv/a:/data",
-        "-o",      "state",  "export",   "pgdata",
+        "--tmpfs", "--bind",    "--secret",  "/scratch:64m", "/srv/a:/data",
+        "-o",      "state",     "export",    "pgdata",
+        // M6b's writable mounts and `--user`: good values, relative and escaping sources, and
+        // users that are not USER[:GROUP].
+              "--mount",
+        "--user",  "site:/srv", "../x:/y",   "/:/y",         ".:/y",
+        "a:b:c",   "0",         "1000:1000", "app:",         "--user=0",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };

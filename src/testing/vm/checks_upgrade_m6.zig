@@ -124,7 +124,7 @@ test "a run record of M5 and one of this zbx are listed side by side" {
 
 test "the versions are the ones the formats have" {
     try up5.check_record_version("    .version = 4,\n", run_record_version_m5);
-    try up5.check_record_version("    .version = 7,\n", run_record_version);
+    try up5.check_record_version("    .version = 8,\n", run_record_version);
     try up5.check_record_version(".version = 2,\n", image_record_version);
 }
 

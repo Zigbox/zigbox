@@ -107,7 +107,15 @@ pub const Stat = struct {
 
 /// Probes run in a forked child so a failed probe cannot damage the caller. The child runs as
 /// an unprivileged user even when the caller is root, so the answer is about ordinary users.
-pub const ProbeKind = enum { userns, overlay };
+pub const ProbeKind = enum {
+    userns,
+    overlay,
+    /// Whether the kernel lets this user make an id-mapped mount of a path (`open_tree` clone,
+    /// then `mount_setattr` with `MOUNT_ATTR_IDMAP`) in a scratch user and mount namespace. Asked
+    /// with `Host.probe_idmap`, which names the path. zbx never uses such a mount; the doctor only
+    /// reports the fact.
+    idmap,
+};
 
 pub const ProbeOutcome = enum {
     ok,
@@ -332,6 +340,8 @@ pub const VTable = struct {
     /// The real user id of this process.
     uid: *const fn (context: *anyopaque) u32,
     probe: *const fn (context: *anyopaque, kind: ProbeKind) Error!ProbeOutcome,
+    /// The `idmap` probe for the file system `path` is on. `ok`: the mount was made.
+    probe_idmap: *const fn (context: *anyopaque, path: [:0]const u8) Error!ProbeOutcome,
     /// The raw errno of the most recent call through this vtable: 0 if it succeeded. Lets the
     /// diagnostics name the real errno without widening `Error`.
     last_errno: *const fn (context: *anyopaque) u16,
@@ -616,7 +626,14 @@ pub const Host = struct {
     }
 
     pub fn probe(host: Host, kind: ProbeKind) Error!ProbeOutcome {
+        assert(kind != .idmap); // It needs a path: `probe_idmap`.
         return host.vtable.probe(host.context, kind);
+    }
+
+    pub fn probe_idmap(host: Host, path: [:0]const u8) Error!ProbeOutcome {
+        assert(path.len > 0);
+        assert(path[0] == '/');
+        return host.vtable.probe_idmap(host.context, path);
     }
 
     // ---- Containers ----

@@ -159,7 +159,7 @@ pub const diag_skip_bytes_max: u32 = 4096;
 
 // The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
 // this; the bound is what the tool's buffers and file reads use.
-pub const errors_page_bytes_max: u32 = 24 * 1024;
+pub const errors_page_bytes_max: u32 = 32 * 1024;
 
 // Host simulator.
 pub const sim_files_max: u32 = 128;
@@ -397,9 +397,13 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 7;
+pub const record_version: u32 = 8;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 52 * 1024;
+pub const record_bytes_max: u32 = 64 * 1024;
+// Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
+comptime {
+    assert(record_bytes_max <= file_bytes_max);
+}
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
 pub const label_key_bytes_max: u32 = 32;
@@ -597,6 +601,16 @@ pub const secret_bytes_max: u32 = 64 * 1024;
 pub const mount_stage_prefix = "/dev/.zbx-mount-";
 /// The options of a `--tmpfs` mount: `mode=1777,size=` and the size in decimal.
 pub const tmpfs_options_bytes_max: u32 = 16 + 20;
+
+// Writable project mounts and `--user` (M6b slice 1, docs/briefs/M6b-dev-loop.md).
+/// Symbolic links followed while a `--mount` source or the project directory is resolved, as
+/// the kernel's own limit is: past it the path is a loop, and the mount is refused.
+pub const symlinks_followed_max: u32 = 40;
+/// Steps of the resolver: each name of the path, and of the target of each link followed. It
+/// stops there with a refusal, never loops on.
+pub const path_resolve_steps_max: u32 = (symlinks_followed_max + 1) * path_bytes_max;
+/// The longest `--user` value, `USER[:GROUP]`.
+pub const user_value_bytes_max: u32 = 256;
 
 // `zbx state export` (M6 slice 3).
 /// Notes about devices, sockets and fifos left out: shown one each up to this many, then counted.

@@ -67,6 +67,9 @@ pub const Probes = struct {
     overlay: host.ProbeOutcome = .ok,
     userns_error: ?host.Error = null,
     overlay_error: ?host.Error = null,
+    /// An ordinary user cannot make an id-mapped mount of a file system the host owns.
+    idmap: host.ProbeOutcome = .denied,
+    idmap_error: ?host.Error = null,
 };
 
 const OpenFile = struct {
@@ -230,6 +233,7 @@ pub const HostSim = struct {
         .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
+        .probe_idmap = probe_idmap,
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
@@ -984,11 +988,23 @@ pub const HostSim = struct {
         from_context(context).world.begin_step(index);
     }
 
+    fn probe_idmap(context: *anyopaque, path: [:0]const u8) host.Error!host.ProbeOutcome {
+        const sim = from_context(context);
+        assert(path.len > 0);
+        // Not a numbered call and never a random fault: the answer is a note on a line of the
+        // report and decides no check, so the tests that walk a failure across every call of a
+        // healthy host (each must end as a FAIL) have nothing to expect of it. `idmap_error`
+        // models a probe that could not run.
+        if (sim.probes.idmap_error) |err| return sim.natural(err);
+        return sim.probes.idmap;
+    }
+
     fn probe(context: *anyopaque, kind: host.ProbeKind) host.Error!host.ProbeOutcome {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         switch (kind) {
+            .idmap => unreachable, // `Host.probe` refuses it.
             .userns => {
                 if (sim.probes.userns_error) |err| return sim.natural(err);
                 return sim.probes.userns;

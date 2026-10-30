@@ -598,7 +598,7 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases;
+    mount_cases ++ writable_cases;
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1219,6 +1219,85 @@ fn prepare_export_fifo(sim: *HostSim) void {
     golden_files.put_file(state_root ++ "/pgdata/data/PG_VERSION", 0o600, "16\n");
     golden_files.put(state_root ++ "/pgdata/data/pipe", .fifo, 0o600, .{ 0, 0 }, "");
 }
+
+/// A project directory with a site in it, a link in it that points out, and a directory beside
+/// it, for the cases of `--mount`.
+fn prepare_mount_files(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    for ([_][]const u8{
+        "/home",
+        "/home/alice",
+        image_project,
+        image_project ++ "/site",
+        "/home/alice/other",
+        "/etc",
+    }) |directory| golden_files.put_dir(directory, 0o755);
+    golden_files.put_symlink(image_project ++ "/escape", "/etc");
+    _ = sim.world.processes[0].cwd.set(image_project);
+}
+
+fn prepare_mount_world(sim: *HostSim) void {
+    prepare_mount_files(sim);
+    sim.world.add_node(image_project ++ "/site", .dir); // The container's view of the host.
+}
+
+/// The service image (it runs as app:staff) and a site in the project to mount.
+fn prepare_service_mount(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", test_registry.TestRegistry.reference(.service) });
+    golden_files.put_dir(image_project ++ "/site", 0o755);
+    sim.world.add_node(image_project ++ "/site", .dir);
+}
+
+const service_reference = test_registry.TestRegistry.reference(.service);
+const mount_run = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine", "--name", "web-1" };
+
+const writable_cases = [_]Case{
+    .{
+        .code = .E0014,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "site", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0015,
+        .args = &(mount_run ++ [_][:0]const u8{ "--user", "a:b:c", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0212,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "escape:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0213,
+        .args = &.{ "run", "--name", "web-1", "--mount", "site:/srv", service_reference },
+        .prepare = prepare_service_mount,
+        .exit = 125,
+    },
+    .{
+        .code = .E0214,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "missing:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0215,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "site:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_files, // No node in the container's model: the bind fails.
+        .exit = 125,
+    },
+    .{
+        .code = .E0216,
+        .args = &.{ "run", "--name", "web-1", "--user", "ghost", service_reference },
+        .prepare = prepare_service_mount,
+        .exit = 125,
+    },
+};
 
 const mount_cases = [_]Case{
     .{

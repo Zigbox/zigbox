@@ -1,0 +1,10 @@
+error[ZBX-E0216]: the --user is not in the image
+  while  choosing the user for --user
+  cause  --user names the user 'ghost', which /etc/passwd in the image
+         registry.test/fixture/service:3.20 has no entry for
+  image  registry.test/fixture/service:3.20
+  user   ghost
+  file   /etc/passwd
+  fix    use a name the image has, or a number: --user 1000
+  more   zbx explain E0216
+  docs   https://zigbox.github.io/zigbox/errors/E0216.html

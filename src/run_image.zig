@@ -74,6 +74,9 @@ pub const Prepared = struct {
     env: []const spec.Label,
     workdir: []const u8,
     user: ?spec.User,
+    /// The user as the run was told: `--user`, else the image's own `User`; empty for root by
+    /// default. For a message only.
+    user_text: []const u8 = "",
 };
 
 const Record = enum { ok, absent, unreadable };
@@ -105,6 +108,7 @@ pub fn prepare(
     ws: *Workspace,
     operand: []const u8,
     given: []const []const u8,
+    user_flag: ?[]const u8,
     out: *Prepared,
     diag: *Diag,
 ) Error!void {
@@ -131,7 +135,7 @@ pub fn prepare(
     } else {
         try via_lock(services, ws, &store, present, operand, &reference, diag);
     }
-    try compose(&store, ws, operand, given, out, diag);
+    try compose(&store, ws, operand, given, user_flag, out, diag);
 }
 
 fn via_lock(
@@ -244,6 +248,7 @@ fn compose(
     ws: *Workspace,
     operand: []const u8,
     given: []const []const u8,
+    user_flag: ?[]const u8,
     out: *Prepared,
     diag: *Diag,
 ) Error!void {
@@ -287,24 +292,40 @@ fn compose(
         return error.Failed;
     }
     out.workdir = workdir;
-    out.user = null;
-    var home: ?[]const u8 = null;
-    if (settings.get(.user).len > 0) {
-        const resolved = try image_user.resolve(
-            store,
-            &ws.user,
-            image.tree,
-            settings.get(.user),
-            diag,
-        );
-        if (resolved.user.uid != 0 or resolved.user.gid != 0) {
-            out.user = resolved.user;
-            const copy = resolved.home_text();
-            @memcpy(ws.home[0..copy.len], copy);
-            home = ws.home[0..copy.len];
-        }
-    }
+    const home = try choose_user(store, ws, operand, user_flag, out, diag);
     try environment(ws, home, out, diag);
+}
+
+/// The user the command runs as: `--user` if given, else the image's `User`, resolved against the
+/// image's own files. Sets `out.user` (null for root) and `out.user_text`; returns the home
+/// directory to put in HOME when the user is not root.
+fn choose_user(
+    store: *const Store,
+    ws: *Workspace,
+    operand: []const u8,
+    user_flag: ?[]const u8,
+    out: *Prepared,
+    diag: *Diag,
+) Error!?[]const u8 {
+    assert(diag.code == null);
+    out.user = null;
+    // `--user` replaces the image's `User` whole, as Docker's does.
+    const user_text = user_flag orelse ws.image.settings.get(.user);
+    out.user_text = user_text;
+    if (user_text.len == 0) return null;
+    const resolved = try image_user.resolve_from(
+        store,
+        &ws.user,
+        ws.image.tree,
+        user_text,
+        if (user_flag != null) operand else null,
+        diag,
+    );
+    if (resolved.user.uid == 0 and resolved.user.gid == 0) return null;
+    out.user = resolved.user;
+    const copy = resolved.home_text();
+    @memcpy(ws.home[0..copy.len], copy);
+    return ws.home[0..copy.len];
 }
 
 fn too_many_words(image: *const images.Image, diag: *Diag) Error {

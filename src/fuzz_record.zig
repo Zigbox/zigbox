@@ -170,8 +170,17 @@ fn random_extra_mounts(
     return out[0..count];
 }
 
-/// The other mounts read back as they were written.
+/// The state volumes, the other mounts and the user read back as they were written.
 fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.state_count == view.state.len);
+    for (view.state, 0..) |mount, index| {
+        const back = parsed.state_mount(@intCast(index));
+        assert(std.mem.eql(u8, back.name, mount.name));
+        assert(std.mem.eql(u8, back.target, mount.target));
+        assert(back.read_only == mount.read_only);
+    }
+    const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
+    assert(std.meta.eql(parsed.user.?, user));
     assert(parsed.mounts_count == view.mounts.len);
     for (view.mounts, 0..) |mount, index| {
         const back = parsed.mount_at(@intCast(index));
@@ -217,6 +226,12 @@ fn check_round_trip(random: std.Random) void {
         .env_names = reach.names[0..reach.names_count],
         .state = random_mounts(random, &mounts),
         .mounts = random_extra_mounts(random, &extra),
+        // Version 8: any ids, including the largest; none is root.
+        .user = switch (random.uintLessThan(u8, 3)) {
+            0 => null,
+            1 => .{ .uid = random.int(u32), .gid = random.int(u32) },
+            else => .{ .uid = 0, .gid = 0 },
+        },
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
@@ -241,13 +256,6 @@ fn check_round_trip(random: std.Random) void {
     assert(parsed.env_names_count == view.env_names.len);
     for (view.env_names, 0..) |wanted, at| {
         assert(std.mem.eql(u8, wanted, parsed.env_name(@intCast(at))));
-    }
-    assert(parsed.state_count == view.state.len);
-    for (view.state, 0..) |mount, index| {
-        const back = parsed.state_mount(@intCast(index));
-        assert(std.mem.eql(u8, back.name, mount.name));
-        assert(std.mem.eql(u8, back.target, mount.target));
-        assert(back.read_only == mount.read_only);
     }
     check_mounts_back(&view, &parsed);
     check_damaged(random, text);
@@ -301,12 +309,16 @@ fn rerender(parsed: *const records.Parsed) void {
         .env_names = words[0..parsed.env_names_count],
         .state = mounts[0..parsed.state_count],
         .mounts = extra[0..parsed.mounts_count],
+        .user = parsed.user,
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
     records.parse(records.render(&view, &buffer), &again) catch unreachable; // Written: reads.
     assert(again.state_count == parsed.state_count);
     assert(again.mounts_count == parsed.mounts_count);
+    // A record that did not say its user is written with root's, and reads as root's.
+    const kept = parsed.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
+    assert(std.meta.eql(again.user.?, kept));
 }
 
 /// What `render` asserts about M6's fields, which `parse` must have refused to break.

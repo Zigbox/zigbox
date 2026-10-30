@@ -1,7 +1,7 @@
 ok   kernel  6.8.0-sim x86_64 (minimum 5.15)
 FAIL userns  /proc/sys/user/max_user_namespaces does not exist  [ZBX-E0101]
 FAIL cgroup  cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid host)  [ZBX-E0103]
-ok   overlay  overlayfs mounts inside a user and mount namespace
+ok   overlay  overlayfs mounts inside a user and mount namespace; id-mapped mounts of /: not allowed (zbx does not use them)
 FAIL subid  uid 1000 (no passwd entry, matched by uid only); no subuid range of 65536 ids (largest: 0); no subgid range of 65536 ids (largest: 0); newuidmap not found; newgidmap not found  [ZBX-E0105]
 FAIL seccomp  cannot read /proc/self/status: not found  [ZBX-E0106]
 warn net  pasta not found: --net user and --publish need it (apt install passt)

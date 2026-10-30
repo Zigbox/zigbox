@@ -121,8 +121,22 @@ const args_max = 48;
 const Words = [args_max][:0]const u8;
 
 /// The other mounts of the run (M6 slice 3): none, a tmpfs, two binds and a secret that all
-/// exist, or a bind of a path that is not there.
-const MountsChoice = enum { none, all, missing };
+/// exist, or a bind of a path that is not there. M6b adds the writable `--mount`: the same four
+/// and two writable ones inside the project, a `--mount` through a link that points out of the
+/// project (E0212), and one of a name that is not there (E0214).
+const MountsChoice = enum {
+    none,
+    all,
+    missing,
+    writable,
+    escaping,
+    absent,
+
+    /// The runs that look at the project, so that the host model has one.
+    fn has_project(choice: MountsChoice) bool {
+        return choice == .writable or choice == .escaping or choice == .absent;
+    }
+};
 
 const marker_key = sim_run.secret_marker;
 
@@ -396,15 +410,18 @@ fn random_cgroup(random: std.Random, scenario: *Scenario) void {
     scenario.read_only = random.uintLessThan(u8, 4) == 0;
     scenario.net = random.enumValue(NetChoice);
     scenario.env = if (random.boolean()) .none else random.enumValue(EnvChoice);
-    scenario.mounts = switch (random.uintLessThan(u8, 6)) {
+    scenario.mounts = switch (random.uintLessThan(u8, 9)) {
         0, 1 => .all,
         2 => .missing,
+        3, 4 => .writable,
+        5 => .escaping,
+        6 => .absent,
         else => .none,
     };
     // A fifth of the good roots are trees of the store. The name is then a valid one: the
     // container's directory is made under it.
     scenario.image = scenario.rootfs == .good and scenario.name != .invalid and
-        random.uintLessThan(u8, 5) == 0;
+        !scenario.mounts.has_project() and random.uintLessThan(u8, 5) == 0;
     if (scenario.image) scenario.home = true; // The store and the layers live under it.
     if (scenario.image and scenario.name == .none) {
         scenario.name = .valid;
@@ -446,6 +463,37 @@ const sample_mounts = [_]plan_mod.MountInput{
     .{ .shape = .secret, .source = sim_run.secret_path, .target = "/run/key", .size_bytes = 0 },
 };
 
+/// The same and the two writable ones, as the resolved sources the plan is given.
+const sample_writable = sample_mounts ++ [_]plan_mod.MountInput{
+    .{ .shape = .mount_dir, .source = project ++ "/site", .target = "/srv", .size_bytes = 0 },
+    .{
+        .shape = .mount_file,
+        .source = project ++ "/site/index.html",
+        .target = "/etc/page",
+        .size_bytes = 0,
+    },
+};
+
+/// The project of the writable runs: a site and a page in it, a link that goes out, a lock.
+const project = "/home/alice/proj";
+
+var project_files: store_fs.SimFs = undefined;
+
+fn prepare_project(sim: *HostSim) void {
+    project_files.init(1);
+    sim.store_fs = &project_files;
+    for ([_][]const u8{ "/home", "/home/alice", project, project ++ "/site", "/etc" }) |path| {
+        project_files.put_dir(path, 0o755);
+    }
+    project_files.put_file(project ++ "/zbx.lock", 0o644, "");
+    project_files.put_file(project ++ "/site/index.html", 0o644, "x");
+    project_files.put_symlink(project ++ "/out", "/etc");
+    _ = sim.world.processes[0].cwd.set(project);
+    sim.world.add_node(project, .dir);
+    sim.world.add_node(project ++ "/site", .dir);
+    sim.world.add_node(project ++ "/site/index.html", .file);
+}
+
 fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
     sim_run.sample_plan_mounts(
         plan,
@@ -454,7 +502,11 @@ fn plan_for(plan: *plan_mod.Plan, scenario: *const Scenario) void {
         scenario.read_only,
         scenario.image,
         scenario.net.network(),
-        if (scenario.mounts == .all) &sample_mounts else &.{},
+        switch (scenario.mounts) {
+            .all => &sample_mounts,
+            .writable => &sample_writable,
+            else => &.{},
+        },
     );
 }
 
@@ -518,6 +570,9 @@ fn early_verdict(scenario: *const Scenario, fault: ?Fault) ?Verdict {
 fn verdict_of(scenario: *const Scenario) Verdict {
     // An unset `-e NAME` is found before an image is looked up or a limit is read.
     if (scenario.env == .unset) return early_refusal(.E0011);
+    // The command line looks at a `--mount` before it looks for an image or reads a limit.
+    if (scenario.mounts == .escaping) return early_refusal(.E0212);
+    if (scenario.mounts == .absent) return early_refusal(.E0214);
     // The command line reads the limits first, then the library checks name and rootfs.
     if (scenario.limit_invalid()) return early_refusal(.E0306);
     if (scenario.name == .invalid) return early_refusal(.E0206);
@@ -631,7 +686,12 @@ fn fault_at(scenario: *const Scenario) ?Fault {
     plan_for(&plan, scenario);
     if (index >= plan.count) return null;
     const kind = plan.steps[index].kind;
-    const code = step_failure(scenario, kind) orelse return null;
+    var code = step_failure(scenario, kind) orelse return null;
+    // A step of a `--mount` has its own code; the plan says whose step it is.
+    if (code == .E0211) {
+        const shape = plan.mount_of(&plan.steps[index]).shape;
+        if (shape == .mount_dir or shape == .mount_file) code = .E0215;
+    }
     return .{ .index = index, .kind = kind, .code = code };
 }
 
@@ -894,6 +954,7 @@ pub fn fuzz_run(seed: u64) void {
     set_bus(&sim, &scenario);
     preload(&sim, &scenario);
     if (scenario.image) prepare_image(&sim, &scenario);
+    if (scenario.mounts.has_project()) prepare_project(&sim);
     sim_run.add_mount_sources(&sim);
     sim.world.disk_full = scenario.disk_full;
     const before = sim_run.baseline(&sim);
@@ -1000,6 +1061,13 @@ fn push_mounts(args: *Words, count: *usize, choice: MountsChoice) void {
             push_pair(args, count, "--secret", sim_run.secret_path ++ ":/run/key");
         },
         .missing => push_pair(args, count, "--bind", "/srv/missing:/data"),
+        .writable => {
+            push_mounts(args, count, .all);
+            push_pair(args, count, "--mount", "site:/srv");
+            push_pair(args, count, "--mount", "./site/../site/index.html:/etc/page");
+        },
+        .escaping => push_pair(args, count, "--mount", "out:/srv"),
+        .absent => push_pair(args, count, "--mount", "nothing:/srv"),
     }
 }
 
@@ -1411,6 +1479,18 @@ fn check_record_v2(
     // Version 5: what the container could reach, and the names (never the values) of `-e`.
     assert(parsed.network.? == scenario.net.network());
     assert(parsed.publish_count == @intFromBool(scenario.net == .publish));
+    // Version 8: the user (root, as every run here is), and the writable mounts by their
+    // resolved paths.
+    assert(std.meta.eql(parsed.user.?, .{ .uid = 0, .gid = 0 }));
+    const writable: u8 = if (scenario.mounts == .writable) 2 else 0;
+    var found_writable: u8 = 0;
+    for (0..parsed.mounts_count) |at| {
+        const mount = parsed.mount_at(@intCast(at));
+        if (mount.kind != .mount) continue;
+        found_writable += 1;
+        assert(std.mem.startsWith(u8, mount.source, project ++ "/site"));
+    }
+    assert(found_writable == writable);
     const names = scenario.env.names();
     assert(parsed.env_names_count == names.len);
     for (names, 0..) |name, at| assert(std.mem.eql(u8, parsed.env_name(@intCast(at)), name));

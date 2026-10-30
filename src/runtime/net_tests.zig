@@ -68,7 +68,7 @@ test "--net user: pasta joins the container's namespaces, configured before the 
         sim.world.processes[1].pid,
     });
     try testing.expectEqualStrings(argv, pasta_of(&sim).argv());
-    const line = "\"network\":\"user\",\"published\":[{\"host\":8080,\"container\":80}]}";
+    const line = "\"network\":\"user\",\"published\":[{\"host\":8080,\"container\":80}]";
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), line) != null);
     const log = sim.world.read_written(sim_run.logs_path ++ "/web-1.pasta.log").?;
     try testing.expectEqualStrings(@import("../sim_world.zig").pasta_ready_output, log);

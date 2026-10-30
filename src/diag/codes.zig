@@ -38,6 +38,8 @@ pub const Code = enum(u8) {
     E0011,
     E0012,
     E0013,
+    E0014,
+    E0015,
     E0101,
     E0102,
     E0103,
@@ -57,6 +59,11 @@ pub const Code = enum(u8) {
     E0209,
     E0210,
     E0211,
+    E0212,
+    E0213,
+    E0214,
+    E0215,
+    E0216,
     W0201,
     W0202,
     W0203,
@@ -389,13 +396,49 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "mounts that cannot go together",
         .explanation =
-        \\One run's mounts (--state, --tmpfs, --bind and --secret) each have a
+        \\One run's mounts (--state, --tmpfs, --bind, --mount, --secret) each have a
         \\path in the container, and no path may be the same as another's, inside
         \\it, or hold it: a mount inside another would be made in the outer one.
-        \\At most 8 of --tmpfs, --bind and --secret may be given in one run, and 8
-        \\--state.
+        \\At most 8 of --tmpfs, --bind, --mount and --secret may be given in one
+        \\run, and 8 --state.
         \\
         \\Give each mount its own place, or drop one.
+        ,
+    },
+    .{
+        .code = .E0014,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --mount value",
+        .explanation =
+        \\--mount takes HOST:PATH: a directory or file on the host, mounted
+        \\writable at PATH in the container. HOST may be relative to the working
+        \\directory, and may hold "." and ".." parts, since where it lands is judged
+        \\after every symbolic link is followed (see ZBX-E0212). It holds no ':',
+        \\space or control character and is at most 256 bytes.
+        \\
+        \\PATH is absolute, with parts that are names, at most 256 bytes. It may not
+        \\be "/", nor /proc, /sys, /dev or below them, nor /etc/hosts, /etc/hostname
+        \\or /etc/resolv.conf: zbx mounts those itself. The cause names the part that
+        \\is wrong.
+        \\
+        \\    zbx run --mount ./site:/srv python:3.12-slim
+        ,
+    },
+    .{
+        .code = .E0015,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --user value",
+        .explanation =
+        \\--user takes USER or USER:GROUP, each a name or a number, and replaces the
+        \\user the image says it runs as. Names are looked up in the image's own
+        \\/etc/passwd and /etc/group, so --user needs an image (a name that zbx pull
+        \\made); a --rootfs directory or a bare tree has no image configuration to
+        \\replace. The value is at most 256 bytes, with no space or control character
+        \\and no empty part.
+        \\
+        \\    zbx run --user 0 --mount ./site:/srv python:3.12-slim
         ,
     },
     .{
@@ -746,6 +789,89 @@ pub const registry = [_]Entry{
         \\by you and at most 65536 bytes. With --read-only the path must already
         \\exist in the image: nothing can be made in a read-only root. zbx doctor
         \\shows what this host allows.
+        ,
+    },
+    .{
+        .code = .E0212,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount source is outside the project",
+        .explanation =
+        \\A writable mount is allowed only for the project directory and what is
+        \\inside it, so that a container you run in a project cannot write anywhere
+        \\else. The project directory is the one that holds the nearest zbx.lock up
+        \\from the working directory, else the working directory itself.
+        \\
+        \\The source is resolved first, with every symbolic link followed, and the
+        \\result is what is compared: "../other" is outside, and so is a link inside
+        \\the project that points out of it, and so is "/". When the project
+        \\directory is "/" (zbx run from the root of the file system) no writable
+        \\mount is allowed.
+        \\
+        \\Run zbx from the project's directory, or move what you need into it. For a
+        \\directory outside the project that the container only reads, use --bind.
+        ,
+    },
+    .{
+        .code = .E0213,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount needs the container to run as root",
+        .explanation =
+        \\The container's root is you: its user namespace maps root to your user id.
+        \\What it writes through a --mount is therefore yours. Any other user of the
+        \\container is mapped to an id from your subordinate range, and a file it
+        \\wrote in your project would belong to an id that is not yours, which you
+        \\could not then edit or remove. So zbx refuses a --mount when the run's user
+        \\(the image's user, or --user) is not root, user and group both 0, and makes
+        \\nothing.
+        \\
+        \\Run the image as root with --user 0, or give the container the directory
+        \\read-only with --bind.
+        ,
+    },
+    .{
+        .code = .E0214,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount source can't be used",
+        .explanation =
+        \\A --mount source is a directory or a regular file on the host, below the
+        \\project directory. The cause says what is wrong with the path you gave: it
+        \\does not exist, cannot be looked at, goes through too many symbolic links,
+        \\is another kind of file (a socket, a device), or, once its links are
+        \\followed, is longer than 256 bytes or holds a ':', space or control
+        \\character. It can also say the project directory itself could not be found.
+        \\zbx never makes a source: make it first, then run again.
+        ,
+    },
+    .{
+        .code = .E0215,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up a --mount",
+        .explanation =
+        \\A --mount is made before the container's command starts: the host path is
+        \\bound in the container's own /dev, and moved onto its path once the
+        \\container's root is entered (so the path is read as the container reads
+        \\it). One of those steps failed; the cause names it and what the kernel
+        \\said.
+        \\
+        \\With --read-only the path must already exist in the image: nothing can be
+        \\made in a read-only root. zbx doctor shows what this host allows.
+        ,
+    },
+    .{
+        .code = .E0216,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the --user is not in the image",
+        .explanation =
+        \\--user names a user or a group, and the image's own /etc/passwd or
+        \\/etc/group has no such name. A number needs no lookup and is used as it is.
+        \\The message names the image and the file looked in.
+        \\
+        \\Use a name the image has, or a number. Nothing was started.
         ,
     },
     .{

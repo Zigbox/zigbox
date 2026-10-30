@@ -478,7 +478,7 @@ pub fn check_ps_lists(streams: Streams, status: u8, names: []const []const u8) E
 /// slice 1 made it 5 (the network, the forwards and the names of `-e`), slice 2 made it 6 (the
 /// state volumes), slice 3 made it 7 (the other mounts), and the earlier demos that check what
 /// the current binary writes follow it.
-pub const record_version_written: u32 = 7;
+pub const record_version_written: u32 = 8;
 
 /// A run record file has the version line `.version = <n>,`.
 pub fn check_record_version(output: []const u8, version: u32) Error!void {
