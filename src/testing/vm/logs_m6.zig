@@ -126,7 +126,9 @@ fn foreground(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: LOGS 3: a foreground run's output, on the terminal and in the log\n", .{
         H.demo_name,
     });
-    const run = zn ++ " run --name lg3 alpine -- sh -c 'echo to-stdout; echo to-stderr >&2'";
+    // The guest's console is a terminal, which a run leaves to the container (LOGS 6); stdout
+    // goes through a pipe here so that it is the log's to keep, and stderr is a file.
+    const run = zn ++ " run --name lg3 alpine -- sh -c 'echo to-stdout; echo to-stderr >&2' | cat";
     const shown = try ok(session, out, run);
     // The streams live in the session's buffer: read before the next command.
     checks.check_terminal(shown.streams) catch |err| {
