@@ -39,15 +39,16 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 - **M6b (dev loop):** in progress, brief `docs/briefs/M6b-dev-loop.md`, with six slices run in order.
   - Slices 1–3 (`--mount` and `--user`, `zbx logs`, `zbx exec`) are merged (PR #21).
   - Slice 4 (pull in the library) is merged (PR #22). Its decisions: an over-long reference or mirrors setting is refused (`E0501`, `E0514`); the report pipe is sized with `F_SETPIPE_SZ` and a pipe under 16 KiB refuses the pull with `E0419` (if a real host hits that, drain the pipe instead); a damaged report fails the pull; `W0504` / `Result.warnings_dropped` for warnings past the cap.
-  - **Slice 5 (`demo-m6b`)** is built, reviewed and fixed on the working branch `claude/nifty-goodall-ux8fpg` (`32b7cdb..5e473c5`, `check: PASS 5e473c5`). `demo-m6b` and `demo-m0`–`demo-m6` are green on KVM in `vm.yml` ([run](https://github.com/Zigbox/zigbox/actions/runs/41090791379)); no PR yet, so the `ci.yml` `demo-m6b` job has not run. What it settled:
+  - **Slice 5 (`demo-m6b`)** is merged (PR #24) and green in CI on `main` with every earlier demo ([run 95](https://github.com/Zigbox/zigbox/actions/runs/41104767772)). The red `demo-m6` on `main` after #22 (run 92, EXEC 6) was the `exec` race slice 5 fixed. What it settled:
     - Parts in order: UPGRADE (against M6 `bf57ec8`), SPEC (the five steps), WRITABLE, LOGS, EXEC (moved from `demo-m6`), AGENT, ACCEPT. ACCEPT must stay last: it prunes the oldest records.
-    - `exec` decides that a command died with its container by reading PF_EXITING in `/proc/<pid1>/stat`, not by timing (a 0.2 s retry was tried and removed). The simulator models a slow PID 1 exit (`pid1_exit_ms`). Unhandled: PID 1's main thread exiting while other threads live.
+    - `exec` decides that a command died with its container by reading PF_EXITING in `/proc/<pid1>/stat`, not by timing. The simulator models a slow PID 1 exit (`pid1_exit_ms`). Unhandled: PID 1's main thread exiting while other threads live.
     - A `zbx logs` refusal exits 1, as DIAGNOSTICS "Exit codes" says (125 is only for commands that run or wait on a workload).
     - The published-port forward accepts a host connection before the server listens and then resets it (predates M6b); the demo waits from inside the container. Recorded as a failure mode.
     - `find … | wc -l` hid a failing `find`; owner checks now use `checks_writable.owners_command`.
     - Trap: the simulator's written-files table (`sim_written_files_max`) drops files silently when full.
-  - **Waiting on the owner:** whether to open the PR now (CI's `demo-m6b` job runs only on a PR), and whether `zbx.logs/1`'s schema should describe the error document a refused `logs --output json` prints (recommended: yes; schemas only grow). Once the PR is green, record `demo-m6b`'s output as demonstrated in README and site.
-- **Slice 6** is the Mac (`logs` and `exec` forwarded). It belongs to the Mac session after slice 5 merges; hand the owner a short note for it then.
+  - **Follow-up, PR #26:** `zbx.logs/1` describes the diagnostic a refused `logs` prints (owner decision, in `docs/DECISIONS.md`), with this status update. Waits for the owner to merge.
+  - **Trap:** a status commit with `[skip ci]` at the head of a PR stops the PR's CI from running at all (GitHub reads the head commit), and the git proxy here refuses force pushes. Push a status commit to a PR only after its CI has run, or put it in the PR's last code push.
+- **Slice 6** is the Mac (`logs` and `exec` forwarded, `demo-m6b`'s steps on `mac.yml`). It belongs to the Mac session now that slice 5 is merged; the owner has the note for it. M6b is demonstrated only when that Mac run is green.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
 ## Owner decisions to remember

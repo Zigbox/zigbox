@@ -130,7 +130,8 @@ const help_text =
     \\  --stream <s>    only stdout, or only stderr
     \\  a stream of a foreground run that is a terminal is left to the container (editors and
     \\  pagers need it), so it is not logged; zbx logs says so
-    \\  --output json   one zbx.logs/1 object per record (a write of the container), per line
+    \\  --output json   one zbx.logs/1 object per record (a write of the container), per line;
+    \\                  a refusal is a diagnostic on stderr (zbx schema logs)
     \\
     \\exec:
     \\  zbx exec <name> [-e <name>[=<value>]] [--user <user>[:<group>]] [--workdir <dir>]

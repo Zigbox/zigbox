@@ -186,20 +186,29 @@ const stop_schema =
     \\"exit_code":{"type":["integer","null"]}}}
 ;
 
-/// `zbx logs --output json`: one object per line, one per record the container's log holds.
+/// `zbx logs --output json`: on stdout one object per line, one per record the container's log
+/// holds; on stderr a diagnostic for each refusal or warning. One object schema, no `$ref`,
+/// like `exec`'s: the record's members stay as they were (M6b slice 2), and `oneOf` names the
+/// members that tell the record from the diagnostic. Only the diagnostic's members were added.
 const logs_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/logs/1","version":1,
     \\"title":"zbx logs --output json",
-    \\"description":"stdout: one object per line, one per record (a write of up to 4096 bytes).",
-    \\"type":"object","required":["schema","stream","time","text"],
+    \\"description":"stdout: a line per record (a write of up to 4096 bytes). stderr: diagnostics.",
+    \\"$comment":"One object schema, no $ref: oneOf names the members that tell them apart.",
+    \\"type":"object",
     \\"properties":{"schema":{"const":"zbx.logs/1"},
     \\"stream":{"enum":["stdout","stderr"]},
     \\"time":{"type":"integer","description":"seconds since the epoch when zbx read the write"},
     \\"text":{"type":"string","description":"the bytes; not UTF-8 becomes U+FFFD and lossy"},
     \\"lossy":{"const":true,"description":"only when text had bytes that are not UTF-8"},
     \\"dropped_bytes":{"type":"integer","minimum":1,
-    \\"description":"first record only: bytes of older output the 5 MiB cap dropped"}}}
+    \\"description":"first record only: bytes of older output the 5 MiB cap dropped"},
+++ diagnostic_properties ++
+    \\},
+    \\"oneOf":[{"required":["schema","stream","time","text"]},{
+++ diagnostic_required ++
+    \\}]}
 ;
 
 /// `zbx exec --output json`: one object per line on stderr, a diagnostic for each failure or
@@ -754,7 +763,7 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
     // object schema whose `oneOf` alternatives are lists of required members (the form the
     // agent's checker follows); every member they require is listed under `properties`; and the
     // members M6 added to the documents are there, with the flags of a fix.
-    for ([_][]const u8{ "run", "doctor", "exec" }) |command| {
+    for ([_][]const u8{ "run", "doctor", "exec", "logs" }) |command| {
         const text = of(command).?;
         try testing.expect(std.mem.indexOf(u8, text, "\"$ref\"") == null);
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
@@ -773,6 +782,11 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
         try testing.expect(flags.get("needs_root") != null);
         try testing.expect(flags.get("template") != null);
     }
+    // A schema only grows: the records of `logs` still require what they always did.
+    const logs_text = of("logs").?;
+    const record = "{\"required\":[\"schema\",\"stream\",\"time\",\"text\"]}";
+    try testing.expect(std.mem.indexOf(u8, logs_text, record) != null);
+    try testing.expect(std.mem.indexOf(u8, logs_text, "\"dropped_bytes\"") != null);
     const run_text = of("run").?;
     for ([_][]const u8{ "\"hint\"", "network_none", "\"env\"", "\"detached\"" }) |part| {
         try testing.expect(std.mem.indexOf(u8, run_text, part) != null);

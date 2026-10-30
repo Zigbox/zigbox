@@ -408,10 +408,6 @@ test "the exec_exit line agrees with the process" {
     );
 }
 
-const logs_schema = "{\"type\":\"object\"," ++
-    "\"required\":[\"schema\",\"stream\",\"time\",\"text\"]," ++
-    "\"properties\":{\"schema\":{\"const\":\"zbx.logs/1\"},\"stream\":{\"enum\":[\"stdout\"," ++
-    "\"stderr\"]},\"time\":{\"type\":\"integer\"},\"text\":{\"type\":\"string\"}}}";
 const request_line = "{\"schema\":\"zbx.logs/1\",\"stream\":\"stderr\",\"time\":1793236000," ++
     "\"text\":\"127.0.0.1 - - [30/Oct/2026 10:00:00] \\\"GET /index.html HTTP/1.1\\\" 200 -\\n" ++
     "\"}\n";
@@ -632,6 +628,35 @@ const real_exec_schema = "{\"$schema\":\"https://json-schema.org/draft/2020-12/s
     "\":\"the command was killed because its container ended\"}}}},\n\"oneOf\":[{\"required\":[" ++
     "\"code\",\"severity\",\"blame\",\"summary\",\"causes\",\"docs\"]},{\"required\":[\"exec_exi" ++
     "t\"]}]}\n";
+// `zbx schema logs`, as the built binary prints it.
+const logs_schema = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\n\"$id\":" ++
+    "\"https://zigbox.github.io/zigbox/schema/logs/1\",\"version\":1,\n\"titl" ++
+    "e\":\"zbx logs --output json\",\n\"description\":\"stdout: a line per re" ++
+    "cord (a write of up to 4096 bytes). stderr: diagnostics.\",\n\"$comment" ++
+    "\":\"One object schema, no $ref: oneOf names the members that tell them " ++
+    "apart.\",\n\"type\":\"object\",\n\"properties\":{\"schema\":{\"const\":" ++
+    "\"zbx.logs/1\"},\n\"stream\":{\"enum\":[\"stdout\",\"stderr\"]},\n\"time" ++
+    "\":{\"type\":\"integer\",\"description\":\"seconds since the epoch when " ++
+    "zbx read the write\"},\n\"text\":{\"type\":\"string\",\"description\":\"" ++
+    "the bytes; not UTF-8 becomes U+FFFD and lossy\"},\n\"lossy\":{\"const\":" ++
+    "true,\"description\":\"only when text had bytes that are not UTF-8\"},\n" ++
+    "\"dropped_bytes\":{\"type\":\"integer\",\"minimum\":1,\n\"description\":" ++
+    "\"first record only: bytes of older output the 5 MiB cap dropped\"},\"co" ++
+    "de\":{\"type\":\"string\",\"pattern\":\"^ZBX-[EWB][0-9]{4}$\"},\n\"sever" ++
+    "ity\":{\"enum\":[\"error\",\"warning\",\"bug\"]},\"blame\":{\"enum\":[\"" ++
+    "user\",\"environment\",\n\"external\",\"internal\",\"bug\"]},\n\"summary" ++
+    "\":{\"type\":\"string\"},\"causes\":{\"type\":\"array\",\"items\":{\"typ" ++
+    "e\":\"string\"}},\n\"while\":{\"type\":\"array\",\"items\":{\"type\":\"s" ++
+    "tring\"}},\"context\":{\"type\":\"object\"},\n\"fixes\":{\"type\":\"arra" ++
+    "y\",\"items\":{\"type\":\"object\",\"properties\":{\n\"sentence\":{\"typ" ++
+    "e\":\"string\"},\"command\":{\"type\":[\"string\",\"null\"]},\n\"needs_r" ++
+    "oot\":{\"type\":\"boolean\",\"description\":\"M6: only when true; the co" ++
+    "mmand needs root\"},\n\"template\":{\"type\":\"boolean\",\n\"description" ++
+    "\":\"M6: only when true; an example to adapt, not to run as written\"}}}" ++
+    "},\n\"docs\":{\"type\":\"string\"},\"saved\":{\"type\":\"string\"},\"omi" ++
+    "tted\":{\"type\":\"object\"}},\n\"oneOf\":[{\"required\":[\"schema\",\"s" ++
+    "tream\",\"time\",\"text\"]},{\"required\":[\"code\",\"severity\",\"blame" ++
+    "\",\"summary\",\"causes\",\"docs\"]}]}\n";
 const real_e0213 = "{\"code\":\"ZBX-E0213\",\"severity\":\"error\",\"blame\":\"user\",\"summary" ++
     "\":\"a --mount needs the container to run as root\",\"causes\":[\"the container would run a" ++
     "s memcache (uid 11211, gid 11211), and what it writes through --mount would belong to an id" ++
@@ -664,6 +689,25 @@ test "the agent reads the state of its own container among all of them" {
     const absent = check_ps_state(arena, real_ps_all, "no-such", "stopped");
     try testing.expectError(error.JsonWrong, absent);
     try testing.expectError(error.JsonWrong, check_ps_state(arena, "nope", "agentweb", "stopped"));
+}
+
+test "the logs schema describes a record and a refusal, and nothing else" {
+    // Goal: an agent validates every document `logs --output json` prints against `zbx schema
+    // logs`. Method: the captured E0402 and a captured record pass; a refusal without its docs
+    // member, a record without its text, and a mix of the two fail.
+    var state = scratch();
+    defer state.deinit();
+    const arena = state.allocator();
+    const refusal_line = std.mem.trim(u8, e0402, "\n");
+    try testing.expect((try agent_json.violation(arena, logs_schema, refusal_line)) == null);
+    const record = std.mem.trim(u8, request_line, "\n");
+    try testing.expect((try agent_json.violation(arena, logs_schema, record)) == null);
+    const no_docs = try std.mem.replaceOwned(u8, arena, refusal_line, "\"docs\"", "\"doc\"");
+    try testing.expect((try agent_json.violation(arena, logs_schema, no_docs)) != null);
+    const no_text = try std.mem.replaceOwned(u8, arena, record, "\"text\"", "\"txt\"");
+    try testing.expect((try agent_json.violation(arena, logs_schema, no_text)) != null);
+    const mixed = try std.mem.replaceOwned(u8, arena, record, "\"stream\"", "\"code\"");
+    try testing.expect((try agent_json.violation(arena, logs_schema, mixed)) != null);
 }
 
 test "the exec schema is known by the member it describes, not by a word in it" {
