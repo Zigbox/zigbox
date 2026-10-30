@@ -142,7 +142,8 @@ pub const resolv_conf_bytes_max: usize = nameservers_max * nameserver_line_bytes
 
 /// The guest's `/etc/resolv.conf`. With the Mac's resolvers (`mac_dns` a list): theirs first, then
 /// the DHCP one (`gateway`, if the lease named one). With "-": `dns_fallback` first, then the
-/// DHCP one (the gateway refuses DNS, and pasta, for `--net user`, asks only the first line). `mac_dns` has passed `parse_dns`. The text is written into `out`.
+/// DHCP one (the gateway refuses DNS, and pasta, for `--net user`, asks only the first line).
+/// `mac_dns` has passed `parse_dns`. The text is written into `out`.
 pub fn resolv_conf(
     out: *[resolv_conf_bytes_max]u8,
     mac_dns: []const u8,
