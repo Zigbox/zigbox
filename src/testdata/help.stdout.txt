@@ -9,6 +9,8 @@ commands:
                   --output json: the report as a document, see zbx schema doctor)
   ps              list the containers (--all: the ones that ended too)
   stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+  logs <name>     show what a container wrote to its output and error (see below)
+  exec <name>     run a command inside a running container (see below)
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
@@ -53,15 +55,45 @@ run:
                   size; k, m or g). Its pages count against --memory
   --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
                   <host> that does not exist is an error, never made (repeatable)
+  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
+                  <host> may be relative; with every symbolic link followed it must be the
+                  project directory (the one with zbx.lock, else the working directory) or
+                  inside it. The container must run as root, which is you: see --user
   --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
                   owned by the container's root. Its contents are never stored or
                   printed, and the mount point is left out of zbx commit (repeatable).
-                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
+                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
+  --user <user>[:<group>]   run the command as this user of the image (a name from its
+                  /etc/passwd and /etc/group, or a number), over the image's own; --user 0
+                  makes a non-root image fit --mount
   --              ends the options; everything after it is the command, as typed
 
 stop:
   zbx stop <name> [--grace <ms>] [--timeout <ms>]
   --timeout <ms>  give up (exit 2) if the container is still there after this long
+
+logs:
+  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
+  every run keeps what its command wrote to standard output and error, in order, in
+  $XDG_STATE_HOME/zbx/logs (~/.local/state/zbx/logs): at most 5 MiB per container, the
+  oldest output dropped first; removed with the container's run record
+  --follow        go on showing what the container writes; ends, exit 0, when it ends
+  --tail <n>      only the last n lines
+  --stream <s>    only stdout, or only stderr
+  a stream of a foreground run that is a terminal is left to the container (editors and
+  pagers need it), so it is not logged; zbx logs says so
+  --output json   one zbx.logs/1 object per record (a write of the container), per line
+
+exec:
+  zbx exec <name> [-e <name>[=<value>]] [--user <user>[:<group>]] [--workdir <dir>]
+           -- <command> [args...]
+  the command joins the container's namespaces and cgroup and has no more than the
+  container: its capabilities, no_new_privs and seccomp filter. By default it has the
+  container's environment, working directory and user; -e, --user and --workdir change
+  them for this command only. With a terminal on zbx's input and output it gets a
+  terminal of its own. It ends with the container. zbx ps does not list it; zbx bundle
+  of the container notes the recent execs (command and exit, never a value of -e)
+  --output json   ends with an exec_exit line on stderr (zbx schema exec)
 
 store:
   zbx store import <dir>   read a directory into the store and print its digest
@@ -111,6 +143,6 @@ options (before the "--" of run, or after any other command):
   --output json   write each failure to stderr as one JSON object per line
 
 exit codes: 0 ok, 1 usage error, 2 this host cannot run zbx, 3 an external service, 70 a bug
-run exits with the command's own exit code, or 128 plus the signal that killed it, and
+run and exec exit with the command's own exit code, or 128 plus the signal that killed it, and
 keeps its own failures out of that range: 125 zbx failed before the command started,
 126 the command could not be run, 127 the command was not found

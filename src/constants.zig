@@ -159,7 +159,7 @@ pub const diag_skip_bytes_max: u32 = 4096;
 
 // The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
 // this; the bound is what the tool's buffers and file reads use.
-pub const errors_page_bytes_max: u32 = 24 * 1024;
+pub const errors_page_bytes_max: u32 = 32 * 1024;
 
 // Host simulator.
 pub const sim_files_max: u32 = 128;
@@ -170,8 +170,8 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 pub const sim_path_bytes_max: u32 = 256;
 pub const sim_nodes_max: u32 = 160;
 pub const sim_mounts_max: u32 = 32;
-pub const sim_processes_max: u32 = 4;
-pub const sim_pipe_ends_max: u32 = 10;
+pub const sim_processes_max: u32 = 8;
+pub const sim_pipe_ends_max: u32 = 24;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
 pub const sim_written_files_max: u32 = 72;
@@ -305,6 +305,9 @@ pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
 pub const signal_term: u8 = 15;
+/// SIGWINCH (the terminal's window changed size), 28 on x86_64 and aarch64. `exec` with a
+/// pseudo-terminal passes the new size on; nothing forwards it to a container.
+pub const signal_winch: u8 = 28;
 
 /// How long a stop waits between SIGTERM and SIGKILL when nobody says.
 pub const stop_grace_ms_default: u32 = 10_000;
@@ -397,9 +400,13 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 7;
+pub const record_version: u32 = 8;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 52 * 1024;
+pub const record_bytes_max: u32 = 64 * 1024;
+// Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
+comptime {
+    assert(record_bytes_max <= file_bytes_max);
+}
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
 pub const label_key_bytes_max: u32 = 32;
@@ -412,11 +419,58 @@ pub const dir_listing_bytes_max: u32 = dir_entries_max * (dir_name_bytes_max + 1
 /// The state directory path: $XDG_STATE_HOME or $HOME/.local/state, then /zbx/runs/<name>.zon.
 pub const state_path_bytes_max: u32 = 512;
 pub const record_suffix = ".zon";
+/// The recent execs a container's history keeps (`runtime/exec_history.zig`): the oldest goes.
+pub const exec_history_entries_max: u32 = 16;
+/// How long an exec waits for another to finish writing the history: tries, and the wait
+/// between two (one second in all).
+pub const exec_history_lock_tries_max: u32 = 100;
+pub const exec_history_lock_wait_ms: u32 = 10;
 /// A container's directory under the state directory: `<state>/zbx/containers/<name>`, and the
 /// longest path inside it (`/upper`, `/merged`).
 pub const containers_path_bytes_max: u32 = 640;
 /// Seconds since the epoch; a record's times are these.
 pub const record_time_unknown: u64 = 0;
+
+// Container logs (M6b, slice 2).
+/// The log of a container, `logs/<name>.log` beside the run record: a header, then records. The
+/// header is 16 bytes: the version, seven zero bytes, and the payload bytes that came before its
+/// first record in the stream of everything the container wrote (u64, little endian). A record
+/// is a 12-byte header
+/// (stream, time in seconds as 5 bytes, length as 2 bytes, CRC-32 of those 8 bytes and the
+/// payload) and its payload.
+pub const log_version: u8 = 1;
+pub const log_header_bytes: u32 = 16;
+pub const log_record_header_bytes: u32 = 12;
+/// The most bytes one record holds; a longer write is cut into several records.
+pub const log_record_bytes_max: u32 = 4096;
+/// The most a container's log keeps, both files together. At the cap the older file is replaced
+/// by the current one, so what is dropped is always a whole file of whole records.
+pub const log_bytes_max: u64 = 5 * 1024 * 1024;
+/// One of the two files a log is kept in: half the cap.
+pub const log_segment_bytes_max: u32 = 2_621_440;
+/// A record's time is seconds since the epoch, as in every other record zbx keeps.
+pub const log_time_max: u64 = 1 << 40;
+/// The file names in the logs directory, after the container's name: the current file and the
+/// older one. A container name has no dot, so neither collides with `pasta_log_suffix`.
+pub const log_suffix = ".log";
+pub const log_older_suffix = ".log.1";
+/// The reader's window into a file: room for the largest record and for reading ahead.
+pub const log_read_bytes: u32 = 16 * 1024;
+/// How often `zbx logs --follow` looks for more, and how many looks it spends on the end of a
+/// log that is still being written to after the container has ended.
+pub const log_follow_poll_ms: u32 = 100;
+pub const log_follow_settle_looks: u32 = 3;
+/// The most `--tail` may ask for.
+pub const log_tail_lines_max: u32 = 1_000_000;
+/// The most a pump reads from one stream at a time.
+pub const log_pump_bytes: u32 = log_record_bytes_max;
+/// The most time the end of a container's output is waited for after it has gone.
+pub const log_drain_ms: u32 = 200;
+/// Reads in one drain of the output after the container ended: it ends at the end of the output,
+/// and a stuck holder of the pipe's write end costs `log_drain_ms` once.
+pub const log_drain_reads_max: u32 = 4096;
+/// The most output events one `wait` takes before it looks at the signals again.
+pub const log_wait_events_max: u32 = 1 << 30;
 
 // Bundles (M1, slice 3).
 /// The directory under the state directory that holds bundles, next to "runs".
@@ -435,6 +489,9 @@ pub const facts_bytes_max: u32 = 256 * 1024;
 pub const bundle_workspace_bytes_max: u32 = 1024 * 1024;
 /// The run `Handle` of a foreground run, kept off the stack too.
 pub const handle_bytes_max: u32 = 480 * 1024;
+/// An exec's handle (`runtime/exec.zig`): the plan, the container's environment, its passwd and
+/// group files, and the room the history is rewritten in.
+pub const exec_handle_bytes_max: u32 = 640 * 1024;
 /// The environment variables listed in a bundle, and those whose values are scrubbed elsewhere.
 pub const environment_entries_max: u32 = 256;
 pub const bundle_secrets_max: u32 = 32;
@@ -597,6 +654,16 @@ pub const secret_bytes_max: u32 = 64 * 1024;
 pub const mount_stage_prefix = "/dev/.zbx-mount-";
 /// The options of a `--tmpfs` mount: `mode=1777,size=` and the size in decimal.
 pub const tmpfs_options_bytes_max: u32 = 16 + 20;
+
+// Writable project mounts and `--user` (M6b slice 1, docs/briefs/M6b-dev-loop.md).
+/// Symbolic links followed while a `--mount` source or the project directory is resolved, as
+/// the kernel's own limit is: past it the path is a loop, and the mount is refused.
+pub const symlinks_followed_max: u32 = 40;
+/// Steps of the resolver: each name of the path, and of the target of each link followed. It
+/// stops there with a refusal, never loops on.
+pub const path_resolve_steps_max: u32 = (symlinks_followed_max + 1) * path_bytes_max;
+/// The longest `--user` value, `USER[:GROUP]`.
+pub const user_value_bytes_max: u32 = 256;
 
 // `zbx state export` (M6 slice 3).
 /// Notes about devices, sockets and fifos left out: shown one each up to this many, then counted.
@@ -947,6 +1014,17 @@ comptime {
     assert(6 * 1024 + 6 * diag_explanation_bytes_max + 2048 <= errors_page_bytes_max);
     assert(diag_code_bytes < 16); // A page name ("E0101.html") fits the 16-byte buffers.
 
+    // Logs: a record and its header fit the window the reader reads in, two files make the cap,
+    // and a file holds a header and at least one largest record.
+    assert(log_header_bytes + log_record_header_bytes + log_record_bytes_max <= log_read_bytes);
+    assert(2 * @as(u64, log_segment_bytes_max) <= log_bytes_max);
+    const smallest_file = log_header_bytes + log_record_header_bytes + log_record_bytes_max;
+    assert(log_segment_bytes_max >= smallest_file);
+    assert(log_record_bytes_max <= std.math.maxInt(u16));
+    assert(log_time_max == 1 << 40); // Five bytes hold a time below it.
+    assert(log_pump_bytes <= output_bytes_max);
+    assert(log_read_bytes <= store_io_buffer_bytes);
+    assert(std.mem.indexOfScalar(u8, log_suffix, '.') == 0);
     assert(sim_files_max > 0);
     assert(sim_open_files_max > 0);
     assert(sim_output_bytes_max >= 2 * output_bytes_max);
@@ -995,7 +1073,7 @@ comptime {
     assert(sim_path_bytes_max >= 64);
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
-    assert(sim_processes_max >= 4); // zbx, the container, its keeper and pasta.
+    assert(sim_processes_max >= 6); // zbx, a container, its keeper, pasta, exec's two.
     assert(sim_pipe_ends_max >= 4);
     assert(sim_written_files_max > runs_max + 4); // Every record, a temporary one, and slack.
     assert(sim_written_bytes_max > 1024);

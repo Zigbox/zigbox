@@ -174,6 +174,14 @@ pub const IdMaps = struct {
 
 pub const text_bytes_max: u32 = 512;
 
+pub const WaitResult = union(enum) { event: host.Event, errno: u16 };
+
+/// A write of the simulated command to one of its standard streams.
+pub const OutChunk = struct {
+    stream: host.Stream,
+    bytes: []const u8,
+};
+
 pub const Process = struct {
     state: ProcessState,
     pid: u32,
@@ -228,6 +236,22 @@ pub const Process = struct {
     pasta_target: u32,
     ports: [constants.publish_count_max]u16,
     ports_count: u32,
+    /// The write ends of the pipes that were this process's standard output and error
+    /// (`SpawnFlags.output`): held while the command lives, so the readers see its end.
+    output_ends: [2]?u32,
+    /// The PID namespace the process is in, named by the host pid of its init (0: the host's),
+    /// and the one its children are born in (another after `join_namespace(.pid)`). When an
+    /// init ends, the kernel kills every other process of its namespace.
+    pid_namespace: u32,
+    children_pid_namespace: u32,
+    /// The namespaces joined with `join_namespace`, one bit per `host.NamespaceKind`.
+    joined: u8,
+    /// Moved into a container's cgroup (an exec'd command: by the manager or by a write of its
+    /// pid to `cgroup.procs`), and whether that happened before it ran its first step.
+    in_scope: bool,
+    in_scope_before_run: bool,
+    /// The process's controlling terminal is a pseudo-terminal's peer (`attach_terminal`).
+    terminal: bool,
 
     pub fn argv(process: *const Process) []const u8 {
         return process.exec_argv[0..process.exec_argv_len];
@@ -267,6 +291,26 @@ pub const Written = struct {
 };
 
 pub const script_max: u32 = 8;
+
+/// Namespace handles are numbered from here (`World.open_namespace`).
+pub const namespace_handle_base: u32 = 3000;
+pub const namespace_handles_max: u32 = 8;
+
+/// What a namespace handle names: the namespaces of the process it was opened for, as they were
+/// then (the kernel keeps a namespace alive while a descriptor of it is open).
+pub const NamespaceSnapshot = struct {
+    pid: u32,
+    kind: host.NamespaceKind,
+    table: u8,
+    uts: u8,
+    root: ?SimPath,
+    new_net: bool,
+    loopback_up: bool,
+    pid_namespace: u32,
+};
+
+/// Room for what the simulated user types (`World.input`) and for what reaches a pseudo-terminal.
+pub const terminal_bytes_max: u32 = 256;
 
 /// What the simulated pasta does when started for a process that exists and ports it can bind.
 pub const PastaBehaviour = enum {
@@ -343,6 +387,10 @@ pub const World = struct {
     /// How long a command that started runs, in milliseconds of that clock, before it ends by
     /// itself. Zero: it ends the moment it is waited for (what every earlier test assumes).
     command_runs_ms: u32,
+    /// What the command writes while it runs, a chunk at a time (`wait_event_watching`), and how
+    /// many chunks it has written.
+    out_script: []const OutChunk,
+    out_at: u32,
     /// A SIGTERM that the command catches ends it (with `term_exit_code`), as a daemon's does.
     term_exits: bool,
     term_exit_code: u8,
@@ -383,6 +431,28 @@ pub const World = struct {
     pasta_starts: u32,
     /// What `pasta --version` prints (its first line is what counts).
     pasta_version_line: []const u8,
+    /// Open namespace handles (`open_namespace`), by slot.
+    namespace_handles: [namespace_handles_max]?NamespaceSnapshot,
+    /// What standard input holds: a pipe made on the first `standard_input`, with this text in
+    /// it and no writer, so that it ends after it.
+    input: []const u8,
+    input_handle: ?host.Handle,
+    /// Standard input is a terminal too (with `HostSim.terminal`).
+    input_terminal: bool,
+    /// zbx dies in the instant after a child changed its user and before it asked again to die
+    /// with it: the child finds no reader on its report pipe.
+    parent_gone_after_user: bool,
+    /// How often a child asked to die with its parent (`die_with_parent`), by the last child.
+    death_signal_requests: u32,
+    /// The pseudo-terminal (`open_terminal`): a pipe whose read end is the master and whose write
+    /// end is the peer, and what was written to the master (the keys sent to the command).
+    terminal_master: ?host.Handle,
+    terminal_typed: [terminal_bytes_max]u8,
+    terminal_typed_len: u32,
+    terminals_opened: u32,
+    /// Standard input is raw (`input_raw`), and how often a window size was copied.
+    input_is_raw: bool,
+    window_copies: u32,
 
     pub fn init(world: *World) void {
         world.nodes_count = 0;
@@ -418,6 +488,8 @@ pub const World = struct {
         world.bus.init();
         world.now_ms = 1_000_000;
         world.command_runs_ms = 0;
+        world.out_script = &.{};
+        world.out_at = 0;
         world.term_exits = false;
         world.term_exit_code = 0;
         world.fork_role = .parent;
@@ -439,6 +511,7 @@ pub const World = struct {
         world.pasta_stays = false;
         world.pasta_starts = 0;
         world.pasta_version_line = "pasta 2024_09_06.6b38f07\n";
+        world.init_exec();
         // The host's own process is alive from the start, in the host's namespaces.
         const first = &world.processes[0];
         first.state = .running;
@@ -446,6 +519,23 @@ pub const World = struct {
         _ = first.cwd.set("/");
         assert(world.tables[0].count == 0);
         assert(world.processes[1].state == .unused);
+    }
+
+    /// The parts of the model `exec` uses: namespace handles, standard input, the terminal.
+    fn init_exec(world: *World) void {
+        world.namespace_handles = @splat(null);
+        world.input = "";
+        world.input_handle = null;
+        world.input_terminal = false;
+        world.parent_gone_after_user = false;
+        world.death_signal_requests = 0;
+        world.terminal_master = null;
+        world.terminal_typed_len = 0;
+        world.terminals_opened = 0;
+        world.input_is_raw = false;
+        world.window_copies = 0;
+        assert(world.namespace_handles.len == namespace_handles_max);
+        assert(world.terminal_master == null);
     }
 
     fn take_pid(world: *World) u32 {
@@ -718,6 +808,17 @@ pub const World = struct {
         return .{ .count = count };
     }
 
+    /// Whether the pipe of the write end `handle` has a reader; false too when the model says
+    /// zbx died in the window after a change of user (`parent_gone_after_user`).
+    pub fn pipe_has_reader(world: *World, handle: host.Handle) bool {
+        const index = end_index(handle);
+        assert(index % 2 == 1); // The write end.
+        if (world.processes[world.current].user_set != null and world.parent_gone_after_user) {
+            return false;
+        }
+        return world.reader_exists(index / 2);
+    }
+
     pub fn write_pipe(world: *World, handle: host.Handle, bytes: []const u8) ?u16 {
         const index = end_index(handle);
         assert(index % 2 == 1); // The write end.
@@ -749,17 +850,30 @@ pub const World = struct {
         child.pid = world.take_pid();
         child.entry = entry;
         child.entry_context = entry_context;
-        child.new_user = flags.user;
+        // A child is born in its parent's namespaces (those it joined, too) unless it is given
+        // new ones.
+        child.new_user = flags.user or parent.new_user;
         child.new_pid = flags.pid;
-        child.new_ipc = flags.ipc;
-        child.new_net = flags.net;
+        child.new_ipc = flags.ipc or parent.new_ipc;
+        child.new_net = flags.net or parent.new_net;
         child.loopback_up = parent.loopback_up and !flags.net;
+        child.pid_namespace = if (flags.pid) child.pid else parent.children_pid_namespace;
+        child.children_pid_namespace = child.pid_namespace;
+        if (flags.sibling) {
+            assert(!flags.user); // A sibling takes no namespace of its own.
+            assert(!flags.pid);
+        }
         child.cwd = parent.cwd;
         child.root = parent.root;
         child.old_root_attached = parent.old_root_attached;
         child.holds = parent.holds;
         child.table = parent.table;
         child.uts = parent.uts;
+        if (flags.output) |pipes| {
+            child.output_ends = .{ pipes.stdout, pipes.stderr };
+            if (pipes.stdout) |handle| assert(parent.holds[end_index(handle)]);
+            if (pipes.stderr) |handle| assert(parent.holds[end_index(handle)]);
+        }
         if (flags.mount) {
             const copy = @as(u8, @intCast(world.tables.len - 1));
             world.tables[copy] = world.tables[parent.table];
@@ -796,9 +910,13 @@ pub const World = struct {
         world.step = previous_step;
         assert(child.state == .running);
         child.holds = @splat(false);
-        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0)) {
-            // Still running: the scripted signals and the clock decide how it ends.
+        const writes_more = world.out_at < world.out_script.len;
+        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0 or writes_more)) {
+            // Still running: the scripted signals, the output and the clock decide how it ends.
             child.state = .command;
+            for (child.output_ends) |end| {
+                if (end) |handle| child.holds[end_index(handle)] = true;
+            }
             return;
         }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
@@ -1027,7 +1145,7 @@ pub const World = struct {
 
     /// The process is gone, and so are its files in /proc.
     fn drop_proc_files(world: *World, pid: u32) void {
-        inline for (.{ "status", "cgroup" }) |name| {
+        inline for (.{ "status", "cgroup", "environ" }) |name| {
             var path: [48]u8 = undefined;
             // Cannot fail: a short path and a pid of at most ten digits.
             const where = std.fmt.bufPrint(&path, "/proc/{d}/" ++ name, .{pid}) catch unreachable;
@@ -1075,6 +1193,7 @@ pub const World = struct {
     fn process_died(world: *World, pid: u32) void {
         world.namespace_gone(pid);
         if (world.find_process(pid)) |process| {
+            process.holds = @splat(false); // Its descriptors close with it: pipes see the end.
             // The status file of a process that ended and is not reaped says so.
             if (process.execd) world.put_status_file(pid, true);
         }
@@ -1100,7 +1219,7 @@ pub const World = struct {
         world: *World,
         pid: u32,
         timeout_ms: u32,
-    ) union(enum) { event: host.Event, errno: u16 } {
+    ) WaitResult {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
@@ -1121,6 +1240,53 @@ pub const World = struct {
         if (process.state != .zombie) return .{ .errno = errno_child };
         world.reap(process);
         return .{ .event = .{ .exited = process.exit.? } };
+    }
+
+    /// `wait_event` that also reports the watched pipes' read ends that can be read. The
+    /// container's scripted output (`out_script`) arrives one chunk per call while it lives,
+    /// after the scripted signals, as the real kernel would show it between two polls.
+    pub fn wait_event_watching(
+        world: *World,
+        pid: u32,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) WaitResult {
+        const index = world.find_index(pid) orelse return .{ .errno = errno_child };
+        if (world.processes[index].state == .pending) world.run_child(index);
+        const process = &world.processes[index];
+        if (process.state == .command and world.script_at >= world.script_len) {
+            world.deliver_next_chunk(process);
+        }
+        var mask: u32 = 0;
+        for (watch, 0..) |handle, at| {
+            const pipe_index = end_index(handle) / 2;
+            const pipe = &world.pipes[pipe_index];
+            const readable = pipe.consumed < pipe.written or !world.writer_exists(pipe_index);
+            if (readable) mask |= @as(u32, 1) << @intCast(at);
+        }
+        if (mask != 0 and !(process.state == .command and world.script_at < world.script_len)) {
+            return .{ .event = .{ .output = mask } };
+        }
+        return world.wait_event(pid, timeout_ms);
+    }
+
+    /// The container writes the next scripted chunk, if its pipe has room for it.
+    fn deliver_next_chunk(world: *World, process: *const Process) void {
+        if (world.out_at >= world.out_script.len) return;
+        const chunk = world.out_script[world.out_at];
+        const handle = process.output_ends[if (chunk.stream == .stdout) 0 else 1] orelse {
+            world.out_at += 1;
+            return;
+        };
+        const pipe = &world.pipes[end_index(handle) / 2];
+        if (pipe.consumed == pipe.written) {
+            pipe.consumed = 0;
+            pipe.written = 0;
+        }
+        if (pipe.written + chunk.bytes.len > pipe.data.len) return; // The reader must catch up.
+        @memcpy(pipe.data[pipe.written..][0..chunk.bytes.len], chunk.bytes);
+        pipe.written += @intCast(chunk.bytes.len);
+        world.out_at += 1;
     }
 
     pub fn signal_state(world: *World, pid: u32) ?host.SignalState {
@@ -1177,6 +1343,18 @@ pub const World = struct {
                 world.scope_started_before_child_ran = true;
             }
         }
+        world.joined_cgroup(pid);
+        // The process's own view of its cgroup, as `/proc/<pid>/cgroup` shows it.
+        const prefix = "/sys/fs/cgroup";
+        if (!std.mem.startsWith(u8, path, prefix)) return;
+        const directory = path[prefix.len .. path.len - "/cgroup.procs".len];
+        var line: [constants.cgroup_path_bytes_max + 8]u8 = undefined;
+        var where: [48]u8 = undefined;
+        // Cannot fail: a bounded cgroup path and a pid of at most ten digits.
+        const text = std.fmt.bufPrint(&line, "0::{s}\n", .{directory}) catch return;
+        // Cannot fail: as above.
+        const proc = std.fmt.bufPrint(&where, "/proc/{d}/cgroup", .{pid}) catch unreachable;
+        world.put_raw(proc, text);
     }
 
     /// Whether the path is on a tmpfs the current process mounted (the container's /dev): a full
@@ -1378,12 +1556,155 @@ pub const World = struct {
     /// The process `pid` is gone: a pasta that serves it sees `/proc/<pid>/ns/net` go and exits,
     /// unless the model says it is a pasta too old to notice.
     fn namespace_gone(world: *World, pid: u32) void {
+        world.pid_namespace_ends(pid);
         if (world.pasta_stays) return;
         for (&world.processes) |*process| {
             if (!process.pasta or process.state != .command) continue;
             if (process.pasta_target != pid) continue;
             world.pasta_ends(process, .{ .exited = 0 });
         }
+    }
+
+    /// The init of a PID namespace ended: the kernel kills every other process in it (an exec'd
+    /// command dies with its container).
+    fn pid_namespace_ends(world: *World, pid: u32) void {
+        assert(pid > 0);
+        for (&world.processes) |*process| {
+            if (process.pid == pid) continue;
+            if (process.pid_namespace != pid) continue;
+            switch (process.state) {
+                .pending, .running, .command => {},
+                .unused, .zombie, .reaped => continue,
+            }
+            process.exit = .{ .signaled = constants.signal_kill };
+            process.state = .zombie;
+            process.holds = @splat(false);
+        }
+    }
+
+    // ---- Exec: namespaces and the terminal ----
+
+    /// A handle for the namespace of `kind` that the process `pid` is in, or null when it is
+    /// the host's own (the network of a container with `--net host`). ENOENT for a process that
+    /// is gone.
+    pub fn open_namespace(
+        world: *World,
+        pid: u32,
+        kind: host.NamespaceKind,
+    ) union(enum) { handle: ?host.Handle, errno: u16 } {
+        const target = world.find_process(pid) orelse return .{ .errno = errno_noent };
+        switch (target.state) {
+            .running, .command, .pending => {},
+            .unused, .zombie, .reaped => return .{ .errno = errno_noent },
+        }
+        if (kind == .net and !target.new_net) return .{ .handle = null };
+        const slot = for (&world.namespace_handles, 0..) |*entry, index| {
+            if (entry.* == null) break index;
+        } else return .{ .errno = errno_nomem };
+        world.namespace_handles[slot] = .{
+            .pid = pid,
+            .kind = kind,
+            .table = target.table,
+            .uts = target.uts,
+            .root = target.root,
+            .new_net = target.new_net,
+            .loopback_up = target.loopback_up,
+            .pid_namespace = target.pid_namespace,
+        };
+        return .{ .handle = namespace_handle_base + @as(u32, @intCast(slot)) };
+    }
+
+    pub fn close_namespace(world: *World, handle: host.Handle) void {
+        assert(handle >= namespace_handle_base);
+        const slot = handle - namespace_handle_base;
+        assert(slot < namespace_handles_max);
+        assert(world.namespace_handles[slot] != null); // Pair with open_namespace.
+        world.namespace_handles[slot] = null;
+    }
+
+    /// `setns`, with the kernel's order rule: every namespace but the user namespace is owned by
+    /// the container's user namespace, and joining it needs CAP_SYS_ADMIN there, which only
+    /// joining that user namespace first gives (EPERM otherwise). A namespace joined twice, or
+    /// a handle of the wrong kind, is EINVAL.
+    pub fn join_namespace(world: *World, handle: host.Handle, kind: host.NamespaceKind) ?u16 {
+        assert(handle >= namespace_handle_base);
+        const slot = handle - namespace_handle_base;
+        assert(slot < namespace_handles_max);
+        const snapshot = world.namespace_handles[slot] orelse return errno_inval;
+        if (snapshot.kind != kind) return errno_inval;
+        const process = &world.processes[world.current];
+        const bit = @as(u8, 1) << @intCast(@backingInt(kind));
+        if (process.joined & bit != 0) return errno_inval;
+        const user_bit = @as(u8, 1) << @intCast(@backingInt(host.NamespaceKind.user));
+        if (kind != .user and process.joined & user_bit == 0) return errno_perm;
+        process.joined |= bit;
+        switch (kind) {
+            .user => process.new_user = true,
+            .ipc => process.new_ipc = true,
+            .uts => process.uts = snapshot.uts,
+            .net => {
+                process.new_net = snapshot.new_net;
+                process.loopback_up = snapshot.loopback_up;
+            },
+            .pid => process.children_pid_namespace = snapshot.pid_namespace,
+            .mount => {
+                // The root and the directory become the namespace's root.
+                process.table = snapshot.table;
+                process.root = snapshot.root;
+                process.old_root_attached = false;
+                if (snapshot.root) |root| process.cwd = root else _ = process.cwd.set("/");
+            },
+        }
+        return null;
+    }
+
+    /// Standard input: a pipe holding `input`, with no writer, made on the first call.
+    pub fn standard_input(world: *World) host.Handle {
+        if (world.input_handle) |handle| return handle;
+        const made = world.make_pipe().?; // A fresh world has free pipes; a test that uses
+        // them all does not read standard input.
+        assert(made.read + 1 == made.write);
+        const pipe = &world.pipes[end_index(made.read) / 2];
+        const length: u32 = @min(world.input.len, pipe.data.len);
+        @memcpy(pipe.data[0..length], world.input[0..length]);
+        pipe.written = length;
+        world.processes[world.current].holds[end_index(made.write)] = false; // Nobody writes.
+        world.input_handle = made.read;
+        return made.read;
+    }
+
+    /// A pseudo-terminal modelled as a pipe: the command writes to the peer, zbx reads the
+    /// master; what zbx writes to the master is kept in `terminal_typed`.
+    pub fn open_terminal(world: *World) ?host.Terminal {
+        const made = world.make_pipe() orelse return null;
+        world.terminal_master = made.read;
+        world.terminals_opened += 1;
+        return .{ .master = made.read, .peer = made.write };
+    }
+
+    pub fn type_into_terminal(world: *World, bytes: []const u8) void {
+        assert(world.terminal_master != null);
+        const room = world.terminal_typed.len - world.terminal_typed_len;
+        const length: u32 = @intCast(@min(room, bytes.len));
+        @memcpy(world.terminal_typed[world.terminal_typed_len..][0..length], bytes[0..length]);
+        world.terminal_typed_len += length;
+    }
+
+    /// The command's controlling terminal is the peer, which is its output: what it writes goes
+    /// to the master.
+    pub fn attach_terminal(world: *World, peer: host.Handle) ?u16 {
+        const process = &world.processes[world.current];
+        if (!process.holds[end_index(peer)]) return errno_inval; // EBADF in the kernel.
+        process.terminal = true;
+        process.output_ends = .{ peer, peer };
+        return null;
+    }
+
+    /// The exec'd command was put in a container's cgroup.
+    pub fn joined_cgroup(world: *World, pid: u32) void {
+        const process = world.find_process(pid) orelse return;
+        process.in_scope = true;
+        if (process.state == .pending) process.in_scope_before_run = true;
     }
 
     fn port_listened(world: *const World, port: u16) bool {
@@ -1640,6 +1961,16 @@ pub const World = struct {
     }
 
     pub fn change_directory(world: *World, path: []const u8) ?u16 {
+        // The magic link of the PID namespace's init: its working directory, as the kernel
+        // follows it (only a process in that namespace sees the init as pid 1).
+        if (std.mem.eql(u8, path, "/proc/1/cwd")) {
+            const process = &world.processes[world.current];
+            const init_pid = process.pid_namespace;
+            if (init_pid == 0) return errno_noent; // The host's pid 1 is not modelled.
+            const target = world.find_process(init_pid) orelse return errno_noent;
+            process.cwd = target.cwd;
+            return null;
+        }
         var real: SimPath = .{};
         if (world.resolve(path, &real)) |errno| return errno;
         const kind = world.node_kind(real.slice()) orelse return errno_noent;
@@ -1796,6 +2127,8 @@ pub const World = struct {
         assert(world.current < world.processes.len);
         const process = &world.processes[world.current];
         process.user_set = .{ uid, gid };
+        // The kernel clears the parent-death signal when the credentials change.
+        if (uid != 0 or gid != 0) process.die_with_parent = false;
         return null;
     }
 
@@ -1822,7 +2155,10 @@ pub const World = struct {
     }
 
     pub fn die_with_parent(world: *World) void {
-        world.processes[world.current].die_with_parent = true;
+        const process = &world.processes[world.current];
+        // A request after a change of user is the one that counts: the kernel cleared the first.
+        if (process.user_set != null) world.death_signal_requests += 1;
+        process.die_with_parent = true;
     }
 
     /// Replaces the current process by the program at `path`, which must be a file below its
@@ -1840,7 +2176,27 @@ pub const World = struct {
         process.ends_at_ms = world.now_ms + world.command_runs_ms;
         process.holds = @splat(false);
         world.put_status_file(process.pid, false);
+        world.put_environ_file(process.pid, request.envp);
         return null;
+    }
+
+    /// `/proc/<pid>/environ`: the variables the command was started with, each ended by a NUL.
+    fn put_environ_file(world: *World, pid: u32, envp: host.CStrings) void {
+        var text: [constants.sim_written_bytes_max]u8 = undefined;
+        var length: usize = 0;
+        var index: usize = 0;
+        while (envp[index]) |variable| : (index += 1) {
+            assert(index < 4096); // The arrays are bounded by the plan; this guards a missing null.
+            const bytes = std.mem.span(variable);
+            if (length + bytes.len + 1 > text.len) break;
+            @memcpy(text[length..][0..bytes.len], bytes);
+            text[length + bytes.len] = 0;
+            length += bytes.len + 1;
+        }
+        var path: [48]u8 = undefined;
+        // Cannot fail: a short path and a pid of at most ten digits.
+        const where = std.fmt.bufPrint(&path, "/proc/{d}/environ", .{pid}) catch unreachable;
+        world.put_raw(where, text[0..length]);
     }
 };
 
@@ -1892,6 +2248,13 @@ fn unused_process() Process {
         .pasta_target = 0,
         .ports = undefined,
         .ports_count = 0,
+        .output_ends = .{ null, null },
+        .pid_namespace = 0,
+        .children_pid_namespace = 0,
+        .joined = 0,
+        .in_scope = false,
+        .in_scope_before_run = false,
+        .terminal = false,
     };
 }
 

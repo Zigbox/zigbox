@@ -77,6 +77,8 @@ jobs:
           - diagnostic
           - run
           - record
+          - logs
+          - exec
           - state
           - vm
           - redact

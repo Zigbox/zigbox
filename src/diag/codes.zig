@@ -38,6 +38,8 @@ pub const Code = enum(u8) {
     E0011,
     E0012,
     E0013,
+    E0014,
+    E0015,
     E0101,
     E0102,
     E0103,
@@ -57,9 +59,26 @@ pub const Code = enum(u8) {
     E0209,
     E0210,
     E0211,
+    E0212,
+    E0213,
+    E0214,
+    E0215,
+    E0216,
+    E0217,
+    E0218,
+    E0219,
+    E0220,
+    E0221,
+    E0222,
+    E0223,
+    E0224,
     W0201,
     W0202,
     W0203,
+    W0204,
+    W0205,
+    W0206,
+    W0207,
     E0301,
     E0302,
     E0303,
@@ -389,13 +408,49 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "mounts that cannot go together",
         .explanation =
-        \\One run's mounts (--state, --tmpfs, --bind and --secret) each have a
+        \\One run's mounts (--state, --tmpfs, --bind, --mount, --secret) each have a
         \\path in the container, and no path may be the same as another's, inside
         \\it, or hold it: a mount inside another would be made in the outer one.
-        \\At most 8 of --tmpfs, --bind and --secret may be given in one run, and 8
-        \\--state.
+        \\At most 8 of --tmpfs, --bind, --mount and --secret may be given in one
+        \\run, and 8 --state.
         \\
         \\Give each mount its own place, or drop one.
+        ,
+    },
+    .{
+        .code = .E0014,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --mount value",
+        .explanation =
+        \\--mount takes HOST:PATH: a directory or file on the host, mounted
+        \\writable at PATH in the container. HOST may be relative to the working
+        \\directory, and may hold "." and ".." parts, since where it lands is judged
+        \\after every symbolic link is followed (see ZBX-E0212). It holds no ':',
+        \\space or control character and is at most 256 bytes.
+        \\
+        \\PATH is absolute, with parts that are names, at most 256 bytes. It may not
+        \\be "/", nor /proc, /sys, /dev or below them, nor /etc/hosts, /etc/hostname
+        \\or /etc/resolv.conf: zbx mounts those itself. The cause names the part that
+        \\is wrong.
+        \\
+        \\    zbx run --mount ./site:/srv python:3.12-slim
+        ,
+    },
+    .{
+        .code = .E0015,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "not a valid --user value",
+        .explanation =
+        \\--user takes USER or USER:GROUP, each a name or a number, and replaces the
+        \\user the image says it runs as. Names are looked up in the image's own
+        \\/etc/passwd and /etc/group, so --user needs an image (a name that zbx pull
+        \\made); a --rootfs directory or a bare tree has no image configuration to
+        \\replace. The value is at most 256 bytes, with no space or control character
+        \\and no empty part.
+        \\
+        \\    zbx run --user 0 --mount ./site:/srv python:3.12-slim
         ,
     },
     .{
@@ -749,6 +804,210 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0212,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount source is outside the project",
+        .explanation =
+        \\A writable mount is allowed only for the project directory and what is
+        \\inside it, so that a container you run in a project cannot write anywhere
+        \\else. The project directory is the one that holds the nearest zbx.lock up
+        \\from the working directory, else the working directory itself.
+        \\
+        \\The source is resolved first, with every symbolic link followed, and the
+        \\result is what is compared: "../other" is outside, and so is a link inside
+        \\the project that points out of it, and so is "/". When the project
+        \\directory is "/" (zbx run from the root of the file system) no writable
+        \\mount is allowed.
+        \\
+        \\Run zbx from the project's directory, or move what you need into it. For a
+        \\directory outside the project that the container only reads, use --bind.
+        ,
+    },
+    .{
+        .code = .E0213,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount needs the container to run as root",
+        .explanation =
+        \\The container's root is you: its user namespace maps root to your user id.
+        \\What it writes through a --mount is therefore yours. Any other user of the
+        \\container is mapped to an id from your subordinate range, and a file it
+        \\wrote in your project would belong to an id that is not yours, which you
+        \\could not then edit or remove. So zbx refuses a --mount when the run's user
+        \\(the image's user, or --user) is not root, user and group both 0, and makes
+        \\nothing.
+        \\
+        \\Run the image as root with --user 0, or give the container the directory
+        \\read-only with --bind.
+        ,
+    },
+    .{
+        .code = .E0214,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a --mount source can't be used",
+        .explanation =
+        \\A --mount source is a directory or a regular file on the host, below the
+        \\project directory. The cause says what is wrong with the path you gave: it
+        \\does not exist, cannot be looked at, goes through too many symbolic links,
+        \\is another kind of file (a socket, a device), or, once its links are
+        \\followed, is longer than 256 bytes or holds a ':', space or control
+        \\character. It can also say the project directory itself could not be found.
+        \\zbx never makes a source: make it first, then run again.
+        ,
+    },
+    .{
+        .code = .E0215,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't set up a --mount",
+        .explanation =
+        \\A --mount is made before the container's command starts: the host path is
+        \\bound in the container's own /dev, and moved onto its path once the
+        \\container's root is entered (so the path is read as the container reads
+        \\it). One of those steps failed; the cause names it and what the kernel
+        \\said.
+        \\
+        \\With --read-only the path must already exist in the image: nothing can be
+        \\made in a read-only root. zbx doctor shows what this host allows.
+        ,
+    },
+    .{
+        .code = .E0216,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the --user is not in the image",
+        .explanation =
+        \\--user names a user or a group, and the image's own /etc/passwd or
+        \\/etc/group has no such name. A number needs no lookup and is used as it is.
+        \\The message names the image and the file looked in.
+        \\
+        \\Use a name the image has, or a number. Nothing was started.
+        ,
+    },
+    .{
+        .code = .E0217,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container has no log",
+        .explanation =
+        \\zbx logs reads the file zbx keeps of what a container wrote to its standard
+        \\output and error (<state>/zbx/logs/<name>.log). The container has a run
+        \\record and no log. It ran before logs were kept (zbx 0.1 to M6), its log
+        \\could not be written (a warning, ZBX-W0204, said so when it started), or the
+        \\log was removed.
+        \\
+        \\Nothing it wrote can be shown. Runs started from now on keep their logs.
+        ,
+    },
+    .{
+        .code = .E0218,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the container's log",
+        .explanation =
+        \\The log of the container exists and zbx cannot use it: the file cannot be
+        \\opened or read, it is not a zbx log, or it was written by a newer zbx than
+        \\this one.
+        \\
+        \\The cause says which. A log from a newer zbx is read by that zbx, or left
+        \\alone; one that is not a log was not written by zbx, and "zbx logs" does not
+        \\guess at it. The path is in the message.
+        ,
+    },
+    .{
+        .code = .E0219,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "bad value for a logs option",
+        .explanation =
+        \\--tail takes a whole number of lines from 0 to one million, and --stream
+        \\takes stdout or stderr. The message names the option and the value it was
+        \\given. Nothing was read.
+        ,
+    },
+    .{
+        .code = .E0220,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container is not running",
+        .explanation =
+        \\zbx exec runs a command inside a container that is running: it joins the
+        \\container's namespaces, which exist only while its first process lives. The
+        \\container named has a run record and is not running: it ended (the message
+        \\says how), or it was lost (zbx lost track of it).
+        \\
+        \\Start it again with zbx run, then exec into it. "zbx ps --all" lists every
+        \\container and its state.
+        ,
+    },
+    .{
+        .code = .E0221,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't join the running container",
+        .explanation =
+        \\zbx exec reads the container's environment from its first process, opens its
+        \\namespaces (/proc/<pid>/ns), and in a child joins them with setns: the user
+        \\namespace first (zbx made it, so this needs no privilege), then the IPC,
+        \\UTS, network, PID and mount namespaces, and forks the command into the PID
+        \\namespace. One of these was refused.
+        \\
+        \\The cause names the step and the kernel's reason. A container that ended at
+        \\that moment is the usual one (try again: zbx ps shows it). A security policy
+        \\that forbids setns, or a /proc that hides other processes (hidepid), is the
+        \\other. Nothing was started.
+        ,
+    },
+    .{
+        .code = .E0222,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't put the command in the container's cgroup",
+        .explanation =
+        \\The command zbx exec starts is put in the container's cgroup before it runs,
+        \\so that it counts against the container's memory and process limits. With
+        \\systemd, the user manager moves it into the container's scope
+        \\(AttachProcessesToUnit, systemd 238 and later); without, zbx writes its pid
+        \\to the container's cgroup.procs. That was refused.
+        \\
+        \\zbx never runs the command outside the container's limits: nothing was
+        \\started. The cause says what the manager or the kernel answered; zbx doctor
+        \\shows the cgroup setup.
+        ,
+    },
+    .{
+        .code = .E0223,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the working directory is not in the container",
+        .explanation =
+        \\zbx exec starts the command in the container's working directory, or in the
+        \\one --workdir names. That directory is not there in the container (or is not
+        \\a directory, or cannot be entered). Unlike zbx run, exec makes nothing in a
+        \\running container.
+        \\
+        \\Name a directory the container has, or make it first:
+        \\  zbx exec web -- mkdir -p /work
+        ,
+    },
+    .{
+        .code = .E0224,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't give the command a terminal",
+        .explanation =
+        \\When zbx's standard input and output are both a terminal, zbx exec gives the
+        \\command a pseudo-terminal of its own (/dev/ptmx), with the size of zbx's,
+        \\and puts zbx's terminal in raw mode so that every key reaches the command.
+        \\One of these steps failed.
+        \\
+        \\Run without a terminal instead: give zbx exec a pipe or a file as its input
+        \\(zbx exec web -- cmd < /dev/null), and the command's streams are zbx's own.
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -793,6 +1052,66 @@ pub const registry = [_]Entry{
         \\The oldest records are deleted when there are more than 32, so a record
         \\that stays unreadable goes away on its own. To keep it, move it out of
         \\the runs directory, or run the zbx that wrote it.
+        ,
+    },
+    .{
+        .code = .W0204,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the container's output is not being kept",
+        .explanation =
+        \\zbx keeps what each container writes to its standard output and error in a
+        \\log (<state>/zbx/logs/<name>.log), up to 5 MiB, for "zbx logs". That log
+        \\could not be made or written, for example because the disk is full or the
+        \\state directory cannot be written, so the run goes on without it.
+        \\
+        \\A foreground run still shows its output on the terminal. "zbx logs" will
+        \\show what was written before the failure, if anything. Free space, or point
+        \\XDG_STATE_HOME at a directory with room.
+        ,
+    },
+    .{
+        .code = .W0205,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "older output of the container was dropped",
+        .explanation =
+        \\A container's log keeps at most 5 MiB. When it is full the oldest records
+        \\are dropped, whole, so what "zbx logs" shows starts after output that
+        \\is gone.
+        \\The message says how many bytes of output were dropped.
+        \\
+        \\Nothing is wrong with the container. To see more, have the program write
+        \\less, or send its output somewhere that keeps it: a --state volume or a
+        \\--mount of the project.
+        ,
+    },
+    .{
+        .code = .W0206,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the terminal was not logged",
+        .explanation =
+        \\A foreground "zbx run" at a terminal gives the container the terminal itself
+        \\for each of standard output and error that is one, so that editors, pagers,
+        \\colours and job control work. What goes to the terminal does not pass
+        \\through zbx, so it is not in the log. The log of such a run holds only the
+        \\stream that was a pipe or a file, and this warning says which is missing.
+        \\
+        \\To have the output in the log, run the container detached ("zbx run -d") or
+        \\send its output to a file or a pipe.
+        ,
+    },
+    .{
+        .code = .W0207,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the exec was not noted in the container's history",
+        .explanation =
+        \\zbx keeps a short list of the recent execs of each container beside its log
+        \\(<state>/zbx/logs/<name>.exec): the command and how it ended, never the
+        \\environment, so that "zbx bundle" can show them. This exec's entry could not
+        \\be written; the cause says why. The command itself ran as reported.
         ,
     },
     .{
@@ -2832,7 +3151,19 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         .E1006, .E1007 => false,
+        .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,
+    };
+}
+
+/// The codes only `zbx exec` reports. It uses the exit codes of a container run (125 for its own
+/// failures, 126 and 127 for a command that cannot run or is not there, E0202), so the codes it
+/// shares with `run` read as `run`'s do, and these read as exec's.
+pub fn exec_only(code: Code) bool {
+    assert(@backingInt(code) < registry.len);
+    return switch (code) {
+        .E0220, .E0221, .E0222, .E0223, .E0224 => true,
+        else => false,
     };
 }
 
@@ -2845,7 +3176,12 @@ pub const exit_text_bytes_max = 40;
 pub fn exit_text(code: Code, buffer: *[exit_text_bytes_max]u8) []const u8 {
     const found = entry(code);
     const standard = exit_code_in(.standard, code, false);
-    const text = if (found.severity == .warning or !can_end_run(code))
+    const text = if (exec_only(code))
+        std.fmt.bufPrint(buffer, "{d} ({d} in zbx exec)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+        })
+    else if (found.severity == .warning or !can_end_run(code))
         std.fmt.bufPrint(buffer, "{d}", .{standard})
     else if (code == .E0202)
         std.fmt.bufPrint(buffer, "{d} ({d} or {d} in zbx run)", .{

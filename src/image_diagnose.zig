@@ -139,20 +139,39 @@ pub fn locked_absent(
     diag.fix_with("fetch the locked image:", "zbx pull '{s}'", .{pull_by_digest});
 }
 
-/// ZBX-E0521: a user or group name the image's files do not have.
-pub fn unknown_user(diag: *Diag, name: []const u8, file: []const u8, is_group: bool) void {
+/// ZBX-E0521: a user or group name the image's files do not have; or, when `flag_image` names the
+/// image, ZBX-E0216: the same for the value of `--user`, which is the caller's to correct.
+pub fn unknown_user(
+    diag: *Diag,
+    name: []const u8,
+    file: []const u8,
+    is_group: bool,
+    flag_image: ?[]const u8,
+) void {
     assert(diag.code == null);
     var storage: [echo_bytes_max]u8 = undefined;
     const echo = echo_of(&storage, name);
-    diag.raise(.E0521);
-    diag.while_("choosing the user the image runs as", .{});
     const kind = if (is_group) "group" else "user";
-    diag.cause("the image runs as {s} '{s}', which {s} in the image has no entry for", .{
-        kind, echo, file,
-    });
+    if (flag_image) |image| {
+        var image_storage: [echo_bytes_max]u8 = undefined;
+        const image_echo = echo_of(&image_storage, image);
+        diag.raise(.E0216);
+        diag.while_("choosing the user for --user", .{});
+        diag.cause("--user names the {s} '{s}', which {s} in the image {s} has no entry for", .{
+            kind, echo, file, image_echo,
+        });
+        diag.context("image", "{s}", .{image_echo});
+        diag.fix(.{ .sentence = "use a name the image has, or a number: --user 1000" });
+    } else {
+        diag.raise(.E0521);
+        diag.while_("choosing the user the image runs as", .{});
+        diag.cause("the image runs as {s} '{s}', which {s} in the image has no entry for", .{
+            kind, echo, file,
+        });
+        diag.fix(.{ .sentence = "the image's configuration is wrong; try another tag of it" });
+    }
     if (is_group) diag.context("group", "{s}", .{echo}) else diag.context("user", "{s}", .{echo});
     diag.context("file", "{s}", .{file});
-    diag.fix(.{ .sentence = "the image's configuration is wrong; try another tag of it" });
 }
 
 /// ZBX-E0522: nothing by that name is locked or in the store. `lock_path` is null when there is

@@ -202,6 +202,21 @@ test {
     _ = @import("runtime/mounts.zig");
     _ = @import("runtime/mounts_diagnose.zig");
     _ = @import("runtime/mount_tests.zig");
+    _ = @import("runtime/project.zig");
+    _ = @import("runtime/writable_tests.zig");
+    _ = @import("runtime/logfile.zig");
+    _ = @import("runtime/logs_tests.zig");
+    _ = @import("logs_commands.zig");
+}
+
+test {
+    // `zbx exec` (M6b slice 3).
+    _ = @import("runtime/exec.zig");
+    _ = @import("runtime/exec_plan.zig");
+    _ = @import("runtime/exec_child.zig");
+    _ = @import("runtime/exec_diagnose.zig");
+    _ = @import("runtime/exec_history.zig");
+    _ = @import("runtime/exec_tests.zig");
 }
 
 test {

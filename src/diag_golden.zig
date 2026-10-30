@@ -598,7 +598,203 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases;
+
+const exec_plan = @import("runtime/exec_plan.zig");
+
+/// The index of the first step of `kind` in the plan of an exec into `prepare_running`'s
+/// container (a scope, every namespace, root), with or without a terminal.
+fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
+    var plan: exec_plan.Plan = undefined;
+    const input: exec_plan.Input = .{
+        .command = &.{"/bin/sh"},
+        .environ = "",
+        .env = &.{},
+        .term = null,
+        .workdir = "",
+        .user = null,
+        .namespaces = 0x3f,
+        .terminal = terminal,
+        .cgroup = true,
+    };
+    plan.build(&input);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in that plan.
+}
+
+/// A running container whose namespace cannot be joined (the first join, the user namespace's).
+fn prepare_exec_join_refused(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.faults.fail_step = exec_step_of(.join_namespace, false);
+    sim.faults.fail_step_errno = 1;
+}
+
+/// A running container whose manager refuses to move a process into its scope.
+fn prepare_exec_attach_refused(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.bus.model.attach_error = "org.freedesktop.DBus.Error.AccessDenied";
+}
+
+/// A running container, and zbx at a terminal whose pseudo-terminal cannot be had.
+fn prepare_exec_no_terminal(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.terminal = true;
+    sim.terminal_only = .stdout; // Standard error is not, so the diagnostic has no colour.
+    sim.world.input_terminal = true;
+    sim.faults.fail_step = exec_step_of(.open_terminal, true);
+    sim.faults.fail_step_errno = 24; // EMFILE.
+}
+
+/// A running container whose log disk fails every call: the history cannot be written.
+fn prepare_exec_history_down(sim: *HostSim) void {
+    prepare_running(sim);
+    logs_disk(sim);
+    golden_logs.crashed = true;
+}
+
+const exec_cases = [_]Case{
+    .{
+        .code = .E0220,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_with_record,
+        .exit = 125,
+    },
+    .{
+        .code = .E0221,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_join_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0222,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_attach_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0223,
+        .args = &.{ "exec", "web-1", "--workdir", "/nowhere", "--", "/bin/sh" },
+        .prepare = prepare_running,
+        .exit = 125,
+    },
+    .{
+        .code = .E0224,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_no_terminal,
+        .exit = 125,
+    },
+    .{
+        .code = .W0207,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_history_down,
+        .warning = true,
+        .exit = 0,
+    },
+};
+
+const logfile = @import("runtime/logfile.zig");
+const records = @import("runtime/records.zig");
+
+/// The disk the logs of the golden cases are kept on.
+var golden_logs: SimFs = undefined;
+
+fn logs_disk(sim: *HostSim) void {
+    golden_logs.init(1);
+    golden_logs.put_dir("/home", 0o755);
+    golden_logs.put_dir("/home/alice", 0o755);
+    sim.log_fs = &golden_logs;
+}
+
+/// A finished container called web-1 with a record and no log.
+fn prepare_no_log(sim: *HostSim) void {
+    prepare_with_record(sim);
+    logs_disk(sim);
+}
+
+/// A log from a newer zbx, and a file that is not a log.
+fn prepare_log_newer(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var header: [constants.log_header_bytes]u8 = undefined;
+    logfile.encode_header(0, 0, &header);
+    header[0] = 2;
+    const parts = [_][]const u8{
+        "/home/alice/.local",
+        "/home/alice/.local/state",
+        "/home/alice/.local/state/zbx",
+        sim_run.logs_path,
+    };
+    for (parts) |part| golden_logs.put_dir(part, 0o755);
+    golden_logs.put_file(sim_run.logs_path ++ "/web-1.log", 0o600, &header);
+}
+
+/// A log that dropped its oldest output: two files, the older one first in the stream.
+fn prepare_log_dropped(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var runs: records.Dir = undefined;
+    assert(records.locate(sim.interface(), &runs));
+    const dir = logfile.dir_of(&runs).?;
+    var writer: logfile.Writer = undefined;
+    const options: logfile.WriterOptions = .{
+        .segment_bytes_max = 16 + 2 * 20,
+        .record_bytes_max = 8,
+    };
+    writer.open(golden_logs.interface(), &dir, "web-1", options) catch unreachable; // Fresh disk.
+    for (0..6) |number| {
+        var text: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&text, "line {d}\n", .{number}) catch unreachable; // Eight bytes.
+        writer.append(.stdout, 1_792_873_000, &text) catch unreachable; // Room for it.
+    }
+    writer.close();
+}
+
+/// A log of a run whose terminal was not interposed on.
+fn prepare_log_terminal(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var runs: records.Dir = undefined;
+    assert(records.locate(sim.interface(), &runs));
+    const dir = logfile.dir_of(&runs).?;
+    var writer: logfile.Writer = undefined;
+    const options: logfile.WriterOptions = .{ .not_kept = 3 };
+    writer.open(golden_logs.interface(), &dir, "web-1", options) catch unreachable; // Fresh.
+    writer.close();
+}
+
+/// A run whose log disk fails every call.
+fn prepare_log_disk_down(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    logs_disk(sim);
+    golden_logs.crashed = true;
+}
+
+const logs_cases = [_]Case{
+    .{ .code = .E0217, .args = &.{ "logs", "web-1" }, .prepare = prepare_no_log, .exit = 1 },
+    .{ .code = .E0218, .args = &.{ "logs", "web-1" }, .prepare = prepare_log_newer, .exit = 2 },
+    .{ .code = .E0219, .args = &.{ "logs", "web-1", "--tail", "many" }, .exit = 1 },
+    .{
+        .code = .W0204,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_log_disk_down,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0206,
+        .args = &.{ "logs", "web-1" },
+        .prepare = prepare_log_terminal,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0205,
+        .args = &.{ "logs", "web-1" },
+        .prepare = prepare_log_dropped,
+        .warning = true,
+        .prints = true,
+        .exit = 0,
+    },
+};
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1220,6 +1416,85 @@ fn prepare_export_fifo(sim: *HostSim) void {
     golden_files.put(state_root ++ "/pgdata/data/pipe", .fifo, 0o600, .{ 0, 0 }, "");
 }
 
+/// A project directory with a site in it, a link in it that points out, and a directory beside
+/// it, for the cases of `--mount`.
+fn prepare_mount_files(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    for ([_][]const u8{
+        "/home",
+        "/home/alice",
+        image_project,
+        image_project ++ "/site",
+        "/home/alice/other",
+        "/etc",
+    }) |directory| golden_files.put_dir(directory, 0o755);
+    golden_files.put_symlink(image_project ++ "/escape", "/etc");
+    _ = sim.world.processes[0].cwd.set(image_project);
+}
+
+fn prepare_mount_world(sim: *HostSim) void {
+    prepare_mount_files(sim);
+    sim.world.add_node(image_project ++ "/site", .dir); // The container's view of the host.
+}
+
+/// The service image (it runs as app:staff) and a site in the project to mount.
+fn prepare_service_mount(sim: *HostSim) void {
+    prepare_image_world(sim);
+    setup_command(sim, &.{ "pull", test_registry.TestRegistry.reference(.service) });
+    golden_files.put_dir(image_project ++ "/site", 0o755);
+    sim.world.add_node(image_project ++ "/site", .dir);
+}
+
+const service_reference = test_registry.TestRegistry.reference(.service);
+const mount_run = [_][:0]const u8{ "run", "--rootfs", "/srv/alpine", "--name", "web-1" };
+
+const writable_cases = [_]Case{
+    .{
+        .code = .E0014,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "site", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0015,
+        .args = &(mount_run ++ [_][:0]const u8{ "--user", "a:b:c", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0212,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "escape:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0213,
+        .args = &.{ "run", "--name", "web-1", "--mount", "site:/srv", service_reference },
+        .prepare = prepare_service_mount,
+        .exit = 125,
+    },
+    .{
+        .code = .E0214,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "missing:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_world,
+        .exit = 125,
+    },
+    .{
+        .code = .E0215,
+        .args = &(mount_run ++ [_][:0]const u8{ "--mount", "site:/srv", "--", "/bin/sh" }),
+        .prepare = prepare_mount_files, // No node in the container's model: the bind fails.
+        .exit = 125,
+    },
+    .{
+        .code = .E0216,
+        .args = &.{ "run", "--name", "web-1", "--user", "ghost", service_reference },
+        .prepare = prepare_service_mount,
+        .exit = 125,
+    },
+};
+
 const mount_cases = [_]Case{
     .{
         .code = .E0012,
@@ -1601,6 +1876,7 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     const code = cli.run_from_iterator(sim.interface(), &iterator);
     if (golden_started) {
         golden_handle.session.release_keeper();
+        golden_handle.session.release_output();
         golden_started = false;
     }
     if (golden_lock) |fd| {
@@ -1702,7 +1978,9 @@ test "golden: every code in default, verbose and JSON output" {
                 return err;
             };
             try testing.expectEqual(case.exit, code);
-            const is_run = case.args.len > 0 and std.mem.eql(u8, case.args[0], "run");
+            // `exec` uses the codes of a run (125 for its own failures).
+            const is_run = case.args.len > 0 and (std.mem.eql(u8, case.args[0], "run") or
+                std.mem.eql(u8, case.args[0], "exec"));
             if (!case.warning and !is_run) {
                 try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
             }

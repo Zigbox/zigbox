@@ -1,0 +1,6 @@
+error[ZBX-E0221]: can't join the running container
+  cause  a security policy, or a /proc mounted with hidepid, refuses it
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0221 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0221.html

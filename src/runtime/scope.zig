@@ -393,6 +393,38 @@ pub fn start(
     return write_fallback(host, directory.slice(), files[0..count], problem);
 }
 
+/// Puts `pid` (an exec'd command, waiting to run) in the cgroup of the running container whose
+/// PID 1 is `container_pid` and whose scope is `name`: with systemd, the manager moves it into
+/// the scope (`AttachProcessesToUnit`); with the cgroupfs driver, its pid is written to the
+/// container's cgroup, found through `/proc/<container_pid>/cgroup`.
+pub fn attach(
+    host: Host,
+    name: []const u8,
+    container_pid: u32,
+    pid: u32,
+    problem: *Problem,
+) bool {
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    assert(pid > 1);
+    assert(container_pid != pid);
+    var root: Directory = .{};
+    if (driver(host, &root) == .cgroupfs) {
+        var buffer: [constants.cgroup_path_bytes_max]u8 = undefined;
+        const directory = cgroup_directory(host, container_pid, &buffer, problem) orelse
+            return false;
+        return join_cgroup(host, directory, pid, problem);
+    }
+    var conn: client.Connection = undefined;
+    var via: Via = undefined;
+    if (!open_bus(host, &conn, problem, &via)) return false;
+    defer conn.close();
+    systemd.attach_process(&conn, name, pid) catch {
+        problem.* = .{ .bus = conn.failure };
+        return false;
+    };
+    return true;
+}
+
 // ---- The cgroupfs driver --------------------------------------------------------------------
 
 const Members = struct { pid: u32, keeper_pid: u32 };

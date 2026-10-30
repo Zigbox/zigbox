@@ -96,6 +96,7 @@ pub const HostReal = struct {
         .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
+        .probe_idmap = probe_idmap,
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
@@ -116,6 +117,7 @@ pub const HostReal = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .pipe_has_reader = pipe_has_reader,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -129,6 +131,8 @@ pub const HostReal = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .wait_event_watching = wait_event_watching,
+        .log_files = log_files,
         .own_pid = own_pid,
         .working_directory = working_directory,
         .sleep_ms = sleep_ms,
@@ -145,6 +149,14 @@ pub const HostReal = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .open_namespace = open_namespace,
+        .join_namespace = join_namespace,
+        .open_terminal = open_terminal,
+        .copy_window_size = copy_window_size,
+        .input_raw = input_raw,
+        .attach_terminal = attach_terminal,
+        .standard_input = standard_input,
+        .input_is_terminal = input_is_terminal,
         .filesystem = filesystem,
         .network = network,
     };
@@ -282,7 +294,14 @@ pub const HostReal = struct {
         const self = from_context(context);
         assert(self.probe_timeout_ms >= constants.probe_poll_ms);
         assert(self.scratch_parent.len > 0);
-        return probe_run(self, kind);
+        return probe_run(self, kind, "");
+    }
+
+    fn probe_idmap(context: *anyopaque, path: [:0]const u8) host.Error!host.ProbeOutcome {
+        const self = from_context(context);
+        assert(self.probe_timeout_ms >= constants.probe_poll_ms);
+        assert(path.len > 0);
+        return probe_run(self, .idmap, path);
     }
 
     // ---- Containers ----
@@ -363,11 +382,15 @@ pub const HostReal = struct {
         _ = from_context(context);
         var arguments: CloneArgs = std.mem.zeroes(CloneArgs);
         arguments.flags = clone_flags(flags);
-        arguments.exit_signal = @backingInt(linux.SIG.CHLD);
+        // A sibling takes the caller's own exit signal; clone3 refuses one given with it.
+        arguments.exit_signal = if (flags.sibling) 0 else @backingInt(linux.SIG.CHLD);
         const result = linux.syscall2(.clone3, @intFromPtr(&arguments), @sizeOf(CloneArgs));
         // clone3 returns twice. In the child (result 0) nothing below this line runs: the entry
         // function does the setup and the child ends here, never returning into the caller.
-        if (result == 0) linux.exit_group(entry(entry_context));
+        if (result == 0) {
+            if (flags.output) |pipes| redirect_output(pipes);
+            linux.exit_group(entry(entry_context));
+        }
         try check(result);
         assert(result > 0);
         assert(result <= std.math.maxInt(i32));
@@ -618,6 +641,19 @@ pub const HostReal = struct {
         try check(linux.close_range(3, -1, flags));
     }
 
+    fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {
+        _ = from_context(context);
+        assert(handle <= std.math.maxInt(i32));
+        const descriptor: i32 = @intCast(handle);
+        const asked: linux.pollfd = .{ .fd = descriptor, .events = linux.POLL.OUT, .revents = 0 };
+        var poll_set = [1]linux.pollfd{asked};
+        const ready = linux.poll(&poll_set, 1, 0);
+        // A poll that fails says nothing: the reader is taken to be there (the death signal,
+        // armed just before, covers a parent that dies later).
+        if (linux.errno(ready) != .SUCCESS) return true;
+        return poll_set[0].revents & linux.POLL.ERR == 0;
+    }
+
     fn die_with_parent(context: *anyopaque) host.Error!void {
         _ = from_context(context);
         const kill: usize = @backingInt(linux.SIG.KILL);
@@ -815,6 +851,64 @@ pub const HostReal = struct {
         return error.Stalled;
     }
 
+    /// Like `wait_event`, and returns `.output` when a watched descriptor can be read. A signalfd
+    /// for the forwarded signals lets one `ppoll` wait for both; the signals stay blocked and
+    /// queued, and are taken off the queue by `wait_event` when the signalfd says one is there.
+    fn wait_event_watching(
+        context: *anyopaque,
+        pid: host.Pid,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) host.Error!host.Event {
+        assert(pid > 0);
+        assert(watch.len > 0);
+        assert(watch.len <= 8);
+        var early_status: i32 = 0;
+        const early = linux.wait4(@intCast(pid), &early_status, linux.W.NOHANG, null);
+        try check(early);
+        if (early != 0) return .{ .exited = try decode_status(early_status) };
+        const started = monotonic_now_ms();
+        const set = forwarded_set();
+        const made = linux.signalfd(-1, &set, linux.SFD.CLOEXEC | linux.SFD.NONBLOCK);
+        try check(made);
+        const signal_fd: i32 = @intCast(made);
+        defer _ = linux.close(signal_fd);
+        for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
+            var polls: [9]linux.pollfd = undefined;
+            polls[0] = .{ .fd = signal_fd, .events = linux.POLL.IN, .revents = 0 };
+            for (watch, 1..) |handle, at| {
+                polls[at] = .{ .fd = @intCast(handle), .events = linux.POLL.IN, .revents = 0 };
+            }
+            var limit: linux.timespec = undefined;
+            var limit_ptr: ?*linux.timespec = null;
+            if (timeout_ms > 0) {
+                const spent = monotonic_now_ms() -| started;
+                if (spent >= timeout_ms) return .timeout;
+                limit = timespec_of(timeout_ms - spent);
+                limit_ptr = &limit;
+            }
+            const waited = linux.ppoll(&polls, @intCast(1 + watch.len), limit_ptr, null);
+            if (linux.errno(waited) == .INTR) continue;
+            try check(waited);
+            if (waited == 0) return .timeout;
+            if (polls[0].revents != 0) {
+                // A signal or a child's end: the queue's owner decides which.
+                const event = try wait_event(context, pid, 1);
+                if (event != .timeout) return event;
+            }
+            var mask: u32 = 0;
+            for (watch, 1..) |_, at| {
+                if (polls[at].revents != 0) mask |= @as(u32, 1) << @intCast(at - 1);
+            }
+            if (mask != 0) return .{ .output = mask };
+        }
+        return error.Stalled;
+    }
+
+    fn log_files(context: *anyopaque) store_fs.Fs {
+        return filesystem(context);
+    }
+
     fn own_pid(context: *anyopaque) host.Pid {
         _ = from_context(context);
         return @intCast(linux.getpid());
@@ -989,6 +1083,155 @@ pub const HostReal = struct {
         _ = index; // The kernel needs no hint; see Host.begin_step.
     }
 
+    // ---- Exec: namespaces and the terminal ----
+
+    fn open_namespace(
+        context: *anyopaque,
+        pid: host.Pid,
+        kind: host.NamespaceKind,
+    ) host.Error!?host.Handle {
+        const self = from_context(context);
+        assert(pid > 1);
+        var path: [48:0]u8 = undefined;
+        // Cannot fail: "/proc/" and "/ns/" and a name of four bytes, and a pid of ten digits.
+        const target = std.fmt.bufPrintSentinel(&path, "/proc/{d}/ns/{s}", .{
+            pid, kind.file_name(),
+        }, 0) catch unreachable; // Same bound as above.
+        var own_path: [32:0]u8 = undefined;
+        // Cannot fail: as above, shorter.
+        const own = std.fmt.bufPrintSentinel(&own_path, "/proc/self/ns/{s}", .{
+            kind.file_name(),
+        }, 0) catch unreachable; // Same bound as above.
+        var theirs: linux.Statx = undefined;
+        var ours: linux.Statx = undefined;
+        const mask: linux.STATX = .{ .INO = true };
+        try check(linux.statx(linux.AT.FDCWD, target.ptr, 0, mask, &theirs));
+        try check(linux.statx(linux.AT.FDCWD, own.ptr, 0, mask, &ours));
+        // One namespace file system holds them all: the inode alone tells one from another.
+        if (theirs.ino == ours.ino) return null;
+        const opened = linux.open(target.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try check(opened);
+        self.open_count += 1;
+        return @intCast(opened);
+    }
+
+    fn join_namespace(
+        context: *anyopaque,
+        handle: host.Handle,
+        kind: host.NamespaceKind,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(handle <= std.math.maxInt(i32));
+        const flag: u32 = switch (kind) {
+            .user => linux.CLONE.NEWUSER,
+            .ipc => linux.CLONE.NEWIPC,
+            .uts => linux.CLONE.NEWUTS,
+            .net => linux.CLONE.NEWNET,
+            .pid => linux.CLONE.NEWPID,
+            .mount => linux.CLONE.NEWNS,
+        };
+        // The type is given, so the kernel refuses a file of another kind of namespace.
+        try check(linux.setns(@intCast(handle), flag));
+    }
+
+    /// `ptmx`, unlocked, and the peer opened through the master (`TIOCGPTPEER`, Linux 4.13), so
+    /// that no path under /dev/pts is looked up: the peer belongs to the devpts of `ptmx`
+    /// whatever mount namespace the command is in.
+    fn open_terminal(context: *anyopaque, ptmx: [:0]const u8) host.Error!host.Terminal {
+        const self = from_context(context);
+        assert(ptmx.len > 0);
+        const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true };
+        const opened = linux.open(ptmx.ptr, flags, 0);
+        try check(opened);
+        const master: i32 = @intCast(opened);
+        var unlock: i32 = 0;
+        const unlocked = linux.ioctl(master, linux.T.IOCSPTLCK, @intFromPtr(&unlock));
+        const peer_flags: usize = @as(u32, @bitCast(flags));
+        const peer = if (linux.errno(unlocked) == .SUCCESS)
+            linux.ioctl(master, linux.T.IOCGPTPEER, peer_flags)
+        else
+            unlocked;
+        check(peer) catch |err| {
+            const errno_peer = errno_last;
+            _ = linux.close(master);
+            errno_last = errno_peer; // The close must not hide why the peer could not be had.
+            return err;
+        };
+        self.open_count += 2;
+        return .{ .master = @intCast(master), .peer = @intCast(peer) };
+    }
+
+    fn copy_window_size(context: *anyopaque, master: host.Handle) host.Error!void {
+        _ = from_context(context);
+        assert(master <= std.math.maxInt(i32));
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        const asked = linux.ioctl(linux.STDIN_FILENO, linux.T.IOCGWINSZ, @intFromPtr(&size));
+        if (linux.errno(asked) != .SUCCESS) {
+            errno_last = 0; // No size to copy: the terminal keeps the kernel's default.
+            return;
+        }
+        try check(linux.ioctl(@intCast(master), linux.T.IOCSWINSZ, @intFromPtr(&size)));
+    }
+
+    /// Raw as `cfmakeraw` makes it: no input translation, no output processing, no echo, no
+    /// line editing, no signal keys, eight bits, one byte at a time.
+    fn input_raw(context: *anyopaque, raw: bool, saved: *host.TerminalSaved) host.Error!void {
+        _ = from_context(context);
+        comptime assert(@sizeOf(linux.termios) <= host.terminal_saved_bytes);
+        const size = @sizeOf(linux.termios);
+        if (!raw) {
+            var settings: linux.termios = undefined;
+            @memcpy(std.mem.asBytes(&settings), saved.bytes[0..size]);
+            try check(linux.tcsetattr(linux.STDIN_FILENO, .FLUSH, &settings));
+            saved.valid = false;
+            return;
+        }
+        var settings: linux.termios = undefined;
+        try check(linux.tcgetattr(linux.STDIN_FILENO, &settings));
+        @memcpy(saved.bytes[0..size], std.mem.asBytes(&settings));
+        saved.valid = true;
+        settings.iflag.IGNBRK = false;
+        settings.iflag.BRKINT = false;
+        settings.iflag.PARMRK = false;
+        settings.iflag.ISTRIP = false;
+        settings.iflag.INLCR = false;
+        settings.iflag.IGNCR = false;
+        settings.iflag.ICRNL = false;
+        settings.iflag.IXON = false;
+        settings.oflag.OPOST = false;
+        settings.lflag.ECHO = false;
+        settings.lflag.ECHONL = false;
+        settings.lflag.ICANON = false;
+        settings.lflag.ISIG = false;
+        settings.lflag.IEXTEN = false;
+        settings.cflag.CSIZE = .CS8;
+        settings.cflag.PARENB = false;
+        settings.cc[@backingInt(linux.V.MIN)] = 1;
+        settings.cc[@backingInt(linux.V.TIME)] = 0;
+        try check(linux.tcsetattr(linux.STDIN_FILENO, .FLUSH, &settings));
+    }
+
+    fn attach_terminal(context: *anyopaque, peer: host.Handle) host.Error!void {
+        _ = from_context(context);
+        assert(peer <= std.math.maxInt(i32));
+        const descriptor: i32 = @intCast(peer);
+        try check(linux.setsid());
+        try check(linux.ioctl(descriptor, linux.T.IOCSCTTY, 0));
+        for ([_]i32{ 0, 1, 2 }) |target| try check(linux.dup2(descriptor, target));
+    }
+
+    fn input_is_terminal(context: *anyopaque) bool {
+        _ = from_context(context);
+        var settings: linux.termios = undefined;
+        const asked = linux.tcgetattr(linux.STDIN_FILENO, &settings);
+        return linux.errno(asked) == .SUCCESS;
+    }
+
+    fn standard_input(context: *anyopaque) host.Handle {
+        _ = from_context(context);
+        return linux.STDIN_FILENO;
+    }
+
     /// Converts a raw syscall return value into an error, or passes success through.
     pub fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
@@ -1049,6 +1292,18 @@ comptime {
     assert(@sizeOf(CloneArgs) == 64);
 }
 
+/// In the new child, before anything else: its standard output and error become the pipes'
+/// write ends. Raw system calls only. A child that cannot do it ends, and the parent sees its
+/// exit status, not a command that wrote to the wrong place.
+fn redirect_output(pipes: host.OutputPipes) void {
+    if (pipes.stdout) |handle| {
+        if (linux.errno(linux.dup2(@intCast(handle), 1)) != .SUCCESS) linux.exit_group(70);
+    }
+    if (pipes.stderr) |handle| {
+        if (linux.errno(linux.dup2(@intCast(handle), 2)) != .SUCCESS) linux.exit_group(70);
+    }
+}
+
 fn clone_flags(flags: host.SpawnFlags) u64 {
     var bits: u64 = 0;
     if (flags.user) bits |= linux.CLONE.NEWUSER;
@@ -1057,6 +1312,10 @@ fn clone_flags(flags: host.SpawnFlags) u64 {
     if (flags.uts) bits |= linux.CLONE.NEWUTS;
     if (flags.ipc) bits |= linux.CLONE.NEWIPC;
     if (flags.net) bits |= linux.CLONE.NEWNET;
+    if (flags.sibling) {
+        assert(bits == 0); // A sibling is born in the namespaces its maker joined.
+        bits |= linux.CLONE.PARENT;
+    }
     assert(bits & linux.CLONE.VM == 0); // The child gets its own memory, as after fork.
     assert(bits & linux.CSIGNAL == 0); // The exit signal is its own field.
     return bits;
@@ -1242,10 +1501,13 @@ test "real host refuses a file larger than the buffer instead of truncating" {
 
 // ---- Helper programs, signals and directories ---------------------------------------------
 
-/// The signals zbx forwards to a container, and SIGCHLD, which says the container ended.
+/// The signals zbx forwards to a container, SIGCHLD, which says the container ended, and
+/// SIGWINCH, which `exec` passes to its pseudo-terminal (a run's wait drops it).
 fn forwarded_set() linux.sigset_t {
     var set = linux.sigemptyset();
-    for ([_]linux.SIG{ .INT, .TERM, .HUP, .QUIT, .CHLD }) |number| linux.sigaddset(&set, number);
+    const numbers = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT, .CHLD, .WINCH };
+    for (numbers) |number| linux.sigaddset(&set, number);
+    comptime assert(@backingInt(linux.SIG.WINCH) == constants.signal_winch);
     return set;
 }
 
@@ -1496,7 +1758,12 @@ const Scratch = struct {
     }
 };
 
-fn probe_run(self: *HostReal, kind: host.ProbeKind) host.Error!host.ProbeOutcome {
+fn probe_run(
+    self: *HostReal,
+    kind: host.ProbeKind,
+    path: [:0]const u8,
+) host.Error!host.ProbeOutcome {
+    assert((path.len > 0) == (kind == .idmap));
     const caller = linux.getuid();
     const give_to: ?u32 = if (caller == 0) nobody_id else null;
     var scratch: Scratch = undefined;
@@ -1511,7 +1778,7 @@ fn probe_run(self: *HostReal, kind: host.ProbeKind) host.Error!host.ProbeOutcome
 
     const forked = linux.fork();
     try HostReal.check(forked);
-    if (forked == 0) child_main(self, kind, &scratch, options_text, caller == 0);
+    if (forked == 0) child_main(self, kind, &scratch, options_text, caller == 0, path);
     const child: i32 = @intCast(forked);
     assert(child > 0);
     assert(scratch.created == (kind == .overlay));
@@ -1540,6 +1807,7 @@ fn child_main(
     scratch: *const Scratch,
     options: [:0]const u8,
     drop_privileges: bool,
+    path: [:0]const u8,
 ) noreturn {
     if (drop_privileges) {
         if (!drop_to_nobody()) linux.exit_group(child_exit_failed);
@@ -1559,7 +1827,7 @@ fn child_main(
 
     const flags: usize = switch (kind) {
         .userns => linux.CLONE.NEWUSER,
-        .overlay => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
+        .overlay, .idmap => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
     };
     const unshared = linux.errno(linux.unshare(flags));
     if (unshared != .SUCCESS) {
@@ -1573,7 +1841,52 @@ fn child_main(
     // Keep the mount from propagating back to the caller's namespace.
     const private = linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0);
     if (linux.errno(private) != .SUCCESS) linux.exit_group(child_exit_refused_mount);
+    if (kind == .idmap) linux.exit_group(idmap_attempt(path));
     linux.exit_group(overlay_mount(scratch, options));
+}
+
+/// Makes the id-mapped mount the doctor asks about, and throws it away with the namespace: a
+/// detached clone of `path`'s mount (`open_tree`), then `mount_setattr` with `MOUNT_ATTR_IDMAP`
+/// and this scratch user namespace as the map. Nothing is attached anywhere. Returns the
+/// child's exit code: ok, a refusal (the kernel or the file system says no), or a failure.
+fn idmap_attempt(path: [:0]const u8) u8 {
+    assert(path.len > 0);
+    const open_tree_number = 428; // The same on x86_64 and aarch64.
+    const mount_setattr_number = 442;
+    const open_tree_clone: usize = 0x1; // OPEN_TREE_CLONE
+    const open_cloexec: usize = 0o2000000; // OPEN_TREE_CLOEXEC is O_CLOEXEC.
+    const at_empty_path: usize = 0x1000; // AT_EMPTY_PATH
+    const attr_idmap: u64 = 0x100000; // MOUNT_ATTR_IDMAP
+    const cwd: usize = @bitCast(@as(isize, linux.AT.FDCWD));
+    const cloned = linux.syscall3(
+        @fromBackingInt(@intCast(open_tree_number)),
+        cwd,
+        @intFromPtr(path.ptr),
+        open_tree_clone | open_cloexec,
+    );
+    if (linux.errno(cloned) != .SUCCESS) {
+        return refusal_exit(linux.errno(cloned), child_exit_refused_mount);
+    }
+    const tree: i32 = @intCast(cloned);
+    const own_namespace: linux.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
+    const user_namespace = linux.open("/proc/self/ns/user", own_namespace, 0);
+    if (linux.errno(user_namespace) != .SUCCESS) return child_exit_failed;
+    const attributes: MountAttr = .{
+        .attr_set = attr_idmap,
+        .attr_clr = 0,
+        .propagation = 0,
+        .userns_fd = @intCast(user_namespace),
+    };
+    const done = linux.syscall5(
+        @fromBackingInt(@intCast(mount_setattr_number)),
+        @intCast(tree),
+        @intFromPtr(@as([*:0]const u8, "")),
+        at_empty_path,
+        @intFromPtr(&attributes),
+        @sizeOf(MountAttr),
+    );
+    if (linux.errno(done) == .SUCCESS) return child_exit_ok;
+    return refusal_exit(linux.errno(done), child_exit_refused_mount);
 }
 
 /// Writes `/proc/self/{setgroups,gid_map,uid_map}` so that `uid` and `gid` (the ids the process
@@ -1749,6 +2062,32 @@ test "probe child outcomes map from exit status, signal and timeout, and are all
         try std.testing.expectEqual(case.expected, outcome);
         try std.testing.expect(no_children_left());
     }
+}
+
+test "the id-mapped mount probe maps its child's exit to an outcome and reaps it" {
+    // Goal: M6b's probe ends as the others do: a mount refused is `denied`, namespaces refused
+    // is `setup_denied`, success is `ok`, and no child is left. Method: hooks stand in for the
+    // child's body; then the real probe on "/", whose answer depends on this kernel and user
+    // (an unprivileged user is normally refused) and must be one of the answers a run can give.
+    const Case = struct { hook: *const fn () noreturn, expected: host.ProbeOutcome };
+    const cases = [_]Case{
+        .{ .hook = hook_exit_ok, .expected = .ok },
+        .{ .hook = hook_exit_mount, .expected = .denied },
+        .{ .hook = hook_exit_namespace, .expected = .setup_denied },
+        .{ .hook = hook_exit_map, .expected = .map_denied },
+        .{ .hook = hook_exit_other, .expected = .failed },
+    };
+    for (cases) |case| {
+        var real: HostReal = .{ .child_hook = case.hook, .probe_timeout_ms = 50 };
+        const outcome = try real.interface().probe_idmap("/");
+        try std.testing.expectEqual(case.expected, outcome);
+        try std.testing.expect(no_children_left());
+    }
+    var real: HostReal = .{ .probe_timeout_ms = 2000 };
+    const answer = try real.interface().probe_idmap("/");
+    try std.testing.expect(answer != .signaled);
+    try std.testing.expect(answer != .timed_out);
+    try std.testing.expect(no_children_left());
 }
 
 test "the probe child runs unprivileged even when the caller is root" {

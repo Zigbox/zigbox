@@ -1,0 +1,13 @@
+error[ZBX-E0223]: the working directory is not in the container
+  while  running a command in the container web-1
+  cause  entering the working directory failed: no such file or directory
+         (ENOENT)
+  cause  the container has no directory /nowhere to start the command in
+  dir    /nowhere
+  name   web-1
+  pid    502
+  step   enter_workdir (23 of 31)
+  fix    make it first:   zbx exec web-1 -- mkdir -p /nowhere
+         or name one the container has: --workdir /
+  more   zbx explain E0223
+  docs   https://zigbox.github.io/zigbox/errors/E0223.html

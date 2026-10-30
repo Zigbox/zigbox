@@ -7,8 +7,10 @@ review every file before you share this bundle; zbx never uploads it
 files:
   MANIFEST.txt
     this list
-  run-record.zon (645 bytes)
+  run-record.zon (664 bytes)
     the run's record: name, rootfs, command, labels, times, how it ended
+  execs.txt (60 bytes)
+    the recent execs into the container: command and exit, never the environment
   version.txt (36 bytes)
     the zbx version and how it was built
   mapping.txt (30 bytes)
@@ -21,5 +23,5 @@ files:
     the cgroup layout of the zbx process
   environment.txt (122 bytes)
     the environment variables of zbx; values are redacted unless --no-redact
-  doctor.json (2154 bytes)
+  doctor.json (2214 bytes)
     the host checks of `zbx doctor`, one JSON object per line

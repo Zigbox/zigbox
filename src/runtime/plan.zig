@@ -205,6 +205,9 @@ pub const Kind = enum {
     /// capabilities are restricted (so the bounding set is already as it will stay) and before
     /// the filter.
     set_user,
+    /// After `set_user`: asks again to die with zbx (a change of credentials clears the request),
+    /// then ends the child at once if zbx is already gone (no reader left on the report pipe).
+    rearm_death_signal,
     set_no_new_privs,
     install_seccomp,
     exec,
@@ -244,8 +247,9 @@ pub const links = [constants.container_links_count]Link{
 
 /// The child's steps: thirty-seven that happen once (four of them the hardening, three the /sys
 /// or the loopback and the sysfs, eleven the /etc files), and two per device and one per link. A
-/// read-only plan has `read_only_steps_count` more, one with a working directory, one with a
-/// user. A plan with a network namespace of its own has one /sys step fewer and the loopback.
+/// read-only plan has `read_only_steps_count` more, one with a working directory, two with a
+/// user (the user and the death signal asked for again). A plan with a network namespace of its
+/// own has one /sys step fewer and the loopback.
 pub const child_steps_count: u32 = 37 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
@@ -270,6 +274,9 @@ pub const state_stage_prefix = "/dev/.zbx-state-";
 /// mount's index. The steps each shape of mount adds: a tmpfs two, the others six.
 pub const mount_steps_tmpfs: u32 = 2;
 pub const mount_steps_staged: u32 = 6;
+/// A writable mount has no read-only remount: the stage, the bind, and after the new root the
+/// target, the move and the removal of the stage.
+pub const mount_steps_writable: u32 = 5;
 
 /// Steps of a plan with the single-id map: the parent has eight (it denies setgroups and
 /// writes both maps itself), the child has `child_steps_count`.
@@ -360,7 +367,15 @@ pub const Input = struct {
 
 /// What a mount is, once the host has been looked at: a bind of a directory or of a file are
 /// two different sequences of steps.
-pub const MountShape = enum { tmpfs, bind_dir, bind_file, secret };
+pub const MountShape = enum {
+    tmpfs,
+    bind_dir,
+    bind_file,
+    secret,
+    /// `--mount` (M6b): a bind that stays writable, of a directory or of a file.
+    mount_dir,
+    mount_file,
+};
 
 /// One other mount as the plan needs it. `source` is the host path (empty for a tmpfs).
 pub const MountInput = struct {
@@ -539,7 +554,8 @@ pub const Plan = struct {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
-        const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) + @intFromBool(plan.has_user);
+        const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) +
+            2 * @as(u32, @intFromBool(plan.has_user));
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
@@ -626,7 +642,11 @@ pub const Plan = struct {
             plan.mount_shapes[index] = mount.shape;
             plan.mount_sources[index] = plan.add_text(&.{mount.source});
             plan.mount_targets[index] = plan.add_text(&.{mount.target});
-            const steps = if (mount.shape == .tmpfs) mount_steps_tmpfs else mount_steps_staged;
+            const steps: u32 = switch (mount.shape) {
+                .tmpfs => mount_steps_tmpfs,
+                .mount_dir, .mount_file => mount_steps_writable,
+                .bind_dir, .bind_file, .secret => mount_steps_staged,
+            };
             plan.mount_steps += steps;
         }
         assert(plan.mount_steps <= constants.mounts_max * mount_steps_staged);
@@ -829,6 +849,7 @@ pub const Plan = struct {
         plan.push(.restrict_capabilities, empty_text, empty_text, 0);
         plan.push(.clear_ambient, empty_text, empty_text, 0);
         if (plan.has_user) plan.push(.set_user, empty_text, empty_text, 0);
+        if (plan.has_user) plan.push(.rearm_death_signal, empty_text, empty_text, 0);
         plan.push(.set_no_new_privs, empty_text, empty_text, 0);
         plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
@@ -892,6 +913,14 @@ pub const Plan = struct {
                     plan.push(.bind_mount_file, stage, source, at);
                     plan.push(.remount_mount, stage, empty_text, at);
                 },
+                .mount_dir => {
+                    plan.push(.make_mount_stage_dir, stage, empty_text, at);
+                    plan.push(.bind_mount_dir, stage, source, at);
+                },
+                .mount_file => {
+                    plan.push(.make_mount_stage_file, stage, empty_text, at);
+                    plan.push(.bind_mount_file, stage, source, at);
+                },
                 .secret => {
                     plan.push(.copy_secret, stage, source, at);
                     plan.push(.bind_mount_file, stage, stage, at);
@@ -919,12 +948,12 @@ pub const Plan = struct {
                     plan.push(.make_mount_target_dir, target, empty_text, at);
                     plan.push(.mount_user_tmpfs, target, plan.add_text(&.{text_}), at);
                 },
-                .bind_dir => {
+                .bind_dir, .mount_dir => {
                     plan.push(.make_mount_target_dir, target, empty_text, at);
                     plan.push(.move_mount, target, stage, at);
                     plan.push(.remove_mount_stage_dir, stage, empty_text, at);
                 },
-                .bind_file, .secret => {
+                .bind_file, .mount_file, .secret => {
                     plan.push(.make_mount_target_file, target, empty_text, at);
                     plan.push(.move_mount, target, stage, at);
                     plan.push(.remove_mount_stage_file, stage, empty_text, at);
@@ -1266,6 +1295,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .remount_sys => "making /sys read-only",
         .enter_workdir => "entering the image's working directory",
         .set_user => "becoming the image's user",
+        .rearm_death_signal => "asking the kernel again to end the container if zbx dies",
         .enter_rootfs => "entering the rootfs directory",
         .pivot_root => "pivot_root into the rootfs",
         .detach_old_root => "unmounting the old root",
@@ -1292,8 +1322,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
 comptime {
     assert(steps_count_single <= constants.plan_steps_max);
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
-    // and pasta.
-    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 2 +
+    // (and the death signal asked for again after it) and pasta.
+    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 3 +
         pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
         constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
     assert(longest <= constants.plan_steps_max);
@@ -1703,7 +1733,7 @@ test "/sys is bound read-only from the host in a plan that shares the host's net
     try testing.expect(index_of(&plan, .remount_sys).? < index_of(&plan, .remount_readonly).?);
 }
 
-test "a working directory and a user add one step each, after the root is entered" {
+test "a working directory adds one step and a user two, after the root is entered" {
     // Goal: the image's config at run. Method: the steps exist only when asked for, the user
     // comes after the capabilities and before no_new_privs, root alone adds nothing.
     var plan: Plan = undefined;
@@ -1724,11 +1754,14 @@ test "a working directory and a user add one step each, after the root is entere
     );
     input.user = .{ .uid = 33, .gid = 44 };
     plan.build(&input);
-    try testing.expectEqual(plain + 2, plan.count);
+    // The user, and the death signal asked for again right after it.
+    try testing.expectEqual(plain + 3, plan.count);
     try testing.expectEqual(@as(u32, 33), plan.user_uid);
     try testing.expectEqual(@as(u32, 44), plan.user_gid);
     try testing.expect(index_of(&plan, .clear_ambient).? < index_of(&plan, .set_user).?);
-    try testing.expect(index_of(&plan, .set_user).? < index_of(&plan, .set_no_new_privs).?);
+    const rearm = index_of(&plan, .rearm_death_signal).?;
+    try testing.expectEqual(index_of(&plan, .set_user).? + 1, rearm);
+    try testing.expect(rearm < index_of(&plan, .set_no_new_privs).?);
     plan.check();
 }
 

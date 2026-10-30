@@ -67,6 +67,9 @@ pub const Probes = struct {
     overlay: host.ProbeOutcome = .ok,
     userns_error: ?host.Error = null,
     overlay_error: ?host.Error = null,
+    /// An ordinary user cannot make an id-mapped mount of a file system the host owns.
+    idmap: host.ProbeOutcome = .denied,
+    idmap_error: ?host.Error = null,
 };
 
 const OpenFile = struct {
@@ -89,6 +92,106 @@ fn down_fs() store_fs.Fs {
         down_ready = true;
     }
     return down_files.interface();
+}
+
+/// The log disk of a host that was given none: it takes the writes and keeps nothing, so a run
+/// that is not a test of logs neither fails nor warns. A test of logs gives the host a real
+/// `SimFs` as `log_fs`.
+fn sink_fs() store_fs.Fs {
+    return .{ .context = &sink_context, .vtable = &sink_vtable };
+}
+
+var sink_context: u8 = 0;
+
+const sink_vtable: store_fs.VTable = .{
+    .lstat = sink_lstat,
+    .read_dir = sink_read_dir,
+    .read_link = sink_read_link,
+    .list_xattrs = sink_list_xattrs,
+    .get_xattr = sink_get_xattr,
+    .open_read = sink_open_read,
+    .read = sink_read,
+    .create = sink_create,
+    .open_append = sink_open_append,
+    .write = sink_write,
+    .fsync = sink_fsync,
+    .close = sink_close,
+    .set_owner = sink_set_owner,
+    .set_mode = sink_set_mode,
+    .set_xattr = sink_set_xattr,
+    .set_mtime = sink_set_mtime,
+    .rename = sink_rename,
+    .unlink = sink_unlink,
+    .make_directory = sink_make_directory,
+    .remove_directory = sink_remove_directory,
+    .sync_directory = sink_sync_directory,
+    .link = sink_link,
+    .symlink = sink_symlink,
+    .set_path_attributes = sink_set_path_attributes,
+    .set_path_xattr = sink_set_path_xattr,
+    .lock = sink_lock,
+    .last_errno = sink_errno,
+};
+
+fn sink_errno(_: *anyopaque) u16 {
+    return 0;
+}
+fn sink_lstat(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Stat {
+    return error.NotFound;
+}
+fn sink_read_dir(_: *anyopaque, _: [:0]const u8, _: store_fs.Visitor) host.Error!void {}
+fn sink_read_link(_: *anyopaque, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return error.NotFound;
+}
+fn sink_list_xattrs(_: *anyopaque, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_get_xattr(_: *anyopaque, _: [:0]const u8, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return error.NotFound;
+}
+fn sink_open_read(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_read(_: *anyopaque, _: store_fs.Fd, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_create(_: *anyopaque, _: [:0]const u8, _: u16) host.Error!store_fs.Fd {
+    return 0;
+}
+fn sink_open_append(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_write(_: *anyopaque, _: store_fs.Fd, bytes: []const u8) host.Error!u32 {
+    return @intCast(bytes.len);
+}
+fn sink_fsync(_: *anyopaque, _: store_fs.Fd) host.Error!void {}
+fn sink_close(_: *anyopaque, _: store_fs.Fd) void {}
+fn sink_set_owner(_: *anyopaque, _: store_fs.Fd, _: u32, _: u32) host.Error!void {}
+fn sink_set_mode(_: *anyopaque, _: store_fs.Fd, _: u16) host.Error!void {}
+fn sink_set_xattr(_: *anyopaque, _: store_fs.Fd, _: [:0]const u8, _: []const u8) host.Error!void {}
+fn sink_set_mtime(_: *anyopaque, _: store_fs.Fd, _: u64) host.Error!void {}
+fn sink_rename(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_unlink(_: *anyopaque, _: [:0]const u8) host.Error!void {
+    return error.NotFound;
+}
+fn sink_make_directory(_: *anyopaque, _: [:0]const u8, _: bool) host.Error!void {}
+fn sink_remove_directory(_: *anyopaque, _: [:0]const u8) host.Error!void {}
+fn sink_sync_directory(_: *anyopaque, _: [:0]const u8) host.Error!void {}
+fn sink_link(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_symlink(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_set_path_attributes(
+    _: *anyopaque,
+    _: [:0]const u8,
+    _: store_fs.PathAttributes,
+) host.Error!void {}
+fn sink_set_path_xattr(
+    _: *anyopaque,
+    _: [:0]const u8,
+    _: [:0]const u8,
+    _: []const u8,
+) host.Error!void {}
+fn sink_lock(_: *anyopaque, _: [:0]const u8, _: bool, _: []const u8) host.Error!store_fs.Fd {
+    return 0; // Nobody else holds anything on a disk that keeps nothing.
 }
 
 /// The network of a host that was given none: no route to anywhere, so every request is refused
@@ -129,6 +232,8 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// With `terminal`: only this stream is one (null: both).
+    terminal_only: ?host.Stream,
     /// The errno of the most recent call, 0 if it succeeded (`Host.last_errno`).
     errno_last: u16,
     /// Whether NO_COLOR is set in the simulated environment.
@@ -153,6 +258,8 @@ pub const HostSim = struct {
     /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
     /// uses it; null for a host with none.
     store_fs: ?*fs_sim.SimFs,
+    /// The disk the container logs are kept on; null for one that keeps nothing (`sink_fs`).
+    log_fs: ?*fs_sim.SimFs,
     /// The network (registry/net_sim.zig), kept by the test that uses it; null for a host with
     /// none.
     wire: ?*net_sim.SimNet,
@@ -172,6 +279,7 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.terminal_only = null;
         sim.errno_last = 0;
         sim.no_color_value = false;
         sim.hard_errors_injected = 0;
@@ -185,6 +293,7 @@ pub const HostSim = struct {
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
         sim.store_fs = null;
+        sim.log_fs = null;
         sim.wire = null;
         assert(sim.open_count() == 0);
         assert(sim.stdout().len == 0);
@@ -213,7 +322,10 @@ pub const HostSim = struct {
         }
         assert(count <= constants.sim_open_files_max);
         const store_open = if (sim.store_fs) |files| files.open_count() else 0;
-        return count + sim.world.open_pipe_ends() + sim.world.bus.open_count() + store_open;
+        var namespaces: u32 = 0;
+        for (sim.world.namespace_handles) |entry| namespaces += @intFromBool(entry != null);
+        const pipes = sim.world.open_pipe_ends() - @intFromBool(sim.world.input_handle != null);
+        return count + pipes + sim.world.bus.open_count() + store_open + namespaces;
     }
 
     const vtable: host.VTable = .{
@@ -230,6 +342,7 @@ pub const HostSim = struct {
         .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
+        .probe_idmap = probe_idmap,
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
@@ -250,6 +363,7 @@ pub const HostSim = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .pipe_has_reader = pipe_has_reader,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -263,6 +377,8 @@ pub const HostSim = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .wait_event_watching = wait_event_watching,
+        .log_files = log_files,
         .own_pid = own_pid,
         .working_directory = working_directory,
         .sleep_ms = sleep_ms,
@@ -279,6 +395,14 @@ pub const HostSim = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .open_namespace = open_namespace,
+        .join_namespace = join_namespace,
+        .open_terminal = open_terminal,
+        .copy_window_size = copy_window_size,
+        .input_raw = input_raw,
+        .attach_terminal = attach_terminal,
+        .standard_input = standard_input,
+        .input_is_terminal = input_is_terminal,
         .filesystem = filesystem,
         .network = network,
     };
@@ -438,6 +562,7 @@ pub const HostSim = struct {
 
     fn close(context: *anyopaque, handle: host.Handle) void {
         const sim = from_context(context);
+        if (handle >= sim_world.namespace_handle_base) return sim.world.close_namespace(handle);
         if (handle >= sim_world.bus_handle_base) {
             return sim.world.bus.close(handle - sim_world.bus_handle_base);
         }
@@ -528,7 +653,9 @@ pub const HostSim = struct {
 
     fn is_terminal(context: *anyopaque, stream: host.Stream) bool {
         const sim = from_context(context);
-        _ = stream;
+        if (sim.terminal_only) |only| {
+            if (only != stream) return false;
+        }
         return sim.terminal;
     }
 
@@ -625,6 +752,10 @@ pub const HostSim = struct {
             sim.world.bus.scope_stopped = null;
             sim.world.end_scope(slot);
         }
+        if (sim.world.bus.attached) |pid| {
+            sim.world.bus.attached = null;
+            sim.world.joined_cgroup(pid);
+        }
         return @intCast(bytes.len);
     }
 
@@ -640,6 +771,12 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
         if (handle >= sim_world.bus_handle_base) return sim.write_bus(handle, bytes);
+        if (sim.world.terminal_master) |master| {
+            if (handle == master) {
+                sim.world.type_into_terminal(bytes);
+                return @intCast(bytes.len);
+            }
+        }
         if (sim.world.write_pipe(handle, bytes)) |errno| {
             // A real parent that did not ignore SIGPIPE would be dead, not handling an error.
             if (errno == sim_world.errno_pipe and sim.world.current == 0) {
@@ -783,6 +920,12 @@ pub const HostSim = struct {
         sim.world.seal();
     }
 
+    fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {
+        const sim = from_context(context);
+        assert(handle >= sim_world.pipe_handle_base);
+        return sim.world.pipe_has_reader(handle);
+    }
+
     fn die_with_parent(context: *anyopaque) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
@@ -887,6 +1030,27 @@ pub const HostSim = struct {
         }
     }
 
+    fn wait_event_watching(
+        context: *anyopaque,
+        pid: host.Pid,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) host.Error!host.Event {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        switch (sim.world.wait_event_watching(pid, timeout_ms, watch)) {
+            .event => |event| return event,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn log_files(context: *anyopaque) store_fs.Fs {
+        const sim = from_context(context);
+        if (sim.log_fs) |files| return files.interface();
+        return sink_fs();
+    }
+
     fn own_pid(context: *anyopaque) host.Pid {
         const world = &from_context(context).world;
         return world.processes[world.current].pid;
@@ -984,11 +1148,83 @@ pub const HostSim = struct {
         from_context(context).world.begin_step(index);
     }
 
+    fn open_namespace(
+        context: *anyopaque,
+        pid: host.Pid,
+        kind: host.NamespaceKind,
+    ) host.Error!?host.Handle {
+        const sim = from_context(context);
+        try sim.begin_call();
+        switch (sim.world.open_namespace(pid, kind)) {
+            .handle => |handle| return handle,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn join_namespace(
+        context: *anyopaque,
+        handle: host.Handle,
+        kind: host.NamespaceKind,
+    ) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.join_namespace(handle, kind)) |errno| return sim.model_error(errno);
+    }
+
+    fn open_terminal(context: *anyopaque, ptmx: [:0]const u8) host.Error!host.Terminal {
+        const sim = from_context(context);
+        assert(ptmx.len > 0);
+        try sim.begin_call();
+        return sim.world.open_terminal() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn copy_window_size(context: *anyopaque, master: host.Handle) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(sim.world.terminal_master.? == master);
+        sim.world.window_copies += 1;
+    }
+
+    fn input_raw(context: *anyopaque, raw: bool, saved: *host.TerminalSaved) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(sim.world.input_is_raw != raw); // Raw once, put back once.
+        sim.world.input_is_raw = raw;
+        saved.valid = raw;
+    }
+
+    fn attach_terminal(context: *anyopaque, peer: host.Handle) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.attach_terminal(peer)) |errno| return sim.model_error(errno);
+    }
+
+    fn input_is_terminal(context: *anyopaque) bool {
+        const sim = from_context(context);
+        return sim.terminal and sim.world.input_terminal;
+    }
+
+    fn standard_input(context: *anyopaque) host.Handle {
+        return from_context(context).world.standard_input();
+    }
+
+    fn probe_idmap(context: *anyopaque, path: [:0]const u8) host.Error!host.ProbeOutcome {
+        const sim = from_context(context);
+        assert(path.len > 0);
+        // Not a numbered call and never a random fault: the answer is a note on a line of the
+        // report and decides no check, so the tests that walk a failure across every call of a
+        // healthy host (each must end as a FAIL) have nothing to expect of it. `idmap_error`
+        // models a probe that could not run.
+        if (sim.probes.idmap_error) |err| return sim.natural(err);
+        return sim.probes.idmap;
+    }
+
     fn probe(context: *anyopaque, kind: host.ProbeKind) host.Error!host.ProbeOutcome {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         switch (kind) {
+            .idmap => unreachable, // `Host.probe` refuses it.
             .userns => {
                 if (sim.probes.userns_error) |err| return sim.natural(err);
                 return sim.probes.userns;

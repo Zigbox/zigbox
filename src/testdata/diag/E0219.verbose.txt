@@ -1,0 +1,7 @@
+error[ZBX-E0219]: bad value for a logs option
+  while  reading --tail
+  cause  'many' is not a whole number of lines from 0 to 1000000
+  value  many
+  fix    give a number of lines:   zbx logs --tail 20 web
+  more   zbx explain E0219
+  docs   https://zigbox.github.io/zigbox/errors/E0219.html

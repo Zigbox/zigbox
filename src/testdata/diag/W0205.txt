@@ -1,0 +1,5 @@
+warning[ZBX-W0205]: older output of the container was dropped
+  cause  the log keeps at most 5 MiB; 16 bytes of older output were dropped
+  fix    see the newest output only, without this note:   zbx logs --tail 100 <name>
+  more   zbx explain W0205 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0205.html

@@ -1,0 +1,7 @@
+error[ZBX-E0214]: a --mount source can't be used
+  while  looking at the source of --mount
+  cause  --mount missing: it does not exist
+  path   missing
+  fix    zbx never makes a source: make it, or check the spelling
+  more   zbx explain E0214
+  docs   https://zigbox.github.io/zigbox/errors/E0214.html

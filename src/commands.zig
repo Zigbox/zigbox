@@ -274,6 +274,34 @@ fn network_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Wr
         try json_string(writer, record.env_name(@intCast(index)));
     }
     try writer.writeAll("]");
+    try writable_json(writer, record);
+}
+
+/// The members M6b added: `writable_mounts` (each `--mount` by its resolved host path and its
+/// target; empty for a record of an older zbx) and `user` (the user the command ran as, null for
+/// a record that did not say).
+fn writable_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Writer.Error!void {
+    assert(record.mounts_count <= constants.mounts_max);
+    try writer.writeAll(",\"writable_mounts\":[");
+    assert((record.mounts_len > 0) == (record.mounts_count > 0));
+    var first = true;
+    for (0..record.mounts_count) |index| {
+        const mount = record.mount_at(@intCast(index));
+        if (mount.kind != .mount) continue;
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writer.writeAll("{\"host\":");
+        try json_string(writer, mount.source);
+        try writer.writeAll(",\"target\":");
+        try json_string(writer, mount.target);
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("],\"user\":");
+    if (record.user) |user| {
+        try writer.print("{{\"uid\":{d},\"gid\":{d}}}", .{ user.uid, user.gid });
+    } else {
+        try writer.writeAll("null");
+    }
 }
 
 // ---- stop -----------------------------------------------------------------------------------

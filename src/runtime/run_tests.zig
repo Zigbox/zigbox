@@ -143,7 +143,8 @@ test "a command that exits n ends zbx with n; one killed by signal s ends it wit
         // The hint is the container's own non-zero exit with the default network.
         const failed = case.status == .exited and case.code != 0;
         const member: []const u8 = if (failed) ",\"hint\":\"network_none\"" else "";
-        const format = "\"code\":{d},\"network\":\"none\"{s},\"published\":[]}},\"ran\":{{";
+        const format = "\"code\":{d},\"network\":\"none\"{s},\"published\":[]," ++
+            "\"writable_mounts\":[],\"user\":{{\"uid\":0,\"gid\":0}}}},\"ran\":{{";
         const code_text = try std.fmt.bufPrint(&number_text, format, .{ case.code, member });
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), code_text) != null);
         const ran = "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n";
@@ -748,7 +749,7 @@ test "upgrade: a missing, empty, older, newer or damaged records directory never
     sim_run.init(&sim, 18);
     sim.world.add_node(sim_run.runs_path, .dir);
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 7,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     try testing.expect(
@@ -882,7 +883,7 @@ test "--net host shares the host's network: its /sys bound, no lo of its own" {
     try testing.expectEqual(@as(u8, 3), run(&sim, &json));
     try testing.expectEqualStrings(
         "{\"container_exit\":{\"reason\":\"exited\",\"code\":3,\"network\":\"host\"," ++
-            "\"published\":[]}," ++
+            "\"published\":[],\"writable_mounts\":[],\"user\":{\"uid\":0,\"gid\":0}}," ++
             "\"ran\":{\"kind\":\"rootfs\",\"path\":\"" ++ rootfs ++ "\"}}\n",
         sim.stderr(),
     );
@@ -921,7 +922,8 @@ test "the no-network hint: only for a failed run that was not given --net, and n
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"network\":\"none\"") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "grant with") == null);
     // The hint is a member of container_exit, after the network and before the forwards.
-    const member = "\"network\":\"none\",\"hint\":\"network_none\",\"published\":[]}";
+    const member = "\"network\":\"none\",\"hint\":\"network_none\",\"published\":[]," ++
+        "\"writable_mounts\":[],\"user\":{\"uid\":0,\"gid\":0}}";
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), member) != null);
 
     // An explicit `--net none` carries none, in JSON as in text; so does a success.

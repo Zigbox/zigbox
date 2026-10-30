@@ -53,7 +53,13 @@ const container_exit_object =
     \\"items":{"type":"object","required":["host","container"],
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
-    \\"timed_out":{"type":"boolean"}}}
+    \\"timed_out":{"type":"boolean"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
 ;
 
 const ran_object =
@@ -76,7 +82,13 @@ const detached_container_object =
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
     \\"env":{"type":"array","items":{"type":"string"},
-    \\"description":"M6: names of the variables set with -e; a value is never shown"}}}
+    \\"description":"M6: names of the variables set with -e; a value is never shown"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
 ;
 
 /// `zbx schema run`: ONE object schema with no `$ref`, which an agent can follow without a
@@ -153,7 +165,13 @@ const ps_schema =
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
     \\"env":{"type":"array","items":{"type":"string"},
-    \\"description":"M6: names of the variables set with -e; a value is never kept"}}}}}}
+    \\"description":"M6: names of the variables set with -e; a value is never kept"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}}}}
 ;
 
 const stop_schema =
@@ -166,6 +184,44 @@ const stop_schema =
     \\"name":{"type":"string"},"result":{"enum":["graceful","killed","already_stopped"]},
     \\"reason":{"enum":["exited","signal","oom","pid_limit","none"]},
     \\"exit_code":{"type":["integer","null"]}}}
+;
+
+/// `zbx logs --output json`: one object per line, one per record the container's log holds.
+const logs_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/logs/1","version":1,
+    \\"title":"zbx logs --output json",
+    \\"description":"stdout: one object per line, one per record (a write of up to 4096 bytes).",
+    \\"type":"object","required":["schema","stream","time","text"],
+    \\"properties":{"schema":{"const":"zbx.logs/1"},
+    \\"stream":{"enum":["stdout","stderr"]},
+    \\"time":{"type":"integer","description":"seconds since the epoch when zbx read the write"},
+    \\"text":{"type":"string","description":"the bytes; not UTF-8 becomes U+FFFD and lossy"},
+    \\"lossy":{"const":true,"description":"only when text had bytes that are not UTF-8"},
+    \\"dropped_bytes":{"type":"integer","minimum":1,
+    \\"description":"first record only: bytes of older output the 5 MiB cap dropped"}}}
+;
+
+/// `zbx exec --output json`: one object per line on stderr, a diagnostic for each failure or
+/// warning, and when the command ran, a last `exec_exit` line. One object schema, no `$ref`.
+const exec_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/exec/1","version":1,
+    \\"title":"zbx exec --output json",
+    \\"description":"stderr: diagnostics, then exec_exit. The command's own output is its own.",
+    \\"type":"object",
+    \\"properties":{
+++ diagnostic_properties ++
+    \\,"exec_exit":{"type":"object","required":["container","reason","code","container_ended"],
+    \\"properties":{"container":{"type":"string"},"reason":{"enum":["exited","signal"]},
+    \\"code":{"type":"integer","minimum":0,"maximum":255,
+    \\"description":"the command's exit code, or 128 plus its signal; zbx exits with it"},
+    \\"signal":{"type":"integer","description":"only for reason signal"},
+    \\"container_ended":{"type":"boolean",
+    \\"description":"the command was killed because its container ended"}}}},
+    \\"oneOf":[{
+++ diagnostic_required ++
+    \\},{"required":["exec_exit"]}]}
 ;
 
 const bundle_schema =
@@ -633,6 +689,8 @@ const table = [_]Entry{
     .{ .command = "bundle", .text = bundle_schema },
     .{ .command = "ps", .text = ps_schema },
     .{ .command = "stop", .text = stop_schema },
+    .{ .command = "logs", .text = logs_schema },
+    .{ .command = "exec", .text = exec_schema },
     .{ .command = "doctor", .text = doctor_schema },
     .{ .command = "store-import", .text = store_import_schema },
     .{ .command = "store-ls", .text = store_ls_schema },
@@ -659,7 +717,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 25);
+    assert(table.len == 27);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -688,7 +746,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 25), table.len);
+    try testing.expectEqual(@as(usize, 27), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {
@@ -696,7 +754,7 @@ test "run and doctor are one object schema without a $ref, as an agent can follo
     // object schema whose `oneOf` alternatives are lists of required members (the form the
     // agent's checker follows); every member they require is listed under `properties`; and the
     // members M6 added to the documents are there, with the flags of a fix.
-    for ([_][]const u8{ "run", "doctor" }) |command| {
+    for ([_][]const u8{ "run", "doctor", "exec" }) |command| {
         const text = of(command).?;
         try testing.expect(std.mem.indexOf(u8, text, "\"$ref\"") == null);
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});

@@ -9,6 +9,10 @@
 //!   the container's cgroup, so `--memory` bounds it too.
 //! - `--bind HOST:PATH`: the host's directory or file, read-only, always. A source that is not
 //!   there is refused and never made: what a container writes belongs in a state volume.
+//! - `--mount HOST:PATH` (M6b): the host's directory or file, writable, and only below the
+//!   project directory (`project.zig`). HOST may be relative and is resolved with every symbolic
+//!   link followed; the run record keeps the resolved path. The container's root writes it, so
+//!   the files belong to the host user; a run whose user is not root is refused (`needs_root`).
 //! - `--secret HOST_FILE:PATH`: a copy of one host file, read-only, mode 0400, owned by the
 //!   container's root. The copy is made inside the container's own /dev (memory), so the file
 //!   on the host is not shared, not changed, and not read again; its bytes are never in a run
@@ -27,6 +31,7 @@ const plan_mod = @import("plan.zig");
 const volume = @import("../state/volume.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const diagnose = @import("mounts_diagnose.zig");
+const project_mod = @import("project.zig");
 
 const Host = host_mod.Host;
 
@@ -34,6 +39,8 @@ pub const Kind = enum {
     tmpfs,
     bind,
     secret,
+    /// M6b: writable, below the project directory.
+    mount,
 
     /// The flag that asks for it, as `help` and the diagnostics spell it.
     pub fn flag(kind: Kind) []const u8 {
@@ -42,6 +49,7 @@ pub const Kind = enum {
             .tmpfs => "--tmpfs",
             .bind => "--bind",
             .secret => "--secret",
+            .mount => "--mount",
         };
     }
 };
@@ -116,10 +124,25 @@ pub fn parse(kind: Kind, value: []const u8) Parsed {
     const at = colon orelse return .{ .problem = .no_target };
     const source = value[0..at];
     const target = value[at + 1 ..];
-    if (volume.path_problem(source)) |problem| return .{ .problem = .{ .source = problem } };
+    if (source_problem(kind, source)) |problem| return .{ .problem = .{ .source = problem } };
     if (volume.target_problem(target)) |problem| return .{ .problem = .{ .target = problem } };
     assert(std.mem.indexOfScalar(u8, target, ':') == null);
     return .{ .ok = .{ .kind = kind, .source = source, .target = target, .size_bytes = 0 } };
+}
+
+/// What a flag's host path must be. A `--mount` source is judged where it lands, after its
+/// links are followed (`project.zig`), so it may be relative and hold `.` and `..` parts; the
+/// other kinds are absolute paths whose parts are names.
+fn source_problem(kind: Kind, source: []const u8) ?volume.TargetProblem {
+    assert(kind != .tmpfs);
+    assert(source.len <= constants.arg_bytes_max);
+    if (kind != .mount) return volume.path_problem(source);
+    if (source.len == 0) return .empty;
+    if (source.len > constants.mount_path_bytes_max) return .too_long;
+    for (source) |byte| {
+        if (byte <= ' ' or byte == ':' or byte == 0x7f) return .bad_character;
+    }
+    return null;
 }
 
 fn parse_tmpfs_size(digits: []const u8) spec_mod.LimitProblem!u64 {
@@ -141,7 +164,7 @@ pub fn mount_problem(mount: *const Mount) ?Problem {
         return null;
     }
     if (mount.size_bytes != 0) return .no_target;
-    if (volume.path_problem(mount.source)) |problem| return .{ .source = problem };
+    if (source_problem(mount.kind, mount.source)) |problem| return .{ .source = problem };
     if (volume.target_problem(mount.target)) |problem| return .{ .target = problem };
     return null;
 }
@@ -163,7 +186,8 @@ pub fn conflict_sentence(found: Conflict) []const u8 {
     };
 }
 
-pub const too_many_sentence = "--tmpfs, --bind and --secret together are given more than 8 times";
+pub const too_many_sentence =
+    "--tmpfs, --bind, --mount and --secret together are given more than 8 times";
 
 comptime {
     assert(constants.mounts_max == 8); // `too_many_sentence` says so.
@@ -216,7 +240,7 @@ pub fn list_problem(state: []const volume.Mount, mounts: []const Mount) ?ListPro
 /// `tmpfs:/scratch:67108864`, `bind:/srv/data:/data`, `secret:/run/key:/run/secrets/key`: the
 /// kind, then the two paths (a tmpfs's size in bytes comes last). No path holds a colon.
 pub fn text(mount: *const Mount, buffer: *[constants.mount_value_bytes_max]u8) []const u8 {
-    assert(mount_problem(mount) == null);
+    assert(record_problem(mount) == null);
     const written = if (mount.kind == .tmpfs)
         std.fmt.bufPrint(buffer, "tmpfs:{s}:{d}", .{ mount.target, mount.size_bytes })
     else
@@ -233,6 +257,16 @@ pub fn text(mount: *const Mount, buffer: *[constants.mount_value_bytes_max]u8) [
 comptime {
     const tmpfs_value = "tmpfs:".len + constants.mount_path_bytes_max + 1 + 20;
     assert(constants.mount_value_bytes_max >= tmpfs_value);
+}
+
+/// What a record may hold: the mount rules, and for a `--mount` the resolved path (absolute, every
+/// part a name), which is what the run record keeps.
+pub fn record_problem(mount: *const Mount) ?Problem {
+    if (mount_problem(mount)) |problem| return problem;
+    if (mount.kind == .mount) {
+        if (volume.path_problem(mount.source)) |problem| return .{ .source = problem };
+    }
+    return null;
 }
 
 /// The mount a record's text names, or null if it is not one `text` could have written. The
@@ -255,7 +289,7 @@ pub fn parse_text(value: []const u8) ?Mount {
     } else {
         found = .{ .kind = kind, .source = middle, .target = last, .size_bytes = 0 };
     }
-    if (mount_problem(&found) != null) return null;
+    if (record_problem(&found) != null) return null;
     return found;
 }
 
@@ -268,6 +302,15 @@ pub const SourceProblem = enum {
     not_a_file_or_directory,
     /// A secret is one regular file.
     not_a_file,
+    /// A `--mount` source: more symbolic links than the kernel follows, or links in a circle.
+    loop,
+    /// A `--mount` source, once resolved, is longer than a mount's path may be.
+    too_long,
+    /// A `--mount` source, once resolved, has a ':', a space or a control byte, which the run
+    /// record cannot keep.
+    unusable_path,
+    /// The project directory (or the working directory) cannot be found or looked at.
+    no_project,
 
     pub fn sentence(problem: SourceProblem) []const u8 {
         assert(@tagName(problem).len > 0);
@@ -276,6 +319,11 @@ pub const SourceProblem = enum {
             .unreadable => "it cannot be looked at",
             .not_a_file_or_directory => "it is not a directory or a regular file",
             .not_a_file => "a secret is one regular file",
+            .loop => "it goes through too many symbolic links, or a circle of them",
+            .too_long => "once its links are followed the path is longer than 256 bytes",
+            .unusable_path => "once its links are followed the path has a ':', a space or a " ++
+                "control character",
+            .no_project => "the project directory cannot be found or looked at",
         };
     }
 };
@@ -292,8 +340,10 @@ const type_file: u32 = 0o100000;
 /// What the plan needs to know of a mount: its shape. A bind of a directory and of a file are
 /// different sequences of steps, so the host's path is looked at (`stat`, following links, as
 /// the kernel does when it binds). Nothing is made, whatever is found. `errno` is the last call's.
+/// A `--mount` is looked at by `resolve_sources` instead.
 pub fn look(host: Host, mount: *const Mount) Looked {
     assert(mount_problem(mount) == null);
+    assert(mount.kind != .mount);
     if (mount.kind == .tmpfs) return .{ .shape = .tmpfs };
     var path: [constants.mount_path_bytes_max + 1:0]u8 = undefined;
     @memcpy(path[0..mount.source.len], mount.source);
@@ -313,13 +363,141 @@ pub fn look(host: Host, mount: *const Mount) Looked {
 
 pub const ResolveError = error{StartFailed};
 
+/// Who the run is and where its project is, for the rules of a `--mount`.
+pub const Writable = struct {
+    /// The project directory (absolute); empty for the nearest `zbx.lock` up from the working
+    /// directory, else the working directory.
+    project: []const u8 = "",
+    /// The user the command runs as; null is root.
+    user: ?spec_mod.User = null,
+    /// The user as the caller names it (`--user`, or the image's `User`), for a message; empty
+    /// if the caller has no name for it.
+    user_text: []const u8 = "",
+};
+
+/// The mounts of a run once the host has been looked at: what the plan is given, and the mounts
+/// themselves with a `--mount`'s source replaced by its resolved path, which the run record
+/// keeps. The sources point into `paths`, so a `Resolution` must not move while they are used.
+pub const Resolution = struct {
+    inputs: [constants.mounts_max]plan_mod.MountInput,
+    mounts: [constants.mounts_max]Mount,
+    paths: [constants.mounts_max][constants.mount_path_bytes_max]u8,
+};
+
+/// Whether the run's user is the container's root: ids 0 and 0, so that what it writes is the
+/// host user's, with no subordinate id in the file's owner or group.
+pub fn user_is_root(user: ?spec_mod.User) bool {
+    const found = user orelse return true;
+    if (found.uid == 0) assert(found.gid <= std.math.maxInt(u32));
+    return found.uid == 0 and found.gid == 0;
+}
+
+/// Resolves each `--mount` of `mounts` (and only those): its source against the working
+/// directory with every link followed, held to the project directory, and looked at. Fills
+/// `out.mounts[i]` and `out.inputs[i]` for those, and leaves the others alone. Nothing is
+/// made. A mount outside the project, or one that is not there, is a diagnostic.
+pub fn resolve_sources(
+    host: Host,
+    project_given: []const u8,
+    mounts: []const Mount,
+    out: *Resolution,
+    diag: *Diag,
+) ResolveError!void {
+    assert(diag.code == null);
+    assert(mounts.len <= constants.mounts_max);
+    var any = false;
+    for (mounts) |*mount| any = any or mount.kind == .mount;
+    if (!any) return;
+    const fs = host.filesystem();
+    var project: project_mod.Path = undefined;
+    project_mod.directory(host, fs, project_given, &project) catch {
+        diagnose.writable_source(diag, "", .no_project);
+        return error.StartFailed;
+    };
+    var cwd_storage: [constants.path_bytes_max]u8 = undefined;
+    const cwd = host.working_directory(&cwd_storage) catch {
+        diagnose.writable_source(diag, "", .no_project);
+        return error.StartFailed;
+    };
+    for (mounts, 0..) |*mount, index| {
+        if (mount.kind != .mount) continue;
+        if (project.len == 1) {
+            diagnose.outside_project(diag, mount.source, "/", project.text());
+            return error.StartFailed;
+        }
+        try resolve_one(fs, cwd, &project, mount, index, out, diag);
+    }
+}
+
+fn resolve_one(
+    fs: project_mod.Fs,
+    cwd: []const u8,
+    project: *const project_mod.Path,
+    mount: *const Mount,
+    index: usize,
+    out: *Resolution,
+    diag: *Diag,
+) ResolveError!void {
+    assert(mount.kind == .mount);
+    assert(index < constants.mounts_max);
+    assert(project.len > 1);
+    var path: project_mod.Path = undefined;
+    project_mod.resolve(fs, cwd, mount.source, &path) catch |err| {
+        const problem: SourceProblem = switch (err) {
+            error.NotFound => .missing,
+            error.Unreadable => .unreadable,
+            error.Loop => .loop,
+            error.TooLong => .too_long,
+        };
+        diagnose.writable_source(diag, mount.source, problem);
+        return error.StartFailed;
+    };
+    if (!project_mod.is_inside(project.text(), path.text())) {
+        diagnose.outside_project(diag, mount.source, path.text(), project.text());
+        return error.StartFailed;
+    }
+    if (volume.path_problem(path.text())) |found| {
+        const problem: SourceProblem = if (found == .too_long) .too_long else .unusable_path;
+        diagnose.writable_source(diag, mount.source, problem);
+        return error.StartFailed;
+    }
+    const found = fs.lstat(path.text()) catch |err| {
+        const problem: SourceProblem = if (err == error.NotFound) .missing else .unreadable;
+        diagnose.writable_source(diag, mount.source, problem);
+        return error.StartFailed;
+    };
+    const shape: plan_mod.MountShape = switch (found.kind) {
+        .dir => .mount_dir,
+        .file => .mount_file,
+        else => {
+            diagnose.writable_source(diag, mount.source, .not_a_file_or_directory);
+            return error.StartFailed;
+        },
+    };
+    const kept = out.paths[index][0..path.len];
+    @memcpy(kept, path.text());
+    out.mounts[index] = .{
+        .kind = .mount,
+        .source = kept,
+        .target = mount.target,
+        .size_bytes = 0,
+    };
+    out.inputs[index] = .{
+        .shape = shape,
+        .source = kept,
+        .target = mount.target,
+        .size_bytes = 0,
+    };
+}
+
 /// A library caller's mounts, held to the rules the flags apply and looked at on the host, in
 /// order: the plan's inputs, or a diagnostic for the first that is wrong. Nothing is made.
 pub fn resolve(
     host: Host,
     state: []const volume.Mount,
     mounts: []const Mount,
-    inputs: *[constants.mounts_max]plan_mod.MountInput,
+    writable: Writable,
+    out: *Resolution,
     diag: *Diag,
 ) ResolveError!void {
     assert(diag.code == null);
@@ -342,9 +520,16 @@ pub fn resolve(
         diagnose.conflict(diag, mount.kind.flag(), shown, conflict_sentence(problem.meets.found));
         return error.StartFailed;
     }
+    try resolve_sources(host, writable.project, mounts, out, diag);
+    var any_writable = false;
     for (mounts, 0..) |*mount, index| {
+        if (mount.kind == .mount) {
+            any_writable = true;
+            continue;
+        }
+        out.mounts[index] = mount.*;
         switch (look(host, mount)) {
-            .shape => |shape| inputs[index] = .{
+            .shape => |shape| out.inputs[index] = .{
                 .shape = shape,
                 .source = mount.source,
                 .target = mount.target,
@@ -355,6 +540,10 @@ pub fn resolve(
                 return error.StartFailed;
             },
         }
+    }
+    if (any_writable and !user_is_root(writable.user)) {
+        diagnose.needs_root(diag, writable.user_text, writable.user.?);
+        return error.StartFailed;
     }
 }
 

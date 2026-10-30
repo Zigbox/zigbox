@@ -100,8 +100,22 @@ pub const Session = struct {
     reaped: std.atomic.Value(bool),
     /// `wait` stopped the container because the time given to it ran out.
     timed_out: bool,
+    /// The container's standard output and error are pipes this process reads (the log).
+    capture: bool,
+    /// Which of the two streams (stdout, stderr) are pipes; the other is left as it was.
+    capture_stream: [2]bool,
+    /// The read ends of those pipes, until the stream ends; and the write ends, from the pipes'
+    /// making until the child has its copies.
+    output_read: [2]?host_mod.Handle,
+    output_write: [2]?host_mod.Handle,
 
-    pub fn start(session: *Session, host: Host, plan: *const Plan, facts: *doctor.Facts) void {
+    pub fn start(
+        session: *Session,
+        host: Host,
+        plan: *const Plan,
+        facts: *doctor.Facts,
+        capture: [2]bool,
+    ) void {
         assert(plan.count == plan.steps_expected());
         assert(plan.candidates_count > 0);
         session.host = host;
@@ -127,6 +141,10 @@ pub const Session = struct {
         session.container_pid = 0;
         session.reaped = std.atomic.Value(bool).init(false);
         session.timed_out = false;
+        session.capture = capture[0] or capture[1];
+        session.capture_stream = capture;
+        session.output_read = .{ null, null };
+        session.output_write = .{ null, null };
         assert(!session.open.any());
         assert(session.pid == null);
     }
@@ -247,6 +265,46 @@ pub const Session = struct {
             .report_read = true,
             .report_write = true,
         };
+        if (!session.capture) return;
+        session.make_output_pipes() catch |err| {
+            session.close_all();
+            return err;
+        };
+    }
+
+    fn make_output_pipes(session: *Session) host_mod.Error!void {
+        assert(session.output_write[0] == null);
+        assert(session.capture);
+        assert(session.output_read[0] == null);
+        for (0..2) |at| {
+            if (!session.capture_stream[at]) continue;
+            const pipe = try session.host.pipe();
+            session.output_read[at] = pipe.read;
+            session.output_write[at] = pipe.write;
+        }
+    }
+
+    /// Closes the write ends the parent holds: the child has its own, and ours would keep the
+    /// reader from ever seeing the end of the output.
+    fn close_output_write(session: *Session) void {
+        assert(session.output_write.len == 2);
+        for (&session.output_write) |*end| {
+            if (end.*) |handle| session.host.close(handle);
+            end.* = null;
+        }
+    }
+
+    /// For a caller that leaves a started run without waiting for it (a test): lets go of the
+    /// pipes the container's output would have been read from.
+    pub fn release_output(session: *Session) void {
+        session.close_output_read();
+    }
+
+    fn close_output_read(session: *Session) void {
+        for (&session.output_read) |*end| {
+            if (end.*) |handle| session.host.close(handle);
+            end.* = null;
+        }
     }
 
     fn spawn(session: *Session) host_mod.Error!void {
@@ -260,9 +318,14 @@ pub const Session = struct {
             .uts = true,
             .ipc = true,
             .net = session.plan.isolated(),
+            .output = if (session.capture) .{
+                .stdout = session.output_write[0],
+                .stderr = session.output_write[1],
+            } else null,
         };
         session.pid = try host.spawn(flags, child_mod.entry, &session.child);
         session.container_pid = session.pid.?;
+        session.close_output_write();
         // From here a write to the ready pipe may find no reader; that is an error to report.
         host.ignore_broken_pipe(true);
         // The child has its own copies of these. Closing ours is what makes end of file reach
@@ -558,6 +621,16 @@ pub const Session = struct {
         /// After the time is up: SIGTERM (as the forwarding rule sends it), then SIGKILL this
         /// many milliseconds later if the container is still there.
         grace_ms: u32 = constants.stop_grace_ms_default,
+        /// Where the container's output goes while it runs (the session must have been started
+        /// to capture it). Null: it is read and dropped.
+        sink: ?Sink = null,
+    };
+
+    /// Takes what the container wrote. False: stop reading that stream, so the container's
+    /// next write to it fails as a write to a closed pipe does.
+    pub const Sink = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) bool,
     };
 
     /// Waits for the container to end, forwarding the signals zbx catches. The signals are
@@ -579,13 +652,17 @@ pub const Session = struct {
             const timed = stage != .killed and (stage != .running or options.timeout_ms > 0);
             const left: u64 = if (timed) deadline -| host.monotonic_ms() else 0;
             const slice_ms: u32 = if (timed) @intCast(@max(left, 1)) else 0;
-            const event = host.wait_event(session.pid.?, slice_ms) catch |err| {
+            const event = session.next_event(slice_ms, options.sink) catch |err| {
                 host.block_signals(false) catch {};
                 return err;
             };
             switch (event) {
+                .output => unreachable, // `next_event` takes output itself.
                 .exited => |ended| break ended,
                 .signal => |number| {
+                    // A terminal's new size is not the container's business: its terminal, when
+                    // it has one, is zbx's own and the kernel tells the processes on it.
+                    if (number == constants.signal_winch) continue;
                     received += 1;
                     assert(received < std.math.maxInt(u32));
                     session.forward(number, received > constants.forwarded_signals_max);
@@ -608,8 +685,102 @@ pub const Session = struct {
         };
         session.pid = null;
         session.reaped.store(true, .release);
+        session.drain_output(options.sink);
         host.block_signals(false) catch {}; // The child is gone; a mask that stays is harmless.
         return session.reported_status(status);
+    }
+
+    /// The next event that is not output: while the container's streams have bytes, they are
+    /// handed to the sink. `slice_ms` is the time left to wait (zero: for ever), counted over
+    /// all the output taken on the way.
+    fn next_event(session: *Session, slice_ms: u32, sink: ?Sink) host_mod.Error!host_mod.Event {
+        const host = session.host;
+        const began = host.monotonic_ms();
+        for (0..constants.wait_timeout_ms_max) |_| {
+            var watch: [2]host_mod.Handle = undefined;
+            var which: [2]u8 = undefined;
+            var count: u32 = 0;
+            for (session.output_read, 0..) |end, at| {
+                const handle = end orelse continue;
+                watch[count] = handle;
+                which[count] = @intCast(at);
+                count += 1;
+            }
+            if (count == 0) return host.wait_event(session.pid.?, slice_ms);
+            var left: u32 = 0;
+            if (slice_ms > 0) {
+                const spent = host.monotonic_ms() -| began;
+                if (spent >= slice_ms) return .timeout;
+                left = @intCast(slice_ms - spent);
+            }
+            const event = try host.wait_event_watching(session.pid.?, left, watch[0..count]);
+            switch (event) {
+                .output => |mask| {
+                    for (0..count) |index| {
+                        if (mask >> @intCast(index) & 1 == 1) session.pump(which[index], sink);
+                    }
+                },
+                else => return event,
+            }
+        }
+        unreachable; // The bound is a day of milliseconds; every pass takes output or returns.
+    }
+
+    /// Reads once from one stream and hands the bytes on. The end of the stream closes it.
+    fn pump(session: *Session, at: u8, sink: ?Sink) void {
+        assert(at < 2);
+        assert(session.capture);
+        const host = session.host;
+        const handle = session.output_read[at].?;
+        var buffer: [constants.log_pump_bytes]u8 = undefined;
+        const count = host.read_some(handle, &buffer) catch 0;
+        if (count == 0) return session.end_stream(at);
+        const stream = stream_of(at);
+        const keep = if (sink) |target|
+            target.call(target.context, stream, buffer[0..count])
+        else
+            true;
+        if (!keep) session.end_stream(at);
+    }
+
+    fn stream_of(at: u8) host_mod.Stream {
+        assert(at < 2);
+        return if (at == 0) .stdout else .stderr;
+    }
+
+    fn end_stream(session: *Session, at: u8) void {
+        assert(at < 2);
+        assert(session.output_write[at] == null);
+        const handle = session.output_read[at] orelse return;
+        session.host.close(handle);
+        session.output_read[at] = null;
+    }
+
+    /// The container is gone: what it wrote and nobody has read yet is handed on, within a bound
+    /// of time for a stream that something else still holds open.
+    fn drain_output(session: *Session, sink: ?Sink) void {
+        assert(session.pid == null);
+        assert(session.reaped.load(.acquire));
+        if (!session.capture) return;
+        const host = session.host;
+        for (0..2) |index| {
+            const at: u8 = @intCast(index);
+            for (0..constants.log_drain_reads_max) |_| {
+                const handle = session.output_read[at] orelse break;
+                var buffer: [constants.log_pump_bytes]u8 = undefined;
+                const count = host.read_timeout(handle, &buffer, constants.log_drain_ms) catch 0;
+                if (count == 0) {
+                    session.end_stream(at);
+                    break;
+                }
+                const keep = if (sink) |target|
+                    target.call(target.context, stream_of(at), buffer[0..count])
+                else
+                    true;
+                if (!keep) session.end_stream(at);
+            }
+            session.end_stream(at);
+        }
     }
 
     /// What zbx reports: a container that died of the SIGKILL zbx sent in place of a signal
@@ -672,6 +843,8 @@ pub const Session = struct {
 
     fn close_all(session: *Session) void {
         const host = session.host;
+        session.close_output_write();
+        session.close_output_read();
         assert(session.pid == null); // The child is gone before its pipes are closed.
         if (session.open.ready_read) host.close(session.child.ready.read);
         if (session.open.ready_write) host.close(session.child.ready.write);

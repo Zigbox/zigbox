@@ -1,0 +1,12 @@
+error[ZBX-E0215]: can't set up a --mount
+  while  starting container web-1
+  while  mounting --mount at /srv
+  cause  binding the host directory failed: no such file or directory (ENOENT)
+  source /home/alice/project/site
+  target /srv
+  name   web-1
+  rootfs /srv/alpine
+  step   bind_mount_dir (53 of 68)
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0215
+  docs   https://zigbox.github.io/zigbox/errors/E0215.html

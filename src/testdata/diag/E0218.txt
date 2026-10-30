@@ -1,0 +1,5 @@
+error[ZBX-E0218]: can't read the container's log
+  cause  the log was written by a newer zbx than this one
+  fix    look at the file:   ls -l "${XDG_STATE_HOME:-$HOME/.local/state}/zbx/logs"
+  more   zbx explain E0218 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0218.html

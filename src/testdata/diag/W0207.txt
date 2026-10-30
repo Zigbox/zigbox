@@ -1,0 +1,5 @@
+warning[ZBX-W0207]: the exec was not noted in the container's history
+  cause  writing the exec history failed: input/output error (EIO)
+  fix    look at the state directory's disk:   df -h "${XDG_STATE_HOME:-$HOME/.local/state}"
+  more   zbx explain W0207 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0207.html

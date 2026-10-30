@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">mounts that cannot go together</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>One run's mounts (--state, --tmpfs, --bind and --secret) each have a path in the container, and no path may be the same as another's, inside it, or hold it: a mount inside another would be made in the outer one. At most 8 of --tmpfs, --bind and --secret may be given in one run, and 8 --state.</p>
+<p>One run's mounts (--state, --tmpfs, --bind, --mount, --secret) each have a path in the container, and no path may be the same as another's, inside it, or hold it: a mount inside another would be made in the outer one. At most 8 of --tmpfs, --bind, --mount and --secret may be given in one run, and 8 --state.</p>
 <p>Give each mount its own place, or drop one.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

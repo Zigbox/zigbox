@@ -1,0 +1,11 @@
+error[ZBX-E0222]: can't put the command in the container's cgroup
+  while  running a command in the container web-1
+  cause  the command was not started: it never runs outside the container's
+         limits
+  cause  systemd answered org.freedesktop.DBus.Error.AccessDenied: Refused
+  scope  zbx-web-1.scope
+  name   web-1
+  pid    502
+  fix    check the cgroup setup:   zbx doctor
+  more   zbx explain E0222
+  docs   https://zigbox.github.io/zigbox/errors/E0222.html

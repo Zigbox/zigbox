@@ -107,7 +107,15 @@ pub const Stat = struct {
 
 /// Probes run in a forked child so a failed probe cannot damage the caller. The child runs as
 /// an unprivileged user even when the caller is root, so the answer is about ordinary users.
-pub const ProbeKind = enum { userns, overlay };
+pub const ProbeKind = enum {
+    userns,
+    overlay,
+    /// Whether the kernel lets this user make an id-mapped mount of a path (`open_tree` clone,
+    /// then `mount_setattr` with `MOUNT_ATTR_IDMAP`) in a scratch user and mount namespace. Asked
+    /// with `Host.probe_idmap`, which names the path. zbx never uses such a mount; the doctor only
+    /// reports the fact.
+    idmap,
+};
 
 pub const ProbeOutcome = enum {
     ok,
@@ -151,6 +159,65 @@ pub const SpawnFlags = struct {
     /// A network namespace of its own, owned by the new user namespace. Without it the child
     /// shares the host's (`--net host`).
     net: bool,
+    /// Pipe write ends the child makes its standard output and error before it runs `entry`; the
+    /// parent keeps the read ends and closes the write ends itself. Null: the child's streams
+    /// are the parent's.
+    output: ?OutputPipes = null,
+    /// The child's parent is the caller's parent, not the caller (`CLONE_PARENT`): `exec`'s
+    /// joiner forks the command this way, so that `zbx` waits for it directly. It takes no
+    /// namespace flag: the child is born in the namespaces the caller joined.
+    sibling: bool = false,
+};
+
+/// The namespaces `exec` joins (`setns`), in the order it joins them: the user namespace first,
+/// which gives the capabilities the others need (the caller owns it, so joining it needs
+/// none), and the mount namespace last, since it changes the root that paths are read from.
+pub const NamespaceKind = enum {
+    user,
+    ipc,
+    uts,
+    net,
+    pid,
+    mount,
+
+    /// The name of the file in `/proc/<pid>/ns/`.
+    pub fn file_name(kind: NamespaceKind) []const u8 {
+        const name: []const u8 = switch (kind) {
+            .user => "user",
+            .ipc => "ipc",
+            .uts => "uts",
+            .net => "net",
+            .pid => "pid",
+            .mount => "mnt",
+        };
+        assert(name.len >= 3);
+        assert(name.len <= 4);
+        return name;
+    }
+};
+
+/// A pseudo-terminal: the side zbx keeps (`master`) and the side the command gets (`peer`).
+/// Both are close-on-exec.
+pub const Terminal = struct {
+    master: Handle,
+    peer: Handle,
+};
+
+/// The settings of zbx's own terminal, saved before it is made raw and put back after.
+pub const TerminalSaved = struct {
+    bytes: [terminal_saved_bytes]u8,
+    /// Set when `bytes` holds settings that were read and must be put back.
+    valid: bool,
+};
+
+/// Room for the kernel's `struct termios` (60 bytes on x86_64 and aarch64).
+pub const terminal_saved_bytes: u32 = 64;
+
+/// The write ends of the pipes that carry a container's standard output and error.
+/// A stream left null stays the parent's own (a terminal that is not interposed on).
+pub const OutputPipes = struct {
+    stdout: ?Handle,
+    stderr: ?Handle,
 };
 
 /// The body of a spawned child. It runs in the child, on a copy of the parent's memory, and its
@@ -238,10 +305,14 @@ pub const HelperResult = struct {
 pub const Event = union(enum) {
     /// The child ended.
     exited: ExitStatus,
-    /// A signal zbx forwards arrived (INT, TERM, HUP or QUIT).
+    /// A signal zbx forwards arrived (INT, TERM, HUP or QUIT), or the terminal's window
+    /// changed size (WINCH, which `exec` passes on to its pseudo-terminal and nothing forwards).
     signal: u8,
     /// The wait's time ran out with neither (only for a wait given a time).
     timeout,
+    /// Some of the watched handles (`wait_event_watching`) have bytes to read or reached their
+    /// end: bit i is set when the i-th is ready.
+    output: u32,
 };
 
 /// Which side of `fork_supervisor` a process is on.
@@ -332,6 +403,8 @@ pub const VTable = struct {
     /// The real user id of this process.
     uid: *const fn (context: *anyopaque) u32,
     probe: *const fn (context: *anyopaque, kind: ProbeKind) Error!ProbeOutcome,
+    /// The `idmap` probe for the file system `path` is on. `ok`: the mount was made.
+    probe_idmap: *const fn (context: *anyopaque, path: [:0]const u8) Error!ProbeOutcome,
     /// The raw errno of the most recent call through this vtable: 0 if it succeeded. Lets the
     /// diagnostics name the real errno without widening `Error`.
     last_errno: *const fn (context: *anyopaque) u16,
@@ -385,6 +458,11 @@ pub const VTable = struct {
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
     die_with_parent: *const fn (context: *anyopaque) Error!void,
+    /// Whether some process still holds the read end of the pipe whose write end is `handle`
+    /// (`poll` without waiting: POLLERR says no reader is left). A container's child uses its
+    /// report pipe to ask whether zbx is still there: zbx holds the read end until the command
+    /// starts, and from inside a PID namespace `getppid` cannot name a parent outside it.
+    pipe_has_reader: *const fn (context: *anyopaque, handle: Handle) bool,
     /// Drops every capability not in `keep` (a mask by capability number) from the bounding set,
     /// then makes it the effective, permitted and inheritable sets (`PR_CAPBSET_DROP`, `capset`).
     restrict_capabilities: *const fn (context: *anyopaque, keep: u64) Error!void,
@@ -414,12 +492,20 @@ pub const VTable = struct {
         request: ExecRequest,
         output: []u8,
     ) Error!HelperResult,
-    /// Blocks (or unblocks) INT, TERM, HUP, QUIT and CHLD, so that they wait to be read by
+    /// Blocks (or unblocks) INT, TERM, HUP, QUIT, CHLD and WINCH, so that they wait to be read by
     /// `wait_event` instead of acting.
     block_signals: *const fn (context: *anyopaque, block: bool) Error!void,
     /// Waits for the child to end or for a forwarded signal; the signals must be blocked. With a
     /// `timeout_ms` above zero it also ends, with `.timeout`, when that long has passed.
     wait_event: *const fn (context: *anyopaque, pid: Pid, timeout_ms: u32) Error!Event,
+    /// Like `wait_event`, and also ends, with `.output`, as soon as one of `watch` can be read
+    /// (bytes, or the end of the stream). A signal that has arrived is delivered before output.
+    wait_event_watching: *const fn (
+        context: *anyopaque,
+        pid: Pid,
+        timeout_ms: u32,
+        watch: []const Handle,
+    ) Error!Event,
     /// This process's id.
     own_pid: *const fn (context: *anyopaque) Pid,
     /// The current working directory, as an absolute path, written into `buffer`.
@@ -465,6 +551,30 @@ pub const VTable = struct {
         timeout_ms: u32,
     ) Error!u32,
     begin_step: *const fn (context: *anyopaque, index: u32) void,
+    /// Opens `/proc/<pid>/ns/<kind>`, close-on-exec. Null when the process is in this process's
+    /// own namespace of that kind (a container that shares the host's network): there is
+    /// nothing to join, and joining it would need a privilege the user lacks.
+    open_namespace: *const fn (context: *anyopaque, pid: Pid, kind: NamespaceKind) Error!?Handle,
+    /// `setns` into the namespace `handle` names; only in a single-threaded child.
+    join_namespace: *const fn (context: *anyopaque, handle: Handle, kind: NamespaceKind) Error!void,
+    /// A new pseudo-terminal of the devpts whose `ptmx` is at `ptmx` (opened, unlocked, and its
+    /// peer opened by `TIOCGPTPEER`).
+    open_terminal: *const fn (context: *anyopaque, ptmx: [:0]const u8) Error!Terminal,
+    /// Gives `master` the window size of this process's terminal (`TIOCGWINSZ` on standard
+    /// input, `TIOCSWINSZ` on `master`). A size that cannot be read leaves `master` as it is.
+    copy_window_size: *const fn (context: *anyopaque, master: Handle) Error!void,
+    /// With `raw`, saves the settings of the terminal on standard input into `saved` and makes
+    /// it raw (no echo, no line editing, no signals from keys: the bytes go to the container's
+    /// terminal, which does all that). Without, puts `saved` back.
+    input_raw: *const fn (context: *anyopaque, raw: bool, saved: *TerminalSaved) Error!void,
+    /// In a child: a session of its own, whose controlling terminal is `peer`, which becomes its
+    /// standard input, output and error.
+    attach_terminal: *const fn (context: *anyopaque, peer: Handle) Error!void,
+    /// The handle of this process's standard input, for `wait_event_watching` and `read_some`.
+    standard_input: *const fn (context: *anyopaque) Handle,
+    /// Whether standard input is a terminal (`exec` gives its command one when standard input
+    /// and output both are).
+    input_is_terminal: *const fn (context: *anyopaque) bool,
     /// The file-system half of the host, which the store is written against (`store/fs.zig`).
     /// The simulator's, when a test gives it none, is a machine that is down: every call fails.
     filesystem: *const fn (context: *anyopaque) store_fs.Fs,
@@ -472,6 +582,10 @@ pub const VTable = struct {
     /// (`registry/net.zig`). The simulator's, when a test gives it none, is a machine with no
     /// network: every request fails to connect.
     network: *const fn (context: *anyopaque) registry_net.Net,
+    /// The file system the container logs are kept on (`runtime/logfile.zig`). The real host's is
+    /// `filesystem`; the simulator's is a disk of the test's own, or one that takes writes and
+    /// keeps nothing, so a test that does not look at logs needs none.
+    log_files: *const fn (context: *anyopaque) store_fs.Fs,
 };
 
 /// What `read_prefix` found.
@@ -616,7 +730,14 @@ pub const Host = struct {
     }
 
     pub fn probe(host: Host, kind: ProbeKind) Error!ProbeOutcome {
+        assert(kind != .idmap); // It needs a path: `probe_idmap`.
         return host.vtable.probe(host.context, kind);
+    }
+
+    pub fn probe_idmap(host: Host, path: [:0]const u8) Error!ProbeOutcome {
+        assert(path.len > 0);
+        assert(path[0] == '/');
+        return host.vtable.probe_idmap(host.context, path);
     }
 
     // ---- Containers ----
@@ -890,6 +1011,12 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
+    pub fn pipe_has_reader(host: Host, handle: Handle) bool {
+        assert(handle < std.math.maxInt(i32));
+        assert(@intFromPtr(host.vtable) != 0);
+        return host.vtable.pipe_has_reader(host.context, handle);
+    }
+
     pub fn die_with_parent(host: Host) Error!void {
         assert(@intFromPtr(host.vtable) != 0);
         try host.vtable.die_with_parent(host.context);
@@ -997,10 +1124,45 @@ pub const Host = struct {
             switch (event) {
                 .exited, .timeout => {},
                 .signal => |number| assert(number > 0),
+                .output => unreachable, // Nothing was watched.
             }
             return event;
         }
         return error.IoFailed;
+    }
+
+    /// `wait_event` that also returns `.output` when a handle of `watch` is ready.
+    pub fn wait_event_watching(
+        host: Host,
+        pid: Pid,
+        timeout_ms: u32,
+        watch: []const Handle,
+    ) Error!Event {
+        assert(pid > 0);
+        assert(timeout_ms <= constants.wait_timeout_ms_max);
+        assert(watch.len > 0);
+        assert(watch.len <= 32);
+        for (0..constants.wait_interrupts_max + 1) |_| {
+            const waited = host.vtable.wait_event_watching(host.context, pid, timeout_ms, watch);
+            const event = waited catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            switch (event) {
+                .exited, .timeout => {},
+                .signal => |number| assert(number > 0),
+                .output => |mask| assert(mask != 0),
+            }
+            return event;
+        }
+        return error.IoFailed;
+    }
+
+    /// The file system of the container logs.
+    pub fn log_files(host: Host) store_fs.Fs {
+        const fs = host.vtable.log_files(host.context);
+        assert(@intFromPtr(fs.vtable) != 0);
+        return fs;
     }
 
     pub fn signal_state(host: Host, pid: Pid) Error!SignalState {
@@ -1104,6 +1266,85 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         host.vtable.ignore_broken_pipe(host.context, ignore);
         assert(host.vtable.last_errno(host.context) < 4096);
+    }
+
+    /// Forks a child with no namespace of its own, which runs `entry` (the exec joiner); with
+    /// `sibling`, the child's parent is this process's parent (`SpawnFlags.sibling`).
+    pub fn fork_child(
+        host: Host,
+        sibling: bool,
+        entry: ChildEntry,
+        entry_context: *anyopaque,
+    ) Error!Pid {
+        const flags: SpawnFlags = .{
+            .user = false,
+            .mount = false,
+            .pid = false,
+            .uts = false,
+            .ipc = false,
+            .net = false,
+            .sibling = sibling,
+        };
+        const pid = try host.vtable.spawn(host.context, flags, entry, entry_context);
+        assert(pid > 1);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return pid;
+    }
+
+    /// See `VTable.open_namespace`.
+    pub fn open_namespace(host: Host, pid: Pid, kind: NamespaceKind) Error!?Handle {
+        assert(pid > 1);
+        assert(kind.file_name().len > 0);
+        const handle = try host.vtable.open_namespace(host.context, pid, kind);
+        assert(host.vtable.last_errno(host.context) == 0);
+        if (handle) |opened| assert(opened < std.math.maxInt(i32));
+        return handle;
+    }
+
+    pub fn join_namespace(host: Host, handle: Handle, kind: NamespaceKind) Error!void {
+        assert(handle < std.math.maxInt(i32));
+        assert(kind.file_name().len > 0);
+        try host.vtable.join_namespace(host.context, handle, kind);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn open_terminal(host: Host, ptmx: [:0]const u8) Error!Terminal {
+        assert(ptmx.len > 0);
+        assert(ptmx[0] == '/');
+        const terminal = try host.vtable.open_terminal(host.context, ptmx);
+        assert(terminal.master != terminal.peer);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return terminal;
+    }
+
+    pub fn copy_window_size(host: Host, master: Handle) Error!void {
+        assert(master < std.math.maxInt(i32));
+        try host.vtable.copy_window_size(host.context, master);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn input_raw(host: Host, raw: bool, saved: *TerminalSaved) Error!void {
+        if (!raw) assert(saved.valid); // Only settings that were saved are put back.
+        try host.vtable.input_raw(host.context, raw, saved);
+        if (raw) assert(saved.valid);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn attach_terminal(host: Host, peer: Handle) Error!void {
+        assert(peer < std.math.maxInt(i32));
+        try host.vtable.attach_terminal(host.context, peer);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn input_is_terminal(host: Host) bool {
+        assert(@intFromPtr(host.vtable) != 0);
+        return host.vtable.input_is_terminal(host.context);
+    }
+
+    pub fn standard_input(host: Host) Handle {
+        const handle = host.vtable.standard_input(host.context);
+        assert(handle < std.math.maxInt(i32));
+        return handle;
     }
 
     /// Tells the host which plan step the calls that follow belong to (`step_none` when none

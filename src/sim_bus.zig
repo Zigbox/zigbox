@@ -84,6 +84,8 @@ pub const Model = struct {
     /// or accepted and then refused at authentication.
     foreign_socket: ?[]const u8 = null,
     foreign_rejects: bool = false,
+    /// A D-Bus error name `AttachProcessesToUnit` answers with.
+    attach_error: ?[]const u8 = null,
 };
 
 pub const scopes_max: u32 = 2;
@@ -166,6 +168,10 @@ pub const Bus = struct {
     scope_started: ?u32,
     /// Set by a write that stopped a scope: its index, for the world to take its files away.
     scope_stopped: ?u32,
+    /// Set by a write that attached a process to a scope (`AttachProcessesToUnit`): its pid,
+    /// for the world to move; and how many were attached so far.
+    attached: ?u32,
+    attach_count: u32,
 
     pub fn init(bus: *Bus) void {
         bus.model = .{};
@@ -177,6 +183,8 @@ pub const Bus = struct {
         bus.last_scope.active = false;
         bus.scope_started = null;
         bus.scope_stopped = null;
+        bus.attached = null;
+        bus.attach_count = 0;
         assert(bus.open_count() == 0);
         assert(bus.scope_count() == 0);
     }
@@ -418,6 +426,7 @@ pub const Bus = struct {
             return bus.start_transient_unit(conn, call);
         }
         if (std.mem.eql(u8, member, "StopUnit")) return bus.stop_unit(conn, call);
+        if (std.mem.eql(u8, member, "AttachProcessesToUnit")) return bus.attach(conn, call);
         if (std.mem.eql(u8, member, "Subscribe") or std.mem.eql(u8, member, "Unsubscribe")) {
             return bus.subscription(conn, call, member[0] == 'S');
         }
@@ -558,6 +567,32 @@ pub const Bus = struct {
         if (std.mem.eql(u8, model.stop_result, "done")) bus.scope_stopped = @intCast(slot);
         if (!model.job_removed) return;
         send_job_removed(conn, job, path, name, model.stop_result);
+    }
+
+    /// `AttachProcessesToUnit(name, "", [pid])`: a unit that is not there (or not running) is
+    /// `NoSuchUnit`; the model may refuse; otherwise the pid is noted for the world to move.
+    fn attach(bus: *Bus, conn: *Conn, call: *const message_mod.Message) void {
+        assert(conn.used);
+        assert(bus.attached == null);
+        const bad = error_invalid_args;
+        if (!std.mem.eql(u8, call.signature, "ssau")) return send_error(conn, call, bad, "ssau");
+        var reader = call.body_reader();
+        const name = reader.string() catch return send_error(conn, call, bad, "Bad name");
+        const sub = reader.string() catch return send_error(conn, call, bad, "Bad path");
+        if (sub.len != 0) return send_error(conn, call, bad, "Bad path");
+        const end = reader.array_begin(4) catch return send_error(conn, call, bad, "Bad pids");
+        const pid = reader.uint32() catch return send_error(conn, call, bad, "Bad pids");
+        if (reader.at != end) return send_error(conn, call, bad, "One pid");
+        for (&bus.scopes) |*scope| {
+            if (!scope.active or !std.mem.eql(u8, scope.name.slice(), name)) continue;
+            if (bus.active(conn).attach_error) |error_name| {
+                return send_error(conn, call, error_name, "Refused");
+            }
+            bus.attached = pid;
+            bus.attach_count += 1;
+            return send_return(conn, call, "", &.{});
+        }
+        send_error(conn, call, error_no_such_unit, "Unit is not loaded");
     }
 
     fn misbehave(bus: *Bus, conn: *Conn, call: *const message_mod.Message, how: Misbehaviour) void {

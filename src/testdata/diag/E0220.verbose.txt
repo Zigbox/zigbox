@@ -1,0 +1,9 @@
+error[ZBX-E0220]: the container is not running
+  while  looking for the container web-1
+  cause  the container web-1 is stopped: it exited with code 3
+  name   web-1
+  state  stopped
+  fix    see the containers and their states:   zbx ps --all
+         start it again, then exec into it:     zbx run -d --name web alpine -- sleep 1000
+  more   zbx explain E0220
+  docs   https://zigbox.github.io/zigbox/errors/E0220.html

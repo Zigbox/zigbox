@@ -1,0 +1,6 @@
+warning[ZBX-W0206]: the terminal was not logged
+  cause  this run's standard output and error went to a terminal, which zbx
+         leaves to the container, so it is not in the log
+  fix    run it detached, or with the output sent to a file or a pipe, to log it:   zbx run -d --name <name> <image>
+  more   zbx explain W0206 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0206.html

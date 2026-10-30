@@ -1,7 +1,7 @@
 FAIL kernel  unrecognised kernel release 'banana'  [ZBX-E0102]
 ok   userns  user.max_user_namespaces=63488, unshare(CLONE_NEWUSER) works
 ok   cgroup  cgroup v2, user@1000.service delegated to uid 1000: cpuset cpu io memory pids; systemd 255.4-1ubuntu8.4 on the user bus
-ok   overlay  overlayfs mounts inside a user and mount namespace
+ok   overlay  overlayfs mounts inside a user and mount namespace; id-mapped mounts of /: not allowed (zbx does not use them)
 ok   subid  alice (uid 1000): subuid 65536 ids, subgid 65536 ids; newuidmap: setuid root, newgidmap: setuid root
 ok   seccomp  seccomp is supported (current mode: disabled for this process)
 warn net  pasta not found: --net user and --publish need it (apt install passt)

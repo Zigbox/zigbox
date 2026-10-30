@@ -1,0 +1,5 @@
+error[ZBX-E0015]: not a valid --user value
+  cause  --user 'a:b:c': a user is USER or USER:GROUP, with one colon
+  fix    give a user of the image, by name or number:   zbx run --user 0 python:3.12-slim -- id
+  more   zbx explain E0015 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0015.html
