@@ -189,3 +189,142 @@ files first). Tested in `runtime/logs_tests.zig`.
 - Fuzzer `logs` at 10,000 iterations.
 - The VM: the `LOGS` part of `demo-m6` (`logs_m6.zig`, `checks_logs_m6.zig`), temporary until
   slice 4 moves it to `demo-m6b`.
+
+## Slice 3: `zbx exec`
+
+`zbx exec NAME [-e NAME[=VALUE]] [--user USER[:GROUP]] [--workdir DIR] -- COMMAND...`, the
+library's `exec_start`/`exec_wait` (`runtime/exec.zig`, exported by `zigbox.zig`), codes `E0220`
+to `E0224` and `W0207`, schema `zbx.exec` (`zbx schema exec`), and the exec history beside the
+log. The run record is unchanged (still version 8).
+
+### How a command gets into a container (`runtime/exec_plan.zig`)
+
+Three processes, all single-threaded, nothing allocated or formatted after the first fork:
+
+1. **zbx** finds the container by name from its run record and checks it runs (its PID 1 alive,
+   its innermost pid 1, in its scope: `lifecycle.alive`). It reads the container's environment
+   from `/proc/<pid>/environ`, and for `--user` the container's `/etc/passwd` and `/etc/group`
+   through `/proc/<pid>/root`. It opens `/proc/<pid>/ns/{user,ipc,uts,net,pid,mnt}` (a namespace
+   that is zbx's own, the network of a `--net host` container, is not joined: joining it would
+   need a privilege the user lacks) and, with a terminal, a pseudo-terminal of the container's
+   own devpts (`/proc/<pid>/root/dev/pts/ptmx`, so `tty` names it inside; the host's `/dev/ptmx`
+   if the container has none). Then it forks the joiner.
+2. **The joiner** joins, in this order: **user** first (zbx made it, so joining needs no
+   privilege; it gives the joiner every capability inside it, which the others need, since the
+   container's user namespace owns them all: EPERM otherwise, which the simulator enforces),
+   then **IPC, UTS, network, PID**, and **mount last** (`setns` of a mount namespace sets the
+   root and the working directory to the namespace's, so every path after it is the
+   container's; the namespace files were opened before for that reason). Joining a PID
+   namespace changes only where children are born, so the joiner forks the command with
+   `CLONE_PARENT`: the command is zbx's child, born in the container's PID namespace, and zbx
+   waits for it directly. The joiner writes the command's host pid on the report pipe and ends.
+3. **The command** asks to die with zbx, then waits for the go-ahead. Meanwhile zbx reaps the
+   joiner and **puts the command in the container's cgroup**: with systemd, the user manager
+   moves it into the scope (`AttachProcessesToUnit`, systemd 238; moving a process needs write
+   access to the cgroup above both where it is and where it goes, and a login session and the
+   manager's `app.slice` meet only in a cgroup root owns, so the manager does it, asking the
+   system manager when it must); with the cgroupfs driver (the macOS VM), zbx writes its pid to
+   the container's `cgroup.procs`. Only then the go-ahead: nothing the command does happens
+   outside the container's limits. The command then takes the terminal (its own session, the
+   peer as its controlling terminal and three streams), enters the working directory, closes
+   every descriptor above 2 at exec, **drops to the container's capability set** (the bounding,
+   effective, permitted and inheritable sets, `policy/capabilities.zon`, and the ambient set
+   emptied), becomes the user (and asks again to die with zbx, which a change of user clears),
+   **sets `no_new_privs`**, **loads the container's seccomp filter** (the same program), and
+   `execve`s. This is the order the brief gives; the kernel needs the capabilities dropped while
+   CAP_SETPCAP is held and the user taken while CAP_SETUID is, and the filter last.
+
+A failed step of any of the three is one record on the report pipe naming the step, and zbx
+builds the diagnostic, kills and reaps what it started, closes every descriptor and puts its
+terminal back (the simulator test fails each step of the longest plan in turn and checks all of
+that, and the `exec` fuzzer does the same at random).
+
+### What the command has
+
+- **Environment**: the container's (its PID 1's, as it was started: the defaults, the image's,
+  the run's `-e`), with each `-e` of the exec replacing the variable of its name, and TERM (the
+  caller's) added only for a terminal when the container has none. A value is never kept or
+  printed.
+- **Working directory**: the container's PID 1's (`/proc/1/cwd`, followed inside the
+  container), which is the image's or the run's unless PID 1 moved; `--workdir DIR` replaces it.
+  It must exist: exec makes nothing in a running container (`E0223`).
+- **User**: the run's (the record's `.user`; root for a record older than version 8); `--user`
+  looks the name up in the container's own files (`E0216` names the container). A container
+  with only root mapped refuses another user (`E0523`, naming `--user`).
+- **Streams**: with a terminal on zbx's standard input *and* output, a pseudo-terminal sized as
+  zbx's (`TIOCGWINSZ`, `TIOCSWINSZ`), resized on SIGWINCH, zbx's terminal raw while it runs and
+  put back on every path; zbx copies the keys to it and its output to zbx's. Otherwise the
+  command's streams are zbx's own. The command's output is not in the container's log.
+- **Signals**: INT, TERM, HUP and QUIT that zbx receives are passed to the command as they are
+  (it is not a PID 1, so a signal it has no handler for acts on it); a flood past 1024 kills it.
+  A run's wait now has SIGWINCH blocked too, and drops it.
+- **Exit code**: the command's own, or 128 plus its signal; zbx's own failures are 125, and 126
+  or 127 for a command that cannot run or is not there (`E0202`), as for `run`. `--output json`
+  ends with `{"exec_exit":{"container":...,"reason":"exited"|"signal","code":N,
+  "container_ended":bool}}` (and `"signal"`) on stderr.
+- **Lifetime**: the command is in the container's PID namespace, so when PID 1 ends the kernel
+  kills it; zbx reaps it (137) and, when the container's PID 1 is gone, says
+  `zbx: exec: the container NAME ended, and the command with it` (`container_ended` in JSON).
+  A SIGKILL of zbx kills the command (`PR_SET_PDEATHSIG`).
+
+### Not a container: the history
+
+`ps` lists records and scopes, and an exec has neither. Each exec appends one line to
+`<state>/zbx/logs/<name>.exec` when it ends (`runtime/exec_history.zig`): start, end, exit and
+the command, quoted; never the environment. At most 16 are kept, oldest dropped; an append
+takes `<name>.exec.lock` (`flock`) and rewrites the file atomically, so two execs ending together
+keep both. It is removed with the record (prune) and when a run takes the name again. `zbx
+bundle` of the container adds `execs.txt` (redacted like every file). A history that cannot be
+written is `W0207`; the command ran.
+
+### Codes
+
+`E0220` the container is not running (names its state: stopped and how, or lost), `E0221` can't
+join (environment, a namespace, the fork into the PID namespace), `E0222` can't put the command
+in the cgroup (the manager's or the kernel's answer), `E0223` the working directory is not there,
+`E0224` can't give the command a terminal, `W0207` the history not written. Reused with the same
+meaning: `E0402` (no such container), `E0202`, `E0207`, `E0208`, `E0216`, `E0523`, `E0005` (a
+`--workdir` that is not absolute or has `..`), `E0008`, `E0010`, `E0011`, `E0015`. The error
+pages of the exec-only codes give their exit code as "125 in zbx exec"; the shared codes' pages
+still say "in zbx run" (an exec ends with the same code).
+
+### The library
+
+`zigbox.exec_start(host, &spec, options, &handle, &diag)` and `exec_wait(&handle)`, an
+`ExecHandle` of the caller's (under 640 KiB: the plan, the container's environment and passwd
+and group files, the history's room), no module-level state. The thread that starts it must be
+the process's only thread then (namespaces are joined in a forked child), and must be the one
+that waits. `ExecSpec.terminal` is the caller's choice; Zigcube's agent leaves it off.
+
+### Deviations and cuts
+
+- **The working directory is PID 1's, not a stored one.** Keeping the run's working directory in
+  the record (a version 9) was built and taken out: its worst case (1024 bytes, each escaped to
+  four) does not fit the record's 64 KiB bound with the rest. PID 1's own directory is the run's
+  unless PID 1 changed it; `--workdir` covers the rest.
+- **The environment is PID 1's environ**: what it was started with, not what it set later.
+- No `-i`/`-t` flags: the terminal follows zbx's own streams, as `zbx run`'s does.
+- A SIGKILL of zbx leaves no history entry (the command dies with it).
+- The death signal is asked for again after the change of user; zbx dying in the instant between
+  the two leaves the command to finish by itself in the container.
+- Cut: the Mac forwards `exec` in slice 6.
+
+### What was checked
+
+- Unit and simulation tests: `exec_plan.zig` (order, counts, environment, bounds),
+  `exec_history.zig` (round trip, damage, bounds), `exec_tests.zig` (every namespace joined, the
+  cgroup joined before the command ran with the bus and the cgroupfs driver, the hardening,
+  environment, user, directory, a stopped and a missing container, death with the container,
+  the terminal with keys, output and a resize, every failed step, the history and `-e`),
+  `sync.zig`, the CLI (parsing and refusals, exit codes, `exec_exit`), `bundle_tests.zig` (the
+  execs noted, a `-e` value in no byte), goldens and pages for the six codes, the schema.
+- Fuzzers at 10,000 iterations: `exec` (new) and `cli`.
+- By hand in the cloud container (root, no user bus, so no scope, kernel 6.18), against an
+  Alpine minirootfs, `run -d` then `exec`: the namespaces and hardening (`CapEff
+  00000000a00405fb`, `NoNewPrivs 1`, `Seccomp 2`, the container's hostname, `ps` showing its PID
+  1), exit 42 passed through, `unshare -U` and `mount` refused as in the container, `-e`,
+  `--workdir`, 127 for a missing command, `E0223`, a terminal under `script` with its size and
+  `tty` naming `/dev/pts/0`, SIGTERM forwarded (143), the command killed with its container (137
+  and the line), `E0220` after the stop, and the history file. The VM is the real check.
+- The VM: the `EXEC` part of `demo-m6` (`exec_m6.zig`, `checks_exec_m6.zig`), temporary until
+  slice 4 moves it to `demo-m6b`.
