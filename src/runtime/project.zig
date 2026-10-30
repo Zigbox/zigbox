@@ -55,6 +55,11 @@ comptime {
     // A link's target and the path after it can each be the longest path.
     assert(rest_bytes_max >= constants.path_bytes_max + 1 + constants.path_bytes_max);
     assert(constants.path_resolve_steps_max > constants.symlinks_followed_max);
+    // Every step consumes a name and its separator, of a path or of a link's target: at most
+    // half the longest path of each, so the bound is never what ends a path that is not a loop.
+    const names_per_path = constants.path_bytes_max / 2 + 1;
+    const paths = constants.symlinks_followed_max + 1;
+    assert(constants.path_resolve_steps_max >= paths * names_per_path);
 }
 
 /// Resolves `input` (absolute, or relative to `base`, which is absolute and has no link in it)
@@ -301,4 +306,27 @@ test "the project directory is the one with the nearest zbx.lock, else the worki
         error.NotFound,
         directory(sim.interface(), files.interface(), "/home/alice/none", &path),
     );
+}
+
+test "forty links each leading through two thousand parts resolve; a forty-first does not" {
+    // Goal: the resolver's step bound (`path_resolve_steps_max`) is generous for what is allowed
+    // and the link bound is exact. Method: a chain of links whose targets are about 2000 `./`
+    // parts and then the next link: forty of them end in a directory, one more is a loop.
+    tree();
+    var dots: [2000]u8 = undefined;
+    for (&dots, 0..) |*byte, at| byte.* = if (at % 2 == 0) '.' else '/';
+    var from: [16]u8 = undefined;
+    var target: [dots.len + 16]u8 = undefined;
+    for (0..constants.symlinks_followed_max + 1) |index| {
+        const name = try std.fmt.bufPrint(&from, "/m{d}", .{index});
+        const text = try std.fmt.bufPrint(&target, "{s}m{d}", .{ &dots, index + 1 });
+        files.put_symlink(name, text);
+    }
+    var last: [16]u8 = undefined;
+    const end = try std.fmt.bufPrint(&last, "/m{d}", .{constants.symlinks_followed_max + 1});
+    files.put_dir(end, 0o755);
+    const forty = try resolved("/", "m1"); // m1 to m40 are links: forty of them.
+    defer testing.allocator.free(forty);
+    try testing.expectEqualStrings(end, forty);
+    try testing.expectError(error.Loop, resolved("/", "m0")); // Forty-one.
 }

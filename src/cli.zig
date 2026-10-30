@@ -4029,3 +4029,16 @@ test "parse: --publish at its bound of sixteen, and one past it" {
     const refused = try parse_case(args[0 .. over + 2], &invocation);
     try testing.expectEqual(@as(?codes.Code, .E0600), refused);
 }
+
+test "a --user value is held to its bound, and to USER or USER:GROUP" {
+    // Goal: `user_value_bytes_max` is the longest value, at the bound and one past (REVIEW.md),
+    // and the forms are Docker's. Method: 256 bytes, 257 bytes, and one value per rule.
+    const at_bound: [constants.user_value_bytes_max]u8 = @splat('u');
+    const past: [constants.user_value_bytes_max + 1]u8 = @splat('u');
+    try testing.expect(user_problem(&at_bound) == null);
+    try testing.expect(user_problem(&past) != null);
+    const good = [_][]const u8{ "0", "1000", "app", "app:staff", "1000:1000", "www-data:7" };
+    for (good) |value| try testing.expect(user_problem(value) == null);
+    const bad = [_][]const u8{ "", ":", "a:", ":b", "a:b:c", "a b", "a\tb", "a\x7f", "::" };
+    for (bad) |value| try testing.expect(user_problem(value) != null);
+}

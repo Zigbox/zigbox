@@ -361,7 +361,9 @@ comptime {
     // fixed text and numbers. It must fit.
     const strings = 4 * (constants.container_name_bytes_max + constants.rootfs_bytes_max + 64);
     const command = 4 * constants.record_command_bytes_max + 8 * constants.command_words_count_max;
-    const label_bytes = 4 * (constants.label_key_bytes_max + constants.label_value_bytes_max);
+    // A label's key is printable ASCII, so at most two bytes each (a quote or a backslash); its
+    // value may be any byte, four escaped.
+    const label_bytes = 2 * constants.label_key_bytes_max + 4 * constants.label_value_bytes_max;
     const labels = constants.labels_count_max * (label_bytes + 16);
     const diagnostic = 4 * constants.diag_json_bytes_max + 32;
     const scope = 4 * constants.scope_name_bytes_max + 160; // The name and the version 2 lines.
@@ -369,8 +371,17 @@ comptime {
     const store = 4 * store_strings + 64;
     const network = constants.publish_count_max * 16 +
         4 * constants.run_env_count_max * (constants.env_name_bytes_max + 4) + 128;
-    const state = 4 * state_text_bytes_max + 32;
-    const total = strings + command + labels + diagnostic + scope + store + network + state + 512;
+    // A volume's name is lowercase letters, digits and `._-`: never escaped. Its target is any
+    // byte, four escaped, and `:ro` follows.
+    const state_target = 4 * constants.state_target_bytes_max;
+    const state_value = constants.state_name_bytes_max + 1 + state_target + 3;
+    const state = constants.state_volumes_max * (state_value + 1) + 32;
+    // Version 7's other mounts and version 8's user: every byte of the mounts' text escaped to
+    // four, and `.user = "4294967295:4294967295",` with its name and newline.
+    const mounts = 4 * mounts_text_bytes_max + 32;
+    const user = 48;
+    const total = strings + command + labels + diagnostic + scope + store + network + state +
+        mounts + user + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -1997,4 +2008,131 @@ test "version 8 keeps the user and the writable mounts; a version 7 record reads
     try testing.expectEqual(@as(?spec_mod.User, null), parsed.user);
     try testing.expectEqual(@as(u8, 2), parsed.mounts_count);
     try testing.expectEqual(@as(u8, 1), parsed.state_count);
+}
+
+/// The longest of everything a record holds, in storage the caller keeps: strings of bytes the
+/// writer escapes to four (0xff), the most labels, forwards, names, volumes and mounts.
+const Worst = struct {
+    name: [constants.container_name_bytes_max]u8,
+    rootfs: [constants.rootfs_bytes_max]u8,
+    word: [constants.record_command_bytes_max / 4]u8,
+    command: [5][]const u8,
+    key: [constants.label_key_bytes_max]u8,
+    value: [constants.label_value_bytes_max]u8,
+    labels: [constants.labels_count_max]Label,
+    publish: [constants.publish_count_max]spec_mod.Publish,
+    env_storage: [constants.run_env_count_max][constants.env_name_bytes_max]u8,
+    env_names: [constants.run_env_count_max][]const u8,
+    targets: [constants.mounts_max + constants.state_volumes_max][constants.mount_path_bytes_max]u8,
+    sources: [constants.mounts_max][constants.mount_path_bytes_max]u8,
+    state_names: [constants.state_volumes_max][constants.state_name_bytes_max]u8,
+    state: [constants.state_volumes_max]volume.Mount,
+    extra: [constants.mounts_max]mounts_mod.Mount,
+    diagnostic: [constants.diag_json_bytes_max]u8,
+    version: [64]u8,
+    scope: [constants.scope_name_bytes_max]u8,
+    tree: [constants.store_digest_text_bytes]u8,
+    upper: [constants.containers_path_bytes_max]u8,
+
+    fn fill(worst: *Worst) void {
+        worst.name = @splat('n');
+        worst.rootfs = @splat(0xff);
+        worst.word = @splat(0xff);
+        worst.command = @splat(&worst.word);
+        worst.key = @splat('k');
+        worst.value = @splat(0xff);
+        for (&worst.labels) |*label| label.* = .{ .key = &worst.key, .value = &worst.value };
+        for (&worst.publish, 0..) |*forward, at| {
+            forward.* = .{ .host = @intCast(65535 - at), .container = @intCast(65535 - at) };
+        }
+        for (&worst.env_names, 0..) |*name, at| {
+            worst.env_storage[at] = @splat('E');
+            worst.env_storage[at][0] = 'A' + @as(u8, @intCast(at));
+            name.* = &worst.env_storage[at];
+        }
+        // Paths of 256 bytes made of 0xff parts, apart from each other by their first part.
+        for (&worst.targets, 0..) |*target, at| {
+            target.* = @splat(0xff);
+            target[0] = '/';
+            target[1] = 'a' + @as(u8, @intCast(at));
+            target[2] = '/';
+        }
+        for (&worst.sources) |*source| {
+            source.* = @splat(0xff);
+            source[0] = '/';
+        }
+        for (&worst.state, 0..) |*mount, at| {
+            worst.state_names[at] = @splat('v');
+            worst.state_names[at][0] = 'a' + @as(u8, @intCast(at));
+            const target = &worst.targets[at];
+            mount.* = .{ .name = &worst.state_names[at], .target = target, .read_only = true };
+        }
+        for (&worst.extra, 0..) |*mount, at| {
+            mount.* = .{
+                .kind = .mount,
+                .source = &worst.sources[at],
+                .target = &worst.targets[constants.state_volumes_max + at],
+                .size_bytes = 0,
+            };
+        }
+        worst.diagnostic = @splat(0xff);
+        worst.version = @splat(0xff);
+        worst.scope = @splat('s');
+        worst.tree = @splat(0xff);
+        worst.upper = @splat(0xff);
+    }
+
+    fn view(worst: *const Worst) View {
+        const most: u32 = std.math.maxInt(u32);
+        return .{
+            .name = &worst.name,
+            .rootfs = &worst.rootfs,
+            .command = &worst.command,
+            .labels = &worst.labels,
+            .started = std.math.maxInt(u64),
+            .ended = std.math.maxInt(u64),
+            .exit = .{ .start_failed = .E0205 },
+            .ids = .full,
+            .zbx_version = &worst.version,
+            .diagnostic = &worst.diagnostic,
+            .limits = .{ .memory_bytes = std.math.maxInt(u64), .pids = most, .cpu_millis = most },
+            .scope = &worst.scope,
+            .detached = true,
+            .timed_out = true,
+            .pid = most,
+            .supervisor = most,
+            .tree = &worst.tree,
+            .upper = &worst.upper,
+            .network = .user,
+            .publish = &worst.publish,
+            .env_names = &worst.env_names,
+            .state = &worst.state,
+            .mounts = &worst.extra,
+            .user = .{ .uid = most, .gid = most },
+        };
+    }
+};
+
+var worst_record: Worst = undefined;
+
+test "a record with every field at its bound renders whole and reads back" {
+    // Goal: `record_bytes_max` holds the largest record (REVIEW.md: every bound is tested at the
+    // bound). Method: `Worst`, the longest of every string made of bytes the writer escapes to
+    // four, with every list full and the largest ids; the text must fit the buffer, end whole,
+    // and parse back with every list full.
+    worst_record.fill();
+    const view = worst_record.view();
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    @memset(&buffer, 0xAA); // Not undefined: a stale byte must not pass for a result.
+    const text = render(&view, &buffer);
+    try testing.expect(text.len < constants.record_bytes_max);
+    try testing.expect(std.mem.endsWith(u8, text, "}\n"));
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(@as(u8, constants.mounts_max), parsed.mounts_count);
+    try testing.expectEqual(@as(u8, constants.state_volumes_max), parsed.state_count);
+    try testing.expectEqual(@as(u8, constants.labels_count_max), parsed.labels_count);
+    try testing.expectEqual(@as(u8, constants.publish_count_max), parsed.publish_count);
+    try testing.expectEqual(@as(u8, constants.run_env_count_max), parsed.env_names_count);
+    try testing.expectEqual(@as(?spec_mod.User, view.user), parsed.user);
 }

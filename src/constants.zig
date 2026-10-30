@@ -399,7 +399,11 @@ pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
 pub const record_version: u32 = 8;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
-pub const record_bytes_max: u32 = 52 * 1024;
+pub const record_bytes_max: u32 = 64 * 1024;
+// Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
+comptime {
+    assert(record_bytes_max <= file_bytes_max);
+}
 pub const record_command_bytes_max: u32 = 2048;
 pub const labels_count_max: u32 = 8;
 pub const label_key_bytes_max: u32 = 32;

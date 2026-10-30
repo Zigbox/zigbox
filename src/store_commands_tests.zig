@@ -9,6 +9,7 @@ const constants = @import("constants.zig");
 const host_sim = @import("host_sim.zig");
 const schemas = @import("schemas.zig");
 const store_commands = @import("store_commands.zig");
+const mounts_mod = @import("runtime/mounts.zig");
 const sim_run = @import("runtime/sim_run.zig");
 const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
@@ -411,6 +412,46 @@ test "commit prints the new digest, records the root, and diff lists what change
     const parent_stored = try stored_bytes(parent);
     const child_stored = try stored_bytes(child);
     try testing.expect(child_stored < parent_stored);
+}
+
+test "a commit leaves out a --mount's target and what is below it, and keeps its neighbours" {
+    // Goal: M6b's rule that a writable mount point is never in `zbx commit`, as --bind's and
+    // --secret's are not. Method: a record that names a `--mount` at /srv (its resolved host path
+    // below the project) and a `--bind`; the upper layer holds the mount point, a file written
+    // into the mounted directory, a neighbour whose name starts the same (/srvx), and one real
+    // change. The diff holds the real change and the neighbour, not /srv.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const parent = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(parent);
+    const mounts = [_]mounts_mod.Mount{
+        .{ .kind = .mount, .source = "/home/alice/proj/site", .target = "/srv", .size_bytes = 0 },
+        .{ .kind = .bind, .source = "/home/alice/ro", .target = "/ro", .size_bytes = 0 },
+    };
+    var view = sim_run.sample_view("web-1", 1000);
+    view.tree = parent;
+    view.upper = "/upper";
+    view.mounts = &mounts;
+    sim_run.put_record(&sim, &view);
+    files.put_dir("/upper", 0o755);
+    files.put_dir("/upper/srv", 0o755);
+    files.put_file("/upper/srv/made-inside.txt", 0o644, "x\n");
+    files.put_dir("/upper/srvx", 0o755);
+    files.put_file("/upper/srvx/keep", 0o644, "y\n");
+    files.put_file("/upper/new.txt", 0o644, "added\n");
+    sim.world.now = 5_000;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "commit", "web-1" }));
+    const child = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(child);
+    var first: [80]u8 = undefined;
+    var second: [80]u8 = undefined;
+    const args = [_][:0]const u8{ "store", "diff", term(&first, parent), term(&second, child) };
+    try testing.expectEqual(@as(u8, 0), try command(&args));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "A /new.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "/srvx") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "/srv/") == null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "made-inside") == null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "A /srv\n") == null);
 }
 
 test "commit --output json has the schema's keys, and an unchanged commit writes no root" {
