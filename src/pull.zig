@@ -33,6 +33,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const blobs_mod = @import("registry/blobs.zig");
 const client_mod = @import("registry/client.zig");
+const codes = @import("diag/codes.zig");
 const config_mod = @import("registry/config.zig");
 const constants = @import("constants.zig");
 const diagnose = @import("registry/diagnose.zig");
@@ -403,7 +404,18 @@ pub fn read_report(
             .failure => |payload| {
                 failed = true;
                 if (code == constants.exit_ok) break;
-                if (diag.decode(payload)) return error.Failed;
+                // Nothing may follow a failure: bytes after it are a damaged report, as after a
+                // result, and the child's word is not taken from such a report.
+                _ = reader.next() catch {
+                    report_failed(diag, .damaged, code);
+                    return error.Failed;
+                };
+                if (diag.decode(payload)) {
+                    // The writer sends the diagnostic that ended the child, never a warning or a
+                    // note; one that is not an error is damage that happens to decode.
+                    const severity = codes.entry(diag.code.?).severity;
+                    if (severity == .@"error" or severity == .bug) return error.Failed;
+                }
                 diag.reset();
                 report_failed(diag, .failure_unreadable, code);
                 return error.Failed;
@@ -572,7 +584,6 @@ fn fetch_all(
 // ---- Tests ---------------------------------------------------------------------------------
 
 const testing = std.testing;
-const codes = @import("diag/codes.zig");
 
 const Seen = struct {
     warnings: u32 = 0,
@@ -671,6 +682,26 @@ test "read_report: a failure with a non-zero exit is the child's own diagnostic"
     try testing.expectEqual(@as(?Error, error.Failed), err);
     try testing.expectEqual(@as(?codes.Code, .E0515), diag.code);
     try testing.expectEqual(@as(u32, 1), seen.warnings);
+}
+
+test "read_report: a failure is believed only when it is an error and ends the report" {
+    // Goal: the first record of a report whose kind byte was damaged from warning to failure is
+    // not taken for the child's word (found by the pull_report fuzzer, seed
+    // 12862358659054011226). Method: a real warning report with its kind byte set to failure and
+    // records after it; the same cut after that record, a failure that is only a warning; and a
+    // real failure with a byte after it. All are refused as E0419 with a cause.
+    var buffer: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    const whole = build_report(&buffer, 2, .result);
+    var altered: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    @memcpy(altered[0..whole.len], whole);
+    altered[0] = @backingInt(report_mod.Kind.failure);
+    try expect_worker_refused(15, altered[0..whole.len], "damaged report");
+    const first_end = constants.pull_report_header_bytes + (whole[1] | @as(usize, whole[2]) << 8);
+    try expect_worker_refused(15, altered[0..first_end], "cannot be read");
+    var failing: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    const failure = build_report(&failing, 0, .failure);
+    failing[failure.len] = 1;
+    try expect_worker_refused(15, failing[0 .. failure.len + 1], "damaged report");
 }
 
 test "read_report: every other ending is a specific refusal of the worker" {
