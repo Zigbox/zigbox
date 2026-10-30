@@ -86,7 +86,7 @@ pub fn signature_of(output: []const u8, exit_code: ?u8) Signature {
 }
 
 fn executable_path(buffer: *[constants.vm_path_bytes_max:0]u8) ?[:0]const u8 {
-    assert(buffer.len == constants.vm_path_bytes_max + 1);
+    assert(buffer.len == constants.vm_path_bytes_max); // The sentinel is past `len`.
     var size: u32 = constants.vm_path_bytes_max;
     if (_NSGetExecutablePath(buffer, &size) != 0) return null;
     return std.mem.sliceTo(buffer, 0);
@@ -477,4 +477,33 @@ test "golden: the macOS doctor's report, healthy and failing, as text and as JSO
     try std.testing.expect(!healthy.failed());
     try std.testing.expect(failing.failed());
     try std.testing.expectEqual(Status.fail, failing.checks[0].status);
+}
+
+test "the doctor runs every check on this machine without a panic" {
+    // Goal: the checks' own assertions hold on a real machine (one of them did not, and the
+    // released doctor ended in B0001 on every run). Method: all six checks against a home
+    // directory of the test's own, with no machine running; each leaves a detail, and the
+    // binary's path is absolute.
+    var storage: [constants.vm_path_bytes_max:0]u8 = undefined;
+    const path = executable_path(&storage).?;
+    try std.testing.expect(path.len > 1);
+    try std.testing.expectEqual(@as(u8, '/'), path[0]);
+    var home: [96]u8 = undefined;
+    const base = try std.fmt.bufPrint(&home, "/tmp/zbx-doctor-test-{d}", .{files.now_ms()});
+    var paths: @import("paths.zig").Paths = .{};
+    try paths.init(base, image.version);
+    try files.make_directories(paths.base.slice());
+    const ctx: commands.Context = .{
+        .paths = &paths,
+        .json = false,
+        .mode = .text,
+        .color = false,
+    };
+    var report: Report = .{};
+    inspect(&ctx, 8, &report);
+    for (&report.checks) |*check| {
+        try std.testing.expect(check.detail_length > 0);
+        if (check.status != .ok) try std.testing.expect(check.diag.code != null);
+    }
+    try std.testing.expectEqual(Status.ok, report.checks[@backingInt(Id.vm)].status);
 }
