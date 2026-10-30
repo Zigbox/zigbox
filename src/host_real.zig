@@ -77,6 +77,10 @@ pub const HostReal = struct {
     child_hook: ?*const fn () noreturn = null,
     /// The process environment, for NO_COLOR. Empty unless `main` provides it.
     environ: std.process.Environ = .empty,
+    /// The memory the real network works in (`host_real_net.Memory`, about 2.4 MiB): the caller's,
+    /// set before the first request and initialised with `Memory.init`. Null for a host that
+    /// makes none, which asserts if it does.
+    network_memory: ?*host_real_net.Memory = null,
 
     pub fn interface(self: *HostReal) host.Host {
         return .{ .context = self, .vtable = &vtable };
