@@ -7,7 +7,7 @@
 //!
 //! When this process dies, by any signal, the connection closes and the guest treats that as a
 //! hangup of the command. When the connection dies first, this process says so (E1009) and ends
-//! with 125 if the command was a `run`.
+//! with 125 if the command was a `run` or an `exec`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -154,7 +154,7 @@ fn ask_host(ctx: *const commands.Context) ?i32 {
 pub const Command = struct {
     words: []const []const u8,
     json: bool,
-    /// A `run` ends with 125 when this process loses the connection; anything else with 2.
+    /// A `run` or an `exec` ends with 125 when this process loses the connection; else with 2.
     is_run: bool,
 };
 

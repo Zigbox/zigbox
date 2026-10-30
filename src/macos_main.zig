@@ -52,7 +52,7 @@ const help_text =
     \\
     \\commands that run in the machine, with the options, output, exit codes and JSON of the
     \\Linux zbx (the machine's zbx is the same program):
-    \\  run, ps, stop, commit, store, state, lock, pull, bundle, doctor
+    \\  run, ps, stop, commit, store, state, lock, pull, bundle, logs, exec, doctor
     \\  for example: zbx run alpine -- cat /etc/os-release
     \\  The command line, the working directory, the terminal (with its size), standard input,
     \\  output and error, and these signals are forwarded: INT, TERM, HUP, QUIT. If zbx dies,
@@ -132,7 +132,7 @@ const Invocation = struct {
 
 /// The Linux `zbx` commands: forwarded into the VM, whole, to the zbx that runs there.
 const linux_commands = [_][]const u8{
-    "run", "ps", "stop", "commit", "store", "state", "lock", "pull", "bundle",
+    "run", "ps", "stop", "commit", "store", "state", "lock", "pull", "bundle", "logs", "exec",
 };
 
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -209,16 +209,27 @@ fn forward_command(words: []const []const u8, invocation: *const Invocation, dia
         .mode = invocation.mode(),
         .color = false,
     };
-    var is_run = false;
-    for (words) |word| {
-        if (std.mem.startsWith(u8, word, "-")) continue;
-        is_run = std.mem.eql(u8, word, "run");
-        break;
-    }
+    const is_run = runs_container(words);
     const command: forward.Command = .{ .words = words, .json = invocation.json, .is_run = is_run };
     return forward.run(&context, &command, diag) catch {
         return fail_in(diag, invocation, if (is_run) .container_run else .standard);
     };
+}
+
+/// True if the command is a `run` or an `exec`, which end with 125 when zbx or the machine
+/// failed. The command is the first operand: past the global options and the value of `--output`.
+fn runs_container(words: []const []const u8) bool {
+    assert(words.len <= constants.args_count_max);
+    var index: usize = 0;
+    while (index < words.len) : (index += 1) {
+        const word = words[index];
+        if (std.mem.eql(u8, word, "--output")) {
+            index += 1;
+        } else if (!std.mem.startsWith(u8, word, "-")) {
+            return std.mem.eql(u8, word, "run") or std.mem.eql(u8, word, "exec");
+        }
+    }
+    return false;
 }
 
 fn fail(diag: *Diag, invocation: *const Invocation) u8 {
@@ -628,4 +639,17 @@ test {
     _ = @import("vm_guest_storage.zig");
     _ = @import("schemas.zig");
     _ = @import("mac/vm_golden.zig");
+}
+
+test "run and exec end with 125, whatever global options come before them" {
+    // Goal: the exit scope of a forwarded command. Method: each command, with and without
+    // `--output json` and `-v` before it.
+    try std.testing.expect(runs_container(&.{ "run", "alpine" }));
+    try std.testing.expect(runs_container(&.{ "exec", "web", "--", "sh" }));
+    try std.testing.expect(runs_container(&.{ "--output", "json", "exec", "web", "--", "sh" }));
+    try std.testing.expect(runs_container(&.{ "-v", "--output=json", "run", "alpine" }));
+    try std.testing.expect(!runs_container(&.{ "logs", "web" }));
+    try std.testing.expect(!runs_container(&.{ "--output", "json", "logs", "web" }));
+    try std.testing.expect(!runs_container(&.{ "--output", "json" }));
+    try std.testing.expect(!runs_container(&.{ "pull", "run" }));
 }

@@ -1,4 +1,5 @@
-//! `zig build demo-mac`: the milestone demos M1 to M4 and steps 2 to 4 of M4b, driven from macOS
+//! `zig build demo-mac`: the milestone demos M1 to M4, steps 2 to 4 of M4b and the five steps of
+//! M6b (with `exec` and `logs` on a terminal, with signals and exit codes), driven from macOS
 //! through the macOS `zbx`, which runs them in its virtual machine. Each step is one shell
 //! command line with what it must print and how it must end; the steps are the ones the Linux
 //! demos check (docs/demos/m1.md to m4.md), taken by number, so a step that passes on Linux and
@@ -170,6 +171,117 @@ pub const steps = [_]Step{
             "echo STILL-OPEN || echo closed",
         .stdout_has = &.{ "Welcome to nginx", "closed" },
         .stdout_lacks = &.{"STILL-OPEN"},
+    },
+    // ---- M6b: the dev loop (docs/demos/m6b.md): the spec's five steps, then what the Mac adds ---
+    // The project is `$W/m6b-project`, which holds its own zbx.lock, so `../outside-spec` is
+    // outside it but inside the home. `web` serves `./site` on the Mac's port 8000.
+    .{
+        .id = "m6b.1",
+        .what = "run -d serves ./site on 8000 (python's http.server), and exec sees it listen",
+        .line = "mkdir -p $W/m6b-project && cd $W/m6b-project && " ++
+            "($Z stop web >/dev/null 2>&1; rm -rf site ../outside-spec zbx.lock; true) && " ++
+            "mkdir site ../outside-spec && echo first-SIGMA > site/index.html && " ++
+            // The project holds its own lock, so that a zbx.lock higher up (the home's) is not it.
+            "printf '.{\\n    .version = 1,\\n    .images = .{},\\n}\\n' > zbx.lock && " ++
+            "$Z pull python:3.12-slim >/dev/null && $Z pull alpine:3.20 >/dev/null && " ++
+            "$Z run -d --name web --publish 8000:8000 --mount ./site:/srv python:3.12-slim " ++
+            "-- python -m http.server -d /srv 8000 >/dev/null && i=0 && " ++
+            "until $Z exec web -- python -c " ++
+            "'import socket; socket.create_connection((\"127.0.0.1\", 8000)).close()' " ++
+            "</dev/null >/dev/null 2>&1; do i=$((i+1)); test $i -lt 90 || exit 9; sleep 1; done; " ++
+            "echo listening",
+        .stdout_has = &.{"listening"},
+    },
+    .{
+        .id = "m6b.2",
+        .what = "curl localhost:8000/index.html returns the page; after an edit on the Mac, the edit",
+        .line = "cd $W/m6b-project && curl -fsS http://localhost:8000/index.html && " ++
+            "echo second-SIGMA > site/index.html && curl -fsS http://localhost:8000/index.html",
+        .stdout_has = &.{ "first-SIGMA", "second-SIGMA" },
+    },
+    .{
+        .id = "m6b.3",
+        .what = "exec writes into the mount; the Mac user owns it, and nothing else is in site",
+        .line = "cd $W/m6b-project && " ++
+            "$Z exec web -- sh -c 'echo made-inside > /srv/new.txt' </dev/null && " ++
+            "ls -l site/new.txt && test \"$(stat -f %u site/new.txt)\" = \"$(id -u)\" && " ++
+            "test -z \"$(find site ! -user \"$(id -un)\" -print)\" && cat site/new.txt",
+        .stdout_has = &.{ "-rw-", "site/new.txt", "made-inside" },
+    },
+    .{
+        .id = "m6b.4",
+        .what = "logs web shows the two requests of step 2, and no others",
+        .line = "cd $W/m6b-project && l=$($Z logs web) && " ++
+            "n=$(echo \"$l\" | grep -c ' HTTP/1\\.') && " ++
+            "g=$(echo \"$l\" | grep -c '\"GET /index.html HTTP/1.1\" 200') && " ++
+            "test $n = 2 -a $g = 2 && echo two-requests",
+        .stdout_has = &.{"two-requests"},
+    },
+    .{
+        .id = "m6b.5",
+        .what = "a writable mount outside the project is ZBX-E0212, naming the rule, exit 125",
+        .line = "cd $W/m6b-project && $Z run --mount ../outside-spec:/x alpine:3.20 -- true",
+        .exit = 125,
+        .stderr_has = &.{ "ZBX-E0212", "outside the project" },
+    },
+    .{
+        .id = "m6b.5h",
+        .what = "a project outside the home is refused before the machine is asked (ZBX-E1013)",
+        .line = "mkdir -p /tmp/zbx-demo-mac-outside && cd /tmp/zbx-demo-mac-outside && " ++
+            "$Z logs web",
+        .exit = 1,
+        .stderr_has = &.{"ZBX-E1013"},
+    },
+    // Terminal, signals, exit codes and --follow across the vsock link.
+    .{
+        .id = "m6b.6",
+        .what = "exec's exit code is the command's, and a refusal of exec is 125",
+        .line = "cd $W/m6b-project && $Z exec web -- sh -c 'exit 7' </dev/null; c=$?; " ++
+            "$Z exec no-such-container -- true </dev/null; d=$?; echo codes=$c,$d",
+        .stdout_has = &.{"codes=7,125"},
+    },
+    .{
+        .id = "m6b.7",
+        .what = "SIGINT to zbx exec stops a foreground sleep 1000 within 2 s, exit 130",
+        .line = "cd $W/m6b-project; $Z exec web -- sleep 1000 </dev/null & p=$!; sleep 3; " ++
+            "kill -INT $p; s=$(date +%s); wait $p; c=$?; " ++
+            "test $(( $(date +%s) - s )) -le 2 && exit $c",
+        .exit = 130,
+    },
+    .{
+        .id = "m6b.8",
+        .what = "exec on a terminal gets a pseudo-terminal in the container",
+        .line = "cd $W/m6b-project && script -q /dev/null $Z exec web -- tty",
+        .stdout_has = &.{"/dev/pts/"},
+    },
+    .{
+        .id = "m6b.9",
+        .what = "logs --follow shows a detached container's output and ends 0 with it",
+        .line = "cd $W/m6b-project && n=fl$$ && " ++
+            "$Z run -d --name $n alpine:3.20 -- sh -c 'echo first-line; sleep 4; echo last-line' " ++
+            ">/dev/null && $Z logs --follow $n",
+        .stdout_has = &.{ "first-line", "last-line" },
+    },
+    .{
+        .id = "m6b.10",
+        .what = "SIGINT to zbx logs --follow ends it within 2 s, and the container goes on",
+        .line = "cd $W/m6b-project; $Z logs --follow web >/dev/null & p=$!; sleep 3; " ++
+            "kill -INT $p; s=$(date +%s); wait $p; c=$?; " ++
+            "test $(( $(date +%s) - s )) -le 2 && " ++
+            "$Z exec web -- true </dev/null && echo still-running; exit $c",
+        .exit = 130,
+        .stdout_has = &.{"still-running"},
+    },
+    .{
+        .id = "m6b.11",
+        .what = "stopping web frees port 8000 and exec into it is refused, exit 125",
+        .line = "cd $W/m6b-project && $Z stop web >/dev/null && sleep 1 && " ++
+            "(curl -sS -m2 http://localhost:8000/ >/dev/null 2>&1 && echo STILL-OPEN || " ++
+            "echo closed); $Z exec web -- true </dev/null",
+        .exit = 125,
+        .stdout_has = &.{"closed"},
+        .stdout_lacks = &.{"STILL-OPEN"},
+        .stderr_has = &.{"ZBX-E0220"},
     },
 };
 

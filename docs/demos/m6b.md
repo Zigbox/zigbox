@@ -76,7 +76,8 @@ ordinary user is normally refused. It is not asked when the overlay check fails.
 ### Mac
 
 The home directory is one owner over virtiofs, so writes land as the Mac user whatever the
-container user; the same rule is kept anyway (one behaviour on both platforms).
+container user; the same rule is kept anyway (one behaviour on both platforms). Slice 6 runs it
+from macOS (see "The Mac" at the end).
 
 ### What was checked
 
@@ -178,7 +179,7 @@ files first). Tested in `runtime/logs_tests.zig`.
   fails as it did before.
 - A record's time is seconds (the host interface has no wall clock in milliseconds).
 - `E0402` (no such container) is reused for an unknown name.
-- Cut: the Mac forwards `logs` in slice 6.
+- On the Mac `logs` is forwarded like `run` (slice 6; see "The Mac" at the end).
 
 ### What was checked
 
@@ -308,7 +309,7 @@ that waits. `ExecSpec.terminal` is the caller's choice; Zigcube's agent leaves i
 - A SIGKILL of zbx leaves no history entry (the command dies with it).
 - The death signal is asked for again after the change of user; zbx dying in the instant between
   the two leaves the command to finish by itself in the container.
-- Cut: the Mac forwards `exec` in slice 6.
+- On the Mac `exec` is forwarded like `run` (slice 6; see "The Mac" at the end).
 
 ### What was checked
 
@@ -547,7 +548,7 @@ lines (a sleeping process, and a zombie with PF_EXITING).
 - The upgrade test uses an `exec` into a container M6 started because the record is the only
   thing `exec` and `stop` share with it; a record without a field it needs would show there.
 - ACCEPT runs last because pruning removes the oldest records of the demo's state directory.
-- **The Mac** runs these steps in slice 6.
+- **The Mac** runs these steps from macOS (slice 6; see "The Mac" at the end).
 
 ### Failure modes
 
@@ -576,3 +577,62 @@ lines (a sleeping process, and a zombie with PF_EXITING).
   summary with the rotated file and E0402's line); the wrong inputs are those texts changed.
 - `zig build harness` compiles the demo.
 - Run in the VM: see the report of the slice (the `vm/m6b-*` and `vm/all-*` runs).
+
+## Slice 6: the Mac
+
+`logs` and `exec` are forwarded into the machine like `run`: `src/macos_main.zig` lists them in
+`linux_commands`, and `src/mac/forward.zig` already relayed everything a forwarded command needs,
+so no new protocol was needed. What is true on the Mac:
+
+- **The same options, output, JSON and exit codes** as on Linux, because the Linux `zbx` in the
+  machine does the work. `logs --follow` and `exec` pass the terminal (raw mode with its size, and
+  its changes) when standard input and output are both terminals, and INT, TERM, HUP and QUIT go
+  to the guest as signals. A SIGINT to `zbx exec` ends the command and exits 130; a SIGINT to
+  `zbx logs --follow` ends it and leaves the container running.
+- **`exec` ends as `run` does**: 125 when zbx or the machine failed (a container that is not
+  there or not running is `E0402` or `E0220`, 125), the command's own code otherwise. `logs`
+  refuses with 1. The macOS `zbx` used to decide this by looking at the first word that did not
+  start with `-`, which read the `json` of `--output json` as the command; `runs_container`
+  skips the value of `--output` (a unit test).
+- **The write rule is the Linux one.** `--mount` is held to the project directory and to a root
+  user by the guest's `zbx`, unchanged. The home directory is one owner over virtiofs, so a file
+  written inside lands as the Mac user whatever the container's user; the rule is kept anyway so
+  that a project behaves the same on both platforms. A project outside the home is refused by
+  the macOS `zbx` before the machine is asked (`ZBX-E1013`), for `logs` and `exec` as for `run`.
+- **The project directory** is the one holding the nearest `zbx.lock` up from the working
+  directory, as on Linux. A `zbx.lock` in the home directory (left by a `pull` run in the home itself)
+  makes the whole home the project of every directory below it that has no closer lock, and then
+  `--mount ../other` inside the home is allowed. The Mac demo gives its project a lock of its own.
+
+### The steps, from macOS (`zig build demo-mac`, `m6b.*` in `src/testing/mac_demo.zig`)
+
+The demo's five steps exactly as the spec types them (`m6b.1` to `m6b.5`; the wait for the
+server listening uses `exec`, so nothing but the steps' requests is in the log), run from
+`$HOME/zbx-demo-mac/m6b-project`, on port 8000 of the Mac:
+
+| Step | What it runs |
+| --- | --- |
+| `m6b.1` | `zbx run -d --name web --publish 8000:8000 --mount ./site:/srv python:3.12-slim -- python -m http.server -d /srv 8000`; `exec` waits until the server takes a connection |
+| `m6b.2` | `curl localhost:8000/index.html` returns the page; after an edit on the Mac, the edit |
+| `m6b.3` | `zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'`; `ls -l site/new.txt`; the owner is the Mac user's uid, and `find site ! -user` finds nothing |
+| `m6b.4` | `zbx logs web` has exactly two requests, both `GET /index.html` answered 200 |
+| `m6b.5` | `zbx run --mount ../outside-spec:/x` is `ZBX-E0212`, "outside the project", exit 125 |
+| `m6b.5h` | the same command line from a directory outside the home is `ZBX-E1013`, exit 1 |
+
+and what only the Mac has (`m6b.6` to `m6b.11`): `exec`'s exit code (7) and 125 for a container
+that does not exist; SIGINT to `zbx exec sleep 1000` within 2 s, exit 130; `exec ... tty` under
+`script` prints `/dev/pts/`; `logs --follow` of a detached container shows its output and exits
+0 when it ends; SIGINT to `zbx logs --follow` ends it, exit 130, with the container still
+running; `zbx stop web` closes port 8000 and `exec` into it is `E0220`, 125.
+
+### Cuts and deviations
+
+- The Mac demo is a table of shell lines, not the Linux demo's pure-function checks over a
+  console; its checks are `mac_demo.zig`'s `check` (exit code and pieces of each stream). The
+  assertions on the log (`m6b.4`) and the owner (`m6b.3`) are shell tests.
+- The Mac steps do not run the agent test, the upgrade test, the cap or the removal of a log
+  with its record: they do not depend on the platform (the Linux `zbx` in the machine is the same
+  program, and `demo-m6b` proves them in CI).
+- **A `zbx.lock` in the home directory** (above) is a trap for a developer who runs `pull` at
+  the top of the home; it is the lock's rule on Linux too, and is not changed in this slice.
+
