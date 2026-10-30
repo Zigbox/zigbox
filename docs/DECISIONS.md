@@ -5,6 +5,21 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+
+## M4b · Mac: public DNS fallback when the Mac has no IPv4 resolver
+
+*Decided 2026-10-30, after the `mac.yml` run 41136813336 (15 of 31 steps failed with ZBX-E0502).*
+
+The guest asks the DNS servers the Mac asks, IPv4 only (`src/mac/dns.zig`). A Mac whose only resolver is an IPv6 router (`fe80::...%en0`) gives the field `-`, and the guest was left with the NAT gateway, which refuses DNS: every name failed to resolve. **Only in that case** the guest's `/etc/resolv.conf` is 1.1.1.1 (Cloudflare), 8.8.8.8 (Google) (`vm_protocol.dns_fallback`), then the DHCP gateway. A Mac with an IPv4 resolver is unchanged: its resolvers, then the gateway, and no public resolver is ever added. No new protocol field: the guest decides from `-`.
+
+The cost is a privacy change in that one case: the machine's lookups (a pull's registry names, a container's) go to Cloudflare and Google. So the command that starts the machine prints `warning[ZBX-W1003]`, once per boot, and the fix is a network with an IPv4 DNS server, then `zbx vm stop`. The public resolvers come first because `--net user` goes through pasta, which forwards to the first nameserver of the guest's file only; with the refusing gateway first, `nslookup` in a `--net user` container timed out (measured 2026-10-30 on a phone tether, IPv6-only with 464XLAT).
+
+## M4b · Mac: the guest's MTU is 1280 on every network
+
+*Decided 2026-10-30, by the supervisor, after `zbx pull` timed out on an IPv6-only 464XLAT tether (ZBX-E0503 at registry-1.docker.io:443).*
+
+`vm_guest_init.zig` sets `eth0` to MTU 1280 (`SIOCSIFMTU`, constant `interface_mtu`) while it configures the network, always. Measured in the guest on that network: busybox `wget` over TLS answered in 3 s, but plain HTTP to the registry's IPv4 address answered with a 1200-byte padded header and got nothing with 1440 or 2500 bytes; the same to its IPv6 address always answered. Full-size IPv4 packets are lost on the translated path and path MTU discovery does not rescue it. zbx's TLS ClientHello is over 1500 bytes (std's `x25519_ml_kem768` key share carries a 1184-byte ML-KEM-768 key, plus x25519, secp256r1 and secp384r1 shares: `std/crypto/tls/Client.zig`), while busybox's is small. 1280 is the smallest MTU every IPv6 path carries and costs about 0.4% more header overhead than 1400. Containers reach the network through the guest's stack (`--net host`, pasta), so they inherit it. A failing `SIOCSIFMTU` fails the network setup, like the address and netmask ioctls.
+
 ## `zbx.logs/1` describes its refusals: every document is checked against its command's schema
 
 *Decided 2026-10-30, by the owner.*

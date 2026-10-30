@@ -1,7 +1,11 @@
 //! The Mac's own DNS resolvers, from the system configuration (the same source `scutil --dns`
 //! reads), for the guest to use. The NAT gateway the guest is given by DHCP does not always
 //! answer DNS queries; the resolvers the Mac asks (the router, a VPN's) are reachable through the
-//! NAT. Only IPv4 addresses are kept: the guest's NAT network is IPv4.
+//! NAT. Only IPv4 addresses are kept: the guest has an IPv4 address from DHCP and a ULA IPv6 one
+//! from router advertisement, but a link-local resolver of the Mac (`fe80::...`) cannot be reached
+//! across the NAT. A Mac with none (its only resolver is an IPv6 router) gives the field "-", and
+//! the guest then also asks the public resolvers of `vm_protocol.dns_fallback`; `none()` says so,
+//! for the warning W1003.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -33,6 +37,12 @@ pub fn resolvers(buffer: []u8) []const u8 {
     const list = objc.send(objc.Id, value, "objectForKey:", .{objc.string("ServerAddresses")});
     if (list == null) return "-";
     return join(buffer, list);
+}
+
+/// Whether the Mac gives the guest no IPv4 resolver, so that the guest falls back to public ones.
+pub fn none() bool {
+    var buffer: [64]u8 = undefined;
+    return std.mem.eql(u8, resolvers(&buffer), "-");
 }
 
 fn join(buffer: []u8, list: objc.Id) []const u8 {

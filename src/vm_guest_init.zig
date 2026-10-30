@@ -669,9 +669,17 @@ const Ifreq = extern struct {
 const siocgifflags: u32 = 0x8913;
 const siocsifflags: u32 = 0x8914;
 const siocsifaddr: u32 = 0x8916;
+const siocsifmtu: u32 = 0x8922;
 const siocsifnetmask: u32 = 0x891c;
 const siocaddrt: u32 = 0x890b;
 const iff_up: u16 = 1;
+
+/// The MTU the guest sets on its NIC, on every network. A NAT, and a translated path such as a
+/// phone tether's IPv6-only network with 464XLAT, may drop larger packets without telling the
+/// guest (no ICMP "too big"), and a TLS handshake whose ClientHello fills a 1500-byte packet then
+/// hangs. 1280 is the smallest MTU every IPv6 path carries, so the packet size is safe anywhere;
+/// it costs about 0.4% more header overhead than 1400.
+const interface_mtu: u32 = 1280;
 const interface_name = "eth0";
 
 const Route = extern struct {
@@ -744,6 +752,12 @@ fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
     const summary = std.fmt.bufPrint(&note, quad, .{ a[0], a[1], a[2], a[3] }) catch "";
     log("zbx-init: address ", summary);
     var request = ifreq_for(interface_name);
+    std.mem.writeInt(u32, request.data[0..4], interface_mtu, .little);
+    if (failed(linux.ioctl(control, siocsifmtu, @intFromPtr(&request)))) {
+        log("zbx-init: cannot set the MTU of ", interface_name);
+        return false;
+    }
+    request.data = @splat(0);
     request.data[0..16].* = sockaddr_in(lease.address);
     if (failed(linux.ioctl(control, siocsifaddr, @intFromPtr(&request)))) return false;
     request.data[0..16].* = sockaddr_in(lease.mask);
@@ -759,26 +773,15 @@ fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
     return true;
 }
 
-/// The Mac's resolvers first, then the one the DHCP server named. The NAT's gateway does not
+/// The Mac's resolvers first, then the one the DHCP server named; with none from the Mac, the
+/// DHCP one and then the public fallback (see `protocol.resolv_conf`). The NAT's gateway does not
 /// always answer DNS, and the Mac's resolvers are reachable through the NAT.
 fn write_resolv_conf(lease: *const dhcp.Lease, mac_dns: []const u8) void {
     assert(mac_dns.len > 0);
-    var text: [256]u8 = undefined;
-    var length: usize = 0;
-    var addresses: [protocol.dns_count_max][4]u8 = undefined;
-    const count = protocol.parse_dns(mac_dns, &addresses) orelse 0;
-    for (addresses[0..count]) |dns| length += append_nameserver(text[length..], dns);
-    if (lease.dns orelse lease.router) |dns| length += append_nameserver(text[length..], dns);
-    assert(length <= text.len);
-    if (length > 0) _ = write_text("/etc/resolv.conf", text[0..length], 0o644);
-}
-
-fn append_nameserver(out: []u8, dns: dhcp.Address) usize {
-    assert(out.len > 0);
-    const written = std.fmt.bufPrint(out, "nameserver {d}.{d}.{d}.{d}\n", .{
-        dns[0], dns[1], dns[2], dns[3],
-    }) catch return 0;
-    return written.len;
+    var text: [protocol.resolv_conf_bytes_max]u8 = undefined;
+    const content = protocol.resolv_conf(&text, mac_dns, lease.dns orelse lease.router);
+    assert(content.len > 0); // The fallback is always there.
+    _ = write_text("/etc/resolv.conf", content, 0o644);
 }
 
 fn read_mac() ?[6]u8 {
