@@ -1,6 +1,5 @@
-//! M6b slice 3's `zbx exec` in the VM, a temporary part of demo-m6 (`EXEC`); slice 4 moves it to
-//! demo-m6b. As the user `demo`, in the net project (`zn`), with a running alpine container that
-//! mounts the project's `site`:
+//! M6b slice 3's `zbx exec` in the VM, a part of demo-m6b (`EXEC`). As the user `demo`, in the
+//! net project (`zn`), with a running alpine container that mounts the project's `site`:
 //!
 //!   1. `exec` writes a file into the writable mount; on the host it is the user's.
 //!   2. A syscall the container's filter refuses (`unshare -U`) and a capability it lacks
@@ -15,14 +14,14 @@
 //!      with `--user`: their `zbx` killed with SIGKILL, the command is gone within a second (the
 //!      change of user clears the death signal; the child asks for it again).
 //!
-//! Every assertion is a function of checks_exec_m6.zig with a unit test. Each command but the
+//! Every assertion is a function of checks_exec_m6b.zig with a unit test. Each command but the
 //! one under `script` reads /dev/null: the guest's console is a terminal, and an exec with a
 //! terminal on both ends gets a pseudo-terminal, which part 5 is for.
 
 const std = @import("std");
 const Io = std.Io;
-const checks = @import("checks_exec_m6.zig");
-const writable = @import("checks_writable_m6.zig");
+const checks = @import("checks_exec_m6b.zig");
+const writable = @import("checks_writable_m6b.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -221,6 +220,6 @@ fn killed_zbx(session: *Session, out: *Io.Writer) !void {
 }
 
 test {
-    _ = @import("checks_exec_m6.zig");
+    _ = @import("checks_exec_m6b.zig");
     _ = limits;
 }

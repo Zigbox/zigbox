@@ -1,6 +1,6 @@
 //! The assertions of M6b slice 3's `zbx exec` as pure functions over the text the guest printed,
-//! each unit-tested with right and wrong input. The commands that print it are in exec_m6.zig,
-//! a part of demo-m6 until slice 4 moves it to demo-m6b.
+//! each unit-tested with right and wrong input. The commands that print it are in exec_m6b.zig,
+//! a part of demo-m6b.
 
 const std = @import("std");
 const checks = @import("checks.zig");
