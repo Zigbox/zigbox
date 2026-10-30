@@ -38,9 +38,13 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 - **M4b (Mac):** built by the session on the owner's Mac (PRs #18–#20), with releases 0.1.0 and 0.1.1. Not demonstrated. `mac.yml`'s job is skipped until the owner sets the repo variable `MAC_RUNNER_LABEL`.
 - **M6b (dev loop):** in progress, brief `docs/briefs/M6b-dev-loop.md`, with six slices run in order.
   - Slices 1–3 (`--mount` and `--user`, `zbx logs`, `zbx exec`) are merged (PR #21).
-  - **Slice 4 (pull in the library)** is on local branch `m6b-slice4` in worktree `/home/user/zigbox-tools`. It has been reviewed, and twelve findings are being fixed by a fresh agent. The blocking one: over-long caller input panics instead of being refused. Others: the report pipe can deadlock or hang on EOF, a malformed report can pass as success, `read_report`'s exit paths are untested, warnings past the cap are dropped silently, and a field is dead. A `pull_report` fuzzer is also being added.
-  - The working branch `claude/blissful-cannon-7pcv0x` holds only the `AGENTS.md` context-discipline commit so far.
-  - **Next:** check the fixes, run `zig build check`, merge `m6b-slice4` into the working branch, and open a PR with slice 4 and the `AGENTS.md` change. Update README and site status in that push.
+  - **Slice 4 (pull in the library)** is reviewed, its twelve review findings fixed by a fresh agent (commits 0c40991, 7b1551e), and merged into the working branch `claude/blissful-cannon-7pcv0x` with the `AGENTS.md` context-discipline section and this file; its PR is open for CI. What the fixes decided:
+    - A caller's over-long reference or mirrors setting is refused (`E0501`, `E0514`), never asserted.
+    - The report pipe is sized with `F_SETPIPE_SZ` and verified; a pipe that stays under 16 KiB refuses the pull with `E0419`. This was chosen over draining the pipe while waiting, which would mean reworking `namespace.run`. If a real host hits that refusal, drain instead.
+    - The parent reads the report without waiting for end of file, so a write end inherited by another thread's child cannot hang it.
+    - A damaged report fails the pull; every exit path of `read_report` is tested; a new `pull_report` fuzzer covers the format.
+    - Warnings past the cap print one `W0504` line in the CLI; the library reports them as `Result.warnings_dropped`.
+  - **Next:** when the PR is green, update README and site status (`[skip ci]`); the owner merges.
 - **Slice 5** is `demo-m6b`:
   - the spec's five steps exactly;
   - the acceptance checks;
@@ -49,7 +53,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
   - the `demo-m6b` CI job and `m6b` in `vm.yml`'s picker;
   - `docs/demos/m6b.md`.
 
-  The reviewer recommended a `pull_report` fuzzer for this slice; it is now in slice 4's fixes, so check that it landed.
+  Start a fresh Sonnet implementer from the brief, the branch and slice 4's handoff above.
 - **Slice 6** is the Mac (`logs` and `exec` forwarded). It belongs to the Mac session after slice 5 merges; hand the owner a short note for it then.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
@@ -64,6 +68,17 @@ Each is in `docs/DECISIONS.md` with its reasons:
 - M6: one writer per volume, `state rm` goes to a trash, `state export` writes tar.gz.
 - M5: `--publish` implies `--net user`; the no-network hint is printed only on failure.
 - Zighub: a catalogue yes, a hub no (spec Part III).
+
+## The cloud environment
+
+- **Set per command, not in the environment:** `ZIG_GLOBAL_CACHE_DIR`, one directory per worktree. Also `PATH` with the Zig directory prepended, unless the setup script puts `zig` on `PATH`.
+- **The setup script provides:**
+  - Zig 0.17.0, checksum-verified;
+  - `uidmap`, and a user `tester` with a subuid range, for `zig build check`'s non-root pass;
+  - Node 22, for Zigcube's wasm checks;
+  - for Zigcube, Postgres 16, `libpq-dev` and SQLite's development files.
+- **Network access:** `ziglang.org`, GitHub, and the registries the tests pull from. GitHub is reached through the MCP tools, with no token in the environment.
+- **No database credentials:** nothing here uses a hosted database. Zigcube's tests start a throwaway Postgres (`zig build pg-up`).
 
 ## Traps already paid for
 
