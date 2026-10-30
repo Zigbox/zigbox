@@ -19,6 +19,10 @@
 //! LOGS (logs_m6.zig, M6b slice 2; slice 4 of M6b moves it to demo-m6b): `zbx logs`: a detached
 //!   server's requests, the log after the starting `zbx` was killed, a foreground run on the
 //!   terminal and in its log, `--follow` ending with the container, and a log at its cap.
+//! EXEC (exec_m6.zig, M6b slice 3; slice 4 of M6b moves it to demo-m6b): `zbx exec`: a file
+//!   written through the mount is the user's, a refused syscall and a missing capability fail as
+//!   in a run, the command is in the container's scope and under its `--pids`, its exit code and
+//!   the bundle's note, a terminal under `script`, death with the container, a stopped one.
 //! AGENT (agent_m6.zig, slice 4): the spec's five steps and the state commands again, by JSON
 //!   only (`--output json`, `zbx schema`, `zbx explain`); what it cannot read is a `FINDING`.
 //!
@@ -40,6 +44,7 @@ const state = @import("state_m6.zig");
 const mounts = @import("mounts_m6.zig");
 const writable = @import("writable_m6.zig");
 const logs = @import("logs_m6.zig");
+const exec = @import("exec_m6.zig");
 const agent = @import("agent_m6.zig");
 
 const Session = session_mod.Session;
@@ -124,6 +129,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     mounts.step_mounts,
     writable.step_writable,
     logs.step_logs,
+    exec.step_exec,
     agent.run_agent,
 };
 
@@ -143,6 +149,7 @@ test {
     _ = @import("mounts_m6.zig");
     _ = @import("writable_m6.zig");
     _ = @import("logs_m6.zig");
+    _ = @import("exec_m6.zig");
     _ = @import("agent_m6.zig");
     _ = @import("upgrade_m6.zig");
 }
