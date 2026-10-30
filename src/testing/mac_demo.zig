@@ -188,13 +188,14 @@ pub const steps = [_]Step{
             "-- python -m http.server -d /srv 8000 >/dev/null && i=0 && " ++
             "until $Z exec web -- python -c " ++
             "'import socket; socket.create_connection((\"127.0.0.1\", 8000)).close()' " ++
-            "</dev/null >/dev/null 2>&1; do i=$((i+1)); test $i -lt 90 || exit 9; sleep 1; done; " ++
+            "</dev/null >/dev/null 2>&1; " ++
+            "do i=$((i+1)); test $i -lt 90 || exit 9; sleep 1; done; " ++
             "echo listening",
         .stdout_has = &.{"listening"},
     },
     .{
         .id = "m6b.2",
-        .what = "curl localhost:8000/index.html returns the page; after an edit on the Mac, the edit",
+        .what = "curl returns the page; after an edit on the Mac, the edit",
         .line = "cd $W/m6b-project && curl -fsS http://localhost:8000/index.html && " ++
             "echo second-SIGMA > site/index.html && curl -fsS http://localhost:8000/index.html",
         .stdout_has = &.{ "first-SIGMA", "second-SIGMA" },
@@ -258,7 +259,8 @@ pub const steps = [_]Step{
         .id = "m6b.9",
         .what = "logs --follow shows a detached container's output and ends 0 with it",
         .line = "cd $W/m6b-project && n=fl$$ && " ++
-            "$Z run -d --name $n alpine:3.20 -- sh -c 'echo first-line; sleep 4; echo last-line' " ++
+            "$Z run -d --name $n alpine:3.20 -- " ++
+            "sh -c 'echo first-line; sleep 4; echo last-line' " ++
             ">/dev/null && $Z logs --follow $n",
         .stdout_has = &.{ "first-line", "last-line" },
     },
