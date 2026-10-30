@@ -39,11 +39,22 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 ## Working as the implementer subagent
 
-- Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push to the working branch.** The supervisor reviews each slice adversarially, and you fix what the review finds before the next slice.
+- Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push to the working branch.** The supervisor reviews each slice adversarially; what the review finds is fixed before the next slice, by a fresh agent (see below).
 - **Before you report, run [REVIEW.md](REVIEW.md) on your own diff**, and say which of its items your slice touched and what you checked.
 - **Gates are `zig build check`, on the commit you report.** Paste its last line (`check: PASS <commit>`, without `+dirty`) into the report. A report without that line, or with another commit's, is not a report. Run the fuzzers you touched as well, and say which.
 - **VM checks run on CI's KVM runners, not under TCG here.** Push the commit to a scratch branch named `vm/<demo>-<slug>` (`<demo>` is `m0` to `m6`, or `all`; for example `git push origin HEAD:vm/m4-slice4`). `.github/workflows/vm.yml` runs that demo in minutes. Read the result with the GitHub tools (`actions_list` with the branch, then `get_job_logs`), quote the run link in your report. The run deletes its branch when it ends, so push a new commit to the same name to run again. Scratch branches are the only branches you may push to. Use local TCG only to debug something CI cannot show.
-- Report what you ran and its output, what you did not run and why, every deviation from the brief, and anything in the spec or brief that seemed wrong.
+- Report what you ran and its output, what you did not run and why, every deviation from the brief, and anything in the spec or brief that seemed wrong. End the report with the handoff note described below.
+
+## Agent context discipline
+
+An agent re-reads its whole context on every turn, so cost grows with context size, not with the work done. Keep implementer context small.
+
+- **One agent per slice.** The supervisor spawns a fresh implementer for each slice of a milestone. Do not resume a finished implementer for the next slice or for follow-up fixes.
+- **Hand off through the repo.** Before stopping, the implementer commits its work and ends its report with a handoff note: decisions made, traps found, what's next. Lasting decisions go in `docs/DECISIONS.md`. The next implementer starts from the brief, the branch and that note.
+- **Context ceiling.** Stop at about 250K tokens of context or 60 turns, whichever comes first. At that point, reach the next safe stopping place, commit, write the handoff note and report. The supervisor enforces this and starts a new implementer rather than extending the current one.
+- **Small fixes get new agents.** For a bug or review finding, spawn a fresh agent with the symptom and the relevant commit. Do not send it back to the agent that wrote the code.
+- **Keep noisy output out of context.** Redirect `zig build` and test output to a file and read only the failing lines. Do not paste full logs.
+- **Delegate lookups.** Send broad reads, such as searching the Zig std source, to a cheap read-only agent and keep only the answer.
 
 ## README status
 
