@@ -204,6 +204,7 @@ test {
     _ = @import("runtime/mount_tests.zig");
     _ = @import("runtime/project.zig");
     _ = @import("runtime/writable_tests.zig");
+    _ = @import("runtime/logfile.zig");
 }
 
 test {

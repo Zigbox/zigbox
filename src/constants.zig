@@ -422,6 +422,46 @@ pub const containers_path_bytes_max: u32 = 640;
 /// Seconds since the epoch; a record's times are these.
 pub const record_time_unknown: u64 = 0;
 
+// Container logs (M6b, slice 2).
+/// The log of a container, `logs/<name>.log` beside the run record: a header, then records. The
+/// header is 16 bytes: the version, seven zero bytes, and the offset of its first record in the
+/// stream of everything the container wrote (u64, little endian). A record is a 12-byte header
+/// (stream, time in seconds as 5 bytes, length as 2 bytes, CRC-32 of those 8 bytes and the
+/// payload) and its payload.
+pub const log_version: u8 = 1;
+pub const log_header_bytes: u32 = 16;
+pub const log_record_header_bytes: u32 = 12;
+/// The most bytes one record holds; a longer write is cut into several records.
+pub const log_record_bytes_max: u32 = 4096;
+/// The most a container's log keeps, both files together. At the cap the older file is replaced
+/// by the current one, so what is dropped is always a whole file of whole records.
+pub const log_bytes_max: u64 = 5 * 1024 * 1024;
+/// One of the two files a log is kept in: half the cap.
+pub const log_segment_bytes_max: u32 = 2_621_440;
+/// A record's time is seconds since the epoch, as in every other record zbx keeps.
+pub const log_time_max: u64 = 1 << 40;
+/// The file names in the logs directory, after the container's name: the current file and the
+/// older one. A container name has no dot, so neither collides with `pasta_log_suffix`.
+pub const log_suffix = ".log";
+pub const log_older_suffix = ".log.1";
+/// The reader's window into a file: room for the largest record and for reading ahead.
+pub const log_read_bytes: u32 = 16 * 1024;
+/// How often `zbx logs --follow` looks for more, and how many looks it spends on the end of a
+/// log that is still being written to after the container has ended.
+pub const log_follow_poll_ms: u32 = 100;
+pub const log_follow_settle_looks: u32 = 3;
+/// The most `--tail` may ask for.
+pub const log_tail_lines_max: u32 = 1_000_000;
+/// The most a pump reads from one stream at a time.
+pub const log_pump_bytes: u32 = log_record_bytes_max;
+/// The most time the end of a container's output is waited for after it has gone.
+pub const log_drain_ms: u32 = 200;
+/// Reads in one drain of the output after the container ended: it ends at the end of the output,
+/// and a stuck holder of the pipe's write end costs `log_drain_ms` once.
+pub const log_drain_reads_max: u32 = 4096;
+/// The most output events one `wait` takes before it looks at the signals again.
+pub const log_wait_events_max: u32 = 1 << 30;
+
 // Bundles (M1, slice 3).
 /// The directory under the state directory that holds bundles, next to "runs".
 pub const bundles_dir_name = "bundles";
@@ -961,6 +1001,16 @@ comptime {
     assert(6 * 1024 + 6 * diag_explanation_bytes_max + 2048 <= errors_page_bytes_max);
     assert(diag_code_bytes < 16); // A page name ("E0101.html") fits the 16-byte buffers.
 
+    // Logs: a record and its header fit the window the reader reads in, two files make the cap,
+    // and a file holds a header and at least one largest record.
+    assert(log_header_bytes + log_record_header_bytes + log_record_bytes_max <= log_read_bytes);
+    assert(2 * @as(u64, log_segment_bytes_max) <= log_bytes_max);
+    assert(log_segment_bytes_max >= log_header_bytes + log_record_header_bytes + log_record_bytes_max);
+    assert(log_record_bytes_max <= std.math.maxInt(u16));
+    assert(log_time_max == 1 << 40); // Five bytes hold a time below it.
+    assert(log_pump_bytes <= output_bytes_max);
+    assert(log_read_bytes <= store_io_buffer_bytes);
+    assert(std.mem.indexOfScalar(u8, log_suffix, '.') == 0);
     assert(sim_files_max > 0);
     assert(sim_open_files_max > 0);
     assert(sim_output_bytes_max >= 2 * output_bytes_max);
