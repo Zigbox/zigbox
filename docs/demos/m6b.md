@@ -495,17 +495,17 @@ no `schema` member, so that one is found by the member name instead.
 | 2 | `curl` twice with an edit between; `logs --output json` | `zbx.logs/1` lines: it counts the records of stream `stderr` whose text has `GET /index.html`: two |
 | 3 | `exec --output json -e TOKEN=... -- sh -c '...; exit 3'` | the status 3 and the `exec_exit` line agree (`exited`, 3, `container_ended` false); the value of `-e` is in no document; the file is the host user's |
 | 4 | a mount outside the project; a mount with a non-root image | E0212 (`context.within` is its project, `real` the path) and E0213 (`context.uid` is not 0), each checked against the `run` schema; the fix of each is a template, so the agent takes the flag and its value from E0213's fix command (`--user 0`, by `flag_from_fix`) and adds it to its own command, which works; `explain` agrees with each |
-| 5 | `stop`, then `exec`; `logs`; a missing name | E0220 against the `exec` schema (`context.state` `stopped`; its first fix is a command, which the agent runs, and `ps --all` gives `agentweb`'s own entry as `stopped`); the stopped container's log still gives the two requests; E0402 for the missing name (exit 1, checked by its members: the `logs` schema describes no refusal) |
+| 5 | `stop`, then `exec`; `logs`; a missing name | E0220 against the `exec` schema (`context.state` `stopped`; its first fix is a command, which the agent runs, and `ps --all` gives `agentweb`'s own entry as `stopped`); the stopped container's log still gives the two requests; E0402 for the missing name (exit 1, checked against the `logs` schema, which describes the refusal as well as the records, and by its members) |
 
 Findings (things the agent could not read from JSON; a `FINDING` line each, not worked around):
 
 - No document says when a container is ready; the agent polls the published port (as in M6).
 - The fixes of E0212 and E0213 are templates (`<image>`, `./site`). The agent adapts them by the
   flag they name and never runs them as written.
-- The `logs` schema describes only its stdout records (`required` `schema`, `stream`, `time`,
-  `text`), so a refusal of `logs` on stderr follows no schema the agent can read; it checks E0402
-  by its members alone. Describing it would be a change to `zbx.logs/1`'s schema, for the owner
-  to decide.
+- Resolved: the `logs` schema used to describe only its stdout records, so a refusal of `logs`
+  on stderr followed no schema. The owner decided (2026-10-30, `docs/DECISIONS.md`) that
+  `zbx.logs/1` grows to describe the diagnostic too, as `exec`'s does; the agent now checks E0402
+  against it, and the finding is gone.
 
 ### A bug the first VM runs found
 

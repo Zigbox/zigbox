@@ -19,7 +19,8 @@
 //!      the fix names, `--user 0`, and the run works); `explain` agrees with each.
 //!   6. After `stop`, `exec` is E0220 with the state `stopped`, the fix (a command, not a
 //!      template) is run and `ps` agrees; `logs` of the stopped container still gives its
-//!      records; a name with no record is E0402 (exit 1 for `logs`).
+//!      records; a name with no record is E0402 (exit 1 for `logs`), checked against
+//!      the logs schema, which describes the refusal as well as the records.
 //!
 //! Every assertion is a function of agent_json_m6b.zig, agent_json.zig or checks_*.zig with a
 //! unit test.
@@ -352,7 +353,7 @@ fn step_stopped(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step, "expected the stopped container's log, the same two", err);
     };
     const missing = za ++ " --output json logs no-such-container";
-    _ = try refusal(session, out, missing, null, .{
+    _ = try refusal(session, out, missing, logs_schema, .{
         .code = "ZBX-E0402",
         .exit = 1,
         .key = "name",
@@ -360,8 +361,6 @@ fn step_stopped(session: *Session, out: *Io.Writer) !void {
         .fix_template = false,
         .fix_has = "ps --all",
     });
-    try finding(out, "the logs schema describes only its stdout records: a refusal on stderr " ++
-        "is in no schema logs serves, so the agent checks it by its members alone");
 }
 
 test {
