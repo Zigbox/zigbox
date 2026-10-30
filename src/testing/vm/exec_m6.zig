@@ -11,6 +11,9 @@
 //!   5. Under `script` (a terminal on zbx's input and output), the command has a terminal.
 //!   6. An exec'd command dies with its container, and zbx says so instead of hanging.
 //!   7. `exec` into the stopped container is refused, naming its state.
+//!   8. A foreground `run` of an image whose user is not root (memcached:alpine), and an `exec`
+//!      with `--user`: their `zbx` killed with SIGKILL, the command is gone within a second (the
+//!      change of user clears the death signal; the child asks for it again).
 //!
 //! Every assertion is a function of checks_exec_m6.zig with a unit test. Each command but the
 //! one under `script` reads /dev/null: the guest's console is a terminal, and an exec with a
@@ -49,6 +52,7 @@ pub fn step_exec(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try terminal(session, out);
     try dies_with_container(session, out);
     try stopped(session, out);
+    try killed_zbx(session, out);
     try timer.lap(out, "exec");
 }
 
@@ -180,6 +184,40 @@ fn stopped(session: *Session, out: *Io.Writer) !void {
     checks.check_stopped(result.streams, result.status) catch |err| {
         return fail_step(out, step_name, "expected ZBX-E0220 naming the state", err);
     };
+}
+
+/// Starts `command` (a `zn` line whose command is `sleep <marker>`) in its own session, waits
+/// for the sleep, kills the `zbx` whose arguments hold `zbx_marker` with SIGKILL, and a second
+/// later says whether the sleep is still there.
+fn kill_and_look(
+    session: *Session,
+    out: *Io.Writer,
+    command: []const u8,
+    sleep: []const u8,
+    zbx_marker: []const u8,
+) !void {
+    const line = try common.format(session, "{s}{s} </dev/null >/dev/null 2>&1 &'; " ++
+        "for i in $(seq 100); do pgrep -fx '{s}' >/dev/null && break; sleep 0.2; done; " ++
+        "pgrep -fx '{s}' >/dev/null && echo started; pkill -KILL -u demo -f -- '{s}'; " ++
+        "sleep 1; pgrep -fx '{s}' >/dev/null && echo still-there || echo gone", .{
+        H.as_demo_setsid, command, sleep, sleep, zbx_marker, sleep,
+    });
+    const shown = try ok(session, out, line);
+    checks.check_gone(shown.streams.stdout) catch |err| {
+        return fail_step(out, step_name, "expected the command gone with its zbx", err);
+    };
+}
+
+fn killed_zbx(session: *Session, out: *Io.Writer) !void {
+    const title = "\n{s}: EXEC 8: a command that runs as a user dies with a killed zbx\n";
+    try out.print(title, .{H.demo_name});
+    _ = try ok(session, out, zn ++ " pull memcached:alpine");
+    const run = "/home/demo/zn run --name pd1 memcached:alpine -- sleep 611";
+    try kill_and_look(session, out, run, "sleep 611", "--name pd1 ");
+    _ = try ok(session, out, zn ++ " run -d --name ex6 alpine -- sleep 1000");
+    const exec = "/home/demo/zn exec --user 1000 ex6 -- sleep 612";
+    try kill_and_look(session, out, exec, "sleep 612", "exec --user 1000 ex6");
+    _ = try ok(session, out, zn ++ " stop ex6");
 }
 
 test {

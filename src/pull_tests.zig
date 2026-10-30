@@ -811,6 +811,9 @@ test "an image's user is resolved against its own files and set before the comma
     );
     const child = &world.sim.world.processes[1];
     try testing.expectEqual(@as(?[2]u32, .{ 1000, 50 }), child.user_set);
+    // The change of user cleared the death signal; the child asked for it again after it.
+    try testing.expect(child.die_with_parent);
+    try testing.expectEqual(@as(u32, 1), world.sim.world.death_signal_requests);
     try testing.expect(std.mem.endsWith(u8, child.cwd.slice(), "/var/lib/app"));
     try testing.expect(
         std.mem.indexOf(u8, child.exec_envp[0..child.exec_envp_len], "HOME=/home/app\n") != null,

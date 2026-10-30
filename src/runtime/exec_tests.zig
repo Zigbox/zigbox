@@ -391,3 +391,51 @@ test "a signal zbx receives reaches the command; a SIGKILL of zbx takes the comm
     try testing.expect(command.state != .command);
     try testing.expectEqual(sim_world.ProcessState.reaped, command.state);
 }
+
+test "after a change of user, run and exec ask again to die with zbx, and end if it is gone" {
+    // Goal: the kernel clears the parent-death signal when the credentials change, so a command
+    // that runs as a user would outlive a zbx killed with SIGKILL (a review finding, for `run`
+    // since M4). Method, for a run and for an exec as a user: the request is made again after
+    // the change (a SIGKILL of zbx then kills the command), and when zbx is gone in the window
+    // between the two (no reader left on the report pipe) the child ends before its command.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 11);
+    var spec = default_spec();
+    spec.user = .{ .uid = 1000, .gid = 1000 };
+    const container_pid = try start_container(&sim, 11, spec);
+    const container = sim.world.find_process(container_pid).?;
+    try testing.expectEqual(@as(?[2]u32, .{ 1000, 1000 }), container.user_set);
+    try testing.expect(container.die_with_parent);
+    try testing.expectEqual(@as(u32, 1), sim.world.death_signal_requests);
+    var diag: Diag = undefined;
+    diag.reset();
+    var execd = exec_spec(&.{ "/bin/sleep", "100" });
+    execd.user = "1000:1000";
+    try exec.start(sim.interface(), &execd, .{}, &exec_handle, &diag);
+    const command = sim.world.find_process(exec_handle.pid.?).?;
+    try testing.expect(command.die_with_parent);
+    try testing.expectEqual(@as(u32, 2), sim.world.death_signal_requests);
+    sim.world.kill_supervisor();
+    try testing.expect(command.state != .command);
+    try testing.expect(container.state != .command);
+
+    // zbx gone in the window: neither command runs.
+    var gone: HostSim = undefined;
+    sim_run.init(&gone, 12);
+    gone.world.parent_gone_after_user = true;
+    const pid = try start_container(&gone, 12, spec);
+    try testing.expect(!gone.world.find_process(pid).?.execd);
+    gone.world.parent_gone_after_user = false;
+    var root: HostSim = undefined;
+    sim_run.init(&root, 13);
+    _ = try start_container(&root, 13, default_spec());
+    root.world.parent_gone_after_user = true;
+    diag.reset();
+    const started = exec.start(root.interface(), &execd, .{}, &exec_handle, &diag);
+    if (started) |_| {
+        // The command ended before its exec, so nothing reported a failure: zbx (alive here,
+        // dead in the case modelled) sees the command end with the setup's code.
+        try testing.expect(!root.world.find_process(exec_handle.pid.?).?.execd);
+        _ = exec.wait(&exec_handle);
+    } else |_| return error.TestUnexpectedResult;
+}

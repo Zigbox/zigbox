@@ -150,6 +150,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
         .set_user => try host.set_user(plan.user_uid, plan.user_gid),
+        .rearm_death_signal => try rearm_death_signal(child),
         .create_device_file => try host.create_file(target, false),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
@@ -291,6 +292,17 @@ fn mount(
         kind == .move or kind == .user_tmpfs;
     assert((source != null) == has_source);
     try host.mount(.{ .kind = kind, .target = target, .source = source });
+}
+
+/// The change of user cleared the request to die with zbx: it is made again, and then, since zbx
+/// may have died between the two, the child looks whether zbx still holds the read end of the
+/// report pipe (it does until the command starts) and ends at once if not. `getppid` cannot say:
+/// zbx is outside the container's PID namespace, where it reads as 0.
+fn rearm_death_signal(child: *const Context) Error!void {
+    assert(child.plan.has_user);
+    assert(child.report.write != child.ready.read);
+    try child.host.die_with_parent();
+    if (!child.host.pipe_has_reader(child.report.write)) return error.ParentGone;
 }
 
 /// Waits for the go-ahead. No byte, only end of file, means the parent will not continue.

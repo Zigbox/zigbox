@@ -117,6 +117,7 @@ pub const HostReal = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .pipe_has_reader = pipe_has_reader,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -638,6 +639,19 @@ pub const HostReal = struct {
         // which a plain close would not.
         const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = true };
         try check(linux.close_range(3, -1, flags));
+    }
+
+    fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {
+        _ = from_context(context);
+        assert(handle <= std.math.maxInt(i32));
+        const descriptor: i32 = @intCast(handle);
+        const asked: linux.pollfd = .{ .fd = descriptor, .events = linux.POLL.OUT, .revents = 0 };
+        var poll_set = [1]linux.pollfd{asked};
+        const ready = linux.poll(&poll_set, 1, 0);
+        // A poll that fails says nothing: the reader is taken to be there (the death signal,
+        // armed just before, covers a parent that dies later).
+        if (linux.errno(ready) != .SUCCESS) return true;
+        return poll_set[0].revents & linux.POLL.ERR == 0;
     }
 
     fn die_with_parent(context: *anyopaque) host.Error!void {

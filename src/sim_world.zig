@@ -439,6 +439,11 @@ pub const World = struct {
     input_handle: ?host.Handle,
     /// Standard input is a terminal too (with `HostSim.terminal`).
     input_terminal: bool,
+    /// zbx dies in the instant after a child changed its user and before it asked again to die
+    /// with it: the child finds no reader on its report pipe.
+    parent_gone_after_user: bool,
+    /// How often a child asked to die with its parent (`die_with_parent`), by the last child.
+    death_signal_requests: u32,
     /// The pseudo-terminal (`open_terminal`): a pipe whose read end is the master and whose write
     /// end is the peer, and what was written to the master (the keys sent to the command).
     terminal_master: ?host.Handle,
@@ -522,6 +527,8 @@ pub const World = struct {
         world.input = "";
         world.input_handle = null;
         world.input_terminal = false;
+        world.parent_gone_after_user = false;
+        world.death_signal_requests = 0;
         world.terminal_master = null;
         world.terminal_typed_len = 0;
         world.terminals_opened = 0;
@@ -799,6 +806,17 @@ pub const World = struct {
         @memcpy(buffer[0..count], pipe.data[pipe.consumed..][0..count]);
         pipe.consumed += count;
         return .{ .count = count };
+    }
+
+    /// Whether the pipe of the write end `handle` has a reader; false too when the model says
+    /// zbx died in the window after a change of user (`parent_gone_after_user`).
+    pub fn pipe_has_reader(world: *World, handle: host.Handle) bool {
+        const index = end_index(handle);
+        assert(index % 2 == 1); // The write end.
+        if (world.processes[world.current].user_set != null and world.parent_gone_after_user) {
+            return false;
+        }
+        return world.reader_exists(index / 2);
     }
 
     pub fn write_pipe(world: *World, handle: host.Handle, bytes: []const u8) ?u16 {
@@ -2109,6 +2127,8 @@ pub const World = struct {
         assert(world.current < world.processes.len);
         const process = &world.processes[world.current];
         process.user_set = .{ uid, gid };
+        // The kernel clears the parent-death signal when the credentials change.
+        if (uid != 0 or gid != 0) process.die_with_parent = false;
         return null;
     }
 
@@ -2135,7 +2155,10 @@ pub const World = struct {
     }
 
     pub fn die_with_parent(world: *World) void {
-        world.processes[world.current].die_with_parent = true;
+        const process = &world.processes[world.current];
+        // A request after a change of user is the one that counts: the kernel cleared the first.
+        if (process.user_set != null) world.death_signal_requests += 1;
+        process.die_with_parent = true;
     }
 
     /// Replaces the current process by the program at `path`, which must be a file below its

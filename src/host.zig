@@ -458,6 +458,11 @@ pub const VTable = struct {
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
     die_with_parent: *const fn (context: *anyopaque) Error!void,
+    /// Whether some process still holds the read end of the pipe whose write end is `handle`
+    /// (`poll` without waiting: POLLERR says no reader is left). A container's child uses its
+    /// report pipe to ask whether zbx is still there: zbx holds the read end until the command
+    /// starts, and from inside a PID namespace `getppid` cannot name a parent outside it.
+    pipe_has_reader: *const fn (context: *anyopaque, handle: Handle) bool,
     /// Drops every capability not in `keep` (a mask by capability number) from the bounding set,
     /// then makes it the effective, permitted and inheritable sets (`PR_CAPBSET_DROP`, `capset`).
     restrict_capabilities: *const fn (context: *anyopaque, keep: u64) Error!void,
@@ -1004,6 +1009,12 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         try host.vtable.seal_descriptors(host.context);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn pipe_has_reader(host: Host, handle: Handle) bool {
+        assert(handle < std.math.maxInt(i32));
+        assert(@intFromPtr(host.vtable) != 0);
+        return host.vtable.pipe_has_reader(host.context, handle);
     }
 
     pub fn die_with_parent(host: Host) Error!void {

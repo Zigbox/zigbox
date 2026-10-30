@@ -113,7 +113,13 @@ fn command_step(child: *const Context, step: Step, errno_override: *u16) Error!v
     const plan = child.plan;
     assert(exec_plan.side_of(step.kind) == .command);
     switch (step.kind) {
-        .die_with_parent, .rearm_death_signal => try host.die_with_parent(),
+        .die_with_parent => try host.die_with_parent(),
+        .rearm_death_signal => {
+            // The change of user cleared it; zbx may have died in between (`child.zig` has why
+            // the report pipe, not `getppid`, says so).
+            try host.die_with_parent();
+            if (!host.pipe_has_reader(child.report.write)) return error.ParentGone;
+        },
         .await_release => try await_release(child),
         .attach_terminal => try host.attach_terminal(child.peer.?),
         // The directory must be there: unlike a run, exec makes nothing in the container.

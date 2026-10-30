@@ -88,6 +88,14 @@ pub fn check_died(output: []const u8) Error!void {
     }
 }
 
+/// A command whose `zbx` was killed: it was running (`started`), and a second later it was not
+/// (`gone`).
+pub fn check_gone(output: []const u8) Error!void {
+    if (!contains(output, "started")) return error.LifetimeWrong;
+    if (contains(output, "still-there")) return error.LifetimeWrong;
+    if (!contains(output, "gone")) return error.LifetimeWrong;
+}
+
 /// `script` ran an exec whose command tested its standard input and output for a terminal.
 pub fn check_terminal(output: []const u8) Error!void {
     if (!contains(output, "TTY-OK")) return error.TerminalWrong;
@@ -150,6 +158,9 @@ test "check_stopped, check_died, check_terminal and check_bundle" {
     try check_died(died);
     try testing.expectError(error.LifetimeWrong, check_died("code=0\n"));
     try testing.expectError(error.LifetimeWrong, check_died("code=137\n"));
+    try check_gone("started\ngone\n");
+    try testing.expectError(error.LifetimeWrong, check_gone("started\nstill-there\n"));
+    try testing.expectError(error.LifetimeWrong, check_gone("gone\n"));
     try check_terminal("TTY-OK\r\n");
     try testing.expectError(error.TerminalWrong, check_terminal("TTY-NO\r\n"));
     const execs = "1 recent execs of ex1\n2026-10-30T00-00-00Z  0s  exited 42  \"sh\" \"-c\" " ++

@@ -363,6 +363,7 @@ pub const HostSim = struct {
         .set_hostname = set_hostname,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
+        .pipe_has_reader = pipe_has_reader,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -917,6 +918,12 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         sim.world.seal();
+    }
+
+    fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {
+        const sim = from_context(context);
+        assert(handle >= sim_world.pipe_handle_base);
+        return sim.world.pipe_has_reader(handle);
     }
 
     fn die_with_parent(context: *anyopaque) host.Error!void {
