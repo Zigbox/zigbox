@@ -216,16 +216,17 @@ test "a refused image is the coded diagnostic of the command, and the store stay
     try testing.expectEqual(@as(u32, 0), zbx_lock_files(caller));
 }
 
-fn thread_work(caller: *Caller, reference: []const u8) void {
-    caller.ok = caller.pull_once(reference, .{});
+fn thread_work(caller: *Caller, reference: []const u8, platform: pull.Platform) void {
+    caller.ok = caller.pull_once(reference, platform);
 }
 
 test "two callers on two threads pull into two stores and share nothing" {
     // Goal: the library promises no process-wide state, here for pull. Method: two callers, each
     // with its own host, disk, wire, memory and store, pull at once, several times over; both
-    // succeed, each store holds the image and is whole, and each result is the same tree (the
-    // image is the same, so a result that is the other caller's would not show, but a record or
-    // a blob in the wrong store, or a shared static that two threads corrupt, would).
+    // succeed, each store holds its image and is whole, and each result is its own: the first
+    // caller pulls the amd64 image and the second the arm64 one, so a result, a record or a blob
+    // that went to the other caller, or a static that two threads share, shows as a digest or a
+    // platform that is not the caller's.
     const first = try Caller.create(10);
     defer first.destroy();
     const second = try Caller.create(11);
@@ -244,14 +245,23 @@ test "two callers on two threads pull into two stores and share nothing" {
         }
         first.ok = false;
         second.ok = false;
-        const one = try std.Thread.spawn(config, thread_work, .{ first, reference });
-        const two = try std.Thread.spawn(config, thread_work, .{ second, reference });
+        const amd64: pull.Platform = .{ .architecture = .amd64 };
+        const arm64: pull.Platform = .{ .architecture = .arm64 };
+        const one = try std.Thread.spawn(config, thread_work, .{ first, reference, amd64 });
+        const two = try std.Thread.spawn(config, thread_work, .{ second, reference, arm64 });
         one.join();
         two.join();
         try testing.expect(first.ok);
         try testing.expect(second.ok);
-        try testing.expect(first.result.tree.eql(second.result.tree));
-        for ([_]*Caller{ first, second }) |caller| {
+        try testing.expect(!first.result.manifest_digest.eql(second.result.manifest_digest));
+        const expected = [2][]const u8{
+            &first.registry.fixture.oci.amd64.digest,
+            &second.registry.fixture.oci.arm64.digest,
+        };
+        const platforms = [2][]const u8{ "linux/amd64", "linux/arm64" };
+        for ([_]*Caller{ first, second }, expected, platforms) |caller, digest, platform| {
+            try testing.expectEqualStrings(digest, &caller.result.manifest_digest.text());
+            try testing.expectEqualStrings(platform, caller.result.platform());
             try support.check_whole(&caller.files, store_root, 1 << 20);
             var store: Store = undefined;
             try testing.expect(store.locate(caller.sim.interface()));
@@ -260,4 +270,70 @@ test "two callers on two threads pull into two stores and share nothing" {
             try testing.expect(caller.record.tree.eql(caller.result.tree));
         }
     }
+}
+
+/// A library caller's request with `reference` and `mirrors`, pulled once.
+fn pull_with(caller: *Caller, reference: []const u8, mirrors: []const u8) bool {
+    const request: pull.Request = .{ .reference = reference, .platform = .{}, .mirrors = mirrors };
+    caller.diag.reset();
+    pull.pull(
+        caller.sim.interface(),
+        &caller.facts,
+        &request,
+        null,
+        &caller.workspace,
+        &caller.import_workspace,
+        &caller.result,
+        &caller.diag,
+    ) catch return false;
+    return true;
+}
+
+test "a request past its bounds is a refusal, never an assertion" {
+    // Goal: the caller's reference and mirrors setting are input, not programming errors. Method:
+    // a reference at, one past and far past `reference_bytes_max` (and past the old argument
+    // bound); a mirrors setting of exactly `registry_mirrors_bytes_max` bytes (blanks around one
+    // host, which is accepted) and one byte more (E0514).
+    const caller = try Caller.create(4);
+    defer caller.destroy();
+    var long: [constants.arg_bytes_max * 2]u8 = @splat('a');
+    const lengths = [_]usize{
+        constants.reference_bytes_max,
+        constants.reference_bytes_max + 1,
+        constants.arg_bytes_max,
+        constants.arg_bytes_max + 1,
+        long.len,
+    };
+    for (lengths) |length| {
+        try testing.expect(!pull_with(caller, long[0..length], ""));
+        try testing.expectEqual(@as(?codes.Code, .E0501), caller.diag.code);
+    }
+    const reference = test_registry.TestRegistry.reference(.open);
+    var mirrors: [constants.registry_mirrors_bytes_max + 1]u8 = @splat(' ');
+    const host_name = "mirror.invalid";
+    const at = constants.registry_mirrors_bytes_max;
+    @memcpy(mirrors[at - host_name.len ..][0..host_name.len], host_name);
+    try testing.expect(pull_with(caller, reference, mirrors[0..at]));
+    mirrors[at] = ' ';
+    try testing.expect(!pull_with(caller, reference, mirrors[0 .. at + 1]));
+    try testing.expectEqual(@as(?codes.Code, .E0514), caller.diag.code);
+    var huge: [constants.arg_bytes_max * 2]u8 = @splat(' ');
+    try testing.expect(!pull_with(caller, reference, &huge));
+    try testing.expectEqual(@as(?codes.Code, .E0514), caller.diag.code);
+}
+
+test "a pipe too small for the report refuses the pull with the worker's diagnostic" {
+    // Goal: a user over the kernel's pipe memory limits gets a pipe smaller than the report, and
+    // the pull must say so instead of hanging. Method: the simulated pipes hold one page; the
+    // pull is refused with E0419 naming the pipe, and the store is whole.
+    const caller = try Caller.create(5);
+    defer caller.destroy();
+    caller.sim.world.pipe_capacity_bytes = 4096;
+    try testing.expect(!caller.pull_once(test_registry.TestRegistry.reference(.open), .{}));
+    try testing.expectEqual(@as(?codes.Code, .E0419), caller.diag.code);
+    const cause = caller.diag.last_cause() orelse "";
+    try testing.expect(std.mem.indexOf(u8, cause, "holds less than") != null);
+    try support.check_whole(&caller.files, store_root, 1 << 20);
+    caller.sim.world.pipe_capacity_bytes = constants.pull_report_bytes_max;
+    try testing.expect(caller.pull_once(test_registry.TestRegistry.reference(.open), .{}));
 }

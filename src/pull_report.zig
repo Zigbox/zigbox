@@ -87,7 +87,11 @@ pub const Writer = struct {
         const text = diag.encode(&payload);
         const size: u32 = @intCast(constants.pull_report_header_bytes + text.len);
         const fits = writer.warnings_used + size <= constants.pull_report_warnings_bytes_max;
-        if (!fits or !writer.send(.warning, text)) {
+        if (!fits) {
+            writer.dropped +|= 1;
+            return;
+        }
+        if (!writer.send(.warning, text)) {
             writer.dropped +|= 1;
             return;
         }
@@ -184,10 +188,12 @@ pub const Reader = struct {
     bytes: []const u8,
     at: u32,
     ended: bool,
+    /// The bytes of the warnings so far: the writer sends no more than its share.
+    warnings_used: u32,
 
     pub fn init(bytes: []const u8) Reader {
         assert(bytes.len <= constants.pull_report_bytes_max);
-        return .{ .bytes = bytes, .at = 0, .ended = false };
+        return .{ .bytes = bytes, .at = 0, .ended = false, .warnings_used = 0 };
     }
 
     /// The next record, or null at the end of a report that ended where a record ends.
@@ -205,7 +211,14 @@ pub const Reader = struct {
         const kind = std.enums.fromInt(Kind, rest[0]) orelse return error.Malformed;
         reader.at += size;
         switch (kind) {
-            .warning => return .{ .warning = payload },
+            .warning => {
+                // The writer counts a warning past its share instead of sending it.
+                reader.warnings_used += size;
+                if (reader.warnings_used > constants.pull_report_warnings_bytes_max) {
+                    return error.Malformed;
+                }
+                return .{ .warning = payload };
+            },
             .failure => {
                 reader.ended = true;
                 return .{ .failure = payload };
@@ -224,20 +237,21 @@ const testing = std.testing;
 const HostSim = @import("host_sim.zig").HostSim;
 const sim_run = @import("runtime/sim_run.zig");
 
-/// A simulated host with a pipe, and a writer on it.
-const Rig = struct {
+/// A simulated host with a pipe, and a writer on it: for the tests of this file and of the parent
+/// that reads the report (`pull.zig`), which builds reports with the real writer.
+pub const Rig = struct {
     sim: HostSim,
     pipe: host_mod.Pipe,
     writer: Writer,
 
-    fn setup(rig: *Rig) void {
+    pub fn setup(rig: *Rig) void {
         sim_run.init(&rig.sim, 1);
         rig.pipe = rig.sim.interface().pipe() catch unreachable; // A fresh simulator has room.
         rig.writer.init(rig.sim.interface(), rig.pipe.write);
     }
 
     /// Everything written so far, read back.
-    fn report(rig: *Rig, out: *[constants.pull_report_bytes_max]u8) []const u8 {
+    pub fn report(rig: *Rig, out: *[constants.pull_report_bytes_max]u8) []const u8 {
         const host = rig.sim.interface();
         host.close(rig.pipe.write);
         var length: usize = 0;
@@ -251,7 +265,7 @@ const Rig = struct {
     }
 };
 
-fn warning_of(code: @import("diag/codes.zig").Code, word: []const u8) Diag {
+pub fn warning_of(code: @import("diag/codes.zig").Code, word: []const u8) Diag {
     var diag: Diag = undefined;
     diag.reset();
     diag.raise(code);
@@ -346,7 +360,9 @@ test "warnings stop at their share, are counted, and the last record still fits"
     var count: u32 = 0;
     var last_was_failure = false;
     while (try reader.next()) |record| : (count += 1) last_was_failure = record == .failure;
-    try testing.expectEqual(sent - 1 + 1, count);
+    // `sent` calls ended at the first dropped one, so `sent - 1` warnings were written, and then
+    // the failure.
+    try testing.expectEqual(sent, count);
     try testing.expect(last_was_failure);
 }
 
@@ -394,4 +410,28 @@ test "a report that is cut, padded or mislabelled is refused" {
     var small: [4]u8 = .{ 3, 1, 0, 7 }; // A result of one byte.
     var short = Reader.init(&small);
     try testing.expectError(error.Malformed, short.next());
+}
+
+test "warnings past the writer's share are refused by the reader" {
+    // Goal: the reader refuses what the writer never writes (the bound, and one past it).
+    // Method: records of maximal warnings built by hand, each sized as the writer sizes them;
+    // as many as fit the share are read, one more is Malformed, and a result after the last
+    // that fits is read.
+    const payload_len = constants.diag_carry_bytes_max;
+    const record_len = constants.pull_report_header_bytes + payload_len;
+    const fitting = @divFloor(constants.pull_report_warnings_bytes_max, record_len);
+    assert(fitting >= 1);
+    var bytes: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    var at: usize = 0;
+    for (0..fitting + 1) |_| {
+        bytes[at] = @backingInt(Kind.warning);
+        std.mem.writeInt(u16, bytes[at + 1 ..][0..2], payload_len, .little);
+        at += record_len;
+    }
+    var reader = Reader.init(bytes[0..at]);
+    for (0..fitting) |_| try testing.expect((try reader.next()).? == .warning);
+    // One more warning than the share holds, unless the share holds the rest of the report.
+    const over = fitting * record_len + record_len > constants.pull_report_warnings_bytes_max;
+    try testing.expect(over);
+    try testing.expectError(error.Malformed, reader.next());
 }

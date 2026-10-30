@@ -352,6 +352,9 @@ pub const World = struct {
     /// The kernel refuses overlay mounts (no module, a policy).
     overlay_refused: bool,
     broken_pipe_ignored: bool,
+    /// What `ensure_pipe_capacity` finds a pipe to hold; a test lowers it to model a user over
+    /// the kernel's pipe-memory limits.
+    pipe_capacity_bytes: u32,
     next_pid: u32,
     /// The plan step the calls that follow belong to (`Host.begin_step`).
     step: u32,
@@ -470,6 +473,7 @@ pub const World = struct {
         world.devpts_refused = false;
         world.overlay_refused = false;
         world.broken_pipe_ignored = false;
+        world.pipe_capacity_bytes = pipe_bytes_max;
         world.next_pid = 500;
         world.step = host.step_none;
         world.written_count = 0;

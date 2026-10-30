@@ -735,6 +735,11 @@ pub const pull_output_bytes_max: u32 = 32 * 1024;
 /// parent reads the pipe only when the child has ended, so the whole report must fit a pipe
 /// (65536 bytes on Linux) with room to spare; a warning that does not fit is counted, not sent.
 pub const pull_report_bytes_max: u32 = 16 * 1024;
+/// How long the parent waits for more of a report from a child that has ended: its writes are
+/// all in the pipe, so a poll that finds nothing ready is the end.
+pub const pull_report_drain_wait_ms: u32 = 1;
+/// The most `ensure_pipe_capacity` is asked for (the kernel's default maximum is 1 MiB).
+pub const pipe_capacity_bytes_max: u32 = 1024 * 1024;
 /// The header of one record of the report: its kind and the length of what follows.
 pub const pull_report_header_bytes: u32 = 3;
 /// A result record's payload: the tree's digest, six counts and the number of warnings dropped.
@@ -1208,7 +1213,8 @@ comptime {
         pull_report_header_bytes + diag_carry_bytes_max);
     assert(pull_report_warnings_bytes_max + pull_report_header_bytes + diag_carry_bytes_max ==
         pull_report_bytes_max);
-    assert(pull_report_bytes_max <= 32 * 1024); // A pipe holds 64 KiB; the child never blocks.
+    // The parent asks the kernel for a pipe this big and refuses the pull if it gets less.
+    assert(pull_report_bytes_max <= pipe_capacity_bytes_max);
     assert(pull_report_warnings_bytes_max >= 4096);
     assert(diag_carry_bytes_max <= std.math.maxInt(u16));
     assert(image_tags_max > 0);

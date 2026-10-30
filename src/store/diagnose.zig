@@ -281,6 +281,8 @@ pub fn changed_while_importing(diag: *Diag, path: []const u8) void {
 pub const WorkerFault = union(enum) {
     /// The child was killed by this signal.
     signaled: u8,
+    /// The child ended, or its report did not reach the parent, in the way this sentence says.
+    report: []const u8,
     /// A step of creating it failed.
     step: struct { name: []const u8, err: host_mod.Error, errno: u16 },
     /// `newuidmap` or `newgidmap` refused the map.
@@ -295,6 +297,10 @@ pub fn worker_ended(diag: *Diag, fault: WorkerFault) void {
     diag.while_("starting the store worker", .{});
     switch (fault) {
         .signaled => |number| diag.cause("it was killed by signal {d}", .{number}),
+        .report => |sentence| {
+            assert(sentence.len > 0);
+            diag.cause("{s}", .{sentence});
+        },
         .step => |step| {
             errors.cause_host_error(diag, step.name, step.err, step.errno);
             diag.cause("the user namespace the store works in could not be set up", .{});

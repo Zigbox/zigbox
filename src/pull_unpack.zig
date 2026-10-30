@@ -60,7 +60,6 @@ pub const Job = struct {
     written: []const u8,
     reference: *const reference_mod.Reference,
     resolved: *const manifest.Resolved,
-    fetched: *const Fetched,
     workspace: *Workspace,
     import_workspace: *import.Workspace,
     settings: *const images.Settings,

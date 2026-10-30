@@ -129,6 +129,13 @@ pub fn run_pull(
         &result,
         diag,
     ) catch return error.Failed;
+    if (result.warnings_dropped > 0) {
+        // The library hands the count on instead of printing: the command line shows it.
+        var dropped: Diag = undefined;
+        dropped.reset();
+        image_diagnose.warnings_dropped(&dropped, result.warnings_dropped);
+        report_event(&reporter, .{ .warning = &dropped });
+    }
     const locked = try record_in_lock(host, args.reference, workspace, &result, diag);
     if (output.quiet) return;
     const text = render_result(args.json, args.reference, workspace, &result, locked);

@@ -73,9 +73,12 @@ pub const Platform = struct {
 
 pub const Request = struct {
     /// A tag or a digest reference, as a person writes it (`alpine:3.20`, `ghcr.io/o/r@sha256:..`).
+    /// At most `constants.reference_bytes_max` bytes; a longer or empty one is refused (E0501).
     reference: []const u8,
     platform: Platform,
-    /// Mirrors for docker.io, comma separated; empty for none.
+    /// Mirrors for docker.io, comma separated; empty for none. At most
+    /// `constants.registry_mirrors_bytes_max` bytes and `registry_mirrors_max` entries; more is
+    /// refused (E0514).
     mirrors: []const u8,
 };
 
@@ -138,7 +141,12 @@ pub const Result = struct {
 /// Parses the reference into `workspace.reference`; a bad one is a diagnostic.
 pub fn parse_reference(workspace: *Workspace, text: []const u8, diag: *Diag) Error!void {
     assert(diag.code == null);
-    assert(text.len <= constants.arg_bytes_max);
+    // Any length is the caller's to give, so a long one is a refusal here, before the parser.
+    if (text.len > constants.reference_bytes_max) {
+        const shown = text[0..@min(text.len, constants.arg_bytes_max)];
+        diagnose.bad_reference(diag, shown, error.TooLong);
+        return error.Failed;
+    }
     reference_mod.parse(text, &workspace.reference) catch |err| {
         diagnose.bad_reference(diag, text, err);
         return error.Failed;
@@ -155,7 +163,6 @@ fn resolve_with(
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
-    assert(request.mirrors.len <= constants.registry_mirrors_bytes_max);
     try parse_reference(workspace, request.reference, diag);
     // A host that cannot say its machine type gets an empty one, which has no image platform:
     // the refusal says so. `uname` does not fail on a real kernel.
@@ -183,7 +190,7 @@ pub fn resolve(host: Host, request: *const Request, workspace: *Workspace, diag:
 }
 
 /// What the callback of `namespace.run` and the report's warnings go through.
-const Sink = struct {
+pub const Sink = struct {
     progress: ?Progress,
 
     fn warn(sink: *const Sink, diag: *const Diag) void {
@@ -254,6 +261,15 @@ fn fill_result(result: *Result, workspace: *const Workspace, done: *const report
 }
 
 /// Makes the store's child do the unpack and the record, and reads its report.
+///
+/// The report goes through a pipe that the parent reads only after the child has ended, so the
+/// pipe must hold the whole report or the child would wait for a reader that waits for it. The
+/// kernel gives a user over `fs.pipe-user-pages-soft` a pipe of one or two pages, so the parent
+/// asks for `pull_report_bytes_max` and checks what it got (`ensure_pipe_capacity`), and refuses
+/// the pull with a diagnostic if the pipe is smaller; draining while the child runs would need
+/// the wait for the child (`namespace.run`) to poll a pipe too, for a case that is rare. The read
+/// does not wait for end of file either: another thread's child that was made while the pipe was
+/// open may hold its write end, so everything buffered is read and the first empty poll ends it.
 fn unpack_in_child(
     host: Host,
     facts: *doctor.Facts,
@@ -265,7 +281,15 @@ fn unpack_in_child(
     diag: *Diag,
 ) Error!void {
     const pipe = host.pipe() catch |err| {
-        store_worker_failed(host, diag, "pipe", err);
+        store_pipe_failed(host, diag, err);
+        return error.Failed;
+    };
+    host.ensure_pipe_capacity(pipe.write, constants.pull_report_bytes_max) catch |err| {
+        host.close(pipe.read);
+        host.close(pipe.write);
+        if (err == error.NoSpace) {
+            report_failed(diag, .small_pipe, 0);
+        } else store_pipe_failed(host, diag, err);
         return error.Failed;
     };
     var writer: report_mod.Writer = undefined;
@@ -276,7 +300,6 @@ fn unpack_in_child(
         .written = request.reference,
         .reference = &workspace.reference,
         .resolved = &workspace.resolved,
-        .fetched = &workspace.fetched,
         .workspace = &workspace.unpack,
         .import_workspace = import_workspace,
         .settings = &workspace.settings,
@@ -294,18 +317,60 @@ fn unpack_in_child(
     host.close(pipe.write);
     defer host.close(pipe.read);
     var bytes: [constants.pull_report_bytes_max]u8 = undefined;
+    const length = read_buffered(host, pipe.read, &bytes) orelse {
+        report_failed(diag, .unreadable, code);
+        return error.Failed;
+    };
+    return read_report(code, bytes[0..length], sink, done, diag);
+}
+
+/// Everything the pipe holds, without waiting for end of file: null if it cannot be read.
+fn read_buffered(
+    host: Host,
+    handle: host_mod.Handle,
+    bytes: *[constants.pull_report_bytes_max]u8,
+) ?usize {
     var length: usize = 0;
-    while (length < bytes.len) {
-        const count = host.read_some(pipe.read, bytes[length..]) catch break;
+    // The child has ended, so its writes are all in the pipe: each read gives some, and the
+    // loop ends when it gives none, when nothing more is ready, or when the report is as big
+    // as a report can be.
+    for (0..constants.pull_report_bytes_max) |_| {
+        if (length == bytes.len) break;
+        const wait_ms = constants.pull_report_drain_wait_ms;
+        const count = host.read_timeout(handle, bytes[length..], wait_ms) catch |err| {
+            if (err == error.TimedOut) break;
+            return null;
+        };
         if (count == 0) break;
         length += count;
     }
-    return read_report(host, code, bytes[0..length], sink, done, diag);
+    assert(length <= bytes.len);
+    return length;
 }
 
-/// Hands the warnings on and turns the last record into the result or the failure.
-fn read_report(
-    host: Host,
+/// Why a pull's worker is not believed. Each is one sentence in the diagnostic.
+const ReportCause = enum {
+    /// The pipe could not be made big enough for the report.
+    small_pipe,
+    /// The pipe could not be read.
+    unreadable,
+    /// The report is not what the worker's writer writes.
+    damaged,
+    /// A failure record whose diagnostic does not decode.
+    failure_unreadable,
+    /// The worker ended with a non-zero status and no failure record.
+    silent,
+    /// The worker ended with status 0 and no result record.
+    no_result,
+    /// The worker reported a failure and ended with status 0, or a result and a failing status.
+    contradiction,
+};
+
+/// Hands the warnings on and turns the report's last record into the result or the failure.
+/// `code` is the child's exit code and `bytes` what it wrote: the report is believed only if it
+/// is whole, ends in one record (a failure with a non-zero code or a result with 0), and the two
+/// agree.
+pub fn read_report(
     code: u8,
     bytes: []const u8,
     sink: *const Sink,
@@ -315,34 +380,102 @@ fn read_report(
     assert(diag.code == null);
     var reader = report_mod.Reader.init(bytes);
     var finished = false;
-    while (reader.next() catch null) |record| switch (record) {
-        .warning => |payload| {
-            var warning: Diag = undefined;
-            warning.reset();
-            // A warning that does not read back is lost; the pull goes on.
-            if (warning.decode(payload)) sink.warn(&warning);
-        },
-        .failure => |payload| {
-            // A failure with an exit code of 0 is a child that contradicts itself: not believed.
-            if (code != constants.exit_ok and diag.decode(payload)) return error.Failed;
-            diag.reset();
-        },
-        .result => |found| {
-            done.* = found;
-            finished = true;
-        },
-    };
-    if (code == constants.exit_ok and finished) return;
-    diag.reset();
-    store_worker_failed(host, diag, "unpacking the image", error.IoFailed);
+    var failed = false;
+    while (true) {
+        const found = reader.next() catch {
+            report_failed(diag, .damaged, code);
+            return error.Failed;
+        };
+        const record = found orelse break;
+        switch (record) {
+            .warning => |payload| {
+                var warning: Diag = undefined;
+                warning.reset();
+                // The writer encoded it, so a warning that does not read back is a damaged report.
+                if (!warning.decode(payload)) {
+                    report_failed(diag, .damaged, code);
+                    return error.Failed;
+                }
+                sink.warn(&warning);
+            },
+            .failure => |payload| {
+                failed = true;
+                if (code == constants.exit_ok) break;
+                if (diag.decode(payload)) return error.Failed;
+                diag.reset();
+                report_failed(diag, .failure_unreadable, code);
+                return error.Failed;
+            },
+            .result => |found_done| {
+                done.* = found_done;
+                finished = true;
+            },
+        }
+    }
+    if (failed) {
+        report_failed(diag, .contradiction, code);
+        return error.Failed;
+    }
+    if (code != constants.exit_ok) {
+        const cause: ReportCause = if (finished) .contradiction else .silent;
+        report_failed(diag, cause, code);
+        return error.Failed;
+    }
+    if (finished) return;
+    report_failed(diag, .no_result, code);
     return error.Failed;
 }
 
-fn store_worker_failed(host: Host, diag: *Diag, step: []const u8, err: host_mod.Error) void {
+/// E0419 with the sentence for `cause`: what the parent saw of the store's worker.
+fn report_failed(diag: *Diag, cause: ReportCause, code: u8) void {
+    diag.reset();
+    var storage: [192]u8 = undefined;
+    const sentence = switch (cause) {
+        .small_pipe => std.fmt.bufPrint(
+            &storage,
+            "the pipe for the store worker's report holds less than {d} bytes, which the " ++
+                "kernel allows a user over its pipe memory limits",
+            .{constants.pull_report_bytes_max},
+        ),
+        .unreadable => std.fmt.bufPrint(
+            &storage,
+            "the store's worker ended with status {d} and its report could not be read",
+            .{code},
+        ),
+        .damaged => std.fmt.bufPrint(
+            &storage,
+            "the store's worker sent a damaged report (it ended with status {d})",
+            .{code},
+        ),
+        .failure_unreadable => std.fmt.bufPrint(
+            &storage,
+            "the store's worker ended with status {d} and sent a failure that cannot be read",
+            .{code},
+        ),
+        .silent => std.fmt.bufPrint(
+            &storage,
+            "the store's worker ended with status {d} and did not say why",
+            .{code},
+        ),
+        .no_result => std.fmt.bufPrint(
+            &storage,
+            "the store's worker ended with status 0 without reporting a result",
+            .{},
+        ),
+        .contradiction => std.fmt.bufPrint(
+            &storage,
+            "the store's worker contradicted itself: its report and its status {d} disagree",
+            .{code},
+        ),
+    } catch unreachable; // The longest sentence is under 160 bytes, and the buffer is 192.
+    store_diagnose.worker_ended(diag, .{ .report = sentence });
+}
+
+/// The pipe for the report could not be made: the kernel's reason is fresh, from the call.
+fn store_pipe_failed(host: Host, diag: *Diag, err: host_mod.Error) void {
     assert(diag.code == null);
-    assert(step.len > 0);
-    @import("store/diagnose.zig").worker_ended(diag, .{ .step = .{
-        .name = step,
+    store_diagnose.worker_ended(diag, .{ .step = .{
+        .name = "making the pipe for the store worker's report",
         .err = err,
         .errno = host.last_errno(),
     } });
@@ -426,5 +559,139 @@ fn fetch_all(
             } };
             watcher.call(watcher.context, event);
         }
+    }
+}
+
+// ---- Tests ---------------------------------------------------------------------------------
+
+const testing = std.testing;
+const codes = @import("diag/codes.zig");
+
+const Seen = struct {
+    warnings: u32 = 0,
+
+    fn on_event(context: *anyopaque, event: Event) void {
+        const seen: *Seen = @ptrCast(@alignCast(context));
+        switch (event) {
+            .warning => seen.warnings += 1,
+            .resolved, .blob => {},
+        }
+    }
+};
+
+/// A report built with the real writer: `warnings` warnings, then the last record as `ending`
+/// says. Returns the bytes in `out`.
+const Ending = enum { none, result, failure };
+
+fn build_report(
+    out: *[constants.pull_report_bytes_max]u8,
+    warnings: u32,
+    ending: Ending,
+) []const u8 {
+    var rig: report_mod.Rig = undefined;
+    rig.setup();
+    const warning = report_mod.warning_of(.W0501, "a device node was left out");
+    for (0..warnings) |_| rig.writer.warning(&warning);
+    switch (ending) {
+        .none => {},
+        .result => {
+            var tree: store_digest.Digest = undefined;
+            @memset(&tree.bytes, 0x42);
+            var counts = std.mem.zeroes(Counts);
+            counts.files = 9;
+            rig.writer.result(tree, counts);
+        },
+        .failure => {
+            var failing = report_mod.warning_of(.E0515, "an entry would leave the root");
+            failing.fix(.{ .sentence = "pull another image:", .command = "zbx pull alpine:3.20" });
+            rig.writer.failure(&failing);
+        },
+    }
+    return rig.report(out);
+}
+
+/// Runs `read_report` on `bytes` and `code`; the result is the error or null, with the warnings
+/// seen and the diagnostic.
+fn read_for_test(
+    code: u8,
+    bytes: []const u8,
+    seen: *Seen,
+    diag: *Diag,
+    done: *report_mod.Done,
+) ?Error {
+    const progress: Progress = .{ .context = seen, .call = Seen.on_event };
+    const sink: Sink = .{ .progress = progress };
+    diag.reset();
+    read_report(code, bytes, &sink, done, diag) catch |err| return err;
+    return null;
+}
+
+fn expect_worker_refused(code: u8, bytes: []const u8, words: []const u8) !void {
+    var seen: Seen = .{};
+    var diag: Diag = undefined;
+    var done: report_mod.Done = undefined;
+    const err = read_for_test(code, bytes, &seen, &diag, &done);
+    try testing.expectEqual(@as(?Error, error.Failed), err);
+    try testing.expectEqual(@as(?codes.Code, .E0419), diag.code);
+    const cause = diag.last_cause() orelse "";
+    testing.expect(std.mem.indexOf(u8, cause, words) != null) catch |failed| {
+        std.debug.print("cause was '{s}', wanted '{s}'\n", .{ cause, words });
+        return failed;
+    };
+}
+
+test "read_report: a report with a result and exit 0 is the result, and its warnings come first" {
+    // Goal: the one good ending. Method: two warnings and a result built by the writer.
+    var buffer: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    const bytes = build_report(&buffer, 2, .result);
+    var seen: Seen = .{};
+    var diag: Diag = undefined;
+    var done: report_mod.Done = undefined;
+    try testing.expectEqual(@as(?Error, null), read_for_test(0, bytes, &seen, &diag, &done));
+    try testing.expectEqual(@as(u32, 2), seen.warnings);
+    try testing.expectEqual(@as(u64, 9), done.counts.files);
+    try testing.expectEqual(@as(?codes.Code, null), diag.code);
+}
+
+test "read_report: a failure with a non-zero exit is the child's own diagnostic" {
+    // Goal: a failure travels whole. Method: a failure record and exit 2.
+    var buffer: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    const bytes = build_report(&buffer, 1, .failure);
+    var seen: Seen = .{};
+    var diag: Diag = undefined;
+    var done: report_mod.Done = undefined;
+    const err = read_for_test(2, bytes, &seen, &diag, &done);
+    try testing.expectEqual(@as(?Error, error.Failed), err);
+    try testing.expectEqual(@as(?codes.Code, .E0515), diag.code);
+    try testing.expectEqual(@as(u32, 1), seen.warnings);
+}
+
+test "read_report: every other ending is a specific refusal of the worker" {
+    // Goal: every exit path of the report reader. Method: reports from the real writer, and
+    // hand-damaged copies, each against the exit code that makes it wrong: a non-zero exit with
+    // no failure, exit 0 with no result, exit 0 with a failure, a result with a failing exit, a
+    // failure whose payload does not decode, a tail after the last record, and every cut.
+    var buffer: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    try expect_worker_refused(3, build_report(&buffer, 0, .none), "did not say why");
+    try expect_worker_refused(3, build_report(&buffer, 2, .none), "did not say why");
+    try expect_worker_refused(0, build_report(&buffer, 2, .none), "without reporting a result");
+    try expect_worker_refused(0, build_report(&buffer, 0, .none), "without reporting a result");
+    try expect_worker_refused(0, build_report(&buffer, 1, .failure), "contradicted itself");
+    try expect_worker_refused(1, build_report(&buffer, 1, .result), "contradicted itself");
+    var junk = [_]u8{ 2, 2, 0, 'x', 'y' }; // A failure whose payload is not a diagnostic.
+    try expect_worker_refused(1, &junk, "failure that cannot be read");
+    var tail: [constants.pull_report_bytes_max]u8 = undefined;
+    const whole = build_report(&buffer, 1, .result);
+    @memcpy(tail[0..whole.len], whole);
+    tail[whole.len] = 7;
+    try expect_worker_refused(0, tail[0 .. whole.len + 1], "damaged report");
+    var junk_warning = [_]u8{ 1, 2, 0, 'x', 'y' }; // A warning that is not a diagnostic.
+    try expect_worker_refused(0, &junk_warning, "damaged report");
+    for (1..whole.len) |cut| {
+        const first_length = whole[1] | @as(usize, whole[2]) << 8;
+        const first_end = constants.pull_report_header_bytes + first_length;
+        // A cut at the end of the first record is a whole report of one warning: no result.
+        const words = if (cut == first_end) "without reporting a result" else "damaged report";
+        try expect_worker_refused(0, whole[0..cut], words);
     }
 }
