@@ -869,7 +869,8 @@ test "--user replaces the image's user, and a --mount needs the run's user to be
 
     try testing.expectEqual(@as(u8, 125), run_text(&world, &(base ++ mount ++ .{service})));
     try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0213]"));
-    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "app:staff (uid 1000, gid 50)") != null);
+    const named_user = "app:staff (uid 1000, gid 50)";
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), named_user) != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--user 0") != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "--bind") != null);
     try testing.expect(world.sim.world.read_written(sim_run.runs_path ++ "/svc-1.zon") == null);
@@ -898,7 +899,9 @@ test "--user replaces the image's user, and a --mount needs the run's user to be
     const record_7 = world.sim.world.read_written(sim_run.runs_path ++ "/svc-2.zon").?;
     try testing.expect(std.mem.indexOf(u8, record_7, "    .user = \"7:7\",\n") != null);
     second_container(&world, "svc-3");
-    const named = [_][:0]const u8{ "zbx", "run", "--name", "svc-3", "--user", "app:staff", service };
+    const named = [_][:0]const u8{
+        "zbx", "run", "--name", "svc-3", "--user", "app:staff", service,
+    };
     try testing.expectEqual(@as(u8, 0), run_text(&world, &named));
     try testing.expectEqual(@as(?[2]u32, .{ 1000, 50 }), world.sim.world.processes[1].user_set);
 
@@ -909,7 +912,9 @@ test "--user replaces the image's user, and a --mount needs the run's user to be
     const no_group = base ++ [_][:0]const u8{ "--user", "app:nogroup", service };
     try testing.expectEqual(@as(u8, 125), run_text(&world, &no_group));
     try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0216]"));
-    const rootfs_user = [_][:0]const u8{ "zbx", "run", "--user", "0", "--rootfs", "/srv/alpine", "--", "sh" };
+    const rootfs_user = [_][:0]const u8{
+        "zbx", "run", "--user", "0", "--rootfs", "/srv/alpine", "--", "sh",
+    };
     try testing.expectEqual(@as(u8, 125), run_text(&world, &rootfs_user));
     try testing.expect(std.mem.startsWith(u8, world.sim.stderr(), "error[ZBX-E0015]"));
 }
