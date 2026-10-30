@@ -156,12 +156,9 @@ fn follow(session: *Session, out: *Io.Writer) !void {
 fn the_cap(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: LOGS 5: a container that writes more than 5 MiB\n", .{H.demo_name});
     _ = try ok(session, out, flood);
-    // The last line, then the end of the container: --follow waits for it.
-    const wait = "timeout 55 " ++ zn ++ " logs --follow --tail 1 lg5";
-    const ended = try ok(session, out, wait);
-    if (std.mem.indexOf(u8, ended.streams.stdout, last_line) == null) {
-        return fail_step(out, step_name, "expected the last line", error.CapWrong);
-    }
+    // --follow waits for the end of the container; the output goes nowhere (the console could
+    // not carry 5 MiB), the summary below reads the log.
+    _ = try ok(session, out, "timeout 55 " ++ zn ++ " logs --follow lg5 >/dev/null");
     try H.put_file(session, summary_path, summary_script);
     const chown = "chown demo:demo " ++ summary_path ++ " && chmod 755 " ++ summary_path;
     _ = try ok(session, out, chown);
