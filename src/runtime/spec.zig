@@ -212,6 +212,13 @@ pub const Spec = struct {
     /// The other mounts (`--tmpfs`, `--bind`, `--secret`), in the order given. Their targets are
     /// apart from each other's and from the state volumes' (`mounts.list_problem`).
     mounts: []const mounts_mod.Mount = &.{},
+    /// The directory a `--mount` (kind `mount`, writable) must be in or below, absolute. Empty:
+    /// the nearest `zbx.lock` up from the working directory, else the working directory. A
+    /// `--mount` source may be relative to the working directory; the run holds it to the
+    /// project with every symbolic link followed, and refuses a user who is not root.
+    project: []const u8 = "",
+    /// The user as the caller names it (`--user`, or the image's `User`), for a refusal's message.
+    user_text: []const u8 = "",
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.

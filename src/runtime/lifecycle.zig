@@ -283,6 +283,11 @@ fn orphan(entry: *Entry, stem: []const u8, scope: []const u8) void {
     record.publish_count = 0;
     record.env_names_len = 0;
     record.env_names_count = 0;
+    record.state_len = 0;
+    record.state_count = 0;
+    record.mounts_len = 0;
+    record.mounts_count = 0;
+    record.user = null;
 }
 
 // ---- A container by reference ---------------------------------------------------------------

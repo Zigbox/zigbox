@@ -53,7 +53,13 @@ const container_exit_object =
     \\"items":{"type":"object","required":["host","container"],
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
-    \\"timed_out":{"type":"boolean"}}}
+    \\"timed_out":{"type":"boolean"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
 ;
 
 const ran_object =
@@ -76,7 +82,13 @@ const detached_container_object =
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
     \\"env":{"type":"array","items":{"type":"string"},
-    \\"description":"M6: names of the variables set with -e; a value is never shown"}}}
+    \\"description":"M6: names of the variables set with -e; a value is never shown"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}
 ;
 
 /// `zbx schema run`: ONE object schema with no `$ref`, which an agent can follow without a
@@ -153,7 +165,13 @@ const ps_schema =
     \\"properties":{"host":{"type":"integer","minimum":1,"maximum":65535},
     \\"container":{"type":"integer","minimum":1,"maximum":65535}}}},
     \\"env":{"type":"array","items":{"type":"string"},
-    \\"description":"M6: names of the variables set with -e; a value is never kept"}}}}}}
+    \\"description":"M6: names of the variables set with -e; a value is never kept"},
+    \\"writable_mounts":{"type":"array",
+    \\"description":"M6b: each --mount, by its resolved host path",
+    \\"items":{"type":"object","required":["host","target"],
+    \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
+    \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}}}}
 ;
 
 const stop_schema =

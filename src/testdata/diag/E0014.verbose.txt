@@ -1,0 +1,7 @@
+error[ZBX-E0014]: not a valid --mount value
+  while  reading the command line
+  cause  --mount 'site': it needs the host's path and the container's: HOST:PATH
+  arg    site
+  fix    mounts look like this:   zbx run --mount ./site:/srv python:3.12-slim
+  more   zbx explain E0014
+  docs   https://zigbox.github.io/zigbox/errors/E0014.html

@@ -1,0 +1,7 @@
+error[ZBX-E0212]: a --mount source is outside the project
+  cause  --mount escape is /etc, outside the project /home/alice/project; a
+         writable mount stays inside it
+  fix    run zbx from the project's directory
+         or give a directory elsewhere read-only:   zbx run --bind /path/to/dir:/dir <image>
+  more   zbx explain E0212 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0212.html

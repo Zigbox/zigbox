@@ -31,7 +31,7 @@ pub const Error = m4.Error || m3.Error || error{
 pub const image_record_version_m4: u32 = 1;
 pub const image_record_version_m5: u32 = 2;
 pub const run_record_version_old: u32 = 4;
-pub const run_record_version: u32 = 7;
+pub const run_record_version: u32 = 8;
 
 /// The image record for `manifest` (`sha256:<hex>`) in a store at `store_dir`:
 /// `<store_dir>/images/<hex>`, as `store/images.zig` names it.
@@ -308,7 +308,7 @@ test "a record's version line is read as it is written" {
     try check_record_version(old, image_record_version_m4);
     try testing.expectError(error.LineMissing, check_record_version(old, image_record_version_m5));
     try check_record_version("    .version = 4,\n", run_record_version_old);
-    try check_record_version("    .version = 7,\n", run_record_version);
+    try check_record_version("    .version = 8,\n", run_record_version);
     try testing.expectError(
         error.LineMissing,
         check_record_version("    .version = 4,\n", run_record_version),

@@ -53,10 +53,17 @@ run:
                   size; k, m or g). Its pages count against --memory
   --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
                   <host> that does not exist is an error, never made (repeatable)
+  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
+                  <host> may be relative; with every symbolic link followed it must be the
+                  project directory (the one with zbx.lock, else the working directory) or
+                  inside it. The container must run as root, which is you: see --user
   --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
                   owned by the container's root. Its contents are never stored or
                   printed, and the mount point is left out of zbx commit (repeatable).
-                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
+                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
+  --user <user>[:<group>]   run the command as this user of the image (a name from its
+                  /etc/passwd and /etc/group, or a number), over the image's own; --user 0
+                  makes a non-root image fit --mount
   --              ends the options; everything after it is the command, as typed
 
 stop:

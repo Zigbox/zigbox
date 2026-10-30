@@ -135,6 +135,19 @@ pub fn resolve_text(
     group_file: ?[]const u8,
     diag: *Diag,
 ) Error!Resolved {
+    return resolve_text_from(user_text, passwd_file, group_file, null, diag);
+}
+
+/// Like `resolve_text`. `flag_image` is null when the text is the image's own `User`; when it is
+/// the value of `--user` (M6b) it names the image, and a name the image lacks is `E0216`, the
+/// caller's mistake, where the image's own would be `E0521`, the image's.
+pub fn resolve_text_from(
+    user_text: []const u8,
+    passwd_file: ?[]const u8,
+    group_file: ?[]const u8,
+    flag_image: ?[]const u8,
+    diag: *Diag,
+) Error!Resolved {
     assert(user_text.len <= constants.image_settings_bytes_max);
     if (user_text.len == 0) return Resolved.with_home(.{ .uid = 0, .gid = 0 }, "/root");
     const colon = std.mem.indexOfScalar(u8, user_text, ':');
@@ -153,7 +166,7 @@ pub fn resolve_text(
     } else {
         const line = if (passwd_file) |file| find_name(file, user_part, true) else null;
         const found = line orelse {
-            image_diagnose.unknown_user(diag, user_part, passwd, false);
+            image_diagnose.unknown_user(diag, user_part, passwd, false, flag_image);
             return error.Failed;
         };
         result = .{ .uid = found.id, .gid = found.gid };
@@ -165,7 +178,7 @@ pub fn resolve_text(
         } else {
             const line = if (group_file) |file| find_name(file, name, false) else null;
             const found = line orelse {
-                image_diagnose.unknown_user(diag, name, group, true);
+                image_diagnose.unknown_user(diag, name, group, true, flag_image);
                 return error.Failed;
             };
             result.gid = found.id;
@@ -226,6 +239,18 @@ pub fn resolve(
     user_text: []const u8,
     diag: *Diag,
 ) Error!Resolved {
+    return resolve_from(store, workspace, root, user_text, null, diag);
+}
+
+/// Like `resolve`, for the value of `--user` of the image `flag_image` (see `resolve_text_from`).
+pub fn resolve_from(
+    store: *const Store,
+    workspace: *Workspace,
+    root: Digest,
+    user_text: []const u8,
+    flag_image: ?[]const u8,
+    diag: *Diag,
+) Error!Resolved {
     assert(diag.code == null);
     if (user_text.len == 0) return Resolved.with_home(.{ .uid = 0, .gid = 0 }, "/root");
     // Both files are needed at once, so the first is copied aside: the second read reuses the
@@ -241,7 +266,7 @@ pub fn resolve(
         }
     }
     const second = file_of(store, workspace, root, "etc", "group");
-    return resolve_text(user_text, passwd_file, second, diag);
+    return resolve_text_from(user_text, passwd_file, second, flag_image, diag);
 }
 
 const testing = std.testing;

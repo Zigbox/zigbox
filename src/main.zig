@@ -202,6 +202,7 @@ test {
     _ = @import("runtime/mounts.zig");
     _ = @import("runtime/mounts_diagnose.zig");
     _ = @import("runtime/mount_tests.zig");
+    _ = @import("runtime/project.zig");
 }
 
 test {

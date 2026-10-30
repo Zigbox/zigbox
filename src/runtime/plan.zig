@@ -270,6 +270,9 @@ pub const state_stage_prefix = "/dev/.zbx-state-";
 /// mount's index. The steps each shape of mount adds: a tmpfs two, the others six.
 pub const mount_steps_tmpfs: u32 = 2;
 pub const mount_steps_staged: u32 = 6;
+/// A writable mount has no read-only remount: the stage, the bind, and after the new root the
+/// target, the move and the removal of the stage.
+pub const mount_steps_writable: u32 = 5;
 
 /// Steps of a plan with the single-id map: the parent has eight (it denies setgroups and
 /// writes both maps itself), the child has `child_steps_count`.
@@ -360,7 +363,15 @@ pub const Input = struct {
 
 /// What a mount is, once the host has been looked at: a bind of a directory or of a file are
 /// two different sequences of steps.
-pub const MountShape = enum { tmpfs, bind_dir, bind_file, secret };
+pub const MountShape = enum {
+    tmpfs,
+    bind_dir,
+    bind_file,
+    secret,
+    /// `--mount` (M6b): a bind that stays writable, of a directory or of a file.
+    mount_dir,
+    mount_file,
+};
 
 /// One other mount as the plan needs it. `source` is the host path (empty for a tmpfs).
 pub const MountInput = struct {
@@ -626,7 +637,11 @@ pub const Plan = struct {
             plan.mount_shapes[index] = mount.shape;
             plan.mount_sources[index] = plan.add_text(&.{mount.source});
             plan.mount_targets[index] = plan.add_text(&.{mount.target});
-            const steps = if (mount.shape == .tmpfs) mount_steps_tmpfs else mount_steps_staged;
+            const steps: u32 = switch (mount.shape) {
+                .tmpfs => mount_steps_tmpfs,
+                .mount_dir, .mount_file => mount_steps_writable,
+                .bind_dir, .bind_file, .secret => mount_steps_staged,
+            };
             plan.mount_steps += steps;
         }
         assert(plan.mount_steps <= constants.mounts_max * mount_steps_staged);
@@ -892,6 +907,14 @@ pub const Plan = struct {
                     plan.push(.bind_mount_file, stage, source, at);
                     plan.push(.remount_mount, stage, empty_text, at);
                 },
+                .mount_dir => {
+                    plan.push(.make_mount_stage_dir, stage, empty_text, at);
+                    plan.push(.bind_mount_dir, stage, source, at);
+                },
+                .mount_file => {
+                    plan.push(.make_mount_stage_file, stage, empty_text, at);
+                    plan.push(.bind_mount_file, stage, source, at);
+                },
                 .secret => {
                     plan.push(.copy_secret, stage, source, at);
                     plan.push(.bind_mount_file, stage, stage, at);
@@ -919,12 +942,12 @@ pub const Plan = struct {
                     plan.push(.make_mount_target_dir, target, empty_text, at);
                     plan.push(.mount_user_tmpfs, target, plan.add_text(&.{text_}), at);
                 },
-                .bind_dir => {
+                .bind_dir, .mount_dir => {
                     plan.push(.make_mount_target_dir, target, empty_text, at);
                     plan.push(.move_mount, target, stage, at);
                     plan.push(.remove_mount_stage_dir, stage, empty_text, at);
                 },
-                .bind_file, .secret => {
+                .bind_file, .mount_file, .secret => {
                     plan.push(.make_mount_target_file, target, empty_text, at);
                     plan.push(.move_mount, target, stage, at);
                     plan.push(.remove_mount_stage_file, stage, empty_text, at);

@@ -5,7 +5,10 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 7 added the other mounts of the run (`.mounts`, one string of
+//! skipped, never misread. Version 8 added the user the command ran as (`.user`, `"UID:GID"`;
+//! an older record has none, which reads as unknown) and a fourth kind of mount, `mount:` (M6b,
+//! `--mount`, writable), whose host path is the resolved one. Version 7 added the other mounts
+//! of the run (`.mounts`, one string of
 //! `kind:...` values separated by spaces, `mounts.text`): a secret's host path is in it, its
 //! bytes never are; an older record has none. Version 6 added the state volumes the run mounted
 //! (`.state`, one
@@ -110,8 +113,10 @@ pub const View = struct {
     env_names: []const []const u8 = &.{},
     /// Version 6: the state volumes the run mounted.
     state: []const volume.Mount = &.{},
-    /// Version 7: the other mounts (`--tmpfs`, `--bind`, `--secret`).
+    /// Version 7: the other mounts (`--tmpfs`, `--bind`, `--secret`; version 8: `--mount`).
     mounts: []const mounts_mod.Mount = &.{},
+    /// Version 8: the user the command ran as; null is root (written as 0:0).
+    user: ?spec_mod.User = null,
 };
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -236,6 +241,8 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_bytes(writer, "\",\n");
     write_state(writer, view.state);
     write_mounts(writer, view.state, view.mounts);
+    const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
+    write_format(writer, "    .user = \"{d}:{d}\",\n", .{ user.uid, user.gid });
 }
 
 /// `.mounts = "bind:/srv:/data tmpfs:/scratch:67108864",`: one string, for the same reason.
@@ -424,6 +431,8 @@ pub const Parsed = struct {
     mounts: [mounts_text_bytes_max]u8,
     mounts_len: u16,
     mounts_count: u8,
+    /// Version 8: the user the command ran as; null for an older record, which did not say.
+    user: ?spec_mod.User,
 
     /// The `index`th other mount the run made; its strings point into this record.
     pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
@@ -627,6 +636,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.state_count = 0;
     out.mounts_len = 0;
     out.mounts_count = 0;
+    out.user = null;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -782,6 +792,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "env_names")) return parse_env_names(value, out);
     if (std.mem.eql(u8, key, "state")) return parse_state(value, out);
     if (std.mem.eql(u8, key, "mounts")) return parse_mounts(value, out);
+    if (std.mem.eql(u8, key, "user")) return parse_user(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
@@ -868,6 +879,27 @@ fn parse_env_names(value: []const u8, out: *Parsed) bool {
         out.env_names_len += @intCast(name.len + 1);
         out.env_names_count += 1;
     }
+    return true;
+}
+
+/// `"UID:GID"`: two numbers in one spelling each (no sign, no leading zero), as `render` writes.
+fn parse_user(value: []const u8, out: *Parsed) bool {
+    assert(value.len > 0);
+    assert(value.len <= constants.record_bytes_max);
+    var text: [24]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    const colon = std.mem.indexOfScalar(u8, text[0..length], ':') orelse return false;
+    const ids = [2][]const u8{ text[0..colon], text[colon + 1 .. length] };
+    var found: [2]u32 = undefined;
+    for (ids, 0..) |digits, at| {
+        if (digits.len == 0 or digits.len > 10) return false;
+        if (digits.len > 1 and digits[0] == '0') return false;
+        for (digits) |byte| {
+            if (byte < '0' or byte > '9') return false;
+        }
+        found[at] = std.fmt.parseInt(u32, digits, 10) catch return false;
+    }
+    out.user = .{ .uid = found[0], .gid = found[1] };
     return true;
 }
 
@@ -1329,7 +1361,7 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 7,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 8,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
@@ -1371,7 +1403,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 8,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 9,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1867,5 +1899,102 @@ test "version 7 keeps the other mounts; a version 6 record reads with none" {
     try parse(record_written_by_m6_slice_2, &parsed);
     try testing.expectEqual(@as(u32, 6), parsed.version);
     try testing.expectEqual(@as(u8, 0), parsed.mounts_count);
+    try testing.expectEqual(@as(u8, 1), parsed.state_count);
+}
+
+/// The record version 7 (M6 as merged, commit 3a357b2) wrote, captured from that source's own
+/// renderer: no `.user` line, and no `mount:` kind among the mounts.
+const record_written_by_m6_merged =
+    \\.{
+    \\    .version = 7,
+    \\    .name = "web-1",
+    \\    .rootfs = "/srv/alpine",
+    \\    .command = .{ "/bin/sh", "-c", "echo \"hi\"\n" },
+    \\    .command_truncated = false,
+    \\    .labels = .{ .{ "app", "web" } },
+    \\    .started = 1760000000,
+    \\    .ended = 1760000042,
+    \\    .exit = .{ .exited = 3 },
+    \\    .ids = .full,
+    \\    .reason = .exited,
+    \\    .detached = false,
+    \\    .timed_out = false,
+    \\    .scope = "",
+    \\    .pid = 0,
+    \\    .supervisor = 0,
+    \\    .limit_memory = null,
+    \\    .limit_pids = null,
+    \\    .limit_cpu_millis = null,
+    \\    .tree = "",
+    \\    .upper = "",
+    \\    .network = .none,
+    \\    .publish = .{ },
+    \\    .env_names = "",
+    \\    .state = "pg:/data",
+    \\    .mounts = "tmpfs:/scratch:8388608 bind:/srv/site:/site",
+    \\    .zbx = "0.0.0",
+    \\}
+    \\
+;
+
+test "version 8 keeps the user and the writable mounts; a version 7 record reads with neither" {
+    // Goal: the fields this version adds round-trip, a user or a mount the writer could not have
+    // written is refused, and the record of the release before reads (REVIEW.md: real old text).
+    // Method: render and parse; edits of each field; then the version 7 text above.
+    var view: View = sample_view();
+    const extra = [_]mounts_mod.Mount{
+        .{ .kind = .mount, .source = "/home/a/proj/site", .target = "/srv", .size_bytes = 0 },
+        .{ .kind = .bind, .source = "/srv/ro", .target = "/ro", .size_bytes = 0 },
+    };
+    view.mounts = &extra;
+    view.user = .{ .uid = 0, .gid = 0 };
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    const mounts_line = "    .mounts = \"mount:/home/a/proj/site:/srv bind:/srv/ro:/ro\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, mounts_line) != null);
+    try testing.expect(std.mem.indexOf(u8, text, "    .user = \"0:0\",\n") != null);
+    var parsed: Parsed = undefined;
+    try parse(text, &parsed);
+    try testing.expectEqual(mounts_mod.Kind.mount, parsed.mount_at(0).kind);
+    try testing.expectEqualStrings("/home/a/proj/site", parsed.mount_at(0).source);
+    try testing.expectEqual(@as(?spec_mod.User, .{ .uid = 0, .gid = 0 }), parsed.user);
+    const bad_mounts = [_][]const u8{
+        "    .mounts = \"mount:site:/srv\",\n",
+        "    .mounts = \"mount:/home/a/../b:/srv\",\n",
+        "    .mounts = \"mount:/home/a/proj/site:/srv/x bind:/srv/ro:/srv\",\n",
+        "    .mounts = \"mount:/a:/proc\",\n",
+    };
+    for (bad_mounts) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, mounts_line, edit);
+        _ = std.mem.replace(u8, text, mounts_line, edit, &edited);
+        try testing.expectError(error.Malformed, parse(edited[0..size], &parsed));
+    }
+    const user_line = "    .user = \"0:0\",\n";
+    const bad_users = [_][]const u8{
+        "    .user = \"\",\n",
+        "    .user = \"0\",\n",
+        "    .user = \"0:\",\n",
+        "    .user = \":0\",\n",
+        "    .user = \"00:0\",\n",
+        "    .user = \"-1:0\",\n",
+        "    .user = \"0:0:0\",\n",
+        "    .user = \"4294967296:0\",\n",
+        "    .user = 0,\n",
+    };
+    for (bad_users) |edit| {
+        var edited: [constants.record_bytes_max]u8 = undefined;
+        const size = std.mem.replacementSize(u8, text, user_line, edit);
+        _ = std.mem.replace(u8, text, user_line, edit, &edited);
+        try testing.expectError(error.Malformed, parse(edited[0..size], &parsed));
+    }
+    view.user = .{ .uid = 4294967295, .gid = 1000 };
+    const other = render(&view, &buffer);
+    try parse(other, &parsed);
+    try testing.expectEqual(@as(?spec_mod.User, .{ .uid = 4294967295, .gid = 1000 }), parsed.user);
+    try parse(record_written_by_m6_merged, &parsed);
+    try testing.expectEqual(@as(u32, 7), parsed.version);
+    try testing.expectEqual(@as(?spec_mod.User, null), parsed.user);
+    try testing.expectEqual(@as(u8, 2), parsed.mounts_count);
     try testing.expectEqual(@as(u8, 1), parsed.state_count);
 }

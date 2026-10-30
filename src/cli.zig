@@ -99,10 +99,17 @@ const help_text =
     \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
     \\                  <host> that does not exist is an error, never made (repeatable)
+    \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
+    \\                  <host> may be relative; with every symbolic link followed it must be the
+    \\                  project directory (the one with zbx.lock, else the working directory) or
+    \\                  inside it. The container must run as root, which is you: see --user
     \\  --secret <host-file>:<path>   a copy of one host file at <path>, read-only, mode 0400,
     \\                  owned by the container's root. Its contents are never stored or
     \\                  printed, and the mount point is left out of zbx commit (repeatable).
-    \\                  Up to 8 of --tmpfs, --bind and --secret; no two on one path
+    \\                  Up to 8 of --tmpfs, --bind, --mount and --secret; no two on one path
+    \\  --user <user>[:<group>]   run the command as this user of the image (a name from its
+    \\                  /etc/passwd and /etc/group, or a number), over the image's own; --user 0
+    \\                  makes a non-root image fit --mount
     \\  --              ends the options; everything after it is the command, as typed
     \\
     \\stop:
@@ -254,6 +261,8 @@ pub const RunArgs = struct {
     /// The `--tmpfs`, `--bind` and `--secret` values, parsed as each was read (`take_mount`).
     mounts: [constants.mounts_max]mounts.Mount = undefined,
     mounts_count: u32 = 0,
+    /// `--user` as typed, `USER[:GROUP]`; checked as it was read (`E0015`).
+    user: ?[]const u8 = null,
 
     pub fn mounts_slice(run_args: *const RunArgs) []const mounts.Mount {
         assert(run_args.mounts_count <= constants.mounts_max);
@@ -291,9 +300,11 @@ const RunOption = enum {
     tmpfs,
     bind,
     secret,
+    mount,
+    user,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 12);
+        assert(@backingInt(option) <= 14);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -309,6 +320,8 @@ const RunOption = enum {
             .tmpfs => "--tmpfs",
             .bind => "--bind",
             .secret => "--secret",
+            .mount => "--mount",
+            .user => "--user",
         };
     }
 };
@@ -432,7 +445,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 13);
+    assert(std.enums.values(RunOption).len == 15);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -800,6 +813,7 @@ fn take_run_option(
     if (option == .tmpfs) return take_mount(diag, run_args, .tmpfs, value);
     if (option == .bind) return take_mount(diag, run_args, .bind, value);
     if (option == .secret) return take_mount(diag, run_args, .secret, value);
+    if (option == .mount) return take_mount(diag, run_args, .mount, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -811,9 +825,13 @@ fn take_run_option(
         .net => &run_args.net,
         .publish => unreachable, // Repeatable: `take_publish` above.
         .state => unreachable, // Repeatable: `take_state` above.
-        .tmpfs, .bind, .secret => unreachable, // Repeatable: `take_mount` above.
+        .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
+        .user => &run_args.user,
     };
     if (slot.* != null) return unexpected_argument(diag, .run, argument);
+    if (option == .user) {
+        if (user_problem(value)) |reason| return bad_user(diag, value, reason);
+    }
     slot.* = value;
 }
 
@@ -1027,6 +1045,47 @@ fn take_mount(
     }
     run_args.mounts[run_args.mounts_count] = mount;
     run_args.mounts_count += 1;
+}
+
+/// Why `value` is not `USER[:GROUP]`, or null: each part is a name or a number, not empty, and
+/// the whole is short and holds no space or control byte. Whether the image has the name is
+/// another question, asked when the image is known (`ZBX-E0216`).
+fn user_problem(value: []const u8) ?[]const u8 {
+    assert(value.len <= constants.arg_bytes_max);
+    assert(std.mem.indexOfScalar(u8, value, 0) == null); // Arguments are C strings.
+    if (value.len == 0) return "the user is empty";
+    if (value.len > constants.user_value_bytes_max) return "the user is longer than 256 bytes";
+    var colons: u32 = 0;
+    var previous: u8 = ':';
+    for (value) |byte| {
+        if (byte <= ' ' or byte == 0x7f) return "a user holds no space or control character";
+        if (byte == ':') {
+            colons += 1;
+            if (previous == ':') return "a user and a group are not empty: USER or USER:GROUP";
+        }
+        previous = byte;
+    }
+    if (colons > 1) return "a user is USER or USER:GROUP, with one colon";
+    if (previous == ':') return "a user and a group are not empty: USER or USER:GROUP";
+    return null;
+}
+
+/// ZBX-E0015: a `--user` value that is not a user zbx can look up.
+fn bad_user(diag: *Diag, value: []const u8, reason: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(reason.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, value);
+    diag.raise(.E0015);
+    diag.while_("reading the command line", .{});
+    diag.cause("--user '{s}': {s}", .{ echo, reason });
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "give a user of the image, by name or number:",
+        .command = "zbx run --user 0 python:3.12-slim -- id",
+        .template = true,
+    });
+    return error.BadOptionValue;
 }
 
 /// ZBX-E0600: a `--publish` value that is not a forward zbx can make.
@@ -1604,6 +1663,10 @@ pub const Storage = struct {
     run_env: run_env.Storage,
     /// The state commands' memory: the listing, the records, the size walk.
     state: state_commands.Workspace,
+    /// A run's `--mount` sources, resolved before the image is looked for (`resolve_writable`),
+    /// and the run's mounts with those sources in place of what was typed.
+    run_mounts: mounts.Resolution,
+    spec_mounts: [constants.mounts_max]mounts.Mount,
     /// Room for `zbx ps`.
     entries: [constants.runs_max + constants.scopes_listed_max]lifecycle.Entry,
     /// The room gc keeps its sets in (`gc.Workspace.tables`): the caller's, at least
@@ -1922,6 +1985,7 @@ fn prepare_image(
         &storage.run_image,
         operand,
         invocation.run.command,
+        invocation.run.user,
         prepared,
         diag,
     ) catch |err| switch (err) {
@@ -1942,6 +2006,9 @@ fn run_container(
     const times = try times_of(&given, diag);
     // An unset `-e NAME` is found before an image is pulled for the run.
     run_env.check_set(host, given.env_slice(), diag) catch return error.StartFailed;
+    try check_user_flag(invocation, diag);
+    // A `--mount` outside the project is refused before an image is pulled for the run.
+    const spec_mounts = try resolve_writable(host, &given, storage, diag);
     var prepared: run_image.Prepared = .{
         .tree = invocation.operand orelse "",
         .command = given.command,
@@ -1974,10 +2041,27 @@ fn run_container(
         .network = network_of(&given),
         .publish = given.publish_slice(),
         .state = given.state_slice(),
-        .mounts = given.mounts_slice(),
+        .mounts = spec_mounts,
+        .user_text = prepared.user_text,
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
+    return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+}
+
+/// A run in the foreground: starts the container, waits for it, and reports how it ended.
+fn run_foreground(
+    host: Host,
+    invocation: *const Invocation,
+    container: *const runtime_spec.Spec,
+    times: Times,
+    storage: *Storage,
+    ran: *const Ran,
+    diag: *Diag,
+) RunError!u8 {
+    assert(diag.code == null);
+    assert(!invocation.run.detach);
+    assert(container.command.len > 0);
     var reporter: Reporter = .{ .host = host, .options = invocation.options };
     const options: runtime.StartOptions = .{
         .warn = .{ .context = &reporter, .call = report_warning },
@@ -1986,7 +2070,7 @@ fn run_container(
         .image_workspace = &storage.image,
     };
     const handle = &storage.handle;
-    runtime.start(host, &container, options, handle, diag) catch {
+    runtime.start(host, container, options, handle, diag) catch {
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
@@ -1996,8 +2080,54 @@ fn run_container(
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
-    report_outcome(host, invocation.options, handle, &reason, &ran, given.net != null);
+    report_outcome(host, invocation.options, handle, &reason, ran, invocation.run.net != null);
     return code;
+}
+
+/// `--user` names a user of an image: a run of a directory or a bare tree has no image whose
+/// files hold the name.
+fn check_user_flag(invocation: *const Invocation, diag: *Diag) RunError!void {
+    assert(diag.code == null);
+    assert(invocation.command == .run);
+    const text = invocation.run.user orelse return;
+    const operand = invocation.operand orelse "";
+    if (operand.len > 0 and !is_tree_operand(operand)) return;
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, text);
+    diag.raise(.E0015);
+    diag.while_("reading the command line", .{});
+    diag.cause("--user '{s}': a directory or a tree has no image to look the user up in", .{echo});
+    diag.context("arg", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "run an image by name, which --user can look a name up in:",
+        .command = "zbx run --user 1000 alpine:3.20 -- id",
+        .template = true,
+    });
+    return error.StartFailed;
+}
+
+/// The run's mounts with each `--mount` source resolved against the project (the rest as typed).
+/// With none, the mounts as given.
+fn resolve_writable(
+    host: Host,
+    given: *const RunArgs,
+    storage: *Storage,
+    diag: *Diag,
+) RunError![]const mounts.Mount {
+    assert(diag.code == null);
+    const typed = given.mounts_slice();
+    assert(typed.len <= constants.mounts_max);
+    var any = false;
+    for (typed) |*mount| any = any or mount.kind == .mount;
+    if (!any) return typed;
+    mounts.resolve_sources(host, "", typed, &storage.run_mounts, diag) catch {
+        return error.StartFailed;
+    };
+    for (typed, 0..) |*mount, at| {
+        const resolved = mount.kind == .mount;
+        storage.spec_mounts[at] = if (resolved) storage.run_mounts.mounts[at] else mount.*;
+    }
+    return storage.spec_mounts[0..typed.len];
 }
 
 /// What a run ran, for `--output json`: an image (the name as typed, its manifest and the tree
@@ -2360,6 +2490,8 @@ fn write_reach(writer: *std.Io.Writer, container: *const runtime_spec.Spec) void
         bundle.write_json_string(writer, name) catch unreachable; // Same.
     }
     writer.writeAll("]") catch unreachable; // Same.
+    // The mounts and the user are in the buffer the caller sized for six times a path.
+    if (!write_writable(writer, container.mounts, container.user)) unreachable;
 }
 
 /// A `bug` from a run that got as far as having a name gets a redacted bundle, and the bug
@@ -2441,6 +2573,7 @@ fn report_outcome(
         }
         writer.end -= 3;
         write_published(&writer, handle.publish_slice());
+        append_writable(&writer, handle.mounts, handle.user);
         if (timed_out) {
             writer.end -= 3;
             writer.writeAll(",\"timed_out\":true}}\n") catch unreachable; // Three bytes were freed.
@@ -2464,6 +2597,51 @@ fn report_outcome(
     }
     const text = writer.buffered();
     if (text.len > 0) host.write_all(.stderr, text) catch return;
+}
+
+/// The members M6b added, `"writable_mounts":[{"host":"/p/site","target":"/srv"}]` (each `--mount`,
+/// by its resolved host path) and `"user":{"uid":0,"gid":0}` (the user the command ran as), into
+/// the object that ends the line in "}}\n". Additive. If the line has no room it is left as it was.
+fn append_writable(
+    writer: *std.Io.Writer,
+    list: []const mounts.Mount,
+    user: ?runtime_spec.User,
+) void {
+    const line = writer.buffered();
+    assert(line.len >= 3);
+    assert(std.mem.endsWith(u8, line, "}}\n"));
+    const mark = writer.end;
+    writer.end -= 3;
+    if (write_writable(writer, list, user)) {
+        if (writer.writeAll("}}\n")) return else |_| {}
+    }
+    writer.end = mark;
+    assert(std.mem.endsWith(u8, writer.buffered(), "}}\n"));
+}
+
+/// `,"writable_mounts":[...],"user":{...}`; false if it does not fit.
+fn write_writable(
+    writer: *std.Io.Writer,
+    list: []const mounts.Mount,
+    user: ?runtime_spec.User,
+) bool {
+    writer.writeAll(",\"writable_mounts\":[") catch return false;
+    assert(list.len <= constants.mounts_max);
+    var first = true;
+    for (list) |mount| {
+        if (mount.kind != .mount) continue;
+        if (!first) writer.writeByte(',') catch return false;
+        first = false;
+        writer.writeAll("{\"host\":") catch return false;
+        bundle.write_json_string(writer, mount.source) catch return false;
+        writer.writeAll(",\"target\":") catch return false;
+        bundle.write_json_string(writer, mount.target) catch return false;
+        writer.writeByte('}') catch return false;
+    }
+    const ids = user orelse runtime_spec.User{ .uid = 0, .gid = 0 };
+    const format = "],\"user\":{{\"uid\":{d},\"gid\":{d}}}";
+    writer.print(format, .{ ids.uid, ids.gid }) catch return false;
+    return true;
 }
 
 /// `"published":[{"host":8080,"container":80}]` and the line's end, "}}\n": the forwards, in
@@ -3596,7 +3774,8 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     sim.interface().close(again);
     const expected = "{\"schema\":\"zbx.run/1\",\"container\":{\"name\":\"web-1\"," ++
         "\"pid\":502,\"scope\":null,\"detached\":true,\"network\":\"none\"," ++
-        "\"published\":[],\"env\":[]},\"ran\":{\"kind\":\"rootfs\"," ++
+        "\"published\":[],\"env\":[],\"writable_mounts\":[],\"user\":{\"uid\":0," ++
+        "\"gid\":0}},\"ran\":{\"kind\":\"rootfs\"," ++
         "\"path\":\"/srv/root\"}}\n";
     try testing.expectEqualStrings(expected, sim.stdout());
 
@@ -3613,7 +3792,7 @@ test "run -d: the caller passes warnings on and prints the name once the start i
     try testing.expectEqual(@as(u8, 0), reached);
     sim.interface().close(third);
     const member = "\"network\":\"user\",\"published\":[{\"host\":8080,\"container\":80}]," ++
-        "\"env\":[\"A_B\",\"C\"]},\"ran\"";
+        "\"env\":[\"A_B\",\"C\"],\"writable_mounts\":[],\"user\":{\"uid\":0,\"gid\":0}},\"ran\"";
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), member) != null);
 }
 

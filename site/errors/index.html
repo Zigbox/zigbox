@@ -89,6 +89,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <tr><td class="code"><a href="E0011.html">ZBX-E0011</a></td><td>-e names a variable that is not set</td><td>user</td></tr>
 <tr><td class="code"><a href="E0012.html">ZBX-E0012</a></td><td>not a valid --tmpfs, --bind or --secret value</td><td>user</td></tr>
 <tr><td class="code"><a href="E0013.html">ZBX-E0013</a></td><td>mounts that cannot go together</td><td>user</td></tr>
+<tr><td class="code"><a href="E0014.html">ZBX-E0014</a></td><td>not a valid --mount value</td><td>user</td></tr>
+<tr><td class="code"><a href="E0015.html">ZBX-E0015</a></td><td>not a valid --user value</td><td>user</td></tr>
 <tr><td class="code"><a href="E0101.html">ZBX-E0101</a></td><td>can't create a user namespace</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0102.html">ZBX-E0102</a></td><td>kernel version is unsupported or unknown</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0103.html">ZBX-E0103</a></td><td>cgroup v2 is not set up for this user</td><td>environment</td></tr>
@@ -108,6 +110,11 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <tr><td class="code"><a href="E0209.html">ZBX-E0209</a></td><td>can't set up the read-only rootfs</td><td>environment</td></tr>
 <tr><td class="code"><a href="E0210.html">ZBX-E0210</a></td><td>a --bind or --secret source can't be used</td><td>user</td></tr>
 <tr><td class="code"><a href="E0211.html">ZBX-E0211</a></td><td>can't set up a --tmpfs, --bind or --secret mount</td><td>environment</td></tr>
+<tr><td class="code"><a href="E0212.html">ZBX-E0212</a></td><td>a --mount source is outside the project</td><td>user</td></tr>
+<tr><td class="code"><a href="E0213.html">ZBX-E0213</a></td><td>a --mount needs the container to run as root</td><td>user</td></tr>
+<tr><td class="code"><a href="E0214.html">ZBX-E0214</a></td><td>a --mount source can't be used</td><td>user</td></tr>
+<tr><td class="code"><a href="E0215.html">ZBX-E0215</a></td><td>can't set up a --mount</td><td>environment</td></tr>
+<tr><td class="code"><a href="E0216.html">ZBX-E0216</a></td><td>the --user is not in the image</td><td>user</td></tr>
 <tr><td class="code"><a href="W0201.html">ZBX-W0201</a></td><td>mapping only your own id into the container</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0202.html">ZBX-W0202</a></td><td>can't save the run record</td><td>environment</td></tr>
 <tr><td class="code"><a href="W0203.html">ZBX-W0203</a></td><td>skipped a run record that can't be read</td><td>environment</td></tr>
