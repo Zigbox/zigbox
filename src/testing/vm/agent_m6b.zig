@@ -35,6 +35,7 @@ const json_m6 = @import("agent_json_m6.zig");
 const json_m6b = @import("agent_json_m6b.zig");
 const net_user = @import("net_user_m5.zig");
 const session_mod = @import("session.zig");
+const spec = @import("spec_m6b.zig");
 const state = @import("state_m6.zig");
 
 const Session = session_mod.Session;
@@ -60,9 +61,7 @@ const setup = H.as_demo ++ "sh -c 'mkdir -p " ++ site ++ " " ++ outside ++ " && 
 const edit = H.as_demo ++ "sh -c 'echo agent-second-TAU > " ++ site ++ "/index.html'";
 const start_web = za ++ " --output json run -d --name " ++ container ++ " --publish " ++ port ++
     ":8000 --mount agentsite:/srv " ++ python ++ " -- python -m http.server -d /srv 8000";
-/// A connection that sends no request, so the log holds the agent's two requests and no more.
-const listening = H.as_demo ++ "bash -c 'for i in $(seq 60); do " ++
-    "(exec 3<>/dev/tcp/127.0.0.1/" ++ port ++ ") 2>/dev/null && exit 0; sleep 1; done; exit 1'";
+const wait_path = "/home/demo/wait-agentweb.sh";
 const fetch = "curl -fsS http://127.0.0.1:" ++ port ++ "/index.html; sleep 1";
 const run_exec = za ++ " --output json exec " ++ container ++ " -e TOKEN=" ++ token ++
     " -- sh -c 'echo agent-inside > /srv/agent.txt; test -n \"$TOKEN\"; exit 3'" ++ no_input;
@@ -173,9 +172,9 @@ fn step_start(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step, "expected the resolved path of agentsite", error.MountWrong);
     }
     try expect_follows(arena, out, run_schema, started.streams.stdout, "the run -d document");
-    _ = try state.expect_long(session, out, listening, 0, 120);
+    try spec.run_waiter(session, out, wait_path, spec.wait_script("/home/demo/za", container));
     try finding(out, "no document says when a container is ready: the agent polls the " ++
-        "published port with a connection");
+        "server by connecting to it from inside the container");
     const listed = try json_run(session, out, za ++ " --output json ps", 0);
     try expect_follows(arena, out, ps_schema, listed.streams.stdout, "the ps document");
     const in_ps = json_m6b.ps_mount(arena, listed.streams.stdout, container) catch |err| {

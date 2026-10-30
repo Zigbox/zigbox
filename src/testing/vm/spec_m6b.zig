@@ -13,8 +13,9 @@
 //!      the project".
 //!
 //! Nothing differs from the spec's lines but what the guest needs: the port is waited for with a
-//! connection that sends no request (so the log holds only the steps' requests), and `-d` is the
-//! spec's own. The part ends by stopping `web`, which frees port 8000 (checked).
+//! connection that sends no request, made from inside the container (so the log holds only the
+//! steps' requests), and `-d` is the spec's own. The part ends by stopping `web`, which frees
+//! port 8000 (checked).
 //!
 //! Every assertion is a function of checks_spec_m6b.zig or checks_writable_m6b.zig with a unit
 //! test.
@@ -42,14 +43,37 @@ const setup = H.as_demo ++ "sh -c 'cd " ++ project ++ " && rm -rf site && mkdir 
     "echo first-SIGMA > site/index.html && mkdir -p " ++ outside ++ "'";
 const start = zn ++ " run -d --name web --publish 8000:8000 --mount ./site:/srv " ++ python ++
     " -- python -m http.server -d /srv 8000";
-/// A connection that sends nothing: the server logs no request for it.
-const listening = H.as_demo ++ "bash -c 'for i in $(seq 60); do " ++
-    "(exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null && exit 0; sleep 1; done; exit 1'";
+const wait_path = "/home/demo/wait-web.sh";
 const fetch = "curl -fsS http://localhost:8000/index.html";
 const edit = H.as_demo ++ "sh -c 'echo second-SIGMA > " ++ project ++ "/site/index.html'";
 const exec = zn ++ " exec web -- sh -c 'echo made-inside > /srv/new.txt' </dev/null";
 const look = H.as_demo ++ "sh -c 'cd " ++ project ++ " && ls -l site/new.txt && cat site/new.txt'";
 const strangers = H.as_demo ++ "sh -c 'find " ++ project ++ "/site ! -user demo | wc -l'";
+
+/// The text of a script that waits (ninety seconds) until the server in the container `name`
+/// (`wrapper` is the `zbx` of its project) takes a connection, asked from inside the container
+/// with `exec`. A connection from the host would not do: the forward accepts it before the
+/// server is up, and resets it. The connection sends no request, so the log has none for it.
+pub fn wait_script(comptime wrapper: []const u8, comptime name: []const u8) []const u8 {
+    return "#!/bin/sh\n" ++
+        "for i in $(seq 90); do\n" ++
+        "  " ++ wrapper ++ " exec " ++ name ++ " -- python -c " ++
+        "\"import socket; socket.create_connection(('127.0.0.1', 8000)).close()\" " ++
+        "</dev/null >/dev/null 2>&1 && exit 0\n" ++
+        "  sleep 1\n" ++
+        "done\n" ++
+        "exit 1\n";
+}
+
+/// Writes `script` to `path` as the demo user's executable and runs it as the demo user.
+pub fn run_waiter(session: *Session, out: *Io.Writer, path: []const u8, script: []const u8) !void {
+    try H.put_file(session, path, script);
+    const pattern = "chown demo:demo {s} && chmod 755 {s}";
+    const command = try common.format(session, pattern, .{ path, path });
+    _ = try common.expect_exit(session, out, step_name, command, 0);
+    const run = try common.format(session, "{s}{s}", .{ H.as_demo, path });
+    _ = try common.expect_exit(session, out, step_name, run, 0);
+}
 
 pub fn step_spec(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\n{s}: SPEC6B: the five steps of the spec (M6b)\n", .{H.demo_name});
@@ -68,7 +92,7 @@ pub fn step_spec(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 fn step_one_two(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: SPEC6B 1 and 2: serve ./site, curl, edit, curl\n", .{H.demo_name});
     _ = try common.expect_exit(session, out, step_name, start, 0);
-    _ = try common.expect_exit(session, out, step_name, listening, 0);
+    try run_waiter(session, out, wait_path, wait_script("/home/demo/zn", "web"));
     const first = try common.expect_exit(session, out, step_name, fetch, 0);
     writable.check_page(first.streams.stdout, "first-SIGMA", "second-SIGMA") catch |err| {
         return fail_step(out, step_name, "expected the page from ./site", err);
