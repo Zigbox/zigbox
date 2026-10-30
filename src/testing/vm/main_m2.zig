@@ -514,7 +514,7 @@ fn lifecycle_refusals(session: *Session, out: *Io.Writer, timer: *H.Timer) !void
     const cases = [_]struct { command: []const u8, code: []const u8 }{
         .{ .command = zbx ++ " stop nobody", .code = "E0402" },
         .{ .command = zbx ++ " stop det4 --grace soon", .code = "E0401" },
-        .{ .command = zbx ++ " schema logs", .code = "E0406" },
+        .{ .command = zbx ++ " schema exec", .code = "E0406" },
     };
     inline for (cases) |case| {
         const result = try H.run_split(session, case.command);
