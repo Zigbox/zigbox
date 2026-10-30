@@ -23,7 +23,7 @@ Acceptance criteria:
 - Logs are bounded, survive the exit of the zbx that started the container, and are removed with its run record.
 - `exec` joins the container's namespaces, cgroup, capabilities and seccomp; it gains nothing the container lacks.
 - The production-readiness checklist: an upgrade test against M6 (`bf57ec8`, the merge of PR #12), stable diagnostics, documented failure modes, and the agent test.
-- On the Mac, the same demo passes driven from macOS (slice 5).
+- On the Mac, the same demo passes driven from macOS (slice 6).
 
 ## Fixed decisions
 
@@ -56,8 +56,16 @@ Acceptance criteria:
 
 ### In the library, and on the Mac
 
-- Writable mounts, `--user`, logs and exec go into the `zigbox` module the same way `run` does, with per-caller storage and no process-wide state, so Zigcube's agent can use them (its `Runtime` interface will follow).
-- **The Mac** forwards `logs` and `exec` like the other Linux commands (`src/mac/forward.zig`), including the terminal and signals for `exec` and `--follow`. That is slice 5, for the session on the owner's Mac.
+- Writable mounts, `--user`, logs, exec and pull go into the `zigbox` module the same way `run` does, with per-caller storage and no process-wide state, so Zigcube's agent can use them (its `Runtime` interface will follow).
+- **The Mac** forwards `logs` and `exec` like the other Linux commands (`src/mac/forward.zig`), including the terminal and signals for `exec` and `--follow`. That is slice 6, for the session on the owner's Mac.
+
+### Pull in the library
+
+- **Decided (2026-10-30):** pull moves into the `zigbox` module, so Zigcube's agent can fetch an image without shelling out to `zbx` (its restart orders, `docs/restart.md` in the zigcube repository, call it `ensure_image`).
+- What it takes and gives: a reference (tag or digest), a platform, and the caller's store; it pulls, verifies, flattens into the store and writes the image record exactly as `zbx pull` does, and returns the manifest and tree digests. It does not touch a `zbx.lock`: the lock is a project's file, which the CLI keeps writing around the library call.
+- Per-caller storage, no process-wide state, bounded memory, the same timeouts, mirrors (`ZBX_REGISTRY_MIRRORS` read by the caller and passed in, not read inside), and every failure the same coded diagnostic as today. A progress callback the CLI uses for its output and Zigcube may ignore.
+- `zbx pull` becomes a thin caller of it; its output and JSON do not change (the goldens prove it).
+- A test that drives the library from a caller other than the CLI, and the demo's agent test unchanged.
 
 ### Diagnostics
 
@@ -68,13 +76,14 @@ Usage and mount refusals are `00xx` or `02xx`, whichever group fits the existing
 1. **Writable mounts and `--user`.** `--mount` with the project-directory rule (symlink escape tested), the root-only rule with its refusal, `--user`, the doctor id-mapped-mount line, the record and JSON fields, and the `cli`, `run` and `record` fuzzers extended. VM check (demo-m6 can hold a temporary part): python's `http.server` serving a mounted directory, an edit on the host seen by the next request, a file written inside owned by the host user, and the refusals.
 2. **`zbx logs`.** The framed log, written by the supervisor and by a foreground run, the cap, removal with the record, `--tail`, `--follow`, `--stream`, `--output json` and its schema; a `logs` fuzzer over the framed format (damage and re-read). VM check: a detached server's requests in the log, the log after the starting `zbx` was killed, the cap.
 3. **`zbx exec`.** Joining, the pseudo-terminal, signals, exit codes, and the tests that it gains nothing; `exec` in the library. VM check: `exec` writes a file, `exec` of a refused syscall and of a missing capability fail as in the container, `exec` into a stopped container is refused, an exec'd process dies with the container.
-4. **VM, CI and the agent test.** `zig build demo-m6b` with the spec's five steps exactly, every assertion a unit-tested pure function; the acceptance checks; the agent test by JSON only; the upgrade test against M6 (`bf57ec8`); the `demo-m6b` CI job and `m6b` in `vm.yml`'s picker; `docs/demos/m6b.md` with the by-hand steps, cuts and failure modes (a mount outside the project, a symlink escape, a non-root image, a log at its cap, exec into a stopped container, the disk full while logging).
-5. **The Mac** (for the session on the owner's Mac, after slice 4 merges): `logs` and `exec` forwarded, `demo-m6b`'s steps on `mac.yml`, and the Mac notes in `docs/demos/m6b.md`.
+4. **Pull in the library.** The section above; `zbx pull` on top of it with unchanged output; a test from a second caller; the `registry` and `layer` fuzzers still at 10,000 iterations. VM check: demo-m4 unchanged and green.
+5. **VM, CI and the agent test.** `zig build demo-m6b` with the spec's five steps exactly, every assertion a unit-tested pure function; the acceptance checks; the agent test by JSON only; the upgrade test against M6 (`bf57ec8`); the `demo-m6b` CI job and `m6b` in `vm.yml`'s picker; `docs/demos/m6b.md` with the by-hand steps, cuts and failure modes (a mount outside the project, a symlink escape, a non-root image, a log at its cap, exec into a stopped container, the disk full while logging).
+6. **The Mac** (for the session on the owner's Mac, after slice 5 merges): `logs` and `exec` forwarded, `demo-m6b`'s steps on `mac.yml`, and the Mac notes in `docs/demos/m6b.md`.
 
 The slices run one after another, in order.
 
 ## Done means
 
 - All gates pass (`zig build check`), and every fuzzer you touched or added runs at 10,000 iterations.
-- `demo-m6b` is green in CI, with `demo-m0` to `demo-m6` still green, and slice 5's Mac run green on `mac.yml`. Until then M6b is "built, not demonstrated".
+- `demo-m6b` is green in CI, with `demo-m0` to `demo-m6` still green, and slice 6's Mac run green on `mac.yml`. Until then M6b is "built, not demonstrated".
 - Your report lists what you ran and its output, what you did not run and why, which REVIEW.md items you touched, every deviation from this brief, and anything in the spec, this brief or `DIAGNOSTICS.md` that seemed wrong.

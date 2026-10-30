@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-30 (doc rev 76), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-30 (doc rev 78), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -206,7 +206,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** a developer edits code on the host and sees it run in a container, with no Docker.
 
-**Scope:** writable mounts of directories inside the project directory (the one holding zbx.lock, else the working directory), written as the container's root so that a file the container writes is the host user's, with a --user option to run as root; `zbx logs <name>`, the bounded output of a detached container, kept with its run; `zbx exec <name> -- <command>`, a process inside a running container's namespaces, under its limits and seccomp. All three in the library, for Zigcube's agent. More than one service is Zigcube's (see Non-goals). Deferred: file watching and hot reload, which are the application's own.
+**Scope:** writable mounts of directories inside the project directory (the one holding zbx.lock, else the working directory), written as the container's root so that a file the container writes is the host user's, with a --user option to run as root; `zbx logs <name>`, the bounded output of a container, detached or foreground, kept with its run; `zbx exec <name> -- <command>`, a process inside a running container's namespaces, under its limits and seccomp. All three in the library for Zigcube's agent, and pull with them: it moves from the CLI into the library, so the agent can fetch an image, and zbx pull becomes a thin caller with unchanged output. More than one service is Zigcube's (see Non-goals). Deferred: file watching and hot reload, which are the application's own.
 
 **Demo script:**
 
