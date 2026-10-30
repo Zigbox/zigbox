@@ -3025,10 +3025,11 @@ pub const registry = [_]Entry{
         .explanation =
         \\The virtual machine asks the DNS servers the Mac asks. This Mac's network
         \\names none that has an IPv4 address (a router that advertises only an
-        \\IPv6 one, for example), and the machine's own network is IPv4 only. The
-        \\machine's gateway does not answer DNS, so zbx adds 1.1.1.1 (Cloudflare)
-        \\and 8.8.8.8 (Google) after it, and the machine's name lookups, such as a
-        \\pull's, may go to them. A Mac with an IPv4 DNS server never does this.
+        \\IPv6 one, for example), and an IPv6 resolver of the Mac cannot be reached
+        \\across the machine's NAT. The machine's gateway does not answer DNS, so
+        \\zbx puts 1.1.1.1 (Cloudflare) and 8.8.8.8 (Google) before it, and the
+        \\machine's name lookups, such as a pull's, go to them. A Mac with an IPv4
+        \\DNS server never does this.
         \\
         \\To keep the lookups on your own network, join one that has an IPv4 DNS
         \\server, then zbx vm stop; the next command starts a machine that asks it.

@@ -442,7 +442,7 @@ pub fn public_dns(diag: *Diag) void {
     assert(diag.code == null);
     diag.raise(.W1003);
     diag.while_("setting up the virtual machine's DNS", .{});
-    diag.cause("the Mac names no IPv4 DNS server; lookups may go to 1.1.1.1 and 8.8.8.8", .{});
+    diag.cause("the Mac names no IPv4 DNS server; lookups go to 1.1.1.1 and 8.8.8.8", .{});
     diag.fix(.{
         .sentence = "to keep them on your network, join one with an IPv4 DNS server, then:",
         .command = "zbx vm stop",

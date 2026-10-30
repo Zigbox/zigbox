@@ -1,5 +1,5 @@
 warning[ZBX-W1003]: the Mac has no IPv4 DNS server, so the machine asks public ones
-  cause  the Mac names no IPv4 DNS server; lookups may go to 1.1.1.1 and 8.8.8.8
+  cause  the Mac names no IPv4 DNS server; lookups go to 1.1.1.1 and 8.8.8.8
   fix    to keep them on your network, join one with an IPv4 DNS server, then:   zbx vm stop
   more   zbx explain W1003 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/W1003.html

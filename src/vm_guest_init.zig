@@ -669,9 +669,17 @@ const Ifreq = extern struct {
 const siocgifflags: u32 = 0x8913;
 const siocsifflags: u32 = 0x8914;
 const siocsifaddr: u32 = 0x8916;
+const siocsifmtu: u32 = 0x8922;
 const siocsifnetmask: u32 = 0x891c;
 const siocaddrt: u32 = 0x890b;
 const iff_up: u16 = 1;
+
+/// The MTU the guest sets on its NIC, on every network. A NAT, and a translated path such as a
+/// phone tether's IPv6-only network with 464XLAT, may drop larger packets without telling the
+/// guest (no ICMP "too big"), and a TLS handshake whose ClientHello fills a 1500-byte packet then
+/// hangs. 1280 is the smallest MTU every IPv6 path carries, so the packet size is safe anywhere;
+/// it costs about 0.4% more header overhead than 1400.
+const interface_mtu: u32 = 1280;
 const interface_name = "eth0";
 
 const Route = extern struct {
@@ -744,6 +752,12 @@ fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
     const summary = std.fmt.bufPrint(&note, quad, .{ a[0], a[1], a[2], a[3] }) catch "";
     log("zbx-init: address ", summary);
     var request = ifreq_for(interface_name);
+    std.mem.writeInt(u32, request.data[0..4], interface_mtu, .little);
+    if (failed(linux.ioctl(control, siocsifmtu, @intFromPtr(&request)))) {
+        log("zbx-init: cannot set the MTU of ", interface_name);
+        return false;
+    }
+    request.data = @splat(0);
     request.data[0..16].* = sockaddr_in(lease.address);
     if (failed(linux.ioctl(control, siocsifaddr, @intFromPtr(&request)))) return false;
     request.data[0..16].* = sockaddr_in(lease.mask);

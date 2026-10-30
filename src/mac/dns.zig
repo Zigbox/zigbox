@@ -1,9 +1,11 @@
 //! The Mac's own DNS resolvers, from the system configuration (the same source `scutil --dns`
 //! reads), for the guest to use. The NAT gateway the guest is given by DHCP does not always
 //! answer DNS queries; the resolvers the Mac asks (the router, a VPN's) are reachable through the
-//! NAT. Only IPv4 addresses are kept: the guest's NAT network is IPv4. A Mac with none (its only
-//! resolver is an IPv6 router) gives the field "-", and the guest then also asks the public
-//! resolvers of `vm_protocol.dns_fallback`; `none()` says so, for the warning W1003.
+//! NAT. Only IPv4 addresses are kept: the guest has an IPv4 address from DHCP and a ULA IPv6 one
+//! from router advertisement, but a link-local resolver of the Mac (`fe80::...`) cannot be reached
+//! across the NAT. A Mac with none (its only resolver is an IPv6 router) gives the field "-", and
+//! the guest then also asks the public resolvers of `vm_protocol.dns_fallback`; `none()` says so,
+//! for the warning W1003.
 
 const std = @import("std");
 const assert = std.debug.assert;
