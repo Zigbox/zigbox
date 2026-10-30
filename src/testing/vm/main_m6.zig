@@ -16,6 +16,9 @@
 //!   `--user`: python serves a mounted directory, an edit on the host is seen, a file written
 //!   inside is the host user's, the refusals (outside the project, a link out, a user that is not
 //!   root), and that image with `--user 0`.
+//! LOGS (logs_m6.zig, M6b slice 2; slice 4 of M6b moves it to demo-m6b): `zbx logs`: a detached
+//!   server's requests, the log after the starting `zbx` was killed, a foreground run on the
+//!   terminal and in its log, `--follow` ending with the container, and a log at its cap.
 //! AGENT (agent_m6.zig, slice 4): the spec's five steps and the state commands again, by JSON
 //!   only (`--output json`, `zbx schema`, `zbx explain`); what it cannot read is a `FINDING`.
 //!
@@ -36,6 +39,7 @@ const spec = @import("spec_m6.zig");
 const state = @import("state_m6.zig");
 const mounts = @import("mounts_m6.zig");
 const writable = @import("writable_m6.zig");
+const logs = @import("logs_m6.zig");
 const agent = @import("agent_m6.zig");
 
 const Session = session_mod.Session;
@@ -119,6 +123,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     state.step_state,
     mounts.step_mounts,
     writable.step_writable,
+    logs.step_logs,
     agent.run_agent,
 };
 
@@ -137,6 +142,7 @@ test {
     _ = @import("state_m6.zig");
     _ = @import("mounts_m6.zig");
     _ = @import("writable_m6.zig");
+    _ = @import("logs_m6.zig");
     _ = @import("agent_m6.zig");
     _ = @import("upgrade_m6.zig");
 }
