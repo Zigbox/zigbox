@@ -1,0 +1,6 @@
+error[ZBX-E0224]: can't give the command a terminal
+  cause  opening a pseudo-terminal for the command failed: the kernel returned
+         EMFILE
+  fix    run it without a terminal:   zbx exec web-1 -- <command> < /dev/null
+  more   zbx explain E0224 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0224.html

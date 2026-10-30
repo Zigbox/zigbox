@@ -50,6 +50,7 @@ const diagnose = @import("diagnose.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
 const logfile = @import("logfile.zig");
+const exec_history = @import("exec_history.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const image_mod = @import("image.zig");
 const netfiles = @import("netfiles.zig");
@@ -947,12 +948,15 @@ fn remove_pasta_logs(handle: *Handle, dir: *const records.Dir, pruned: *const re
     }
 }
 
-/// A record that was pruned takes its log with it. Best effort, like the pasta log.
+/// A record that was pruned takes its log and its exec history with it; a run that takes a name
+/// again starts with no history of the execs of the run before. Best effort, like the pasta log.
 fn remove_logs(handle: *Handle, dir: *const records.Dir, pruned: *const records.Pruned) void {
     const logs = logfile.dir_of(dir) orelse return;
     const fs = handle.host.log_files();
+    exec_history.remove(fs, &logs, handle.name_slice()) catch {};
     for (0..pruned.count) |index| {
         logfile.remove(fs, &logs, pruned.name(@intCast(index))) catch {};
+        exec_history.remove(fs, &logs, pruned.name(@intCast(index))) catch {};
     }
 }
 

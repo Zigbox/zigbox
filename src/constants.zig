@@ -170,8 +170,8 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 pub const sim_path_bytes_max: u32 = 256;
 pub const sim_nodes_max: u32 = 160;
 pub const sim_mounts_max: u32 = 32;
-pub const sim_processes_max: u32 = 4;
-pub const sim_pipe_ends_max: u32 = 16;
+pub const sim_processes_max: u32 = 8;
+pub const sim_pipe_ends_max: u32 = 24;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
 pub const sim_written_files_max: u32 = 72;
@@ -305,6 +305,9 @@ pub const errno_io: u16 = 5;
 /// SIGKILL, the same number on x86_64 and aarch64.
 pub const signal_kill: u8 = 9;
 pub const signal_term: u8 = 15;
+/// SIGWINCH (the terminal's window changed size), 28 on x86_64 and aarch64. `exec` with a
+/// pseudo-terminal passes the new size on; nothing forwards it to a container.
+pub const signal_winch: u8 = 28;
 
 /// How long a stop waits between SIGTERM and SIGKILL when nobody says.
 pub const stop_grace_ms_default: u32 = 10_000;
@@ -416,6 +419,12 @@ pub const dir_listing_bytes_max: u32 = dir_entries_max * (dir_name_bytes_max + 1
 /// The state directory path: $XDG_STATE_HOME or $HOME/.local/state, then /zbx/runs/<name>.zon.
 pub const state_path_bytes_max: u32 = 512;
 pub const record_suffix = ".zon";
+/// The recent execs a container's history keeps (`runtime/exec_history.zig`): the oldest goes.
+pub const exec_history_entries_max: u32 = 16;
+/// How long an exec waits for another to finish writing the history: tries, and the wait
+/// between two (one second in all).
+pub const exec_history_lock_tries_max: u32 = 100;
+pub const exec_history_lock_wait_ms: u32 = 10;
 /// A container's directory under the state directory: `<state>/zbx/containers/<name>`, and the
 /// longest path inside it (`/upper`, `/merged`).
 pub const containers_path_bytes_max: u32 = 640;
@@ -480,6 +489,9 @@ pub const facts_bytes_max: u32 = 256 * 1024;
 pub const bundle_workspace_bytes_max: u32 = 1024 * 1024;
 /// The run `Handle` of a foreground run, kept off the stack too.
 pub const handle_bytes_max: u32 = 480 * 1024;
+/// An exec's handle (`runtime/exec.zig`): the plan, the container's environment, its passwd and
+/// group files, and the room the history is rewritten in.
+pub const exec_handle_bytes_max: u32 = 640 * 1024;
 /// The environment variables listed in a bundle, and those whose values are scrubbed elsewhere.
 pub const environment_entries_max: u32 = 256;
 pub const bundle_secrets_max: u32 = 32;
@@ -1061,7 +1073,7 @@ comptime {
     assert(sim_path_bytes_max >= 64);
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
-    assert(sim_processes_max >= 4); // zbx, the container, its keeper and pasta.
+    assert(sim_processes_max >= 6); // zbx, a container, its keeper, pasta, exec's two.
     assert(sim_pipe_ends_max >= 4);
     assert(sim_written_files_max > runs_max + 4); // Every record, a temporary one, and slack.
     assert(sim_written_bytes_max > 1024);

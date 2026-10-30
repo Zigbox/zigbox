@@ -322,7 +322,10 @@ pub const HostSim = struct {
         }
         assert(count <= constants.sim_open_files_max);
         const store_open = if (sim.store_fs) |files| files.open_count() else 0;
-        return count + sim.world.open_pipe_ends() + sim.world.bus.open_count() + store_open;
+        var namespaces: u32 = 0;
+        for (sim.world.namespace_handles) |entry| namespaces += @intFromBool(entry != null);
+        const pipes = sim.world.open_pipe_ends() - @intFromBool(sim.world.input_handle != null);
+        return count + pipes + sim.world.bus.open_count() + store_open + namespaces;
     }
 
     const vtable: host.VTable = .{
@@ -391,6 +394,14 @@ pub const HostSim = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .open_namespace = open_namespace,
+        .join_namespace = join_namespace,
+        .open_terminal = open_terminal,
+        .copy_window_size = copy_window_size,
+        .input_raw = input_raw,
+        .attach_terminal = attach_terminal,
+        .standard_input = standard_input,
+        .input_is_terminal = input_is_terminal,
         .filesystem = filesystem,
         .network = network,
     };
@@ -550,6 +561,7 @@ pub const HostSim = struct {
 
     fn close(context: *anyopaque, handle: host.Handle) void {
         const sim = from_context(context);
+        if (handle >= sim_world.namespace_handle_base) return sim.world.close_namespace(handle);
         if (handle >= sim_world.bus_handle_base) {
             return sim.world.bus.close(handle - sim_world.bus_handle_base);
         }
@@ -739,6 +751,10 @@ pub const HostSim = struct {
             sim.world.bus.scope_stopped = null;
             sim.world.end_scope(slot);
         }
+        if (sim.world.bus.attached) |pid| {
+            sim.world.bus.attached = null;
+            sim.world.joined_cgroup(pid);
+        }
         return @intCast(bytes.len);
     }
 
@@ -754,6 +770,12 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
         if (handle >= sim_world.bus_handle_base) return sim.write_bus(handle, bytes);
+        if (sim.world.terminal_master) |master| {
+            if (handle == master) {
+                sim.world.type_into_terminal(bytes);
+                return @intCast(bytes.len);
+            }
+        }
         if (sim.world.write_pipe(handle, bytes)) |errno| {
             // A real parent that did not ignore SIGPIPE would be dead, not handling an error.
             if (errno == sim_world.errno_pipe and sim.world.current == 0) {
@@ -1117,6 +1139,65 @@ pub const HostSim = struct {
 
     fn begin_step(context: *anyopaque, index: u32) void {
         from_context(context).world.begin_step(index);
+    }
+
+    fn open_namespace(
+        context: *anyopaque,
+        pid: host.Pid,
+        kind: host.NamespaceKind,
+    ) host.Error!?host.Handle {
+        const sim = from_context(context);
+        try sim.begin_call();
+        switch (sim.world.open_namespace(pid, kind)) {
+            .handle => |handle| return handle,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn join_namespace(
+        context: *anyopaque,
+        handle: host.Handle,
+        kind: host.NamespaceKind,
+    ) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.join_namespace(handle, kind)) |errno| return sim.model_error(errno);
+    }
+
+    fn open_terminal(context: *anyopaque) host.Error!host.Terminal {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.world.open_terminal() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn copy_window_size(context: *anyopaque, master: host.Handle) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(sim.world.terminal_master.? == master);
+        sim.world.window_copies += 1;
+    }
+
+    fn input_raw(context: *anyopaque, raw: bool, saved: *host.TerminalSaved) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        assert(sim.world.input_is_raw != raw); // Raw once, put back once.
+        sim.world.input_is_raw = raw;
+        saved.valid = raw;
+    }
+
+    fn attach_terminal(context: *anyopaque, peer: host.Handle) host.Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.world.attach_terminal(peer)) |errno| return sim.model_error(errno);
+    }
+
+    fn input_is_terminal(context: *anyopaque) bool {
+        const sim = from_context(context);
+        return sim.terminal and sim.world.input_terminal;
+    }
+
+    fn standard_input(context: *anyopaque) host.Handle {
+        return from_context(context).world.standard_input();
     }
 
     fn probe_idmap(context: *anyopaque, path: [:0]const u8) host.Error!host.ProbeOutcome {

@@ -41,6 +41,27 @@ pub const Record = struct {
     }
 };
 
+/// The first record `exec`'s joiner writes when it has forked the command: a tag byte that no
+/// `Kind` uses, and the command's pid as the host sees it in the three bytes after (a pid is at
+/// most 2^22 on Linux, `PID_MAX_LIMIT`). A joiner that fails writes a `failure` record instead.
+pub const forked_tag: u8 = 0xf0;
+
+pub fn encode_forked(pid: u32) [constants.sync_record_bytes]u8 {
+    assert(pid > 1);
+    assert(pid < 1 << 24);
+    return .{ forked_tag, @truncate(pid), @truncate(pid >> 8), @truncate(pid >> 16) };
+}
+
+/// The pid of a forked record, or null if the bytes are not one.
+pub fn decode_forked(bytes: *const [constants.sync_record_bytes]u8) ?u32 {
+    assert(bytes.len == 4);
+    assert(std.enums.fromInt(Kind, forked_tag) == null); // Never a record's kind.
+    if (bytes[0] != forked_tag) return null;
+    const pid = @as(u32, bytes[1]) | (@as(u32, bytes[2]) << 8) | (@as(u32, bytes[3]) << 16);
+    if (pid <= 1) return null;
+    return pid;
+}
+
 /// What the parent learned from the pipe.
 pub const Report = struct {
     notes: [constants.sync_records_max]Record,
@@ -99,6 +120,17 @@ test "a record survives the pipe, at the edges of every field" {
         const decoded = Record.decode(&bytes).?;
         try testing.expectEqual(record, decoded);
     }
+}
+
+test "a forked record carries the pid and is never a record" {
+    // Goal: the joiner's pid record round-trips at its bounds and cannot be read as a failure.
+    for ([_]u32{ 2, 256, 4_194_304, (1 << 24) - 1 }) |pid| {
+        const bytes = encode_forked(pid);
+        try testing.expectEqual(@as(?u32, pid), decode_forked(&bytes));
+        try testing.expect(Record.decode(&bytes) == null);
+    }
+    try testing.expect(decode_forked(&.{ 2, 5, 13, 0 }) == null);
+    try testing.expect(decode_forked(&.{ forked_tag, 1, 0, 0 }) == null);
 }
 
 test "decode refuses bytes that are not a record" {

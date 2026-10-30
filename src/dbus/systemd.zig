@@ -255,6 +255,35 @@ pub fn stop_scope(conn: *Connection, name: []const u8) CallError!Stopped {
 
 const no_such_unit = "org.freedesktop.systemd1.NoSuchUnit";
 
+/// `AttachProcessesToUnit(name, "", [pid])` (systemd 238): the manager moves the process into
+/// the unit's cgroup, a scope with `Delegate=yes`. The manager does it, not the caller, because
+/// moving a process needs write access to the cgroup that holds both where it is and where it
+/// goes, and a user's login session and the manager's `app.slice` meet only in a cgroup root
+/// owns (the user manager asks the system manager when it cannot do it itself). Used by `exec`
+/// for the command it starts in a running container.
+pub fn attach_process(conn: *Connection, name: []const u8, pid: u32) CallError!void {
+    assert(conn.is_open);
+    assert(std.mem.endsWith(u8, name, constants.scope_suffix));
+    assert(pid > 1);
+    var body_buffer: [constants.scope_name_bytes_max + 32]u8 = undefined;
+    var writer = wire.Writer.init(&body_buffer);
+    writer.string(name);
+    writer.string(""); // No sub-cgroup: the scope's own.
+    const pids = writer.array_begin(4);
+    writer.uint32(pid);
+    writer.array_end(pids);
+    const body = writer.finish() catch |err| return protocol(conn, err);
+    const reply = try conn.call(.{
+        .destination = systemd_name,
+        .path = manager_path,
+        .interface = manager_interface,
+        .member = "AttachProcessesToUnit",
+        .signature = "ssau",
+        .body = body,
+    }, .call);
+    if (reply.signature.len != 0) return protocol(conn, error.BadSignature);
+}
+
 /// The body of `StartTransientUnit(name, "fail", properties, [])`. "fail" means: an existing
 /// unit of that name is an error, never silently reused.
 pub fn marshal_scope(buffer: []u8, request: *const ScopeRequest) wire.WireError![]const u8 {

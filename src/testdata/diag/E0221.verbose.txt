@@ -1,0 +1,13 @@
+error[ZBX-E0221]: can't join the running container
+  while  running a command in the container web-1
+  cause  joining the container's namespace failed: operation not permitted
+         (EPERM)
+  cause  a security policy, or a /proc mounted with hidepid, refuses it
+  name   web-1
+  pid    502
+  ns     user
+  step   join_namespace (14 of 31)
+  fix    look for the policy that denies it:   sudo dmesg | grep -iE 'apparmor|seccomp|selinux'
+         check what this host allows:          zbx doctor
+  more   zbx explain E0221
+  docs   https://zigbox.github.io/zigbox/errors/E0221.html

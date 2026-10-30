@@ -148,6 +148,14 @@ pub const HostReal = struct {
         .socket_connect = socket_connect,
         .read_timeout = read_timeout,
         .begin_step = begin_step,
+        .open_namespace = open_namespace,
+        .join_namespace = join_namespace,
+        .open_terminal = open_terminal,
+        .copy_window_size = copy_window_size,
+        .input_raw = input_raw,
+        .attach_terminal = attach_terminal,
+        .standard_input = standard_input,
+        .input_is_terminal = input_is_terminal,
         .filesystem = filesystem,
         .network = network,
     };
@@ -373,7 +381,8 @@ pub const HostReal = struct {
         _ = from_context(context);
         var arguments: CloneArgs = std.mem.zeroes(CloneArgs);
         arguments.flags = clone_flags(flags);
-        arguments.exit_signal = @backingInt(linux.SIG.CHLD);
+        // A sibling takes the caller's own exit signal; clone3 refuses one given with it.
+        arguments.exit_signal = if (flags.sibling) 0 else @backingInt(linux.SIG.CHLD);
         const result = linux.syscall2(.clone3, @intFromPtr(&arguments), @sizeOf(CloneArgs));
         // clone3 returns twice. In the child (result 0) nothing below this line runs: the entry
         // function does the setup and the child ends here, never returning into the caller.
@@ -1060,6 +1069,154 @@ pub const HostReal = struct {
         _ = index; // The kernel needs no hint; see Host.begin_step.
     }
 
+    // ---- Exec: namespaces and the terminal ----
+
+    fn open_namespace(
+        context: *anyopaque,
+        pid: host.Pid,
+        kind: host.NamespaceKind,
+    ) host.Error!?host.Handle {
+        const self = from_context(context);
+        assert(pid > 1);
+        var path: [48:0]u8 = undefined;
+        // Cannot fail: "/proc/" and "/ns/" and a name of four bytes, and a pid of ten digits.
+        const target = std.fmt.bufPrintSentinel(&path, "/proc/{d}/ns/{s}", .{
+            pid, kind.file_name(),
+        }, 0) catch unreachable; // Same bound as above.
+        var own_path: [32:0]u8 = undefined;
+        // Cannot fail: as above, shorter.
+        const own = std.fmt.bufPrintSentinel(&own_path, "/proc/self/ns/{s}", .{
+            kind.file_name(),
+        }, 0) catch unreachable; // Same bound as above.
+        var theirs: linux.Statx = undefined;
+        var ours: linux.Statx = undefined;
+        const mask: linux.STATX = .{ .INO = true };
+        try check(linux.statx(linux.AT.FDCWD, target.ptr, 0, mask, &theirs));
+        try check(linux.statx(linux.AT.FDCWD, own.ptr, 0, mask, &ours));
+        // One namespace file system holds them all: the inode alone tells one from another.
+        if (theirs.ino == ours.ino) return null;
+        const opened = linux.open(target.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try check(opened);
+        self.open_count += 1;
+        return @intCast(opened);
+    }
+
+    fn join_namespace(
+        context: *anyopaque,
+        handle: host.Handle,
+        kind: host.NamespaceKind,
+    ) host.Error!void {
+        _ = from_context(context);
+        assert(handle <= std.math.maxInt(i32));
+        const flag: u32 = switch (kind) {
+            .user => linux.CLONE.NEWUSER,
+            .ipc => linux.CLONE.NEWIPC,
+            .uts => linux.CLONE.NEWUTS,
+            .net => linux.CLONE.NEWNET,
+            .pid => linux.CLONE.NEWPID,
+            .mount => linux.CLONE.NEWNS,
+        };
+        // The type is given, so the kernel refuses a file of another kind of namespace.
+        try check(linux.setns(@intCast(handle), flag));
+    }
+
+    /// `/dev/ptmx`, unlocked, and the peer opened through the master (`TIOCGPTPEER`, Linux 4.13),
+    /// so that no path under /dev/pts is looked up: the peer belongs to this devpts whatever
+    /// mount namespace the command is in.
+    fn open_terminal(context: *anyopaque) host.Error!host.Terminal {
+        const self = from_context(context);
+        const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true };
+        const opened = linux.open("/dev/ptmx", flags, 0);
+        try check(opened);
+        const master: i32 = @intCast(opened);
+        var unlock: i32 = 0;
+        const unlocked = linux.ioctl(master, linux.T.IOCSPTLCK, @intFromPtr(&unlock));
+        const peer_flags: usize = @as(u32, @bitCast(flags));
+        const peer = if (linux.errno(unlocked) == .SUCCESS)
+            linux.ioctl(master, linux.T.IOCGPTPEER, peer_flags)
+        else
+            unlocked;
+        check(peer) catch |err| {
+            const errno_peer = errno_last;
+            _ = linux.close(master);
+            errno_last = errno_peer; // The close must not hide why the peer could not be had.
+            return err;
+        };
+        self.open_count += 2;
+        return .{ .master = @intCast(master), .peer = @intCast(peer) };
+    }
+
+    fn copy_window_size(context: *anyopaque, master: host.Handle) host.Error!void {
+        _ = from_context(context);
+        assert(master <= std.math.maxInt(i32));
+        var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+        const asked = linux.ioctl(linux.STDIN_FILENO, linux.T.IOCGWINSZ, @intFromPtr(&size));
+        if (linux.errno(asked) != .SUCCESS) {
+            errno_last = 0; // No size to copy: the terminal keeps the kernel's default.
+            return;
+        }
+        try check(linux.ioctl(@intCast(master), linux.T.IOCSWINSZ, @intFromPtr(&size)));
+    }
+
+    /// Raw as `cfmakeraw` makes it: no input translation, no output processing, no echo, no
+    /// line editing, no signal keys, eight bits, one byte at a time.
+    fn input_raw(context: *anyopaque, raw: bool, saved: *host.TerminalSaved) host.Error!void {
+        _ = from_context(context);
+        comptime assert(@sizeOf(linux.termios) <= host.terminal_saved_bytes);
+        const size = @sizeOf(linux.termios);
+        if (!raw) {
+            var settings: linux.termios = undefined;
+            @memcpy(std.mem.asBytes(&settings), saved.bytes[0..size]);
+            try check(linux.tcsetattr(linux.STDIN_FILENO, .FLUSH, &settings));
+            saved.valid = false;
+            return;
+        }
+        var settings: linux.termios = undefined;
+        try check(linux.tcgetattr(linux.STDIN_FILENO, &settings));
+        @memcpy(saved.bytes[0..size], std.mem.asBytes(&settings));
+        saved.valid = true;
+        settings.iflag.IGNBRK = false;
+        settings.iflag.BRKINT = false;
+        settings.iflag.PARMRK = false;
+        settings.iflag.ISTRIP = false;
+        settings.iflag.INLCR = false;
+        settings.iflag.IGNCR = false;
+        settings.iflag.ICRNL = false;
+        settings.iflag.IXON = false;
+        settings.oflag.OPOST = false;
+        settings.lflag.ECHO = false;
+        settings.lflag.ECHONL = false;
+        settings.lflag.ICANON = false;
+        settings.lflag.ISIG = false;
+        settings.lflag.IEXTEN = false;
+        settings.cflag.CSIZE = .CS8;
+        settings.cflag.PARENB = false;
+        settings.cc[@backingInt(linux.V.MIN)] = 1;
+        settings.cc[@backingInt(linux.V.TIME)] = 0;
+        try check(linux.tcsetattr(linux.STDIN_FILENO, .FLUSH, &settings));
+    }
+
+    fn attach_terminal(context: *anyopaque, peer: host.Handle) host.Error!void {
+        _ = from_context(context);
+        assert(peer <= std.math.maxInt(i32));
+        const descriptor: i32 = @intCast(peer);
+        try check(linux.setsid());
+        try check(linux.ioctl(descriptor, linux.T.IOCSCTTY, 0));
+        for ([_]i32{ 0, 1, 2 }) |target| try check(linux.dup2(descriptor, target));
+    }
+
+    fn input_is_terminal(context: *anyopaque) bool {
+        _ = from_context(context);
+        var settings: linux.termios = undefined;
+        const asked = linux.tcgetattr(linux.STDIN_FILENO, &settings);
+        return linux.errno(asked) == .SUCCESS;
+    }
+
+    fn standard_input(context: *anyopaque) host.Handle {
+        _ = from_context(context);
+        return linux.STDIN_FILENO;
+    }
+
     /// Converts a raw syscall return value into an error, or passes success through.
     pub fn check(result: usize) host.Error!void {
         const code = linux.errno(result);
@@ -1140,6 +1297,10 @@ fn clone_flags(flags: host.SpawnFlags) u64 {
     if (flags.uts) bits |= linux.CLONE.NEWUTS;
     if (flags.ipc) bits |= linux.CLONE.NEWIPC;
     if (flags.net) bits |= linux.CLONE.NEWNET;
+    if (flags.sibling) {
+        assert(bits == 0); // A sibling is born in the namespaces its maker joined.
+        bits |= linux.CLONE.PARENT;
+    }
     assert(bits & linux.CLONE.VM == 0); // The child gets its own memory, as after fork.
     assert(bits & linux.CSIGNAL == 0); // The exit signal is its own field.
     return bits;
@@ -1325,10 +1486,13 @@ test "real host refuses a file larger than the buffer instead of truncating" {
 
 // ---- Helper programs, signals and directories ---------------------------------------------
 
-/// The signals zbx forwards to a container, and SIGCHLD, which says the container ended.
+/// The signals zbx forwards to a container, SIGCHLD, which says the container ended, and
+/// SIGWINCH, which `exec` passes to its pseudo-terminal (a run's wait drops it).
 fn forwarded_set() linux.sigset_t {
     var set = linux.sigemptyset();
-    for ([_]linux.SIG{ .INT, .TERM, .HUP, .QUIT, .CHLD }) |number| linux.sigaddset(&set, number);
+    const numbers = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT, .CHLD, .WINCH };
+    for (numbers) |number| linux.sigaddset(&set, number);
+    comptime assert(@backingInt(linux.SIG.WINCH) == constants.signal_winch);
     return set;
 }
 

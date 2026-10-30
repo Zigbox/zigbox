@@ -598,7 +598,101 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases ++ logs_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases;
+
+const exec_plan = @import("runtime/exec_plan.zig");
+
+/// The index of the first step of `kind` in the plan of an exec into `prepare_running`'s
+/// container (a scope, every namespace, root), with or without a terminal.
+fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
+    var plan: exec_plan.Plan = undefined;
+    const input: exec_plan.Input = .{
+        .command = &.{"/bin/sh"},
+        .environ = "",
+        .env = &.{},
+        .term = null,
+        .workdir = "",
+        .user = null,
+        .namespaces = 0x3f,
+        .terminal = terminal,
+        .cgroup = true,
+    };
+    plan.build(&input);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in that plan.
+}
+
+/// A running container whose namespace cannot be joined (the first join, the user namespace's).
+fn prepare_exec_join_refused(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.faults.fail_step = exec_step_of(.join_namespace, false);
+    sim.faults.fail_step_errno = 1;
+}
+
+/// A running container whose manager refuses to move a process into its scope.
+fn prepare_exec_attach_refused(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.world.bus.model.attach_error = "org.freedesktop.DBus.Error.AccessDenied";
+}
+
+/// A running container, and zbx at a terminal whose pseudo-terminal cannot be had.
+fn prepare_exec_no_terminal(sim: *HostSim) void {
+    prepare_running(sim);
+    sim.terminal = true;
+    sim.terminal_only = .stdout; // Standard error is not, so the diagnostic has no colour.
+    sim.world.input_terminal = true;
+    sim.faults.fail_step = exec_step_of(.open_terminal, true);
+    sim.faults.fail_step_errno = 24; // EMFILE.
+}
+
+/// A running container whose log disk fails every call: the history cannot be written.
+fn prepare_exec_history_down(sim: *HostSim) void {
+    prepare_running(sim);
+    logs_disk(sim);
+    golden_logs.crashed = true;
+}
+
+const exec_cases = [_]Case{
+    .{
+        .code = .E0220,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_with_record,
+        .exit = 125,
+    },
+    .{
+        .code = .E0221,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_join_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0222,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_attach_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0223,
+        .args = &.{ "exec", "web-1", "--workdir", "/nowhere", "--", "/bin/sh" },
+        .prepare = prepare_running,
+        .exit = 125,
+    },
+    .{
+        .code = .E0224,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_no_terminal,
+        .exit = 125,
+    },
+    .{
+        .code = .W0207,
+        .args = &.{ "exec", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_exec_history_down,
+        .warning = true,
+        .exit = 0,
+    },
+};
 
 const logfile = @import("runtime/logfile.zig");
 const records = @import("runtime/records.zig");
@@ -1884,7 +1978,9 @@ test "golden: every code in default, verbose and JSON output" {
                 return err;
             };
             try testing.expectEqual(case.exit, code);
-            const is_run = case.args.len > 0 and std.mem.eql(u8, case.args[0], "run");
+            // `exec` uses the codes of a run (125 for its own failures).
+            const is_run = case.args.len > 0 and (std.mem.eql(u8, case.args[0], "run") or
+                std.mem.eql(u8, case.args[0], "exec"));
             if (!case.warning and !is_run) {
                 try testing.expectEqual(codes.exit_code(codes.entry(case.code).blame), code);
             }

@@ -660,6 +660,9 @@ pub const Session = struct {
                 .output => unreachable, // `next_event` takes output itself.
                 .exited => |ended| break ended,
                 .signal => |number| {
+                    // A terminal's new size is not the container's business: its terminal, when
+                    // it has one, is zbx's own and the kernel tells the processes on it.
+                    if (number == constants.signal_winch) continue;
                     received += 1;
                     assert(received < std.math.maxInt(u32));
                     session.forward(number, received > constants.forwarded_signals_max);

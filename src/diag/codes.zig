@@ -67,12 +67,18 @@ pub const Code = enum(u8) {
     E0217,
     E0218,
     E0219,
+    E0220,
+    E0221,
+    E0222,
+    E0223,
+    E0224,
     W0201,
     W0202,
     W0203,
     W0204,
     W0205,
     W0206,
+    W0207,
     E0301,
     E0302,
     E0303,
@@ -922,6 +928,86 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0220,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container is not running",
+        .explanation =
+        \\zbx exec runs a command inside a container that is running: it joins the
+        \\container's namespaces, which exist only while its first process lives. The
+        \\container named has a run record and is not running: it ended (the message
+        \\says how), or it was lost (zbx lost track of it).
+        \\
+        \\Start it again with zbx run, then exec into it. "zbx ps --all" lists every
+        \\container and its state.
+        ,
+    },
+    .{
+        .code = .E0221,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't join the running container",
+        .explanation =
+        \\zbx exec reads the container's environment from its first process, opens its
+        \\namespaces (/proc/<pid>/ns), and in a child joins them with setns: the user
+        \\namespace first (zbx made it, so this needs no privilege), then the IPC,
+        \\UTS, network, PID and mount namespaces, and forks the command into the PID
+        \\namespace. One of these was refused.
+        \\
+        \\The cause names the step and the kernel's reason. A container that ended at
+        \\that moment is the usual one (try again: zbx ps shows it). A security policy
+        \\that forbids setns, or a /proc that hides other processes (hidepid), is the
+        \\other. Nothing was started.
+        ,
+    },
+    .{
+        .code = .E0222,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't put the command in the container's cgroup",
+        .explanation =
+        \\The command zbx exec starts is put in the container's cgroup before it runs,
+        \\so that it counts against the container's memory and process limits. With
+        \\systemd, the user manager moves it into the container's scope
+        \\(AttachProcessesToUnit, systemd 238 and later); without, zbx writes its pid
+        \\to the container's cgroup.procs. That was refused.
+        \\
+        \\zbx never runs the command outside the container's limits: nothing was
+        \\started. The cause says what the manager or the kernel answered; zbx doctor
+        \\shows the cgroup setup.
+        ,
+    },
+    .{
+        .code = .E0223,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the working directory is not in the container",
+        .explanation =
+        \\zbx exec starts the command in the container's working directory, or in the
+        \\one --workdir names. That directory is not there in the container (or is not
+        \\a directory, or cannot be entered). Unlike zbx run, exec makes nothing in a
+        \\running container.
+        \\
+        \\Name a directory the container has, or make it first:
+        \\  zbx exec web -- mkdir -p /work
+        ,
+    },
+    .{
+        .code = .E0224,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't give the command a terminal",
+        .explanation =
+        \\When zbx's standard input and output are both a terminal, zbx exec gives the
+        \\command a pseudo-terminal of its own (/dev/ptmx), with the size of zbx's,
+        \\and puts zbx's terminal in raw mode so that every key reaches the command.
+        \\One of these steps failed.
+        \\
+        \\Run without a terminal instead: give zbx exec a pipe or a file as its input
+        \\(zbx exec web -- cmd < /dev/null), and the command's streams are zbx's own.
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -1014,6 +1100,18 @@ pub const registry = [_]Entry{
         \\
         \\To have the output in the log, run the container detached ("zbx run -d") or
         \\send its output to a file or a pipe.
+        ,
+    },
+    .{
+        .code = .W0207,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the exec was not noted in the container's history",
+        .explanation =
+        \\zbx keeps a short list of the recent execs of each container beside its log
+        \\(<state>/zbx/logs/<name>.exec): the command and how it ended, never the
+        \\environment, so that "zbx bundle" can show them. This exec's entry could not
+        \\be written; the cause says why. The command itself ran as reported.
         ,
     },
     .{
@@ -3053,7 +3151,19 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         .E1006, .E1007 => false,
+        .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,
+    };
+}
+
+/// The codes only `zbx exec` reports. It uses the exit codes of a container run (125 for its own
+/// failures, 126 and 127 for a command that cannot run or is not there, E0202), so the codes it
+/// shares with `run` read as `run`'s do, and these read as exec's.
+pub fn exec_only(code: Code) bool {
+    assert(@backingInt(code) < registry.len);
+    return switch (code) {
+        .E0220, .E0221, .E0222, .E0223, .E0224 => true,
+        else => false,
     };
 }
 
@@ -3066,7 +3176,12 @@ pub const exit_text_bytes_max = 40;
 pub fn exit_text(code: Code, buffer: *[exit_text_bytes_max]u8) []const u8 {
     const found = entry(code);
     const standard = exit_code_in(.standard, code, false);
-    const text = if (found.severity == .warning or !can_end_run(code))
+    const text = if (exec_only(code))
+        std.fmt.bufPrint(buffer, "{d} ({d} in zbx exec)", .{
+            standard,
+            exit_code_in(.container_run, code, false),
+        })
+    else if (found.severity == .warning or !can_end_run(code))
         std.fmt.bufPrint(buffer, "{d}", .{standard})
     else if (code == .E0202)
         std.fmt.bufPrint(buffer, "{d} ({d} or {d} in zbx run)", .{

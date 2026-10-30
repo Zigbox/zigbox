@@ -210,6 +210,16 @@ test {
 }
 
 test {
+    // `zbx exec` (M6b slice 3).
+    _ = @import("runtime/exec.zig");
+    _ = @import("runtime/exec_plan.zig");
+    _ = @import("runtime/exec_child.zig");
+    _ = @import("runtime/exec_diagnose.zig");
+    _ = @import("runtime/exec_history.zig");
+    _ = @import("runtime/exec_tests.zig");
+}
+
+test {
     // The macOS VM layer's portable parts (M4b): the settings record, the control and guest
     // protocols, the diagnostics and their goldens. They run on Linux CI too, so a change to
     // the shared registry cannot break them unseen; the macOS-only parts (the Objective-C
