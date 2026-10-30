@@ -202,11 +202,38 @@ test "the exec'd command dies with its container, and zbx says so" {
     try testing.expect(exec_handle.container_ended);
 }
 
-test "a command killed by SIGKILL while its container lives asks again, then says it did not" {
-    // Goal: the kernel kills the command of a PID namespace while PID 1 is still dying (and no
-    // zombie yet), so the exec asks `exec_ended_tries_max` times, `exec_ended_wait_ms` apart,
-    // before it decides that someone else killed the command. Method: SIGKILL the command alone;
-    // the container lives throughout, so every try is spent and none is left over.
+test "a command killed with its container while PID 1 is still exiting says the container ended" {
+    // Goal: the kernel kills the other processes of a PID namespace from PID 1's `do_exit`
+    // (`zap_pid_ns_processes`), after PF_EXITING is set and before PID 1 is a zombie, and keeps
+    // PID 1 out of the zombie state until every one of them is reaped, which can take as long as
+    // the slowest of their parents. The VM showed an exec reaped in that window that left out the
+    // line. Method: the simulator keeps PID 1 exiting (PF_EXITING in its stat, not a zombie, still
+    // in its scope) for longer than any wait an exec could afford, and the exec must say the
+    // container ended without waiting at all.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 7);
+    sim.world.pid1_exit_ms = 60_000;
+    const container_pid = try start_container(&sim, 7, default_spec());
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec = exec_spec(&.{ "/bin/sleep", "1000" });
+    try exec.start(sim.interface(), &spec, .{}, &exec_handle, &diag);
+    try testing.expect(sim.world.kill(container_pid, constants.signal_kill) == null);
+    try testing.expectEqual(container_pid, sim.world.exiting_pid);
+    const before = sim.world.now_ms;
+    const exit = exec.wait(&exec_handle);
+    try testing.expectEqual(exec.Exit{ .signaled = constants.signal_kill }, exit);
+    try testing.expect(exec_handle.container_ended);
+    try testing.expectEqual(before, sim.world.now_ms);
+    // PID 1 is still exiting: the exec did not wait for it to be a zombie.
+    try testing.expectEqual(container_pid, sim.world.exiting_pid);
+}
+
+test "a command killed by SIGKILL while its container lives says so at once" {
+    // Goal: a command SIGKILLed by someone else while PID 1 lives (not exiting) is not reported
+    // as dying with the container, and the exec decides that from PID 1's flags without waiting.
+    // Method: SIGKILL the command alone; the container lives throughout, and the clock does not
+    // move.
     var sim: HostSim = undefined;
     sim_run.init(&sim, 6);
     _ = try start_container(&sim, 6, default_spec());
@@ -219,8 +246,7 @@ test "a command killed by SIGKILL while its container lives asks again, then say
     const exit = exec.wait(&exec_handle);
     try testing.expectEqual(exec.Exit{ .signaled = constants.signal_kill }, exit);
     try testing.expect(!exec_handle.container_ended);
-    const spent = constants.exec_ended_tries_max * constants.exec_ended_wait_ms;
-    try testing.expect(sim.world.now_ms - before >= spent);
+    try testing.expectEqual(before, sim.world.now_ms);
 }
 
 const terminal_chunks = [_]sim_world.OutChunk{

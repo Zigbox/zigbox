@@ -179,6 +179,25 @@ pub fn is_zombie(status: []const u8) bool {
     return false;
 }
 
+/// PF_EXITING in a task's flags (`include/linux/sched.h`): `do_exit` sets it in `exit_signals`,
+/// before anything else of the exit, and it is never cleared.
+pub const task_flag_exiting: u64 = 0x00000004;
+
+/// `/proc/<pid>/stat` says the process is exiting: PF_EXITING in its flags, field 9. The name in
+/// field 2 is in parentheses and may hold spaces and parentheses itself, so the fields are
+/// counted from the last `)`. A line that does not parse is not taken as exiting.
+pub fn is_exiting(stat: []const u8) bool {
+    assert(stat.len <= constants.status_bytes_max);
+    const name_end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return false;
+    assert(name_end < stat.len);
+    // After the name: state (3), ppid, pgrp, session, tty_nr, tpgid (8), flags (9).
+    var fields = std.mem.tokenizeScalar(u8, stat[name_end + 1 ..], ' ');
+    for (0..6) |_| _ = fields.next() orelse return false;
+    const flags_text = fields.next() orelse return false;
+    const flags = std.fmt.parseInt(u64, flags_text, 10) catch return false;
+    return flags & task_flag_exiting != 0;
+}
+
 /// `NSpid:\t<host pid>\t...\t1`: more than one pid, the last is 1.
 pub fn innermost_pid_is_one(status: []const u8) bool {
     assert(status.len <= constants.status_bytes_max);

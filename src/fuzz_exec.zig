@@ -149,8 +149,13 @@ fn fuzz_start(random: std.Random, seed: u64) void {
     sim.world.command_exit = .{ .exited = random.int(u8) };
     diag.reset();
     if (exec.start(sim.interface(), &exec_spec, .{}, &handle, &diag)) |_| {
+        const ending = random.enumValue(Ending);
+        if (ending == .container) sim.world.pid1_exit_ms = random.uintAtMost(u32, 120_000);
+        end_early(ending, container.pid);
+        const before_ms = sim.world.now_ms;
         const exit = exec.wait(&handle);
         if (exit.code() == null) assert(handle.lost_diag.code != null);
+        check_ending(ending, exit, before_ms);
     } else |_| {
         const code = diag.code.?;
         assert(codes.entry(code).severity == .@"error");
@@ -160,4 +165,28 @@ fn fuzz_start(random: std.Random, seed: u64) void {
     assert(!sim.world.input_is_raw);
     assert(container.status == .running);
     container.session.release_keeper();
+}
+
+/// How the exec'd command ends: by itself, by a SIGKILL of its own, or with its container, whose
+/// PID 1 may take a while to exit (`pid1_exit_ms`).
+const Ending = enum { itself, command, container };
+
+fn end_early(ending: Ending, container_pid: u32) void {
+    assert(container_pid != 0);
+    assert(handle.pid != null);
+    switch (ending) {
+        .itself => {},
+        .command => assert(sim.world.kill(handle.pid.?, constants.signal_kill) == null),
+        .container => assert(sim.world.kill(container_pid, constants.signal_kill) == null),
+    }
+}
+
+/// A command killed with its container says so, and one killed alone does not; neither waits.
+fn check_ending(ending: Ending, exit: exec.Exit, before_ms: u64) void {
+    if (ending == .itself) return;
+    if (exit == .lost) return; // A fault in the reap step: nothing is known of how it ended.
+    assert(exit == .signaled);
+    assert(exit.signaled == constants.signal_kill);
+    assert(handle.container_ended == (ending == .container));
+    assert(sim.world.now_ms == before_ms);
 }

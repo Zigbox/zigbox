@@ -511,10 +511,27 @@ An exec'd command that the kernel kills with its container's PID namespace is re
 is still on its way out, so `lifecycle.alive` still answered yes and `exec` did not say "the
 container ended, and the command with it" (exit 137 was right; the line was missing). It showed
 as a failure of EXEC 6 in one of three runs. Slice 3's tests used a simulator in which PID 1 is
-gone at once. Now the exec asks again, up to `exec_ended_tries_max` (20) times, `exec_ended_wait_ms`
-(10) apart, before it decides that someone else killed the command; a command killed by SIGKILL
-alone while its container lives pays that fifth of a second. Tested in `exec_tests.zig` (the
-retries are spent and the container is not reported ended).
+gone at once.
+
+The kernel kills the rest of a PID namespace from PID 1's `do_exit` (`exit_notify` →
+`forget_original_parent` → `find_child_reaper` → `zap_pid_ns_processes`), and PID 1 stays out of
+the zombie state until every other process of the namespace has been reaped, by parents that may
+be slow (other execs' `zbx`), so no fixed wait is long enough. But `do_exit` sets PF_EXITING
+(`0x4`) in PID 1's flags first (`exit_signals`), and never clears it. So when the command was
+killed by SIGKILL and PID 1 still looks alive, the exec reads field 9 of `/proc/<pid1>/stat`
+(`lifecycle.is_exiting`): PF_EXITING means the container is ending and the command died with it.
+That is decided at once, with no retry (a first fix asked again 20 times, 10 ms apart; it is
+gone). No retry backs it up: `zbx` signals only PID 1, so every path on which the kernel kills the
+command for the namespace passes PF_EXITING first; a command SIGKILLed before that (a kill of the
+whole cgroup from outside `zbx`) was killed by someone else, which is what the exec says.
+
+Tested first, then fixed: the simulator can keep a killed PID 1 exiting (`pid1_exit_ms`: PF_EXITING
+in its stat, no zombie, still in its scope, the namespace's other processes already killed), and
+`exec_tests.zig` asserts that the exec says the container ended without the clock moving; a
+command killed alone says it did not, also without the clock moving. The `exec` fuzzer ends the
+command by itself, by its own SIGKILL, or with its container (a PID 1 that takes up to two
+minutes to exit), and asserts the same. `lifecycle_tests.zig` reads the flags from real stat
+lines (a sleeping process, and a zombie with PF_EXITING).
 
 ### Cuts and deviations
 
