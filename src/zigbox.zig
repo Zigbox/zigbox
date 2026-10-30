@@ -114,6 +114,14 @@ pub const exec_history = @import("runtime/exec_history.zig");
 /// single-threaded child inside the user's namespace (`store.namespace`).
 pub const store = @import("store/store.zig");
 
+/// Pull (M6b): fetch an image into the store and record it, as `zbx pull` does, from a library
+/// call (`pull.pull`). The caller passes the request (reference, platform, mirrors), its own
+/// `pull.Workspace` (about 15 MiB: static storage or the heap), the store's `import.Workspace`
+/// and the doctor's `Facts`, an optional progress callback and a `Result` to fill. It reads no
+/// environment variable of its own, touches no `zbx.lock` and prints nothing; a failure is a
+/// coded `Diag`. `pull.zig` has the rest.
+pub const pull = @import("pull.zig");
+
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
@@ -135,6 +143,8 @@ test "the module's surface is what the contract names" {
     _ = LogReader;
     _ = exec_start;
     _ = exec_wait;
+    _ = pull.pull;
+    _ = pull.Workspace;
     _ = exec_signal;
     _ = ExecHandle;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);

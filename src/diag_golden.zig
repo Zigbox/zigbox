@@ -13,6 +13,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
+const image_diagnose = @import("image_diagnose.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -55,6 +56,9 @@ const Case = struct {
     /// the user of the text), so the golden is the diagnostic that the check holds, rendered in
     /// each mode, and `--output json` shows it in the `zbx.doctor/1` document.
     from_report: bool = false,
+    /// A warning that no fixture can raise cheaply: this function builds the diagnostic, and the
+    /// golden is it rendered in each mode.
+    direct: ?*const fn (diag: *Diag) void = null,
 };
 
 /// The index of the first step of `kind` in a plan for a host that maps a full range of ids.
@@ -1838,6 +1842,13 @@ const image_cases = [_]Case{
         .warning = true,
         .exit = 0,
     },
+    .{
+        .code = .W0504,
+        .args = &.{},
+        .direct = build_warnings_dropped,
+        .warning = true,
+        .exit = 0,
+    },
 };
 
 const Style = enum { default, verbose, json };
@@ -1942,6 +1953,41 @@ fn warning_block(sim: *HostSim, case: *const Case, style: Style, buffer: []u8) [
     unreachable; // The case's fixture is chosen to warn with this code.
 }
 
+/// The diagnostic `build` raises, rendered in the mode `style` stands for.
+fn direct_block(
+    build: *const fn (diag: *Diag) void,
+    style: Style,
+    buffer: []u8,
+) []const u8 {
+    var diag: Diag = undefined;
+    diag.reset();
+    build(&diag);
+    const mode: render.Mode = switch (style) {
+        .default => .text,
+        .verbose => .verbose,
+        .json => .json,
+    };
+    return render.render(&diag, mode, false, buffer);
+}
+
+fn expect_direct(
+    build: *const fn (diag: *Diag) void,
+    name: []const u8,
+    style: Style,
+    golden: []const u8,
+) !void {
+    var storage: [constants.output_bytes_max]u8 = undefined;
+    const block = direct_block(build, style, &storage);
+    testing.expectEqualStrings(golden, block) catch |err| {
+        std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+        return err;
+    };
+}
+
+fn build_warnings_dropped(diag: *Diag) void {
+    image_diagnose.warnings_dropped(diag, 7);
+}
+
 test "golden: every code in default, verbose and JSON output" {
     // Goal: the text of each diagnostic is part of the product. Method: trigger each code
     // through run_from_iterator (the E01xx ones by a doctor fixture) and compare stderr, or the
@@ -1958,6 +2004,10 @@ test "golden: every code in default, verbose and JSON output" {
             @embedFile("testdata/diag/" ++ name ++ ".json.txt"),
         };
         for (std.enums.values(Style), expected) |style, golden| {
+            if (case.direct) |build| {
+                try expect_direct(build, name, style, golden);
+                continue;
+            }
             if (case.from_report) {
                 var storage: [constants.output_bytes_max]u8 = undefined;
                 const block = warning_block(&sim, &case, style, &storage);

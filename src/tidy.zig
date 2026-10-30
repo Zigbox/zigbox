@@ -64,6 +64,8 @@ const shipped_files = [_][]const u8{
     "src/layer/reader.zig",
     "src/layer/tar.zig",
     "src/pull_unpack.zig",
+    "src/pull.zig",
+    "src/pull_report.zig",
     "src/registry/auth.zig",
     "src/registry/blobs.zig",
     "src/registry/client.zig",

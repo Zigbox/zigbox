@@ -3,55 +3,42 @@
 //! file records), without fetching any layer. Text is the digest on a line; `--output json` is
 //! one object (`zbx schema pull-resolve`).
 //!
-//! `zbx pull <reference>` goes on: it downloads the config and the layers into the store's blob
-//! cache (a cut download resumes), then the store's child (`pull_unpack.zig`) unpacks the layers
-//! into one tree, imports it, and records the image. It prints the manifest digest (the same
-//! line as the resolve), or with `--output json` the object `zbx.pull/1`.
-//!
-//! The network work runs here, in the parent, before and outside any namespace child.
+//! `zbx pull <reference>` goes on: it is a thin caller of the library's `pull.pull`
+//! (`pull.zig`), which downloads the config and the layers into the store's blob cache (a cut
+//! download resumes), unpacks the layers into one tree, imports it, and records the image. What
+//! stays here is what belongs to the command line: the environment (`ZBX_REGISTRY_MIRRORS`,
+//! `ZBX_PLATFORM`, `ZBX_PLATFORM_FALLBACK`), the project's `zbx.lock`, the rendering of warnings
+//! and of the result. It prints the manifest digest (the same line as the resolve), or with
+//! `--output json` the object `zbx.pull/1`.
 
 const std = @import("std");
 const assert = std.debug.assert;
-const blobs_mod = @import("registry/blobs.zig");
-const config_mod = @import("registry/config.zig");
+const bundle = @import("bundle.zig");
+const constants = @import("constants.zig");
+const doctor = @import("doctor.zig");
+const errors = @import("diag/errors.zig");
+const fs_mod = @import("store/fs.zig");
+const host_mod = @import("host.zig");
 const image_diagnose = @import("image_diagnose.zig");
 const images = @import("store/images.zig");
-const lock_file = @import("lock_file.zig");
-const client_mod = @import("registry/client.zig");
-const constants = @import("constants.zig");
-const diagnose = @import("registry/diagnose.zig");
-const errors = @import("diag/errors.zig");
-const host_mod = @import("host.zig");
-const manifest = @import("registry/manifest.zig");
-const reference_mod = @import("registry/reference.zig");
-const doctor = @import("doctor.zig");
 const import = @import("store/import.zig");
-const lock = @import("store/lock.zig");
-const namespace = @import("store/namespace.zig");
-const open = @import("store/open.zig");
+const lock_file = @import("lock_file.zig");
+const manifest = @import("registry/manifest.zig");
+const pull_lib = @import("pull.zig");
+const reference_mod = @import("registry/reference.zig");
 const render_diag = @import("diag/render.zig");
-const store_diagnose = @import("store/diagnose.zig");
-const unpack = @import("pull_unpack.zig");
-const fs_mod = @import("store/fs.zig");
 const Diag = @import("diag/diag.zig").Diag;
-const Store = @import("store/layout.zig").Store;
-
 const Host = host_mod.Host;
 
 pub const Error = error{ Failed, OutputFailed };
 
-/// What a pull works in: the client's memory, the result, the text of the JSON result, the
-/// blob being downloaded, and what the child unpacks in.
+/// What the command line's pull works in: the library's memory, the text of the JSON result and
+/// the project's lock.
 pub const Workspace = struct {
-    client: client_mod.Workspace,
-    resolved: manifest.Resolved,
+    library: pull_lib.Workspace,
     output: [constants.pull_output_bytes_max]u8,
-    fetched: unpack.Fetched,
-    download: blobs_mod.Download,
-    unpack: unpack.Workspace,
-    reference: reference_mod.Reference,
-    /// What the image runs by default, read from its configuration blob.
-    settings: images.Settings,
+    /// The project's zbx.lock, read before the pull and updated after it.
+    locking: lock_file.Workspace,
 };
 
 pub const Args = struct {
@@ -59,73 +46,62 @@ pub const Args = struct {
     json: bool,
 };
 
-/// Parses the reference and resolves it for this machine into `workspace.resolved`.
-fn resolve_reference(
-    host: Host,
-    text: []const u8,
-    workspace: *Workspace,
-    client: *client_mod.Client,
-    diag: *Diag,
-) Error!void {
-    assert(diag.code == null);
+/// How warnings are written, and whether the result is.
+pub const Output = struct {
+    mode: render_diag.Mode,
+    color: bool,
+    json: bool,
+    /// The pull is a step of something else (a run that has no lock): its result is not printed.
+    quiet: bool = false,
+};
+
+/// The request the command line makes: the reference as typed, the platform the macOS zbx sets
+/// in the virtual machine and the mirrors, all read from the environment here and nowhere in the
+/// library.
+fn request_of(host: Host, text: []const u8) pull_lib.Request {
     assert(text.len <= constants.arg_bytes_max);
-    reference_mod.parse(text, &workspace.reference) catch |err| {
-        diagnose.bad_reference(diag, text, err);
-        return error.Failed;
-    };
-    // A host that cannot say its machine type gets an empty one, which has no image platform:
-    // the refusal says so. `uname` does not fail on a real kernel.
-    const uname = host.uname() catch host_mod.Uname{
-        .release = host_mod.Text.from_slice(""),
-        .machine = host_mod.Text.from_slice(""),
-    };
-    var machine = uname.machine;
-    client.* = client_mod.Client.init(host.network(), &workspace.client, machine.slice());
     const mirrors = host.environment("ZBX_REGISTRY_MIRRORS", constants.registry_mirrors_bytes_max);
-    client.mirrors = mirrors orelse "";
-    choose_platform(host, client);
-    client_mod.resolve(client, &workspace.reference, &workspace.resolved, diag) catch {
-        return error.Failed;
+    return .{
+        .reference = text,
+        .platform = platform_of(host),
+        .mirrors = mirrors orelse "",
     };
-    assert(diag.code == null);
-    assert(workspace.resolved.layer_count <= constants.registry_layers_max);
 }
 
 /// `ZBX_PLATFORM` (`linux/amd64` or `linux/arm64`) replaces the machine's platform, and
 /// `ZBX_PLATFORM_FALLBACK` names one to use when an image has none for it. The macOS zbx sets
 /// them in the virtual machine (`--platform`, and Rosetta); a value that is not one of the two
 /// is ignored, because nothing but zbx sets them.
-fn choose_platform(host: Host, client: *client_mod.Client) void {
-    assert(client.fallback == null);
+fn platform_of(host: Host) pull_lib.Platform {
     const limit: u32 = 32;
+    var platform: pull_lib.Platform = .{};
     if (host.environment("ZBX_PLATFORM", limit)) |text| {
-        if (manifest.architecture_of_platform(text)) |architecture| {
-            client.architecture = architecture;
-        }
+        platform.architecture = manifest.architecture_of_platform(text);
     }
     if (host.environment("ZBX_PLATFORM_FALLBACK", limit)) |text| {
-        client.fallback = manifest.architecture_of_platform(text);
+        platform.fallback = manifest.architecture_of_platform(text);
     }
+    return platform;
 }
 
 pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(args.reference.len <= constants.arg_bytes_max);
     assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
-    var client: client_mod.Client = undefined;
-    try resolve_reference(host, args.reference, workspace, &client, diag);
-    const text = render(args.json, &workspace.reference, &workspace.resolved, &workspace.output);
+    const library = &workspace.library;
+    pull_lib.resolve(host, &request_of(host, args.reference), library, diag) catch {
+        return error.Failed;
+    };
+    const text = render(args.json, &library.reference, &library.resolved, &workspace.output);
     host.write_all(.stdout, text) catch |err| {
         errors.output_failed(diag, .stdout, err, host.last_errno());
         return error.OutputFailed;
     };
 }
 
-/// How the child's output is written, and the one thing the parent needs to say about the map.
-pub const Output = unpack.Output;
-
-/// `zbx pull <reference>`: resolve, download what the cache lacks, and have the store's child
-/// unpack, import and record. The result is the exit code (the child's).
+/// `zbx pull <reference>`: the library's pull between the lock's two steps. A lock that cannot
+/// be read ends the pull before any work (a digest reference needs no lock); the lock is updated
+/// when the image is in the store; then the result is written.
 pub fn run_pull(
     host: Host,
     args: Args,
@@ -134,42 +110,39 @@ pub fn run_pull(
     workspace: *Workspace,
     import_workspace: *import.Workspace,
     diag: *Diag,
-) Error!u8 {
+) Error!void {
     assert(diag.code == null);
     assert(args.reference.len <= constants.arg_bytes_max);
-    var client: client_mod.Client = undefined;
-    try resolve_reference(host, args.reference, workspace, &client, diag);
-    var store: Store = undefined;
-    if (!store.locate(host)) {
-        store_diagnose.no_data_directory(diag);
-        return error.Failed;
-    }
-    _ = open.check(&store, .create, diag) catch return error.Failed;
-    // The blobs are in the cache from the first byte to the record of the image that names them,
-    // and a gc in that time would take them: hold the lock for the whole pull.
-    store_diagnose.hold(diag, &store, .shared, "pull", "pulling an image") catch {
-        return error.Failed;
-    };
-    defer lock.release(&store);
-    // A lock that is damaged is found now, not after the layers are unpacked.
-    try check_lock(host, &store, workspace, diag);
-    try fetch_all(&client, workspace, &store, diag);
-    try read_settings(workspace, &store, diag);
-    var job: unpack.Job = .{
-        .host = host,
-        .output = output,
-        .written = args.reference,
-        .reference = &workspace.reference,
-        .resolved = &workspace.resolved,
-        .fetched = &workspace.fetched,
-        .workspace = &workspace.unpack,
-        .import_workspace = import_workspace,
-        .settings = &workspace.settings,
-    };
+    const library = &workspace.library;
+    pull_lib.parse_reference(library, args.reference, diag) catch return error.Failed;
+    try check_lock(host, workspace, diag);
     var reporter: Reporter = .{ .host = host, .output = output };
-    const work: namespace.Work = .{ .context = &job, .call = unpack.work_call };
-    const warn: namespace.Warn = .{ .context = &reporter, .call = report_warning };
-    return namespace.run(host, facts, work, warn, diag) catch return error.Failed;
+    const progress: pull_lib.Progress = .{ .context = &reporter, .call = report_event };
+    var result: pull_lib.Result = undefined;
+    pull_lib.pull(
+        host,
+        facts,
+        &request_of(host, args.reference),
+        progress,
+        library,
+        import_workspace,
+        &result,
+        diag,
+    ) catch return error.Failed;
+    if (result.warnings_dropped > 0) {
+        // The library hands the count on instead of printing: the command line shows it.
+        var dropped: Diag = undefined;
+        dropped.reset();
+        image_diagnose.warnings_dropped(&dropped, result.warnings_dropped);
+        report_event(&reporter, .{ .warning = &dropped });
+    }
+    const locked = try record_in_lock(host, args.reference, workspace, &result, diag);
+    if (output.quiet) return;
+    const text = render_result(args.json, args.reference, workspace, &result, locked);
+    host.write_all(.stdout, text) catch |err| {
+        errors.output_failed(diag, .stdout, err, host.last_errno());
+        return error.OutputFailed;
+    };
 }
 
 const Reporter = struct {
@@ -177,48 +150,13 @@ const Reporter = struct {
     output: Output,
 };
 
-/// Reads zbx.lock before any work, if the pull is going to record in it (a digest reference
-/// needs no lock): a lock that can not be read ends the pull now.
-fn check_lock(host: Host, store: *const Store, workspace: *Workspace, diag: *Diag) Error!void {
-    assert(workspace.reference.registry_len > 0);
-    assert(diag.code == null);
-    if (workspace.reference.digest != null) return;
-    const locking = &workspace.unpack.locking;
-    var failure: lock_file.Failure = undefined;
-    lock_file.open_project(host, store.fs, locking, &failure) catch {
-        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
-        image_diagnose.lock_failure(diag, path, failure);
-        return error.Failed;
-    };
-}
-
-/// Reads the image's configuration blob (checked by its digest when it arrived) into
-/// `workspace.settings`.
-fn read_settings(workspace: *Workspace, store: *const Store, diag: *Diag) Error!void {
-    assert(workspace.resolved.layer_count > 0);
-    assert(diag.code == null);
-    const config = workspace.resolved.config_digest;
-    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
-    var path: fs_mod.PathBuf = undefined;
-    const where = blobs.final_path(&path, config);
-    const body = store.fs.read_whole(where, &workspace.client.body) catch {
-        image_diagnose.config_refused(diag, config, "could not be read back from the blob cache");
-        return error.Failed;
-    };
-    config_mod.parse(&workspace.client.arena, body, &workspace.settings) catch |problem| {
-        const words = switch (problem) {
-            error.malformed => "is not the JSON of an image configuration",
-            error.too_complex => "is more complex than zbx reads",
-            error.too_big => "has more words or bytes than zbx keeps",
-            error.bad_variable => "has an environment entry that is not NAME=value",
-        };
-        image_diagnose.config_refused(diag, config, words);
-        return error.Failed;
-    };
-}
-
-fn report_warning(context: *anyopaque, diag: *const Diag) void {
+/// The command line shows warnings, as they come, and nothing else of the pull's progress.
+fn report_event(context: *anyopaque, event: pull_lib.Event) void {
     const reporter: *const Reporter = @ptrCast(@alignCast(context));
+    const diag = switch (event) {
+        .warning => |warning| warning,
+        .resolved, .blob => return,
+    };
     assert(diag.code != null);
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const text = render_diag.render(diag, reporter.output.mode, reporter.output.color, &buffer);
@@ -226,45 +164,19 @@ fn report_warning(context: *anyopaque, diag: *const Diag) void {
     reporter.host.write_all(.stderr, text) catch return;
 }
 
-/// Downloads the config and every layer the cache lacks, in manifest order.
-fn fetch_all(
-    client: *client_mod.Client,
-    workspace: *Workspace,
-    store: *const Store,
-    diag: *Diag,
-) Error!void {
+/// Reads zbx.lock before any work, if the pull is going to record in it (a digest reference
+/// needs no lock): a lock that can not be read ends the pull now.
+fn check_lock(host: Host, workspace: *Workspace, diag: *Diag) Error!void {
+    assert(workspace.library.reference.registry_len > 0);
     assert(diag.code == null);
-    assert(workspace.resolved.layer_count > 0);
-    const resolved = &workspace.resolved;
-    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
-    var failure: blobs_mod.Failure = undefined;
-    blobs.ensure_directories(&failure) catch {
-        diagnose.cache_failed(diag, blobs.root, &failure);
+    if (workspace.library.reference.digest != null) return;
+    const locking = &workspace.locking;
+    var failure: lock_file.Failure = undefined;
+    lock_file.open_project(host, host.filesystem(), locking, &failure) catch {
+        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
+        image_diagnose.lock_failure(diag, path, failure);
         return error.Failed;
     };
-    const reference = &workspace.reference;
-    const download = &workspace.download;
-    const config = resolved.config_digest;
-    workspace.fetched.config = client_mod.fetch_blob(
-        client,
-        reference,
-        config,
-        resolved.config_size,
-        blobs,
-        download,
-        diag,
-    ) catch return error.Failed;
-    for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
-        workspace.fetched.layers[index] = client_mod.fetch_blob(
-            client,
-            reference,
-            layer.digest,
-            layer.size,
-            blobs,
-            download,
-            diag,
-        ) catch return error.Failed;
-    }
 }
 
 fn render(
@@ -320,4 +232,138 @@ fn write_json(
         try writer.print("\"kind\":\"{s}\"}}", .{kind});
     }
     try writer.writeAll("]}\n");
+}
+
+/// Adds the image to zbx.lock (unless the reference was a digest, which needs none). Whether this
+/// made the file, or null if the lock was not touched. The pull has already recorded the image in
+/// the store, so a lock that cannot be written leaves the image there.
+fn record_in_lock(
+    host: Host,
+    written: []const u8,
+    workspace: *Workspace,
+    result: *const pull_lib.Result,
+    diag: *Diag,
+) Error!?bool {
+    assert(written.len > 0);
+    assert(result.layer_count > 0);
+    if (workspace.library.reference.digest != null) return null;
+    const fs = host.filesystem();
+    const locking = &workspace.locking;
+    var failure: lock_file.Failure = undefined;
+    lock_file.open_project(host, fs, locking, &failure) catch {
+        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
+        image_diagnose.lock_failure(diag, path, failure);
+        return error.Failed;
+    };
+    const existed = locking.located.exists;
+    locking.lock.put(written, result.manifest_digest, result.platform(), result.tree) catch |err| {
+        const too_long: fs_mod.Failure = .{ .err = error.FileTooLarge, .errno = 0 };
+        failure = if (err == error.Full) .full else .{ .write = too_long };
+        image_diagnose.lock_failure(diag, locking.located.text(), failure);
+        return error.Failed;
+    };
+    lock_file.save(host, fs, locking, &failure) catch {
+        image_diagnose.lock_failure(diag, locking.located.text(), failure);
+        return error.Failed;
+    };
+    return !existed;
+}
+
+fn render_result(
+    json: bool,
+    written: []const u8,
+    workspace: *Workspace,
+    result: *const pull_lib.Result,
+    locked: ?bool,
+) []const u8 {
+    assert(workspace.output.len == constants.pull_output_bytes_max);
+    assert(result.layer_count > 0);
+    const buffer = &workspace.output;
+    var writer = std.Io.Writer.fixed(buffer);
+    const resolved = &workspace.library.resolved;
+    // Cannot fail: the buffer holds the largest result (128 layers, the constants assert it).
+    if (!json) {
+        writer.print("{s}\n", .{&resolved.manifest_digest.text()}) catch unreachable; // Sized.
+        return writer.buffered();
+    }
+    write_pull_json(&writer, written, workspace, result, locked) catch unreachable; // Same bound.
+    return writer.buffered();
+}
+
+fn write_pull_json(
+    writer: *std.Io.Writer,
+    written: []const u8,
+    workspace: *const Workspace,
+    result: *const pull_lib.Result,
+    locked: ?bool,
+) std.Io.Writer.Error!void {
+    const library = &workspace.library;
+    assert(library.resolved.layer_count <= constants.registry_layers_max);
+    assert(result.layer_count == library.resolved.layer_count);
+    const resolved = &library.resolved;
+    const reference = &library.reference;
+    try writer.writeAll("{\"schema\":\"zbx.pull/1\",\"reference\":");
+    try bundle.write_json_string(writer, written);
+    try writer.print(",\"registry\":\"{s}\",\"repository\":\"{s}\",", .{
+        reference.registry(), reference.repository(),
+    });
+    try writer.print("\"manifest_digest\":\"{s}\",\"platform\":\"{s}\",", .{
+        &resolved.manifest_digest.text(), result.platform(),
+    });
+    try writer.print("\"tree\":\"{s}\",\"config\":{{\"digest\":\"{s}\",\"cache\":\"{s}\"}},", .{
+        result.tree.text(), &resolved.config_digest.text(), @tagName(library.fetched.config),
+    });
+    try writer.writeAll("\"layers\":[");
+    for (resolved.layers[0..resolved.layer_count], 0..) |blob, index| {
+        if (index > 0) try writer.writeAll(",");
+        try writer.print("{{\"digest\":\"{s}\",\"size\":{d},\"cache\":\"{s}\"}}", .{
+            &blob.digest.text(), blob.size, @tagName(library.fetched.layers[index]),
+        });
+    }
+    const counts = result.counts;
+    try writer.print("],\"files\":{d},\"directories\":{d},\"symlinks\":{d},\"bytes\":{d},", .{
+        counts.files, counts.directories, counts.symlinks, counts.bytes,
+    });
+    try writer.print("\"special_skipped\":{d},\"xattrs_skipped\":{d},", .{
+        counts.special_skipped, counts.xattrs_skipped,
+    });
+    try write_settings(writer, result.settings);
+    try writer.writeAll(",\"lock\":");
+    if (locked) |created| {
+        try writer.writeAll("{\"path\":");
+        try bundle.write_json_string(writer, workspace.locking.located.text());
+        try writer.print(",\"created\":{}}}", .{created});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}\n");
+}
+
+/// The image's settings as the member "image": what it runs by default.
+fn write_settings(
+    writer: *std.Io.Writer,
+    settings: *const images.Settings,
+) std.Io.Writer.Error!void {
+    assert(settings.count(.env) <= constants.env_vars_count_max);
+    assert(settings.used <= settings.bytes.len);
+    const json = bundle.write_json_string;
+    try writer.writeAll("\"image\":{");
+    inline for (.{ .entrypoint, .cmd }) |list| {
+        try writer.print("\"{s}\":[", .{@tagName(list)});
+        for (0..settings.count(list)) |index| {
+            if (index > 0) try writer.writeAll(",");
+            try json(writer, settings.word(list, @intCast(index)));
+        }
+        try writer.writeAll("],");
+    }
+    try writer.writeAll("\"env\":[");
+    for (0..settings.count(.env)) |index| {
+        if (index > 0) try writer.writeAll(",");
+        try json(writer, settings.word(.env, @intCast(index)));
+    }
+    try writer.writeAll("],\"workdir\":");
+    try json(writer, settings.get(.workdir));
+    try writer.writeAll(",\"user\":");
+    try json(writer, settings.get(.user));
+    try writer.writeAll("}");
 }

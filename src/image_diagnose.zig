@@ -252,6 +252,17 @@ pub fn lock_not_written(diag: *Diag, path: []const u8, failure: *const fs_mod.Fa
     diag.fix(.{ .sentence = "make the directory writable, then run the command again" });
 }
 
+/// ZBX-W0504: the unpacking raised more warnings than its report holds.
+pub fn warnings_dropped(diag: *Diag, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    diag.raise(.W0504);
+    diag.while_("unpacking the image", .{});
+    diag.cause("{d} warnings did not fit the unpacking's report and are not shown", .{count});
+    diag.context("count", "{d}", .{count});
+    diag.fix(.{ .sentence = "nothing to do; the image is unpacked and recorded" });
+}
+
 /// ZBX-W0503: a run found no lock and made one.
 pub fn lock_created(diag: *Diag, reference: []const u8, path: []const u8) void {
     assert(diag.code == null);

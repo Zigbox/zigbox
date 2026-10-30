@@ -8,8 +8,9 @@
 //! staging directory is `tmp/<pid>-<n>` in the store, so a pull that is killed leaves it where
 //! `gc` already removes the leftovers of dead processes.
 //!
-//! The child prints the result itself (stdout) and its diagnostics (stderr), and its exit code
-//! is the command's, as for every store command.
+//! The child prints nothing: it reports to its parent through a pipe (`pull_report.zig`), the
+//! warnings it raises, then its failure or its result, and its exit code says which. It does
+//! not touch `zbx.lock`: that is the project's file, and the command line writes it.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,15 +23,13 @@ const import = @import("store/import.zig");
 const images = @import("store/images.zig");
 const layer_diagnose = @import("layer/diagnose.zig");
 const layout = @import("store/layout.zig");
-const lock_file = @import("lock_file.zig");
-const image_diagnose = @import("image_diagnose.zig");
 const manifest = @import("registry/manifest.zig");
 const open = @import("store/open.zig");
 const reader_mod = @import("layer/reader.zig");
 const reference_mod = @import("registry/reference.zig");
 const registry_diagnose = @import("registry/diagnose.zig");
+const report_mod = @import("pull_report.zig");
 const remove = @import("store/remove.zig");
-const render = @import("diag/render.zig");
 const store_diagnose = @import("store/diagnose.zig");
 const fs_mod = @import("store/fs.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -41,22 +40,10 @@ const Store = layout.Store;
 
 pub const Error = error{Failed};
 
-/// How results and diagnostics are written (the same three facts as a store command's).
-pub const Output = struct {
-    mode: render.Mode,
-    color: bool,
-    json: bool,
-    /// The pull is a step of something else (a run that has no lock): its result is not printed.
-    quiet: bool = false,
-};
-
 /// The caller's memory for unpacking, about 14 MiB: keep it in static storage.
 pub const Workspace = struct {
     applier: apply.Applier,
     layer: reader_mod.Layer,
-    output: [constants.pull_output_bytes_max]u8,
-    /// The project's zbx.lock, read by the parent before the work and updated by the child.
-    locking: lock_file.Workspace,
 };
 
 /// What the parent did before the child started: how each blob came, for the result.
@@ -67,16 +54,22 @@ pub const Fetched = struct {
 
 pub const Job = struct {
     host: Host,
-    output: Output,
+    /// Where the child reports; the parent reads it when the child has ended.
+    report: *report_mod.Writer,
     /// The reference as the user wrote it.
     written: []const u8,
     reference: *const reference_mod.Reference,
     resolved: *const manifest.Resolved,
-    fetched: *const Fetched,
     workspace: *Workspace,
     import_workspace: *import.Workspace,
     settings: *const images.Settings,
 };
+
+/// The platform text of an image, "linux/amd64": what the record and the lock carry.
+pub fn platform_text(buffer: *[16]u8, architecture: manifest.Architecture) []const u8 {
+    // Cannot fail: "linux/" and a name under eight bytes fit 16.
+    return std.fmt.bufPrint(buffer, "linux/{s}", .{architecture.name()}) catch unreachable;
+}
 
 pub fn work_call(context: *anyopaque, squash_owner: bool) u8 {
     assert(@intFromPtr(context) != 0);
@@ -88,26 +81,17 @@ pub fn work_call(context: *anyopaque, squash_owner: bool) u8 {
             diag.raise(.B0001);
             diag.cause("a pull failed with no diagnostic", .{});
         }
-        write_diag(job, &diag);
+        job.report.failure(&diag);
         return diag.exit_code();
     };
     return constants.exit_ok;
-}
-
-fn write_diag(job: *const Job, diag: *const Diag) void {
-    assert(@intFromPtr(job) != 0);
-    assert(diag.code != null);
-    var buffer: [constants.output_bytes_max]u8 = undefined;
-    const text = render.render(diag, job.output.mode, job.output.color, &buffer);
-    // A diagnostic that cannot be written is lost; the exit code still says the pull failed.
-    job.host.write_all(.stderr, text) catch return;
 }
 
 fn report_warning(context: *anyopaque, diag: *const Diag) void {
     assert(diag.code != null);
     assert(@intFromPtr(context) != 0);
     const job: *const Job = @ptrCast(@alignCast(context));
-    write_diag(job, diag);
+    job.report.warning(diag);
 }
 
 fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
@@ -238,17 +222,17 @@ fn report_skipped(job: *const Job, applier: *const apply.Applier) void {
         warning.reset();
         const first = applier.first_special_path();
         layer_diagnose.special_skipped(&warning, counts.special_skipped, first);
-        write_diag(job, &warning);
+        job.report.warning(&warning);
     }
     if (counts.xattrs_skipped > 0) {
         var warning: Diag = undefined;
         warning.reset();
         layer_diagnose.xattrs_skipped(&warning, counts.xattrs_skipped, applier.first_xattr_path());
-        write_diag(job, &warning);
+        job.report.warning(&warning);
     }
 }
 
-/// The image's record, then the result on stdout.
+/// The image's record, then the result in the report.
 fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) Error!void {
     assert(result.directories > 0);
     assert(diag.code == null);
@@ -261,9 +245,7 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
     if (job.reference.digest == null) image.add_tag(written);
     image.manifest = resolved.manifest_digest;
     var platform_buffer: [16]u8 = undefined;
-    const platform = std.fmt.bufPrint(&platform_buffer, "linux/{s}", .{
-        resolved.architecture.name(),
-    }) catch unreachable; // Sized: "linux/" and a name under eight bytes.
+    const platform = platform_text(&platform_buffer, resolved.architecture);
     @memcpy(image.platform[0..platform.len], platform);
     image.platform_len = @intCast(platform.len);
     image.config = resolved.config_digest;
@@ -280,146 +262,13 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
         store_diagnose.write_failed(diag, store, step, failure.err, failure.errno);
         return error.Failed;
     };
-    const locked = try record_in_lock(job, store, &image, diag);
-    if (job.output.quiet) return;
-    const text = render_result(job, result, &platform_buffer, locked);
-    job.host.write_all(.stdout, text) catch |err| {
-        @import("diag/errors.zig").output_failed(diag, .stdout, err, job.host.last_errno());
-        return error.Failed;
-    };
-}
-
-/// Adds the image to zbx.lock (unless the reference was a digest, which needs none). The path
-/// of the lock and whether this made it, or null if it was not touched.
-fn record_in_lock(
-    job: *Job,
-    store: *const Store,
-    image: *const images.Image,
-    diag: *Diag,
-) Error!?bool {
-    assert(job.written.len > 0);
-    assert(store.root_len > 1);
-    assert(image.layer_count > 0);
-    if (job.reference.digest != null) return null;
-    const locking = &job.workspace.locking;
-    var failure: lock_file.Failure = undefined;
-    lock_file.open_project(job.host, store.fs, locking, &failure) catch {
-        const path = if (locking.located.len > 0) locking.located.text() else lock_file.file_name;
-        image_diagnose.lock_failure(diag, path, failure);
-        return error.Failed;
-    };
-    const existed = locking.located.exists;
-    locking.lock.put(
-        job.written,
-        image.manifest,
-        image.platform_text(),
-        image.tree,
-    ) catch |err| {
-        const too_long: fs_mod.Failure = .{ .err = error.FileTooLarge, .errno = 0 };
-        failure = if (err == error.Full) .full else .{ .write = too_long };
-        image_diagnose.lock_failure(diag, locking.located.text(), failure);
-        return error.Failed;
-    };
-    lock_file.save(job.host, store.fs, locking, &failure) catch {
-        image_diagnose.lock_failure(diag, locking.located.text(), failure);
-        return error.Failed;
-    };
-    return !existed;
-}
-
-fn render_result(
-    job: *Job,
-    result: *const import.Result,
-    platform: []const u8,
-    locked: ?bool,
-) []const u8 {
-    assert(job.workspace.output.len == constants.pull_output_bytes_max);
-    assert(platform.len > 0);
-    const buffer = &job.workspace.output;
-    var writer = std.Io.Writer.fixed(buffer);
-    const resolved = job.resolved;
-    // Cannot fail: the buffer holds the largest result (128 layers, the constants assert it).
-    if (!job.output.json) {
-        writer.print("{s}\n", .{&resolved.manifest_digest.text()}) catch unreachable; // Sized.
-        return writer.buffered();
-    }
-    write_json(&writer, job, result, locked) catch unreachable; // Same bound.
-    return writer.buffered();
-}
-
-fn write_json(
-    writer: *std.Io.Writer,
-    job: *const Job,
-    result: *const import.Result,
-    locked: ?bool,
-) std.Io.Writer.Error!void {
-    assert(job.resolved.layer_count <= constants.registry_layers_max);
-    assert(result.directories > 0);
-    const resolved = job.resolved;
-    const reference = job.reference;
-    try writer.writeAll("{\"schema\":\"zbx.pull/1\",\"reference\":");
-    try @import("bundle.zig").write_json_string(writer, job.written);
-    try writer.print(",\"registry\":\"{s}\",\"repository\":\"{s}\",", .{
-        reference.registry(), reference.repository(),
-    });
-    try writer.print("\"manifest_digest\":\"{s}\",\"platform\":\"linux/{s}\",", .{
-        &resolved.manifest_digest.text(), resolved.architecture.name(),
-    });
-    try writer.print("\"tree\":\"{s}\",\"config\":{{\"digest\":\"{s}\",\"cache\":\"{s}\"}},", .{
-        result.digest.text(), &resolved.config_digest.text(), @tagName(job.fetched.config),
-    });
-    try writer.writeAll("\"layers\":[");
-    for (resolved.layers[0..resolved.layer_count], 0..) |blob, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.print("{{\"digest\":\"{s}\",\"size\":{d},\"cache\":\"{s}\"}}", .{
-            &blob.digest.text(), blob.size, @tagName(job.fetched.layers[index]),
-        });
-    }
     const counts = job.workspace.applier.counts;
-    try writer.print("],\"files\":{d},\"directories\":{d},\"symlinks\":{d},\"bytes\":{d},", .{
-        result.files, result.directories, result.symlinks, result.bytes,
+    job.report.result(result.digest, .{
+        .files = result.files,
+        .directories = result.directories,
+        .symlinks = result.symlinks,
+        .bytes = result.bytes,
+        .special_skipped = counts.special_skipped,
+        .xattrs_skipped = counts.xattrs_skipped,
     });
-    try writer.print("\"special_skipped\":{d},\"xattrs_skipped\":{d},", .{
-        counts.special_skipped, counts.xattrs_skipped,
-    });
-    try write_settings(writer, job.settings);
-    try writer.writeAll(",\"lock\":");
-    if (locked) |created| {
-        const located = &job.workspace.locking.located;
-        try writer.writeAll("{\"path\":");
-        try @import("bundle.zig").write_json_string(writer, located.text());
-        try writer.print(",\"created\":{}}}", .{created});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll("}\n");
-}
-
-/// The image's settings as the member "image": what it runs by default.
-fn write_settings(
-    writer: *std.Io.Writer,
-    settings: *const images.Settings,
-) std.Io.Writer.Error!void {
-    assert(settings.count(.env) <= constants.env_vars_count_max);
-    assert(settings.used <= settings.bytes.len);
-    const json = @import("bundle.zig").write_json_string;
-    try writer.writeAll("\"image\":{");
-    inline for (.{ .entrypoint, .cmd }) |list| {
-        try writer.print("\"{s}\":[", .{@tagName(list)});
-        for (0..settings.count(list)) |index| {
-            if (index > 0) try writer.writeAll(",");
-            try json(writer, settings.word(list, @intCast(index)));
-        }
-        try writer.writeAll("],");
-    }
-    try writer.writeAll("\"env\":[");
-    for (0..settings.count(.env)) |index| {
-        if (index > 0) try writer.writeAll(",");
-        try json(writer, settings.word(.env, @intCast(index)));
-    }
-    try writer.writeAll("],\"workdir\":");
-    try json(writer, settings.get(.workdir));
-    try writer.writeAll(",\"user\":");
-    try json(writer, settings.get(.user));
-    try writer.writeAll("}");
 }

@@ -328,3 +328,83 @@ that waits. `ExecSpec.terminal` is the caller's choice; Zigcube's agent leaves i
   and the line), `E0220` after the stop, and the history file. The VM is the real check.
 - The VM: the `EXEC` part of `demo-m6` (`exec_m6.zig`, `checks_exec_m6.zig`), temporary until
   slice 4 moves it to `demo-m6b`.
+
+## Slice 4: pull in the library
+
+Zigcube's agent links the `zigbox` module and could not fetch an image: pull lived in the command
+line's code and its child printed the result itself. Pull is now a library call, and `zbx pull` is
+a thin caller of it. Zigcube's orders call the operation `ensure_image`; here it is `pull.pull`
+(`zigbox.pull.pull`), and `ensure_image` is that call plus a look at the store first (the agent's
+to write: `images.load` by manifest digest, or a pull).
+
+### What the library offers (`src/pull.zig`)
+
+```zig
+pub fn pull(
+    host: Host,
+    facts: *doctor.Facts,
+    request: *const Request,       // reference (tag or digest), platform, mirrors
+    progress: ?Progress,           // may be null
+    workspace: *Workspace,         // the caller's memory, about 15 MiB: static or heap
+    import_workspace: *import.Workspace,
+    result: *Result,
+    diag: *Diag,
+) Error!void
+```
+
+It resolves the reference for the platform, downloads what the cache lacks (a cut download
+resumes), verifies every blob by its digest, unpacks the layers into one tree in the store's
+single-threaded child, imports it and writes the image record exactly as `zbx pull` does. The
+`Result` has the manifest digest, the config digest, the tree digest, the platform
+(`linux/amd64`), the layer count, the unpack's counts (files, directories, symlinks, bytes, special
+entries and attributes skipped), the number of warnings that did not fit the child's report, and
+the image's settings (entrypoint, cmd, env, working directory, user; a pointer into the
+workspace, valid until its next pull). `pull.resolve` asks the registry only. `Platform` is the
+architecture to ask for (null: this machine's, from `uname`) and a fallback.
+
+- **Per caller, no process-wide state.** The store is the one `host` locates, as for every call of
+  the library. Memory is the caller's. The real network's buffers, parsed CA certificates and
+  resolver `Io`, which were module-level statics (and a "not reentrant" assertion), are now a
+  `host_real_net.Memory` that `HostReal.network_memory` points to; `zbx` has one static in
+  `main.zig`. A host that makes a request without one asserts.
+- **Bounded.** Memory is fixed by constants; the child's report is at most 16 KiB
+  (`pull_report_bytes_max`), the same timeouts apply, and the store's shared lock is held from the
+  first byte downloaded to the record.
+- **Prints nothing, reads no pull variable.** Warnings (W0201 from the id map, the unpack's, the
+  import's) go to the progress callback, with `resolved` and `blob` events. A failure is the same
+  coded `Diag`, carried from the child through the report (`pull_report.zig`; the same carrier
+  as `Diag.encode`), so the CLI's stderr is byte for byte what the child used to write.
+- **Never touches `zbx.lock`.** The library has no lock code. `pull_commands.zig` reads the lock
+  before the pull (a lock that does not read ends the command before the network is asked, which
+  is earlier than before: the child used to check it after resolving) and writes it after.
+
+### What moved out of the library, and what stayed
+
+Moved to the caller: `ZBX_REGISTRY_MIRRORS` (the `mirrors` of the request), `ZBX_PLATFORM` and
+`ZBX_PLATFORM_FALLBACK` (the `platform`), `zbx.lock`, and the rendering of the result, of the JSON
+`zbx.pull/1` and of warnings. `pull_commands.zig` reads them with `host.environment` and builds
+the request.
+
+Stayed: `HTTPS_PROXY`/`https_proxy`, `NO_PROXY`/`no_proxy` and `SSL_CERT_FILE`, read by the real
+network from `host`'s environment at each request (the CA bundle once per `Memory`). They are
+properties of the host's network, not of the pull; the library does what the rest of it does and
+asks `host`. They are per caller, because the host and the `Memory` are.
+
+### Differences a caller can see
+
+- Warnings of the store's child reach the callback (and so stderr) when the child has ended, not
+  as it goes: the child is another process and the parent reads its pipe after it. The text and
+  the order among stderr lines are the same.
+- `zbx run` of a tag whose implicit pull fails now exits through the run scope of the diagnostic
+  (125 for every code a pull raises) instead of a fixed 125; the line is the same.
+- A client's `machine` text now lives in the workspace; it used to point into a stack frame that
+  had returned.
+
+### What was checked
+
+- `pull_report.zig`: both ends against each other, the bound and one past it, damage.
+- `pull_library_tests.zig`: a caller that is not the CLI (result, record, store whole, no
+  `zbx.lock`, a second pull from the cache), the environment ignored, E0515, E0516, bad reference
+  and E0503 as diagnostics, and two callers on two threads, three rounds, each with its own host,
+  disk, wire and memory.
+- Unchanged and passing: every test and golden of `pull_tests.zig`, `run_image`, `cli`.

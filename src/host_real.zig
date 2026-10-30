@@ -77,6 +77,10 @@ pub const HostReal = struct {
     child_hook: ?*const fn () noreturn = null,
     /// The process environment, for NO_COLOR. Empty unless `main` provides it.
     environ: std.process.Environ = .empty,
+    /// The memory the real network works in (`host_real_net.Memory`, about 2.4 MiB): the caller's,
+    /// set before the first request and initialised with `Memory.init`. Null for a host that
+    /// makes none, which asserts if it does.
+    network_memory: ?*host_real_net.Memory = null,
 
     pub fn interface(self: *HostReal) host.Host {
         return .{ .context = self, .vtable = &vtable };
@@ -118,6 +122,7 @@ pub const HostReal = struct {
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
         .pipe_has_reader = pipe_has_reader,
+        .pipe_capacity = pipe_capacity,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -639,6 +644,24 @@ pub const HostReal = struct {
         // which a plain close would not.
         const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = true };
         try check(linux.close_range(3, -1, flags));
+    }
+
+    fn pipe_capacity(context: *anyopaque, handle: host.Handle, bytes_min: u32) host.Error!void {
+        _ = from_context(context);
+        assert(bytes_min > 0);
+        assert(handle <= std.math.maxInt(i32));
+        const descriptor: i32 = @intCast(handle);
+        const set_size: i32 = 1031; // F_SETPIPE_SZ
+        const get_size: i32 = 1032; // F_GETPIPE_SZ
+        // A refusal (EPERM over the user's pipe limits) is not final: the pipe may already be big
+        // enough, which the read-back below decides.
+        _ = linux.fcntl(descriptor, set_size, bytes_min);
+        const size = linux.fcntl(descriptor, get_size, 0);
+        try check(size);
+        if (size < bytes_min) {
+            errno_last = 0;
+            return error.NoSpace;
+        }
     }
 
     fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {

@@ -13,8 +13,10 @@
 //!
 //! One request, one connection (`Connection: close`). The proxy is `HTTPS_PROXY` (an HTTP CONNECT
 //! tunnel), bypassed by `NO_PROXY`; plain-HTTP requests, which only a loopback registry makes, go
-//! direct. All buffers are static and the call is not reentrant: the registry client is the
-//! parent process's, single-threaded (a second call at once is a bug and asserts).
+//! direct. The buffers, the parsed CA certificates and the resolver's `Io` are the caller's, in a
+//! `Memory` that its `HostReal` points to (`HostReal.network_memory`); the file keeps no state of
+//! its own. A `Memory` serves one call at a time (a second call at once on the same `Memory` is
+//! a bug and asserts), so two callers on two threads each bring their own.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -41,16 +43,24 @@ pub fn interface(context: *HostReal) net.Net {
 const vtable: net.VTable = .{ .get = get, .last_errno = last_errno };
 
 fn last_errno(context: *anyopaque) u16 {
-    assert(@intFromPtr(context) != 0);
-    assert(state.errno_last < 4096);
-    return state.errno_last;
+    const memory = memory_of(@ptrCast(@alignCast(context)));
+    assert(memory.state.errno_last < 4096);
+    return memory.state.errno_last;
+}
+
+/// The caller's memory for the network. A host that makes a request without one is a bug in the
+/// program that built it (`zbx` sets it in `main`, a library caller before its first pull).
+fn memory_of(real: *const HostReal) *Memory {
+    assert(real.network_memory != null);
+    const memory = real.network_memory.?;
+    assert(memory.state.errno_last < 4096);
+    return memory;
 }
 
 const request_head_bytes_max = constants.registry_request_head_bytes_max;
 
 /// The buffers of the socket and of TLS, the request head, and the memory the CA certificates are
-/// kept in (parsed once per process, on the first HTTPS call). Static and never initialised, so
-/// they take no room in the binary.
+/// kept in (parsed once per `Memory`, on its first HTTPS call).
 const Buffers = struct {
     socket_read: [tls.Client.min_buffer_len]u8,
     socket_write: [tls.Client.min_buffer_len]u8,
@@ -60,9 +70,7 @@ const Buffers = struct {
     ca_arena: [constants.net_ca_arena_bytes]u8,
 };
 
-var buffers: Buffers = undefined;
-
-/// What one call and the process keep between calls.
+/// What one call and its `Memory` keep between calls.
 const State = struct {
     busy: bool,
     errno_last: u16,
@@ -72,21 +80,37 @@ const State = struct {
     ca_ready: bool,
 };
 
-var state: State = .{
-    .busy = false,
-    .errno_last = 0,
-    .ca_allocator = undefined,
-    .ca_bundle = .empty,
-    .ca_lock = .init,
-    .ca_ready = false,
-};
+/// Everything the real network keeps: about 2.4 MiB, most of it the CA arena. The caller owns it
+/// (static storage or the heap, never a small stack), initialises it in place with `init`, and
+/// does not move it while a request is going on. `zbx` has one static; a library caller on
+/// another thread has its own.
+pub const Memory = struct {
+    buffers: Buffers,
+    state: State,
+    /// The resolver's `Io`: single-threaded, so no thread is made and nothing is shared.
+    threaded: Io.Threaded,
 
-fn global_io() Io {
-    const io = Io.Threaded.global_single_threaded.io();
-    assert(io.userdata != null);
-    assert(@intFromPtr(io.vtable) != 0);
-    return io;
-}
+    pub fn init(memory: *Memory) void {
+        memory.state = .{
+            .busy = false,
+            .errno_last = 0,
+            .ca_allocator = undefined,
+            .ca_bundle = .empty,
+            .ca_lock = .init,
+            .ca_ready = false,
+        };
+        memory.threaded = .init_single_threaded;
+        assert(!memory.state.busy);
+        assert(!memory.state.ca_ready);
+    }
+
+    fn io(memory: *Memory) Io {
+        const value = memory.threaded.io();
+        assert(value.userdata != null);
+        assert(@intFromPtr(value.vtable) != 0);
+        return value;
+    }
+};
 
 // ---- Time and sockets ----------------------------------------------------------------------
 
@@ -106,6 +130,7 @@ const Failure = enum { none, eof, timed_out, io };
 /// A connected socket with the deadlines of the call, and a `Reader` and `Writer` over it for the
 /// layers above. Every wait ends at the idle timeout or the call's deadline, whichever is first.
 const Socket = struct {
+    memory: *Memory,
     fd: i32,
     idle_ms: u32,
     /// Absolute monotonic time the whole call must end by; zero for no limit.
@@ -141,7 +166,7 @@ const Socket = struct {
                 },
                 .INTR => continue,
                 else => |code| {
-                    state.errno_last = @backingInt(code);
+                    socket.memory.state.errno_last = @backingInt(code);
                     return error.Io;
                 },
             }
@@ -170,7 +195,7 @@ const Socket = struct {
                 .AGAIN => socket.wait(linux.POLL.IN) catch |err| return socket.failed(err),
                 .INTR => continue,
                 else => |code| {
-                    state.errno_last = @backingInt(code);
+                    socket.memory.state.errno_last = @backingInt(code);
                     socket.fail(.io);
                     return error.Failed;
                 },
@@ -204,7 +229,7 @@ const Socket = struct {
                 .AGAIN => socket.wait(linux.POLL.OUT) catch |err| return socket.failed(err),
                 .INTR => continue,
                 else => |code| {
-                    state.errno_last = @backingInt(code);
+                    socket.memory.state.errno_last = @backingInt(code);
                     socket.fail(.io);
                     return error.Failed;
                 },
@@ -272,23 +297,24 @@ fn writer_drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.W
     return consumed + last.len * splat;
 }
 
-fn init_socket(socket: *Socket, fd: i32, idle_ms: u32, deadline_ms: u64) void {
+fn init_socket(memory: *Memory, socket: *Socket, fd: i32, idle_ms: u32, deadline_ms: u64) void {
     assert(fd >= 0);
     assert(idle_ms > 0);
     socket.* = .{
+        .memory = memory,
         .fd = fd,
         .idle_ms = idle_ms,
         .deadline_ms = deadline_ms,
         .failure = .none,
         .reader = .{
             .vtable = &.{ .stream = reader_stream },
-            .buffer = &buffers.socket_read,
+            .buffer = &memory.buffers.socket_read,
             .seek = 0,
             .end = 0,
         },
         .writer = .{
             .vtable = &.{ .drain = writer_drain },
-            .buffer = &buffers.socket_write,
+            .buffer = &memory.buffers.socket_write,
         },
     };
 }
@@ -301,7 +327,11 @@ const Address = union(enum) {
 };
 
 /// The addresses of `host`: the literal itself, or what the system's resolver finds.
-fn resolve(host: []const u8, addresses: *[constants.net_addresses_max]Address) net.Error!u32 {
+fn resolve(
+    memory: *Memory,
+    host: []const u8,
+    addresses: *[constants.net_addresses_max]Address,
+) net.Error!u32 {
     assert(host.len > 0);
     assert(host.len <= 253);
     if (Io.net.Ip4Address.parse(host, 0)) |literal| {
@@ -309,7 +339,7 @@ fn resolve(host: []const u8, addresses: *[constants.net_addresses_max]Address) n
         return 1;
     } else |_| {}
     const name = Io.net.HostName.init(host) catch return error.UnknownHost;
-    const io = global_io();
+    const io = memory.io();
     var storage: [32]Io.net.HostName.LookupResult = undefined;
     var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&storage);
     var canonical: [Io.net.HostName.max_len]u8 = undefined;
@@ -341,7 +371,13 @@ fn resolve(host: []const u8, addresses: *[constants.net_addresses_max]Address) n
 }
 
 /// A non-blocking stream socket connecting to `address:port`; its descriptor, once connected.
-fn connect_one(address: Address, port: u16, idle_ms: u32, deadline_ms: u64) error{Connect}!i32 {
+fn connect_one(
+    memory: *Memory,
+    address: Address,
+    port: u16,
+    idle_ms: u32,
+    deadline_ms: u64,
+) error{Connect}!i32 {
     assert(port != 0);
     assert(idle_ms > 0);
     const family: u32 = switch (address) {
@@ -351,7 +387,7 @@ fn connect_one(address: Address, port: u16, idle_ms: u32, deadline_ms: u64) erro
     const kind = linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC;
     const created = linux.socket(family, kind, 0);
     if (linux.errno(created) != .SUCCESS) {
-        state.errno_last = @backingInt(linux.errno(created));
+        memory.state.errno_last = @backingInt(linux.errno(created));
         return error.Connect;
     }
     const fd: i32 = @intCast(created);
@@ -366,14 +402,14 @@ fn connect_one(address: Address, port: u16, idle_ms: u32, deadline_ms: u64) erro
         },
         .INPROGRESS, .INTR => {},
         else => |code| {
-            state.errno_last = @backingInt(code);
+            memory.state.errno_last = @backingInt(code);
             return error.Connect;
         },
     }
     var waiter: Socket = undefined;
-    init_socket(&waiter, fd, idle_ms, deadline_ms);
+    init_socket(memory, &waiter, fd, idle_ms, deadline_ms);
     waiter.wait(linux.POLL.OUT) catch |err| {
-        if (err == error.TimedOut) state.errno_last = @backingInt(linux.E.TIMEDOUT);
+        if (err == error.TimedOut) memory.state.errno_last = @backingInt(linux.E.TIMEDOUT);
         return error.Connect;
     };
     var pending: i32 = 0;
@@ -381,7 +417,7 @@ fn connect_one(address: Address, port: u16, idle_ms: u32, deadline_ms: u64) erro
     const got = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&pending), &size);
     if (linux.errno(got) != .SUCCESS) return error.Connect;
     if (pending != 0) {
-        state.errno_last = @intCast(pending);
+        memory.state.errno_last = @intCast(pending);
         return error.Connect;
     }
     assert(fd >= 0);
@@ -412,17 +448,23 @@ fn fill_address(storage: *linux.sockaddr.storage, address: Address, port: u16) l
 }
 
 /// Connects to the first address of `host` that answers.
-fn connect_host(host: []const u8, port: u16, idle_ms: u32, deadline_ms: u64) net.Error!i32 {
+fn connect_host(
+    memory: *Memory,
+    host: []const u8,
+    port: u16,
+    idle_ms: u32,
+    deadline_ms: u64,
+) net.Error!i32 {
     assert(host.len > 0);
     assert(port != 0);
     var addresses: [constants.net_addresses_max]Address = undefined;
-    const count = try resolve(host, &addresses);
+    const count = try resolve(memory, host, &addresses);
     assert(count >= 1);
     assert(count <= addresses.len);
     for (addresses[0..count]) |address| {
-        if (connect_one(address, port, idle_ms, deadline_ms)) |fd| return fd else |_| {}
+        if (connect_one(memory, address, port, idle_ms, deadline_ms)) |fd| return fd else |_| {}
     }
-    if (state.errno_last == @backingInt(linux.E.TIMEDOUT)) return error.TimedOut;
+    if (memory.state.errno_last == @backingInt(linux.E.TIMEDOUT)) return error.TimedOut;
     return error.ConnectFailed;
 }
 
@@ -456,7 +498,7 @@ fn open_tunnel(
 ) net.Error!void {
     assert(proxy.host.len > 0);
     assert(request.port != 0);
-    var writer = Io.Writer.fixed(&buffers.request_head);
+    var writer = Io.Writer.fixed(&socket.memory.buffers.request_head);
     const target = .{ request.host, request.port, request.host, request.port };
     // Cannot fail: the head buffer holds a host name, a port and a base64 userinfo of 255 bytes.
     writer.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n", target) catch unreachable;
@@ -503,25 +545,26 @@ fn socket_error(socket: *const Socket) net.Error {
 
 /// Loads the CA certificates once: the file `SSL_CERT_FILE` names, else the system's.
 fn load_certificates(real: *HostReal) net.Error!void {
-    assert(buffers.ca_arena.len == constants.net_ca_arena_bytes);
-    if (state.ca_ready) return;
-    state.ca_allocator = std.heap.FixedBufferAllocator.init(&buffers.ca_arena);
-    const gpa = state.ca_allocator.allocator();
-    const io = global_io();
+    const memory = memory_of(real);
+    assert(memory.buffers.ca_arena.len == constants.net_ca_arena_bytes);
+    if (memory.state.ca_ready) return;
+    memory.state.ca_allocator = std.heap.FixedBufferAllocator.init(&memory.buffers.ca_arena);
+    const gpa = memory.state.ca_allocator.allocator();
+    const io = memory.io();
     const now = Io.Clock.real.now(io);
     const host = real.interface();
     var loaded = false;
     if (host.environment("SSL_CERT_FILE", constants.path_bytes_max)) |path| {
         if (path.len > 0 and path[0] == '/') {
-            const added = state.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, path);
+            const added = memory.state.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, path);
             loaded = if (added) |_| true else |_| false;
         }
     }
-    if (!loaded) state.ca_bundle.rescan(gpa, io, now) catch return error.NoCertificates;
-    if (state.ca_bundle.map.count() == 0) return error.NoCertificates;
-    state.ca_ready = true;
-    assert(state.ca_bundle.map.count() > 0);
-    assert(state.ca_ready);
+    if (!loaded) memory.state.ca_bundle.rescan(gpa, io, now) catch return error.NoCertificates;
+    if (memory.state.ca_bundle.map.count() == 0) return error.NoCertificates;
+    memory.state.ca_ready = true;
+    assert(memory.state.ca_bundle.map.count() > 0);
+    assert(memory.state.ca_ready);
 }
 
 fn tls_error(err: tls.Client.InitError, socket: *const Socket) net.Error {
@@ -546,19 +589,20 @@ fn start_tls(real: *HostReal, socket: *Socket, host: []const u8) net.Error!tls.C
     assert(host.len > 0);
     assert(socket.fd >= 0);
     try load_certificates(real);
-    const io = global_io();
+    const memory = memory_of(real);
+    const io = memory.io();
     var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
     io.random(&entropy);
     const options: tls.Client.Options = .{
         .host = .{ .explicit = host },
         .ca = .{ .bundle = .{
-            .gpa = state.ca_allocator.allocator(),
+            .gpa = memory.state.ca_allocator.allocator(),
             .io = io,
-            .lock = &state.ca_lock,
-            .bundle = &state.ca_bundle,
+            .lock = &memory.state.ca_lock,
+            .bundle = &memory.state.ca_bundle,
         } },
-        .write_buffer = &buffers.tls_write,
-        .read_buffer = &buffers.tls_read,
+        .write_buffer = &memory.buffers.tls_write,
+        .read_buffer = &memory.buffers.tls_read,
         .entropy = &entropy,
         .realtime_now = Io.Clock.real.now(io),
         // Truncation is caught by the HTTP layer: a body shorter than its declared length is an
@@ -687,10 +731,11 @@ fn get(
     const real: *HostReal = @ptrCast(@alignCast(context));
     assert(request.port != 0);
     assert(request.host.len > 0);
-    assert(!state.busy); // Not reentrant: one call at a time, from the parent process.
-    state.busy = true;
-    defer state.busy = false;
-    state.errno_last = 0;
+    const memory = memory_of(real);
+    assert(!memory.state.busy); // One call at a time on a `Memory`.
+    memory.state.busy = true;
+    defer memory.state.busy = false;
+    memory.state.errno_last = 0;
     var socket: Socket = undefined;
     const started = monotonic_ms();
     const deadline = if (request.total_timeout_ms == 0) 0 else started + request.total_timeout_ms;
@@ -698,15 +743,15 @@ fn get(
     const proxy = try proxy_for(real.interface(), request, &proxy_storage);
     const via_host = if (proxy) |found| found.host else request.host;
     const via_port = if (proxy) |found| found.port else request.port;
-    const fd = try connect_host(via_host, via_port, request.idle_timeout_ms, deadline);
-    init_socket(&socket, fd, request.idle_timeout_ms, deadline);
+    const fd = try connect_host(memory, via_host, via_port, request.idle_timeout_ms, deadline);
+    init_socket(memory, &socket, fd, request.idle_timeout_ms, deadline);
     defer socket.close();
     if (proxy) |found| try open_tunnel(&socket, found, request);
     if (request.scheme == .https) {
         var client = try start_tls(real, &socket, request.host);
         return exchange(request, head, sink, &socket, &client.reader, &client.writer);
     }
-    socket.reader.buffer = &buffers.tls_read;
+    socket.reader.buffer = &memory.buffers.tls_read;
     return exchange(request, head, sink, &socket, &socket.reader, &socket.writer);
 }
 
@@ -719,8 +764,8 @@ fn exchange(
     out: *Io.Writer,
 ) net.Error!void {
     assert(socket.fd >= 0);
-    assert(state.busy);
-    var writer = Io.Writer.fixed(&buffers.request_head);
+    assert(socket.memory.state.busy);
+    var writer = Io.Writer.fixed(&socket.memory.buffers.request_head);
     write_request(&writer, request) catch return error.Unsupported;
 
     out.writeAll(writer.buffered()) catch return socket_error(socket);
@@ -749,6 +794,13 @@ const Diag = @import("diag/diag.zig").Diag;
 const HostSim = @import("host_sim.zig").HostSim;
 
 var test_workspace: client_mod.Workspace = undefined;
+var test_memory: Memory = undefined;
+
+/// A real host whose network uses the tests' one `Memory`, fresh.
+fn test_real() HostReal {
+    test_memory.init();
+    return .{ .network_memory = &test_memory };
+}
 
 const Loopback = struct {
     server: registry_server.Server,
@@ -782,7 +834,7 @@ const Loopback = struct {
         const written = try std.fmt.bufPrint(&text, format, .{ port, name });
         var reference: reference_mod.Reference = undefined;
         try reference_mod.parse(written, &reference);
-        var real: HostReal = .{};
+        var real = test_real();
         var client = client_mod.Client.init(interface(&real), &test_workspace, "x86_64");
         var resolved: manifest.Resolved = undefined;
         diag.reset();
@@ -853,7 +905,7 @@ const Probed = struct { status: u16, content_length: ?u64 };
 /// One GET straight through the real network; only the error set, so a failed `expectError`
 /// does not print a whole head.
 fn probe(loopback: *Loopback, request: *const net.Request, storage: []u8) net.Error!Probed {
-    var real: HostReal = .{};
+    var real = test_real();
     var sink: net.BufferSink = .{ .buffer = storage };
     var head: net.Head = .{};
     try interface(&real).get(request, &head, sink.sink());
@@ -884,7 +936,8 @@ test "a closed port is a refused connection, with the errno" {
     var storage: [64]u8 = undefined;
     const request = probe_request(loopback.server.port, 1000, 0);
     try testing.expectError(error.ConnectFailed, probe(&loopback, &request, &storage));
-    try testing.expectEqual(@as(u16, @backingInt(linux.E.CONNREFUSED)), state.errno_last);
+    const refused: u16 = @backingInt(linux.E.CONNREFUSED);
+    try testing.expectEqual(refused, test_memory.state.errno_last);
 }
 
 test "answers that are not usable: garbage, a fat head, a body over the bound" {
@@ -916,15 +969,15 @@ test "a tunnel: CONNECT with the proxy's credentials, a refusal, and no TLS behi
     // Goal: open_tunnel sends the right request and reads a 2xx; a 407 is ProxyFailed; and a
     // tunnel to a peer that does not speak TLS ends the handshake as TlsFailed.
     var loopback: Loopback = undefined;
-    var real: HostReal = .{};
+    var real = test_real();
     try loopback.start(.normal);
     var socket: Socket = undefined;
     var request = probe_request(loopback.server.port, 1000, 0);
     request.scheme = .https;
     request.host = "registry.test";
     request.port = 443;
-    const fd = try connect_host("127.0.0.1", loopback.server.port, 1000, 0);
-    init_socket(&socket, fd, 1000, 0);
+    const fd = try connect_host(&test_memory, "127.0.0.1", loopback.server.port, 1000, 0);
+    init_socket(&test_memory, &socket, fd, 1000, 0);
     const proxy: proxy_mod.Proxy = .{
         .host = "127.0.0.1",
         .port = loopback.server.port,
@@ -947,8 +1000,8 @@ test "a tunnel: CONNECT with the proxy's credentials, a refusal, and no TLS behi
 
     try loopback.start(.refuse_tunnel);
     defer loopback.stop();
-    const again = try connect_host("127.0.0.1", loopback.server.port, 1000, 0);
-    init_socket(&socket, again, 1000, 0);
+    const again = try connect_host(&test_memory, "127.0.0.1", loopback.server.port, 1000, 0);
+    init_socket(&test_memory, &socket, again, 1000, 0);
     defer socket.close();
     try testing.expectError(error.ProxyFailed, open_tunnel(&socket, proxy, &request));
 }
@@ -1000,7 +1053,7 @@ fn fetch_first_layer(
     const written = try std.fmt.bufPrint(&text, format, .{ port, @tagName(scenario) });
     var reference: reference_mod.Reference = undefined;
     try reference_mod.parse(written, &reference);
-    var real: HostReal = .{};
+    var real = test_real();
     var client = client_mod.Client.init(interface(&real), &test_workspace, "x86_64");
     var resolved: manifest.Resolved = undefined;
     diag.reset();

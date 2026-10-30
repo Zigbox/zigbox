@@ -156,6 +156,7 @@ pub const Code = enum(u8) {
     W0501,
     W0502,
     W0503,
+    W0504,
     E0600,
     E0601,
     E0602,
@@ -2333,6 +2334,22 @@ pub const registry = [_]Entry{
         \\in the working directory, recording which manifest and tree the name meant
         \\today. Commit the file to keep every machine on the same image. The next run
         \\checks the store against it and refuses if they differ.
+        ,
+    },
+    .{
+        .code = .W0504,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "warnings from unpacking an image were not shown",
+        .explanation =
+        \\Unpacking an image can warn (device nodes or extended attributes left
+        \\out: W0501 and W0502). The process that unpacks reports its warnings
+        \\through a pipe of a fixed size, and an image that raises more than fit
+        \\had the rest counted but not sent. The image was unpacked and recorded;
+        \\only the warnings are missing.
+        \\
+        \\The message says how many were not shown. Nothing to do unless one of
+        \\mattered. The image is the same either way.
         ,
     },
     .{
