@@ -312,3 +312,28 @@ test "a library caller that keeps no log leaves the container's output where it 
     try testing.expectError(error.NoLog, zigbox.open_log(&reader, sim.interface(), "agent-2"));
     try testing.expectEqual(@as(u32, 0), sim.open_count());
 }
+
+test "a log larger than one write of the host is shown whole" {
+    // Goal: a regression the VM found (the output buffer was written in one call over the host's
+    // bound of 16 KiB). Method: twelve records of 4000 bytes, shown in text and as the last line.
+    var sim: HostSim = undefined;
+    setup(&sim, 14);
+    try old_run(&sim, "web", 1000);
+    var runs: records.Dir = undefined;
+    try testing.expect(records.locate(sim.interface(), &runs));
+    const dir = logfile.dir_of(&runs).?;
+    var writer: logfile.Writer = undefined;
+    try writer.open(disk.interface(), &dir, "web", .{});
+    var big: [4000]u8 = undefined;
+    for (0..12) |at| {
+        @memset(&big, 'a' + @as(u8, @intCast(at)));
+        big[3999] = '\n';
+        try writer.append(.stdout, 1000, &big);
+    }
+    writer.close();
+    try testing.expectEqual(@as(u8, 0), logs(&sim, &.{}));
+    try testing.expectEqual(@as(usize, 48_000), sim.stdout().len);
+    try testing.expectEqual(@as(u8, 0), logs(&sim, &.{ "--tail", "1" }));
+    try testing.expectEqual(@as(usize, 4000), sim.stdout().len);
+    try testing.expectEqual(@as(u8, 'l'), sim.stdout()[0]);
+}

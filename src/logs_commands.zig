@@ -82,12 +82,17 @@ pub fn run_logs(host: Host, ws: *Workspace, options: Options, diag: *Diag) Error
     };
     const logs = logfile.dir_of(&runs) orelse return no_log(diag, options.name);
     const fs = host.log_files();
-    var skip: u64 = 0;
+    var skip: Skip = .{ .lines = 0, .end = 0 };
     if (options.tail) |lines| skip = try lines_to_skip(fs, &logs, ws, options, lines, diag);
     try open_reader(fs, &logs, ws, options.name, diag);
     defer ws.reader.close();
-    var show: Shown = .{ .skip_lines = skip, .first = true };
-    note_dropped(ws, options, skip);
+    var show: Shown = .{
+        .skip_lines = skip.lines,
+        .first = true,
+        .snapshot_end = skip.end,
+        .from_start = skip.lines == 0,
+    };
+    note_dropped(ws, options, skip.lines);
     try show_available(host, ws, options, &show, diag);
     if (options.follow) try follow(host, ws, options, &show, diag);
     try flush(host, ws, diag);
@@ -140,27 +145,32 @@ fn lines_to_skip(
     options: Options,
     lines: u32,
     diag: *Diag,
-) Error!u64 {
+) Error!Skip {
     assert(lines <= constants.log_tail_lines_max);
     assert(options.tail != null);
     try open_reader(fs, logs, ws, options.name, diag);
     defer ws.reader.close();
     var newlines: u64 = 0;
     var last: u8 = '\n';
+    var end: u64 = 0;
     for (0..records_bound) |_| {
         const found = switch (ws.reader.next()) {
             .record => |item| item,
             .end, .damaged => break,
             .failed => break,
         };
+        end = found.offset + constants.log_record_header_bytes + found.payload.len;
         if (!selected(options, found.stream)) continue;
         newlines += std.mem.count(u8, found.payload, "\n");
         last = found.payload[found.payload.len - 1];
     }
     const total = newlines + @intFromBool(last != '\n');
     assert(total >= newlines);
-    return total -| lines;
+    return .{ .lines = total -| lines, .end = end };
 }
+
+/// What `--tail` found: how many lines of the log to skip, and where the log ended then.
+const Skip = struct { lines: u64, end: u64 };
 
 /// More records than a log can hold (the cap over the smallest record).
 const records_bound: u32 = constants.log_segment_bytes_max;
@@ -176,6 +186,11 @@ fn selected(options: Options, stream: logfile.Stream) bool {
 const Shown = struct {
     skip_lines: u64,
     first: bool,
+    /// `--tail` counted the lines of the log as it was when the count was made, which ends here
+    /// in the stream: what the container wrote after that is shown whole, never skipped.
+    snapshot_end: u64,
+    /// Nothing at the start of the log is skipped, so its dropped output is the reader's to say.
+    from_start: bool,
 };
 
 /// The bytes of `payload` after `skip` newlines have been passed (all of them if there are
@@ -224,7 +239,10 @@ fn show_available(
             .end, .damaged, .failed => return,
         };
         if (!selected(options, found.stream)) continue;
-        const payload = after_skipped(found.payload, &show.skip_lines);
+        const payload = if (found.offset >= show.snapshot_end)
+            found.payload
+        else
+            after_skipped(found.payload, &show.skip_lines);
         if (payload.len == 0) continue;
         try emit(host, ws, options, show, found, payload, diag);
     }
@@ -245,7 +263,7 @@ fn emit(
     if (ws.out_len + line_bytes_max > ws.out.len) try flush(host, ws, diag);
     var writer = std.Io.Writer.fixed(ws.out[ws.out_len..]);
     if (options.json) {
-        const dropped = if (show.first and show.skip_lines == 0) ws.reader.dropped_bytes else 0;
+        const dropped = if (show.first and show.from_start) ws.reader.dropped_bytes else 0;
         // Cannot fail: a record's line is at most `line_bytes_max` and the buffer has that much
         // room after the flush above.
         write_json_line(&writer, found, payload, dropped) catch unreachable;
@@ -323,10 +341,16 @@ fn flush(host: Host, ws: *Workspace, diag: *Diag) Error!void {
     assert(ws.out_len <= ws.out.len);
     assert(diag.code == null);
     if (ws.out_len == 0) return;
-    host.write_all(.stdout, ws.out[0..ws.out_len]) catch |err| {
-        errors.output_failed(diag, .stdout, err, host.last_errno());
-        return error.OutputFailed;
-    };
+    // The host writes at most `output_bytes_max` at a time.
+    var at: u32 = 0;
+    while (at < ws.out_len) {
+        const piece = @min(ws.out_len - at, constants.output_bytes_max);
+        host.write_all(.stdout, ws.out[at..][0..piece]) catch |err| {
+            errors.output_failed(diag, .stdout, err, host.last_errno());
+            return error.OutputFailed;
+        };
+        at += piece;
+    }
     ws.out_len = 0;
 }
 
