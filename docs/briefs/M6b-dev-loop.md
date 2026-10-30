@@ -41,10 +41,10 @@ Acceptance criteria:
 
 ### `zbx logs NAME [--follow] [--tail N]`
 
-- **What is kept.** A detached container's standard output and error, written by its supervisor into `logs/<name>.log` beside the run record, as framed records (stream, time, bytes) so that the order of the two streams and the time of each line survive. Foreground runs keep their output on the terminal and write no log.
-- **Bounded.** A per-container cap in `constants.zig` (propose one; a few MiB). At the cap the oldest records are dropped as whole records, never a torn one, and the reader says how many bytes were dropped. Removed with the run record, on every path that removes it.
-- **Survives zbx.** The supervisor of a detached run owns the file, so the `zbx` that started it may exit; a crash of the supervisor leaves a readable log up to its last whole record.
-- **Reading.** Text by default: the bytes as written, both streams in order (`--stream stdout|stderr` filters). `--tail N` the last N lines. `--follow` waits for more until the container ends, then exits 0. `--output json`: one `zbx.logs/1` record per line (`stream`, `time`, `text`, and `dropped_bytes` where the cap cut), with a schema. A container that does not exist, or a foreground run, is a coded error with a fix.
+- **What is kept.** Every container's standard output and error, detached or foreground, written into `logs/<name>.log` beside the run record as framed records (stream, time, bytes), so that the order of the two streams and the time of each line survive. A detached container's supervisor writes it; a foreground `zbx run` writes it as it copies the output to the terminal, which it still does unchanged. A run whose log cannot be written still runs, and says so once.
+- **Bounded.** 5 MiB per container, a constant in `constants.zig`. At the cap the oldest records are dropped as whole records, never a torn one, and the reader says how many bytes were dropped. Removed with the run record, on every path that removes it.
+- **Survives zbx.** The supervisor of a detached run owns the file, so the `zbx` that started it may exit; a crash of the writer (the supervisor, or a foreground `zbx`) leaves a readable log up to its last whole record.
+- **Reading.** Text by default: the bytes as written, both streams in order (`--stream stdout|stderr` filters). `--tail N` the last N lines. `--follow` waits for more until the container ends, then exits 0. `--output json`: one `zbx.logs/1` record per line (`stream`, `time`, `text`, and `dropped_bytes` where the cap cut), with a schema. A container that does not exist is a coded error with a fix. `--follow` on a foreground run that is still going works as on a detached one.
 
 ### `zbx exec NAME [-e ...] [--user ...] [--workdir DIR] -- COMMAND...`
 
@@ -66,12 +66,12 @@ Usage and mount refusals are `00xx` or `02xx`, whichever group fits the existing
 ## Slices (commit and stop for review after each; do not push to the working branch)
 
 1. **Writable mounts and `--user`.** `--mount` with the project-directory rule (symlink escape tested), the root-only rule with its refusal, `--user`, the doctor id-mapped-mount line, the record and JSON fields, and the `cli`, `run` and `record` fuzzers extended. VM check (demo-m6 can hold a temporary part): python's `http.server` serving a mounted directory, an edit on the host seen by the next request, a file written inside owned by the host user, and the refusals.
-2. **`zbx logs`.** The supervisor's framed log, the cap, removal with the record, `--tail`, `--follow`, `--stream`, `--output json` and its schema; a `logs` fuzzer over the framed format (damage and re-read). VM check: a detached server's requests in the log, the log after the starting `zbx` was killed, the cap.
+2. **`zbx logs`.** The framed log, written by the supervisor and by a foreground run, the cap, removal with the record, `--tail`, `--follow`, `--stream`, `--output json` and its schema; a `logs` fuzzer over the framed format (damage and re-read). VM check: a detached server's requests in the log, the log after the starting `zbx` was killed, the cap.
 3. **`zbx exec`.** Joining, the pseudo-terminal, signals, exit codes, and the tests that it gains nothing; `exec` in the library. VM check: `exec` writes a file, `exec` of a refused syscall and of a missing capability fail as in the container, `exec` into a stopped container is refused, an exec'd process dies with the container.
 4. **VM, CI and the agent test.** `zig build demo-m6b` with the spec's five steps exactly, every assertion a unit-tested pure function; the acceptance checks; the agent test by JSON only; the upgrade test against M6 (`bf57ec8`); the `demo-m6b` CI job and `m6b` in `vm.yml`'s picker; `docs/demos/m6b.md` with the by-hand steps, cuts and failure modes (a mount outside the project, a symlink escape, a non-root image, a log at its cap, exec into a stopped container, the disk full while logging).
 5. **The Mac** (for the session on the owner's Mac, after slice 4 merges): `logs` and `exec` forwarded, `demo-m6b`'s steps on `mac.yml`, and the Mac notes in `docs/demos/m6b.md`.
 
-Slices 1 and 2 touch different code and may run in parallel; slice 3 follows 1 (it shares `--user`); slice 4 follows 1 to 3.
+The slices run one after another, in order.
 
 ## Done means
 

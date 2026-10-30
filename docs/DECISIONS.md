@@ -5,6 +5,15 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## M6b · Dev loop: logs for every run, 5 MiB, one implementer
+
+*Decided 2026-10-30, on the M6b brief.*
+
+- **Every run keeps its log**, foreground as well as detached: a foreground `zbx run` writes the framed log as it copies the output to the terminal.
+- **The cap is 5 MiB per container**, the oldest whole records dropped first.
+- **The upgrade baseline is the M6 merge (`bf57ec8`)**, not the 0.1.1 macOS release.
+- **One implementer, slices in order**, Sonnet for slices 1 and 2.
+
 ## M4b · Mac: the network (slice 4)
 
 *Decided 2026-10-29, on the slice 4 design.*
