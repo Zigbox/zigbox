@@ -37,6 +37,7 @@ const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
+const logs_commands = @import("logs_commands.zig");
 const pull_commands = @import("pull_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const Sha256 = @import("registry/digest.zig").Sha256;
@@ -55,6 +56,7 @@ const help_text =
     \\                  --output json: the report as a document, see zbx schema doctor)
     \\  ps              list the containers (--all: the ones that ended too)
     \\  stop <name>     stop a container: SIGTERM, then SIGKILL after --grace
+    \\  logs <name>     show what a container wrote to its output and error (see below)
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
@@ -115,6 +117,16 @@ const help_text =
     \\stop:
     \\  zbx stop <name> [--grace <ms>] [--timeout <ms>]
     \\  --timeout <ms>  give up (exit 2) if the container is still there after this long
+    \\
+    \\logs:
+    \\  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
+    \\  every run keeps what its command wrote to standard output and error, in order, in
+    \\  $XDG_STATE_HOME/zbx/logs (~/.local/state/zbx/logs): at most 5 MiB per container, the
+    \\  oldest output dropped first; removed with the container's run record
+    \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
+    \\  --tail <n>      only the last n lines
+    \\  --stream <s>    only stdout, or only stderr
+    \\  --output json   one zbx.logs/1 object per record (a write of the container), per line
     \\
     \\store:
     \\  zbx store import <dir>   read a directory into the store and print its digest
@@ -187,6 +199,7 @@ pub const Command = enum {
     explain,
     help,
     lock,
+    logs,
     ps,
     pull,
     run,
@@ -263,6 +276,10 @@ pub const RunArgs = struct {
     mounts_count: u32 = 0,
     /// `--user` as typed, `USER[:GROUP]`; checked as it was read (`E0015`).
     user: ?[]const u8 = null,
+    /// `logs`: `--follow`, `--tail` and `--stream` as typed (checked as they were read, E0219).
+    follow: bool = false,
+    tail: ?[]const u8 = null,
+    stream: ?[]const u8 = null,
 
     pub fn mounts_slice(run_args: *const RunArgs) []const mounts.Mount {
         assert(run_args.mounts_count <= constants.mounts_max);
@@ -302,9 +319,11 @@ const RunOption = enum {
     secret,
     mount,
     user,
+    tail,
+    stream,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 14);
+        assert(@backingInt(option) <= 16);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -322,6 +341,8 @@ const RunOption = enum {
             .secret => "--secret",
             .mount => "--mount",
             .user => "--user",
+            .tail => "--tail",
+            .stream => "--stream",
         };
     }
 };
@@ -418,6 +439,8 @@ const Token = union(enum) {
     /// `-e` and `--env`, whose value is the next argument, and `--env=<value>`: `run`'s.
     env_next,
     env_inline: []const u8,
+    /// `--follow`: `logs`'s.
+    follow,
     /// `--read-only` and `-d`: options of `run` without a value; `--all` is `ps`'s.
     read_only,
     detach,
@@ -445,7 +468,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 15);
+    assert(std.enums.values(RunOption).len == 17);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -474,6 +497,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.startsWith(u8, argument, "--env=")) {
         return .{ .env_inline = argument["--env=".len..] };
     }
+    if (std.mem.eql(u8, argument, "--follow")) return .follow;
     if (std.mem.eql(u8, argument, "--read-only")) return .read_only;
     if (std.mem.eql(u8, argument, "-d")) return .detach;
     if (std.mem.eql(u8, argument, "--detach")) return .detach;
@@ -515,6 +539,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
     if (std.mem.eql(u8, name, "lock")) found = .lock;
+    if (std.mem.eql(u8, name, "logs")) found = .logs;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "run")) found = .run;
@@ -532,7 +557,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull, .lock => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock, .logs => 1,
         .store, .state => 2,
     };
     assert(count <= 2);
@@ -573,7 +598,7 @@ pub fn scan_options(args: []const []const u8) Options {
             },
             .confirm_inline, .trash, .resolve_only, .by_image => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
-            .read_only, .detach, .all => {},
+            .read_only, .detach, .all, .follow => {},
             .operand => {
                 if (!seen_operand) first = command_named(args[index]);
                 seen_operand = true;
@@ -618,6 +643,11 @@ pub fn parse(
                 try take_run_or_env(diag, &run_args, operands[0..count], args, &index);
             },
             .all => try take_all_option(diag, &run_args, operands[0..count], argument),
+            .follow => {
+                const is_logs = count > 0 and command_named(operands[0]) == .logs;
+                if (!is_logs) return unknown_option(diag, argument);
+                run_args.follow = true;
+            },
             .separator => {
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
@@ -785,7 +815,7 @@ fn take_run_option(
     run_args: *RunArgs,
     args: []const []const u8,
     index: *usize,
-    is_run: bool,
+    command: Command,
 ) ParseError!void {
     assert(index.* < args.len);
     assert(diag.code == null);
@@ -795,8 +825,13 @@ fn take_run_option(
         .run_option_inline => |chosen| chosen.option,
         else => unreachable, // The caller matched one of the two.
     };
-    // `stop` takes the two times and nothing else of the options of `run`.
-    if (!is_run and option != .timeout and option != .grace) return unknown_option(diag, argument);
+    // `stop` takes the two times and nothing else of the options of `run`; `logs` takes its own.
+    const is_log_option = option == .tail or option == .stream;
+    if (command == .run and is_log_option) return unknown_option(diag, argument);
+    if (command == .logs and !is_log_option) return unknown_option(diag, argument);
+    if (command == .stop and (option != .timeout and option != .grace)) {
+        return unknown_option(diag, argument);
+    }
     const value: []const u8 = switch (classify(argument)) {
         .run_option_inline => |chosen| chosen.value,
         else => blk: {
@@ -827,12 +862,25 @@ fn take_run_option(
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
         .user => &run_args.user,
+        .tail => &run_args.tail,
+        .stream => &run_args.stream,
     };
-    if (slot.* != null) return unexpected_argument(diag, .run, argument);
+    if (slot.* != null) return unexpected_argument(diag, command, argument);
     if (option == .user) {
         if (user_problem(value)) |reason| return bad_user(diag, value, reason);
     }
+    if (option == .tail and logs_commands.parse_tail(value) == null) {
+        return bad_logs_option(diag, "--tail", value);
+    }
+    if (option == .stream and logs_commands.parse_stream(value) == null) {
+        return bad_logs_option(diag, "--stream", value);
+    }
     slot.* = value;
+}
+
+fn bad_logs_option(diag: *Diag, flag: []const u8, value: []const u8) ParseError {
+    diagnose.logs_option(diag, flag, value);
+    return error.BadOptionValue;
 }
 
 /// A value option of `run` (`stop` takes two of them), or `-e`: the command decides which are
@@ -849,14 +897,15 @@ fn take_run_or_env(
     const first: ?Command = if (operands.len > 0) command_named(operands[0]) else null;
     const is_run = first != null and first.? == .run;
     const is_stop = first != null and first.? == .stop;
+    const is_logs = first != null and first.? == .logs;
     switch (classify(argument)) {
         .env_next, .env_inline => {
             if (!is_run) return unknown_option(diag, argument);
             try take_env(diag, run_args, args, index);
         },
         else => {
-            if (!is_run and !is_stop) return unknown_option(diag, argument);
-            try take_run_option(diag, run_args, args, index, is_run);
+            if (!is_run and !is_stop and !is_logs) return unknown_option(diag, argument);
+            try take_run_option(diag, run_args, args, index, first.?);
         },
     }
 }
@@ -1167,7 +1216,7 @@ fn resolve(
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
     if (given < wanted and command != .bundle and command != .run) {
         const what: Missing = switch (command) {
-            .stop, .commit => .container,
+            .stop, .commit, .logs => .container,
             .schema => .topic,
             .lock => .action,
             .pull => .reference,
@@ -1437,6 +1486,8 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix(.{ .sentence = "stop one container at a time:", .command = "zbx stop web-1" });
     } else if (command == .commit) {
         diag.fix(.{ .sentence = "commit one container at a time:", .command = "zbx commit web-1" });
+    } else if (command == .logs) {
+        diag.fix(.{ .sentence = "show one container's log at a time:", .command = "zbx logs web-1" });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
     } else if (command == .lock) {
@@ -1489,7 +1540,9 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
     if (command == .run) assert(missing != .code);
     if (command == .explain) assert(missing == .code);
     if (command == .bundle) assert(missing == .target);
-    if (command == .stop or command == .commit) assert(missing == .container);
+    if (command == .stop or command == .commit or command == .logs) {
+        assert(missing == .container);
+    }
     if (command == .schema) assert(missing == .topic);
     if (command == .lock) assert(missing == .action);
     if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
@@ -1518,6 +1571,8 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
         .container => {
             if (command == .commit) {
                 diag.cause("'commit' needs the name of the container to commit", .{});
+            } else if (command == .logs) {
+                diag.cause("'logs' needs the name of the container whose log to show", .{});
             } else {
                 diag.cause("'stop' needs the name of the container to stop", .{});
             }
@@ -1663,6 +1718,8 @@ pub const Storage = struct {
     run_env: run_env.Storage,
     /// The state commands' memory: the listing, the records, the size walk.
     state: state_commands.Workspace,
+    /// `zbx logs`: the reader's windows and the output buffer.
+    logs: logs_commands.Workspace,
     /// A run's `--mount` sources, resolved before the image is looked for (`resolve_writable`),
     /// and the run's mounts with those sources in place of what was typed.
     run_mounts: mounts.Resolution,
@@ -1732,7 +1789,7 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit, .pull, .lock => true,
+        .explain, .bundle, .schema, .stop, .run, .commit, .pull, .lock, .logs => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -1766,6 +1823,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             return command_error(err);
         },
         .stop => return run_stop(host, invocation, diag),
+        .logs => return run_logs(host, invocation, storage, diag),
         .pull => return run_pull(host, invocation, storage, diag),
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
@@ -1843,6 +1901,26 @@ fn run_stop(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 
     if (invocation.run.grace != null) options.grace_ms = times.grace_ms;
     if (invocation.run.timeout != null) options.timeout_ms = times.timeout_ms;
     commands.run_stop(host, options, diag) catch |err| return command_error(err);
+    return constants.exit_ok;
+}
+
+/// `zbx logs <name>`: what the container wrote, from its log.
+fn run_logs(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
+    assert(invocation.command == .logs);
+    assert(diag.code == null);
+    var reporter: Reporter = .{ .host = host, .options = invocation.options };
+    const given = &invocation.run;
+    const options: logs_commands.Options = .{
+        .name = invocation.operand.?,
+        .follow = given.follow,
+        .tail = if (given.tail) |text| logs_commands.parse_tail(text).? else null,
+        .stream = if (given.stream) |text| logs_commands.parse_stream(text).? else null,
+        .json = invocation.options.output == .json,
+        .warn = .{ .context = &reporter, .call = report_warning },
+    };
+    logs_commands.run_logs(host, &storage.logs, options, diag) catch |err| {
+        return command_error(@as(commands.Error, err));
+    };
     return constants.exit_ok;
 }
 
@@ -3509,7 +3587,7 @@ test "schema prints the versioned schema of each command, and refuses the others
     // Goal: `zbx schema <command>` for run, bundle, ps, stop and doctor, and E0402 otherwise.
     var sim: HostSim = undefined;
     sim.init(1, &.{});
-    for ([_][]const u8{ "run", "bundle", "ps", "stop", "doctor" }) |name| {
+    for ([_][]const u8{ "run", "bundle", "ps", "stop", "doctor", "logs" }) |name| {
         sim.init(1, &.{});
         try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "schema", name }));
         try testing.expect(std.mem.indexOf(u8, sim.stdout(), "/schema/") != null);
@@ -3517,7 +3595,7 @@ test "schema prints the versioned schema of each command, and refuses the others
         try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     }
     sim.init(1, &.{});
-    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "logs" }));
+    try testing.expectEqual(@as(u8, 1), command_line(&sim, &.{ "schema", "exec" }));
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0406") != null);
     sim.init(1, &.{});

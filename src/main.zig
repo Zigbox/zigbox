@@ -205,6 +205,8 @@ test {
     _ = @import("runtime/project.zig");
     _ = @import("runtime/writable_tests.zig");
     _ = @import("runtime/logfile.zig");
+    _ = @import("runtime/logs_tests.zig");
+    _ = @import("logs_commands.zig");
 }
 
 test {

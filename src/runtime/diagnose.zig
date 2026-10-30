@@ -945,7 +945,7 @@ pub fn logs_dropped(diag: *Diag, name: []const u8, dropped_bytes: u64) void {
         .{ constants.log_bytes_max >> 20, dropped_bytes },
     );
     diag.context("name", "{s}", .{name});
-    diag.context("dropped_bytes", "{d}", .{dropped_bytes});
+    diag.context("bytes", "{d}", .{dropped_bytes});
     diag.fix(.{
         .sentence = "see the newest output only, without this note:",
         .command = "zbx logs --tail 100 <name>",

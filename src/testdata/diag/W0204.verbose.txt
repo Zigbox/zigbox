@@ -1,0 +1,8 @@
+warning[ZBX-W0204]: the container's output is not being kept
+  while  keeping the container's output
+  cause  writing the log failed: input/output error (EIO)
+  path   /home/alice/.local/state/zbx/logs
+  fix    free space, or choose another state directory:   df -h "/home/alice/.local/state/zbx/logs"
+  more   zbx explain W0204
+  docs   https://zigbox.github.io/zigbox/errors/W0204.html
+zbx: note: scope zbx-web-1.scope went by itself just after the run ended

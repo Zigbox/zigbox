@@ -288,6 +288,12 @@ pub const Session = struct {
         }
     }
 
+    /// For a caller that leaves a started run without waiting for it (a test): lets go of the
+    /// pipes the container's output would have been read from.
+    pub fn release_output(session: *Session) void {
+        session.close_output_read();
+    }
+
     fn close_output_read(session: *Session) void {
         for (&session.output_read) |*end| {
             if (end.*) |handle| session.host.close(handle);

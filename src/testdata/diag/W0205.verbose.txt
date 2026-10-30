@@ -1,0 +1,8 @@
+warning[ZBX-W0205]: older output of the container was dropped
+  while  reading the log of web-1
+  cause  the log keeps at most 5 MiB; 40 bytes of older output were dropped
+  name   web-1
+  bytes  40
+  fix    see the newest output only, without this note:   zbx logs --tail 100 <name>
+  more   zbx explain W0205
+  docs   https://zigbox.github.io/zigbox/errors/W0205.html

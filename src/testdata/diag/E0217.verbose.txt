@@ -1,0 +1,8 @@
+error[ZBX-E0217]: the container has no log
+  while  reading the log of web-1
+  cause  'web-1' has a run record and no log: it ran before logs were kept, its
+         log could not be written, or it was removed
+  name   web-1
+  fix    run it again to get a log:   zbx run -d --name <name> <image>
+  more   zbx explain E0217
+  docs   https://zigbox.github.io/zigbox/errors/E0217.html

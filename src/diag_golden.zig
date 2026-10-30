@@ -598,7 +598,87 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases;
+    mount_cases ++ writable_cases ++ logs_cases;
+
+const logfile = @import("runtime/logfile.zig");
+const records = @import("runtime/records.zig");
+
+/// The disk the logs of the golden cases are kept on.
+var golden_logs: SimFs = undefined;
+
+fn logs_disk(sim: *HostSim) void {
+    golden_logs.init(1);
+    golden_logs.put_dir("/home", 0o755);
+    golden_logs.put_dir("/home/alice", 0o755);
+    sim.log_fs = &golden_logs;
+}
+
+/// A finished container called web-1 with a record and no log.
+fn prepare_no_log(sim: *HostSim) void {
+    prepare_with_record(sim);
+    logs_disk(sim);
+}
+
+/// A log from a newer zbx, and a file that is not a log.
+fn prepare_log_newer(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var header: [constants.log_header_bytes]u8 = undefined;
+    logfile.encode_header(0, &header);
+    header[0] = 2;
+    const parts = [_][]const u8{
+        "/home/alice/.local",
+        "/home/alice/.local/state",
+        "/home/alice/.local/state/zbx",
+        sim_run.logs_path,
+    };
+    for (parts) |part| golden_logs.put_dir(part, 0o755);
+    golden_logs.put_file(sim_run.logs_path ++ "/web-1.log", 0o600, &header);
+}
+
+/// A log that dropped its oldest output: two files, the older one first in the stream.
+fn prepare_log_dropped(sim: *HostSim) void {
+    prepare_no_log(sim);
+    var runs: records.Dir = undefined;
+    assert(records.locate(sim.interface(), &runs));
+    const dir = logfile.dir_of(&runs).?;
+    var writer: logfile.Writer = undefined;
+    const options: logfile.WriterOptions = .{ .segment_bytes_max = 16 + 2 * 20, .record_bytes_max = 8 };
+    writer.open(golden_logs.interface(), &dir, "web-1", options) catch unreachable; // Fresh disk.
+    for (0..6) |number| {
+        var text: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&text, "line {d}\n", .{number}) catch unreachable; // Eight bytes.
+        writer.append(.stdout, 1_792_873_000, &text) catch unreachable; // Room for it.
+    }
+    writer.close();
+}
+
+/// A run whose log disk fails every call.
+fn prepare_log_disk_down(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    logs_disk(sim);
+    golden_logs.crashed = true;
+}
+
+const logs_cases = [_]Case{
+    .{ .code = .E0217, .args = &.{ "logs", "web-1" }, .prepare = prepare_no_log, .exit = 1 },
+    .{ .code = .E0218, .args = &.{ "logs", "web-1" }, .prepare = prepare_log_newer, .exit = 2 },
+    .{ .code = .E0219, .args = &.{ "logs", "web-1", "--tail", "many" }, .exit = 1 },
+    .{
+        .code = .W0204,
+        .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
+        .prepare = prepare_log_disk_down,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0205,
+        .args = &.{ "logs", "web-1" },
+        .prepare = prepare_log_dropped,
+        .warning = true,
+        .prints = true,
+        .exit = 0,
+    },
+};
 
 const base_cases = [_]Case{
     .{ .code = .E0001, .args = &.{"frobnicate"}, .exit = 1 },
@@ -1680,6 +1760,7 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     const code = cli.run_from_iterator(sim.interface(), &iterator);
     if (golden_started) {
         golden_handle.session.release_keeper();
+        golden_handle.session.release_output();
         golden_started = false;
     }
     if (golden_lock) |fd| {
