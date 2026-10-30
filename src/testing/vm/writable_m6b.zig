@@ -1,5 +1,5 @@
-//! M6b slice 1's writable mounts and `--user` in the VM, a temporary part of demo-m6
-//! (`WRITABLE`); slice 4 moves it to demo-m6b. As the user `demo`, in the net project (`zn`),
+//! M6b slice 1's writable mounts and `--user` in the VM, a part of demo-m6b
+//! (`WRITABLE`). As the user `demo`, in the net project (`zn`),
 //! which holds a `site` directory, a link to a directory outside the project and a link to /etc:
 //!
 //!   1. python's `http.server` serves the mounted `site` (`--publish`), and `curl` gets its page.
@@ -11,11 +11,11 @@
 //!      not root (E0213, naming the user and both fixes); nothing was made.
 //!   5. That same image with `--user 0` runs, and its file is the host user's.
 //!
-//! Every assertion is a function of checks_writable_m6.zig with a unit test.
+//! Every assertion is a function of checks_writable_m6b.zig with a unit test.
 
 const std = @import("std");
 const Io = std.Io;
-const checks = @import("checks_writable_m6.zig");
+const checks = @import("checks_writable_m6b.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -29,6 +29,8 @@ const zn = net_user.zn;
 const step_name = "WRITABLE";
 
 const project = net_user.net_project;
+const by_memcached_owns = H.as_demo ++
+    checks.owners_command(project ++ "/site/by-memcached.txt", project ++ "/site");
 const outside = "/home/demo/outside-wr";
 const python = "python:3.12-slim";
 const non_root = "memcached:alpine";
@@ -46,8 +48,8 @@ const edit = H.as_demo ++ "sh -c 'echo second-OMEGA > " ++ project ++ "/site/ind
 
 const write_inside = zn ++ " --output json run --name wr2 --mount site:/srv alpine -- sh -c " ++
     "'echo made-inside > /srv/new.txt; id -u'";
-const who_owns = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/new.txt; id -u; " ++
-    "find " ++ project ++ "/site ! -user demo | wc -l'";
+const who_owns = H.as_demo ++
+    checks.owners_command(project ++ "/site/new.txt", project ++ "/site");
 
 pub fn step_writable(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\n{s}: WRITABLE: --mount and --user (M6b slice 1)\n", .{H.demo_name});
@@ -150,15 +152,13 @@ fn root_flag(session: *Session, out: *Io.Writer) !void {
     checks.check_root_run(inside.streams.stdout, inside.status) catch |err| {
         return fail_step(out, step_name, "expected the image to run as root", err);
     };
-    const owner = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/by-memcached.txt; " ++
-        "id -u; find " ++ project ++ "/site ! -user demo | wc -l'";
-    const owners = try common.expect_exit(session, out, step_name, owner, 0);
+    const owners = try common.expect_exit(session, out, step_name, by_memcached_owns, 0);
     checks.check_owner(owners.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the host user to own the file", err);
     };
 }
 
 test {
-    _ = @import("checks_writable_m6.zig");
+    _ = @import("checks_writable_m6b.zig");
     _ = limits;
 }

@@ -2,7 +2,7 @@
 
 This is the handoff for the Zigbox **supervisor** session: the agent that writes briefs, settles decisions with the owner, spawns implementers, reviews their slices and keeps the docs and status in step. A new supervisor starts from this file, `AGENTS.md`, the README's status table and the current brief, and from nothing else. Update this file whenever the state below changes, and before the session hands over.
 
-*State as of 2026-10-30.*
+*State as of 2026-10-30, after M6b slice 5.*
 
 ## The role
 
@@ -38,22 +38,15 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 - **M4b (Mac):** built by the session on the owner's Mac (PRs #18–#20), with releases 0.1.0 and 0.1.1. Not demonstrated. `mac.yml`'s job is skipped until the owner sets the repo variable `MAC_RUNNER_LABEL`.
 - **M6b (dev loop):** in progress, brief `docs/briefs/M6b-dev-loop.md`, with six slices run in order.
   - Slices 1–3 (`--mount` and `--user`, `zbx logs`, `zbx exec`) are merged (PR #21).
-  - **Slice 4 (pull in the library)** is reviewed, its twelve review findings fixed by a fresh agent (commits 0c40991, 7b1551e), plus one bug the new fuzzer then found (75dc033: a failure record must be an error and must end the report), and merged into the working branch `claude/blissful-cannon-7pcv0x` with the `AGENTS.md` context-discipline section and this file; its PR, [Zigbox/zigbox#22](https://github.com/Zigbox/zigbox/pull/22), is green in CI ([run](https://github.com/Zigbox/zigbox/actions/runs/41065703920), every demo m0–m6) and waits for the owner to merge. What the fixes decided:
-    - A caller's over-long reference or mirrors setting is refused (`E0501`, `E0514`), never asserted.
-    - The report pipe is sized with `F_SETPIPE_SZ` and verified; a pipe that stays under 16 KiB refuses the pull with `E0419`. This was chosen over draining the pipe while waiting, which would mean reworking `namespace.run`. If a real host hits that refusal, drain instead.
-    - The parent reads the report without waiting for end of file, so a write end inherited by another thread's child cannot hang it.
-    - A damaged report fails the pull; every exit path of `read_report` is tested; a new `pull_report` fuzzer covers the format.
-    - Warnings past the cap print one `W0504` line in the CLI; the library reports them as `Result.warnings_dropped`.
-  - **Next:** once #22 is merged, restart the working branch from `main` and start slice 5.
-- **Slice 5** is `demo-m6b`:
-  - the spec's five steps exactly;
-  - the acceptance checks;
-  - the agent test, by JSON only;
-  - the upgrade test against M6 (`bf57ec8`);
-  - the `demo-m6b` CI job and `m6b` in `vm.yml`'s picker;
-  - `docs/demos/m6b.md`.
-
-  Start a fresh Sonnet implementer from the brief, the branch and slice 4's handoff above.
+  - Slice 4 (pull in the library) is merged (PR #22). Its decisions: an over-long reference or mirrors setting is refused (`E0501`, `E0514`); the report pipe is sized with `F_SETPIPE_SZ` and a pipe under 16 KiB refuses the pull with `E0419` (if a real host hits that, drain the pipe instead); a damaged report fails the pull; `W0504` / `Result.warnings_dropped` for warnings past the cap.
+  - **Slice 5 (`demo-m6b`)** is built, reviewed and fixed on the working branch `claude/nifty-goodall-ux8fpg` (`32b7cdb..5e473c5`, `check: PASS 5e473c5`). `demo-m6b` and `demo-m0`–`demo-m6` are green on KVM in `vm.yml` ([run](https://github.com/Zigbox/zigbox/actions/runs/41090791379)); no PR yet, so the `ci.yml` `demo-m6b` job has not run. What it settled:
+    - Parts in order: UPGRADE (against M6 `bf57ec8`), SPEC (the five steps), WRITABLE, LOGS, EXEC (moved from `demo-m6`), AGENT, ACCEPT. ACCEPT must stay last: it prunes the oldest records.
+    - `exec` decides that a command died with its container by reading PF_EXITING in `/proc/<pid1>/stat`, not by timing (a 0.2 s retry was tried and removed). The simulator models a slow PID 1 exit (`pid1_exit_ms`). Unhandled: PID 1's main thread exiting while other threads live.
+    - A `zbx logs` refusal exits 1, as DIAGNOSTICS "Exit codes" says (125 is only for commands that run or wait on a workload).
+    - The published-port forward accepts a host connection before the server listens and then resets it (predates M6b); the demo waits from inside the container. Recorded as a failure mode.
+    - `find … | wc -l` hid a failing `find`; owner checks now use `checks_writable.owners_command`.
+    - Trap: the simulator's written-files table (`sim_written_files_max`) drops files silently when full.
+  - **Waiting on the owner:** whether to open the PR now (CI's `demo-m6b` job runs only on a PR), and whether `zbx.logs/1`'s schema should describe the error document a refused `logs --output json` prints (recommended: yes; schemas only grow). Once the PR is green, record `demo-m6b`'s output as demonstrated in README and site.
 - **Slice 6** is the Mac (`logs` and `exec` forwarded). It belongs to the Mac session after slice 5 merges; hand the owner a short note for it then.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
@@ -71,6 +64,7 @@ Each is in `docs/DECISIONS.md` with its reasons:
 
 ## The cloud environment
 
+- **The setup script did not run in the 2026-10-30 session:** Zig, `uidmap` and `tester` were missing and were installed by hand (Zig from ziglang.org, checksum as in Zigcube's `.claude/hooks/session-start.sh`; `useradd -m tester`, `tester:200000:65536` in `/etc/subuid` and `/etc/subgid`). Check before assuming.
 - **Set per command, not in the environment:** `ZIG_GLOBAL_CACHE_DIR`, one directory per worktree. Also `PATH` with the Zig directory prepended, unless the setup script puts `zig` on `PATH`.
 - **The setup script provides:**
   - Zig 0.17.0, checksum-verified;

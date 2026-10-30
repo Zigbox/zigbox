@@ -753,10 +753,36 @@ pub fn wait(handle: *Handle) Exit {
     };
     // A command killed by SIGKILL while its container's PID 1 is gone died with the container.
     if (handle.ended == .signaled and handle.ended.signaled == constants.signal_kill) {
-        handle.container_ended = !lifecycle.alive(host, handle.container_pid, handle.scope.slice());
+        handle.container_ended = container_gone(handle);
     }
     note_history(handle);
     return handle.ended;
+}
+
+/// Whether the container's PID 1 is gone or on its way out. The kernel kills the other processes
+/// of a PID namespace from PID 1's `do_exit` (`exit_notify`, `forget_original_parent`,
+/// `find_child_reaper`, `zap_pid_ns_processes`), after `exit_signals` has set PF_EXITING in its
+/// flags, and PID 1 is no zombie until every one of them is reaped, by parents that may be slow.
+/// So a PID 1 that still looks alive died with the command if PF_EXITING shows in field 9 of its
+/// `/proc/<pid>/stat`: that is decided once, with no wait. No retry backs it up: zbx signals only
+/// PID 1, so every path on which the kernel kills the command for the namespace passes through
+/// PF_EXITING first; a command that got SIGKILL before that (a kill of the whole cgroup from
+/// outside zbx) was killed by someone else, which is what the exec then says.
+fn container_gone(handle: *const Handle) bool {
+    assert(handle.ended == .signaled);
+    assert(handle.container_pid != 0);
+    const host = handle.host;
+    const pid = handle.container_pid;
+    if (!lifecycle.alive(host, pid, handle.scope.slice())) return true;
+    var buffer: [constants.status_bytes_max]u8 = undefined;
+    var path: [48]u8 = undefined;
+    // Cannot fail: "/proc/" and "/stat" are 11 bytes and a pid at most ten digits.
+    const stat_path = std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}) catch unreachable;
+    // A stat that cannot be read went with its process between the two reads, or not: ask again.
+    const stat = host.read_file(stat_path, &buffer) catch {
+        return !lifecycle.alive(host, pid, handle.scope.slice());
+    };
+    return lifecycle.is_exiting(stat);
 }
 
 fn wait_loop(handle: *Handle) host_mod.Error!host_mod.ExitStatus {

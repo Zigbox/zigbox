@@ -407,6 +407,14 @@ pub const World = struct {
     fork_errno: ?u16,
     kill_errno: ?u16,
     immortal: bool,
+    /// How long a container's PID 1 takes to exit after SIGKILL, in milliseconds of the clock.
+    /// Zero: it is a zombie at once. Otherwise it is exiting meanwhile, as the kernel's PID 1 is
+    /// while `zap_pid_ns_processes` waits for the namespace's other processes to be reaped: they
+    /// are killed at once, PF_EXITING shows in its `/proc/<pid>/stat`, and it is no zombie yet
+    /// (`exiting_pid`, until `exiting_until_ms`).
+    pid1_exit_ms: u32,
+    exiting_pid: u32,
+    exiting_until_ms: u64,
     /// What the kernel counted in the container's cgroup by the time it ended: processes the
     /// OOM killer killed (`memory.events`), and forks refused at the limit (`pids.events`).
     oom_kills: u32,
@@ -502,6 +510,9 @@ pub const World = struct {
         world.fork_errno = null;
         world.kill_errno = null;
         world.immortal = false;
+        world.pid1_exit_ms = 0;
+        world.exiting_pid = 0;
+        world.exiting_until_ms = 0;
         world.oom_kills = 0;
         world.pids_max_hits = 0;
         world.cgroup_stays = false;
@@ -955,10 +966,15 @@ pub const World = struct {
                 world.received_count += 1;
                 // PID 1 of a namespace ignores a signal it has no handler for, from outside it;
                 // only SIGKILL (and SIGSTOP) cannot be ignored.
+                const slow = world.pid1_exit_ms > 0 and process.pid_namespace == process.pid;
                 if (number == constants.signal_kill and !world.immortal) {
-                    process.exit = .{ .signaled = number };
-                    process.state = .zombie;
-                    world.process_died(process.pid);
+                    if (slow) {
+                        world.begin_exit(process);
+                    } else {
+                        process.exit = .{ .signaled = number };
+                        process.state = .zombie;
+                        world.process_died(process.pid);
+                    }
                 }
                 const handled = host.SignalState.has(world.command_caught, number);
                 if (number == constants.signal_term and handled and world.term_exits) {
@@ -1150,7 +1166,7 @@ pub const World = struct {
 
     /// The process is gone, and so are its files in /proc.
     fn drop_proc_files(world: *World, pid: u32) void {
-        inline for (.{ "status", "cgroup", "environ" }) |name| {
+        inline for (.{ "status", "stat", "cgroup", "environ" }) |name| {
             var path: [48]u8 = undefined;
             // Cannot fail: a short path and a pid of at most ten digits.
             const where = std.fmt.bufPrint(&path, "/proc/{d}/" ++ name, .{pid}) catch unreachable;
@@ -1168,6 +1184,30 @@ pub const World = struct {
         const state = if (zombie) "Z (zombie)" else "S (sleeping)";
         const format = "State:\t{s}\nNSpid:\t{d}\t1\n";
         const line = std.fmt.bufPrint(&text, format, .{ state, pid }) catch unreachable; // Same.
+        world.put_raw(where, line);
+        world.put_stat_file(pid, if (zombie) .zombie else .running);
+    }
+
+    /// `/proc/<pid>/stat`, from lines a real kernel wrote: a sleeping process (flags 4194304)
+    /// and a zombie (flags 4227148, PF_EXITING among them). An exiting one is the sleeping line
+    /// with PF_EXITING (4) added to its flags, as `do_exit` adds it.
+    fn put_stat_file(world: *World, pid: u32, state: enum { running, exiting, zombie }) void {
+        var path: [48]u8 = undefined;
+        var text: [320]u8 = undefined;
+        // Cannot fail: a short path with a pid of at most ten digits.
+        const where = std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}) catch unreachable;
+        const flags: u32 = switch (state) {
+            .running => 4194304,
+            .exiting => 4194304 | 4,
+            .zombie => 4227148,
+        };
+        const letter: u8 = if (state == .zombie) 'Z' else 'S';
+        const format = "{d} (sleep) {c} 8020 {d} 8020 0 -1 {d} 125 0 0 0 0 0 0 0 20 0 1 0 " ++
+            "621705 2781184 395 18446744073709551615 94382478065664 94382478079665 0 0 0 0 0 " ++
+            "0 1 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        // Cannot fail: the line is under 320 bytes with three numbers of at most ten digits.
+        const line = std.fmt.bufPrint(&text, format, .{ pid, letter, pid, flags }) catch
+            unreachable; // Same bound as above.
         world.put_raw(where, line);
     }
 
@@ -1188,9 +1228,43 @@ pub const World = struct {
     /// The command ends by itself, the way the model says it does.
     fn finish_command(world: *World, process: *Process) void {
         assert(process.state == .command);
+        if (process.pid == world.exiting_pid) {
+            // A PID 1 on its way out ends when its exit does, as SIGKILL decided.
+            world.advance_ms(world.exiting_until_ms -| world.now_ms);
+            assert(process.state == .zombie);
+            return;
+        }
         process.exit = world.command_exit;
         process.state = .zombie;
         world.process_died(process.pid);
+    }
+
+    /// A container's PID 1 got SIGKILL and takes `pid1_exit_ms` to exit: the kernel's `do_exit`
+    /// sets PF_EXITING, then kills the rest of the namespace and waits for them to be reaped
+    /// before PID 1 is a zombie. It stays in its scope meanwhile.
+    fn begin_exit(world: *World, process: *Process) void {
+        assert(process.state == .command);
+        assert(world.pid1_exit_ms > 0);
+        if (world.exiting_pid == process.pid) return; // A second SIGKILL changes nothing.
+        assert(world.exiting_pid == 0);
+        world.exiting_pid = process.pid;
+        world.exiting_until_ms = world.now_ms + world.pid1_exit_ms;
+        if (process.execd) world.put_stat_file(process.pid, .exiting);
+        world.pid_namespace_ends(process.pid);
+    }
+
+    /// The clock moves: a PID 1 whose exit is due is a zombie now.
+    pub fn advance_ms(world: *World, ms: u64) void {
+        world.now_ms += ms;
+        if (world.exiting_pid == 0) return;
+        if (world.now_ms < world.exiting_until_ms) return;
+        const process = world.find_process(world.exiting_pid).?;
+        world.exiting_pid = 0;
+        if (process.state != .command) return;
+        process.exit = .{ .signaled = constants.signal_kill };
+        process.state = .zombie;
+        world.process_died(process.pid);
+        assert(!world.process_alive(process.pid));
     }
 
     /// The kernel counts a zombie out of its cgroup: the scope is no longer populated. A pasta
@@ -1236,11 +1310,11 @@ pub const World = struct {
             }
             const left = process.ends_at_ms -| world.now_ms;
             if (timeout_ms > 0 and left > timeout_ms) {
-                world.now_ms += timeout_ms;
+                world.advance_ms(timeout_ms);
                 return .{ .event = .timeout };
             }
-            world.now_ms += left;
-            world.finish_command(process);
+            world.advance_ms(left);
+            if (process.state == .command) world.finish_command(process);
         }
         if (process.state != .zombie) return .{ .errno = errno_child };
         world.reap(process);

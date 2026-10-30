@@ -13,4 +13,8 @@
     // alpine:3.20, runs it with `--net user`, commits and pulls postgres:16; M6's `zbx` has to read
     // the store, the version-2 image records, the lock and the version-4 run records it leaves.
     .m6_commit = "fd48d38",
+    // The same for `demo-m6b`: bf57ec8, the merge of PR #12, the merged M6. Its `zbx` pulls
+    // alpine:3.20 and starts a detached container with a `--state` volume; M6b's `zbx` has to read
+    // the store, the version-7 run record and the volume, `exec` into that container and stop it.
+    .m6b_commit = "bf57ec8",
 }

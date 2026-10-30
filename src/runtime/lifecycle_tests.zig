@@ -328,3 +328,21 @@ test "an environment that does not fit is refused before anything is created" {
     try run.start(sim.interface(), &container, .{ .detached = true }, &handle, &diag);
     try testing.expectEqual(run.Status.running, run.inspect(&handle));
 }
+
+test "is_exiting reads PF_EXITING from field 9 of real stat lines" {
+    // Goal: the flags field is found and read, past a name with spaces and parentheses. Method:
+    // lines a real 6.18 kernel wrote (a sleeping `sleep`, flags 4194304; a zombie `sh`, flags
+    // 4227148 with PF_EXITING), the sleeping one renamed, and damaged lines.
+    const sleeping = "8023 (sleep) S 8020 8023 8020 0 -1 4194304 125 0 0 0 0 0 0 0 20 0 1 0 " ++
+        "621705 2781184 395 18446744073709551615 94382478065664 94382478079665 140728031521552\n";
+    const zombie = "8042 (sh) Z 8040 8040 8039 0 -1 4227148 26 0 0 0 0 0 0 0 20 0 1 0 622018 " ++
+        "0 0 18446744073709551615 0 0 0 0 0 0 0 6 65536 1 0 0 17 2 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+    try testing.expect(!lifecycle.is_exiting(sleeping));
+    try testing.expect(lifecycle.is_exiting(zombie));
+    try testing.expect(lifecycle.is_exiting("8 (a) b) S 1 8 8 0 -1 4194308 125\n"));
+    try testing.expect(!lifecycle.is_exiting("8 (a) b) S 1 8 8 0 -1 4194304 125\n"));
+    try testing.expect(!lifecycle.is_exiting("8 (sleep S 1 8 8 0 -1 4194308\n"));
+    try testing.expect(!lifecycle.is_exiting("8 (sleep) S 1 8 8 0 -1\n"));
+    try testing.expect(!lifecycle.is_exiting("8 (sleep) S 1 8 8 0 -1 -4\n"));
+    try testing.expect(!lifecycle.is_exiting(""));
+}

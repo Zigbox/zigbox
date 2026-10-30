@@ -1,5 +1,5 @@
-//! M6b slice 2's `zbx logs` in the VM, a temporary part of demo-m6 (`LOGS`); slice 4 moves it to
-//! demo-m6b. As the user `demo`, in the net project (`zn`):
+//! M6b slice 2's `zbx logs` in the VM, a part of demo-m6b (`LOGS`). As the user `demo`, in the net
+//! project (`zn`):
 //!
 //!   1. A detached `python -m http.server` is asked for `/` and for a path it lacks; its requests
 //!      are in `zbx logs` (and in `--stream stderr`, and as `zbx.logs/1` lines).
@@ -12,11 +12,11 @@
 //!      of that output from a whole record on, `dropped_bytes` and the bytes shown add up to
 //!      what was written, and the two files on the disk are each at most half the cap.
 //!
-//! Every assertion is a function of checks_logs_m6.zig with a unit test.
+//! Every assertion is a function of checks_logs_m6b.zig with a unit test.
 
 const std = @import("std");
 const Io = std.Io;
-const checks = @import("checks_logs_m6.zig");
+const checks = @import("checks_logs_m6b.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -194,6 +194,6 @@ fn the_cap(session: *Session, out: *Io.Writer) !void {
 }
 
 test {
-    _ = @import("checks_logs_m6.zig");
+    _ = @import("checks_logs_m6b.zig");
     _ = limits;
 }

@@ -1074,7 +1074,7 @@ pub const HostSim = struct {
     }
 
     fn sleep_ms(context: *anyopaque, ms: u32) void {
-        from_context(context).world.now_ms += ms;
+        from_context(context).world.advance_ms(ms);
     }
 
     fn monotonic_ms(context: *anyopaque) u64 {

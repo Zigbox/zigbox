@@ -98,6 +98,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m4.zig",
     "src/testing/vm/main_m5.zig",
     "src/testing/vm/main_m6.zig",
+    "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -121,6 +122,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m4.zig",
     "src/testing/vm/main_m5.zig",
     "src/testing/vm/main_m6.zig",
+    "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -317,6 +319,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the M6 demo, as far as it is built: the five steps, upgrade from M5",
     },
     .{
+        .step = "demo-m6b",
+        .root = "src/testing/vm/main_m6b.zig",
+        .help = "Run the M6b demo: the dev loop (mount, exec, logs), upgrade from M6",
+    },
+    .{
         .step = "top20",
         .root = "src/testing/vm/main_top20.zig",
         .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
@@ -370,18 +377,9 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         run.setCwd(b.path("."));
         run.addArgs(&.{ "--accel", @tagName(accel) });
         if (dropin and std.mem.eql(u8, demo.step, "demo-m0")) run.addArg("--delegate-dropin");
-        if (std.mem.eql(u8, demo.step, "demo-m3")) {
-            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").commit);
-        }
+        if (old_commit_of(demo.step)) |commit| add_old_binary(b, run, commit);
         if (std.mem.eql(u8, demo.step, "demo-m4")) {
-            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m4_commit);
             run.addArgs(&.{ "--blob-cache", ".zig-cache/zbx-vm/m4-blobs.img" });
-        }
-        if (std.mem.eql(u8, demo.step, "demo-m5")) {
-            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m5_commit);
-        }
-        if (std.mem.eql(u8, demo.step, "demo-m6")) {
-            add_old_binary(b, run, @import("src/testing/vm/old_release.zon").m6_commit);
         }
         if (is_top20 and mirror != null) run.addArgs(&.{ "--mirror", mirror.? });
         if (is_top20 and only != null) run.addArgs(&.{ "--only", only.? });
@@ -395,6 +393,17 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }
+}
+
+/// The commit whose zbx a demo's upgrade test starts from (`old_release.zon`), if it has one.
+fn old_commit_of(step: []const u8) ?[]const u8 {
+    const releases = @import("src/testing/vm/old_release.zon");
+    if (std.mem.eql(u8, step, "demo-m3")) return releases.commit;
+    if (std.mem.eql(u8, step, "demo-m4")) return releases.m4_commit;
+    if (std.mem.eql(u8, step, "demo-m5")) return releases.m5_commit;
+    if (std.mem.eql(u8, step, "demo-m6")) return releases.m6_commit;
+    if (std.mem.eql(u8, step, "demo-m6b")) return releases.m6b_commit;
+    return null;
 }
 
 /// The harness drives QEMU on a Linux host. On a Mac it is compiled for Linux (so a change to
@@ -422,7 +431,7 @@ fn add_release_binaries(
     }
 }
 
-/// The upgrade test of demo-m3 to demo-m6: the older zbx, built from a worktree of the
+/// The upgrade test of demo-m3 to demo-m6b: the older zbx, built from a worktree of the
 /// pinned commit by `src/testing/vm/build_old.zig`, handed to the harness as `--old-zbx`.
 fn add_old_binary(b: *std.Build, run: *std.Build.Step.Run, commit: []const u8) void {
     const builder = b.addExecutable(.{

@@ -1,6 +1,5 @@
-//! M6b slice 3's `zbx exec` in the VM, a temporary part of demo-m6 (`EXEC`); slice 4 moves it to
-//! demo-m6b. As the user `demo`, in the net project (`zn`), with a running alpine container that
-//! mounts the project's `site`:
+//! M6b slice 3's `zbx exec` in the VM, a part of demo-m6b (`EXEC`). As the user `demo`, in the
+//! net project (`zn`), with a running alpine container that mounts the project's `site`:
 //!
 //!   1. `exec` writes a file into the writable mount; on the host it is the user's.
 //!   2. A syscall the container's filter refuses (`unshare -U`) and a capability it lacks
@@ -15,14 +14,14 @@
 //!      with `--user`: their `zbx` killed with SIGKILL, the command is gone within a second (the
 //!      change of user clears the death signal; the child asks for it again).
 //!
-//! Every assertion is a function of checks_exec_m6.zig with a unit test. Each command but the
+//! Every assertion is a function of checks_exec_m6b.zig with a unit test. Each command but the
 //! one under `script` reads /dev/null: the guest's console is a terminal, and an exec with a
 //! terminal on both ends gets a pseudo-terminal, which part 5 is for.
 
 const std = @import("std");
 const Io = std.Io;
-const checks = @import("checks_exec_m6.zig");
-const writable = @import("checks_writable_m6.zig");
+const checks = @import("checks_exec_m6b.zig");
+const writable = @import("checks_writable_m6b.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -36,6 +35,8 @@ const zn = net_user.zn;
 const step_name = "EXEC";
 
 const project = net_user.net_project;
+const by_exec_owns = H.as_demo ++
+    writable.owners_command(project ++ "/site/by-exec.txt", project ++ "/site");
 const no_input = " </dev/null";
 const secret_value = "VALUE-PSI-77";
 
@@ -64,9 +65,7 @@ fn writes_a_file(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: EXEC 1: a file written by exec is the host user's\n", .{H.demo_name});
     const write = zn ++ " exec ex1 -- sh -c 'echo made-by-exec > /srv/by-exec.txt'" ++ no_input;
     _ = try ok(session, out, write);
-    const who = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/by-exec.txt; id -u; " ++
-        "find " ++ project ++ "/site ! -user demo | wc -l'";
-    const owners = try ok(session, out, who);
+    const owners = try ok(session, out, by_exec_owns);
     writable.check_owner(owners.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the host user to own the file", err);
     };
@@ -221,6 +220,6 @@ fn killed_zbx(session: *Session, out: *Io.Writer) !void {
 }
 
 test {
-    _ = @import("checks_exec_m6.zig");
+    _ = @import("checks_exec_m6b.zig");
     _ = limits;
 }
