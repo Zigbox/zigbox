@@ -92,6 +92,7 @@ jobs:
           - registry
           - layer
           - lock
+          - pull_report
           - parse_sysctl
           - parse_kernel
           - parse_controllers

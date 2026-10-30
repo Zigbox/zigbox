@@ -364,6 +364,7 @@ pub const HostSim = struct {
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
         .pipe_has_reader = pipe_has_reader,
+        .pipe_capacity = pipe_capacity,
         .restrict_capabilities = restrict_capabilities,
         .clear_ambient = clear_ambient,
         .no_new_privs = no_new_privs,
@@ -918,6 +919,13 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         sim.world.seal();
+    }
+
+    fn pipe_capacity(context: *anyopaque, handle: host.Handle, bytes_min: u32) host.Error!void {
+        const sim = from_context(context);
+        assert(handle >= sim_world.pipe_handle_base);
+        try sim.begin_call();
+        if (bytes_min > sim.world.pipe_capacity_bytes) return error.NoSpace;
     }
 
     fn pipe_has_reader(context: *anyopaque, handle: host.Handle) bool {

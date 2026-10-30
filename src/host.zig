@@ -463,6 +463,10 @@ pub const VTable = struct {
     /// report pipe to ask whether zbx is still there: zbx holds the read end until the command
     /// starts, and from inside a PID namespace `getppid` cannot name a parent outside it.
     pipe_has_reader: *const fn (context: *anyopaque, handle: Handle) bool,
+    /// Makes the pipe of `handle` hold at least `bytes_min` bytes and checks that it does:
+    /// `NoSpace` if the kernel gave less (a user over the pipe-memory limits gets one or two
+    /// pages), so that a writer of that many bytes never waits for a reader.
+    pipe_capacity: *const fn (context: *anyopaque, handle: Handle, bytes_min: u32) Error!void,
     /// Drops every capability not in `keep` (a mask by capability number) from the bounding set,
     /// then makes it the effective, permitted and inheritable sets (`PR_CAPBSET_DROP`, `capset`).
     restrict_capabilities: *const fn (context: *anyopaque, keep: u64) Error!void,
@@ -1009,6 +1013,12 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         try host.vtable.seal_descriptors(host.context);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn ensure_pipe_capacity(host: Host, handle: Handle, bytes_min: u32) Error!void {
+        assert(bytes_min > 0);
+        assert(bytes_min <= constants.pipe_capacity_bytes_max);
+        return host.vtable.pipe_capacity(host.context, handle, bytes_min);
     }
 
     pub fn pipe_has_reader(host: Host, handle: Handle) bool {

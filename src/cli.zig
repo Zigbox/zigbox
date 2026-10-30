@@ -435,8 +435,6 @@ pub const RunError = error{
     OutputFailed,
     /// The container could not be started; the reason is in the diagnostic.
     StartFailed,
-    /// A pull the run began failed, and its child has written the diagnostic.
-    PullFailed,
     /// The bundle could not be written; the reason is in the diagnostic.
     BundleFailed,
     /// `ps`, `stop` or `schema` failed; the reason is in the diagnostic.
@@ -1907,7 +1905,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         ),
         .lock => lock_commands.run_show(
             host,
-            &storage.pull.unpack.locking,
+            &storage.pull.locking,
             invocation.options.output == .json,
             diag,
         ) catch |err| return lock_error(err),
@@ -1977,7 +1975,7 @@ fn run_pull(
         .color = mode != .json and host.color_enabled(.stderr),
         .json = args.json,
     };
-    return pull_commands.run_pull(
+    pull_commands.run_pull(
         host,
         args,
         output,
@@ -1989,6 +1987,7 @@ fn run_pull(
         error.Failed => return error.CommandFailed,
         error.OutputFailed => return error.OutputFailed,
     };
+    return constants.exit_ok;
 }
 
 /// `zbx stop <name>`: the times are checked first (`ZBX-E0401`), then the container is stopped.
@@ -2188,7 +2187,6 @@ fn prepare_image(
         diag,
     ) catch |err| switch (err) {
         error.Failed => return error.StartFailed,
-        error.PullFailed => return error.PullFailed,
     };
 }
 
@@ -2216,11 +2214,7 @@ fn run_container(
     };
     if (invocation.operand) |operand| {
         if (operand.len > 0 and !is_tree_operand(operand)) {
-            prepare_image(host, invocation, storage, operand, &prepared, diag) catch |err| {
-                // A pull the run began has written its own diagnostic: only the exit code is left.
-                if (err == error.PullFailed) return constants.exit_run_failed;
-                return err;
-            };
+            try prepare_image(host, invocation, storage, operand, &prepared, diag);
         }
     }
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);

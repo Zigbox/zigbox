@@ -115,8 +115,12 @@ pub fn candidates(
     list: *Candidates,
     diag: *Diag,
 ) Error!void {
-    assert(client.mirrors.len <= constants.registry_mirrors_bytes_max);
     list.count = 0;
+    // The setting is the caller's, so a setting too long is a refusal, not a programming error.
+    if (client.mirrors.len > constants.registry_mirrors_bytes_max) {
+        const shown = client.mirrors[0..@min(client.mirrors.len, constants.arg_bytes_max)];
+        return bad_mirror(diag, shown);
+    }
     var mirrors_used: u32 = 0;
     var entries = std.mem.splitScalar(u8, client.mirrors, ',');
     while (entries.next()) |raw| {

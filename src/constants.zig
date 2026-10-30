@@ -730,6 +730,23 @@ pub const net_no_proxy_bytes_max: u32 = 2048;
 pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
 /// The JSON result of a resolve: 128 layers of about 150 bytes, and the rest.
 pub const pull_output_bytes_max: u32 = 32 * 1024;
+/// What the pull's child tells its parent through a pipe (`pull_report.zig`): the warnings it
+/// raised, then the failure (a diagnostic, at most `diag_carry_bytes_max`) or the result. The
+/// parent reads the pipe only when the child has ended, so the whole report must fit a pipe
+/// (65536 bytes on Linux) with room to spare; a warning that does not fit is counted, not sent.
+pub const pull_report_bytes_max: u32 = 16 * 1024;
+/// How long the parent waits for more of a report from a child that has ended: its writes are
+/// all in the pipe, so a poll that finds nothing ready is the end.
+pub const pull_report_drain_wait_ms: u32 = 1;
+/// The most `ensure_pipe_capacity` is asked for (the kernel's default maximum is 1 MiB).
+pub const pipe_capacity_bytes_max: u32 = 1024 * 1024;
+/// The header of one record of the report: its kind and the length of what follows.
+pub const pull_report_header_bytes: u32 = 3;
+/// A result record's payload: the tree's digest, six counts and the number of warnings dropped.
+pub const pull_report_result_bytes: u32 = store_digest_bytes + 6 * 8 + 4;
+/// What the warnings of a report may use: the rest is kept for the record that ends it.
+pub const pull_report_warnings_bytes_max: u32 =
+    pull_report_bytes_max - pull_report_header_bytes - diag_carry_bytes_max;
 /// Calls one read or write loop makes before it gives up (each wait inside is time bounded).
 pub const net_io_calls_max: u32 = 1 << 20;
 /// Mirrors for docker.io that a setting may name, and the longest setting.
@@ -1190,6 +1207,16 @@ comptime {
     assert(net_idle_timeout_ms < net_request_timeout_ms);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
+    // The last record of a report (a failure or a result) always fits, after the warnings.
+    assert(pull_report_header_bytes + diag_carry_bytes_max < pull_report_bytes_max);
+    assert(pull_report_header_bytes + pull_report_result_bytes <=
+        pull_report_header_bytes + diag_carry_bytes_max);
+    assert(pull_report_warnings_bytes_max + pull_report_header_bytes + diag_carry_bytes_max ==
+        pull_report_bytes_max);
+    // The parent asks the kernel for a pipe this big and refuses the pull if it gets less.
+    assert(pull_report_bytes_max <= pipe_capacity_bytes_max);
+    assert(pull_report_warnings_bytes_max >= 4096);
+    assert(diag_carry_bytes_max <= std.math.maxInt(u16));
     assert(image_tags_max > 0);
     // A record holds the tags escaped, 128 layer lines of 90 bytes and the settings escaped.
     assert(image_tags_max * (reference_bytes_max * 4 + 16) + registry_layers_max * 90 +

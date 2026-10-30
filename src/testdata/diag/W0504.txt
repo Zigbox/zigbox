@@ -1,0 +1,5 @@
+warning[ZBX-W0504]: warnings from unpacking an image were not shown
+  cause  7 warnings did not fit the unpacking's report and are not shown
+  fix    nothing to do; the image is unpacked and recorded
+  more   zbx explain W0504 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0504.html

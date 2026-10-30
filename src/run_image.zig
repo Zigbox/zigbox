@@ -39,8 +39,6 @@ const Store = @import("store/layout.zig").Store;
 pub const Error = error{
     /// The reason is in the diagnostic.
     Failed,
-    /// A pull the run started failed in the store's child, which wrote its own diagnostic.
-    PullFailed,
 };
 
 /// The caller's memory, about 1.1 MiB beyond the pull's: keep it in static storage.
@@ -148,7 +146,7 @@ fn via_lock(
     diag: *Diag,
 ) Error!void {
     assert(reference.digest == null);
-    const locking = &services.pull.unpack.locking;
+    const locking = &services.pull.locking;
     var failure: lock_file.Failure = undefined;
     lock_file.open_project(services.host, store.fs, locking, &failure) catch {
         image_diagnose.lock_failure(diag, located_path(locking), failure);
@@ -220,7 +218,7 @@ fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag
     var quiet = services.output;
     quiet.quiet = true;
     const args: pull_commands.Args = .{ .reference = operand, .json = false };
-    const code = pull_commands.run_pull(
+    pull_commands.run_pull(
         services.host,
         args,
         quiet,
@@ -229,7 +227,6 @@ fn pull_without_lock(services: *const Services, operand: []const u8, diag: *Diag
         services.import_workspace,
         diag,
     ) catch return error.Failed;
-    if (code != constants.exit_ok) return error.PullFailed;
 }
 
 fn warn_created(services: *const Services, operand: []const u8, path: []const u8) void {
