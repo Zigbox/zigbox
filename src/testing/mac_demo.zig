@@ -189,7 +189,7 @@ pub const steps = [_]Step{
             "until $Z exec web -- python -c " ++
             "'import socket; socket.create_connection((\"127.0.0.1\", 8000)).close()' " ++
             "</dev/null >/dev/null 2>&1; " ++
-            "do i=$((i+1)); test $i -lt 90 || exit 9; sleep 1; done; " ++
+            "do i=$((i+1)); test $i -lt 90 || exit 9; sleep 1; done && " ++
             "echo listening",
         .stdout_has = &.{"listening"},
     },

@@ -759,26 +759,15 @@ fn configure(control: i32, lease: *const dhcp.Lease, mac_dns: []const u8) bool {
     return true;
 }
 
-/// The Mac's resolvers first, then the one the DHCP server named. The NAT's gateway does not
+/// The Mac's resolvers first, then the one the DHCP server named; with none from the Mac, the
+/// DHCP one and then the public fallback (see `protocol.resolv_conf`). The NAT's gateway does not
 /// always answer DNS, and the Mac's resolvers are reachable through the NAT.
 fn write_resolv_conf(lease: *const dhcp.Lease, mac_dns: []const u8) void {
     assert(mac_dns.len > 0);
-    var text: [256]u8 = undefined;
-    var length: usize = 0;
-    var addresses: [protocol.dns_count_max][4]u8 = undefined;
-    const count = protocol.parse_dns(mac_dns, &addresses) orelse 0;
-    for (addresses[0..count]) |dns| length += append_nameserver(text[length..], dns);
-    if (lease.dns orelse lease.router) |dns| length += append_nameserver(text[length..], dns);
-    assert(length <= text.len);
-    if (length > 0) _ = write_text("/etc/resolv.conf", text[0..length], 0o644);
-}
-
-fn append_nameserver(out: []u8, dns: dhcp.Address) usize {
-    assert(out.len > 0);
-    const written = std.fmt.bufPrint(out, "nameserver {d}.{d}.{d}.{d}\n", .{
-        dns[0], dns[1], dns[2], dns[3],
-    }) catch return 0;
-    return written.len;
+    var text: [protocol.resolv_conf_bytes_max]u8 = undefined;
+    const content = protocol.resolv_conf(&text, mac_dns, lease.dns orelse lease.router);
+    assert(content.len > 0); // The fallback is always there.
+    _ = write_text("/etc/resolv.conf", content, 0o644);
 }
 
 fn read_mac() ?[6]u8 {

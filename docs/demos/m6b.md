@@ -633,6 +633,13 @@ running; `zbx stop web` closes port 8000 and `exec` into it is `E0220`, 125.
 - The Mac steps do not run the agent test, the upgrade test, the cap or the removal of a log
   with its record: they do not depend on the platform (the Linux `zbx` in the machine is the same
   program, and `demo-m6b` proves them in CI).
+- **A false pass in `m6b.1`, and DNS (found in `mac.yml` run 41136813336).** The line ended
+  `done; echo listening`, so when a `pull` or `run -d` failed, `echo listening` still ran and the
+  step passed while 15 of 31 steps failed on `ZBX-E0502`. It is `done && echo listening` now. The
+  other lines were judged: `m6b.6` and `m6b.11` use `;` on purpose (they record a code, and a
+  refused `exec` is the expected end); `m6b.7` and `m6b.10` end in `exit $c`, which the step's
+  `exit` checks. The cause of the failures was the Mac's network having only an IPv6 DNS
+  server: see `ZBX-W1003` and DECISIONS.md.
 - **A `zbx.lock` in the home directory** (above) is a trap for a developer who runs `pull` at
   the top of the home; it is the lock's rule on Linux too, and is not changed in this slice.
 

@@ -125,6 +125,55 @@ pub fn parse_dns(text: []const u8, out: *[dns_count_max][4]u8) ?u32 {
     return count;
 }
 
+/// The resolvers the guest falls back to when the Mac gives it none (the `dns` field is "-"):
+/// Cloudflare's and Google's public ones. A Mac whose only resolver is an IPv6 router (a router
+/// advertising only an fe80:: address) leaves the guest with the NAT gateway, which does not
+/// answer DNS; without these, every name fails to resolve. They follow the gateway, and are used
+/// only in that case: a Mac with an IPv4 resolver never sends a query to a public resolver.
+pub const dns_fallback = [_][4]u8{ .{ 1, 1, 1, 1 }, .{ 8, 8, 8, 8 } };
+
+/// "nameserver 255.255.255.255\n", the longest line `resolv_conf` writes.
+const nameserver_line_bytes_max: usize = 27;
+
+/// The most nameservers in the file: the Mac's, or the fallback, and the DHCP one.
+const nameservers_max: usize = @as(usize, @max(dns_count_max, dns_fallback.len)) + 1;
+
+pub const resolv_conf_bytes_max: usize = nameservers_max * nameserver_line_bytes_max;
+
+/// The guest's `/etc/resolv.conf`. With the Mac's resolvers (`mac_dns` a list): theirs first, then
+/// the DHCP one (`gateway`, if the lease named one). With "-": the DHCP one first, then
+/// `dns_fallback`. `mac_dns` has passed `parse_dns`. The text is written into `out`.
+pub fn resolv_conf(
+    out: *[resolv_conf_bytes_max]u8,
+    mac_dns: []const u8,
+    gateway: ?[4]u8,
+) []const u8 {
+    var addresses: [dns_count_max][4]u8 = undefined;
+    const count = parse_dns(mac_dns, &addresses) orelse 0;
+    var lines: u32 = 0;
+    var length: usize = 0;
+    if (count == 0) {
+        if (gateway) |address| length += nameserver_line(out[length..], address, &lines);
+        for (dns_fallback) |address| length += nameserver_line(out[length..], address, &lines);
+    } else {
+        for (addresses[0..count]) |address| {
+            length += nameserver_line(out[length..], address, &lines);
+        }
+        if (gateway) |address| length += nameserver_line(out[length..], address, &lines);
+    }
+    assert(lines <= nameservers_max); // Every line is a nameserver, and the buffer fits them all.
+    assert(length <= lines * nameserver_line_bytes_max);
+    return out[0..length];
+}
+
+fn nameserver_line(out: []u8, address: [4]u8, lines: *u32) usize {
+    const text = std.fmt.bufPrint(out, "nameserver {d}.{d}.{d}.{d}\n", .{
+        address[0], address[1], address[2], address[3],
+    }) catch unreachable; // Cannot fail: `resolv_conf_bytes_max` holds every line that is written.
+    lines.* += 1;
+    return text.len;
+}
+
 /// A name that is safe as a /etc/passwd field and as an argument: letters, digits, `_`, `.`, `-`,
 /// not starting with `-`.
 pub fn name_ok(name: []const u8) bool {
@@ -274,4 +323,25 @@ test "the setup and busy answers parse only as written" {
     try std.testing.expect(parse_busy_reply("busy 03\n") == null);
     try std.testing.expect(parse_busy_reply("busy \n") == null);
     try std.testing.expect(parse_busy_reply("idle\n") == null);
+}
+
+test "resolv.conf: the Mac leads, or the fallback follows the gateway" {
+    var out: [resolv_conf_bytes_max]u8 = undefined;
+    const gateway: [4]u8 = .{ 192, 168, 64, 1 };
+    try std.testing.expectEqualStrings(
+        "nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 192.168.64.1\n",
+        resolv_conf(&out, "10.0.0.1,10.0.0.2", gateway),
+    );
+    try std.testing.expectEqualStrings(
+        "nameserver 192.168.64.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+        resolv_conf(&out, "-", gateway),
+    );
+    try std.testing.expectEqualStrings(
+        "nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+        resolv_conf(&out, "-", null),
+    );
+    // The longest case: three Mac resolvers and a gateway, all of the widest lines.
+    const widest = "255.255.255.255,255.255.255.255,255.255.255.255";
+    const text = resolv_conf(&out, widest, .{ 255, 255, 255, 255 });
+    try std.testing.expectEqual(resolv_conf_bytes_max, text.len);
 }

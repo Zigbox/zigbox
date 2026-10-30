@@ -201,6 +201,7 @@ pub const Code = enum(u8) {
     E1015,
     E1016,
     E1017,
+    W1003,
     B0001,
 };
 
@@ -3014,6 +3015,24 @@ pub const registry = [_]Entry{
         \\macOS lets a program that is not root listen on a port under 1024 only on
         \\every interface, not on 127.0.0.1 alone: --publish 0.0.0.0:80:80 works
         \\without root, and exposes the port on the Mac's network.
+        ,
+    },
+    .{
+        .code = .W1003,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the Mac has no IPv4 DNS server, so the machine asks public ones",
+        .explanation =
+        \\The virtual machine asks the DNS servers the Mac asks. This Mac's network
+        \\names none that has an IPv4 address (a router that advertises only an
+        \\IPv6 one, for example), and the machine's own network is IPv4 only. The
+        \\machine's gateway does not answer DNS, so zbx adds 1.1.1.1 (Cloudflare)
+        \\and 8.8.8.8 (Google) after it, and the machine's name lookups, such as a
+        \\pull's, may go to them. A Mac with an IPv4 DNS server never does this.
+        \\
+        \\To keep the lookups on your own network, join one that has an IPv4 DNS
+        \\server, then zbx vm stop; the next command starts a machine that asks it.
+        \\The warning is printed once, by the command that starts the machine.
         ,
     },
     .{

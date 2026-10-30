@@ -437,6 +437,19 @@ pub fn no_network(diag: *Diag) void {
     assert(diag.fixes.count == 1);
 }
 
+/// W1003: the Mac names no IPv4 DNS server, so the guest also asks 1.1.1.1 and 8.8.8.8.
+pub fn public_dns(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.W1003);
+    diag.while_("setting up the virtual machine's DNS", .{});
+    diag.cause("the Mac names no IPv4 DNS server; lookups may go to 1.1.1.1 and 8.8.8.8", .{});
+    diag.fix(.{
+        .sentence = "to keep them on your network, join one with an IPv4 DNS server, then:",
+        .command = "zbx vm stop",
+    });
+    assert(diag.fixes.count == 1);
+}
+
 /// E1011: the guest could not finish its setup; `word` is the step it names.
 pub fn setup_failed(diag: *Diag, word: []const u8, console_log: []const u8) void {
     assert(diag.code == null);

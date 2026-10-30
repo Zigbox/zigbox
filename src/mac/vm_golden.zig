@@ -95,6 +95,10 @@ fn no_network(diag: *Diag) void {
     diagnose.no_network(diag);
 }
 
+fn public_dns(diag: *Diag) void {
+    diagnose.public_dns(diag);
+}
+
 fn disk_shrink(diag: *Diag) void {
     const path = "/Users/ada/Library/Application Support/zbx/store.img";
     diagnose.disk_shrink(diag, 32 << 30, 64 << 30, path);
@@ -141,6 +145,7 @@ pub const cases = [_]Case{
     .{ .code = .E1015, .build = &host_full },
     .{ .code = .E1016, .build = &rosetta_missing },
     .{ .code = .E1017, .build = &port_unavailable },
+    .{ .code = .W1003, .build = &public_dns },
 };
 
 /// True if a golden case here covers `code` (the registry's "every code has a case" test asks).
@@ -201,7 +206,8 @@ test "the diagnostics blame who the registry says" {
     for (cases) |case| {
         const entry = codes.entry(case.code);
         const is_warning = entry.severity == .warning;
-        const warns = case.code == .W1001 or case.code == .W1002;
+        const warns = case.code == .W1001 or case.code == .W1002 or
+            case.code == .W1003;
         try std.testing.expectEqual(warns, is_warning);
         try std.testing.expect(entry.blame != .internal);
     }

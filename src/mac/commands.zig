@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const control = @import("control.zig");
 const diagnose = @import("diagnose.zig");
+const dns = @import("dns.zig");
 const files = @import("files.zig");
 const image = @import("image.zig");
 const paths_mod = @import("paths.zig");
@@ -319,6 +320,8 @@ pub fn ensure_running(ctx: *const Context, diag: *Diag) Error!control.Status {
             assert(status.pid > 0);
             // The host that was just started is ours.
             assert(std.mem.eql(u8, &status.version, image.version));
+            // Once per boot: only the command that started this machine says so.
+            if (dns.none()) print_public_dns_warning(ctx);
             return status;
         },
         else => {
@@ -333,6 +336,14 @@ fn print_network_warning(ctx: *const Context) void {
     var warning: Diag = undefined;
     warning.reset();
     diagnose.no_network(&warning);
+    print_diag_warning(ctx, &warning);
+}
+
+fn print_public_dns_warning(ctx: *const Context) void {
+    assert(ctx.paths.socket.length > 0);
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.public_dns(&warning);
     print_diag_warning(ctx, &warning);
 }
 
