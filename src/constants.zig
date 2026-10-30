@@ -171,7 +171,7 @@ pub const sim_path_bytes_max: u32 = 256;
 pub const sim_nodes_max: u32 = 160;
 pub const sim_mounts_max: u32 = 32;
 pub const sim_processes_max: u32 = 4;
-pub const sim_pipe_ends_max: u32 = 10;
+pub const sim_pipe_ends_max: u32 = 16;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
 /// is "no space left on the device", which is also how a full disk is simulated.
 pub const sim_written_files_max: u32 = 72;

@@ -130,6 +130,8 @@ pub const HostReal = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .wait_event_watching = wait_event_watching,
+        .log_files = log_files,
         .own_pid = own_pid,
         .working_directory = working_directory,
         .sleep_ms = sleep_ms,
@@ -375,7 +377,10 @@ pub const HostReal = struct {
         const result = linux.syscall2(.clone3, @intFromPtr(&arguments), @sizeOf(CloneArgs));
         // clone3 returns twice. In the child (result 0) nothing below this line runs: the entry
         // function does the setup and the child ends here, never returning into the caller.
-        if (result == 0) linux.exit_group(entry(entry_context));
+        if (result == 0) {
+            if (flags.output) |pipes| redirect_output(pipes);
+            linux.exit_group(entry(entry_context));
+        }
         try check(result);
         assert(result > 0);
         assert(result <= std.math.maxInt(i32));
@@ -823,6 +828,64 @@ pub const HostReal = struct {
         return error.Stalled;
     }
 
+    /// Like `wait_event`, and returns `.output` when a watched descriptor can be read. A signalfd
+    /// for the forwarded signals lets one `ppoll` wait for both; the signals stay blocked and
+    /// queued, and are taken off the queue by `wait_event` when the signalfd says one is there.
+    fn wait_event_watching(
+        context: *anyopaque,
+        pid: host.Pid,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) host.Error!host.Event {
+        assert(pid > 0);
+        assert(watch.len > 0);
+        assert(watch.len <= 8);
+        var early_status: i32 = 0;
+        const early = linux.wait4(@intCast(pid), &early_status, linux.W.NOHANG, null);
+        try check(early);
+        if (early != 0) return .{ .exited = try decode_status(early_status) };
+        const started = monotonic_now_ms();
+        const set = forwarded_set();
+        const made = linux.signalfd(-1, &set, linux.SFD.CLOEXEC | linux.SFD.NONBLOCK);
+        try check(made);
+        const signal_fd: i32 = @intCast(made);
+        defer _ = linux.close(signal_fd);
+        for (0..constants.forwarded_signals_max + constants.wait_interrupts_max) |_| {
+            var polls: [9]linux.pollfd = undefined;
+            polls[0] = .{ .fd = signal_fd, .events = linux.POLL.IN, .revents = 0 };
+            for (watch, 1..) |handle, at| {
+                polls[at] = .{ .fd = @intCast(handle), .events = linux.POLL.IN, .revents = 0 };
+            }
+            var limit: linux.timespec = undefined;
+            var limit_ptr: ?*linux.timespec = null;
+            if (timeout_ms > 0) {
+                const spent = monotonic_now_ms() -| started;
+                if (spent >= timeout_ms) return .timeout;
+                limit = timespec_of(timeout_ms - spent);
+                limit_ptr = &limit;
+            }
+            const waited = linux.ppoll(&polls, @intCast(1 + watch.len), limit_ptr, null);
+            if (linux.errno(waited) == .INTR) continue;
+            try check(waited);
+            if (waited == 0) return .timeout;
+            if (polls[0].revents != 0) {
+                // A signal or a child's end: the queue's owner decides which.
+                const event = try wait_event(context, pid, 1);
+                if (event != .timeout) return event;
+            }
+            var mask: u32 = 0;
+            for (watch, 1..) |_, at| {
+                if (polls[at].revents != 0) mask |= @as(u32, 1) << @intCast(at - 1);
+            }
+            if (mask != 0) return .{ .output = mask };
+        }
+        return error.Stalled;
+    }
+
+    fn log_files(context: *anyopaque) store_fs.Fs {
+        return filesystem(context);
+    }
+
     fn own_pid(context: *anyopaque) host.Pid {
         _ = from_context(context);
         return @intCast(linux.getpid());
@@ -1055,6 +1118,15 @@ const CloneArgs = extern struct {
 
 comptime {
     assert(@sizeOf(CloneArgs) == 64);
+}
+
+/// In the new child, before anything else: its standard output and error become the pipes'
+/// write ends. Raw system calls only. A child that cannot do it ends, and the parent sees its
+/// exit status, not a command that wrote to the wrong place.
+fn redirect_output(pipes: host.OutputPipes) void {
+    const out = linux.dup2(@intCast(pipes.stdout), 1);
+    const err = linux.dup2(@intCast(pipes.stderr), 2);
+    if (linux.errno(out) != .SUCCESS or linux.errno(err) != .SUCCESS) linux.exit_group(70);
 }
 
 fn clone_flags(flags: host.SpawnFlags) u64 {

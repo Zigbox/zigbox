@@ -920,6 +920,97 @@ pub fn record_not_saved(diag: *Diag, directory: ?[]const u8, failure: ?Failure) 
     assert(diag.fixes.count > 0);
 }
 
+/// ZBX-W0204: the container's output is not being kept (its log could not be made or written).
+pub fn log_not_kept(diag: *Diag, directory: ?[]const u8, failure: Failure) void {
+    assert(diag.code == null);
+    diag.raise(.W0204);
+    diag.while_("keeping the container's output", .{});
+    errors.cause_host_error(diag, "writing the log", failure.err, failure.errno);
+    if (directory) |where| diag.context("path", "{s}", .{where});
+    diag.fix_with("free space, or choose another state directory:", "df -h \"{s}\"", .{
+        directory orelse "/",
+    });
+    assert(diag.code.? == .W0204);
+    assert(diag.fixes.count > 0);
+}
+
+/// ZBX-W0205: `zbx logs` shows a log whose oldest output was dropped at the cap.
+pub fn logs_dropped(diag: *Diag, name: []const u8, dropped_bytes: u64) void {
+    assert(diag.code == null);
+    assert(dropped_bytes > 0);
+    diag.raise(.W0205);
+    diag.while_("reading the log of {s}", .{name});
+    diag.cause(
+        "the log keeps at most {d} MiB; {d} bytes of older output were dropped",
+        .{ constants.log_bytes_max >> 20, dropped_bytes },
+    );
+    diag.context("name", "{s}", .{name});
+    diag.context("dropped_bytes", "{d}", .{dropped_bytes});
+    diag.fix(.{
+        .sentence = "see the newest output only, without this note:",
+        .command = "zbx logs --tail 100 <name>",
+        .template = true,
+    });
+    assert(diag.code.? == .W0205);
+}
+
+/// ZBX-E0217: the container has a record and no log.
+pub fn no_log(diag: *Diag, name: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, name);
+    diag.raise(.E0217);
+    diag.while_("reading the log of {s}", .{echo});
+    diag.cause("'{s}' has a run record and no log: it ran before logs were kept, its " ++
+        "log could not be written, or it was removed", .{echo});
+    diag.context("name", "{s}", .{echo});
+    diag.fix(.{ .sentence = "run it again to get a log:", .command = "zbx run -d --name <name> <image>", .template = true });
+    assert(diag.code.? == .E0217);
+}
+
+pub const LogProblem = enum { unreadable, newer, damaged };
+
+/// ZBX-E0218: the container's log cannot be used.
+pub fn log_unreadable(diag: *Diag, name: []const u8, problem: LogProblem, failure: ?Failure) void {
+    assert(diag.code == null);
+    diag.raise(.E0218);
+    diag.while_("reading the log of {s}", .{name});
+    switch (problem) {
+        .unreadable => {
+            const found = failure orelse unreachable; // The caller has the errno of the read.
+            errors.cause_host_error(diag, "reading the log", found.err, found.errno);
+        },
+        .newer => diag.cause("the log was written by a newer zbx than this one", .{}),
+        .damaged => diag.cause("the log's first bytes are not those of a zbx log", .{}),
+    }
+    diag.context("name", "{s}", .{name});
+    diag.fix(.{
+        .sentence = "look at the file:",
+        .command = "ls -l \"${XDG_STATE_HOME:-$HOME/.local/state}/zbx/logs\"",
+    });
+    assert(diag.code.? == .E0218);
+}
+
+/// ZBX-E0219: a value of `--tail` or `--stream` that is not one.
+pub fn logs_option(diag: *Diag, flag: []const u8, value: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, value);
+    diag.raise(.E0219);
+    diag.while_("reading {s}", .{flag});
+    if (std.mem.eql(u8, flag, "--stream")) {
+        diag.cause("'{s}' is not a stream: it is stdout or stderr", .{echo});
+        diag.fix(.{ .sentence = "name one:", .command = "zbx logs --stream stderr web" });
+    } else {
+        diag.cause("'{s}' is not a whole number of lines from 0 to {d}", .{
+            echo, constants.log_tail_lines_max,
+        });
+        diag.fix(.{ .sentence = "give a number of lines:", .command = "zbx logs --tail 20 web" });
+    }
+    diag.context("value", "{s}", .{echo});
+    assert(diag.code.? == .E0219);
+}
+
 /// ZBX-W0203: records that could not be used were skipped.
 pub fn records_skipped(diag: *Diag, directory: []const u8, skipped: *const records.Skipped) void {
     assert(diag.code == null);

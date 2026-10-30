@@ -49,6 +49,7 @@ const render = @import("../diag/render.zig");
 const diagnose = @import("diagnose.zig");
 const doctor = @import("../doctor.zig");
 const ids = @import("ids.zig");
+const logfile = @import("logfile.zig");
 const image_diagnose = @import("../image_diagnose.zig");
 const image_mod = @import("image.zig");
 const netfiles = @import("netfiles.zig");
@@ -179,6 +180,14 @@ pub const StartOptions = struct {
     /// The memory a run of a tree from the store (`Spec.image`) prepares it in, about 17 MiB:
     /// the caller's, in static or heap storage. Required exactly when `image` is set.
     image_workspace: ?*image_mod.Workspace = null,
+    /// Keep what the container writes to its standard output and error in its log
+    /// (`logfile.zig`). The container's streams are then pipes this library reads until the
+    /// container ends. A log that cannot be written is a warning, and the run goes on.
+    keep_log: bool = true,
+    /// Also copy that output to this process's standard output and error as it comes (the
+    /// foreground `zbx run`). Without a log there is nothing to copy: the container writes to
+    /// the terminal itself, as before logs existed.
+    mirror: bool = false,
 };
 
 pub const Note = text_util.Bounded(160);
@@ -241,6 +250,12 @@ pub const Handle = struct {
     resolution: mounts_mod.Resolution,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
+    /// The log of the container's output: open from before the container exists until it has
+    /// ended, when `log_active`. `mirror` copies the output to the terminal too.
+    log: logfile.Writer,
+    log_active: bool,
+    log_warned: bool,
+    mirror: bool,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -320,6 +335,9 @@ pub fn start(
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.user = container.user;
+    handle.log_active = false;
+    handle.log_warned = false;
+    handle.mirror = options.mirror;
     handle.command = container.command;
     handle.labels = container.labels;
     handle.env_names = container.env_names;
@@ -346,8 +364,10 @@ pub fn start(
 
     handle.started = host.time_now();
     begin_record(handle);
-    handle.session.start(host, &handle.plan, &handle.facts);
+    const capture = open_log(handle, options);
+    handle.session.start(host, &handle.plan, &handle.facts, capture);
     handle.session.execute(diag, run_info(handle)) catch |err| {
+        close_log(handle);
         handle.ended = failed_start(diag); // Asserts that the diagnostic has a code.
         handle.status = .stopped;
         save_record(handle, .{ .start_failed = diag.code.? }, host.time_now(), diag);
@@ -356,6 +376,7 @@ pub fn start(
     };
     collect_notes(handle);
     handle.status = .running;
+    if (capture) handle.wait_options.sink = .{ .context = handle, .call = log_sink };
     assert(handle.session.pid != null);
     handle.pid = handle.session.container_pid;
     // Again, now that the container's pid is known: this is what a later process finds it by.
@@ -472,7 +493,11 @@ pub fn wait(handle: *Handle) ExitReason {
     assert(handle.status == .running);
     const host = handle.host;
     host.begin_step(@intCast(handle.plan.count - 1)); // The `reap` step.
+    // A terminal that closes is a write that fails, not a signal that ends this process.
+    if (handle.mirror) host.ignore_broken_pipe(true);
     const result = handle.session.wait(handle.wait_options);
+    if (handle.mirror) host.ignore_broken_pipe(false);
+    close_log(handle);
     host.begin_step(host_mod.step_none);
     // The container is gone (or zbx lost it, and `abandon` below ends it): pasta goes now, and
     // the host's ports with it, before anything else is done.
@@ -890,6 +915,7 @@ fn begin_record(handle: *Handle) void {
     records.prune(handle.host, &dir, handle.name_slice(), &skipped, &pruned) catch return;
     reclaim_layers(handle, &pruned);
     remove_pasta_logs(handle, &dir, &pruned);
+    remove_logs(handle, &dir, &pruned);
     if (skipped.count == 0) return;
     var warning: Diag = undefined;
     warning.reset();
@@ -911,6 +937,87 @@ fn remove_pasta_logs(handle: *Handle, dir: *const records.Dir, pruned: *const re
             unreachable; // Same bound as above.
         handle.host.remove_file(text) catch {};
     }
+}
+
+/// A record that was pruned takes its log with it. Best effort, like the pasta log.
+fn remove_logs(handle: *Handle, dir: *const records.Dir, pruned: *const records.Pruned) void {
+    const logs = logfile.dir_of(dir) orelse return;
+    const fs = handle.host.log_files();
+    for (0..pruned.count) |index| {
+        logfile.remove(fs, &logs, pruned.name(@intCast(index))) catch {};
+    }
+}
+
+// ---- The log -------------------------------------------------------------------------------
+
+/// Opens the container's log, for a run that keeps one. True when the container's output is to
+/// be read through pipes: the log is open and there is a place for it. A run with no state
+/// directory has said so already (the record's warning); one whose log cannot be made says so
+/// here, once, and the container writes where it always did.
+fn open_log(handle: *Handle, options: StartOptions) bool {
+    assert(!handle.log_active);
+    if (!options.keep_log) return false;
+    const runs = handle.record_dir orelse return false;
+    const logs = logfile.dir_of(&runs) orelse return false;
+    handle.log.open(handle.host.log_files(), &logs, handle.name_slice(), .{}) catch |err| {
+        const failure: diagnose.Failure = .{
+            .step = 0,
+            .err = err,
+            .errno = handle.host.log_files().last_errno(),
+        };
+        warn_log_not_kept(handle, logs.text(), failure);
+        return false;
+    };
+    handle.log_active = true;
+    return true;
+}
+
+fn close_log(handle: *Handle) void {
+    if (!handle.log_active) return;
+    handle.log.close();
+    handle.log_active = false;
+}
+
+/// Tells the caller once per run that the output is not being kept. A detached run's supervisor
+/// can tell its caller only while the caller waits for it: once the start has been reported the
+/// warning has nowhere to go, so it is not sent.
+fn warn_log_not_kept(handle: *Handle, directory: []const u8, failure: diagnose.Failure) void {
+    if (handle.log_warned) return;
+    handle.log_warned = true;
+    if (handle.detached and handle.status != .starting) return;
+    var warning: Diag = undefined;
+    warning.reset();
+    diagnose.log_not_kept(&warning, directory, failure);
+    handle.report(&warning);
+}
+
+/// What the container wrote: to the terminal first (a foreground run's output must not depend on
+/// the log), then into the log. A log that fails stops for good and the run goes on. False when
+/// the terminal cannot be written to: the stream is closed, so the container's next write to it
+/// fails as it would have without a log.
+fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) bool {
+    const handle: *Handle = @ptrCast(@alignCast(context));
+    assert(bytes.len > 0);
+    var keep = true;
+    if (handle.mirror) {
+        handle.host.write_all(stream, bytes) catch {
+            keep = false;
+        };
+    }
+    if (!handle.log_active) return keep;
+    const which: logfile.Stream = if (stream == .stdout) .stdout else .stderr;
+    const time = @min(handle.host.time_now(), constants.log_time_max - 1);
+    handle.log.append(which, time, bytes) catch |err| {
+        const failure: diagnose.Failure = .{
+            .step = 0,
+            .err = err,
+            .errno = handle.host.log_files().last_errno(),
+        };
+        var runs = handle.record_dir.?;
+        const logs = logfile.dir_of(&runs).?;
+        warn_log_not_kept(handle, logs.text(), failure);
+    };
+    return keep;
 }
 
 /// A record that was pruned no longer needs the layers kept for it: they go, from inside the

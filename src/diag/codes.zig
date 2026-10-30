@@ -64,9 +64,14 @@ pub const Code = enum(u8) {
     E0214,
     E0215,
     E0216,
+    E0217,
+    E0218,
+    E0219,
     W0201,
     W0202,
     W0203,
+    W0204,
+    W0205,
     E0301,
     E0302,
     E0303,
@@ -875,6 +880,47 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0217,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the container has no log",
+        .explanation =
+        \\zbx logs reads the file zbx keeps of what a container wrote to its standard
+        \\output and error (<state>/zbx/logs/<name>.log). The container has a run
+        \\record and no log. It ran before logs were kept (zbx 0.1 to M6), its log
+        \\could not be written (a warning, ZBX-W0204, said so when it started), or the
+        \\log was removed.
+        \\
+        \\Nothing it wrote can be shown. Runs started from now on keep their logs.
+        ,
+    },
+    .{
+        .code = .E0218,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "can't read the container's log",
+        .explanation =
+        \\The log of the container exists and zbx cannot use it: the file cannot be
+        \\opened or read, it is not a zbx log, or it was written by a newer zbx than
+        \\this one.
+        \\
+        \\The cause says which. A log from a newer zbx is read by that zbx, or left
+        \\alone; one that is not a log was not written by zbx, and "zbx logs" does not
+        \\guess at it. The path is in the message.
+        ,
+    },
+    .{
+        .code = .E0219,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "bad value for a logs option",
+        .explanation =
+        \\--tail takes a whole number of lines from 0 to one million, and --stream
+        \\takes stdout or stderr. The message names the option and the value it was
+        \\given. Nothing was read.
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -919,6 +965,38 @@ pub const registry = [_]Entry{
         \\The oldest records are deleted when there are more than 32, so a record
         \\that stays unreadable goes away on its own. To keep it, move it out of
         \\the runs directory, or run the zbx that wrote it.
+        ,
+    },
+    .{
+        .code = .W0204,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the container's output is not being kept",
+        .explanation =
+        \\zbx keeps what each container writes to its standard output and error in a
+        \\log (<state>/zbx/logs/<name>.log), up to 5 MiB, for "zbx logs". That log
+        \\could not be made or written, for example because the disk is full or the
+        \\state directory cannot be written, so the run goes on without it.
+        \\
+        \\A foreground run still shows its output on the terminal. "zbx logs" will
+        \\show what was written before the failure, if anything. Free space, or point
+        \\XDG_STATE_HOME at a directory with room.
+        ,
+    },
+    .{
+        .code = .W0205,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "older output of the container was dropped",
+        .explanation =
+        \\A container's log keeps at most 5 MiB. When it is full the oldest records
+        \\are dropped, whole, so what "zbx logs" shows starts after output that
+        \\is gone.
+        \\The message says how many bytes of output were dropped.
+        \\
+        \\Nothing is wrong with the container. To see more, have the program write
+        \\less, or send its output somewhere that keeps it: a --state volume or a
+        \\--mount of the project.
         ,
     },
     .{

@@ -174,6 +174,14 @@ pub const IdMaps = struct {
 
 pub const text_bytes_max: u32 = 512;
 
+pub const WaitResult = union(enum) { event: host.Event, errno: u16 };
+
+/// A write of the simulated command to one of its standard streams.
+pub const OutChunk = struct {
+    stream: host.Stream,
+    bytes: []const u8,
+};
+
 pub const Process = struct {
     state: ProcessState,
     pid: u32,
@@ -228,6 +236,9 @@ pub const Process = struct {
     pasta_target: u32,
     ports: [constants.publish_count_max]u16,
     ports_count: u32,
+    /// The write ends of the pipes that were this process's standard output and error
+    /// (`SpawnFlags.output`): held while the command lives, so the readers see its end.
+    output_ends: [2]?u32,
 
     pub fn argv(process: *const Process) []const u8 {
         return process.exec_argv[0..process.exec_argv_len];
@@ -343,6 +354,10 @@ pub const World = struct {
     /// How long a command that started runs, in milliseconds of that clock, before it ends by
     /// itself. Zero: it ends the moment it is waited for (what every earlier test assumes).
     command_runs_ms: u32,
+    /// What the command writes while it runs, a chunk at a time (`wait_event_watching`), and how
+    /// many chunks it has written.
+    out_script: []const OutChunk,
+    out_at: u32,
     /// A SIGTERM that the command catches ends it (with `term_exit_code`), as a daemon's does.
     term_exits: bool,
     term_exit_code: u8,
@@ -418,6 +433,8 @@ pub const World = struct {
         world.bus.init();
         world.now_ms = 1_000_000;
         world.command_runs_ms = 0;
+        world.out_script = &.{};
+        world.out_at = 0;
         world.term_exits = false;
         world.term_exit_code = 0;
         world.fork_role = .parent;
@@ -760,6 +777,11 @@ pub const World = struct {
         child.holds = parent.holds;
         child.table = parent.table;
         child.uts = parent.uts;
+        if (flags.output) |pipes| {
+            child.output_ends = .{ pipes.stdout, pipes.stderr };
+            assert(parent.holds[end_index(pipes.stdout)]);
+            assert(parent.holds[end_index(pipes.stderr)]);
+        }
         if (flags.mount) {
             const copy = @as(u8, @intCast(world.tables.len - 1));
             world.tables[copy] = world.tables[parent.table];
@@ -796,9 +818,13 @@ pub const World = struct {
         world.step = previous_step;
         assert(child.state == .running);
         child.holds = @splat(false);
-        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0)) {
-            // Still running: the scripted signals and the clock decide how it ends.
+        const writes_more = world.out_at < world.out_script.len;
+        if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0 or writes_more)) {
+            // Still running: the scripted signals, the output and the clock decide how it ends.
             child.state = .command;
+            for (child.output_ends) |end| {
+                if (end) |handle| child.holds[end_index(handle)] = true;
+            }
             return;
         }
         child.exit = if (child.execd) world.command_exit else .{ .exited = code };
@@ -1075,6 +1101,7 @@ pub const World = struct {
     fn process_died(world: *World, pid: u32) void {
         world.namespace_gone(pid);
         if (world.find_process(pid)) |process| {
+            process.holds = @splat(false); // Its descriptors close with it: pipes see the end.
             // The status file of a process that ended and is not reaped says so.
             if (process.execd) world.put_status_file(pid, true);
         }
@@ -1100,7 +1127,7 @@ pub const World = struct {
         world: *World,
         pid: u32,
         timeout_ms: u32,
-    ) union(enum) { event: host.Event, errno: u16 } {
+    ) WaitResult {
         const index = world.find_index(pid) orelse return .{ .errno = errno_child };
         if (world.processes[index].state == .pending) world.run_child(index);
         const process = &world.processes[index];
@@ -1121,6 +1148,53 @@ pub const World = struct {
         if (process.state != .zombie) return .{ .errno = errno_child };
         world.reap(process);
         return .{ .event = .{ .exited = process.exit.? } };
+    }
+
+    /// `wait_event` that also reports the watched pipes' read ends that can be read. The
+    /// container's scripted output (`out_script`) arrives one chunk per call while it lives,
+    /// after the scripted signals, as the real kernel would show it between two polls.
+    pub fn wait_event_watching(
+        world: *World,
+        pid: u32,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) WaitResult {
+        const index = world.find_index(pid) orelse return .{ .errno = errno_child };
+        if (world.processes[index].state == .pending) world.run_child(index);
+        const process = &world.processes[index];
+        if (process.state == .command and world.script_at >= world.script_len) {
+            world.deliver_next_chunk(process);
+        }
+        var mask: u32 = 0;
+        for (watch, 0..) |handle, at| {
+            const pipe_index = end_index(handle) / 2;
+            const pipe = &world.pipes[pipe_index];
+            const readable = pipe.consumed < pipe.written or !world.writer_exists(pipe_index);
+            if (readable) mask |= @as(u32, 1) << @intCast(at);
+        }
+        if (mask != 0 and !(process.state == .command and world.script_at < world.script_len)) {
+            return .{ .event = .{ .output = mask } };
+        }
+        return world.wait_event(pid, timeout_ms);
+    }
+
+    /// The container writes the next scripted chunk, if its pipe has room for it.
+    fn deliver_next_chunk(world: *World, process: *const Process) void {
+        if (world.out_at >= world.out_script.len) return;
+        const chunk = world.out_script[world.out_at];
+        const handle = process.output_ends[if (chunk.stream == .stdout) 0 else 1] orelse {
+            world.out_at += 1;
+            return;
+        };
+        const pipe = &world.pipes[end_index(handle) / 2];
+        if (pipe.consumed == pipe.written) {
+            pipe.consumed = 0;
+            pipe.written = 0;
+        }
+        if (pipe.written + chunk.bytes.len > pipe.data.len) return; // The reader must catch up.
+        @memcpy(pipe.data[pipe.written..][0..chunk.bytes.len], chunk.bytes);
+        pipe.written += @intCast(chunk.bytes.len);
+        world.out_at += 1;
     }
 
     pub fn signal_state(world: *World, pid: u32) ?host.SignalState {
@@ -1892,6 +1966,7 @@ fn unused_process() Process {
         .pasta_target = 0,
         .ports = undefined,
         .ports_count = 0,
+        .output_ends = .{ null, null },
     };
 }
 

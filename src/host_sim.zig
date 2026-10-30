@@ -94,6 +94,106 @@ fn down_fs() store_fs.Fs {
     return down_files.interface();
 }
 
+/// The log disk of a host that was given none: it takes the writes and keeps nothing, so a run
+/// that is not a test of logs neither fails nor warns. A test of logs gives the host a real
+/// `SimFs` as `log_fs`.
+fn sink_fs() store_fs.Fs {
+    return .{ .context = &sink_context, .vtable = &sink_vtable };
+}
+
+var sink_context: u8 = 0;
+
+const sink_vtable: store_fs.VTable = .{
+    .lstat = sink_lstat,
+    .read_dir = sink_read_dir,
+    .read_link = sink_read_link,
+    .list_xattrs = sink_list_xattrs,
+    .get_xattr = sink_get_xattr,
+    .open_read = sink_open_read,
+    .read = sink_read,
+    .create = sink_create,
+    .open_append = sink_open_append,
+    .write = sink_write,
+    .fsync = sink_fsync,
+    .close = sink_close,
+    .set_owner = sink_set_owner,
+    .set_mode = sink_set_mode,
+    .set_xattr = sink_set_xattr,
+    .set_mtime = sink_set_mtime,
+    .rename = sink_rename,
+    .unlink = sink_unlink,
+    .make_directory = sink_make_directory,
+    .remove_directory = sink_remove_directory,
+    .sync_directory = sink_sync_directory,
+    .link = sink_link,
+    .symlink = sink_symlink,
+    .set_path_attributes = sink_set_path_attributes,
+    .set_path_xattr = sink_set_path_xattr,
+    .lock = sink_lock,
+    .last_errno = sink_errno,
+};
+
+fn sink_errno(_: *anyopaque) u16 {
+    return 0;
+}
+fn sink_lstat(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Stat {
+    return error.NotFound;
+}
+fn sink_read_dir(_: *anyopaque, _: [:0]const u8, _: store_fs.Visitor) host.Error!void {}
+fn sink_read_link(_: *anyopaque, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return error.NotFound;
+}
+fn sink_list_xattrs(_: *anyopaque, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_get_xattr(_: *anyopaque, _: [:0]const u8, _: [:0]const u8, _: []u8) host.Error!u32 {
+    return error.NotFound;
+}
+fn sink_open_read(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_read(_: *anyopaque, _: store_fs.Fd, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_create(_: *anyopaque, _: [:0]const u8, _: u16) host.Error!store_fs.Fd {
+    return 0;
+}
+fn sink_open_append(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_write(_: *anyopaque, _: store_fs.Fd, bytes: []const u8) host.Error!u32 {
+    return @intCast(bytes.len);
+}
+fn sink_fsync(_: *anyopaque, _: store_fs.Fd) host.Error!void {}
+fn sink_close(_: *anyopaque, _: store_fs.Fd) void {}
+fn sink_set_owner(_: *anyopaque, _: store_fs.Fd, _: u32, _: u32) host.Error!void {}
+fn sink_set_mode(_: *anyopaque, _: store_fs.Fd, _: u16) host.Error!void {}
+fn sink_set_xattr(_: *anyopaque, _: store_fs.Fd, _: [:0]const u8, _: []const u8) host.Error!void {}
+fn sink_set_mtime(_: *anyopaque, _: store_fs.Fd, _: u64) host.Error!void {}
+fn sink_rename(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_unlink(_: *anyopaque, _: [:0]const u8) host.Error!void {
+    return error.NotFound;
+}
+fn sink_make_directory(_: *anyopaque, _: [:0]const u8, _: bool) host.Error!void {}
+fn sink_remove_directory(_: *anyopaque, _: [:0]const u8) host.Error!void {}
+fn sink_sync_directory(_: *anyopaque, _: [:0]const u8) host.Error!void {}
+fn sink_link(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_symlink(_: *anyopaque, _: [:0]const u8, _: [:0]const u8) host.Error!void {}
+fn sink_set_path_attributes(
+    _: *anyopaque,
+    _: [:0]const u8,
+    _: store_fs.PathAttributes,
+) host.Error!void {}
+fn sink_set_path_xattr(
+    _: *anyopaque,
+    _: [:0]const u8,
+    _: [:0]const u8,
+    _: []const u8,
+) host.Error!void {}
+fn sink_lock(_: *anyopaque, _: [:0]const u8, _: bool, _: []const u8) host.Error!store_fs.Fd {
+    return error.WouldBlock;
+}
+
 /// The network of a host that was given none: no route to anywhere, so every request is refused
 /// at the connect. One for all hosts, since it never holds anything.
 fn down_net() registry_net.Net {
@@ -156,6 +256,8 @@ pub const HostSim = struct {
     /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
     /// uses it; null for a host with none.
     store_fs: ?*fs_sim.SimFs,
+    /// The disk the container logs are kept on; null for one that keeps nothing (`sink_fs`).
+    log_fs: ?*fs_sim.SimFs,
     /// The network (registry/net_sim.zig), kept by the test that uses it; null for a host with
     /// none.
     wire: ?*net_sim.SimNet,
@@ -188,6 +290,7 @@ pub const HostSim = struct {
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
         sim.store_fs = null;
+        sim.log_fs = null;
         sim.wire = null;
         assert(sim.open_count() == 0);
         assert(sim.stdout().len == 0);
@@ -267,6 +370,8 @@ pub const HostSim = struct {
         .run_helper = run_helper,
         .block_signals = block_signals,
         .wait_event = wait_event,
+        .wait_event_watching = wait_event_watching,
+        .log_files = log_files,
         .own_pid = own_pid,
         .working_directory = working_directory,
         .sleep_ms = sleep_ms,
@@ -889,6 +994,27 @@ pub const HostSim = struct {
             .event => |event| return event,
             .errno => |errno| return sim.model_error(errno),
         }
+    }
+
+    fn wait_event_watching(
+        context: *anyopaque,
+        pid: host.Pid,
+        timeout_ms: u32,
+        watch: []const host.Handle,
+    ) host.Error!host.Event {
+        const sim = from_context(context);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.interrupt_per_mille)) return sim.inject(error.Interrupted);
+        switch (sim.world.wait_event_watching(pid, timeout_ms, watch)) {
+            .event => |event| return event,
+            .errno => |errno| return sim.model_error(errno),
+        }
+    }
+
+    fn log_files(context: *anyopaque) store_fs.Fs {
+        const sim = from_context(context);
+        if (sim.log_fs) |files| return files.interface();
+        return sink_fs();
     }
 
     fn own_pid(context: *anyopaque) host.Pid {

@@ -2068,6 +2068,7 @@ fn run_foreground(
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
         .image_workspace = &storage.image,
+        .mirror = true,
     };
     const handle = &storage.handle;
     runtime.start(host, container, options, handle, diag) catch {

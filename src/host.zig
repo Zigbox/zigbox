@@ -159,6 +159,16 @@ pub const SpawnFlags = struct {
     /// A network namespace of its own, owned by the new user namespace. Without it the child
     /// shares the host's (`--net host`).
     net: bool,
+    /// Pipe write ends the child makes its standard output and error before it runs `entry`; the
+    /// parent keeps the read ends and closes the write ends itself. Null: the child's streams
+    /// are the parent's.
+    output: ?OutputPipes = null,
+};
+
+/// The write ends of the pipes that carry a container's standard output and error.
+pub const OutputPipes = struct {
+    stdout: Handle,
+    stderr: Handle,
 };
 
 /// The body of a spawned child. It runs in the child, on a copy of the parent's memory, and its
@@ -250,6 +260,9 @@ pub const Event = union(enum) {
     signal: u8,
     /// The wait's time ran out with neither (only for a wait given a time).
     timeout,
+    /// Some of the watched handles (`wait_event_watching`) have bytes to read or reached their
+    /// end: bit i is set when the i-th is ready.
+    output: u32,
 };
 
 /// Which side of `fork_supervisor` a process is on.
@@ -430,6 +443,14 @@ pub const VTable = struct {
     /// Waits for the child to end or for a forwarded signal; the signals must be blocked. With a
     /// `timeout_ms` above zero it also ends, with `.timeout`, when that long has passed.
     wait_event: *const fn (context: *anyopaque, pid: Pid, timeout_ms: u32) Error!Event,
+    /// Like `wait_event`, and also ends, with `.output`, as soon as one of `watch` can be read
+    /// (bytes, or the end of the stream). A signal that has arrived is delivered before output.
+    wait_event_watching: *const fn (
+        context: *anyopaque,
+        pid: Pid,
+        timeout_ms: u32,
+        watch: []const Handle,
+    ) Error!Event,
     /// This process's id.
     own_pid: *const fn (context: *anyopaque) Pid,
     /// The current working directory, as an absolute path, written into `buffer`.
@@ -482,6 +503,10 @@ pub const VTable = struct {
     /// (`registry/net.zig`). The simulator's, when a test gives it none, is a machine with no
     /// network: every request fails to connect.
     network: *const fn (context: *anyopaque) registry_net.Net,
+    /// The file system the container logs are kept on (`runtime/logfile.zig`). The real host's is
+    /// `filesystem`; the simulator's is a disk of the test's own, or one that takes writes and
+    /// keeps nothing, so a test that does not look at logs needs none.
+    log_files: *const fn (context: *anyopaque) store_fs.Fs,
 };
 
 /// What `read_prefix` found.
@@ -1014,10 +1039,45 @@ pub const Host = struct {
             switch (event) {
                 .exited, .timeout => {},
                 .signal => |number| assert(number > 0),
+                .output => unreachable, // Nothing was watched.
             }
             return event;
         }
         return error.IoFailed;
+    }
+
+    /// `wait_event` that also returns `.output` when a handle of `watch` is ready.
+    pub fn wait_event_watching(
+        host: Host,
+        pid: Pid,
+        timeout_ms: u32,
+        watch: []const Handle,
+    ) Error!Event {
+        assert(pid > 0);
+        assert(timeout_ms <= constants.wait_timeout_ms_max);
+        assert(watch.len > 0);
+        assert(watch.len <= 32);
+        for (0..constants.wait_interrupts_max + 1) |_| {
+            const waited = host.vtable.wait_event_watching(host.context, pid, timeout_ms, watch);
+            const event = waited catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            switch (event) {
+                .exited, .timeout => {},
+                .signal => |number| assert(number > 0),
+                .output => |mask| assert(mask != 0),
+            }
+            return event;
+        }
+        return error.IoFailed;
+    }
+
+    /// The file system of the container logs.
+    pub fn log_files(host: Host) store_fs.Fs {
+        const fs = host.vtable.log_files(host.context);
+        assert(@intFromPtr(fs.vtable) != 0);
+        return fs;
     }
 
     pub fn signal_state(host: Host, pid: Pid) Error!SignalState {
