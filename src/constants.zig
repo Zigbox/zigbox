@@ -425,6 +425,11 @@ pub const exec_history_entries_max: u32 = 16;
 /// between two (one second in all).
 pub const exec_history_lock_tries_max: u32 = 100;
 pub const exec_history_lock_wait_ms: u32 = 10;
+/// A command killed by SIGKILL died with its container only if PID 1 is gone, and the kernel
+/// kills the command while PID 1 is still on its way out (it is not yet a zombie). The exec asks
+/// again: tries, and the wait between two (a fifth of a second in all).
+pub const exec_ended_tries_max: u32 = 20;
+pub const exec_ended_wait_ms: u32 = 10;
 /// A container's directory under the state directory: `<state>/zbx/containers/<name>`, and the
 /// longest path inside it (`/upper`, `/merged`).
 pub const containers_path_bytes_max: u32 = 640;
@@ -1063,6 +1068,9 @@ comptime {
     assert(command_word_bytes_max + "/usr/local/sbin/".len <= path_bytes_max);
     assert(exec_strings_bytes_max >= command_word_bytes_max + container_path.len + 64);
     assert(term_bytes_max < exec_strings_bytes_max);
+    // The exec's second look at PID 1 is a fraction of a second, well under one sleep.
+    assert(exec_ended_tries_max * exec_ended_wait_ms <= 1000);
+    assert(exec_ended_wait_ms <= sleep_ms_max);
     assert(environment_count_max == 4);
     assert(std.mem.count(u8, container_path, ":") + 1 == container_path_dirs_count);
     assert(container_devices_count == 6);

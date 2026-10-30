@@ -753,10 +753,23 @@ pub fn wait(handle: *Handle) Exit {
     };
     // A command killed by SIGKILL while its container's PID 1 is gone died with the container.
     if (handle.ended == .signaled and handle.ended.signaled == constants.signal_kill) {
-        handle.container_ended = !lifecycle.alive(host, handle.container_pid, handle.scope.slice());
+        handle.container_ended = container_gone(handle);
     }
     note_history(handle);
     return handle.ended;
+}
+
+/// Whether the container's PID 1 is gone. A command that the kernel killed because its PID
+/// namespace ended is reaped while PID 1 is still dying (it is no zombie yet), so a PID 1 that
+/// looks alive is asked about again, a few times, before the command is taken as killed by
+/// someone else.
+fn container_gone(handle: *Handle) bool {
+    const host = handle.host;
+    for (0..constants.exec_ended_tries_max) |_| {
+        if (!lifecycle.alive(host, handle.container_pid, handle.scope.slice())) return true;
+        host.sleep_ms(constants.exec_ended_wait_ms);
+    }
+    return false;
 }
 
 fn wait_loop(handle: *Handle) host_mod.Error!host_mod.ExitStatus {

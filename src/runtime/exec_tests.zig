@@ -202,6 +202,27 @@ test "the exec'd command dies with its container, and zbx says so" {
     try testing.expect(exec_handle.container_ended);
 }
 
+test "a command killed by SIGKILL while its container lives asks again, then says it did not" {
+    // Goal: the kernel kills the command of a PID namespace while PID 1 is still dying (and no
+    // zombie yet), so the exec asks `exec_ended_tries_max` times, `exec_ended_wait_ms` apart,
+    // before it decides that someone else killed the command. Method: SIGKILL the command alone;
+    // the container lives throughout, so every try is spent and none is left over.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    _ = try start_container(&sim, 6, default_spec());
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec = exec_spec(&.{ "/bin/sleep", "1000" });
+    try exec.start(sim.interface(), &spec, .{}, &exec_handle, &diag);
+    try testing.expect(sim.world.kill(exec_handle.pid.?, constants.signal_kill) == null);
+    const before = sim.world.now_ms;
+    const exit = exec.wait(&exec_handle);
+    try testing.expectEqual(exec.Exit{ .signaled = constants.signal_kill }, exit);
+    try testing.expect(!exec_handle.container_ended);
+    const spent = constants.exec_ended_tries_max * constants.exec_ended_wait_ms;
+    try testing.expect(sim.world.now_ms - before >= spent);
+}
+
 const terminal_chunks = [_]sim_world.OutChunk{
     .{ .stream = .stdout, .bytes = "prompt$ " },
     .{ .stream = .stdout, .bytes = "ls\r\nbin dev\r\n" },

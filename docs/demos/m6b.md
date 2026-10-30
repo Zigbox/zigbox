@@ -505,6 +505,17 @@ Findings (things the agent could not read from JSON; a `FINDING` line each, not 
 - `logs` ends a refusal with status 1 where `run` and `exec` end it with 125 (E0402 is exit 125
   in `exec` and exit 1 in `logs`). The agent reads the code from the document, not the status.
 
+### A bug the first VM runs found
+
+An exec'd command that the kernel kills with its container's PID namespace is reaped while PID 1
+is still on its way out, so `lifecycle.alive` still answered yes and `exec` did not say "the
+container ended, and the command with it" (exit 137 was right; the line was missing). It showed
+as a failure of EXEC 6 in one of three runs. Slice 3's tests used a simulator in which PID 1 is
+gone at once. Now the exec asks again, up to `exec_ended_tries_max` (20) times, `exec_ended_wait_ms`
+(10) apart, before it decides that someone else killed the command; a command killed by SIGKILL
+alone while its container lives pays that fifth of a second. Tested in `exec_tests.zig` (the
+retries are spent and the container is not reported ended).
+
 ### Cuts and deviations
 
 - **The disk full while logging is not in the VM.** It cannot be made reliably in the guest in

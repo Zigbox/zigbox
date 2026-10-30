@@ -465,3 +465,39 @@ test "refusals are read by code, context member and fix" {
     try refused(arena, error.FixWrong, "", e0213, 125, word);
     try refused(arena, error.DiagnosticWrong, "", "", 125, root);
 }
+
+// Text captured from a real run of this demo in the KVM guest (vm run 41076069695): not what the
+// code above is believed to print.
+const real_ps = "{\"schema\":\"zbx.ps/1\",\"containers\":[{\"name\":\"agentweb\",\"state\":" ++
+    "\"running\",\"pid\":3350,\"supervisor\":3345,\"scope\":\"zbx-agentweb.scope\",\"detached\":" ++
+    "true,\"timed_out\":false,\"started\":1793372526,\"ended\":null,\"reason\":\"none\"," ++
+    "\"exit_code\":null,\"command\":[\"python\",\"-m\",\"http.server\",\"-d\",\"/srv\"," ++
+    "\"8000\"],\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":" ++
+    "null},\"network\":\"user\",\"published\":[{\"host\":18090,\"container\":8000}],\"env\":[]," ++
+    "\"writable_mounts\":[{\"host\":\"/home/demo/agent-project/agentsite\",\"target\":" ++
+    "\"/srv\"}],\"user\":{\"uid\":0,\"gid\":0}},{\"name\":\"lg2\",\"state\":\"lost\",\"pid\":" ++
+    "2935,\"supervisor\":2929,\"scope\":\"zbx-lg2.scope\",\"detached\":false,\"timed_out\":" ++
+    "false,\"started\":1793372506,\"ended\":null,\"reason\":\"none\",\"exit_code\":null," ++
+    "\"command\":[\"sh\",\"-c\",\"echo before-the-kill; sleep 600\"],\"labels\":[],\"limits\":" ++
+    "{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null},\"network\":\"none\"," ++
+    "\"published\":[],\"env\":[],\"writable_mounts\":[],\"user\":{\"uid\":0,\"gid\":0}}]}\n";
+const real_log = "{\"schema\":\"zbx.logs/1\",\"stream\":\"stderr\",\"time\":1793372527," ++
+    "\"text\":\"127.0.0.1 - - [30/Oct/2026 15:02:07] \\\"GET /index.html HTTP/1.1\\\" 200 " ++
+    "-\\n\"}\n" ++
+    "{\"schema\":\"zbx.logs/1\",\"stream\":\"stderr\",\"time\":1793372528,\"text\":" ++
+    "\"127.0.0.1 - - [30/Oct/2026 15:02:08] \\\"GET /index.html HTTP/1.1\\\" 200 -\\n\"}\n";
+const real_exec = "{\"exec_exit\":{\"container\":\"agentweb\",\"reason\":\"exited\",\"code\":3," ++
+    "\"container_ended\":false}}\n";
+
+test "text the binary printed in the guest passes the checks" {
+    var state = scratch();
+    defer state.deinit();
+    const arena = state.allocator();
+    const mount = try ps_mount(arena, real_ps, "agentweb");
+    try check_mount(mount, "/home/demo/agent-project", "/srv");
+    try testing.expectEqualStrings("/home/demo/agent-project/agentsite", mount.host);
+    try testing.expectError(error.JsonWrong, ps_mount(arena, real_ps, "lg2"));
+    const counted = try count_in(arena, real_log, "stderr", "GET /index.html");
+    try testing.expectEqual(@as(u32, 2), counted);
+    try check_exec_exit(arena, captured("", real_exec), 3, "agentweb", 3);
+}
