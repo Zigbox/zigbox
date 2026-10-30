@@ -4246,7 +4246,8 @@ test "parse: exec takes a container, -e, --user, --workdir, then -- and the comm
     // Goal: exec's command line, and every line that must be refused, with its code. Method: one
     // line each; the refusals are the usage codes, which an exec ends with 125.
     var invocation: Invocation = undefined;
-    const good = [_][]const u8{ "exec", "web", "-e", "A=1", "--user", "0:0", "--workdir", "/srv" } ++
+    const good = [_][]const u8{ "exec", "web", "-e", "A=1", "--user", "0:0" } ++
+        [_][]const u8{ "--workdir", "/srv" } ++
         [_][]const u8{ "--", "sh", "-c", "echo -v --output json" };
     try testing.expect(try parse_case(&good, &invocation) == null);
     try testing.expectEqual(Command.exec, invocation.command);

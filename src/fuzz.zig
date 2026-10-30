@@ -18,6 +18,7 @@ const diagnostic_fuzz = @import("fuzz_diagnostic.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
 const logs_fuzz = @import("fuzz_logs.zig");
+const exec_fuzz = @import("fuzz_exec.zig");
 const state_fuzz = @import("fuzz_state.zig");
 const vm_fuzz = @import("fuzz_vm.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
@@ -57,6 +58,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "logs", .run_iteration = logs_fuzz.fuzz_logs },
+    .{ .name = "exec", .run_iteration = exec_fuzz.fuzz_exec },
     .{ .name = "state", .run_iteration = state_fuzz.fuzz_state },
     .{ .name = "vm", .run_iteration = vm_fuzz.fuzz_vm },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },
@@ -213,16 +215,19 @@ fn random_args(
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     // M5's network options, their good values and some that are not.
     const net_words = [_][]const u8{
-        "--net",   "user",      "host",      "none",         "--publish",
-        "8080:80", "80:80",     "8080",      "0:1",          "--net=user",
+        "--net",   "user",        "host",      "none",         "--publish",
+        "8080:80", "80:80",       "8080",      "0:1",          "--net=user",
         // M6's other mounts and the export.
-        "--tmpfs", "--bind",    "--secret",  "/scratch:64m", "/srv/a:/data",
-        "-o",      "state",     "export",    "pgdata",
+        "--tmpfs", "--bind",      "--secret",  "/scratch:64m", "/srv/a:/data",
+        "-o",      "state",       "export",    "pgdata",
         // M6b's writable mounts and `--user`: good values, relative and escaping sources, and
         // users that are not USER[:GROUP].
               "--mount",
-        "--user",  "site:/srv", "../x:/y",   "/:/y",         ".:/y",
-        "a:b:c",   "0",         "1000:1000", "app:",         "--user=0",
+        "--user",  "site:/srv",   "../x:/y",   "/:/y",         ".:/y",
+        "a:b:c",   "0",           "1000:1000", "app:",         "--user=0",
+        // M6b's exec: its options and their values.
+        "exec",    "--workdir",   "/srv",      "srv",          "-e",
+        "A=1",     "--workdir=/",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -617,10 +622,10 @@ fn command_word(args: FuzzArgs) ?[]const u8 {
     return null;
 }
 
-/// Whether the command line is a `run` one.
+/// Whether the command line is a `run` or an `exec` one: both use the codes of a container run.
 fn is_run_line(args: FuzzArgs) bool {
     const word = command_word(args) orelse return false;
-    return std.mem.eql(u8, word, "run");
+    return std.mem.eql(u8, word, "run") or std.mem.eql(u8, word, "exec");
 }
 
 /// Whether it is a `pull` one: like the doctor it reads the host (the machine type, the

@@ -283,14 +283,14 @@ fn stage_execs(ws: *Workspace, host: Host, runs: *const records.Dir, name: []con
         // Cannot fail: a short line into a buffer of 32 KiB.
         writer.print("unavailable: the exec history could not be read ({s})\n", .{
             @errorName(err),
-        }) catch unreachable;
+        }) catch unreachable; // Same: a short line.
         return ws.add_trusted(file, why, writer.buffered(), false);
     };
     const history = &ws.execs.history;
     // Cannot fail: as above.
     writer.print("{d} recent execs of {s}, oldest first (at most {d} are kept)\n", .{
         history.count, name, constants.exec_history_entries_max,
-    }) catch unreachable;
+    }) catch unreachable; // Same: a short line.
     var cut = false;
     for (history.slice()) |*entry| {
         write_exec(&writer, entry) catch {
@@ -305,7 +305,8 @@ fn write_exec(writer: *std.Io.Writer, entry: *const exec_history.Entry) std.Io.W
     assert(entry.ended >= entry.started);
     assert(entry.command_len > 0);
     var stamp: [constants.timestamp_bytes]u8 = undefined;
-    try writer.print("{s}  {d}s  ", .{ timestamp(entry.started, &stamp), entry.ended - entry.started });
+    const seconds = entry.ended - entry.started;
+    try writer.print("{s}  {d}s  ", .{ timestamp(entry.started, &stamp), seconds });
     switch (entry.exit) {
         .exited => |code| try writer.print("exited {d}", .{code}),
         .signaled => |number| try writer.print("signal {d}", .{number}),
