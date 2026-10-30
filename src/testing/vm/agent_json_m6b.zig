@@ -107,6 +107,51 @@ pub fn check_mount(mount: Mount, project: []const u8, target: []const u8) Error!
     if (mount.uid != 0 or mount.gid != 0) return error.MountWrong;
 }
 
+/// The mount is at `host`, the path the agent's own directory resolves to, exactly.
+pub fn check_resolved(mount: Mount, host: []const u8) Error!void {
+    std.debug.assert(host.len > 0);
+    if (!std.mem.eql(u8, mount.host, host)) return error.MountWrong;
+}
+
+/// The state `ps --output json` gives the container `name`, found by its name among them all.
+pub fn ps_state(arena: Allocator, stdout: []const u8, name: []const u8) Error![]const u8 {
+    std.debug.assert(name.len > 0);
+    const doc = try parse_value(arena, stdout);
+    const schema = string_of(doc, "schema") orelse return error.JsonWrong;
+    if (!std.mem.eql(u8, schema, "zbx.ps/1")) return error.JsonWrong;
+    const list = member(doc, "containers") orelse return error.JsonWrong;
+    if (list != .array) return error.JsonWrong;
+    for (list.array.items) |entry| {
+        const found = string_of(entry, "name") orelse return error.JsonWrong;
+        if (!std.mem.eql(u8, found, name)) continue;
+        return string_of(entry, "state") orelse error.JsonWrong;
+    }
+    return error.JsonWrong;
+}
+
+/// `ps --all` says the container `name` (not any other) is in `wanted`.
+pub fn check_ps_state(
+    arena: Allocator,
+    stdout: []const u8,
+    name: []const u8,
+    wanted: []const u8,
+) Error!void {
+    const state = try ps_state(arena, stdout, name);
+    if (!std.mem.eql(u8, state, wanted)) return error.JsonWrong;
+}
+
+/// The schema the agent read describes `name` as an object under `properties`: how it knows a
+/// document with no `schema` member (the `exec_exit` line of `exec`) by the member's name. A
+/// word in a description is not a member.
+pub fn check_describes(arena: Allocator, schema_text: []const u8, name: []const u8) Error!void {
+    std.debug.assert(name.len > 0);
+    const doc = try parse_value(arena, schema_text);
+    const properties = member(doc, "properties") orelse return error.JsonWrong;
+    const described = member(properties, name) orelse return error.JsonWrong;
+    const kind = string_of(described, "type") orelse return error.JsonWrong;
+    if (!std.mem.eql(u8, kind, "object")) return error.JsonWrong;
+}
+
 // ---- exec ----------------------------------------------------------------------------------
 
 /// `exec --output json` ended as the command did: the process status is `wanted`, and the last
@@ -166,6 +211,20 @@ pub fn count_log_records(
         if (std.mem.indexOf(u8, text, needle) != null) count += 1;
     }
     return count;
+}
+
+/// The log has exactly `wanted` records of `stream` holding `needle` (see count_log_records).
+pub fn check_log_records(
+    arena: Allocator,
+    schema_text: []const u8,
+    streams: Streams,
+    status: u8,
+    stream: []const u8,
+    needle: []const u8,
+    wanted: u32,
+) Error!void {
+    const counted = try count_log_records(arena, schema_text, streams, status, stream, needle);
+    if (counted != wanted) return error.LogWrong;
 }
 
 // ---- Refusals ------------------------------------------------------------------------------
@@ -228,6 +287,31 @@ fn first_fix_with_command(found: agent_json.Diagnostic) ?agent_json.Fix {
 /// The context member `key` of a diagnostic, as text.
 pub fn context_of(found: agent_json.Diagnostic, key: []const u8) ?[]const u8 {
     return string_of(found.context, key);
+}
+
+/// The context member `key` is `wanted`.
+pub fn check_context(found: agent_json.Diagnostic, key: []const u8, wanted: []const u8) Error!void {
+    std.debug.assert(key.len > 0);
+    const said = context_of(found, key) orelse return error.DiagnosticWrong;
+    if (!std.mem.eql(u8, said, wanted)) return error.DiagnosticWrong;
+}
+
+/// From a fix that is a template, the flag `flag` with the value it gives (`--user 0`): the
+/// part the agent takes, to add to its own command. Null when the fix does not name the flag,
+/// or names it with no value or with a placeholder (`<...>`) the agent could not fill.
+pub fn flag_from_fix(command: []const u8, flag: []const u8) ?[]const u8 {
+    std.debug.assert(std.mem.startsWith(u8, flag, "--"));
+    var words = std.mem.tokenizeScalar(u8, command, ' ');
+    while (words.next()) |word| {
+        if (!std.mem.eql(u8, word, flag)) continue;
+        const value = words.next() orelse return null;
+        if (value[0] == '<' or value[0] == '-') return null;
+        const begin = @intFromPtr(word.ptr) - @intFromPtr(command.ptr);
+        const end = @intFromPtr(value.ptr) - @intFromPtr(command.ptr) + value.len;
+        std.debug.assert(end <= command.len);
+        return command[begin..end];
+    }
+    return null;
 }
 
 /// The command of the first fix that has one: what the agent runs when it is not a template.
@@ -466,8 +550,9 @@ test "refusals are read by code, context member and fix" {
     try refused(arena, error.DiagnosticWrong, "", "", 125, root);
 }
 
-// Text captured from a real run of this demo in the KVM guest (vm run 41076069695): not what the
-// code above is believed to print.
+// Text captured from real runs of this demo in the KVM guest (vm runs 41076069695 and, for the
+// schema, the refusal of a non-root image and `ps --all`, 41079428757): not what the code above
+// is believed to print. `ps --all` is cut to three of its 21 entries, each as printed.
 const real_ps = "{\"schema\":\"zbx.ps/1\",\"containers\":[{\"name\":\"agentweb\",\"state\":" ++
     "\"running\",\"pid\":3350,\"supervisor\":3345,\"scope\":\"zbx-agentweb.scope\",\"detached\":" ++
     "true,\"timed_out\":false,\"started\":1793372526,\"ended\":null,\"reason\":\"none\"," ++
@@ -490,6 +575,10 @@ const real_exec = "{\"exec_exit\":{\"container\":\"agentweb\",\"reason\":\"exite
     "\"container_ended\":false}}\n";
 
 test "text the binary printed in the guest passes the checks" {
+    // Goal: the agent's checks accept what the binary really printed, so the modelled inputs of
+    // the tests above are not the only thing they were tried on. Method: the captured documents,
+    // each through the check that reads it in the demo, and the wrong name or state where a
+    // check selects one.
     var state = scratch();
     defer state.deinit();
     const arena = state.allocator();
@@ -500,4 +589,140 @@ test "text the binary printed in the guest passes the checks" {
     const counted = try count_in(arena, real_log, "stderr", "GET /index.html");
     try testing.expectEqual(@as(u32, 2), counted);
     try check_exec_exit(arena, captured("", real_exec), 3, "agentweb", 3);
+}
+
+const real_ps_all = "{\"schema\":\"zbx.ps/1\",\"containers\":[{\"name\":\"zbx-ab74b6\",\"state\"" ++
+    ":\"stopped\",\"pid\":3442,\"supervisor\":3438,\"scope\":\"zbx-zbx-ab74b6.scope\",\"detached" ++
+    "\":false,\"timed_out\":false,\"started\":1793373899,\"ended\":1793373899,\"reason\":\"exite" ++
+    "d\",\"exit_code\":0,\"command\":[\"docker-entrypoint.sh\",\"id\",\"-u\"],\"labels\":[],\"li" ++
+    "mits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null},\"network\":\"none\",\"pub" ++
+    "lished\":[],\"env\":[],\"writable_mounts\":[{\"host\":\"/home/demo/agent-project/agentsite" ++
+    "\",\"target\":\"/srv\"}],\"user\":{\"uid\":0,\"gid\":0}},{\"name\":\"agentweb\",\"state\":" ++
+    "\"stopped\",\"pid\":3350,\"supervisor\":3345,\"scope\":\"zbx-agentweb.scope\",\"detached\":" ++
+    "true,\"timed_out\":false,\"started\":1793373895,\"ended\":1793373899,\"reason\":\"signal\"," ++
+    "\"exit_code\":137,\"command\":[\"python\",\"-m\",\"http.server\",\"-d\",\"/srv\",\"8000\"]," ++
+    "\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null},\"networ" ++
+    "k\":\"user\",\"published\":[{\"host\":18090,\"container\":8000}],\"env\":[],\"writable_moun" ++
+    "ts\":[{\"host\":\"/home/demo/agent-project/agentsite\",\"target\":\"/srv\"}],\"user\":{\"ui" ++
+    "d\":0,\"gid\":0}},{\"name\":\"pd1\",\"state\":\"lost\",\"pid\":3257,\"supervisor\":3251,\"s" ++
+    "cope\":\"zbx-pd1.scope\",\"detached\":false,\"timed_out\":false,\"started\":1793373887,\"en" ++
+    "ded\":null,\"reason\":\"none\",\"exit_code\":null,\"command\":[\"docker-entrypoint.sh\",\"s" ++
+    "leep\",\"611\"],\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis" ++
+    "\":null},\"network\":\"none\",\"published\":[],\"env\":[],\"writable_mounts\":[],\"user\":{" ++
+    "\"uid\":11211,\"gid\":11211}}]}\n";
+const real_exec_schema = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\n\"$id" ++
+    "\":\"https://zigbox.github.io/zigbox/schema/exec/1\",\"version\":1,\n\"title\":\"zbx exec -" ++
+    "-output json\",\n\"description\":\"stderr: diagnostics, then exec_exit. The command's own o" ++
+    "utput is its own.\",\n\"type\":\"object\",\n\"properties\":{\"code\":{\"type\":\"string\"," ++
+    "\"pattern\":\"^ZBX-[EWB][0-9]{4}$\"},\n\"severity\":{\"enum\":[\"error\",\"warning\",\"bug" ++
+    "\"]},\"blame\":{\"enum\":[\"user\",\"environment\",\n\"external\",\"internal\",\"bug\"]},\n" ++
+    "\"summary\":{\"type\":\"string\"},\"causes\":{\"type\":\"array\",\"items\":{\"type\":\"stri" ++
+    "ng\"}},\n\"while\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"context\":{\"type" ++
+    "\":\"object\"},\n\"fixes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties" ++
+    "\":{\n\"sentence\":{\"type\":\"string\"},\"command\":{\"type\":[\"string\",\"null\"]},\n\"n" ++
+    "eeds_root\":{\"type\":\"boolean\",\"description\":\"M6: only when true; the command needs r" ++
+    "oot\"},\n\"template\":{\"type\":\"boolean\",\n\"description\":\"M6: only when true; an exam" ++
+    "ple to adapt, not to run as written\"}}}},\n\"docs\":{\"type\":\"string\"},\"saved\":{\"typ" ++
+    "e\":\"string\"},\"omitted\":{\"type\":\"object\"},\"exec_exit\":{\"type\":\"object\",\"requ" ++
+    "ired\":[\"container\",\"reason\",\"code\",\"container_ended\"],\n\"properties\":{\"containe" ++
+    "r\":{\"type\":\"string\"},\"reason\":{\"enum\":[\"exited\",\"signal\"]},\n\"code\":{\"type" ++
+    "\":\"integer\",\"minimum\":0,\"maximum\":255,\n\"description\":\"the command's exit code, o" ++
+    "r 128 plus its signal; zbx exits with it\"},\n\"signal\":{\"type\":\"integer\",\"descriptio" ++
+    "n\":\"only for reason signal\"},\n\"container_ended\":{\"type\":\"boolean\",\n\"description" ++
+    "\":\"the command was killed because its container ended\"}}}},\n\"oneOf\":[{\"required\":[" ++
+    "\"code\",\"severity\",\"blame\",\"summary\",\"causes\",\"docs\"]},{\"required\":[\"exec_exi" ++
+    "t\"]}]}\n";
+const real_e0213 = "{\"code\":\"ZBX-E0213\",\"severity\":\"error\",\"blame\":\"user\",\"summary" ++
+    "\":\"a --mount needs the container to run as root\",\"causes\":[\"the container would run a" ++
+    "s memcache (uid 11211, gid 11211), and what it writes through --mount would belong to an id" ++
+    " that is not yours\"],\"while\":[\"checking the user of a run with --mount\"],\"context\":{" ++
+    "\"uid\":\"11211\",\"gid\":\"11211\"},\"fixes\":[{\"sentence\":\"run it as root, which is yo" ++
+    "u inside the container:\",\"command\":\"zbx run --user 0 --mount ./site:/srv <image>\",\"te" ++
+    "mplate\":true},{\"sentence\":\"or give the directory read-only:\",\"command\":\"zbx run --b" ++
+    "ind ./site:/srv <image>\",\"template\":true}],\"docs\":\"https://zigbox.github.io/zigbox/er" ++
+    "rors/E0213.html\",\"omitted\":{\"causes\":0,\"while\":0,\"context\":0,\"fixes\":0}}\n";
+
+test "the agent reads the state of its own container among all of them" {
+    // Goal: `ps --all` is read for the one container the agent stopped, not for any entry that
+    // is stopped. Method: the captured `ps --all`, where other containers are stopped (and one
+    // lost) too: agentweb's entry changed to running fails, and so does a list without it.
+    var state = scratch();
+    defer state.deinit();
+    const arena = state.allocator();
+    try check_ps_state(arena, real_ps_all, "agentweb", "stopped");
+    try testing.expectEqualStrings("lost", try ps_state(arena, real_ps_all, "pd1"));
+    const running = try std.mem.replaceOwned(
+        u8,
+        arena,
+        real_ps_all,
+        "{\"name\":\"agentweb\",\"state\":\"stopped\"",
+        "{\"name\":\"agentweb\",\"state\":\"running\"",
+    );
+    try testing.expect(!std.mem.eql(u8, running, real_ps_all));
+    const wrong = check_ps_state(arena, running, "agentweb", "stopped");
+    try testing.expectError(error.JsonWrong, wrong);
+    const absent = check_ps_state(arena, real_ps_all, "no-such", "stopped");
+    try testing.expectError(error.JsonWrong, absent);
+    try testing.expectError(error.JsonWrong, check_ps_state(arena, "nope", "agentweb", "stopped"));
+}
+
+test "the exec schema is known by the member it describes, not by a word in it" {
+    // Goal: the agent finds that the exec schema describes `exec_exit` as a member. Method: the
+    // captured schema passes; with the member renamed (the word still in its descriptions) it
+    // fails, and so does the logs schema, which has no such member.
+    var state = scratch();
+    defer state.deinit();
+    const arena = state.allocator();
+    try check_describes(arena, real_exec_schema, "exec_exit");
+    const renamed = try std.mem.replaceOwned(
+        u8,
+        arena,
+        real_exec_schema,
+        "\"exec_exit\":{\"type\"",
+        "\"exit\":{\"type\"",
+    );
+    try testing.expect(std.mem.indexOf(u8, renamed, "exec_exit") != null);
+    try testing.expectError(error.JsonWrong, check_describes(arena, renamed, "exec_exit"));
+    try testing.expectError(error.JsonWrong, check_describes(arena, logs_schema, "exec_exit"));
+    try testing.expectError(error.JsonWrong, check_describes(arena, "[]", "exec_exit"));
+}
+
+test "the agent takes the flag from the template, and the exact values it acts on" {
+    // Goal: the agent adapts E0213's fix by the flag it names, and compares the path, the
+    // context and the count it reads exactly. Method: the captured refusal gives `--user 0`; a
+    // fix without the flag, with a placeholder, or with the flag last gives nothing; another
+    // path, context value or count fails.
+    var state = scratch();
+    defer state.deinit();
+    const arena = state.allocator();
+    const root: Want = .{
+        .code = "ZBX-E0213",
+        .exit = 125,
+        .key = "uid",
+        .not_value = "0",
+        .fix_template = true,
+        .fix_has = "--user 0",
+    };
+    const found = try check_refusal(arena, captured("", real_e0213), 125, root);
+    try testing.expectEqualStrings("--user 0", flag_from_fix(fix_command(found).?, "--user").?);
+    const none = [_][]const u8{
+        "zbx run --bind ./site:/srv <image>",
+        "zbx run --user <id> --mount ./site:/srv <image>",
+        "zbx run --mount ./site:/srv --user",
+        "zbx run --userx 0 <image>",
+    };
+    for (none) |fix| try testing.expect(flag_from_fix(fix, "--user") == null);
+    try check_context(found, "uid", "11211");
+    try testing.expectError(error.DiagnosticWrong, check_context(found, "uid", "1121"));
+    try testing.expectError(error.DiagnosticWrong, check_context(found, "real", "11211"));
+    const mount = try ps_mount(arena, real_ps, "agentweb");
+    try check_resolved(mount, "/home/demo/agent-project/agentsite");
+    const other = check_resolved(mount, "/home/demo/agent-project/agentsite2");
+    try testing.expectError(error.MountWrong, other);
+    const log = captured(real_log, "");
+    try check_log_records(arena, logs_schema, log, 0, "stderr", "GET /index.html", 2);
+    const three = check_log_records(arena, logs_schema, log, 0, "stderr", "GET /index.html", 3);
+    try testing.expectError(error.LogWrong, three);
+    const one = check_log_records(arena, logs_schema, log, 0, "stderr", "GET /index.html", 1);
+    try testing.expectError(error.LogWrong, one);
 }

@@ -1,10 +1,12 @@
 //! demo-m6b's ACCEPT part: the acceptance criterion of M6b that the parts WRITABLE, LOGS and EXEC
 //! do not show. As the user `demo`, in the net project (`zn`):
 //!
-//!   A container (`lrm00`) writes a marker and ends; its log and its run record are on the disk
-//!   and `zbx logs` shows the marker. Forty more containers run after it, so that the record
-//!   (the newest `runs_max` are kept) is pruned. The log goes with it: neither of its two files
-//!   is left, the newest container's log is, and `zbx logs lrm00` is ZBX-E0402.
+//!   A container (`lrm00`) writes more than one log file holds (`log_segment_bytes_max`) and
+//!   then a marker, and ends; its log is two files (the rotated `lrm00.log.1` too), its run
+//!   record is on the disk, and `zbx logs` ends with the marker. Forty more containers run after
+//!   it, so that the record (the newest `runs_max` are kept) is pruned. The log goes with it:
+//!   neither of its two files is left, the newest container's log is, and `zbx logs lrm00` is
+//!   ZBX-E0402 with its summary.
 //!
 //! It runs last, because pruning removes the oldest records of the demo's state directory, which
 //! must not be one a part still needs.
@@ -27,6 +29,17 @@ const zn = net_user.zn;
 const step_name = "ACCEPT6B";
 
 const marker = "gone-with-the-record";
+/// What `lrm00` writes before the marker: more than one log file holds, so that the log rotates
+/// once, and less than the cap. The harness is a module of its own, so it cannot import
+/// `constants.zig`; these are `log_segment_bytes_max` and `log_bytes_max` as they are there.
+const segment_bytes: u64 = 2_621_440;
+const cap_bytes: u64 = 5 * 1024 * 1024;
+const filler_bytes: u64 = 3_000_000;
+
+comptime {
+    std.debug.assert(filler_bytes > segment_bytes);
+    std.debug.assert(filler_bytes < cap_bytes);
+}
 
 const script_path = "/home/demo/log-removal.sh";
 const script =
@@ -34,10 +47,13 @@ const script =
     "Z=/home/demo/zn\n" ++
     "L=" ++ common.state_dir ++ "/logs\n" ++
     "R=" ++ common.state_dir ++ "/runs\n" ++
-    "$Z run --name lrm00 alpine -- echo " ++ marker ++ " > /dev/null || exit 1\n" ++
+    "$Z run --name lrm00 alpine -- sh -c 'yes 0123456789abcdef | head -c " ++
+    std.fmt.comptimePrint("{d}", .{filler_bytes}) ++ "; echo; echo " ++ marker ++
+    "' > /dev/null || exit 1\n" ++
     "echo before_log=$(ls $L | grep -c '^lrm00\\.log$')\n" ++
+    "echo before_older=$(ls $L | grep -c '^lrm00\\.log\\.1$')\n" ++
     "echo before_record=$(ls $R | grep -c '^lrm00\\.')\n" ++
-    "echo before_text=$($Z logs lrm00)\n" ++
+    "echo before_text=$($Z logs lrm00 | tail -n 1)\n" ++
     "i=1\n" ++
     "while [ $i -le 40 ]; do\n" ++
     "  $Z run --name lrm$(printf %02d $i) alpine -- true > /dev/null 2>&1 || exit 2\n" ++
@@ -49,7 +65,7 @@ const script =
     "echo newest_log=$(ls $L | grep -c '^lrm40\\.log$')\n" ++
     "$Z logs lrm00 > /dev/null 2> /tmp/lrm00.err\n" ++
     "echo gone_status=$?\n" ++
-    "echo gone_code=$(grep -o 'ZBX-E0402' /tmp/lrm00.err | head -n 1)\n";
+    "echo gone_line=$(head -n 1 /tmp/lrm00.err)\n";
 
 pub fn step_accept(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\n{s}: ACCEPT6B: a log is removed with its run record\n", .{H.demo_name});

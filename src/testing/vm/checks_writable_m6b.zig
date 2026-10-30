@@ -39,9 +39,21 @@ pub fn check_page(output: []const u8, wanted: []const u8, other: []const u8) Err
     if (contains(output, other)) return error.PageWrong;
 }
 
-/// On the host after a run as root wrote through a mount: `stat -c %u` of the file, `id -u` of
-/// the user, and a count of the files of the site not owned by that user (three lines). The file
-/// is the user's, and no file of the site is another id's.
+/// The host-side command whose output `check_owner` reads, run as `demo`: `stat -c %u` of
+/// `file`, `id -u`, and the number of bytes of the paths `find` prints under `directory` that
+/// `demo` does not own. `find` runs from inside `directory` (from `/root`, runuser's start, it
+/// fails on its way out), and a `find` that fails ends the command with 7, so a failed search
+/// never reads as an empty one.
+pub fn owners_command(comptime file: []const u8, comptime directory: []const u8) []const u8 {
+    comptime std.debug.assert(file[0] == '/');
+    comptime std.debug.assert(directory[0] == '/');
+    return "sh -c 'stat -c %u " ++ file ++ "; id -u; f=$(cd " ++ directory ++
+        " && find . ! -user demo -print) || exit 7; echo ${#f}'";
+}
+
+/// On the host after a run as root wrote through a mount (`owners_command`, exit 0): `stat -c
+/// %u` of the file, `id -u` of the user, and the bytes of the paths of the site not owned by that
+/// user (three lines). The file is the user's, and no file of the site is another id's.
 pub fn check_owner(host: []const u8) Error!void {
     var lines = std.mem.tokenizeScalar(u8, host, '\n');
     const owner = std.mem.trim(u8, lines.next() orelse return error.OwnerWrong, " \r\t");

@@ -34,13 +34,15 @@ fn expect_value(summary: []const u8, key: []const u8, wanted: []const u8) Error!
 }
 
 /// The guest's summary (one `key=value` per line) of a container that ran first and then had
-/// more than `constants.runs_max` newer ones after it: right after its run its log and its
-/// record were there and `zbx logs` showed `marker`; once the record was pruned neither file was
-/// left, a newer container's log was, and `zbx logs` of the old name is ZBX-E0402 (exit 1, which
-/// is how `logs` ends a refusal).
+/// more than `constants.runs_max` newer ones after it: right after its run its log, rotated once
+/// (both files), and its record were there and `zbx logs` ended with `marker`; once the record
+/// was pruned neither file was left, a newer container's log was, and `zbx logs` of the old name
+/// is ZBX-E0402 with its summary, exit 1 (DIAGNOSTICS.md, "Exit codes": 125 is only for a
+/// command that runs or waits on a workload).
 pub fn check_removal(summary: []const u8, status: u8, marker: []const u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     try expect_value(summary, "before_log", "1");
+    try expect_value(summary, "before_older", "1");
     try expect_value(summary, "before_record", "1");
     try expect_value(summary, "before_text", marker);
     try expect_value(summary, "after_log", "0");
@@ -48,24 +50,28 @@ pub fn check_removal(summary: []const u8, status: u8, marker: []const u8) Error!
     try expect_value(summary, "after_record", "0");
     try expect_value(summary, "newest_log", "1");
     try expect_value(summary, "gone_status", "1");
-    try expect_value(summary, "gone_code", "ZBX-E0402");
+    try expect_value(summary, "gone_line", "error[ZBX-E0402]: no container with that name");
 }
 
 const testing = std.testing;
+const marker_text = "gone-with-the-record";
 
-const good = "before_log=1\nbefore_record=1\nbefore_text=gone-with-the-record\n" ++
+/// The summary of run 41079428757 (vm/m6b-slice5d), with the two lines that run did not print
+/// yet (`before_older`, `gone_line`, from E0402 as the agent's JSON gave it in that run).
+const good = "before_log=1\nbefore_older=1\nbefore_record=1\nbefore_text=gone-with-the-record\n" ++
     "after_log=0\nafter_older=0\nafter_record=0\nnewest_log=1\ngone_status=1\n" ++
-    "gone_code=ZBX-E0402\n";
+    "gone_line=error[ZBX-E0402]: no container with that name\n";
 
 test "a log removed with its record passes, and each way to fail is caught" {
     // Goal: the check passes on the summary of a correct run and fails on each lie in it: a log
-    // or its older half left, the record left, the log never there, the newest missing, the
-    // wrong refusal, and a command that failed.
+    // or its older half left, the record left, the log never there or never rotated, the newest
+    // missing, the wrong refusal (another code, another summary), and a command that failed.
+    // Method: the summary the guest printed (`good`), each line changed in turn.
     try check_removal(good, 0, "gone-with-the-record");
     try testing.expectError(error.ExitCodeWrong, check_removal(good, 1, "gone-with-the-record"));
     const keys = [_][]const u8{
-        "before_log",   "before_record", "after_log", "after_older",
-        "after_record", "newest_log",
+        "before_log",  "before_older", "before_record", "after_log",
+        "after_older", "after_record", "newest_log",
     };
     var buffer: [512]u8 = undefined;
     for (keys) |key| {
@@ -82,6 +88,13 @@ test "a log removed with its record passes, and each way to fail is caught" {
     defer testing.allocator.free(unix);
     try testing.expectError(error.RemovalWrong, check_removal(unix, 0, "gone-with-the-record"));
     try testing.expectError(error.SummaryWrong, check_removal("", 0, "x"));
-    const cut = good[0 .. good.len - "gone_code=ZBX-E0402\n".len];
+    const other_code = try std.mem.replaceOwned(u8, testing.allocator, good, "E0402", "E0217");
+    defer testing.allocator.free(other_code);
+    try testing.expectError(error.RemovalWrong, check_removal(other_code, 0, marker_text));
+    const summary = "no container with that name";
+    const other_summary = try std.mem.replaceOwned(u8, testing.allocator, good, summary, "no");
+    defer testing.allocator.free(other_summary);
+    try testing.expectError(error.RemovalWrong, check_removal(other_summary, 0, marker_text));
+    const cut = good[0..std.mem.indexOf(u8, good, "gone_line=").?];
     try testing.expectError(error.SummaryWrong, check_removal(cut, 0, "gone-with-the-record"));
 }

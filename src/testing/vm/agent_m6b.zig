@@ -65,8 +65,7 @@ const wait_path = "/home/demo/wait-agentweb.sh";
 const fetch = "curl -fsS http://127.0.0.1:" ++ port ++ "/index.html; sleep 1";
 const run_exec = za ++ " --output json exec " ++ container ++ " -e TOKEN=" ++ token ++
     " -- sh -c 'echo agent-inside > /srv/agent.txt; test -n \"$TOKEN\"; exit 3'" ++ no_input;
-const owners = H.as_demo ++ "sh -c 'stat -c %u " ++ site ++ "/agent.txt; id -u; " ++
-    "find " ++ site ++ " ! -user demo | wc -l'";
+const owners = H.as_demo ++ checks_writable.owners_command(site ++ "/agent.txt", site);
 
 /// The schemas the agent read first, kept for the steps that check a document against them.
 var run_schema: []const u8 = "";
@@ -120,10 +119,9 @@ fn step_schemas(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step, "expected the logs schema to name its document", err);
     };
     // The exec schema has no `schema` member: its document is a line, `exec_exit`.
-    if (std.mem.indexOf(u8, exec_schema, "\"exec_exit\"") == null) {
-        const what = "expected the exec schema to describe exec_exit";
-        return fail_step(out, step, what, error.JsonWrong);
-    }
+    json_m6b.check_describes(arena, exec_schema, "exec_exit") catch |err| {
+        return fail_step(out, step, "expected the exec schema to describe exec_exit", err);
+    };
 }
 
 /// The document `text` follows `schema`, which the agent reads as it is: no `$ref` to resolve.
@@ -168,9 +166,9 @@ fn step_start(session: *Session, out: *Io.Writer) !void {
     json_m6b.check_mount(found, project, "/srv") catch |err| {
         return fail_step(out, step, "expected the mount inside the project, run as root", err);
     };
-    if (!std.mem.eql(u8, found.host, site)) {
-        return fail_step(out, step, "expected the resolved path of agentsite", error.MountWrong);
-    }
+    json_m6b.check_resolved(found, site) catch |err| {
+        return fail_step(out, step, "expected the resolved path of agentsite", err);
+    };
     try expect_follows(arena, out, run_schema, started.streams.stdout, "the run -d document");
     try spec.run_waiter(session, out, wait_path, spec.wait_script("/home/demo/za", container));
     try finding(out, "no document says when a container is ready: the agent polls the " ++
@@ -202,19 +200,17 @@ fn step_loop(session: *Session, out: *Io.Writer) !void {
     };
     const command = try common.format(session, "{s} --output json logs {s}", .{ za, container });
     const logged = try json_run(session, out, command, 0);
-    const counted = json_m6b.count_log_records(
+    json_m6b.check_log_records(
         arena,
         logs_schema,
         logged.streams,
         logged.status,
         "stderr",
         "GET /index.html",
+        2,
     ) catch |err| {
-        return fail_step(out, step, "expected zbx.logs/1 lines that follow the schema", err);
+        return fail_step(out, step, "expected two requests in zbx.logs/1 lines", err);
     };
-    if (counted != 2) {
-        return fail_step(out, step, "expected two requests in the log", error.LogWrong);
-    }
 }
 
 fn step_exec(session: *Session, out: *Io.Writer) !void {
@@ -232,18 +228,21 @@ fn step_exec(session: *Session, out: *Io.Writer) !void {
     json_m6.check_absent(&shown, token) catch |err| {
         return fail_step(out, step, "the value of -e is in a document", err);
     };
-    // The owner is read from stdout: `find` says on stderr that it cannot go back to /root.
+    // The owner is read from stdout; `find` runs from the site, so it has nothing to say on stderr.
     const who = try state.expect_long_split(session, out, owners, 0, short_s);
     checks_writable.check_owner(who.streams.stdout) catch |err| {
         return fail_step(out, step, "expected the host user to own the file", err);
     };
 }
 
-/// A refusal read by its members, and `explain` of its code agrees with it.
+/// A refusal read by its members, checked against the schema of the command that refused (null
+/// for a command whose schema describes no refusal: a finding), and `explain` of its code agrees
+/// with it.
 fn refusal(
     session: *Session,
     out: *Io.Writer,
     command: []const u8,
+    schema: ?[]const u8,
     want: json_m6b.Want,
 ) !json.Diagnostic {
     const arena = session.scratch_allocator();
@@ -252,7 +251,7 @@ fn refusal(
         return fail_step(out, step, "expected the refusal with its code, context and fix", err);
     };
     const line = std.mem.trim(u8, refused.streams.stderr, " \r\n\t");
-    try expect_follows(arena, out, run_schema, line, "the refusal");
+    if (schema) |text| try expect_follows(arena, out, text, line, "the refusal");
     const pattern = "{s} --output json explain {s}";
     const explain = try common.format(session, pattern, .{ za, found.code[4..] });
     const explained = try json_run(session, out, explain, 0);
@@ -269,7 +268,7 @@ fn step_refusals(session: *Session, out: *Io.Writer) !void {
     const arena = session.scratch_allocator();
     const outside_run = za ++ " --output json run --mount ../outside-agent:/x " ++ alpine ++
         " -- true";
-    const found = try refusal(session, out, outside_run, .{
+    const found = try refusal(session, out, outside_run, run_schema, .{
         .code = "ZBX-E0212",
         .exit = 125,
         .key = "within",
@@ -277,12 +276,11 @@ fn step_refusals(session: *Session, out: *Io.Writer) !void {
         .fix_template = true,
         .fix_has = "--bind",
     });
-    const real = json_m6b.context_of(found, "real") orelse "";
-    if (!std.mem.eql(u8, real, outside)) {
-        return fail_step(out, step, "expected the real path in the context", error.DiagnosticWrong);
-    }
+    json_m6b.check_context(found, "real", outside) catch |err| {
+        return fail_step(out, step, "expected the real path in the context", err);
+    };
     const user_run = za ++ " --output json run --mount agentsite:/srv " ++ non_root ++ " -- id -u";
-    const root = try refusal(session, out, user_run, .{
+    const root = try refusal(session, out, user_run, run_schema, .{
         .code = "ZBX-E0213",
         .exit = 125,
         .key = "uid",
@@ -292,12 +290,15 @@ fn step_refusals(session: *Session, out: *Io.Writer) !void {
     });
     try finding(out, "the fix of ZBX-E0213 is a template (<image>, ./site): the agent adapts " ++
         "it by the flag it names, --user 0, and keeps its own directory and image");
-    // The agent never runs a template as written: it takes the flag from it.
-    if (json_m6b.fix_command(root) == null) {
-        return fail_step(out, step, "expected a fix with a command", error.FixWrong);
-    }
-    const adapted = za ++ " --output json run --user 0 --mount agentsite:/srv " ++ non_root ++
-        " -- id -u";
+    // The agent never runs a template as written: it takes the flag (and its value) from it and
+    // adds that to its own command.
+    const fix = json_m6b.fix_command(root) orelse "";
+    const flag = json_m6b.flag_from_fix(fix, "--user") orelse {
+        const what = "expected the fix to name --user and its value";
+        return fail_step(out, step, what, error.FixWrong);
+    };
+    const pattern = "{s} --output json run {s} --mount agentsite:/srv {s} -- id -u";
+    const adapted = try common.format(session, pattern, .{ za, flag, non_root });
     const ran = try state.expect_long_split(session, out, adapted, 0, long_s);
     json.check_exited(arena, ran.streams, ran.status, 0) catch |err| {
         return fail_step(out, step, "expected the adapted run to end with 0", err);
@@ -318,7 +319,7 @@ fn step_stopped(session: *Session, out: *Io.Writer) !void {
     };
     try net_user.expect_free(session, out, 18090, "after the agent stopped the server");
     const exec = za ++ " --output json exec " ++ container ++ " -- true" ++ no_input;
-    const found = try refusal(session, out, exec, .{
+    const found = try refusal(session, out, exec, exec_schema, .{
         .code = "ZBX-E0220",
         .exit = 125,
         .key = "state",
@@ -334,26 +335,24 @@ fn step_stopped(session: *Session, out: *Io.Writer) !void {
     };
     const listed = try json_run(session, out, typed, 0);
     try expect_follows(arena, out, ps_schema, listed.streams.stdout, "the ps --all document");
-    if (std.mem.indexOf(u8, listed.streams.stdout, "\"state\":\"stopped\"") == null) {
-        return fail_step(out, step, "expected ps --all to say stopped", error.JsonWrong);
-    }
+    json_m6b.check_ps_state(arena, listed.streams.stdout, container, "stopped") catch |err| {
+        return fail_step(out, step, "expected ps --all to say the container is stopped", err);
+    };
     const command = try common.format(session, "{s} --output json logs {s}", .{ za, container });
     const logged = try json_run(session, out, command, 0);
-    const counted = json_m6b.count_log_records(
+    json_m6b.check_log_records(
         arena,
         logs_schema,
         logged.streams,
         logged.status,
         "stderr",
         "GET /index.html",
+        2,
     ) catch |err| {
-        return fail_step(out, step, "expected the stopped container's log to remain", err);
+        return fail_step(out, step, "expected the stopped container's log, the same two", err);
     };
-    if (counted != 2) {
-        return fail_step(out, step, "expected the same two requests", error.LogWrong);
-    }
     const missing = za ++ " --output json logs no-such-container";
-    _ = try refusal(session, out, missing, .{
+    _ = try refusal(session, out, missing, null, .{
         .code = "ZBX-E0402",
         .exit = 1,
         .key = "name",
@@ -361,8 +360,8 @@ fn step_stopped(session: *Session, out: *Io.Writer) !void {
         .fix_template = false,
         .fix_has = "ps --all",
     });
-    try finding(out, "logs ends with exit 1 for a refusal where run and exec end with 125; " ++
-        "the agent reads the code from the document, not from the status");
+    try finding(out, "the logs schema describes only its stdout records: a refusal on stderr " ++
+        "is in no schema logs serves, so the agent checks it by its members alone");
 }
 
 test {

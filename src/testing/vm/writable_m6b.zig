@@ -29,6 +29,8 @@ const zn = net_user.zn;
 const step_name = "WRITABLE";
 
 const project = net_user.net_project;
+const by_memcached_owns = H.as_demo ++
+    checks.owners_command(project ++ "/site/by-memcached.txt", project ++ "/site");
 const outside = "/home/demo/outside-wr";
 const python = "python:3.12-slim";
 const non_root = "memcached:alpine";
@@ -46,8 +48,8 @@ const edit = H.as_demo ++ "sh -c 'echo second-OMEGA > " ++ project ++ "/site/ind
 
 const write_inside = zn ++ " --output json run --name wr2 --mount site:/srv alpine -- sh -c " ++
     "'echo made-inside > /srv/new.txt; id -u'";
-const who_owns = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/new.txt; id -u; " ++
-    "find " ++ project ++ "/site ! -user demo | wc -l'";
+const who_owns = H.as_demo ++
+    checks.owners_command(project ++ "/site/new.txt", project ++ "/site");
 
 pub fn step_writable(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\n{s}: WRITABLE: --mount and --user (M6b slice 1)\n", .{H.demo_name});
@@ -150,9 +152,7 @@ fn root_flag(session: *Session, out: *Io.Writer) !void {
     checks.check_root_run(inside.streams.stdout, inside.status) catch |err| {
         return fail_step(out, step_name, "expected the image to run as root", err);
     };
-    const owner = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/by-memcached.txt; " ++
-        "id -u; find " ++ project ++ "/site ! -user demo | wc -l'";
-    const owners = try common.expect_exit(session, out, step_name, owner, 0);
+    const owners = try common.expect_exit(session, out, step_name, by_memcached_owns, 0);
     checks.check_owner(owners.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the host user to own the file", err);
     };

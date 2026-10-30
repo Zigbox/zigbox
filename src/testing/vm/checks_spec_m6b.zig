@@ -48,6 +48,15 @@ pub fn check_owner_listing(
     if (!std.mem.eql(u8, std.mem.trim(u8, body, " \r\t"), content)) return error.ContentWrong;
 }
 
+/// Step 3: `find site ! -user demo -print` exits 0, prints no path and no error: the search
+/// ran to the end and found no file of another owner. A `find` that failed (a directory it could
+/// not read, a missing `site`) exits non-zero and says why on stderr, so it never passes.
+pub fn check_no_strangers(stdout: []const u8, stderr: []const u8, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (std.mem.trim(u8, stderr, " \r\n").len != 0) return error.ExitCodeWrong;
+    if (std.mem.trim(u8, stdout, " \r\n").len != 0) return error.OwnerWrong;
+}
+
 /// Step 4: `zbx logs` exits 0 and shows exactly two requests, both `GET <path>` answered 200: the
 /// two `curl`s of step 2, before and after the edit. A request that is not these (a probe that
 /// asked for another path, a third `curl`) fails, so the log is the record of the steps and no
@@ -70,17 +79,19 @@ pub fn check_two_requests(log: []const u8, status: u8, path: []const u8) Error!v
 const testing = std.testing;
 
 test "the owner is the host user, by name, and the file holds what was written" {
-    // Goal: step 3's `ls -l` names the presenter. Wrong: another owner (a number, as for a
-    // subordinate id), a directory, another file, other content, a failed command.
-    const listing = "-rw-r--r-- 1 demo demo 12 Oct 30 10:00 site/new.txt\nmade-inside\n";
+    // Goal: step 3's `ls -l` names the presenter. Method: the right input is what the guest
+    // printed in run 41079428757 (vm/m6b-slice5d); the wrong ones are that line changed: another
+    // owner (a number, as for a subordinate id), a directory, another file, other content, a
+    // failed command.
+    const listing = "-rw-r--r-- 1 demo demo 12 Oct 30 15:24 site/new.txt\nmade-inside\n";
     try check_owner_listing(listing, 0, "demo", "site/new.txt", "made-inside");
-    const subordinate = "-rw-r--r-- 1 100000 100000 12 Oct 30 10:00 site/new.txt\nmade-inside\n";
+    const subordinate = "-rw-r--r-- 1 100000 100000 12 Oct 30 15:24 site/new.txt\nmade-inside\n";
     const wrong = check_owner_listing(subordinate, 0, "demo", "site/new.txt", "made-inside");
     try testing.expectError(error.OwnerWrong, wrong);
-    const root = "-rw-r--r-- 1 root root 12 Oct 30 10:00 site/new.txt\nmade-inside\n";
+    const root = "-rw-r--r-- 1 root root 12 Oct 30 15:24 site/new.txt\nmade-inside\n";
     const owned = check_owner_listing(root, 0, "demo", "site/new.txt", "made-inside");
     try testing.expectError(error.OwnerWrong, owned);
-    const directory = "drwxr-xr-x 1 demo demo 12 Oct 30 10:00 site/new.txt\nmade-inside\n";
+    const directory = "drwxr-xr-x 1 demo demo 12 Oct 30 15:24 site/new.txt\nmade-inside\n";
     const dir = check_owner_listing(directory, 0, "demo", "site/new.txt", "made-inside");
     try testing.expectError(error.OwnerWrong, dir);
     const other = check_owner_listing(listing, 0, "demo", "site/old.txt", "made-inside");
@@ -99,21 +110,36 @@ test "the owner is the host user, by name, and the file holds what was written" 
 }
 
 test "the log has the two requests of the steps, and nothing else" {
-    // Goal: step 4 shows two requests. Wrong: one, three, a 404, another path, no exit 0.
-    const one = "127.0.0.1 - - [30/Oct/2026 10:00:00] \"GET /index.html HTTP/1.1\" 200 -\n";
+    // Goal: step 4 shows two requests. Method: the right input is the line python's server
+    // wrote in run 41079428757 (`zbx logs web`, twice); the wrong ones are that line changed:
+    // one, three, a 404, another path, no exit 0.
+    const one = "127.0.0.1 - - [30/Oct/2026 15:24:21] \"GET /index.html HTTP/1.1\" 200 -\n";
     const two = one ++ one;
     try check_two_requests(two, 0, "/index.html");
     try testing.expectError(error.RequestsWrong, check_two_requests(one, 0, "/index.html"));
     try testing.expectError(error.RequestsWrong, check_two_requests("", 0, "/index.html"));
     try testing.expectError(error.RequestsWrong, check_two_requests(two ++ one, 0, "/index.html"));
-    const missing = "127.0.0.1 - - [30/Oct/2026 10:00:01] \"GET /index.html HTTP/1.1\" 404 -\n";
+    const missing = "127.0.0.1 - - [30/Oct/2026 15:24:21] \"GET /index.html HTTP/1.1\" 404 -\n";
     const with_404 = check_two_requests(one ++ missing, 0, "/index.html");
     try testing.expectError(error.RequestsWrong, with_404);
-    const other = "127.0.0.1 - - [30/Oct/2026 10:00:01] \"GET / HTTP/1.1\" 200 -\n";
+    const other = "127.0.0.1 - - [30/Oct/2026 15:24:21] \"GET / HTTP/1.1\" 200 -\n";
     const with_root = check_two_requests(one ++ other, 0, "/index.html");
     try testing.expectError(error.RequestsWrong, with_root);
     try testing.expectError(error.ExitCodeWrong, check_two_requests(two, 1, "/index.html"));
     // Other lines (the server's banner) are not requests.
     const banner = "Serving HTTP on 0.0.0.0 port 8000 ...\n";
     try check_two_requests(banner ++ two, 0, "/index.html");
+}
+
+test "no file of another owner, from a search that ran to the end" {
+    // Goal: step 3's `find` proves nothing unless it succeeded. Method: the passing run printed
+    // nothing (run 41079428757); the stderr line is the one `find` printed in that run when it
+    // started in `/root`, where `demo` may not read; a path is a file of another owner.
+    try check_no_strangers("", "", 0);
+    const restore = "find: Failed to restore initial working directory: /root: Permission denied\n";
+    try testing.expectError(error.ExitCodeWrong, check_no_strangers("", restore, 1));
+    try testing.expectError(error.ExitCodeWrong, check_no_strangers("", restore, 0));
+    const missing = "find: 'site': No such file or directory\n";
+    try testing.expectError(error.ExitCodeWrong, check_no_strangers("", missing, 1));
+    try testing.expectError(error.OwnerWrong, check_no_strangers("site/new.txt\n", "", 0));
 }

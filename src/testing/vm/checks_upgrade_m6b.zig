@@ -74,9 +74,9 @@ fn check_entry(entry: std.json.ObjectMap) Error!Running {
     return .{ .pid = @intCast(pid.integer), .scope = scope.string };
 }
 
-/// `zbx logs` of a container that has a record and no log: ZBX-E0217 on the first line of stderr
-/// (`logs` ends a refusal with 1, where `run` and `exec` end it with 125), naming the container
-/// and saying why, and nothing on stdout.
+/// `zbx logs` of a container that has a record and no log: ZBX-E0217 on the first line of stderr,
+/// exit 1 (DIAGNOSTICS.md, "Exit codes": 125 is only for a command that runs or waits on a
+/// workload), naming the container and saying why, and nothing on stdout.
 pub fn check_no_log(streams: Streams, status: u8, name: []const u8) Error!void {
     if (status != 1) return error.ExitCodeWrong;
     if (streams.stdout.len != 0) return error.RecordWrong;
@@ -102,29 +102,34 @@ fn wrap(arena: Allocator, item: []const u8) ![]const u8 {
     return std.fmt.allocPrint(arena, pattern, .{item});
 }
 
-const running_item = "{\"name\":\"m6bold\",\"state\":\"running\",\"pid\":2490," ++
-    "\"supervisor\":2484,\"scope\":\"zbx-m6bold.scope\",\"detached\":true," ++
-    "\"timed_out\":false,\"started\":1793227669,\"command\":[\"sh\",\"-c\",\"sleep 1000\"]," ++
-    "\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null,\"cpu_millis\":null}," ++
-    "\"network\":\"none\",\"published\":[],\"env\":[]}";
+/// The entry `ps --output json` printed for the old container in run 41079428757
+/// (vm/m6b-slice5d), as captured.
+const running_item = "{\"name\":\"m6bold\",\"state\":\"running\",\"pid\":2495," ++
+    "\"supervisor\":2490,\"scope\":\"zbx-m6bold.scope\",\"detached\":true," ++
+    "\"timed_out\":false,\"started\":1793373841,\"ended\":null,\"reason\":\"none\"," ++
+    "\"exit_code\":null,\"command\":[\"sh\",\"-c\",\"echo from-m6 > /data/marker; " ++
+    "sleep 1000\"],\"labels\":[],\"limits\":{\"memory_bytes\":null,\"pids\":null," ++
+    "\"cpu_millis\":null},\"network\":\"none\",\"published\":[],\"env\":[]," ++
+    "\"writable_mounts\":[],\"user\":null}";
 
 test "an old container still running is read with its pid and scope" {
-    // Goal: the entry of a container the M6 binary started is complete. Wrong: stopped, pid 1 or
-    // none, no scope, not detached, a network, a forward, an invented mount, another name.
+    // Goal: the entry of a container the M6 binary started is complete. Method: the right input
+    // is the entry captured in run 41079428757; the wrong ones are that entry changed: stopped,
+    // pid 1, no scope, not detached, a network, a forward, an invented mount, another name.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const found = try check_old_running(arena, doc(running_item), 0, "m6bold");
-    try testing.expectEqual(@as(u32, 2490), found.pid);
+    try testing.expectEqual(@as(u32, 2495), found.pid);
     try testing.expectEqualStrings("zbx-m6bold.scope", found.scope);
     const edits = [_][2][]const u8{
         .{ "\"state\":\"running\"", "\"state\":\"stopped\"" },
-        .{ "\"pid\":2490", "\"pid\":1" },
+        .{ "\"pid\":2495", "\"pid\":1" },
         .{ "\"scope\":\"zbx-m6bold.scope\"", "\"scope\":\"\"" },
         .{ "\"detached\":true", "\"detached\":false" },
         .{ "\"network\":\"none\"", "\"network\":\"user\"" },
         .{ "\"published\":[]", "\"published\":[{\"host\":1,\"container\":2}]" },
-        .{ "\"env\":[]", "\"env\":[],\"writable_mounts\":[{\"host\":\"/x\",\"target\":\"/y\"}]" },
+        .{ "\"writable_mounts\":[]", "\"writable_mounts\":[{\"host\":\"/x\",\"target\":\"/y\"}]" },
     };
     for (edits) |edit| {
         const changed = try std.mem.replaceOwned(u8, arena, running_item, edit[0], edit[1]);
@@ -135,11 +140,10 @@ test "an old container still running is read with its pid and scope" {
     try testing.expectError(error.RecordWrong, check_old_running(arena, good, 0, "other"));
     try testing.expectError(error.ExitCodeWrong, check_old_running(arena, good, 1, "m6bold"));
     try testing.expectError(error.JsonWrong, check_old_running(arena, "nope", 0, "m6bold"));
-    // An empty list of mounts is what a record without any reads as; it is not wrong.
-    const bare = "\"env\":[]";
-    const with_list = bare ++ ",\"writable_mounts\":[]";
-    const empty = try std.mem.replaceOwned(u8, arena, running_item, bare, with_list);
-    _ = try check_old_running(arena, try wrap(arena, empty), 0, "m6bold");
+    // No member for the mounts at all (a reader older than the member) is not wrong either.
+    const listed = ",\"writable_mounts\":[]";
+    const bare = try std.mem.replaceOwned(u8, arena, running_item, listed, "");
+    _ = try check_old_running(arena, try wrap(arena, bare), 0, "m6bold");
 }
 
 test "the versions are the ones the formats have" {
@@ -153,11 +157,15 @@ test "the versions are the ones the formats have" {
 
 test "a container without a log is a coded refusal, and each lie is caught" {
     // Goal: the check passes on E0217 as the binary prints it, and fails on another code, the
-    // exit status of a run's refusal (125), text on stdout, another name, an errno dump.
+    // exit status of a run's refusal (125), text on stdout, another name, an errno dump. Method:
+    // the right input is the stderr of `zbx logs m6bold` captured in run 41079428757; the wrong
+    // ones change it.
     const text = "error[ZBX-E0217]: the container has no log\n" ++
-        "  cause  'm6bold' has a run record and no log: it ran before logs were kept, its log " ++
-        "could not be written, or it was " ++
-        "removed\n";
+        "  cause  'm6bold' has a run record and no log: it ran before logs were kept, its\n" ++
+        "         log could not be written, or it was removed\n" ++
+        "  fix    run it again to get a log:   zbx run -d --name <name> <image>\n" ++
+        "  more   zbx explain E0217 \xc2\xb7 rerun with --verbose for the full cause chain\n" ++
+        "  docs   https://zigbox.github.io/zigbox/errors/E0217.html\n";
     const right: Streams = .{ .stdout = "", .stderr = text };
     try check_no_log(right, 1, "m6bold");
     try testing.expectError(error.ExitCodeWrong, check_no_log(right, 125, "m6bold"));

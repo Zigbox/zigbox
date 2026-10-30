@@ -426,7 +426,7 @@ built, not demonstrated.
 | LOGS | `logs_m6b.zig` | slice 2's checks, moved from `demo-m6`: requests in the log, the log after the starting `zbx` was killed, a foreground run, `--follow`, the cap |
 | EXEC | `exec_m6b.zig` | slice 3's checks, moved from `demo-m6`: a file through the mount, a refused syscall, a missing capability, the scope and `--pids`, the exit code, the terminal, death with the container, a stopped container |
 | AGENT | `agent_m6b.zig`, `agent_json_m6b.zig` | the dev loop by JSON only (below) |
-| ACCEPT | `accept_m6b.zig`, `checks_accept_m6b.zig` | a log is removed with its run record |
+| ACCEPT | `accept_m6b.zig`, `checks_accept_m6b.zig` | a log, rotated once, is removed with its run record |
 
 `demo-m6` lost WRITABLE, LOGS and EXEC (they stay green there as part of `demo-m6b`, which a CI
 job and a `vm/m6b-*` push run). Every assertion of every part is a pure function with a unit test
@@ -440,7 +440,7 @@ The acceptance criteria and where they are shown:
 | a writable mount for a non-root user is refused, naming the user and the fix | WRITABLE 4 (E0213: the user, `--user 0`, `--bind`), AGENT 4 |
 | logs are bounded | LOGS 5 (more than 5 MiB written; the end is kept from a whole record, `dropped_bytes` and the bytes shown add up) |
 | logs survive the exit of the `zbx` that started the container | LOGS 2 (the `zbx` is killed with SIGKILL) |
-| logs are removed with the run record | ACCEPT (the record is pruned by newer runs; neither log file is left, `logs` is E0402) |
+| logs are removed with the run record | ACCEPT (`lrm00` writes 3,000,000 bytes, so both log files exist; the record is pruned by newer runs; neither file is left, `logs` is E0402 with its summary) |
 | `exec` gains nothing the container lacks | EXEC 2 (`unshare -U` refused, `mount` without the capability), EXEC 3 (the scope, `--pids`), EXEC 8 (the death signal after a change of user) |
 | upgrade test against M6 (`bf57ec8`) | UPGRADE |
 | stable diagnostics | SPEC 5, WRITABLE 4, EXEC 7, ACCEPT, AGENT 4 and 5 read the codes (`E0212`, `E0213`, `E0214`, `E0217`, `E0220`, `E0402`) |
@@ -452,7 +452,7 @@ In the net project (`zn`), with `python:3.12-slim`:
 
 1. `zbx run -d --name web --publish 8000:8000 --mount ./site:/srv python:3.12-slim -- python -m http.server -d /srv 8000` (the spec's line, with `-d` so that the demo keeps its shell).
 2. `curl localhost:8000/index.html` returns `first-SIGMA`; the page is edited on the host; the next `curl` returns `second-SIGMA`.
-3. `zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'`; `ls -l site/new.txt` shows `demo` as the owner, the file holds `made-inside`, and `find site ! -user demo` prints nothing.
+3. `zbx exec web -- sh -c 'echo made-inside > /srv/new.txt'`; `ls -l site/new.txt` shows `demo` as the owner, the file holds `made-inside`, and `find site ! -user demo -print`, run from the project, exits 0 and prints nothing (a `find` that fails says so on stderr and exits non-zero, so it never passes as an empty search).
 4. `zbx logs web` shows the two requests (`GET /index.html` answered 200), and no others.
 5. `zbx run --mount ../outside-spec:/x alpine -- true` is ZBX-E0212: the project directory, "outside the project", and the real path.
 
@@ -494,16 +494,18 @@ no `schema` member, so that one is found by the member name instead.
 | 1 | `run -d --mount agentsite:/srv --publish` | `container.writable_mounts` (the resolved host path and the target) and `container.user` (0:0); it checks the path is inside its own project; `ps` says the same |
 | 2 | `curl` twice with an edit between; `logs --output json` | `zbx.logs/1` lines: it counts the records of stream `stderr` whose text has `GET /index.html`: two |
 | 3 | `exec --output json -e TOKEN=... -- sh -c '...; exit 3'` | the status 3 and the `exec_exit` line agree (`exited`, 3, `container_ended` false); the value of `-e` is in no document; the file is the host user's |
-| 4 | a mount outside the project; a mount with a non-root image | E0212 (`context.within` is its project, `real` the path) and E0213 (`context.uid` is not 0); the fix of each is a template, so the agent takes the flag it names (`--user 0`) and runs its own command, which works; `explain` agrees with each |
-| 5 | `stop`, then `exec`; `logs`; a missing name | E0220 (`context.state` `stopped`; its first fix is a command, which the agent runs and finds `stopped` in `ps --all`); the stopped container's log still gives the two requests; E0402 for the missing name |
+| 4 | a mount outside the project; a mount with a non-root image | E0212 (`context.within` is its project, `real` the path) and E0213 (`context.uid` is not 0), each checked against the `run` schema; the fix of each is a template, so the agent takes the flag and its value from E0213's fix command (`--user 0`, by `flag_from_fix`) and adds it to its own command, which works; `explain` agrees with each |
+| 5 | `stop`, then `exec`; `logs`; a missing name | E0220 against the `exec` schema (`context.state` `stopped`; its first fix is a command, which the agent runs, and `ps --all` gives `agentweb`'s own entry as `stopped`); the stopped container's log still gives the two requests; E0402 for the missing name (exit 1, checked by its members: the `logs` schema describes no refusal) |
 
 Findings (things the agent could not read from JSON; a `FINDING` line each, not worked around):
 
 - No document says when a container is ready; the agent polls the published port (as in M6).
 - The fixes of E0212 and E0213 are templates (`<image>`, `./site`). The agent adapts them by the
   flag they name and never runs them as written.
-- `logs` ends a refusal with status 1 where `run` and `exec` end it with 125 (E0402 is exit 125
-  in `exec` and exit 1 in `logs`). The agent reads the code from the document, not the status.
+- The `logs` schema describes only its stdout records (`required` `schema`, `stream`, `time`,
+  `text`), so a refusal of `logs` on stderr follows no schema the agent can read; it checks E0402
+  by its members alone. Describing it would be a change to `zbx.logs/1`'s schema, for the owner
+  to decide.
 
 ### A bug the first VM runs found
 
@@ -539,13 +541,9 @@ lines (a sleeping process, and a zombie with PF_EXITING).
   minutes; the simulator tests it (`logs_tests.zig`: a disk that takes the header and the first
   write, then is full, gives one `W0204`, the terminal is unharmed, and the run continues). See
   the failure modes.
-- **Real output for the new fixtures comes with the first green run.** The unit tests of the new
-  checks use text the code is believed to print (python's request lines, `ls -l`, the `ps` entry
-  of a container) and the binary's own output for the diagnostics. The first green run's output
-  is to be pasted into the tests in place of the modelled lines.
-- **`logs` ends a refusal with status 1.** The UPGRADE and ACCEPT checks assert it as built (the
-  brief does not say). If it is meant to be 125 like the other commands, both checks change with
-  it.
+- **`logs` ends a refusal with status 1**, as DIAGNOSTICS.md, "Exit codes", says: the four
+  blame codes (`1` user) for every command, and 125 only for a command that runs a container or
+  waits on a workload (`run`, `exec`). The UPGRADE and ACCEPT checks assert 1.
 - The upgrade test uses an `exec` into a container M6 started because the record is the only
   thing `exec` and `stop` share with it; a record without a field it needs would show there.
 - ACCEPT runs last because pruning removes the oldest records of the demo's state directory.
@@ -564,10 +562,18 @@ lines (a sleeping process, and a zombie with PF_EXITING).
 | the disk full while logging | one `W0204`; the container goes on and the terminal still gets everything; a detached container's output is read and dropped so that it never blocks | make room; the log up to the last whole record is readable |
 | a log that cannot be made | one `W0204` at the start; the container writes where it always did | check the state directory's permissions and space |
 | `logs` or `exec` of a name with no record | `E0402` (exit 1 for `logs`, 125 for `exec`) | `zbx ps --all` (only the newest 32 records are kept) |
+| a connection to a published port before the server listens | the forward accepts it on the host and then resets it, so the client sees a reset rather than a refusal; this predates M6b | wait for the server from inside the container (the demo does), or retry |
 
 ### What was checked
 
-- `zig build test`: the unit tests of every new check (each with right and wrong input and
-  the modelled or captured text), run from `main_m6b.zig`'s test block.
+- `zig build test`: the unit tests of every new check (each with right and wrong input), run from
+  `main_m6b.zig`'s test block. The right input of each is text captured from the green runs of
+  `503a591`: https://github.com/Zigbox/zigbox/actions/runs/41079428757 (`vm/m6b-slice5d`: the
+  `ls -l` line, python's request lines, `find`'s stderr, the old container's `ps` entry, E0217's
+  text, the ACCEPT summary, the agent's documents, the exec schema, E0213 and `ps --all`) and
+  https://github.com/Zigbox/zigbox/actions/runs/41076069695 (the agent's first captures); the
+  wrong inputs are those texts changed. The two ACCEPT lines that run did not print
+  (`before_older`, `gone_line`) are taken from the run that follows this change (see the
+  slice's report).
 - `zig build harness` compiles the demo.
 - Run in the VM: see the report of the slice (the `vm/m6b-*` and `vm/all-*` runs).

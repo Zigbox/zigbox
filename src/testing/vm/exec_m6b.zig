@@ -35,6 +35,8 @@ const zn = net_user.zn;
 const step_name = "EXEC";
 
 const project = net_user.net_project;
+const by_exec_owns = H.as_demo ++
+    writable.owners_command(project ++ "/site/by-exec.txt", project ++ "/site");
 const no_input = " </dev/null";
 const secret_value = "VALUE-PSI-77";
 
@@ -63,9 +65,7 @@ fn writes_a_file(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: EXEC 1: a file written by exec is the host user's\n", .{H.demo_name});
     const write = zn ++ " exec ex1 -- sh -c 'echo made-by-exec > /srv/by-exec.txt'" ++ no_input;
     _ = try ok(session, out, write);
-    const who = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/by-exec.txt; id -u; " ++
-        "find " ++ project ++ "/site ! -user demo | wc -l'";
-    const owners = try ok(session, out, who);
+    const owners = try ok(session, out, by_exec_owns);
     writable.check_owner(owners.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the host user to own the file", err);
     };

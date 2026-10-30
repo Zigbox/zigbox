@@ -48,7 +48,9 @@ const fetch = "curl -fsS http://localhost:8000/index.html";
 const edit = H.as_demo ++ "sh -c 'echo second-SIGMA > " ++ project ++ "/site/index.html'";
 const exec = zn ++ " exec web -- sh -c 'echo made-inside > /srv/new.txt' </dev/null";
 const look = H.as_demo ++ "sh -c 'cd " ++ project ++ " && ls -l site/new.txt && cat site/new.txt'";
-const strangers = H.as_demo ++ "sh -c 'find " ++ project ++ "/site ! -user demo | wc -l'";
+/// From inside the project: `find` run where the user cannot read (`/root`, runuser's start)
+/// fails on its way out, and its status is what tells a failed search from an empty one.
+const strangers = H.as_demo ++ "sh -c 'cd " ++ project ++ " && find site ! -user demo -print'";
 
 /// The text of a script that waits (ninety seconds) until the server in the container `name`
 /// (`wrapper` is the `zbx` of its project) takes a connection, asked from inside the container
@@ -120,10 +122,11 @@ fn step_three(session: *Session, out: *Io.Writer) !void {
         return fail_step(out, step_name, "expected ls -l to show demo as the owner", err);
     };
     // Nothing in the project belongs to anyone else, the file the page came from included.
-    const others = try common.expect_exit(session, out, step_name, strangers, 0);
-    if (!std.mem.eql(u8, std.mem.trim(u8, others.streams.stdout, " \r\n"), "0")) {
-        return fail_step(out, step_name, "expected no file of another owner", error.OwnerWrong);
-    }
+    const others = try common.run_shown(session, out, strangers);
+    const streams = others.streams;
+    checks.check_no_strangers(streams.stdout, streams.stderr, others.status) catch |err| {
+        return fail_step(out, step_name, "expected no file of another owner", err);
+    };
 }
 
 fn step_four(session: *Session, out: *Io.Writer) !void {
