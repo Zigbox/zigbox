@@ -232,8 +232,9 @@ fn step_exec(session: *Session, out: *Io.Writer) !void {
     json_m6.check_absent(&shown, token) catch |err| {
         return fail_step(out, step, "the value of -e is in a document", err);
     };
-    const who = try state.expect_long(session, out, owners, 0, short_s);
-    checks_writable.check_owner(who.output) catch |err| {
+    // The owner is read from stdout: `find` says on stderr that it cannot go back to /root.
+    const who = try state.expect_long_split(session, out, owners, 0, short_s);
+    checks_writable.check_owner(who.streams.stdout) catch |err| {
         return fail_step(out, step, "expected the host user to own the file", err);
     };
 }
