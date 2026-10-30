@@ -270,6 +270,7 @@ pub const Session = struct {
     }
 
     fn make_output_pipes(session: *Session) host_mod.Error!void {
+        assert(session.output_write[0] == null);
         assert(session.capture);
         assert(session.output_read[0] == null);
         for (0..2) |at| {
@@ -282,6 +283,7 @@ pub const Session = struct {
     /// Closes the write ends the parent holds: the child has its own, and ours would keep the
     /// reader from ever seeing the end of the output.
     fn close_output_write(session: *Session) void {
+        assert(session.output_write.len == 2);
         for (&session.output_write) |*end| {
             if (end.*) |handle| session.host.close(handle);
             end.* = null;
@@ -719,12 +721,18 @@ pub const Session = struct {
 
     /// Reads once from one stream and hands the bytes on. The end of the stream closes it.
     fn pump(session: *Session, at: u8, sink: ?Sink) void {
+        assert(at < 2);
+        assert(session.capture);
         const host = session.host;
         const handle = session.output_read[at].?;
         var buffer: [constants.log_pump_bytes]u8 = undefined;
         const count = host.read_some(handle, &buffer) catch 0;
         if (count == 0) return session.end_stream(at);
-        const keep = if (sink) |target| target.call(target.context, stream_of(at), buffer[0..count]) else true;
+        const stream = stream_of(at);
+        const keep = if (sink) |target|
+            target.call(target.context, stream, buffer[0..count])
+        else
+            true;
         if (!keep) session.end_stream(at);
     }
 
@@ -734,6 +742,8 @@ pub const Session = struct {
     }
 
     fn end_stream(session: *Session, at: u8) void {
+        assert(at < 2);
+        assert(session.output_write[at] == null);
         const handle = session.output_read[at] orelse return;
         session.host.close(handle);
         session.output_read[at] = null;
@@ -742,6 +752,9 @@ pub const Session = struct {
     /// The container is gone: what it wrote and nobody has read yet is handed on, within a bound
     /// of time for a stream that something else still holds open.
     fn drain_output(session: *Session, sink: ?Sink) void {
+        assert(session.pid == null);
+        assert(session.reaped.load(.acquire));
+        if (!session.capture) return;
         const host = session.host;
         for (0..2) |index| {
             const at: u8 = @intCast(index);

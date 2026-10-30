@@ -643,11 +643,7 @@ pub fn parse(
                 try take_run_or_env(diag, &run_args, operands[0..count], args, &index);
             },
             .all => try take_all_option(diag, &run_args, operands[0..count], argument),
-            .follow => {
-                const is_logs = count > 0 and command_named(operands[0]) == .logs;
-                if (!is_logs) return unknown_option(diag, argument);
-                run_args.follow = true;
-            },
+            .follow => try take_follow(diag, &run_args, operands[0..count], argument),
             .separator => {
                 if (!is_run) return unknown_option(diag, argument);
                 run_args.command = args[index + 1 ..];
@@ -685,6 +681,19 @@ pub fn parse(
     try check_options(&gc_args, invocation, diag);
     invocation.state.out = export_file;
     if (export_file != null) assert(invocation.state.action == .@"export"); // `-o` is its own.
+}
+
+/// `--follow`, which only `logs` takes.
+fn take_follow(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .follow);
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .logs) return unknown_option(diag, argument);
+    run_args.follow = true;
 }
 
 /// `--all`, which only `ps` takes.
@@ -1487,7 +1496,10 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     } else if (command == .commit) {
         diag.fix(.{ .sentence = "commit one container at a time:", .command = "zbx commit web-1" });
     } else if (command == .logs) {
-        diag.fix(.{ .sentence = "show one container's log at a time:", .command = "zbx logs web-1" });
+        diag.fix(.{
+            .sentence = "show one container's log at a time:",
+            .command = "zbx logs web-1",
+        });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
     } else if (command == .lock) {

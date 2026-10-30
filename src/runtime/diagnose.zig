@@ -964,7 +964,11 @@ pub fn no_log(diag: *Diag, name: []const u8) void {
     diag.cause("'{s}' has a run record and no log: it ran before logs were kept, its " ++
         "log could not be written, or it was removed", .{echo});
     diag.context("name", "{s}", .{echo});
-    diag.fix(.{ .sentence = "run it again to get a log:", .command = "zbx run -d --name <name> <image>", .template = true });
+    diag.fix(.{
+        .sentence = "run it again to get a log:",
+        .command = "zbx run -d --name <name> <image>",
+        .template = true,
+    });
     assert(diag.code.? == .E0217);
 }
 

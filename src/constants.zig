@@ -1005,7 +1005,8 @@ comptime {
     // and a file holds a header and at least one largest record.
     assert(log_header_bytes + log_record_header_bytes + log_record_bytes_max <= log_read_bytes);
     assert(2 * @as(u64, log_segment_bytes_max) <= log_bytes_max);
-    assert(log_segment_bytes_max >= log_header_bytes + log_record_header_bytes + log_record_bytes_max);
+    const smallest_file = log_header_bytes + log_record_header_bytes + log_record_bytes_max;
+    assert(log_segment_bytes_max >= smallest_file);
     assert(log_record_bytes_max <= std.math.maxInt(u16));
     assert(log_time_max == 1 << 40); // Five bytes hold a time below it.
     assert(log_pump_bytes <= output_bytes_max);

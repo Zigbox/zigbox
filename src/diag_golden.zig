@@ -642,7 +642,10 @@ fn prepare_log_dropped(sim: *HostSim) void {
     assert(records.locate(sim.interface(), &runs));
     const dir = logfile.dir_of(&runs).?;
     var writer: logfile.Writer = undefined;
-    const options: logfile.WriterOptions = .{ .segment_bytes_max = 16 + 2 * 20, .record_bytes_max = 8 };
+    const options: logfile.WriterOptions = .{
+        .segment_bytes_max = 16 + 2 * 20,
+        .record_bytes_max = 8,
+    };
     writer.open(golden_logs.interface(), &dir, "web-1", options) catch unreachable; // Fresh disk.
     for (0..6) |number| {
         var text: [8]u8 = undefined;

@@ -47,6 +47,8 @@ pub const Stream = enum(u8) {
     stderr = 2,
 
     pub fn word(stream: Stream) []const u8 {
+        assert(@backingInt(stream) >= 1);
+        assert(@backingInt(stream) <= 2);
         return switch (stream) {
             .stdout => "stdout",
             .stderr => "stderr",
@@ -54,16 +56,20 @@ pub const Stream = enum(u8) {
     }
 
     fn from_byte(byte: u8) ?Stream {
-        return switch (byte) {
+        assert(std.enums.values(Stream).len == 2);
+        const found: ?Stream = switch (byte) {
             1 => .stdout,
             2 => .stderr,
             else => null,
         };
+        if (found) |stream| assert(@backingInt(stream) == byte);
+        return found;
     }
 };
 
 const path_bytes: u32 = constants.state_path_bytes_max + 80;
-const record_bytes_total_max: u32 = constants.log_record_header_bytes + constants.log_record_bytes_max;
+const record_bytes_total_max: u32 =
+    constants.log_record_header_bytes + constants.log_record_bytes_max;
 
 // ---- The format ----------------------------------------------------------------------------
 
@@ -87,6 +93,8 @@ pub const HeaderResult = union(enum) {
 };
 
 pub fn parse_header(bytes: []const u8) HeaderResult {
+    assert(constants.log_header_bytes == 16);
+    assert(bytes.len <= constants.log_read_bytes);
     if (bytes.len < constants.log_header_bytes) return .short;
     for (bytes[1..8]) |byte| {
         if (byte != 0) return .bad;
@@ -108,7 +116,7 @@ pub fn encode_record(
     assert(payload.len > 0);
     assert(payload.len <= constants.log_record_bytes_max);
     assert(time < constants.log_time_max);
-    out[0] = @intFromEnum(stream);
+    out[0] = @backingInt(stream);
     std.mem.writeInt(u40, out[1..6], @intCast(time), .little);
     std.mem.writeInt(u16, out[6..8], @intCast(payload.len), .little);
     @memcpy(out[constants.log_record_header_bytes..][0..payload.len], payload);
@@ -120,6 +128,7 @@ pub fn encode_record(
 }
 
 fn checksum_of(head: []const u8, payload: []const u8) u32 {
+    assert(payload.len <= constants.log_record_bytes_max);
     assert(head.len == 8);
     var state = std.hash.Crc32.init();
     state.update(head);
@@ -147,6 +156,7 @@ pub const RecordResult = union(enum) {
 };
 
 pub fn parse_record(bytes: []const u8) RecordResult {
+    assert(constants.log_record_header_bytes == 12);
     const head = constants.log_record_header_bytes;
     if (bytes.len < head) {
         // A prefix that already breaks the format cannot be completed into a record.
@@ -197,7 +207,7 @@ pub const Paths = struct {
             "{s}/{s}{s}",
             .{ base, name, constants.log_suffix },
             0,
-        ) catch unreachable;
+        ) catch unreachable; // Cannot fail: the bound above.
         const older = std.fmt.bufPrintSentinel(
             &paths.older,
             "{s}/{s}{s}",
@@ -210,11 +220,13 @@ pub const Paths = struct {
 
     pub fn current_text(paths: *const Paths) [:0]const u8 {
         assert(paths.current_len > 0);
+        assert(paths.current[paths.current_len] == 0);
         return paths.current[0..paths.current_len :0];
     }
 
     pub fn older_text(paths: *const Paths) [:0]const u8 {
         assert(paths.older_len > paths.current_len);
+        assert(paths.older[paths.older_len] == 0);
         return paths.older[0..paths.older_len :0];
     }
 };
@@ -237,6 +249,8 @@ pub fn ensure_directory(fs: Fs, dir: *const records.Dir) Error!void {
 /// Removes a container's log, both files. Files that are not there are not an error; the first
 /// real failure is returned after both were tried.
 pub fn remove(fs: Fs, dir: *const records.Dir, name: []const u8) Error!void {
+    assert(name.len > 0);
+    assert(dir.len > 0);
     var paths: Paths = undefined;
     paths.set(dir, name);
     var failure: ?Error = null;
@@ -285,6 +299,8 @@ pub const Writer = struct {
         const smallest = constants.log_header_bytes + constants.log_record_header_bytes +
             options.record_bytes_max;
         assert(options.segment_bytes_max >= smallest);
+        assert(options.segment_bytes_max >= constants.log_header_bytes);
+        assert(name.len > 0);
         writer.state = .closed;
         writer.fd_open = false;
         writer.fs = fs;
@@ -297,6 +313,8 @@ pub const Writer = struct {
     }
 
     fn start_file(writer: *Writer, base: u64) Error!void {
+        assert(!writer.fd_open);
+        assert(writer.state != .open);
         const fs = writer.fs;
         const fd = try fs.create(writer.paths.current_text(), 0o600);
         var header: [constants.log_header_bytes]u8 = undefined;
@@ -359,6 +377,8 @@ pub const Writer = struct {
     }
 
     pub fn close(writer: *Writer) void {
+        assert(writer.options.segment_bytes_max > 0);
+        assert(writer.size <= writer.options.segment_bytes_max);
         if (writer.fd_open) writer.fs.close(writer.fd);
         writer.fd_open = false;
         writer.state = .closed;
@@ -394,6 +414,8 @@ pub const Cursor = struct {
     damaged: bool,
 
     pub fn open(cursor: *Cursor, fs: Fs, path: [:0]const u8) OpenResult {
+        assert(path.len > 0);
+        assert(@intFromPtr(fs.vtable) != 0);
         cursor.is_open = false;
         cursor.damaged = false;
         const fd = fs.open_read(path) catch |err| {
@@ -431,6 +453,8 @@ pub const Cursor = struct {
     }
 
     pub fn close(cursor: *Cursor) void {
+        assert(cursor.window_at <= cursor.window_len);
+        assert(cursor.window_len <= cursor.window.len);
         if (cursor.is_open) cursor.fs.close(cursor.fd);
         cursor.is_open = false;
     }
@@ -439,6 +463,7 @@ pub const Cursor = struct {
     /// what has been written since.
     pub fn next(cursor: *Cursor) NextResult {
         assert(cursor.is_open);
+        assert(cursor.window_at <= cursor.window_len);
         if (cursor.damaged) return .damaged;
         for (0..constants.log_drain_reads_max) |_| {
             const unread = cursor.window[cursor.window_at..cursor.window_len];
@@ -467,14 +492,18 @@ pub const Cursor = struct {
     /// Reads more into the window, after moving the unread bytes to its start. False at the end
     /// of the file (or on an error, which reads as the end here and fails the next look).
     fn fill(cursor: *Cursor) bool {
+        assert(cursor.is_open);
+        assert(cursor.window_len <= cursor.window.len);
         const unread = cursor.window_len - cursor.window_at;
         if (cursor.window_at > 0) {
-            std.mem.copyForwards(u8, cursor.window[0..unread], cursor.window[cursor.window_at..][0..unread]);
+            const unread_bytes = cursor.window[cursor.window_at..][0..unread];
+            std.mem.copyForwards(u8, cursor.window[0..unread], unread_bytes);
             cursor.window_at = 0;
             cursor.window_len = unread;
         }
         assert(cursor.window_len < cursor.window.len);
-        const count = cursor.fs.read(cursor.fd, cursor.window[cursor.window_len..]) catch return false;
+        const room = cursor.window[cursor.window_len..];
+        const count = cursor.fs.read(cursor.fd, room) catch return false;
         cursor.window_len += count;
         return count > 0;
     }
@@ -482,6 +511,8 @@ pub const Cursor = struct {
 
 /// Reads until the buffer is full or the file ends; the count read.
 fn read_up_to(fs: Fs, fd: Fd, buffer: []u8) Error!u32 {
+    assert(buffer.len > 0);
+    assert(buffer.len <= constants.log_read_bytes);
     var have: u32 = 0;
     for (0..buffer.len + constants.store_io_retries_max + 1) |_| {
         if (have == buffer.len) break;
@@ -524,6 +555,8 @@ pub const Reader = struct {
         dir: *const records.Dir,
         name: []const u8,
     ) ReadError!void {
+        assert(name.len > 0);
+        assert(dir.len > 0);
         reader.fs = fs;
         reader.paths.set(dir, name);
         reader.has_older = false;
@@ -551,9 +584,13 @@ pub const Reader = struct {
         reader.stage = if (reader.has_older) .older else .current;
         if (reader.has_older) reader.dropped_bytes = reader.older.base;
         if (!reader.has_older and reader.has_current) reader.dropped_bytes = reader.current.base;
+        if (reader.has_older) assert(reader.dropped_bytes == reader.older.base);
+        if (!reader.has_older) assert(reader.stage == .current);
     }
 
     pub fn close(reader: *Reader) void {
+        if (reader.has_older) assert(reader.older.is_open);
+        if (reader.has_current) assert(reader.current.is_open);
         if (reader.has_older) reader.older.close();
         if (reader.has_current) reader.current.close();
         reader.has_older = false;
@@ -563,6 +600,10 @@ pub const Reader = struct {
     /// The next record, or `end` when none is there now. With `end` returned, `follow_look`
     /// finds out whether the log was rotated, and `next` can be asked again.
     pub fn next(reader: *Reader) NextResult {
+        if (reader.stage == .older) assert(reader.has_older);
+        if (!reader.has_current) {
+            if (reader.stage == .older) assert(reader.has_older);
+        }
         if (reader.stage == .older) {
             switch (reader.older.next()) {
                 .record => |found| return .{ .record = found },
@@ -580,6 +621,7 @@ pub const Reader = struct {
     /// writer closed it before it renamed it, so nothing more will be added), and then the new
     /// file takes its place. Returns true when it did.
     pub fn follow_look(reader: *Reader) bool {
+        if (reader.stage == .current and reader.has_older) assert(reader.older.is_open);
         if (reader.stage != .current) return false;
         if (!reader.has_current) return reader.adopt_new_current();
         if (reader.current.damaged) return false;
@@ -599,20 +641,26 @@ pub const Reader = struct {
 
     /// After `follow_look` returned true and `next` ran dry: switches to the new current file.
     pub fn follow_switch(reader: *Reader) bool {
+        assert(reader.stage == .current);
+        assert(!reader.older.is_open);
         const found = reader.older.open(reader.fs, reader.paths.current_text());
         if (found != .opened) return false;
         reader.current.close();
         std.mem.swap(Cursor, &reader.current, &reader.older);
         reader.has_current = true;
         reader.has_older = false;
+        assert(reader.current.is_open);
+        assert(!reader.older.is_open);
         return true;
     }
 
     fn adopt_new_current(reader: *Reader) bool {
         assert(!reader.has_current);
+        assert(reader.stage == .current);
         const found = reader.current.open(reader.fs, reader.paths.current_text());
         if (found != .opened) return false;
         reader.has_current = true;
+        assert(reader.current.is_open);
         return true;
     }
 };
@@ -695,6 +743,7 @@ test "paths: the current file and the older one, beside the pasta log's name spa
 
 /// What the tests write: record `index` has a stream, a time and a payload that tell its index.
 fn payload_of(index: u32, out: *[24]u8) []const u8 {
+    // Cannot fail: the text is 24 bytes, the size of the buffer.
     const text = std.fmt.bufPrint(out, "line {d:0>6} of the test\n", .{index}) catch unreachable;
     return text[0..@min(text.len, 24)];
 }
@@ -741,7 +790,10 @@ fn write_numbered(writer: *Writer, from: u32, to: u32) Error!void {
     }
 }
 
-const small: WriterOptions = .{ .segment_bytes_max = 16 + 4 * (12 + 24) + 10, .record_bytes_max = 24 };
+const small: WriterOptions = .{
+    .segment_bytes_max = 16 + 4 * (12 + 24) + 10,
+    .record_bytes_max = 24,
+};
 
 test "a log that fits one file reads back whole and drops nothing" {
     // Goal: the plain path. Method: write ten records, read them, expect all, in order.
@@ -835,7 +887,8 @@ test "a long write is cut into records of the bound, and every byte comes back i
     while (true) {
         switch (reader.next()) {
             .record => |found| {
-                try testing.expectEqualSlices(u8, long[total..][0..found.payload.len], found.payload);
+                const want = long[total..][0..found.payload.len];
+                try testing.expectEqualSlices(u8, want, found.payload);
                 try testing.expectEqual(@as(u64, 77), found.time);
                 total += found.payload.len;
                 records_seen += 1;

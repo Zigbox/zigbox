@@ -305,17 +305,9 @@ pub fn inspect(handle: *const Handle) Status {
     };
 }
 
-/// Starts the container described by `container`. On return the command has started and
-/// `handle` is running; on `StartFailed` it did not, `diag` says why, and the run record (if one
-/// was begun) says so too. `handle` is set up in place and must not move afterwards.
-pub fn start(
-    host: Host,
-    container: *const Spec,
-    options: StartOptions,
-    handle: *Handle,
-    diag: *Diag,
-) Error!void {
-    assert(diag.code == null);
+/// Everything a run's handle holds before the first check: what the caller gave, and the state
+/// of a run that has not begun.
+fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
@@ -335,12 +327,26 @@ pub fn start(
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.user = container.user;
-    handle.log_active = false;
-    handle.log_warned = false;
-    handle.mirror = options.mirror;
+    reset_log(handle, options);
     handle.command = container.command;
     handle.labels = container.labels;
     handle.env_names = container.env_names;
+    assert(handle.status == .starting);
+    assert(handle.name_len == 0);
+}
+
+/// Starts the container described by `container`. On return the command has started and
+/// `handle` is running; on `StartFailed` it did not, `diag` says why, and the run record (if one
+/// was begun) says so too. `handle` is set up in place and must not move afterwards.
+pub fn start(
+    host: Host,
+    container: *const Spec,
+    options: StartOptions,
+    handle: *Handle,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    init_handle(host, container, options, handle);
     try choose_name(host, container.name, handle, diag);
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
@@ -950,6 +956,14 @@ fn remove_logs(handle: *Handle, dir: *const records.Dir, pruned: *const records.
 
 // ---- The log -------------------------------------------------------------------------------
 
+fn reset_log(handle: *Handle, options: StartOptions) void {
+    handle.log_active = false;
+    handle.log_warned = false;
+    handle.mirror = options.mirror;
+    assert(!handle.log_active);
+    assert(handle.log_warned == false);
+}
+
 /// Opens the container's log, for a run that keeps one. True when the container's output is to
 /// be read through pipes: the log is open and there is a place for it. A run with no state
 /// directory has said so already (the record's warning); one whose log cannot be made says so
@@ -973,9 +987,11 @@ fn open_log(handle: *Handle, options: StartOptions) bool {
 }
 
 fn close_log(handle: *Handle) void {
+    assert(handle.name_len > 0);
     if (!handle.log_active) return;
     handle.log.close();
     handle.log_active = false;
+    assert(!handle.log.fd_open);
 }
 
 /// Tells the caller once per run that the output is not being kept. A detached run's supervisor

@@ -103,7 +103,9 @@ test "--output json is one zbx.logs/1 object per record" {
         try testing.expect(std.mem.eql(u8, stream, "stdout") or std.mem.eql(u8, stream, "stderr"));
         try testing.expect(object.get("time").?.integer > 0);
         try testing.expect(object.get("dropped_bytes") == null);
-        if (count == 1) try testing.expectEqualStrings("warning: one\n", object.get("text").?.string);
+        if (count == 1) {
+            try testing.expectEqualStrings("warning: one\n", object.get("text").?.string);
+        }
     }
     try testing.expectEqual(@as(u32, 4), count);
 }
@@ -180,10 +182,15 @@ test "a log over the cap starts at a whole record and says how much was dropped"
     try testing.expect(records.locate(sim.interface(), &runs));
     const dir = logfile.dir_of(&runs).?;
     var writer: logfile.Writer = undefined;
-    try writer.open(disk.interface(), &dir, "web", .{ .segment_bytes_max = 16 + 4 * (12 + 8) + 4, .record_bytes_max = 8 });
+    const options: logfile.WriterOptions = .{
+        .segment_bytes_max = 16 + 4 * (12 + 8) + 4,
+        .record_bytes_max = 8,
+    };
+    try writer.open(disk.interface(), &dir, "web", options);
     var at: u32 = 0;
     while (at < 30) : (at += 1) {
         var text: [8]u8 = undefined;
+        // Cannot fail: "rec", four digits and a newline are the eight bytes of the buffer.
         _ = std.fmt.bufPrint(&text, "rec{d:0>4}\n", .{at}) catch unreachable;
         try writer.append(.stdout, 5000 + at, text[0..8]);
     }

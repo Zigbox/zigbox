@@ -49,6 +49,8 @@ pub const Options = struct {
 
 /// A value of `--tail`: a whole number of lines from 0 to the bound.
 pub fn parse_tail(text: []const u8) ?u32 {
+    assert(constants.log_tail_lines_max < std.math.maxInt(u32));
+    assert(text.len <= constants.arg_bytes_max);
     if (text.len == 0 or text.len > 10) return null;
     const value = std.fmt.parseInt(u32, text, 10) catch return null;
     if (value > constants.log_tail_lines_max) return null;
@@ -56,6 +58,8 @@ pub fn parse_tail(text: []const u8) ?u32 {
 }
 
 pub fn parse_stream(text: []const u8) ?logfile.Stream {
+    assert(text.len <= constants.arg_bytes_max);
+    assert(@tagName(logfile.Stream.stdout).len == 6);
     if (std.mem.eql(u8, text, "stdout")) return .stdout;
     if (std.mem.eql(u8, text, "stderr")) return .stderr;
     return null;
@@ -71,23 +75,27 @@ pub fn run_logs(host: Host, ws: *Workspace, options: Options, diag: *Diag) Error
         return error.Failed;
     }
     records.load(host, &runs, options.name, &ws.record) catch |err| {
-        const why: diagnose.NoContainer = if (err == error.NotFound) .no_record else .unreadable_record;
+        const missing = err == error.NotFound;
+        const why: diagnose.NoContainer = if (missing) .no_record else .unreadable_record;
         diagnose.no_such_container(diag, options.name, why);
         return error.Failed;
     };
     const logs = logfile.dir_of(&runs) orelse return no_log(diag, options.name);
     const fs = host.log_files();
-    const skip = if (options.tail) |lines| try lines_to_skip(fs, &logs, ws, options, lines, diag) else 0;
+    var skip: u64 = 0;
+    if (options.tail) |lines| skip = try lines_to_skip(fs, &logs, ws, options, lines, diag);
     try open_reader(fs, &logs, ws, options.name, diag);
     defer ws.reader.close();
     var show: Shown = .{ .skip_lines = skip, .first = true };
-    try note_dropped(host, ws, options, skip);
+    note_dropped(ws, options, skip);
     try show_available(host, ws, options, &show, diag);
     if (options.follow) try follow(host, ws, options, &show, diag);
     try flush(host, ws, diag);
 }
 
 fn no_log(diag: *Diag, name: []const u8) Error {
+    assert(diag.code == null);
+    assert(name.len > 0);
     diagnose.no_log(diag, name);
     return error.Failed;
 }
@@ -99,6 +107,8 @@ fn open_reader(
     name: []const u8,
     diag: *Diag,
 ) Error!void {
+    assert(diag.code == null);
+    assert(name.len > 0);
     ws.reader.open(fs, logs, name) catch |err| switch (err) {
         error.NoLog => return no_log(diag, name),
         error.Newer => {
@@ -131,6 +141,8 @@ fn lines_to_skip(
     lines: u32,
     diag: *Diag,
 ) Error!u64 {
+    assert(lines <= constants.log_tail_lines_max);
+    assert(options.tail != null);
     try open_reader(fs, logs, ws, options.name, diag);
     defer ws.reader.close();
     var newlines: u64 = 0;
@@ -146,6 +158,7 @@ fn lines_to_skip(
         last = found.payload[found.payload.len - 1];
     }
     const total = newlines + @intFromBool(last != '\n');
+    assert(total >= newlines);
     return total -| lines;
 }
 
@@ -153,6 +166,8 @@ fn lines_to_skip(
 const records_bound: u32 = constants.log_segment_bytes_max;
 
 fn selected(options: Options, stream: logfile.Stream) bool {
+    assert(@backingInt(stream) >= 1);
+    assert(@backingInt(stream) <= 2);
     const wanted = options.stream orelse return true;
     return wanted == stream;
 }
@@ -166,6 +181,9 @@ const Shown = struct {
 /// The bytes of `payload` after `skip` newlines have been passed (all of them if there are
 /// fewer); `skip` is what is left to pass.
 fn after_skipped(payload: []const u8, skip: *u64) []const u8 {
+    assert(payload.len <= constants.log_record_bytes_max);
+    const before = skip.*;
+    defer assert(skip.* <= before);
     var rest = payload;
     while (skip.* > 0) {
         const at = std.mem.indexOfScalar(u8, rest, '\n') orelse return rest[rest.len..];
@@ -177,8 +195,9 @@ fn after_skipped(payload: []const u8, skip: *u64) []const u8 {
 
 /// A log that dropped output says so (a warning on stderr), unless `--tail` showed only the end
 /// of it. The JSON records carry the number too.
-fn note_dropped(host: Host, ws: *Workspace, options: Options, skip: u64) Error!void {
-    _ = host;
+fn note_dropped(ws: *Workspace, options: Options, skip: u64) void {
+    assert(options.name.len > 0);
+    assert(@backingInt(ws.reader.stage) <= 1);
     if (skip > 0) return;
     const dropped = ws.reader.dropped_bytes;
     if (dropped == 0) return;
@@ -197,6 +216,8 @@ fn show_available(
     show: *Shown,
     diag: *Diag,
 ) Error!void {
+    assert(show.skip_lines <= constants.log_bytes_max);
+    assert(ws.out_len <= ws.out.len);
     for (0..records_bound) |_| {
         const found = switch (ws.reader.next()) {
             .record => |item| item,
@@ -220,6 +241,7 @@ fn emit(
 ) Error!void {
     assert(payload.len > 0);
     assert(payload.len <= found.payload.len);
+    assert(ws.out_len <= ws.out.len);
     if (ws.out_len + line_bytes_max > ws.out.len) try flush(host, ws, diag);
     var writer = std.Io.Writer.fixed(ws.out[ws.out_len..]);
     if (options.json) {
@@ -241,6 +263,8 @@ pub fn write_json_line(
     dropped_bytes: u64,
 ) std.Io.Writer.Error!void {
     assert(payload.len > 0);
+    assert(payload.len <= constants.log_record_bytes_max);
+    assert(found.time < constants.log_time_max);
     var lossy = false;
     var probe = payload;
     while (probe.len > 0) {
@@ -272,13 +296,17 @@ const Step = struct { length: usize, bad: bool };
 /// The next character of `bytes` as UTF-8: its length, or one byte that is not part of one.
 fn utf8_step(bytes: []const u8) Step {
     assert(bytes.len > 0);
-    const length = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return .{ .length = 1, .bad = true };
+    assert(bytes.len <= constants.log_record_bytes_max);
+    const bad: Step = .{ .length = 1, .bad = true };
+    const length = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return bad;
     if (length > bytes.len) return .{ .length = 1, .bad = true };
     if (!std.unicode.utf8ValidateSlice(bytes[0..length])) return .{ .length = 1, .bad = true };
     return .{ .length = length, .bad = false };
 }
 
 fn write_json_piece(writer: *std.Io.Writer, piece: []const u8) std.Io.Writer.Error!void {
+    assert(piece.len > 0);
+    assert(piece.len <= 4);
     if (piece.len > 1) return writer.writeAll(piece);
     switch (piece[0]) {
         '"' => try writer.writeAll("\\\""),
@@ -292,6 +320,8 @@ fn write_json_piece(writer: *std.Io.Writer, piece: []const u8) std.Io.Writer.Err
 }
 
 fn flush(host: Host, ws: *Workspace, diag: *Diag) Error!void {
+    assert(ws.out_len <= ws.out.len);
+    assert(diag.code == null);
     if (ws.out_len == 0) return;
     host.write_all(.stdout, ws.out[0..ws.out_len]) catch |err| {
         errors.output_failed(diag, .stdout, err, host.last_errno());
@@ -304,6 +334,7 @@ fn flush(host: Host, ws: *Workspace, diag: *Diag) Error!void {
 /// loop ends with the container, not by a count: a container can run for ever.
 fn follow(host: Host, ws: *Workspace, options: Options, show: *Shown, diag: *Diag) Error!void {
     assert(options.follow);
+    assert(diag.code == null);
     while (true) {
         try flush(host, ws, diag);
         if (container_ended(host, ws, options.name)) {
@@ -327,12 +358,16 @@ fn finish_rotation(
     show: *Shown,
     diag: *Diag,
 ) Error!void {
+    assert(options.follow);
+    assert(show.skip_lines <= constants.log_bytes_max);
     if (!ws.reader.follow_look()) return;
     try show_available(host, ws, options, show, diag);
     _ = ws.reader.follow_switch();
 }
 
 fn container_ended(host: Host, ws: *Workspace, name: []const u8) bool {
+    assert(name.len > 0);
+    assert(name.len <= constants.container_name_bytes_max);
     var runs: records.Dir = undefined;
     if (!records.locate(host, &runs)) return true;
     records.load(host, &runs, name, &ws.record) catch return true;
@@ -375,7 +410,8 @@ test "a JSON line escapes controls, keeps UTF-8 and marks bytes that are not" {
     const expected = "{\"schema\":\"zbx.logs/1\",\"stream\":\"stderr\",\"time\":42," ++
         "\"text\":\"a\\\"b\\\\c\\n\\u0001\u{e9}\u{fffd}\",\"lossy\":true,\"dropped_bytes\":7}\n";
     try testing.expectEqualStrings(expected, writer.buffered());
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, writer.buffered(), .{});
+    const text = writer.buffered();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("zbx.logs/1", parsed.value.object.get("schema").?.string);
 }
