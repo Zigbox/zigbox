@@ -241,9 +241,11 @@ fn step_env(session: *Session, out: *Io.Writer) !void {
     };
     const line = try json_m5.exit_line(ran.streams.stderr);
     try expect_follows(arena, out, run_schema, line, "the exit line of the run with -e");
+    // The logs directory keeps what the container wrote (M6b): this command prints the values,
+    // so its log has them. What zbx itself stores (records, bundles) must not.
     const grep = try common.format(
         session,
-        "grep -rlE '{s}|{s}' {s}",
+        "grep -rlE --exclude-dir=logs '{s}|{s}' {s}",
         .{ marker_value, copied_value, common.state_dir },
     );
     const found = try session.run(grep, limits.command_timeout_kvm_s);
