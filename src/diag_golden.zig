@@ -1970,6 +1970,20 @@ fn direct_block(
     return render.render(&diag, mode, false, buffer);
 }
 
+fn expect_direct(
+    build: *const fn (diag: *Diag) void,
+    name: []const u8,
+    style: Style,
+    golden: []const u8,
+) !void {
+    var storage: [constants.output_bytes_max]u8 = undefined;
+    const block = direct_block(build, style, &storage);
+    testing.expectEqualStrings(golden, block) catch |err| {
+        std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
+        return err;
+    };
+}
+
 fn build_warnings_dropped(diag: *Diag) void {
     image_diagnose.warnings_dropped(diag, 7);
 }
@@ -1991,12 +2005,7 @@ test "golden: every code in default, verbose and JSON output" {
         };
         for (std.enums.values(Style), expected) |style, golden| {
             if (case.direct) |build| {
-                var storage: [constants.output_bytes_max]u8 = undefined;
-                const block = direct_block(build, style, &storage);
-                testing.expectEqualStrings(golden, block) catch |err| {
-                    std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
-                    return err;
-                };
+                try expect_direct(build, name, style, golden);
                 continue;
             }
             if (case.from_report) {

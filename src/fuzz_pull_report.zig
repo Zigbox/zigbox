@@ -198,7 +198,7 @@ fn check_damaged(random: std.Random, made: Made) void {
     } else {
         const found = diag.code.?;
         // The child's own failure, or the parent's word on the worker.
-        assert(found == .E0419 or found == .E0515);
+        if (found != .E0419) assert(found == .E0515);
     }
 }
 

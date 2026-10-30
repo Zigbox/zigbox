@@ -330,6 +330,7 @@ fn read_buffered(
     handle: host_mod.Handle,
     bytes: *[constants.pull_report_bytes_max]u8,
 ) ?usize {
+    assert(bytes.len == constants.pull_report_bytes_max);
     var length: usize = 0;
     // The child has ended, so its writes are all in the pipe: each read gives some, and the
     // loop ends when it gives none, when nothing more is ready, or when the report is as big
@@ -345,6 +346,7 @@ fn read_buffered(
         length += count;
     }
     assert(length <= bytes.len);
+    assert(length <= constants.pull_report_bytes_max);
     return length;
 }
 
@@ -428,6 +430,8 @@ pub fn read_report(
 
 /// E0419 with the sentence for `cause`: what the parent saw of the store's worker.
 fn report_failed(diag: *Diag, cause: ReportCause, code: u8) void {
+    if (cause == .no_result) assert(code == constants.exit_ok);
+    if (cause == .silent) assert(code != constants.exit_ok);
     diag.reset();
     var storage: [192]u8 = undefined;
     const sentence = switch (cause) {
@@ -468,12 +472,15 @@ fn report_failed(diag: *Diag, cause: ReportCause, code: u8) void {
             .{code},
         ),
     } catch unreachable; // The longest sentence is under 160 bytes, and the buffer is 192.
+    assert(sentence.len > 0);
     store_diagnose.worker_ended(diag, .{ .report = sentence });
+    assert(diag.code.? == .E0419);
 }
 
 /// The pipe for the report could not be made: the kernel's reason is fresh, from the call.
 fn store_pipe_failed(host: Host, diag: *Diag, err: host_mod.Error) void {
     assert(diag.code == null);
+    assert(err != error.Interrupted); // Neither pipe2 nor fcntl is interruptible.
     store_diagnose.worker_ended(diag, .{ .step = .{
         .name = "making the pipe for the store worker's report",
         .err = err,
