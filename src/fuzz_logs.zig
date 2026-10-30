@@ -72,7 +72,8 @@ fn write_log(random: std.Random, total: u32, options: logfile.WriterOptions) Out
     return .{ .done = done, .options = options };
 }
 
-/// What the reader returned, checked against the oracle: the records are `oracle[first..][0..count]`.
+/// What the reader returned, checked against the oracle: the records are
+/// `oracle[first..][0..count]`.
 const Found = struct { first: u32, count: u32, dropped: u64 };
 
 fn read_log(total: u32, expect_all: bool) ?Found {
@@ -138,7 +139,10 @@ fn check_cap(random: std.Random) void {
     const record_max = random.intRangeAtMost(u32, payload_bytes_max, 64);
     const segment = constants.log_header_bytes + constants.log_record_header_bytes + record_max +
         random.uintLessThan(u32, 400);
-    const options: logfile.WriterOptions = .{ .segment_bytes_max = segment, .record_bytes_max = record_max };
+    const options: logfile.WriterOptions = .{
+        .segment_bytes_max = segment,
+        .record_bytes_max = record_max,
+    };
     if (random.boolean()) disk.faults.short_write_per_mille = random.uintLessThan(u16, 1000);
     disk.faults.interrupt_per_mille = random.uintLessThan(u16, 300);
     const outcome = write_log(random, total, options);
@@ -182,7 +186,9 @@ fn check_damage(random: std.Random) void {
     assert(outcome.done == total);
     const path = logs_dir ++ "/web.log";
     const whole = disk.content_of(path).?;
-    var copy: [constants.log_header_bytes + 60 * (constants.log_record_header_bytes + payload_bytes_max)]u8 = undefined;
+    const copy_bytes = constants.log_header_bytes +
+        60 * (constants.log_record_header_bytes + payload_bytes_max);
+    var copy: [copy_bytes]u8 = undefined;
     @memcpy(copy[0..whole.len], whole);
     var length = whole.len;
     switch (random.uintLessThan(u8, 4)) {
