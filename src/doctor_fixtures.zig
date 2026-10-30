@@ -215,9 +215,12 @@ pub const all = [_]Fixture{
         .seccomp = 2,
         .status = "Name:\tzbx\nSeccomp:\t2\nSeccomp_filters:\t1\n",
     }),
-    // This kind of container: root, cgroup v1/hybrid, no uidmap, a range only for another user.
+    // This kind of container (a Claude Code cloud container): root, cgroup v1/hybrid with cgroup2
+    // mounted below /sys/fs/cgroup/unified, so no root cgroup.controllers, no user session and no
+    // bus, no uidmap, a range only for another user.
     build(.{
         .name = "container_cgroup_v1",
+        .bus = .no_environment,
         .kernel = "6.18.44-fc-v153",
         .uid = 0,
         .apparmor_restrict = null,
@@ -230,6 +233,14 @@ pub const all = [_]Fixture{
         .subgid = "ubuntu:100000:65536\n",
         .newuidmap = null,
         .newgidmap = null,
+    }),
+    // cgroup v2 is mounted but its root offers only hugetlb (a namespaced mount in a sandbox).
+    build(.{
+        .name = "cgroup_root_lacks_controllers",
+        .uid = 0,
+        .cgroup_root = "hugetlb\n",
+        .cgroup_user = false,
+        .bus = .no_environment,
     }),
     // A root user on a healthy cgroup v2 host still has no subuid range: uid 0 never passes.
     build(.{

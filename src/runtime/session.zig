@@ -556,7 +556,9 @@ pub const Session = struct {
                 .timeout, .io, .protocol => failure.stage == .call or failure.stage == .job,
                 .no_bus, .auth_refused => false,
             },
+            // The two cgroup v2 shortfalls come from the probe only; no scope was asked for.
             .bus_retried, .no_address, .bad_address, .scope_left => false,
+            .no_cgroup2, .cgroup2_lacks => false,
             .no_cgroup_path, .cgroup_write => true,
             // The cgroup exists unless making it was what failed.
             .cgroupfs => |failure| failure.step != .make,

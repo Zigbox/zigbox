@@ -176,6 +176,54 @@ test "without a user bus a run with a limit is refused, E0307, and creates nothi
     try expect_leak_free(&sim, &before);
 }
 
+test "on a cgroup v1 or hybrid host with no user bus, the missing cgroup v2 is the cause" {
+    // Goal: the shape of a Claude Code cloud container: root, the v1 hierarchies own cpu,
+    // memory and pids, no cgroup v2 root, no user bus. The cause W0301 and E0307 give is the
+    // host's cgroup layout, not the bus, and the fix points at the doctor. Method: the same run
+    // with the bus gone, with and without a limit flag, on a host with no cgroup v2 root and on
+    // one whose root offers only hugetlb.
+    const cases = [_]struct { lacking: bool, cause: []const u8 }{
+        .{ .lacking = false, .cause = "cgroup v2 is not mounted at /sys/fs/cgroup (this host" },
+        .{ .lacking = true, .cause = "lacks the controllers:" },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |limited| {
+            var sim: HostSim = undefined;
+            sim_run.init_hybrid(&sim, 9);
+            if (case.lacking) {
+                const root = "/sys/fs/cgroup/cgroup.controllers";
+                sim.world.add_node("/sys/fs/cgroup", .dir);
+                try testing.expect(sim.world.write_file(root, "hugetlb\n") == null);
+            }
+            sim.environment_variables = &.{.{ .name = "HOME", .value = sim_run.home_path }};
+            const plain = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--", "sh" };
+            const limit = [_][:0]const u8{
+                "zbx", "run", "--rootfs", rootfs, "--memory", "64m", "--", "sh",
+            };
+            const args: []const [:0]const u8 = if (limited) &limit else &plain;
+            try testing.expectEqual(@as(u8, if (limited) 125 else 0), run(&sim, args));
+            const code = if (limited) "error[ZBX-E0307]: " else "warning[ZBX-W0301]: ";
+            try testing.expect(std.mem.startsWith(u8, sim.stderr(), code));
+            try testing.expect(std.mem.indexOf(u8, sim.stderr(), case.cause) != null);
+            // The user bus is not blamed, and the fix is the doctor.
+            try testing.expect(std.mem.indexOf(u8, sim.stderr(), "DBUS_SESSION") == null);
+            try testing.expect(std.mem.indexOf(u8, sim.stderr(), "zbx doctor") != null);
+            try testing.expectEqual(@as(u32, 0), sim.world.bus.scopes_started);
+        }
+    }
+}
+
+test "a working user bus is not second-guessed by the cgroup v2 root" {
+    // Goal: the root cause is looked for only when no scope can be had, so a host with a bus
+    // and no root `cgroup.controllers` file (a sandbox that mounts cgroup differently) behaves
+    // as before.
+    var sim: HostSim = undefined;
+    sim_run.init_hybrid(&sim, 10);
+    const args = [_][:0]const u8{ "zbx", "run", "--rootfs", rootfs, "--memory", "64m", "--", "sh" };
+    try testing.expectEqual(@as(u8, 0), run(&sim, &args));
+    try testing.expectEqual(@as(u32, 1), sim.world.bus.scopes_started);
+}
+
 test "each way the scope step can fail is its own code, exit 125, and cleans up" {
     // Goal: after a perfect probe, a bus or a systemd that fails the step gives the code the
     // table in the E03xx pages promises, the container never runs a command, and the scope the

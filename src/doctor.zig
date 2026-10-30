@@ -1020,7 +1020,7 @@ fn map_denied(check: *Check) void {
 
 // cgroup
 
-const required_controllers = [_]parse.Controller{ .cpu, .memory, .pids };
+const required_controllers = scope_mod.required_controllers;
 
 /// Three runnable steps that delegate the controllers to user services: the drop-in directory,
 /// the drop-in, and the reload. A fresh login restarts the user manager with them.
@@ -1056,10 +1056,15 @@ fn evaluate_cgroup(facts: *const Facts, check: *Check) void {
     assert(facts.cgroup_root.attempted); // gather_cgroup ran.
     assert(facts.cgroup_user.attempted);
     if (facts.cgroup_root.err) |err| {
-        const root_file = "/sys/fs/cgroup/cgroup.controllers";
+        const root_file = scope_mod.cgroup_root_controllers_path;
         const failure: Failure = .{ .err = err, .errno = facts.cgroup_root.errno };
         if (err != error.NotFound) return read_failed(check, .read, root_file, failure);
-        return cgroup_v2_missing(check);
+    }
+    // The same test a run makes when it finds no scope to give, on the read made above.
+    var shortfall: scope_mod.Problem = undefined;
+    const root_text = if (facts.cgroup_root.err == null) facts.cgroup_root.text() else "";
+    if (scope_mod.cgroup2_shortfall(facts.cgroup_root.err, root_text, &shortfall)) {
+        return cgroup_v2_unusable(check, &shortfall);
     }
     var buffer: [160]u8 = undefined;
     const directory = user_manager_path(&buffer, facts.uid);
@@ -1086,16 +1091,42 @@ fn evaluate_cgroup(facts: *const Facts, check: *Check) void {
     cgroup_verdict(check, facts.uid, offered, &facts.bus);
 }
 
-fn cgroup_v2_missing(check: *Check) void {
+/// What a host without a cgroup v2 that can carry a limit gives: containers run, with no
+/// limits. Worded as a conditional and read from no other check's facts, so that a fault in the
+/// userns or overlay probes changes no other check's line.
+const without_limits_note = "; a container started here runs without limits, and --memory, " ++
+    "--pids and --cpus are refused (ZBX-E0307)";
+
+fn cgroup_v2_unusable(check: *Check, shortfall: *const scope_mod.Problem) void {
     assert(check.detail.len == 0);
     assert(check.status == .ok);
-    check.problem("cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid host)", .{});
+    switch (shortfall.*) {
+        .no_cgroup2 => check.problem(
+            "cgroup v2 is not mounted at /sys/fs/cgroup (cgroup v1 or hybrid host){s}",
+            .{without_limits_note},
+        ),
+        .cgroup2_lacks => |missing| {
+            var names: [64]u8 = undefined;
+            check.problem("cgroup v2 at /sys/fs/cgroup lacks controllers:{s}{s}", .{
+                scope_text.missing_names(missing, &names), without_limits_note,
+            });
+        },
+        else => unreachable, // `cgroup2_shortfall` sets only these two.
+    }
     check.cause_symptom();
-    check.cause("/sys/fs/cgroup/cgroup.controllers exists only on the unified cgroup v2 " ++
-        "hierarchy, so this host runs cgroup v1 or the hybrid layout", .{});
-    check.fix("check the mount (cgroup2fs is v2):", "stat -fc %T /sys/fs/cgroup");
-    check.fix("boot with systemd.unified_cgroup_hierarchy=1, or use a cgroup v2 distro", "");
-    assert(check.diag.fixes.count == 2);
+    scope_text.problem_causes(&check.diag, shortfall);
+    switch (shortfall.*) {
+        .no_cgroup2 => {
+            check.fix("check the mount (cgroup2fs is v2):", "stat -fc %T /sys/fs/cgroup");
+            const boot = "boot with systemd.unified_cgroup_hierarchy=1, or use a cgroup v2 distro";
+            check.fix(boot, "");
+        },
+        else => {
+            const enable = "have the host enable them in the parent's cgroup.subtree_control";
+            check.fix(enable, "");
+        },
+    }
+    assert(check.diag.fixes.count > 0);
 }
 
 fn user_manager_missing(check: *Check, uid: u32, directory: []const u8) void {

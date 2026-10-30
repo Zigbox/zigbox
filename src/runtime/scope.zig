@@ -17,6 +17,7 @@ const constants = @import("../constants.zig");
 const auth = @import("../dbus/auth.zig");
 const client = @import("../dbus/client.zig");
 const host_mod = @import("../host.zig");
+const parse = @import("../parse.zig");
 const systemd = @import("../dbus/systemd.zig");
 const text_util = @import("../text.zig");
 const plan_mod = @import("plan.zig");
@@ -61,6 +62,12 @@ pub const Via = struct {
 
 /// Why a scope could not be had.
 pub const Problem = union(enum) {
+    /// No cgroup v2 is mounted at `/sys/fs/cgroup` (a cgroup v1 or hybrid layout): there is no
+    /// cgroup anywhere that zbx could limit a container with, whatever a bus would say.
+    no_cgroup2,
+    /// cgroup v2 is mounted but its root does not offer all of `required_controllers`; `missing`
+    /// names the ones it lacks.
+    cgroup2_lacks: parse.ControllerSet,
     /// Neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR` says where the bus is.
     no_address,
     /// The address is not a `unix:path=` one, or is malformed.
@@ -112,6 +119,12 @@ pub fn driver(host: Host, root: *Directory) Driver {
     assert(root.slice()[0] == '/');
     return .cgroupfs;
 }
+
+/// What a limit needs from the kernel: the controllers the cgroup v2 root must offer.
+pub const required_controllers = [_]parse.Controller{ .cpu, .memory, .pids };
+
+/// The file whose presence says the unified (v2) hierarchy is what `/sys/fs/cgroup` is.
+pub const cgroup_root_controllers_path = "/sys/fs/cgroup/cgroup.controllers";
 
 pub const Probe = struct {
     version: u32,
@@ -229,8 +242,18 @@ fn open_steps(conn: *client.Connection, path: []const u8, uid: u32) bool {
 
 /// Reads the bus and the systemd on it. Opens its own connection and closes it; a write to a bus
 /// that hangs up is an error here, not a signal, for the length of the call.
+///
+/// When there is no scope to be had, the cause that comes first is the one that would stay even
+/// with a perfect bus: a host without a usable cgroup v2 (`cgroup2_shortfall`) is reported as
+/// that, not as a missing user bus. A host where the bus works is not second-guessed here.
 pub fn probe(host: Host, out: *Probe, problem: *Problem) bool {
     assert(@intFromPtr(problem) != @intFromPtr(out));
+    if (probe_driver(host, out, problem)) return true;
+    if (root_shortfall(host, problem)) assert(problem.* != .bus);
+    return false;
+}
+
+fn probe_driver(host: Host, out: *Probe, problem: *Problem) bool {
     var root: Directory = .{};
     if (driver(host, &root) == .cgroupfs) {
         out.version = cgroupfs_version;
@@ -253,6 +276,46 @@ pub fn probe(host: Host, out: *Probe, problem: *Problem) bool {
     out.version_text = version.text;
     assert(out.version > 0);
     return true;
+}
+
+/// True, with the cause in `problem`, if the cgroup v2 root cannot carry a limit: it is not there
+/// (`read_err` is `NotFound`, the v1 and hybrid layouts) or it lacks a required controller. The
+/// doctor calls this with the read it already made; a run reads the file itself
+/// (`root_shortfall`). A read that failed for another reason, or text that does not parse, says
+/// nothing about the layout, so it is not a shortfall: the doctor reports those itself.
+pub fn cgroup2_shortfall(
+    read_err: ?host_mod.Error,
+    text: []const u8,
+    problem: *Problem,
+) bool {
+    assert(text.len <= constants.cgroup_list_bytes_max);
+    if (read_err) |err| {
+        assert(text.len == 0);
+        if (err != error.NotFound) return false;
+        problem.* = .no_cgroup2;
+        assert(problem.* == .no_cgroup2);
+        return true;
+    }
+    const offered = parse.parse_controller_list(text) catch return false;
+    var missing: parse.ControllerSet = .{};
+    for (required_controllers) |controller| {
+        if (offered.has(controller)) continue;
+        missing.bits |= @as(u16, 1) << @backingInt(controller);
+    }
+    if (missing.is_empty()) return false;
+    assert(missing.unknown == 0); // Only known controllers are required.
+    problem.* = .{ .cgroup2_lacks = missing };
+    assert(problem.* == .cgroup2_lacks);
+    return true;
+}
+
+/// `cgroup2_shortfall` for the root's `cgroup.controllers` as the host has it.
+fn root_shortfall(host: Host, problem: *Problem) bool {
+    var buffer: [constants.cgroup_list_bytes_max]u8 = undefined;
+    const text = host.read_file(cgroup_root_controllers_path, &buffer) catch |err| {
+        return cgroup2_shortfall(err, "", problem);
+    };
+    return cgroup2_shortfall(null, text, problem);
 }
 
 /// The request for `plan`'s scope with the container's `pid` and the scope's keeper in it. A

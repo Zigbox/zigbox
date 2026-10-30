@@ -12,12 +12,14 @@ const wire = @import("../dbus/wire.zig");
 const codes = @import("../diag/codes.zig");
 const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const parse = @import("../parse.zig");
 const scope_mod = @import("scope.zig");
 
 /// A few words for the doctor's one-line report: what is wrong with the bus.
 pub fn problem_short(problem: *const scope_mod.Problem) []const u8 {
     assert(@intFromPtr(problem) != 0);
     return switch (problem_code(problem)) {
+        .E0103 => "this host has no cgroup v2 with cpu, memory and pids",
         .E0301 => "no systemd user manager answers on the user bus",
         .E0302 => "the user bus does not accept this user",
         .E0303 => "the user bus answers in a way zbx cannot use",
@@ -30,6 +32,8 @@ pub fn problem_short(problem: *const scope_mod.Problem) []const u8 {
 pub fn problem_code(problem: *const scope_mod.Problem) codes.Code {
     assert(@intFromPtr(problem) != 0);
     switch (problem.*) {
+        // The host's own cgroup layout, which the doctor reports as ZBX-E0103.
+        .no_cgroup2, .cgroup2_lacks => return .E0103,
         .no_address, .bad_address => return .E0301,
         .no_cgroup_path, .cgroup_write => return .E0308,
         .bus => |failure| return bus_code(&failure),
@@ -67,6 +71,16 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
     assert(diag.code != null);
     assert(diag.causes.count <= constants.diag_causes_count_max);
     switch (problem.*) {
+        .no_cgroup2 => diag.cause(
+            "cgroup v2 is not mounted at /sys/fs/cgroup (this host runs cgroup v1 or the " ++
+                "hybrid layout), so zbx has no cgroup to limit a container with",
+            .{},
+        ),
+        .cgroup2_lacks => |missing| {
+            var names: [64]u8 = undefined;
+            diag.cause("the cgroup v2 at /sys/fs/cgroup lacks the controllers:{s}, so zbx has " ++
+                "no cgroup to limit a container with", .{missing_names(missing, &names)});
+        },
         .no_address => diag.cause(
             "neither DBUS_SESSION_BUS_ADDRESS nor XDG_RUNTIME_DIR is set, so there is no " ++
                 "user bus to ask: this is not a systemd user session",
@@ -106,6 +120,21 @@ pub fn problem_causes(diag: *Diag, problem: *const scope_mod.Problem) void {
                 "controller is not delegated to this user", .{});
         },
     }
+}
+
+/// The required controllers in `missing`, each after a space: " memory pids".
+pub fn missing_names(missing: parse.ControllerSet, buffer: *[64]u8) []const u8 {
+    assert(!missing.is_empty());
+    var length: usize = 0;
+    for (scope_mod.required_controllers) |controller| {
+        if (!missing.has(controller)) continue;
+        const name = @tagName(controller);
+        // Cannot overflow: three names of at most six bytes and a space each fit 64.
+        const written = std.fmt.bufPrint(buffer[length..], " {s}", .{name}) catch unreachable;
+        length += written.len;
+    }
+    assert(length > 0);
+    return buffer[0..length];
 }
 
 /// What the cleanup of the scope found, for `--verbose`.
