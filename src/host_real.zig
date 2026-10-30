@@ -96,6 +96,7 @@ pub const HostReal = struct {
         .last_errno = last_errno,
         .uid = uid,
         .probe = probe,
+        .probe_idmap = probe_idmap,
         .pipe = pipe,
         .write_handle = write_handle,
         .spawn = spawn,
@@ -282,7 +283,14 @@ pub const HostReal = struct {
         const self = from_context(context);
         assert(self.probe_timeout_ms >= constants.probe_poll_ms);
         assert(self.scratch_parent.len > 0);
-        return probe_run(self, kind);
+        return probe_run(self, kind, "");
+    }
+
+    fn probe_idmap(context: *anyopaque, path: [:0]const u8) host.Error!host.ProbeOutcome {
+        const self = from_context(context);
+        assert(self.probe_timeout_ms >= constants.probe_poll_ms);
+        assert(path.len > 0);
+        return probe_run(self, .idmap, path);
     }
 
     // ---- Containers ----
@@ -1496,7 +1504,12 @@ const Scratch = struct {
     }
 };
 
-fn probe_run(self: *HostReal, kind: host.ProbeKind) host.Error!host.ProbeOutcome {
+fn probe_run(
+    self: *HostReal,
+    kind: host.ProbeKind,
+    path: [:0]const u8,
+) host.Error!host.ProbeOutcome {
+    assert((path.len > 0) == (kind == .idmap));
     const caller = linux.getuid();
     const give_to: ?u32 = if (caller == 0) nobody_id else null;
     var scratch: Scratch = undefined;
@@ -1511,7 +1524,7 @@ fn probe_run(self: *HostReal, kind: host.ProbeKind) host.Error!host.ProbeOutcome
 
     const forked = linux.fork();
     try HostReal.check(forked);
-    if (forked == 0) child_main(self, kind, &scratch, options_text, caller == 0);
+    if (forked == 0) child_main(self, kind, &scratch, options_text, caller == 0, path);
     const child: i32 = @intCast(forked);
     assert(child > 0);
     assert(scratch.created == (kind == .overlay));
@@ -1540,6 +1553,7 @@ fn child_main(
     scratch: *const Scratch,
     options: [:0]const u8,
     drop_privileges: bool,
+    path: [:0]const u8,
 ) noreturn {
     if (drop_privileges) {
         if (!drop_to_nobody()) linux.exit_group(child_exit_failed);
@@ -1559,7 +1573,7 @@ fn child_main(
 
     const flags: usize = switch (kind) {
         .userns => linux.CLONE.NEWUSER,
-        .overlay => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
+        .overlay, .idmap => linux.CLONE.NEWUSER | linux.CLONE.NEWNS,
     };
     const unshared = linux.errno(linux.unshare(flags));
     if (unshared != .SUCCESS) {
@@ -1573,7 +1587,52 @@ fn child_main(
     // Keep the mount from propagating back to the caller's namespace.
     const private = linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0);
     if (linux.errno(private) != .SUCCESS) linux.exit_group(child_exit_refused_mount);
+    if (kind == .idmap) linux.exit_group(idmap_attempt(path));
     linux.exit_group(overlay_mount(scratch, options));
+}
+
+/// Makes the id-mapped mount the doctor asks about, and throws it away with the namespace: a
+/// detached clone of `path`'s mount (`open_tree`), then `mount_setattr` with `MOUNT_ATTR_IDMAP`
+/// and this scratch user namespace as the map. Nothing is attached anywhere. Returns the
+/// child's exit code: ok, a refusal (the kernel or the file system says no), or a failure.
+fn idmap_attempt(path: [:0]const u8) u8 {
+    assert(path.len > 0);
+    const open_tree_number = 428; // The same on x86_64 and aarch64.
+    const mount_setattr_number = 442;
+    const open_tree_clone: usize = 0x1; // OPEN_TREE_CLONE
+    const open_cloexec: usize = 0o2000000; // OPEN_TREE_CLOEXEC is O_CLOEXEC.
+    const at_empty_path: usize = 0x1000; // AT_EMPTY_PATH
+    const attr_idmap: u64 = 0x100000; // MOUNT_ATTR_IDMAP
+    const cwd: usize = @bitCast(@as(isize, linux.AT.FDCWD));
+    const cloned = linux.syscall3(
+        @fromBackingInt(@intCast(open_tree_number)),
+        cwd,
+        @intFromPtr(path.ptr),
+        open_tree_clone | open_cloexec,
+    );
+    if (linux.errno(cloned) != .SUCCESS) {
+        return refusal_exit(linux.errno(cloned), child_exit_refused_mount);
+    }
+    const tree: i32 = @intCast(cloned);
+    const own_namespace: linux.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
+    const user_namespace = linux.open("/proc/self/ns/user", own_namespace, 0);
+    if (linux.errno(user_namespace) != .SUCCESS) return child_exit_failed;
+    const attributes: MountAttr = .{
+        .attr_set = attr_idmap,
+        .attr_clr = 0,
+        .propagation = 0,
+        .userns_fd = @intCast(user_namespace),
+    };
+    const done = linux.syscall5(
+        @fromBackingInt(@intCast(mount_setattr_number)),
+        @intCast(tree),
+        @intFromPtr(@as([*:0]const u8, "")),
+        at_empty_path,
+        @intFromPtr(&attributes),
+        @sizeOf(MountAttr),
+    );
+    if (linux.errno(done) == .SUCCESS) return child_exit_ok;
+    return refusal_exit(linux.errno(done), child_exit_refused_mount);
 }
 
 /// Writes `/proc/self/{setgroups,gid_map,uid_map}` so that `uid` and `gid` (the ids the process
@@ -1749,6 +1808,32 @@ test "probe child outcomes map from exit status, signal and timeout, and are all
         try std.testing.expectEqual(case.expected, outcome);
         try std.testing.expect(no_children_left());
     }
+}
+
+test "the id-mapped mount probe maps its child's exit to an outcome and reaps it" {
+    // Goal: M6b's probe ends as the others do: a mount refused is `denied`, namespaces refused
+    // is `setup_denied`, success is `ok`, and no child is left. Method: hooks stand in for the
+    // child's body; then the real probe on "/", whose answer depends on this kernel and user
+    // (an unprivileged user is normally refused) and must be one of the answers a run can give.
+    const Case = struct { hook: *const fn () noreturn, expected: host.ProbeOutcome };
+    const cases = [_]Case{
+        .{ .hook = hook_exit_ok, .expected = .ok },
+        .{ .hook = hook_exit_mount, .expected = .denied },
+        .{ .hook = hook_exit_namespace, .expected = .setup_denied },
+        .{ .hook = hook_exit_map, .expected = .map_denied },
+        .{ .hook = hook_exit_other, .expected = .failed },
+    };
+    for (cases) |case| {
+        var real: HostReal = .{ .child_hook = case.hook, .probe_timeout_ms = 50 };
+        const outcome = try real.interface().probe_idmap("/");
+        try std.testing.expectEqual(case.expected, outcome);
+        try std.testing.expect(no_children_left());
+    }
+    var real: HostReal = .{ .probe_timeout_ms = 2000 };
+    const answer = try real.interface().probe_idmap("/");
+    try std.testing.expect(answer != .signaled);
+    try std.testing.expect(answer != .timed_out);
+    try std.testing.expect(no_children_left());
 }
 
 test "the probe child runs unprivileged even when the caller is root" {

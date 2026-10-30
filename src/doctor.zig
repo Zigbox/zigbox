@@ -38,6 +38,7 @@ const scope_mod = @import("runtime/scope.zig");
 const scope_text = @import("runtime/scope_text.zig");
 const parse = @import("parse.zig");
 const text_util = @import("text.zig");
+const project_mod = @import("runtime/project.zig");
 const diag_codes = @import("diag/codes.zig");
 const diag_errors = @import("diag/errors.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -300,6 +301,19 @@ const ProbeFact = struct {
         return fact.outcome == outcome;
     }
 
+    /// The id-mapped mount probe of the file system `path` is on.
+    fn run_path(fact: *ProbeFact, host: Host, path: [:0]const u8) void {
+        assert(path.len > 0);
+        fact.err = null;
+        fact.errno = 0;
+        fact.outcome = host.probe_idmap(path) catch |err| {
+            fact.err = err;
+            fact.errno = host.last_errno();
+            return;
+        };
+        assert(fact.err == null);
+    }
+
     fn run(fact: *ProbeFact, host: Host, kind: host_mod.ProbeKind) void {
         fact.err = null;
         fact.errno = 0;
@@ -407,6 +421,10 @@ pub const Facts = struct {
     bus: BusFact,
 
     probe_overlay: ProbeFact,
+    /// M6b: the project directory the id-mapped mount probe was asked about (empty: it could not
+    /// be found, so nothing was asked), and what the probe said. Reported, never used.
+    idmap_path: text_util.Bounded(constants.mount_path_bytes_max),
+    probe_idmap: ProbeFact,
 
     uid: u32,
     passwd: Slot(constants.passwd_bytes_max),
@@ -437,6 +455,8 @@ pub const Facts = struct {
         facts.cgroup_controllers.reset();
         facts.bus = .{};
         facts.probe_overlay = .{};
+        facts.idmap_path = .{};
+        facts.probe_idmap = .{};
         facts.uid = 0;
         facts.passwd.reset();
         facts.subuid.reset();
@@ -466,7 +486,7 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .kernel => gather_kernel(host, facts),
         .userns => gather_userns(host, facts),
         .cgroup => gather_cgroup(host, facts),
-        .overlay => facts.probe_overlay.run(host, .overlay),
+        .overlay => gather_overlay(host, facts),
         .subid => gather_subid(host, facts),
         .seccomp => gather_seccomp(host, facts),
         .net => gather_net(host, facts),
@@ -481,6 +501,18 @@ pub fn gather_one(host: Host, facts: *Facts, id: CheckId) void {
         .seccomp => assert(facts.status.attempted),
         .net => assert(facts.pasta.attempted),
     }
+}
+
+fn gather_overlay(host: Host, facts: *Facts) void {
+    facts.probe_overlay.run(host, .overlay);
+    facts.idmap_path = .{};
+    facts.probe_idmap = .{};
+    var project: project_mod.Path = undefined;
+    project_mod.directory(host, host.filesystem(), "", &project) catch return;
+    if (project.len > constants.mount_path_bytes_max) return;
+    facts.idmap_path.print("{s}", .{project.text()});
+    facts.probe_idmap.run_path(host, project.text());
+    assert(facts.idmap_path.len > 0);
 }
 
 fn gather_kernel(host: Host, facts: *Facts) void {
@@ -1180,6 +1212,7 @@ fn evaluate_overlay(facts: *const Facts, check: *Check) void {
     const probe = facts.probe_overlay;
     if (probe.is(.ok)) {
         check.pass("overlayfs mounts inside a user and mount namespace", .{});
+        idmap_detail(facts, check);
         return;
     }
     if (probe.is(.denied)) {
@@ -1204,6 +1237,24 @@ fn evaluate_overlay(facts: *const Facts, check: *Check) void {
     assert(!probe.is(.ok)); // Every success and named refusal returned above.
     if (probe.err == null) assert(probe.outcome != .denied);
     probe_problem(check, "overlay", probe);
+}
+
+/// M6b: the line of the overlay check says, after the overlay, whether this user could make an
+/// id-mapped mount of the project's file system. A fact, not a requirement: zbx never makes one
+/// (docs/DECISIONS.md, "Local dev"), so it is never a warning and never changes the exit code.
+fn idmap_detail(facts: *const Facts, check: *Check) void {
+    assert(check.status == .ok);
+    assert(check.detail.len > 0);
+    if (facts.idmap_path.len == 0) return;
+    const verdict: []const u8 = if (facts.probe_idmap.is(.ok))
+        "allowed"
+    else if (facts.probe_idmap.is(.denied))
+        "not allowed"
+    else
+        "could not be tested";
+    check.detail.print("; id-mapped mounts of {s}: {s} (zbx does not use them)", .{
+        facts.idmap_path.slice(), verdict,
+    });
 }
 
 // subid
@@ -2062,4 +2113,72 @@ test "explain_userns adds the host's reason to a refused clone, or nothing" {
         try testing.expectEqual(case.fixes, diag.fixes.count);
         try testing.expectEqual(@as(u32, 0), target.open_count());
     }
+}
+
+var idmap_facts: Facts = undefined;
+
+fn overlay_detail(target: *HostSim, report: *Report) []const u8 {
+    inspect(target.interface(), &idmap_facts, report);
+    const check = &report.checks[@backingInt(CheckId.overlay)];
+    assert(check.id == .overlay);
+    return check.detail.slice();
+}
+
+test "the overlay line says whether an id-mapped mount of the project is allowed" {
+    // Goal: M6b's fact, reported and never used: allowed, not allowed, or could not be tested,
+    // after the overlay's own words; the check passes in each case and the exit code is as it
+    // was. Method: a healthy host whose id-map probe answers each way, then one with no project
+    // directory to ask about (the line is unchanged), and a failing overlay (no detail).
+    const SimFs = @import("store/fs_sim.zig").SimFs;
+    var disk: SimFs = undefined;
+    disk.init(1);
+    disk.put_dir("/home", 0o755);
+    disk.put_dir("/home/alice", 0o755);
+    disk.put_dir("/home/alice/proj", 0o755);
+    disk.put_file("/home/alice/proj/zbx.lock", 0o644, "");
+    disk.put_dir("/home/alice/proj/sub", 0o755);
+    const fixture = fixtures.find("ubuntu_2404").?;
+    var target: HostSim = undefined;
+    var report: Report = undefined;
+    const Outcome = struct {
+        probe: host_mod.ProbeOutcome,
+        error_: ?host_mod.Error,
+        text: []const u8,
+    };
+    const outcomes = [_]Outcome{
+        .{ .probe = .ok, .error_ = null, .text = "allowed" },
+        .{ .probe = .denied, .error_ = null, .text = "not allowed" },
+        .{ .probe = .failed, .error_ = null, .text = "could not be tested" },
+        .{ .probe = .timed_out, .error_ = null, .text = "could not be tested" },
+        .{ .probe = .ok, .error_ = error.IoFailed, .text = "could not be tested" },
+    };
+    for (outcomes) |outcome| {
+        target.init(7, fixture.files);
+        fixture.apply(&target);
+        target.store_fs = &disk;
+        _ = target.world.processes[0].cwd.set("/home/alice/proj/sub");
+        target.probes.idmap = outcome.probe;
+        target.probes.idmap_error = outcome.error_;
+        const detail = overlay_detail(&target, &report);
+        const expected = "overlayfs mounts inside a user and mount namespace; " ++
+            "id-mapped mounts of /home/alice/proj: ";
+        try testing.expect(std.mem.startsWith(u8, detail, expected));
+        const rest = detail[expected.len..];
+        try testing.expect(std.mem.startsWith(u8, rest, outcome.text));
+        try testing.expect(std.mem.endsWith(u8, rest, " (zbx does not use them)"));
+        try testing.expectEqual(Status.ok, report.checks[@backingInt(CheckId.overlay)].status);
+        for (report.checks) |check| try testing.expect(check.status != .fail);
+    }
+    // The working directory is the project when there is no lock above it.
+    target.init(7, fixture.files);
+    fixture.apply(&target);
+    target.store_fs = &disk;
+    _ = target.world.processes[0].cwd.set("/home/alice");
+    const at_home = overlay_detail(&target, &report);
+    try testing.expect(std.mem.indexOf(u8, at_home, "mounts of /home/alice:") != null);
+    // A failing overlay says nothing of it.
+    target.probes.overlay = .denied;
+    const failing = overlay_detail(&target, &report);
+    try testing.expect(std.mem.indexOf(u8, failing, "id-mapped") == null);
+    try testing.expectEqual(Status.fail, report.checks[@backingInt(CheckId.overlay)].status);
 }
