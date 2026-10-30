@@ -12,6 +12,9 @@ const logfile = @import("logfile.zig");
 const records = @import("records.zig");
 const sim_run = @import("sim_run.zig");
 const sim_world = @import("../sim_world.zig");
+const run = @import("run.zig");
+const zigbox = @import("../zigbox.zig");
+const Diag = @import("../diag/diag.zig").Diag;
 const SimFs = @import("../store/fs_sim.zig").SimFs;
 
 const HostSim = host_sim.HostSim;
@@ -251,4 +254,61 @@ test "a run's log is removed when its record is pruned, and a name used again st
     try testing.expect(disk.kind_of(logs_dir ++ "/r-99.log") != null);
     try testing.expectEqual(@as(u8, 0), logs(&sim, &.{ "--stream", "stderr" }));
     try testing.expectEqualStrings("warning: one\nwarning: two\nwarning: three\n", sim.stdout());
+}
+
+var library_handle: run.Handle = undefined;
+
+test "a library caller reads the log of a run it started, with its own storage" {
+    // Goal: Zigcube's agent path. Method: `start` and `wait` as the agent does, no terminal copy
+    // (the default), then `open_log` and a reader of the caller's own: every byte the container
+    // wrote, in order, nothing on the host's terminal.
+    var sim: HostSim = undefined;
+    setup(&sim, 12);
+    sim.world.out_script = &chunks;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "agent-1",
+        .command = &.{"/bin/sh"},
+    };
+    try run.start(sim.interface(), &spec, .{}, &library_handle, &diag);
+    _ = run.wait(&library_handle);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    var reader: zigbox.LogReader = undefined;
+    try zigbox.open_log(&reader, sim.interface(), "agent-1");
+    defer reader.close();
+    var total: usize = 0;
+    var seen: u32 = 0;
+    while (true) {
+        switch (reader.next()) {
+            .record => |found| {
+                total += found.payload.len;
+                seen += 1;
+            },
+            else => break,
+        }
+    }
+    try testing.expectEqual(@as(u32, 4), seen);
+    try testing.expectEqual(@as(usize, 18 + 13 + 16 + 28), total);
+    try testing.expectEqual(@as(u64, 0), reader.dropped_bytes);
+    try testing.expectError(error.NoLog, zigbox.open_log(&reader, sim.interface(), "nobody"));
+}
+
+test "a library caller that keeps no log leaves the container's output where it was" {
+    var sim: HostSim = undefined;
+    setup(&sim, 13);
+    sim.world.out_script = &chunks;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec: run.Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "agent-2",
+        .command = &.{"/bin/sh"},
+    };
+    try run.start(sim.interface(), &spec, .{ .keep_log = false }, &library_handle, &diag);
+    _ = run.wait(&library_handle);
+    var reader: zigbox.LogReader = undefined;
+    try testing.expectError(error.NoLog, zigbox.open_log(&reader, sim.interface(), "agent-2"));
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
 }

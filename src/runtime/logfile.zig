@@ -665,6 +665,17 @@ pub const Reader = struct {
     }
 };
 
+/// Opens the log of the container `name` for a caller that has the host and not the paths: the
+/// library's way in (Zigcube's agent). The reader is the caller's storage.
+pub fn open_log(reader: *Reader, host: host_mod.Host, name: []const u8) ReadError!void {
+    assert(name.len > 0);
+    assert(name.len <= constants.container_name_bytes_max);
+    var runs: records.Dir = undefined;
+    if (!records.locate(host, &runs)) return error.NoLog;
+    const dir = dir_of(&runs) orelse return error.NoLog;
+    return reader.open(host.log_files(), &dir, name);
+}
+
 // ---- Tests ----------------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -1041,4 +1052,51 @@ test "a write that fails stops the log for good" {
     const got = try read_all(sim_disk.interface(), &dir, "web", &indexes);
     try testing.expectEqual(@as(u32, 3), got.count);
     try testing.expectEqual(@as(u32, 0), sim_disk.open_count());
+}
+
+test "a reader that follows a log through a rotation loses no record that is still there" {
+    // Goal: --follow across the cap. Method: a small file size; read what is there, write enough
+    // to rotate once, and follow: the records come on in order, with no gap, from the file that
+    // was rotated away and then from the new one.
+    sim_disk.init(11);
+    const dir = test_dir("/s/zbx/logs");
+    var writer: Writer = undefined;
+    try writer.open(sim_disk.interface(), &dir, "web", small);
+    try write_numbered(&writer, 0, 3);
+    var reader: Reader = undefined;
+    try reader.open(sim_disk.interface(), &dir, "web");
+    defer reader.close();
+    var seen: u32 = 0;
+    var rounds: u32 = 0;
+    while (rounds < 30) : (rounds += 1) {
+        while (true) {
+            switch (reader.next()) {
+                .record => |found| {
+                    const number = try std.fmt.parseInt(u32, found.payload[5..11], 10);
+                    try testing.expectEqual(seen, number);
+                    seen += 1;
+                },
+                else => break,
+            }
+        }
+        // One round of the writer: a few records, enough to rotate every so often.
+        if (reader.follow_look()) {
+            while (true) {
+                switch (reader.next()) {
+                    .record => |found| {
+                        const number = try std.fmt.parseInt(u32, found.payload[5..11], 10);
+                        try testing.expectEqual(seen, number);
+                        seen += 1;
+                    },
+                    else => break,
+                }
+            }
+            try testing.expect(reader.follow_switch());
+        }
+        const next_index = 3 + rounds * 2;
+        try write_numbered(&writer, next_index, next_index + 2);
+    }
+    writer.close();
+    try testing.expectEqual(@as(u32, 0), sim_disk.open_count() - 1); // The reader's file.
+    try testing.expect(seen >= 30);
 }

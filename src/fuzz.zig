@@ -17,6 +17,7 @@ const diag_fuzz = @import("fuzz_diag.zig");
 const diagnostic_fuzz = @import("fuzz_diagnostic.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
+const logs_fuzz = @import("fuzz_logs.zig");
 const state_fuzz = @import("fuzz_state.zig");
 const vm_fuzz = @import("fuzz_vm.zig");
 const redact_fuzz = @import("fuzz_redact.zig");
@@ -55,6 +56,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
+    .{ .name = "logs", .run_iteration = logs_fuzz.fuzz_logs },
     .{ .name = "state", .run_iteration = state_fuzz.fuzz_state },
     .{ .name = "vm", .run_iteration = vm_fuzz.fuzz_vm },
     .{ .name = "redact", .run_iteration = redact_fuzz.fuzz_redact },

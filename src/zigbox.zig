@@ -81,6 +81,16 @@ pub const explain = @import("diag/explain.zig");
 /// Run records: the state a run leaves in the state directory.
 pub const records = @import("runtime/records.zig");
 
+/// The log of a container: everything it wrote to standard output and error, kept up to 5 MiB
+/// beside its run record (`runtime/logfile.zig` has the format). A caller that did not start the
+/// container reads it with `open_log` and a `LogReader` of its own (about 33 KiB, no allocation):
+/// `LogReader.next` returns records (stream, time, bytes) until `end`, and
+/// `LogReader.dropped_bytes` says how much older output the cap dropped. `StartOptions.keep_log`
+/// turns the log off for a run; a run that cannot write it warns once and goes on.
+pub const logs = @import("runtime/logfile.zig");
+pub const LogReader = logs.Reader;
+pub const open_log = logs.open_log;
+
 /// The store: content-addressed file trees (docs/briefs/M3-store.md). Its module doc has the
 /// layout; `Store` and `import.Workspace` are the caller's storage, and the work runs in a
 /// single-threaded child inside the user's namespace (`store.namespace`).
@@ -103,6 +113,8 @@ test "the module's surface is what the contract names" {
     _ = list;
     _ = adopt;
     _ = Watcher;
+    _ = open_log;
+    _ = LogReader;
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
 }
 
