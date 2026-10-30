@@ -39,12 +39,10 @@ pub fn check_page(output: []const u8, wanted: []const u8, other: []const u8) Err
     if (contains(output, other)) return error.PageWrong;
 }
 
-/// A run that wrote through a mount and printed `id -u` (`inside`), and on the host `stat -c %u`
-/// of the file, `id -u` of the user, and a count of the files of the site not owned by that user
-/// (`host`, three lines). The container ran as root, the file is the user's, and no file of the
-/// site is another id's.
-pub fn check_owner(inside: []const u8, host: []const u8) Error!void {
-    if (!has_line(inside, "0")) return error.RunWrong;
+/// On the host after a run as root wrote through a mount: `stat -c %u` of the file, `id -u` of
+/// the user, and a count of the files of the site not owned by that user (three lines). The file
+/// is the user's, and no file of the site is another id's.
+pub fn check_owner(host: []const u8) Error!void {
     var lines = std.mem.tokenizeScalar(u8, host, '\n');
     const owner = std.mem.trim(u8, lines.next() orelse return error.OwnerWrong, " \r\t");
     const user = std.mem.trim(u8, lines.next() orelse return error.OwnerWrong, " \r\t");
@@ -113,15 +111,13 @@ test "the page: the wanted one, and not the other" {
 }
 
 test "the owner: the user's own id for the file, and for every file of the site" {
-    try check_owner("0\n", "1000\n1000\n0\n");
-    try testing.expectError(error.RunWrong, check_owner("1000\n", "1000\n1000\n0\n"));
-    try testing.expectError(error.RunWrong, check_owner("", "1000\n1000\n0\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", "100999\n1000\n0\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", "1000\n1000\n1\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", "0\n0\n0\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", "1000\n1000\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", "1000\n1000\n0\n7\n"));
-    try testing.expectError(error.OwnerWrong, check_owner("0\n", ""));
+    try check_owner("1000\n1000\n0\n");
+    try testing.expectError(error.OwnerWrong, check_owner("100999\n1000\n0\n"));
+    try testing.expectError(error.OwnerWrong, check_owner("1000\n1000\n1\n"));
+    try testing.expectError(error.OwnerWrong, check_owner("0\n0\n0\n"));
+    try testing.expectError(error.OwnerWrong, check_owner("1000\n1000\n"));
+    try testing.expectError(error.OwnerWrong, check_owner("1000\n1000\n0\n7\n"));
+    try testing.expectError(error.OwnerWrong, check_owner(""));
 }
 
 test "a refusal: 125, its code first, its parts, and no errno" {

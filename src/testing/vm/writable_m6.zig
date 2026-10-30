@@ -82,14 +82,18 @@ fn serve_and_edit(session: *Session, out: *Io.Writer) !void {
 
 fn owned_by_the_user(session: *Session, out: *Io.Writer) !void {
     try out.print("\n{s}: WRITABLE 3: a file written inside is the host user's\n", .{H.demo_name});
+    // Each result is read before the next command: the streams live in the session's buffer.
     const inside = try common.expect_exit(session, out, step_name, write_inside, 0);
-    const owners = try common.expect_exit(session, out, step_name, who_owns, 0);
-    checks.check_owner(inside.streams.stdout, owners.streams.stdout) catch |err| {
-        return fail_step(out, step_name, "expected the host user to own the file", err);
+    checks.check_root_run(inside.streams.stdout, inside.status) catch |err| {
+        return fail_step(out, step_name, "expected the run to be root", err);
     };
     const site = project ++ "/site";
     checks.check_json(inside.streams.stderr, site, "/srv") catch |err| {
         return fail_step(out, step_name, "expected the mount and the user in run's JSON", err);
+    };
+    const owners = try common.expect_exit(session, out, step_name, who_owns, 0);
+    checks.check_owner(owners.streams.stdout) catch |err| {
+        return fail_step(out, step_name, "expected the host user to own the file", err);
     };
     const ps = zn ++ " --output json ps --all";
     const listed = try common.expect_exit(session, out, step_name, ps, 0);
@@ -149,7 +153,7 @@ fn root_flag(session: *Session, out: *Io.Writer) !void {
     const owner = H.as_demo ++ "sh -c 'stat -c %u " ++ project ++ "/site/by-memcached.txt; " ++
         "id -u; find " ++ project ++ "/site ! -user demo | wc -l'";
     const owners = try common.expect_exit(session, out, step_name, owner, 0);
-    checks.check_owner(inside.streams.stdout, owners.streams.stdout) catch |err| {
+    checks.check_owner(owners.streams.stdout) catch |err| {
         return fail_step(out, step_name, "expected the host user to own the file", err);
     };
 }
