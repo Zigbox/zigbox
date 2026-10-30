@@ -56,8 +56,7 @@ pub fn check_removal(summary: []const u8, status: u8, marker: []const u8) Error!
 const testing = std.testing;
 const marker_text = "gone-with-the-record";
 
-/// The summary of run 41079428757 (vm/m6b-slice5d), with the two lines that run did not print
-/// yet (`before_older`, `gone_line`, from E0402 as the agent's JSON gave it in that run).
+/// The summary the guest printed in run 41089445044 (vm/m6b-review5a), as captured.
 const good = "before_log=1\nbefore_older=1\nbefore_record=1\nbefore_text=gone-with-the-record\n" ++
     "after_log=0\nafter_older=0\nafter_record=0\nnewest_log=1\ngone_status=1\n" ++
     "gone_line=error[ZBX-E0402]: no container with that name\n";

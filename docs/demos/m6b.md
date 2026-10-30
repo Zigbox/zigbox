@@ -570,10 +570,9 @@ lines (a sleeping process, and a zombie with PF_EXITING).
   `main_m6b.zig`'s test block. The right input of each is text captured from the green runs of
   `503a591`: https://github.com/Zigbox/zigbox/actions/runs/41079428757 (`vm/m6b-slice5d`: the
   `ls -l` line, python's request lines, `find`'s stderr, the old container's `ps` entry, E0217's
-  text, the ACCEPT summary, the agent's documents, the exec schema, E0213 and `ps --all`) and
-  https://github.com/Zigbox/zigbox/actions/runs/41076069695 (the agent's first captures); the
-  wrong inputs are those texts changed. The two ACCEPT lines that run did not print
-  (`before_older`, `gone_line`) are taken from the run that follows this change (see the
-  slice's report).
+  text, the agent's documents, the exec schema, E0213 and `ps --all`),
+  https://github.com/Zigbox/zigbox/actions/runs/41076069695 (the agent's first captures) and
+  https://github.com/Zigbox/zigbox/actions/runs/41089445044 (`vm/m6b-review5a`: the ACCEPT
+  summary with the rotated file and E0402's line); the wrong inputs are those texts changed.
 - `zig build harness` compiles the demo.
 - Run in the VM: see the report of the slice (the `vm/m6b-*` and `vm/all-*` runs).
