@@ -4241,3 +4241,78 @@ test "a --user value is held to its bound, and to USER or USER:GROUP" {
     const bad = [_][]const u8{ "", ":", "a:", ":b", "a:b:c", "a b", "a\tb", "a\x7f", "::" };
     for (bad) |value| try testing.expect(user_problem(value) != null);
 }
+
+test "parse: exec takes a container, -e, --user, --workdir, then -- and the command" {
+    // Goal: exec's command line, and every line that must be refused, with its code. Method: one
+    // line each; the refusals are the usage codes, which an exec ends with 125.
+    var invocation: Invocation = undefined;
+    const good = [_][]const u8{ "exec", "web", "-e", "A=1", "--user", "0:0", "--workdir", "/srv" } ++
+        [_][]const u8{ "--", "sh", "-c", "echo -v --output json" };
+    try testing.expect(try parse_case(&good, &invocation) == null);
+    try testing.expectEqual(Command.exec, invocation.command);
+    try testing.expectEqualStrings("web", invocation.operand.?);
+    try testing.expectEqualStrings("/srv", invocation.run.workdir.?);
+    try testing.expectEqualStrings("0:0", invocation.run.user.?);
+    try testing.expectEqual(@as(usize, 3), invocation.run.command.len);
+    try testing.expectEqual(@as(u32, 1), invocation.run.env_count);
+    try testing.expect(invocation.options.runs_container);
+    try testing.expect(!invocation.options.verbose); // `-v` after `--` is the command's.
+    const refused = [_]struct { args: []const []const u8, code: codes.Code }{
+        .{ .args = &.{ "exec", "web" }, .code = .E0006 },
+        .{ .args = &.{ "exec", "web", "--" }, .code = .E0006 },
+        .{ .args = &.{ "exec", "--", "sh" }, .code = .E0006 },
+        .{ .args = &.{ "exec", "web", "ls", "--", "sh" }, .code = .E0003 },
+        .{ .args = &.{ "exec", "web", "--workdir" }, .code = .E0005 },
+        .{ .args = &.{ "exec", "web", "--memory", "1m", "--", "sh" }, .code = .E0004 },
+        .{ .args = &.{ "exec", "web", "-d", "--", "sh" }, .code = .E0004 },
+        .{ .args = &.{ "exec", "web", "--user", "a::b", "--", "sh" }, .code = .E0015 },
+        .{ .args = &.{ "exec", "web", "-e", "1A=x", "--", "sh" }, .code = .E0010 },
+        .{ .args = &.{ "run", "--workdir", "/x", "--rootfs", "/r", "--", "sh" }, .code = .E0004 },
+        .{ .args = &.{ "logs", "web", "--workdir", "/x" }, .code = .E0004 },
+    };
+    for (refused) |case| {
+        const found = try parse_case(case.args, &invocation);
+        testing.expectEqual(case.code, found.?) catch |err| {
+            const last = case.args[case.args.len - 1];
+            std.debug.print("refused: {s} {s}\n", .{ case.args[0], last });
+            return err;
+        };
+    }
+}
+
+test "exec on the command line: the command's code, 125 to 127 for zbx's, and exec_exit" {
+    // Goal: the exit codes of the brief and the JSON line. Method: a running container; an exec
+    // whose command exits 7, one that is not there (127), one into a missing container (125),
+    // one with a bad --workdir value (125, E0005), and the JSON of one killed by a signal.
+    var sim: HostSim = undefined;
+    try running_container(&sim, "web-1");
+    sim.stderr_len = 0; // The start's own warnings.
+    sim.world.command_exit = .{ .exited = 7 };
+    try testing.expectEqual(@as(u8, 7), command_line(&sim, &.{ "exec", "web-1", "--", "/bin/sh" }));
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    sim.stderr_len = 0;
+    try testing.expectEqual(@as(u8, 127), command_line(&sim, &.{ "exec", "web-1", "--", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0202") != null);
+    sim.stderr_len = 0;
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &.{ "exec", "gone", "--", "sh" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0402") != null);
+    sim.stderr_len = 0;
+    const relative = [_][]const u8{ "exec", "web-1", "--workdir", "srv", "--", "/bin/sh" };
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &relative));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0005") != null);
+    sim.stderr_len = 0;
+    sim.world.command_exit = .{ .signaled = 15 };
+    const json = [_][]const u8{ "--output", "json", "exec", "web-1", "--", "/bin/sh" };
+    try testing.expectEqual(@as(u8, 143), command_line(&sim, &json));
+    const line = std.mem.trimEnd(u8, sim.stderr(), "\n");
+    var parsed = try parse_json(line);
+    defer parsed.deinit();
+    const exit = parsed.value.object.get("exec_exit").?.object;
+    try testing.expectEqualStrings("signal", exit.get("reason").?.string);
+    try testing.expectEqual(@as(i64, 143), exit.get("code").?.integer);
+    try testing.expectEqual(@as(i64, 15), exit.get("signal").?.integer);
+    try testing.expectEqualStrings("web-1", exit.get("container").?.string);
+    try testing.expect(!exit.get("container_ended").?.bool);
+    test_storage.handle.session.release_keeper();
+    test_storage.handle.session.release_output();
+}

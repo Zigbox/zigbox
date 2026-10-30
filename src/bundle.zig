@@ -12,6 +12,7 @@
 //!   MANIFEST.txt     every file below and why it is there; what was cut; what was redacted
 //!   run-record.zon   the run's record (name, rootfs, command, labels, times, how it ended)
 //!   diagnostic.json  the diagnostic the run ended with, as `--output json` prints it (if any)
+//!   execs.txt        the recent execs into the container: command and exit, no environment
 //!   version.txt      the zbx version and how it was built
 //!   mapping.txt      the id mapping mode of the run, and the uid and gid of the user
 //!   doctor.json      `zbx doctor`, run in-process: one line per check, then each failure
@@ -36,6 +37,8 @@ const diag_errors = @import("diag/errors.zig");
 const render = @import("diag/render.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const records = @import("runtime/records.zig");
+const exec_history = @import("runtime/exec_history.zig");
+const logfile = @import("runtime/logfile.zig");
 
 const Host = host_mod.Host;
 const flate = std.compress.flate;
@@ -93,6 +96,8 @@ pub const Workspace = struct {
     mask: redact.Mask,
     /// Room for the doctor check the bundle includes.
     facts: doctor.Facts,
+    /// Room for the container's exec history (`runtime/exec_history.zig`).
+    execs: exec_history.Scratch,
 
     fn reset(ws: *Workspace, redacting: bool) void {
         ws.used = manifest_bytes_max;
@@ -261,6 +266,52 @@ fn stage_file(
         return;
     };
     ws.add(name, why, prefix.bytes, prefix.truncated);
+}
+
+/// The container's recent execs (M6b): when each started, how long it ran, how it ended and its
+/// command. The history keeps no environment, so no value of an exec's `-e` can be here; the
+/// commands are redacted like every other file. A container that was never exec'd into has
+/// none, and the bundle says so.
+fn stage_execs(ws: *Workspace, host: Host, runs: *const records.Dir, name: []const u8) void {
+    assert(ws.count < constants.bundle_files_max - 1);
+    assert(name.len > 0);
+    const file = "execs.txt";
+    const why = "the recent execs into the container: command and exit, never the environment";
+    var writer = std.Io.Writer.fixed(&ws.raw);
+    const logs = logfile.dir_of(runs) orelse return;
+    exec_history.read(host.log_files(), &logs, name, &ws.execs) catch |err| {
+        // Cannot fail: a short line into a buffer of 32 KiB.
+        writer.print("unavailable: the exec history could not be read ({s})\n", .{
+            @errorName(err),
+        }) catch unreachable;
+        return ws.add_trusted(file, why, writer.buffered(), false);
+    };
+    const history = &ws.execs.history;
+    // Cannot fail: as above.
+    writer.print("{d} recent execs of {s}, oldest first (at most {d} are kept)\n", .{
+        history.count, name, constants.exec_history_entries_max,
+    }) catch unreachable;
+    var cut = false;
+    for (history.slice()) |*entry| {
+        write_exec(&writer, entry) catch {
+            cut = true;
+            break;
+        };
+    }
+    ws.add(file, why, writer.buffered(), cut);
+}
+
+fn write_exec(writer: *std.Io.Writer, entry: *const exec_history.Entry) std.Io.Writer.Error!void {
+    assert(entry.ended >= entry.started);
+    assert(entry.command_len > 0);
+    var stamp: [constants.timestamp_bytes]u8 = undefined;
+    try writer.print("{s}  {d}s  ", .{ timestamp(entry.started, &stamp), entry.ended - entry.started });
+    switch (entry.exit) {
+        .exited => |code| try writer.print("exited {d}", .{code}),
+        .signaled => |number| try writer.print("signal {d}", .{number}),
+        .lost => try writer.writeAll("lost"),
+    }
+    try writer.print("  {s}\n", .{entry.command_text()});
 }
 
 /// The names of the environment variables. The values are never copied: with redaction on each
@@ -650,6 +701,7 @@ pub fn write(
     ws.reset(request.redact);
     if (ws.redact) collect_secrets(ws, host);
     const mapping = try stage_record(ws, host, &dir, name, diag);
+    stage_execs(ws, host, &dir, name);
     stage_system_files(ws, host, mapping);
     stage_environment(ws, host);
     stage_doctor(ws, host);

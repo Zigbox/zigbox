@@ -11,6 +11,8 @@ files:
   run-record.zon (677 bytes)
     the run's record: name, rootfs, command, labels, times, how it ended
     values redacted: 1
+  execs.txt (60 bytes)
+    the recent execs into the container: command and exit, never the environment
   version.txt (36 bytes)
     the zbx version and how it was built
   mapping.txt (30 bytes)

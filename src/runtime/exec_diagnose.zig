@@ -11,6 +11,7 @@ const errors = @import("../diag/errors.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const exec_plan = @import("exec_plan.zig");
 const records = @import("records.zig");
+const spec = @import("spec.zig");
 const scope_mod = @import("scope.zig");
 const scope_text = @import("scope_text.zig");
 const text_util = @import("../text.zig");
@@ -67,6 +68,25 @@ pub fn not_running(diag: *Diag, name: []const u8, lost: bool, record: *const rec
         .template = true,
     });
     assert(diag.code.? == .E0220);
+}
+
+/// ZBX-E0523: the exec's `--user` is not root, and the container maps only root (the single-id
+/// map of a host without the helpers or ranges).
+pub fn user_needs_ids(diag: *Diag, name: []const u8, user: spec.User) void {
+    assert(diag.code == null);
+    if (user.uid == 0) assert(user.gid != 0);
+    diag.raise(.E0523);
+    diag.while_("choosing the user for --user", .{});
+    diag.cause("--user {d}:{d} is not root, and the container {s} maps only root", .{
+        user.uid, user.gid, name,
+    });
+    diag.context("uid", "{d}", .{user.uid});
+    diag.context("gid", "{d}", .{user.gid});
+    diag.fix(.{ .sentence = "run it as root in this container: leave --user out" });
+    diag.fix(.{
+        .sentence = "or give your account id ranges and the helpers; the doctor shows how:",
+        .command = "zbx doctor",
+    });
 }
 
 /// ZBX-E0221: the container's environment could not be read, or a namespace opened or joined,

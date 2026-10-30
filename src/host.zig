@@ -552,8 +552,9 @@ pub const VTable = struct {
     open_namespace: *const fn (context: *anyopaque, pid: Pid, kind: NamespaceKind) Error!?Handle,
     /// `setns` into the namespace `handle` names; only in a single-threaded child.
     join_namespace: *const fn (context: *anyopaque, handle: Handle, kind: NamespaceKind) Error!void,
-    /// A new pseudo-terminal (`/dev/ptmx`, unlocked, and its peer opened by `TIOCGPTPEER`).
-    open_terminal: *const fn (context: *anyopaque) Error!Terminal,
+    /// A new pseudo-terminal of the devpts whose `ptmx` is at `ptmx` (opened, unlocked, and its
+    /// peer opened by `TIOCGPTPEER`).
+    open_terminal: *const fn (context: *anyopaque, ptmx: [:0]const u8) Error!Terminal,
     /// Gives `master` the window size of this process's terminal (`TIOCGWINSZ` on standard
     /// input, `TIOCSWINSZ` on `master`). A size that cannot be read leaves `master` as it is.
     copy_window_size: *const fn (context: *anyopaque, master: Handle) Error!void,
@@ -1296,8 +1297,10 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
-    pub fn open_terminal(host: Host) Error!Terminal {
-        const terminal = try host.vtable.open_terminal(host.context);
+    pub fn open_terminal(host: Host, ptmx: [:0]const u8) Error!Terminal {
+        assert(ptmx.len > 0);
+        assert(ptmx[0] == '/');
+        const terminal = try host.vtable.open_terminal(host.context, ptmx);
         assert(terminal.master != terminal.peer);
         assert(host.vtable.last_errno(host.context) == 0);
         return terminal;

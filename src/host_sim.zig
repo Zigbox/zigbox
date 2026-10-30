@@ -191,7 +191,7 @@ fn sink_set_path_xattr(
     _: []const u8,
 ) host.Error!void {}
 fn sink_lock(_: *anyopaque, _: [:0]const u8, _: bool, _: []const u8) host.Error!store_fs.Fd {
-    return error.WouldBlock;
+    return 0; // Nobody else holds anything on a disk that keeps nothing.
 }
 
 /// The network of a host that was given none: no route to anywhere, so every request is refused
@@ -1164,8 +1164,9 @@ pub const HostSim = struct {
         if (sim.world.join_namespace(handle, kind)) |errno| return sim.model_error(errno);
     }
 
-    fn open_terminal(context: *anyopaque) host.Error!host.Terminal {
+    fn open_terminal(context: *anyopaque, ptmx: [:0]const u8) host.Error!host.Terminal {
         const sim = from_context(context);
+        assert(ptmx.len > 0);
         try sim.begin_call();
         return sim.world.open_terminal() orelse sim.model_error(sim_world.errno_nomem);
     }

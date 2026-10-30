@@ -1120,13 +1120,14 @@ pub const HostReal = struct {
         try check(linux.setns(@intCast(handle), flag));
     }
 
-    /// `/dev/ptmx`, unlocked, and the peer opened through the master (`TIOCGPTPEER`, Linux 4.13),
-    /// so that no path under /dev/pts is looked up: the peer belongs to this devpts whatever
-    /// mount namespace the command is in.
-    fn open_terminal(context: *anyopaque) host.Error!host.Terminal {
+    /// `ptmx`, unlocked, and the peer opened through the master (`TIOCGPTPEER`, Linux 4.13), so
+    /// that no path under /dev/pts is looked up: the peer belongs to the devpts of `ptmx`
+    /// whatever mount namespace the command is in.
+    fn open_terminal(context: *anyopaque, ptmx: [:0]const u8) host.Error!host.Terminal {
         const self = from_context(context);
+        assert(ptmx.len > 0);
         const flags: linux.O = .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true };
-        const opened = linux.open("/dev/ptmx", flags, 0);
+        const opened = linux.open(ptmx.ptr, flags, 0);
         try check(opened);
         const master: i32 = @intCast(opened);
         var unlock: i32 = 0;

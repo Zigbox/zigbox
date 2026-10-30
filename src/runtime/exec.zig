@@ -24,7 +24,6 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
-const image_diagnose = @import("../image_diagnose.zig");
 const image_user = @import("../image_user.zig");
 const diagnose = @import("diagnose.zig");
 const exec_child = @import("exec_child.zig");
@@ -356,7 +355,7 @@ fn choose_user(
     const chosen = user orelse return null;
     const single = if (record.ids) |ids| ids == .single else false;
     if (single and (chosen.uid != 0 or chosen.gid != 0)) {
-        image_diagnose.needs_id_map(diag, chosen.uid, chosen.gid);
+        exec_diagnose.user_needs_ids(diag, handle.name.slice(), chosen);
         return error.StartFailed;
     }
     return chosen;
@@ -527,7 +526,7 @@ fn make_pipes(handle: *Handle) host_mod.Error!void {
 fn open_terminal(handle: *Handle) host_mod.Error!void {
     const host = handle.host;
     assert(handle.terminal == null);
-    const terminal = try host.open_terminal();
+    const terminal = try open_container_terminal(handle);
     handle.terminal = terminal;
     handle.child.peer = terminal.peer;
     handle.peer_open = true;
@@ -536,6 +535,26 @@ fn open_terminal(handle: *Handle) host_mod.Error!void {
     try host.input_raw(true, &handle.saved);
     handle.input_open = true;
     assert(handle.saved.valid);
+}
+
+/// A pseudo-terminal of the container's own devpts, reached through its PID 1's root, so that
+/// the command finds its terminal under its /dev/pts (`tty` names it); a container without one
+/// (the devpts mount is allowed to fail) gets one of the host's, which works as a terminal but
+/// has no name inside.
+fn open_container_terminal(handle: *Handle) host_mod.Error!host_mod.Terminal {
+    const host = handle.host;
+    assert(handle.container_pid > 1);
+    var path: [64]u8 = undefined;
+    // Cannot fail: "/proc/" and "/root/dev/pts/ptmx" and a pid of ten digits.
+    const own = std.fmt.bufPrintSentinel(&path, "/proc/{d}/root/dev/pts/ptmx", .{
+        handle.container_pid,
+    }, 0) catch unreachable; // Same bound as above.
+    const terminal = host.open_terminal(own) catch |err| {
+        if (err != error.NotFound) return err;
+        return host.open_terminal("/dev/ptmx");
+    };
+    assert(terminal.master != terminal.peer);
+    return terminal;
 }
 
 fn spawn_joiner(handle: *Handle) host_mod.Error!void {

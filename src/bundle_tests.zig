@@ -225,6 +225,51 @@ test "a bundle holds no byte of a container's log, with redaction on or off" {
     }
 }
 
+var exec_container: @import("runtime/run.zig").Handle = undefined;
+
+const exec_marker = "exec-env-value-AKIAIOSFODNN7EXAMPLE-ETA-12";
+
+test "a bundle notes the container's recent execs and never a value of their -e" {
+    // Goal: M6b slice 3's rule: `bundle` of a container notes its recent execs, the command and
+    // the exit, and an exec's environment is in no byte of it. Method: a running container, two
+    // execs through the command line (one with a secret-shaped `-e` value), then the bundle with
+    // redaction off, so that only the history's rule can keep the value out.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 52);
+    sim.world.now = 1_792_873_384;
+    sim.world.command_runs_ms = 60_000;
+    log_disk.init(52);
+    log_disk.put_dir("/home", 0o755);
+    log_disk.put_dir(sim_run.home_path, 0o755);
+    sim.log_fs = &log_disk;
+    var diag: Diag = undefined;
+    diag.reset();
+    const spec: @import("runtime/run.zig").Spec = .{
+        .rootfs = sim_run.rootfs_path,
+        .name = "ex-1",
+        .command = &.{"/bin/sh"},
+    };
+    try @import("runtime/run.zig").start(sim.interface(), &spec, .{}, &exec_container, &diag);
+    exec_container.session.release_output();
+    const first = [_][:0]const u8{ "zbx", "exec", "ex-1", "-e", "TOKEN=" ++ exec_marker } ++
+        [_][:0]const u8{ "--", "/bin/sh", "-c", "echo made" };
+    try testing.expectEqual(@as(u8, 0), run_args(&sim, &first));
+    sim.world.command_exit = .{ .exited = 4 };
+    const second = [_][:0]const u8{ "zbx", "exec", "ex-1", "--", "/bin/sleep", "1" };
+    try testing.expectEqual(@as(u8, 4), run_args(&sim, &second));
+    sim.stdout_len = 0;
+    const flags = [_][:0]const u8{ "zbx", "bundle", "ex-1", "--no-redact" };
+    try testing.expectEqual(@as(u8, 0), run_args(&sim, &flags));
+    var plain: [constants.bundle_stage_bytes_max * 2]u8 = undefined;
+    const tar = try bundle_bytes(&sim, &plain);
+    const execs = member(tar, "execs.txt").?;
+    try testing.expect(std.mem.indexOf(u8, execs, "2 recent execs of ex-1") != null);
+    try testing.expect(std.mem.indexOf(u8, execs, "exited 0  \"/bin/sh\" \"-c\"") != null);
+    try testing.expect(std.mem.indexOf(u8, execs, "exited 4  \"/bin/sleep\" \"1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, tar, exec_marker) == null);
+    exec_container.session.release_keeper();
+}
+
 // ---- The golden manifest -------------------------------------------------------------------
 
 /// `text` with the version of this build replaced, so a release does not change the golden.
