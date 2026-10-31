@@ -2,7 +2,7 @@
 
 This is the handoff for the Zigbox **supervisor** session: the agent that writes briefs, settles decisions with the owner, spawns implementers, reviews their slices and keeps the docs and status in step. A new supervisor starts from this file, `AGENTS.md`, the README's status table and the current brief, and from nothing else. Update this file whenever the state below changes, and before the session hands over.
 
-*State as of 2026-10-30, after M6b slice 5.*
+*State as of 2026-10-30, after M6b (demonstrated), with release 0.2.0 being cut.*
 
 ## The role
 
@@ -34,9 +34,9 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 
 ## Milestones
 
-- **M0–M6:** demonstrated and merged.
-- **M4b (Mac):** built by the session on the owner's Mac (PRs #18–#20), with releases 0.1.0 and 0.1.1. Not demonstrated. `mac.yml`'s job is skipped until the owner sets the repo variable `MAC_RUNNER_LABEL`.
-- **M6b (dev loop):** in progress, brief `docs/briefs/M6b-dev-loop.md`, with six slices run in order.
+- **M0–M6 and M6b:** demonstrated and merged.
+- **M4b (Mac):** built by the session on the owner's Mac (PRs #18–#20), with releases 0.1.0 and 0.1.1. Not demonstrated. The owner's laptop is the self-hosted runner (`Laptopische`, user `ghrunner`, `MAC_RUNNER_LABEL` set); `mac.yml` is green on `main` ([run 24](https://github.com/Zigbox/zigbox/actions/runs/41143740466)). What remains is `brew install` on a clean Mac, recorded; 0.2.0 is the release to do it with. The runner runs only while the laptop is awake: a queued `mac` job is the laptop asleep, not a failure.
+- **M6b (dev loop):** demonstrated. Brief `docs/briefs/M6b-dev-loop.md`, six slices run in order. `demo-m6b` green on `main` after the last merge ([run 104](https://github.com/Zigbox/zigbox/actions/runs/41143740654)) and `demo-mac`'s M6b steps green on the Mac runner ([run 24](https://github.com/Zigbox/zigbox/actions/runs/41143740466)).
   - Slices 1–3 (`--mount` and `--user`, `zbx logs`, `zbx exec`) are merged (PR #21).
   - Slice 4 (pull in the library) is merged (PR #22). Its decisions: an over-long reference or mirrors setting is refused (`E0501`, `E0514`); the report pipe is sized with `F_SETPIPE_SZ` and a pipe under 16 KiB refuses the pull with `E0419` (if a real host hits that, drain the pipe instead); a damaged report fails the pull; `W0504` / `Result.warnings_dropped` for warnings past the cap.
   - **Slice 5 (`demo-m6b`)** is merged (PR #24) and green in CI on `main` with every earlier demo ([run 95](https://github.com/Zigbox/zigbox/actions/runs/41104767772)). The red `demo-m6` on `main` after #22 (run 92, EXEC 6) was the `exec` race slice 5 fixed. What it settled:
@@ -46,9 +46,10 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
     - The published-port forward accepts a host connection before the server listens and then resets it (predates M6b); the demo waits from inside the container. Recorded as a failure mode.
     - `find … | wc -l` hid a failing `find`; owner checks now use `checks_writable.owners_command`.
     - Trap: the simulator's written-files table (`sim_written_files_max`) drops files silently when full.
-  - **Follow-up, PR #26:** `zbx.logs/1` describes the diagnostic a refused `logs` prints (owner decision, in `docs/DECISIONS.md`), with this status update. Waits for the owner to merge.
+  - **Follow-up, PR #26 (merged):** `zbx.logs/1` describes the diagnostic a refused `logs` prints (owner decision, in `docs/DECISIONS.md`).
   - **Trap:** a status commit with `[skip ci]` at the head of a PR stops the PR's CI from running at all (GitHub reads the head commit), and the git proxy here refuses force pushes. Push a status commit to a PR only after its CI has run, or put it in the PR's last code push.
-- **Slice 6** is the Mac (`logs` and `exec` forwarded, `demo-m6b`'s steps on `mac.yml`). It belongs to the Mac session now that slice 5 is merged; the owner has the note for it. M6b is demonstrated only when that Mac run is green.
+  - **Slice 6 (the Mac)** was done by the Mac session and merged (PR #27): `logs` and `exec` forwarded with the terminal and signals, and `demo-mac` (31 steps) runs M6b's five steps plus the terminal, signal and follow cases. PR #28 (merged) names a missing cgroup v2 first when a run finds no scope.
+- **Release 0.2.0** (writable mounts, `--user`, logs, exec): the version bump and this status are on the working branch's PR. Then the owner runs `zig build mac-release -Dnotarize=true`, publishes `v0.2.0` with the zip and its `.sha256`, and puts the new formula in `Zigbox/homebrew-tap`. Optionally tags `v0.0.0-m6b`.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
 ## Owner decisions to remember
