@@ -12,6 +12,12 @@
 //! the winner's. Directories get their attributes after their entries, so a directory without
 //! write permission is still filled and its modification time is the fixed one.
 //!
+//! Every entry (file, symlink, directory) carries the fixed time, `SOURCE_DATE_EPOCH`
+//! (`constants.store_mtime_seconds`, 1980-01-01), for reproducible builds: a tool run in a farm
+//! (`tar`, `zip`) cannot copy the host's times into its output. Symlinks and directories are
+//! stamped by `set_path_attributes` (`AT_SYMLINK_NOFOLLOW`; a directory after its entries, as
+//! making an entry changes its time); a file by a stamp on its link, which is the object.
+//!
 //! The farm is never written by a container: it is the overlay's lower layer, and a write goes
 //! to the container's own upper layer by copy-up (`runtime/image.zig`). It must be built from
 //! inside the user's namespace (`namespace.zig`): a hard link to a file owned by a subordinate
@@ -219,6 +225,17 @@ const Run = struct {
                 return error.Failed;
             }
             return run.write_failed("linking an object into the tree", err, fs.last_errno());
+        };
+        // The link is the object's inode, so this stamps the object too: an object written by
+        // a release that stamped another time is repaired the first time a farm uses it.
+        fs.set_path_attributes(path, .{
+            .mode = null,
+            .uid = 0,
+            .gid = 0,
+            .mtime = constants.store_mtime_seconds,
+            .set_owner = false,
+        }) catch |err| {
+            return run.write_failed("setting a file's time", err, fs.last_errno());
         };
     }
 
@@ -562,7 +579,63 @@ test "a failure or a crash at any write point leaves no half farm under a digest
     }
 }
 
+/// Every entry of the farm of `digest` (and the farm's root) carries the fixed time. Returns
+/// how many entries it saw below the root, so a caller can tell the walk saw something.
+fn check_times(digest: Digest) !u32 {
+    const prefix = farm_of(digest, "");
+    var seen: u32 = 0;
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (!std.mem.startsWith(u8, path, prefix)) continue;
+        try testing.expectEqual(@as(?u64, constants.store_mtime_seconds), files.mtime_of(path));
+        if (path.len > prefix.len) seen += 1;
+    }
+    try testing.expectEqual(@as(?u64, constants.store_mtime_seconds), files.mtime_of(prefix));
+    return seen;
+}
+
+test "every entry of a new farm carries the fixed time, whatever time it had" {
+    // Goal: SOURCE_DATE_EPOCH on files (objects included), symlinks and nested directories.
+    // Method: stamp every node of the store with another time after the import, so only a write
+    // by `ensure` can give the fixed one; ensure; check each node under the farm and the
+    // objects its files link to; then a second ensure must not touch the farm again.
+    start(1);
+    const digest = try imported();
+    const other: u64 = 1_700_000_000;
+    try testing.expect(other != constants.store_mtime_seconds);
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (std.mem.startsWith(u8, path, root_path)) files.set_mtime_of(path, other);
+    }
+    try testing.expect(try ensure(&tstore, &tws, digest, &tdiag));
+    const seen = try check_times(digest);
+    try testing.expect(seen >= 6); // Files, a symlink and the nested directories of the sample.
+    const busybox = farm_of(digest, "/bin/busybox");
+    try testing.expectEqual(@as(?u64, constants.store_mtime_seconds), files.mtime_of(busybox));
+    // The linked objects were stamped through their links.
+    var linked: u32 = 0;
+    index = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (std.mem.indexOf(u8, path, "/objects/") == null) continue;
+        if (files.kind_of(path).? != .file) continue;
+        if (files.stat_of(path).?.links < 2) continue;
+        linked += 1;
+        try testing.expectEqual(@as(?u64, constants.store_mtime_seconds), files.mtime_of(path));
+    }
+    try testing.expect(linked >= 2);
+    // A second ensure finds the farm and writes nothing, so a changed time stays changed.
+    files.set_mtime_of(busybox, other);
+    const mutations = files.mutations;
+    try testing.expect(!(try ensure(&tstore, &tws, digest, &tdiag)));
+    try testing.expectEqual(mutations, files.mutations);
+    try testing.expectEqual(@as(?u64, other), files.mtime_of(busybox));
+}
+
 fn check_complete(digest: Digest) !void {
+    _ = try check_times(digest);
     try testing.expect(files.stat_of(farm_of(digest, "/etc/passwd")) != null);
     try testing.expect(files.stat_of(farm_of(digest, "/bin/busybox")) != null);
     try testing.expect(files.stat_of(farm_of(digest, "/empty")) != null);

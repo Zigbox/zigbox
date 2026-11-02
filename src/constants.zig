@@ -523,10 +523,12 @@ pub const store_chunk_bytes: u32 = 1024 * 1024;
 /// The most chunks one object has, so the longest file is 4 GiB.
 pub const store_chunks_max: u32 = 4096;
 pub const store_file_bytes_max: u64 = @as(u64, store_chunk_bytes) * store_chunks_max;
-/// Every file of the store is stamped with this modification time (2000-01-01T00:00:00Z), so a
-/// materialized tree does not depend on when it was imported. Zero is avoided: some tools treat
-/// the epoch as "no time".
-pub const store_mtime_seconds: u64 = 946_684_800;
+/// Every file of the store, and every entry of a materialized tree, is stamped with this
+/// modification time, `SOURCE_DATE_EPOCH` (1980-01-01T00:00:00Z, the earliest time `zip`
+/// stores), so a farm does not depend on when it was imported and a build step sees no host
+/// time. Zero is avoided: some tools treat the epoch as "no time". Releases up to 0.2.0 stamped
+/// 2000-01-01; a farm built since repairs the objects it links.
+pub const store_mtime_seconds: u64 = build_source_date_epoch;
 /// The tree encoding's version byte.
 pub const store_tree_version: u8 = 1;
 
