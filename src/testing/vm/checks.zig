@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const limits = @import("limits.zig");
+const limits = @import("release_limits.zig");
 
 pub const CheckError = error{
     NotElf,

@@ -9,6 +9,7 @@ const checks = @import("checks.zig");
 const cloud_init = @import("cloud_init.zig");
 const limits = @import("limits.zig");
 const session_mod = @import("session.zig");
+const vm = @import("zigbox_vm");
 
 const Session = session_mod.Session;
 
@@ -110,12 +111,7 @@ pub fn parse_options(init: std.process.Init) !Options {
 }
 
 /// Opens /dev/kvm read-write: usable means the accelerator will work.
-pub fn kvm_usable(io: Io) bool {
-    const options: Io.Dir.OpenFileOptions = .{ .mode = .read_write };
-    const file = Io.Dir.openFileAbsolute(io, "/dev/kvm", options) catch return false;
-    file.close(io);
-    return true;
-}
+pub const kvm_usable = vm.accel.kvm_usable;
 
 pub const Timer = struct {
     began: u64,
@@ -169,19 +165,7 @@ pub fn check_binaries(init: std.process.Init, out: *Io.Writer, options: Options)
 
 pub fn provision(session: *Session, out: *Io.Writer, timer: *Timer, reuse: bool) !void {
     try out.print("\n{s}: booting and provisioning the guest (cloud-init)...\n", .{demo_name});
-    // A reused overlay is already provisioned: cloud-init does not run again.
-    const boot_s = limits.boot_timeout_kvm_s;
-    const ready = if (reuse) 0 else try session.wait_for(cloud_init.ready_marker, 0, boot_s);
-    _ = try session.wait_for("root@zigbox-demo:~#", ready, limits.command_timeout_kvm_s);
-    try session.send("stty -echo; bind 'set enable-bracketed-paste off'; PS1=''\n");
-    // The first command's output still contains the echo of the line above; discard it.
-    _ = try session.run("true", limits.command_timeout_kvm_s);
-    // Wait for the guest to finish booting, so late service chatter (cloud-init prints key
-    // fingerprints, for one) cannot land in the middle of a command's output.
-    const settle = "cloud-init status --wait; systemctl is-system-running --wait; true";
-    _ = try session.run(settle, limits.boot_timeout_kvm_s);
-    const probe = try session.run("echo shell-ok", limits.command_timeout_kvm_s);
-    if (!std.mem.eql(u8, probe.output, "shell-ok")) return error.ShellNotReady;
+    try session.provision(cloud_init.hostname, reuse);
     try timer.lap(out, "boot and provision");
 }
 
@@ -218,13 +202,12 @@ pub fn show_split(out: *Io.Writer, title: []const u8, result: SplitResult) !void
 }
 
 pub fn install_binary(session: *Session, out: *Io.Writer, timer: *Timer) !void {
-    const command = try std.fmt.allocPrint(
-        session.scratch_allocator(),
-        "curl -fsS -o /home/demo/zbx http://10.0.2.2:{d}/zbx && " ++
-            "chown demo:demo /home/demo/zbx && chmod 755 /home/demo/zbx && ls -l /home/demo/zbx",
-        .{session.server.port},
-    );
-    const result = try session.run(command, limits.command_timeout_kvm_s);
+    const result = try session.copy_in(.{
+        .route = "/zbx",
+        .guest_path = "/home/demo/zbx",
+        .owner = "demo:demo",
+        .mode = "755",
+    });
     try show(out, "install zbx", result);
     if (result.status != 0) return error.InstallFailed;
     const manager = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service";
@@ -237,25 +220,8 @@ pub fn install_binary(session: *Session, out: *Io.Writer, timer: *Timer) !void {
     try timer.lap(out, "install");
 }
 
-pub const AccelError = error{ BadAccel, NoKvm };
-
-pub fn choose_accel(requested: []const u8, kvm_available: bool) AccelError!session_mod.Accel {
-    if (std.mem.eql(u8, requested, "tcg")) return .tcg;
-    if (std.mem.eql(u8, requested, "kvm")) return if (kvm_available) .kvm else error.NoKvm;
-    if (!std.mem.eql(u8, requested, "auto")) return error.BadAccel;
-    return if (kvm_available) .kvm else error.NoKvm;
-}
-
-test "accelerator choice: KVM when usable, TCG only when asked, otherwise a clear error" {
-    // Goal: software emulation is never silently chosen, and KVM is never requested without it.
-    try std.testing.expectEqual(session_mod.Accel.kvm, try choose_accel("auto", true));
-    try std.testing.expectError(error.NoKvm, choose_accel("auto", false));
-    try std.testing.expectEqual(session_mod.Accel.tcg, try choose_accel("tcg", false));
-    try std.testing.expectEqual(session_mod.Accel.tcg, try choose_accel("tcg", true));
-    try std.testing.expectEqual(session_mod.Accel.kvm, try choose_accel("kvm", true));
-    try std.testing.expectError(error.NoKvm, choose_accel("kvm", false));
-    try std.testing.expectError(error.BadAccel, choose_accel("hvf", true));
-}
+pub const AccelError = vm.accel.Error;
+pub const choose_accel = vm.accel.choose;
 
 test "every demo command that runs zbx as the demo user goes through the session prefix" {
     // Goal: a later demo cannot forget the user's bus (it would run without a cgroup scope, or
@@ -296,32 +262,8 @@ test "every demo command that runs zbx as the demo user goes through the session
     }
 }
 
-/// Writes `text` to `path` in the guest through base64 in short pieces (a typed line is at most
-/// 1 KiB, and the text has quotes in it), and makes it executable.
+/// Writes `text` to `path` in the guest through base64 in short pieces, and makes it executable
+/// (`zigbox_vm.Session.put_file`).
 pub fn put_file(session: *Session, path: []const u8, text: []const u8) !void {
-    const encoder = std.base64.standard.Encoder;
-    var encoded: [2048]u8 = undefined;
-    if (encoder.calcSize(text.len) > encoded.len) return error.ScriptTooBig;
-    const whole = encoder.encode(&encoded, text);
-    const piece = 600;
-    var at: usize = 0;
-    var command_buffer: [900]u8 = undefined;
-    _ = try session.run("rm -f /tmp/put.b64", limits.command_timeout_kvm_s);
-    while (at < whole.len) : (at += piece) {
-        const end = @min(at + piece, whole.len);
-        const command = try std.fmt.bufPrint(
-            &command_buffer,
-            "printf %s {s} >> /tmp/put.b64",
-            .{whole[at..end]},
-        );
-        const result = try session.run(command, limits.command_timeout_kvm_s);
-        if (result.status != 0) return error.ScriptNotWritten;
-    }
-    const decode = try std.fmt.bufPrint(
-        &command_buffer,
-        "base64 -d /tmp/put.b64 > {s} && chmod 755 {s}",
-        .{ path, path },
-    );
-    const result = try session.run(decode, limits.command_timeout_kvm_s);
-    if (result.status != 0) return error.ScriptNotWritten;
+    try session.put_file(path, text);
 }

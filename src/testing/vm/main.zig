@@ -15,7 +15,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 const checks = @import("checks.zig");
-const cloud_init = @import("cloud_init.zig");
 const image = @import("image.zig");
 const limits = @import("limits.zig");
 const session_mod = @import("session.zig");
@@ -63,12 +62,11 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     if (!options.reuse_overlay) try image.make_overlay(init, base, overlay);
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
-    const user_data = if (options.delegate_dropin)
-        cloud_init.user_data_with_delegate
-    else
-        cloud_init.user_data;
     var session: Session = undefined;
-    try session.start(init, out, overlay, accel, .{ .user_data = user_data, .binary = binary });
+    try session_mod.start(&session, init, out, overlay, accel, .{
+        .binary = binary,
+        .delegate_dropin = options.delegate_dropin,
+    });
     defer session.deinit();
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
@@ -215,7 +213,6 @@ test {
     _ = @import("checks_m1.zig");
     _ = @import("checks.zig");
     _ = @import("cloud_init.zig");
-    _ = @import("http_server.zig");
     _ = @import("image.zig");
     _ = @import("session.zig");
 }
