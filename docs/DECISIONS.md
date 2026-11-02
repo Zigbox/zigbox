@@ -35,6 +35,18 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 - **Not repaired: a farm that 0.2.0 already built** stays as it is (2000 on its directories and symlinks), since `ensure` does not touch a farm it finds. Its files may be repaired by another farm that shares the objects. A step on such a base would see mixed times; if that matters, build steps should use a new cache path or a farm marker (owner's call).
 - **Store verify** in the simulator now expects 1980 on objects; a real store from 0.2.0 has 2000 and nothing reads that time, so no real check changes.
 
+## M7 · Slice 2c: cache entries
+
+*Decided 2026-11-02, owner (the root), with the encoding by the slice 2c implementer, for review.*
+
+- Owner, 2026-11-02: "cache dir is the root; no new root kind; old gc may drop cached trees, which read as misses".
+- **Where.** `build/cache/<key hex>` in the store (`layout.build_cache_directory`), created lazily by the first `record`. `roots.zig` is unchanged: gc lists the directory and marks the tree each entry names (`gc.reach_build_cache`).
+- **Format.** `"zbx-build-cache\x00"`, u32 version (1, little endian), the 32-byte tree digest, u32 preimage length, then the key's preimage (`key.Key.preimage()`) and nothing after it. `parse` accepts only what `render` writes: magic, version, length within `build_key_preimage_bytes_max` and at least the key magic and a version, exact remaining bytes, the key magic, and the preimage hashing to the entry's name. A version above 1 is `newer`, a miss.
+- **Malformed is a miss, not an error.** A damaged, newer, truncated or mismatched entry (including a stored preimage that differs from the key's) is a miss, and `record` replaces it. Errors are for what the cache cannot judge: an unreadable entry, or a tree that cannot be walked (damaged, unreadable). A hit walks the tree and checks every object is present (the `verify` presence check), so a tree an older gc took is `tree_incomplete`, a miss.
+- **Races.** Written to a temp file, fsynced, renamed (`write_atomic`). `record` looks up first and keeps a whole entry that is already there ("first wins"; it returns the tree now named), so two racing writers both succeed and a reader sees one whole entry.
+- **gc.** At most `build_cache_entries_max` (8192) entries are followed; one more is refused (`too_big`, naming the limit and `build/cache`), because freeing a tree an unseen entry names is the unsafe choice. A name that is not a hex digest, an entry that is gone or too large, or does not parse, roots nothing. An entry whose tree is missing roots nothing. A damaged tree refuses the plan, like a root's.
+- **Accepted.** An older 0.2.x gc does not know the directory and may collect cached trees; they read as misses and the step rebuilds. There is no pruning of the cache yet, and `verify` and `usage` do not read entries.
+
 ## M7 · Slice 2: how a step's inputs are imported (for review)
 
 *Decided 2026-11-02 by the slice 2 implementer, for review.* The brief was silent on these; each is the smaller option.

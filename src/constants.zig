@@ -824,6 +824,11 @@ pub const build_source_date_epoch: u64 = 315_532_800;
 /// the length prefixes) fits in the margin.
 pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max +
     16 * 1024;
+/// A build cache entry (`build/cache.zig`): its fixed fields and a key's preimage.
+pub const build_cache_entry_bytes_max: u32 = 64 + build_key_preimage_bytes_max;
+/// The entries in `build/cache/` that gc follows. Each names a tree that gc keeps, so past this
+/// gc refuses (naming the limit) rather than free a tree an entry might still name.
+pub const build_cache_entries_max: u32 = 8192;
 /// The strings one file can hold, from the bounds above.
 pub const build_strings_max: u32 = 2 + build_steps_max *
     (2 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
@@ -835,6 +840,9 @@ pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings
     build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
 
 comptime {
+    assert(build_cache_entry_bytes_max < store_tree_bytes_max);
+    assert(build_cache_entry_bytes_max < store_arena_bytes_max);
+    assert(build_cache_entries_max > build_steps_max);
     // `/src`, `/out` and every needed step's `/in/<name>` are a run's mounts.
     assert(build_step_needs_max + 2 <= mounts_max);
     assert(build_step_needs_max < build_steps_max);
