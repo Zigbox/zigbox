@@ -154,8 +154,15 @@ const shipped_files = [_][]const u8{
 const asserts_per_function_min: u32 = 2;
 
 // `seccomp_policy` is the allowlist file, handed to the top-20 harness by build.zig because the
-// harness's module root cannot reach it by a path.
-const module_allowlist = [_][]const u8{ "std", "builtin", "build_options", "seccomp_policy" };
+// harness's module root cannot reach it by a path. `zigbox_vm` is the VM module
+// (src/testing/vm/lib/), handed to the VM demo harnesses by build.zig.
+const module_allowlist = [_][]const u8{
+    "std",
+    "builtin",
+    "build_options",
+    "seccomp_policy",
+    "zigbox_vm",
+};
 
 const skipped_directories = [_][]const u8{ ".git", ".zig-cache", "zig-out", "zig-pkg" };
 

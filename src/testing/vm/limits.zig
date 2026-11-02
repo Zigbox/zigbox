@@ -1,57 +1,35 @@
-//! Every limit of the VM harness, with its unit last, and comptime checks on how they relate.
-//! The harness is test tooling, but docs/STYLE.md still asks for a bound on everything.
+//! Every limit of the Zigbox VM demos: the VM module's own (`zigbox_vm.limits`), and the ones of
+//! Zigbox's release checks (`release_limits.zig`), under one name so a demo file needs one import.
 
 const std = @import("std");
-const assert = std.debug.assert;
+const vm = @import("zigbox_vm");
+const release = @import("release_limits.zig");
 
-/// Everything the guest console prints is kept (and echoed to our stdout). A full boot plus
-/// provisioning is well under a megabyte; the rest is headroom for a failure's own noise.
-pub const console_bytes_max: u32 = 16 * 1024 * 1024;
-/// The output of one guest command.
-pub const command_output_bytes_max: u32 = 64 * 1024;
-pub const command_bytes_max: u32 = 1024;
-pub const http_connections_max: u32 = 4;
-pub const http_request_bytes_max: u32 = 8 * 1024;
-pub const http_routes_max: u32 = 8;
-/// One served file: a release binary (under `binary_bytes_max`) or a rootfs tarball.
-pub const http_body_bytes_max: u32 = 8 * 1024 * 1024;
-/// Size of a binary the harness reads to inspect its ELF headers.
-pub const elf_bytes_max: u32 = 8 * 1024 * 1024;
-pub const program_headers_max: u32 = 64;
-pub const dynamic_entries_max: u32 = 256;
-pub const poll_step_ms: u32 = 200;
+pub const console_bytes_max = vm.limits.console_bytes_max;
+pub const command_output_bytes_max = vm.limits.command_output_bytes_max;
+pub const command_bytes_max = vm.limits.command_bytes_max;
+pub const http_connections_max = vm.limits.http_connections_max;
+pub const http_request_bytes_max = vm.limits.http_request_bytes_max;
+pub const http_routes_max = vm.limits.http_routes_max;
+pub const http_body_bytes_max = vm.limits.http_body_bytes_max;
+pub const poll_step_ms = vm.limits.poll_step_ms;
+pub const tcg_timeout_factor = vm.limits.tcg_timeout_factor;
+pub const boot_timeout_kvm_s = vm.limits.boot_timeout_kvm_s;
+pub const command_timeout_kvm_s = vm.limits.command_timeout_kvm_s;
+pub const shutdown_timeout_s = vm.limits.shutdown_timeout_s;
+pub const download_chunk_bytes = vm.limits.download_chunk_bytes;
+pub const overlay_size_text = vm.limits.overlay_size_text;
+pub const guest_memory_mib = vm.limits.guest_memory_mib;
+pub const guest_cpus = vm.limits.guest_cpus;
 
-/// Seconds. The guest runs about this many times slower under TCG than under KVM.
-pub const tcg_timeout_factor: u32 = 8;
-pub const boot_timeout_kvm_s: u32 = 300;
-pub const command_timeout_kvm_s: u32 = 60;
-pub const shutdown_timeout_s: u32 = 60;
-pub const download_chunk_bytes: u32 = 64 * 1024;
-pub const overlay_size_text = "8G";
-/// The M4 blob cache disk: room for the demo's images (about 150 MB of blobs) with headroom.
-pub const blob_cache_size_text = "1G";
-pub const guest_memory_mib: u32 = 2048;
-pub const guest_cpus: u32 = 2;
-
-/// The release size limit: a static binary under 4 MiB (the spec's criterion since rev 54; 2 MiB
-/// before). It must match `release_size_limit_bytes` in `build.zig`.
-pub const binary_bytes_max: u64 = 4 * 1024 * 1024;
+pub const elf_bytes_max = release.elf_bytes_max;
+pub const program_headers_max = release.program_headers_max;
+pub const dynamic_entries_max = release.dynamic_entries_max;
+pub const blob_cache_size_text = release.blob_cache_size_text;
+pub const binary_bytes_max = release.binary_bytes_max;
 
 comptime {
-    // A binary at the limit can still be read and served.
-    std.debug.assert(binary_bytes_max <= elf_bytes_max);
-    std.debug.assert(binary_bytes_max <= http_body_bytes_max);
-}
-
-comptime {
-    assert(console_bytes_max >= 1024 * 1024);
-    assert(command_output_bytes_max < console_bytes_max);
-    assert(command_bytes_max < 4096); // The tty line discipline truncates longer lines.
-    assert(http_body_bytes_max > binary_bytes_max);
-    assert(elf_bytes_max >= binary_bytes_max);
-    assert(poll_step_ms > 0);
-    assert(tcg_timeout_factor >= 1);
-    assert(boot_timeout_kvm_s * tcg_timeout_factor < 24 * 60 * 60);
-    assert(guest_memory_mib >= 1024);
-    assert(http_connections_max >= 2); // cloud-init may fetch two files at once.
+    // A release binary at the limit can still be served to the guest.
+    std.debug.assert(binary_bytes_max < http_body_bytes_max);
+    std.debug.assert(elf_bytes_max >= binary_bytes_max);
 }

@@ -70,6 +70,15 @@ pub const Server = struct {
         server.route_count += 1;
     }
 
+    /// Whether `path` is one of the routes.
+    pub fn serves(server: *const Server, path: []const u8) bool {
+        assert(server.route_count <= limits.http_routes_max);
+        for (server.routes[0..server.route_count]) |route| {
+            if (std.mem.eql(u8, route.path, path)) return true;
+        }
+        return false;
+    }
+
     /// Fills `entries` with what to poll for (the listener first, then each live connection)
     /// and returns how many. Pair with `handle` using the same `entries`.
     pub fn poll_entries(server: *Server, entries: []linux.pollfd) u32 {
