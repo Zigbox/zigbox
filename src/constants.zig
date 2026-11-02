@@ -804,6 +804,18 @@ pub const build_label_key_bytes_max: u32 = 128;
 pub const build_problem_word_bytes_max: u32 = 64;
 /// The decimal digits of `.version`.
 pub const build_version_digits_max: u32 = 4;
+/// Bumped when what a step means changes (its mounts, its fixed environment, how its output is
+/// imported), so that no cache entry of the old meaning is a hit. A zbx patch release keeps it,
+/// and with it the cache.
+pub const build_step_format_version: u32 = 1;
+/// `SOURCE_DATE_EPOCH` for every step, 1980-01-01T00:00:00Z: the earliest time `zip` stores.
+/// Every file a step sees carries it as its mtime (`store_mtime_seconds`).
+pub const build_source_date_epoch: u64 = 315_532_800;
+/// A key's preimage (`build/key.zig`): one step's strings are at most the file's pool, its
+/// base's env at most an image's settings, and the rest (digests, needs, the fixed environment,
+/// the length prefixes) fits in the margin.
+pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max +
+    16 * 1024;
 /// The strings one file can hold, from the bounds above.
 pub const build_strings_max: u32 = 2 + build_steps_max *
     (2 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
