@@ -188,6 +188,16 @@ const Run = struct {
         return error.Failed;
     }
 
+    /// The top frame's tree writer ran out of room. Its room is the tree's bound, or less when
+    /// the frames below it left the arena short: then the arena is the limit that was reached.
+    fn writer_full(run: *Run, path_len: u32) Error {
+        assert(run.depth > 0);
+        const writer = &run.ws.frames[run.depth - 1].writer;
+        assert(writer.len <= writer.buffer.len);
+        const short = writer.buffer.len < constants.store_tree_bytes_max;
+        return run.limit(if (short) .arena else .tree_bytes, path_len);
+    }
+
     fn store_failed(run: *Run, operation: []const u8, failure: *const object.Failure) Error {
         assert(operation.len > 0);
         assert(run.diag.code == null);
@@ -231,7 +241,7 @@ const Run = struct {
             const name = text[at..slash];
             const writer = &run.ws.frames[run.depth - 1].writer;
             writer.begin(name, .dir, directory_mode, 0, 0, &xattrs.empty) catch
-                return run.limit(.tree_bytes, @intCast(slash));
+                return run.writer_full(@intCast(slash));
             try run.push_made_up(@intCast(slash));
             at = @intCast(slash + 1);
         }
@@ -283,7 +293,7 @@ const Run = struct {
             .file => try run.entry_file(path_len, &stat),
             .dir => {
                 writer.begin(name, .dir, directory_mode, 0, 0, &xattrs.empty) catch
-                    return run.limit(.tree_bytes, path_len);
+                    return run.writer_full(path_len);
                 try run.push_walked(path_len, stat.inode);
             },
             .symlink => {
@@ -297,8 +307,8 @@ const Run = struct {
                     return run.limit(.target, path_len);
                 }
                 writer.begin(name, .symlink, symlink_mode, 0, 0, &xattrs.empty) catch
-                    return run.limit(.tree_bytes, path_len);
-                writer.end_symlink(target) catch return run.limit(.tree_bytes, path_len);
+                    return run.writer_full(path_len);
+                writer.end_symlink(target) catch return run.writer_full(path_len);
             },
             else => return run.refuse(
                 if (declared) .bad_kind else .holds_bad_kind,
@@ -318,9 +328,9 @@ const Run = struct {
         const id = object.object_id(content.hash, attrs);
         const writer = &run.ws.frames[run.depth - 1].writer;
         writer.begin(base_name(path), .file, mode, 0, 0, &xattrs.empty) catch
-            return run.limit(.tree_bytes, path_len);
+            return run.writer_full(path_len);
         writer.end_file(content.size, content.hash, id) catch
-            return run.limit(.tree_bytes, path_len);
+            return run.writer_full(path_len);
         var failure: object.Failure = undefined;
         var storage: PathBuf = undefined;
         if (store.fs.lstat(store.object_path(&storage, id))) |_| return else |err| {
@@ -445,7 +455,7 @@ const Run = struct {
         const path_len = top.path_len;
         run.depth -= 1;
         const parent = &run.ws.frames[run.depth - 1];
-        parent.writer.end_dir(digest) catch return run.limit(.tree_bytes, path_len);
+        parent.writer.end_dir(digest) catch return run.writer_full(path_len);
     }
 
     fn finish_root(run: *Run) Error!Digest {
@@ -458,7 +468,7 @@ const Run = struct {
             .gid = 0,
             .xattrs = &xattrs.empty,
         };
-        const bytes = root.writer.finish_with(own) catch return run.limit(.tree_bytes, 0);
+        const bytes = root.writer.finish_with(own) catch return run.writer_full(0);
         const digest = Digest.of(bytes);
         var failure: object.Failure = undefined;
         _ = trees.put(run.request.store, digest, bytes, &failure) catch

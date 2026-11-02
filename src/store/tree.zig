@@ -85,10 +85,10 @@ pub const Own = struct {
 
 pub const zero_digest: Digest = .{ .bytes = @splat(0) };
 
-const header_bytes: u32 = 5;
+pub const header_bytes: u32 = 5;
 
 /// What `own` takes when it has no attributes: the room every writer keeps for it.
-const own_bytes_min: u32 = 2 + 4 + 4 + xattrs.empty.len;
+pub const own_bytes_min: u32 = 2 + 4 + 4 + xattrs.empty.len;
 
 /// A name the encoder accepts: not empty, at most 255 bytes, no slash, no NUL, not "." or "..".
 pub fn name_is_valid(name: []const u8) bool {

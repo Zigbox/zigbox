@@ -195,3 +195,70 @@ test "a declared input that leads out of the project is refused, never read" {
     _ = try import_inputs(); // A link that stays inside is followed.
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
+
+/// Directories `/p/<first>/d/d/...` with `levels` directories below `first`.
+fn make_chain(first: []const u8, levels: u32) void {
+    var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    const base = std.fmt.bufPrint(&buffer, "{s}/{s}", .{ proj, first }) catch
+        unreachable; // Short.
+    var length: usize = base.len;
+    files.put_dir(buffer[0..length], 0o755);
+    for (0..levels) |_| {
+        @memcpy(buffer[length..][0..2], "/d");
+        length += 2;
+        files.put_dir(buffer[0..length], 0o755);
+    }
+}
+
+fn repeat(comptime unit: []const u8, comptime times: u32) *const [unit.len * times]u8 {
+    comptime {
+        var out: [unit.len * times]u8 = undefined;
+        for (0..times) |index| @memcpy(out[index * unit.len ..][0..unit.len], unit);
+        const final = out;
+        return &final;
+    }
+}
+
+/// Every directory above `path`, below the project.
+fn put_parents(path: []const u8) void {
+    var at: usize = proj.len + 1;
+    while (std.mem.indexOfScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
+        files.put_dir(path[0..slash], 0o755);
+    }
+}
+
+fn expect_limit(words: []const u8) !void {
+    try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0415), diag.code);
+    try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, words) != null);
+}
+
+test "a directory input nested to the store's depth imports, and one level more is E0415" {
+    // Goal: the depth bound is exact for a directory that is read. Method: `deep` holds a
+    // chain of 63 directories, so the tree has 64 below its root; then one more.
+    start(6);
+    parse("\"deep\"");
+    make_chain("deep", constants.store_depth_max - 1);
+    _ = try import_inputs();
+    start(6);
+    make_chain("deep", constants.store_depth_max);
+    try testing.expectError(error.Failed, import_inputs());
+    try expect_limit("nested more than 64 levels deep");
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "a declared file below 64 made-up directories imports, and below 65 is E0415" {
+    // Goal: the depth bound is exact for the directories made up above a declared input.
+    // Method: a file `a/a/.../f` with 64 parts above it, then 65.
+    const at_bound = comptime repeat("a/", constants.store_depth_max);
+    const past = comptime repeat("a/", constants.store_depth_max + 1);
+    start(7);
+    parse("\"" ++ at_bound ++ "f\"");
+    put_parents(proj ++ "/" ++ past ++ "f");
+    files.put_file(proj ++ "/" ++ at_bound ++ "f", 0o644, "deep\n");
+    files.put_file(proj ++ "/" ++ past ++ "f", 0o644, "deeper\n");
+    _ = try import_inputs();
+    parse("\"" ++ past ++ "f\"");
+    try testing.expectError(error.Failed, import_inputs());
+    try expect_limit("nested more than 64 levels deep");
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
