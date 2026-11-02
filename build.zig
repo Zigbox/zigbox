@@ -27,9 +27,10 @@ pub fn build(b: *std.Build) void {
     // On a Mac the default install is the macOS zbx (a forwarder to a Linux VM; it links
     // libSystem and Virtualization.framework). The Linux zbx, static and libc-free, is what
     // `-Dtarget=<arch>-linux` and `release` build, and what the VM's initramfs carries.
+    const vm_module = add_vm_module(b);
     const for_macos = target.result.os.tag == .macos;
     if (for_macos) {
-        add_macos_install(b, options, target, optimize);
+        add_macos_install(b, options, target, optimize, vm_module);
     } else {
         const exe = b.addExecutable(.{
             .name = "zbx",
@@ -39,7 +40,6 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     }
     add_library_module(b, options, target, optimize);
-    const vm_module = add_vm_module(b);
 
     add_test_step(b, options, target, optimize, vm_module);
     add_tidy_step(b);
@@ -147,6 +147,7 @@ const linux_only = [_][]const u8{
 };
 
 const macos_root = "src/macos_main.zig";
+const mac_demo_root = "src/testing/mac_demo.zig";
 const kernel_build_root = "src/vm_image/kernel_build.zig";
 
 fn is_listed(list: []const []const u8, name: []const u8) bool {
@@ -183,7 +184,9 @@ fn add_test_step(
         });
         if (std.mem.eql(u8, root, macos_root)) link_macos(module, add_vm_image(b, options));
         // The demos are built on the VM module; the module's own root needs no import of itself.
-        if (std.mem.startsWith(u8, root, "src/testing/vm/main")) {
+        const needs_vm = std.mem.startsWith(u8, root, "src/testing/vm/main") or
+            std.mem.eql(u8, root, mac_demo_root);
+        if (needs_vm) {
             module.addImport("zigbox_vm", vm_module);
         }
         if (std.mem.eql(u8, root, kernel_build_root)) {
@@ -730,13 +733,15 @@ fn link_macos(module: *std.Build.Module, image: VmImage) void {
 /// a Developer ID signature and notarization are the release's job) and installs it.
 /// `zig build demo-mac`: the M1 to M4 demo steps and M4b's, driven from this Mac through the macOS
 /// `zbx` it installs (src/testing/mac_demo.zig). Only where the build runs on macOS.
-fn add_demo_mac(b: *std.Build) void {
+fn add_demo_mac(b: *std.Build, vm_module: *std.Build.Module) void {
     const exe = b.addExecutable(.{
         .name = "demo_mac",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testing/mac_demo.zig"),
+            .root_source_file = b.path(mac_demo_root),
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
+            // It boots the image through the harness's `vm/image.zig`, built on the VM module.
+            .imports = &.{.{ .name = "zigbox_vm", .module = vm_module }},
         }),
     });
     const run = b.addRunArtifact(exe);
@@ -802,6 +807,7 @@ fn add_macos_install(
     options: *std.Build.Step.Options,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    vm_module: *std.Build.Module,
 ) void {
     const image = add_vm_image(b, options);
     const module = b.createModule(.{
@@ -813,7 +819,7 @@ fn add_macos_install(
     link_macos(module, image);
     const exe = b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
     add_mac_release(b, options, target);
-    add_demo_mac(b);
+    add_demo_mac(b, vm_module);
     const copy = b.addSystemCommand(&.{"cp"});
     copy.addArtifactArg(exe);
     const signed = copy.addOutputFileArg("zbx");
