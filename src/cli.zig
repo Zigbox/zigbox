@@ -819,11 +819,28 @@ fn take_build_option(
         build_args.graph = true;
         return;
     }
-    if (build_args.file != null) return unexpected_argument(diag, .build, argument);
+    if (build_args.file != null) return file_twice(diag);
     if (index.* + 1 == args.len) return missing_option_value(diag, "-f");
     index.* += 1;
     if (args[index.*].len == 0) return missing_option_value(diag, "-f");
     build_args.file = args[index.*];
+}
+
+/// `-f` a second time: one build file per build, and the second would be silently ignored.
+fn file_twice(diag: *Diag) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    diag.cause("-f given twice; a build reads one build file", .{});
+    diag.context("cmd", "{s}", .{"build"});
+    diag.context("arg", "{s}", .{"-f"});
+    diag.fix(.{
+        .sentence = "give -f once, with the build file:",
+        .command = "zbx build --graph -f build/zbx.build.zon",
+        .template = true,
+    });
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
 }
 
 /// `--resolve-only`, which only `pull` takes.

@@ -36,7 +36,10 @@ pub const ProblemKind = enum {
     too_long,
     /// Not a file or a directory (`kind`).
     bad_kind,
-    /// The step lists it twice.
+    /// It resolves to the project directory itself, which holds the build's own state.
+    whole_project,
+    /// The step lists it twice, or two of its inputs overlap once resolved: the same object, or
+    /// one inside the other (`src` and `src/main.go`). `other` is the earlier one.
     input_twice,
 };
 
@@ -46,13 +49,25 @@ pub const Problem = struct {
     input: Text,
     /// For `outside` and `bad_kind`: what the input resolved to.
     resolved: Path,
+    /// For `input_twice`: the earlier input it overlaps, and room to resolve it.
+    other: Text,
+    other_resolved: Path,
     /// For `bad_kind`.
     file_kind: fs_mod.FileKind,
 };
 
 pub const Result = enum { ok, refused };
 
-pub const Error = error{ NotPlain, Outside, Missing, Unreadable, Loop, TooLong, BadKind };
+pub const Error = error{
+    NotPlain,
+    Outside,
+    WholeProject,
+    Missing,
+    Unreadable,
+    Loop,
+    TooLong,
+    BadKind,
+};
 
 /// Resolves one input, written `input` in the build file, against the resolved `project_path`
 /// into `out`, and sets `kind` to what it is (also on `BadKind`). The next slice imports it
@@ -66,6 +81,8 @@ pub fn resolve_input(
 ) Error!void {
     assert(project_path.len > 0);
     assert(project_path[0] == '/');
+    // `load.locate` refuses a project at `/`, inside which every path is.
+    assert(project_path.len > 1);
     if (input.len == 0) return error.NotPlain;
     if (input.len > constants.path_bytes_max) return error.TooLong;
     project.resolve(fs, project_path, input, out) catch |err| return switch (err) {
@@ -75,6 +92,7 @@ pub fn resolve_input(
         error.TooLong => error.TooLong,
     };
     if (!project.is_inside(project_path, out.text())) return error.Outside;
+    if (std.mem.eql(u8, out.text(), project_path)) return error.WholeProject;
     if (!is_plain_relative(input)) return error.NotPlain;
     const stat = fs.lstat(out.text()) catch |err| return switch (err) {
         error.NotFound => error.Missing,
@@ -95,12 +113,6 @@ pub fn check(fs: Fs, project_path: []const u8, file: *const BuildFile, problem: 
             const text = file.text(input);
             problem.step = @intCast(step_index);
             problem.input = input;
-            for (inputs[0..index]) |earlier| {
-                if (std.mem.eql(u8, file.text(earlier), text)) {
-                    problem.kind = .input_twice;
-                    return .refused;
-                }
-            }
             const resolved = &problem.resolved;
             resolve_input(fs, project_path, text, resolved, &problem.file_kind) catch |err| {
                 problem.kind = kind_of(err);
@@ -110,15 +122,46 @@ pub fn check(fs: Fs, project_path: []const u8, file: *const BuildFile, problem: 
                 .file, .dir => true,
                 else => false,
             });
+            if (overlap(fs, project_path, file, inputs[0..index], problem)) |earlier| {
+                problem.kind = .input_twice;
+                problem.other = earlier;
+                return .refused;
+            }
         }
     }
     return .ok;
+}
+
+/// The earlier input that `problem.resolved` overlaps once resolved: the same path, or one
+/// inside the other. Each earlier input is resolved again, into `problem.other_resolved`, to
+/// keep no path per input: at most `build_step_inputs_max` squared resolutions, all cached by
+/// the kernel. An earlier input resolved before, so it resolves again unless the disk changed;
+/// if it no longer does, it is no overlap here, and slice 2's import refuses it.
+fn overlap(
+    fs: Fs,
+    project_path: []const u8,
+    file: *const BuildFile,
+    earlier: []const Text,
+    problem: *Problem,
+) ?Text {
+    assert(earlier.len < constants.build_step_inputs_max);
+    const resolved = problem.resolved.text();
+    assert(project.is_inside(project_path, resolved));
+    for (earlier) |input| {
+        var kind: fs_mod.FileKind = undefined;
+        const other = &problem.other_resolved;
+        resolve_input(fs, project_path, file.text(input), other, &kind) catch continue;
+        if (project.is_inside(other.text(), resolved)) return input;
+        if (project.is_inside(resolved, other.text())) return input;
+    }
+    return null;
 }
 
 fn kind_of(err: Error) ProblemKind {
     return switch (err) {
         error.NotPlain => .not_plain,
         error.Outside => .outside,
+        error.WholeProject => .whole_project,
         error.Missing => .missing,
         error.Unreadable => .unreadable,
         error.Loop => .loop,
@@ -162,6 +205,8 @@ fn tree() void {
     files.put_symlink(proj ++ "/inner", "src/main.go");
     files.put_symlink(proj ++ "/dangling", "nowhere");
     files.put_symlink(proj ++ "/self", "self");
+    files.put_symlink(proj ++ "/here", ".");
+    files.put_symlink(proj ++ "/src/up", "..");
     files.put(proj ++ "/pipe", .fifo, 0o644, .{ 0, 0 }, "");
     files.put_dir("/etc", 0o755);
 }
@@ -194,6 +239,9 @@ test "an input is a file or a directory in the project, written plainly" {
     try testing.expectError(error.Missing, input_kind("dangling"));
     try testing.expectError(error.Loop, input_kind("self"));
     try testing.expectError(error.BadKind, input_kind("pipe"));
+    try testing.expectError(error.WholeProject, input_kind("here"));
+    try testing.expectError(error.WholeProject, input_kind("src/up"));
+    try testing.expectError(error.WholeProject, input_kind("."));
     files.crashed = true; // Every call fails with EIO until restart.
     try testing.expectError(error.Unreadable, input_kind("src/main.go"));
 }
@@ -221,6 +269,14 @@ test "the inputs of a file are checked step by step and named when refused" {
     try testing.expectEqualStrings("/home/alice/secret", problem.resolved.text());
     try testing.expectEqual(Result.refused, try check_inputs("\"src\", \"src\"", &problem));
     try testing.expectEqual(ProblemKind.input_twice, problem.kind);
+    try testing.expectEqualStrings("src", test_file.text(problem.other));
+    try testing.expectEqual(Result.refused, try check_inputs("\"src\", \"inner\"", &problem));
+    try testing.expectEqual(ProblemKind.input_twice, problem.kind);
+    try testing.expectEqualStrings("inner", test_file.text(problem.input));
+    try testing.expectEqualStrings("src", test_file.text(problem.other));
+    try testing.expectEqual(Result.refused, try check_inputs("\"inner\", \"src\"", &problem));
+    try testing.expectEqualStrings("inner", test_file.text(problem.other));
+    try testing.expectEqual(Result.ok, try check_inputs("\"src\", \"go.mod\"", &problem));
     try testing.expectEqual(Result.refused, try check_inputs("\"pipe\"", &problem));
     try testing.expectEqual(ProblemKind.bad_kind, problem.kind);
     try testing.expectEqual(fs_mod.FileKind.fifo, problem.file_kind);

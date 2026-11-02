@@ -50,11 +50,19 @@ const words = [_][]const u8{
     "x",        "=",        "--flag=on", "/usr/bin/a", "",
 };
 
+/// Each with its own key, so that `distinct_list` never sets a key twice.
 const env_entries = [_][]const u8{
     "CGO_ENABLED=0", "GOFLAGS=-trimpath -buildvcs=false", "A=", "PATH=/usr/bin:/bin",
     "Q=\"x\"",       "K=v=w",
-    "ü=1",
+    "_u=1\tü",
 };
+
+comptime {
+    assert(env_entries.len >= list_generated_max);
+}
+
+/// Label values: no control bytes, which only arguments and env values may hold.
+const label_values = [_][]const u8{ "https://example.test/a", "", "a b", "ünï", "quote\"d" };
 
 const references = [_][]const u8{
     "alpine:3.20",            "golang:1.23-alpine",     "docker.io/library/busybox",
@@ -144,6 +152,20 @@ const Gen = struct {
         }
         gen.put(" }");
     }
+
+    /// A list of `count` different entries of `pool`: consecutive from a random start.
+    fn distinct_list(gen: *Gen, pool: []const []const u8, count: u32) void {
+        assert(count <= list_generated_max);
+        assert(count <= pool.len);
+        const start = gen.random.uintLessThan(usize, pool.len);
+        gen.put(".{");
+        for (0..count) |index| {
+            gen.space();
+            gen.string(pool[(start + index) % pool.len]);
+            gen.comma(@intCast(index), count);
+        }
+        gen.put(" }");
+    }
 };
 
 const StepField = enum { name, base, inputs, needs, env, run, network };
@@ -163,7 +185,7 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
             .base => gen.string(references[gen.random.uintLessThan(usize, references.len)]),
             .inputs => gen.list(&inputs, gen.random.uintAtMost(u32, list_generated_max)),
             .needs => gen_needs(gen, shape, index),
-            .env => gen.list(&env_entries, gen.random.uintAtMost(u32, list_generated_max)),
+            .env => gen.distinct_list(&env_entries, gen.random.uintAtMost(u32, list_generated_max)),
             .run => {
                 gen.put(".{ ");
                 gen.string(step_names[gen.random.uintLessThan(usize, step_names.len)]);
@@ -232,7 +254,7 @@ fn gen_config(gen: *Gen) void {
     gen.list(&words, gen.random.uintAtMost(u32, list_generated_max));
     gen.put(",");
     gen.field(".env");
-    gen.list(&env_entries, gen.random.uintAtMost(u32, list_generated_max));
+    gen.distinct_list(&env_entries, gen.random.uintAtMost(u32, list_generated_max));
     gen.put(",");
     gen.field(".workdir");
     gen.string(targets[gen.random.uintLessThan(usize, targets.len)]);
@@ -248,7 +270,7 @@ fn gen_config(gen: *Gen) void {
         // Distinct keys: a key twice is refused.
         gen.string(label_keys[index]);
         gen.put(", ");
-        gen.string(words[gen.random.uintLessThan(usize, words.len)]);
+        gen.string(label_values[gen.random.uintLessThan(usize, label_values.len)]);
         gen.put(" }");
         gen.comma(@intCast(index), labels);
     }
@@ -420,6 +442,12 @@ const pieces = [_][]const u8{
     "\"image\"",
     "\"..\"",
     "\"/a/../b\"",
+    "\\x+f",
+    "\\x80",
+    "\\n",
+    "\"HOME=/\"",
+    "\"A=1\", \"A=2\"",
+    ".version = 01",
 };
 
 /// Damages `text` into `damaged` one of several ways, and returns the damaged length.

@@ -251,3 +251,174 @@ test "a file cut short anywhere is refused at its end, inside a list too" {
     }
     try expect_refused(".{ .version = 1, .image = .{ .add = .{", .syntax, 1, 39);
 }
+
+test "a string is UTF-8 once decoded, and only arguments and env values hold control bytes" {
+    // Goal: an escape cannot make what the raw text may not hold: bytes that are not UTF-8
+    // anywhere, or a control byte outside an argv or an env value. Method: `\x80`, a whole
+    // UTF-8 sequence written as escapes, and `\n` in every kind of field.
+    const head = ".{ .version = 1, .image = .{ ";
+    const config = head ++ ".config = .{ ";
+    try refused_at(config ++ ".cmd = .{ \"a\\x80\" } } } }", .bad_string, "\"a");
+    try refused_at(config ++ ".cmd = .{ \"\\xc3\" } } } }", .bad_string, "\"\\");
+    const accented = try parse_ok(config ++ ".cmd = .{ \"\\xc3\\xa9\" } } } }");
+    try testing.expectEqualStrings("é", accented.text(accented.image.config.cmd.items[0]));
+    _ = try parse_ok(config ++ ".entrypoint = .{ \"a\\nb\\t\" }, .env = .{ \"A=\\n\" } } } }");
+    try refused_at(config ++ ".workdir = \"/a\\nb\" } } }", .bad_string, "\"");
+    try refused_at(config ++ ".labels = .{ .{ \"a\", \"b\\n\" } } } } }", .bad_string, "\"b");
+    try refused_at(config ++ ".labels = .{ .{ \"a\\x7f\", \"b\" } } } } }", .bad_string, "\"a");
+    const add = head ++ ".add = .{ .{ ";
+    try refused_at(add ++ ".from = \"a\", .to = \"/a\\tb\" } } } }", .bad_string, "\"/");
+    try refused_at(add ++ ".from = \"a\\r\", .to = \"/\" } } } }", .bad_string, "\"a");
+    const step = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"a\", ";
+    _ = try parse_ok(step ++ ".run = .{ \"sh\", \"-c\", \"a\\nb\" }, .env = .{ \"A=\\t\" } } } }");
+    const inputs = step ++ ".run = .{\"x\"}, .inputs = .{ \"a\\nb\" } } } }";
+    try refused_at(inputs, .bad_string, "\"a\\n");
+    try refused_at(step ++ ".run = .{\"x\"}, .needs = .{ \"a\\n\" } } } }", .bad_string, "\"a\\n");
+}
+
+test "an escape is exactly two hex digits, and .version is written as render writes it" {
+    // Goal: parse accepts only what render writes. Method: `\x` with a sign, one digit or a
+    // non-hex letter; `.version` with a leading zero.
+    const config = ".{ .version = 1, .image = .{ .config = .{ ";
+    try refused_at(config ++ ".cmd = .{ \"\\x+f\" } } } }", .bad_escape, "\"");
+    try refused_at(config ++ ".cmd = .{ \"\\x-0\" } } } }", .bad_escape, "\"");
+    try refused_at(config ++ ".cmd = .{ \"\\xg0\" } } } }", .bad_escape, "\"");
+    try refused_at(config ++ ".cmd = .{ \"\\x4\" } } } }", .bad_escape, "\"");
+    const upper = try parse_ok(config ++ ".cmd = .{ \"\\x4A\\x4a\" } } } }");
+    try testing.expectEqualStrings("JJ", upper.text(upper.image.config.cmd.items[0]));
+    try refused_at(".{ .version = 01, .image = .{} }", .bad_version, "01");
+    try refused_at(".{ .version = 00, .image = .{} }", .bad_version, "00");
+}
+
+test "an env list has plain keys, each once, and a step cannot set the fixed environment" {
+    // Goal: the key rule `[A-Za-z_][A-Za-z0-9_]*`, a key twice in one list, and the fixed keys
+    // in a step's env (allowed in image.config's, which is the image's own). Method: one list
+    // per refusal, at both levels.
+    const step = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"a\", " ++
+        ".run = .{\"x\"}, .env = .{ ";
+    try refused_at(step ++ "\"1A=b\" } } } }", .bad_env, "\"1A");
+    try refused_at(step ++ "\"A-B=c\" } } } }", .bad_env, "\"A-B");
+    try refused_at(step ++ "\"ü=c\" } } } }", .bad_env, "\"ü");
+    try refused_at(step ++ "\"A=1\", \"B=2\", \"A=3\" } } } }", .env_twice, "\"A=3");
+    inline for (file_mod.fixed_env) |key| {
+        var buffer: [256]u8 = undefined;
+        const format = "{s}\"_x9=1\", \"{s}=1\" }} }} }} }}";
+        const text = try std.fmt.bufPrint(&buffer, format, .{ step, key });
+        try refused_at(text, .env_fixed, "\"" ++ key);
+    }
+    _ = try parse_ok(step ++ "\"_x9=1\", \"PATH=/usr/bin\", \"A=\" } } } }");
+    const config = ".{ .version = 1, .image = .{ .config = .{ .env = .{ ";
+    try refused_at(config ++ "\"A B=c\" } } } }", .config_env, "\"A B");
+    try refused_at(config ++ "\"A=1\", \"A=1\" } } } }", .env_twice, "\"A=1\" }");
+    _ = try parse_ok(config ++ "\"HOME=/home/app\", \"TZ=UTC\" } } } }");
+}
+
+/// A file with `count` entries of a list, one per line after the first: the entry past a
+/// bound is refused at line `count + 1`, column 1. `entry` takes the entry's index as `{d}`.
+fn write_list(
+    comptime head: []const u8,
+    comptime entry: []const u8,
+    comptime tail: []const u8,
+    count: u32,
+) []const u8 {
+    var writer: std.Io.Writer = .fixed(&test_text);
+    writer.writeAll(head ++ "\n") catch unreachable; // Fits.
+    for (0..count) |index| {
+        // At most 65 entries of under 64 bytes fit the render buffer.
+        writer.print(entry ++ ",\n", .{index}) catch unreachable;
+    }
+    writer.writeAll(tail) catch unreachable; // Fits.
+    return writer.buffered();
+}
+
+fn expect_list_bound(
+    comptime head: []const u8,
+    comptime entry: []const u8,
+    comptime tail: []const u8,
+    max: u32,
+    kind: ProblemKind,
+) !void {
+    _ = try parse_ok(write_list(head, entry, tail, max));
+    try expect_refused(write_list(head, entry, tail, max + 1), kind, max + 2, 1);
+}
+
+test "every list bound of a step holds at its limit and refuses one past it" {
+    // Goal: the lists of a step are bounded exactly by their constants. Method: each list
+    // written at its bound and one past, entries distinct.
+    const step = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"a\", ";
+    const run = ".run = .{\"x\"}, ";
+    const close_step = "} } } }";
+    try expect_list_bound(
+        step ++ run ++ ".inputs = .{",
+        "\"i{d}\"",
+        close_step,
+        constants.build_step_inputs_max,
+        .list_too_long,
+    );
+    try expect_list_bound(
+        step ++ ".run = .{",
+        "\"a{d}\"",
+        close_step,
+        constants.build_step_argv_max,
+        .list_too_long,
+    );
+    try expect_list_bound(
+        step ++ run ++ ".env = .{",
+        "\"K{d}=v\"",
+        close_step,
+        constants.build_step_env_max,
+        .list_too_long,
+    );
+}
+
+test "every list bound of the image holds at its limit and refuses one past it" {
+    // Goal: as above, for the image's lists. Method: each written at its bound and one past.
+    const image = ".{ .version = 1, .image = .{ ";
+    try expect_list_bound(
+        image ++ ".add = .{",
+        ".{{ .from = \"a\", .to = \"/{d}\" }}",
+        "} } }",
+        constants.build_image_adds_max,
+        .list_too_long,
+    );
+    const config = image ++ ".config = .{ ";
+    const close_config = "} } } }";
+    try expect_list_bound(
+        config ++ ".labels = .{",
+        ".{{ \"k{d}\", \"v\" }}",
+        close_config,
+        constants.build_config_labels_max,
+        .list_too_long,
+    );
+    try expect_list_bound(
+        config ++ ".entrypoint = .{",
+        "\"e{d}\"",
+        close_config,
+        constants.build_config_argv_max,
+        .list_too_long,
+    );
+    try expect_list_bound(
+        config ++ ".cmd = .{",
+        "\"c{d}\"",
+        close_config,
+        constants.build_config_argv_max,
+        .list_too_long,
+    );
+    try expect_list_bound(
+        config ++ ".env = .{",
+        "\"K{d}=v\"",
+        close_config,
+        constants.build_config_env_max,
+        .list_too_long,
+    );
+}
+
+test "a step name holds at its bound and is refused one past it" {
+    // Goal: the name bound is the constant. Method: a name at the bound and one byte longer.
+    const name_max = constants.build_step_name_bytes_max;
+    const long_name: [name_max + 1]u8 = @splat('a');
+    const tail = "\", .base = \"a\", .run = .{\"x\"} } } }";
+    const named = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"";
+    _ = try parse_ok(named ++ long_name[0..name_max] ++ tail);
+    try refused_at(named ++ long_name ++ tail, .bad_step_name, "\"a");
+}

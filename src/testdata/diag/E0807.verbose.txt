@@ -4,7 +4,6 @@ error[ZBX-E0807]: the image can't be made as declared
          UID:GID in numbers; names are not looked up in a build
   path   zbx.build.zon
   at     line 4, column 38
-  fix    change the build file at line 4, column 38
-         see the format:   zbx explain E0807
+  fix    write .user as "UID:GID" in numbers, for example "0:0"
   more   zbx explain E0807
   docs   https://zigbox.github.io/zigbox/errors/E0807.html

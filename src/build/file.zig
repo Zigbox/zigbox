@@ -235,8 +235,12 @@ pub const ProblemKind = enum {
     bad_reference,
     /// `run` is empty, or its first word is.
     empty_run,
-    /// A step's env entry is not `KEY=VALUE` with a key.
+    /// A step's env entry is not `KEY=VALUE` with a key `[A-Za-z_][A-Za-z0-9_]*`.
     bad_env,
+    /// An env list sets a key twice (`word` is the key).
+    env_twice,
+    /// A step's env sets a key of the fixed environment (`word` is the key).
+    env_fixed,
     /// `add.to` is not an absolute path written plainly (no `.`, `..` or empty parts).
     bad_target,
     // E0802: the graph.
@@ -473,6 +477,10 @@ fn parse_version(parser: *Parser) Refused!void {
     if (digits.len > constants.build_version_digits_max) {
         return parser.fail(.bad_version, token, .file, .version);
     }
+    // Parse accepts only what render writes, and render writes no leading zero.
+    if (digits.len > 1) {
+        if (digits[0] == '0') return parser.fail(.bad_version, token, .file, .version);
+    }
     const value = std.fmt.parseInt(u32, digits, 10) catch unreachable; // Four digits at most.
     if (value == 0) return parser.fail(.bad_version, token, .file, .version);
     if (value > version) {
@@ -519,7 +527,7 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
             .needs => try parse_list(parser, .step, field, &step.needs, .too_many_needs),
             .env => {
                 try parse_list(parser, .step, field, &step.env, .list_too_long);
-                for (step.env.slice()) |entry| try check_env(parser, entry, .bad_env, .step);
+                try check_env_list(parser, step.env.slice(), .bad_env, .step);
             },
             .run => {
                 try parse_list(parser, .step, field, &step.run, .list_too_long);
@@ -595,9 +603,7 @@ fn parse_config(parser: *Parser) Refused!void {
             .cmd => try parse_list(parser, .config, field, &config.cmd, .list_too_long),
             .env => {
                 try parse_list(parser, .config, field, &config.env, .list_too_long);
-                for (config.env.slice()) |entry| {
-                    try check_env(parser, entry, .config_env, .config);
-                }
+                try check_env_list(parser, config.env.slice(), .config_env, .config);
             },
             .workdir => {
                 const workdir = try parse_string(parser, .config, field);
@@ -713,7 +719,7 @@ fn decode(parser: *Parser, token: Token, level: Level, field: Field) Refused!Tex
             };
             byte = escape;
             if (byte == 0) return parser.fail(.nul_byte, token, level, field);
-        } else if (byte < 0x20 or byte == 0x7f) {
+        } else if (is_control(byte)) {
             return parser.fail(.bad_string, token, level, field);
         } else if (byte >= 0x80) {
             // A raw byte over 127 starts a UTF-8 sequence, copied whole once it is checked.
@@ -739,7 +745,34 @@ fn decode(parser: *Parser, token: Token, level: Level, field: Field) Refused!Tex
         file.pool_len += 1;
     }
     assert(file.pool_len - at <= constants.build_string_bytes_max);
+    // Escapes can make bytes that are not UTF-8 (`\xff`) or control bytes (`\n`): check what
+    // the string decoded to, not only how it was written.
+    const decoded = file.pool[at..file.pool_len];
+    if (!std.unicode.utf8ValidateSlice(decoded)) {
+        return parser.fail(.bad_string, token, level, field);
+    }
+    if (!takes_control_bytes(level, field)) {
+        for (decoded) |byte| {
+            if (is_control(byte)) return parser.fail(.bad_string, token, level, field);
+        }
+    }
     return .{ .at = at, .len = file.pool_len - at, .line = token.line, .column = token.column };
+}
+
+/// Whether a string of `field` may hold control bytes: an argument (a `sh -c` script has line
+/// ends) and an env entry's value may; a name, a reference, a path or a label may not. An env
+/// entry's key is held to `[A-Za-z_][A-Za-z0-9_]*` by `check_env`.
+pub fn takes_control_bytes(level: Level, field: Field) bool {
+    assert(@tagName(level).len > 0);
+    return switch (level) {
+        .step => field == .run or field == .env,
+        .config => field == .entrypoint or field == .cmd or field == .env,
+        .file, .image, .add, .label => false,
+    };
+}
+
+pub fn is_control(byte: u8) bool {
+    return byte < 0x20 or byte == 0x7f;
 }
 
 /// The byte an escape stands for, `index` just past the `\`; null if it is not one.
@@ -756,12 +789,24 @@ fn escape_at(raw: []const u8, index: *usize) ?u8 {
         '\\', '\'', '"' => return letter,
         'x' => {
             if (index.* + 2 > raw.len) return null;
-            const value = std.fmt.parseInt(u8, raw[index.*..][0..2], 16) catch return null;
+            const high = raw[index.*];
+            const low = raw[index.* + 1];
+            // `parseInt` would take `+f` and `-0`; an escape is exactly two hex digits.
+            if (!std.ascii.isHex(high)) return null;
+            if (!std.ascii.isHex(low)) return null;
             index.* += 2;
-            return value;
+            const value = 16 * hex_value(high) + hex_value(low);
+            return @intCast(value);
         },
         else => return null,
     }
+}
+
+fn hex_value(digit: u8) u8 {
+    assert(std.ascii.isHex(digit));
+    const value = std.fmt.charToDigit(digit, 16) catch unreachable; // A hex digit, just checked.
+    assert(value < 16);
+    return value;
 }
 
 /// The length of the valid UTF-8 sequence at the start of `bytes`, or null.
@@ -790,16 +835,77 @@ fn check_step_name(parser: *Parser, name: Text) Refused!void {
     }
 }
 
-fn check_env(parser: *Parser, entry: Text, kind: ProblemKind, level: Level) Refused!void {
-    assert(switch (kind) {
-        .bad_env, .config_env => true,
-        else => false,
+/// The variables every step is given after the build file's, which a step's `.env` cannot set
+/// (docs/briefs/M7-build.md, "A fixed environment").
+pub const fixed_env = [_][]const u8{
+    "HOME", "TZ", "LC_ALL", "SOURCE_DATE_EPOCH", "ZBX_BUILD_STEP",
+};
+
+/// An env list: each entry `KEY=VALUE` with a plain key, no key twice, and in a step no key of
+/// the fixed environment (it would be overridden, and a silent override is a surprise).
+fn check_env_list(
+    parser: *Parser,
+    entries: []const Text,
+    kind: ProblemKind,
+    level: Level,
+) Refused!void {
+    assert(entries.len <= constants.build_config_env_max);
+    assert(switch (level) {
+        .step, .config => true,
+        .file, .image, .add, .label => false,
     });
-    const text = parser.file.text(entry);
-    const equals = std.mem.indexOfScalar(u8, text, '=') orelse {
-        return parser.fail_value(kind, entry, level, .env);
-    };
-    if (equals == 0) return parser.fail_value(kind, entry, level, .env);
+    for (entries, 0..) |entry, index| {
+        const key = env_key(parser.file.text(entry)) orelse {
+            return parser.fail_value(kind, entry, level, .env);
+        };
+        for (entries[0..index]) |earlier| {
+            const earlier_key = env_key(parser.file.text(earlier)).?;
+            if (std.mem.eql(u8, earlier_key, key)) {
+                return fail_key(parser, .env_twice, entry, key, level);
+            }
+        }
+        if (level == .step) {
+            if (is_fixed_env(key)) return fail_key(parser, .env_fixed, entry, key, level);
+        }
+    }
+}
+
+/// A refusal naming an env entry's key, which is all of it the message needs.
+fn fail_key(
+    parser: *Parser,
+    kind: ProblemKind,
+    entry: Text,
+    key: []const u8,
+    level: Level,
+) Refused {
+    assert(key.len > 0);
+    const result = parser.fail(kind, entry, level, .env);
+    parser.problem.set_word(key);
+    return result;
+}
+
+/// The key of `KEY=VALUE`, or null if the entry has no `=` or its key is not
+/// `[A-Za-z_][A-Za-z0-9_]*` (what a shell can name).
+pub fn env_key(entry: []const u8) ?[]const u8 {
+    const equals = std.mem.indexOfScalar(u8, entry, '=') orelse return null;
+    const key = entry[0..equals];
+    if (key.len == 0) return null;
+    if (std.ascii.isDigit(key[0])) return null;
+    for (key) |byte| {
+        if (byte != '_') {
+            if (!std.ascii.isAlphanumeric(byte)) return null;
+        }
+    }
+    assert(key.len < entry.len);
+    return key;
+}
+
+pub fn is_fixed_env(key: []const u8) bool {
+    assert(key.len > 0);
+    for (fixed_env) |name| {
+        if (std.mem.eql(u8, name, key)) return true;
+    }
+    return false;
 }
 
 fn check_run(parser: *Parser, step: *const Step) Refused!void {

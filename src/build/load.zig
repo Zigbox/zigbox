@@ -73,22 +73,28 @@ fn locate(host: Host, fs: Fs, given: []const u8, workspace: *Workspace, diag: *D
     assert(diag.code == null);
     const shown_given = if (given.len > 0) given else file_mod.file_name;
     project.directory(host, fs, "", &workspace.project) catch {
-        diagnose.read_failure(diag, shown_given, "", .no_project);
+        diagnose.read_failure(diag, shown_given, "", "", .no_project);
         return error.Failed;
     };
     const directory = workspace.project.text();
     assert(directory[0] == '/');
+    // Everything is inside `/`, so a project there would let the file and its inputs name any
+    // path on the host (as `--mount` refuses `/`, a build does).
+    if (directory.len == 1) {
+        diagnose.read_failure(diag, shown_given, directory, "", .root_project);
+        return error.Failed;
+    }
     var base_buffer: [constants.path_bytes_max + 1]u8 = undefined;
     const base = if (given.len > 0)
         host.working_directory(&base_buffer) catch {
-            diagnose.read_failure(diag, shown_given, directory, .no_project);
+            diagnose.read_failure(diag, shown_given, directory, "", .no_project);
             return error.Failed;
         }
     else
         directory;
     const name = if (given.len > 0) given else file_mod.file_name;
     if (name.len > constants.path_bytes_max) {
-        diagnose.read_failure(diag, shown_given, directory, .bad_path);
+        diagnose.read_failure(diag, shown_given, directory, "", .bad_path);
         return error.Failed;
     }
     project.resolve(fs, base, name, &workspace.path) catch |err| {
@@ -97,11 +103,11 @@ fn locate(host: Host, fs: Fs, given: []const u8, workspace: *Workspace, diag: *D
             error.Unreadable => .unreadable,
             error.Loop, error.TooLong => .bad_path,
         };
-        diagnose.read_failure(diag, shown_given, directory, failure);
+        diagnose.read_failure(diag, shown_given, directory, "", failure);
         return error.Failed;
     };
     if (!project.is_inside(directory, workspace.path.text())) {
-        diagnose.read_failure(diag, shown_given, directory, .outside);
+        diagnose.read_failure(diag, shown_given, directory, workspace.path.text(), .outside);
         return error.Failed;
     }
 }
@@ -113,11 +119,11 @@ fn read(fs: Fs, workspace: *Workspace, diag: *Diag) Error![]const u8 {
     const directory = workspace.project.text();
     const stat = fs.lstat(path) catch |err| {
         const failure: diagnose.ReadFailure = if (err == error.NotFound) .missing else .unreadable;
-        diagnose.read_failure(diag, workspace.shown(), directory, failure);
+        diagnose.read_failure(diag, workspace.shown(), directory, "", failure);
         return error.Failed;
     };
     if (stat.kind != .file) {
-        diagnose.read_failure(diag, workspace.shown(), directory, .not_file);
+        diagnose.read_failure(diag, workspace.shown(), directory, "", .not_file);
         return error.Failed;
     }
     const text = fs.read_whole(path, &workspace.text) catch |err| {
@@ -126,7 +132,7 @@ fn read(fs: Fs, workspace: *Workspace, diag: *Diag) Error![]const u8 {
             error.NotFound => .missing,
             else => .unreadable,
         };
-        diagnose.read_failure(diag, workspace.shown(), directory, failure);
+        diagnose.read_failure(diag, workspace.shown(), directory, "", failure);
         return error.Failed;
     };
     workspace.text_len = @intCast(text.len);

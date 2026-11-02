@@ -50,8 +50,10 @@ pub fn parse_code(kind: ProblemKind) codes.Code {
 pub const ReadFailure = enum {
     /// The project directory cannot be worked out (the working directory cannot be read).
     no_project,
-    /// `-f` names a file outside the project directory.
+    /// `-f` names a file outside the project directory (`resolved` is where it led).
     outside,
+    /// The project directory is `/`, inside which every path is.
+    root_project,
     missing,
     unreadable,
     /// Its links lead round, or its path is too long.
@@ -62,26 +64,32 @@ pub const ReadFailure = enum {
     too_large,
 };
 
-/// `E0801` for a file that could not be read. `shown` is its path as the user knows it.
+/// `E0801` for a file that could not be read. `shown` is its path as the user knows it;
+/// `resolved` is where it led, for `outside`, and empty otherwise.
 pub fn read_failure(
     diag: *Diag,
     shown: []const u8,
     project: []const u8,
+    resolved: []const u8,
     failure: ReadFailure,
 ) void {
     assert(diag.code == null);
     assert(shown.len > 0);
+    if (failure == .outside) assert(resolved.len > 0);
     var shown_echo: Echo = undefined;
     var project_echo: Echo = undefined;
+    var resolved_echo: Echo = undefined;
     const path = text_util.sanitise(&shown_echo, shown);
     const directory = if (project.len > 0) text_util.sanitise(&project_echo, project) else "?";
     diag.raise(.E0801);
     diag.while_("reading the build file '{s}'", .{path});
     switch (failure) {
         .no_project => diag.cause("the working directory cannot be read", .{}),
-        .outside => diag.cause("'{s}' is outside the project directory '{s}'", .{
-            path, directory,
+        .outside => diag.cause("'{s}' leads to '{s}', outside the project directory '{s}'", .{
+            path, text_util.sanitise(&resolved_echo, resolved), directory,
         }),
+        .root_project => diag.cause("the project directory is /, and a build reads only " ++
+            "inside its project", .{}),
         .missing => diag.cause("'{s}' is not there", .{path}),
         .unreadable => diag.cause("'{s}' cannot be read", .{path}),
         .not_file => diag.cause("'{s}' is not a file", .{path}),
@@ -91,10 +99,14 @@ pub fn read_failure(
         }),
     }
     diag.context("path", "{s}", .{path});
-    if (project.len > 0) diag.context("dir", "{s}", .{directory});
+    // The context keeps the whole path, up to the diagnostic's field; only prose is cut short.
+    if (project.len > 0) diag.context("dir", "{s}", .{project});
+    if (resolved.len > 0) diag.context("target", "{s}", .{resolved});
     switch (failure) {
         .no_project => diag.fix(.{ .sentence = "run zbx build from the project's directory" }),
         .outside => diag.fix(.{ .sentence = "name a build file inside the project with -f" }),
+        .root_project => diag.fix(.{ .sentence = "run zbx build from the project, or create " ++
+            "zbx.lock there" }),
         .missing => diag.fix(.{
             .sentence = "write zbx.build.zon in the project directory; its format is in:",
             .command = "zbx explain E0801",
@@ -102,7 +114,9 @@ pub fn read_failure(
         .unreadable => diag.fix(.{ .sentence = "make the file readable by you" }),
         .not_file => diag.fix(.{ .sentence = "name the build file itself with -f" }),
         .bad_path => diag.fix(.{ .sentence = "name the file by a path without a link loop" }),
-        .too_large => diag.fix(.{ .sentence = "split the work into fewer, larger steps" }),
+        .too_large => fix_sentence(diag, "shorten the file; it may be at most {d} bytes", .{
+            constants.build_file_bytes_max,
+        }),
     }
     assert(diag.code.? == .E0801);
 }
@@ -132,31 +146,85 @@ pub fn parse_problem(diag: *Diag, shown: []const u8, problem: *const file_mod.Pr
 fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
     assert(diag.code != null);
     assert(problem.line > 0);
+    const field = if (problem.field) |known| @tagName(known) else "?";
+    const level = level_name(problem.level);
     switch (problem.kind) {
+        .syntax => {
+            fix_sentence(diag, "write {s} at line {d}, column {d}", .{
+                expected_name(problem.expected), problem.line, problem.column,
+            });
+            diag.fix_with("see the format:", "zbx explain {t}", .{parse_code(problem.kind)});
+        },
         .unknown_field => {
             var fields: [sentence_bytes_max]u8 = undefined;
             var writer = std.Io.Writer.fixed(&fields);
             // The longest list, a step's, is seven short names: it fits.
             write_fields(&writer, problem.level.allowed()) catch unreachable;
-            fix_sentence(diag, "use a field that {s} takes: {s}", .{
-                level_name(problem.level), writer.buffered(),
-            });
+            fix_sentence(diag, "use a field that {s} takes: {s}", .{ level, writer.buffered() });
         },
+        .duplicate_field => fix_sentence(diag, "keep one .{s} in {s} and remove the other", .{
+            field, level,
+        }),
+        .missing_field => fix_sentence(diag, "add .{s} = ... to {s}", .{ field, level }),
+        .bad_escape => diag.fix(.{ .sentence = "write the escape as one of \\n \\r \\t " ++
+            "\\\\ \\' \\\" or \\x and two hex digits" }),
+        .bad_string => if (file_mod.takes_control_bytes(problem.level, problem.field.?))
+            diag.fix(.{ .sentence = "save the file as UTF-8, and write a control byte " ++
+                "as \\n, \\t or \\xNN" })
+        else
+            fix_sentence(diag, "write .{s} as UTF-8 text without control bytes", .{field}),
+        .nul_byte => diag.fix(.{ .sentence = "take the \\x00 out of the string" }),
+        .string_too_long => fix_sentence(diag, "shorten the string to at most {d} bytes", .{
+            constants.build_string_bytes_max,
+        }),
+        .list_too_long => fix_sentence(diag, "list at most {d} entries in .{s}", .{
+            list_max(problem.level, problem.field), field,
+        }),
+        .text_too_long => fix_sentence(diag, "shorten the strings of the file to at most {d} " ++
+            "bytes in all", .{constants.build_pool_bytes}),
+        .bad_version => fix_sentence(diag, "write .version = {d}", .{file_mod.version}),
         .newer_version => diag.fix(.{
             .sentence = "use a newer zbx, or write the file for version 1",
         }),
+        else => value_fix(diag, problem),
+    }
+}
+
+/// The fixes of the problems of one value (`describe_value`'s).
+fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
+    assert(diag.code != null);
+    assert(problem.word_len <= problem.word.len);
+    var word_echo: Echo = undefined;
+    const word = text_util.sanitise(&word_echo, problem.word_text());
+    switch (problem.kind) {
+        .bad_step_name => fix_sentence(diag, "name the step with 1 to {d} of a-z, 0-9 and -, " ++
+            "for example \"compile\"", .{constants.build_step_name_bytes_max}),
+        .reserved_step_name => diag.fix(.{ .sentence = "give the step another name, such as " ++
+            "\"assemble\"" }),
         .bad_reference => diag.fix(.{
             .sentence = "name an image as zbx pull takes it, for example alpine:3.20",
         }),
+        .empty_run => diag.fix(.{ .sentence = "give .run the command and its arguments, " ++
+            "for example .{ \"go\", \"build\" }" }),
+        .bad_env, .config_env => diag.fix(.{ .sentence = "write the entry as KEY=VALUE, the key " ++
+            "of A-Z, a-z, 0-9 and _ and not starting with a digit" }),
+        .env_twice => fix_sentence(diag, "set \"{s}\" once in this .env", .{word}),
+        .env_fixed => fix_sentence(diag, "take \"{s}\" out of the step's .env; every step " ++
+            "is given its fixed value", .{word}),
+        .bad_target => diag.fix(.{ .sentence = "write .to as an absolute path, for example " ++
+            "\"/usr/local/bin\"" }),
         .too_many_needs => diag.fix(.{
             .sentence = "need fewer steps, and have one of them gather what the others make",
         }),
-        else => {
-            fix_sentence(diag, "change the build file at line {d}, column {d}", .{
-                problem.line, problem.column,
-            });
-            diag.fix_with("see the format:", "zbx explain {t}", .{parse_code(problem.kind)});
-        },
+        .config_workdir => diag.fix(.{ .sentence = "write .workdir as an absolute path, for " ++
+            "example \"/app\"" }),
+        .config_user => diag.fix(.{ .sentence = "write .user as \"UID:GID\" in numbers, " ++
+            "for example \"0:0\"" }),
+        .config_label_key => diag.fix(.{ .sentence = "write the key with a-z, 0-9 and . _ / -, " ++
+            "for example \"org.opencontainers.image.source\"" }),
+        .config_label_twice => fix_sentence(diag, "give the label \"{s}\" once", .{word}),
+        // `parse_fix` writes the others.
+        else => unreachable,
     }
 }
 
@@ -187,8 +255,10 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .missing_field => try writer.print("{s} has no .{s}, which it needs", .{ level, field }),
         .bad_escape => try writer.writeAll("a string has an escape zbx does not read; " ++
             "the escapes are \\n \\r \\t \\\\ \\' \\\" and \\xNN"),
-        .bad_string => try writer.writeAll("a string holds a control byte, or bytes that " ++
-            "are not UTF-8; write a control byte as \\xNN"),
+        .bad_string => try writer.print("a string in .{s} holds bytes that are not UTF-8, or " ++
+            "a control byte, which only .run, .entrypoint, .cmd and .env values may hold", .{
+            field,
+        }),
         .nul_byte => try writer.writeAll("a string holds a NUL byte (\\x00), which no " ++
             "argument, path or variable can hold"),
         .string_too_long => try writer.print("a string is longer than {d} bytes", .{
@@ -220,7 +290,11 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
         .bad_reference => try writer.print(".base \"{s}\" is not an image reference", .{word}),
         .empty_run => try writer.writeAll(".run needs a command, and its first word " ++
             "cannot be empty"),
-        .bad_env => try writer.print("the env entry \"{s}\" is not NAME=VALUE", .{word}),
+        .bad_env => try writer.print("the env entry \"{s}\" is not NAME=VALUE with a plain " ++
+            "NAME", .{word}),
+        .env_twice => try writer.print("the env key \"{s}\" is set twice", .{word}),
+        .env_fixed => try writer.print("the step's env sets \"{s}\", which is fixed for " ++
+            "every step", .{word}),
         .bad_target => try writer.print(".to \"{s}\" is not an absolute path written plainly " ++
             "(no empty, . or .. part)", .{word}),
         .too_many_needs => try writer.print("a step needs more than {d} steps, the most " ++
@@ -229,9 +303,8 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "absolute path written plainly", .{word}),
         .config_user => try writer.print("image.config .user \"{s}\" is not UID:GID in " ++
             "numbers; names are not looked up in a build", .{word}),
-        .config_env => try writer.print("image.config .env entry \"{s}\" is not NAME=VALUE", .{
-            word,
-        }),
+        .config_env => try writer.print("image.config .env entry \"{s}\" is not NAME=VALUE " ++
+            "with a plain NAME", .{word}),
         .config_label_key => try writer.print("the label key \"{s}\" is not 1 to {d} of " ++
             "a-z, 0-9 and . _ / -", .{ word, constants.build_label_key_bytes_max }),
         .config_label_twice => try writer.print("the label \"{s}\" is given twice", .{word}),
@@ -338,13 +411,14 @@ pub fn input_problem(
     var sentence: [sentence_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&sentence);
     // A sentence longer than the room is cut, as the diagnostic would cut it anyway.
-    describe_input(&writer, problem, directory) catch {};
+    describe_input(&writer, file, problem, directory) catch {};
     diag.raise(.E0803);
     diag.while_("checking the inputs of step \"{s}\"", .{step});
     diag.cause("input \"{s}\" of step \"{s}\" {s}", .{ input, step, writer.buffered() });
     diag.context("input", "{s}", .{input});
     diag.context("step", "{s}", .{step});
-    diag.context("dir", "{s}", .{directory});
+    // The context keeps the whole path, up to the diagnostic's field; only prose is cut short.
+    diag.context("dir", "{s}", .{project});
     diag.context("at", "line {d}, column {d}", .{ problem.input.line, problem.input.column });
     input_fix(diag, problem.kind, step);
     assert(diag.code.? == .E0803);
@@ -352,11 +426,13 @@ pub fn input_problem(
 
 fn describe_input(
     writer: *std.Io.Writer,
+    file: *const BuildFile,
     problem: *const inputs_mod.Problem,
     directory: []const u8,
 ) std.Io.Writer.Error!void {
     assert(directory.len > 0);
     var resolved_echo: Echo = undefined;
+    var other_echo: Echo = undefined;
     switch (problem.kind) {
         .not_plain => try writer.writeAll("is not a plain relative path: no leading /, no " ++
             "empty, . or .. part, no trailing /"),
@@ -372,7 +448,11 @@ fn describe_input(
         .bad_kind => try writer.print("is {s}; an input is a file or a directory", .{
             kind_name(problem.file_kind),
         }),
-        .input_twice => try writer.writeAll("is listed twice"),
+        .whole_project => try writer.writeAll("names the whole project directory"),
+        .input_twice => try writer.print("overlaps input \"{s}\" of the same step: they " ++
+            "name the same file, or one is inside the other", .{
+            text_util.sanitise(&other_echo, file.text(problem.other)),
+        }),
     }
 }
 
@@ -393,7 +473,10 @@ fn input_fix(diag: *Diag, kind: inputs_mod.ProblemKind, step: []const u8) void {
             "its own path" }),
         .bad_kind => diag.fix(.{ .sentence = "list the files or directories the step " ++
             "reads instead" }),
-        .input_twice => fix_sentence(diag, "list it once in step \"{s}\"'s .inputs", .{step}),
+        .whole_project => diag.fix(.{ .sentence = "list the files and directories the step " ++
+            "reads, not the project itself" }),
+        .input_twice => fix_sentence(diag, "list each file once in step \"{s}\"'s .inputs: " ++
+            "a directory, or files inside it, not both", .{step}),
     }
 }
 

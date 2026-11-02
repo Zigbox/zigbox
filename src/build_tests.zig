@@ -114,3 +114,69 @@ test "build -f must name a file inside the project, and build alone says what it
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--graph", "-f" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0005") != null);
 }
+
+fn expect_stderr(needle: []const u8) !void {
+    if (std.mem.indexOf(u8, sim.stderr(), needle) == null) {
+        std.debug.print("STDERR: {s}\n", .{sim.stderr()});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "a project at / is refused, whatever the build file names" {
+    // Goal: with no zbx.lock above, a build from `/` would let the file name any host path as
+    // an input; it is E0801 before the file is read. Method: the working directory `/`, a build
+    // file below it that names /etc/shadow, as the review's repro did.
+    world(4);
+    files.put_dir("/tmp", 0o755);
+    files.put_dir("/tmp/x", 0o755);
+    files.put_dir("/etc", 0o755);
+    files.put_file("/etc/shadow", 0o600, "root:x\n");
+    files.put_file("/tmp/x/root.zon", 0o644, ".{ .version = 1, .image = .{}, .steps = .{ " ++
+        ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"}, .inputs = .{\"etc/shadow\"} } } }");
+    _ = sim.world.processes[0].cwd.set("/");
+    const args = [_][:0]const u8{ "zbx", "build", "--graph", "-f", "tmp/x/root.zon" };
+    try testing.expectEqual(@as(u8, 1), run(&args));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try expect_stderr("ZBX-E0801");
+    try expect_stderr("the project directory is /");
+    try expect_stderr("create zbx.lock there");
+}
+
+test "-f given twice, and -f through a link out, are refused naming what was given" {
+    // Goal: a second -f is its own one-line refusal; a -f link that leads out of the project
+    // names the given path and where it led. Method: the CLI on the sim.
+    world(5);
+    const twice = [_][:0]const u8{ "zbx", "build", "--graph", "-f", "a.zon", "-f", "b.zon" };
+    try testing.expectEqual(@as(u8, 1), run(&twice));
+    try expect_stderr("ZBX-E0003");
+    try expect_stderr("-f given twice");
+    files.put_dir("/home/alice/other", 0o755);
+    files.put_file("/home/alice/other/real.zon", 0o644, file_tests.example);
+    files.put_symlink(project ++ "/link.zon", "../other/real.zon");
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--graph", "-f", "link.zon" }));
+    try expect_stderr("ZBX-E0801");
+    try expect_stderr("'link.zon' leads to '/home/alice/other/real.zon', outside the project");
+}
+
+test "an input that names the project directory, or overlaps another, is refused" {
+    // Goal: `ln -s . self2` listed as an input is E0803 (the whole project); two inputs that
+    // resolve to one object, or one inside the other, are E0803 naming both. Method: the CLI on
+    // the sim with links to the project and to a file.
+    world(6);
+    files.put_symlink(project ++ "/self2", ".");
+    files.put_symlink(project ++ "/again.go", "main.go");
+    files.put_dir(project ++ "/src", 0o755);
+    files.put_file(project ++ "/src/a.go", 0o644, "package a\n");
+    const head = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"}, .inputs = .{";
+    overwrite(build_path, head ++ "\"self2\"} } } }");
+    try expect_refused("ZBX-E0803", "input \"self2\" of step \"a\" names the whole project");
+    overwrite(build_path, head ++ "\"main.go\", \"again.go\"} } } }");
+    try expect_refused("ZBX-E0803", "input \"again.go\" of step \"a\" overlaps input \"main.go\"");
+    overwrite(build_path, head ++ "\"src/a.go\", \"src\"} } } }");
+    try expect_refused("ZBX-E0803", "input \"src\" of step \"a\" overlaps input \"src/a.go\"");
+    overwrite(build_path, head ++ "\"src\", \"src\"} } } }");
+    try expect_refused("ZBX-E0803", "input \"src\" of step \"a\" overlaps input \"src\"");
+    overwrite(build_path, head ++ "\"src\", \"main.go\"} } } }");
+    try testing.expectEqual(@as(u8, 0), run(&.{ "zbx", "build", "--graph" }));
+}
