@@ -602,7 +602,77 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases;
+
+const build_project = "/home/alice/hello";
+
+/// The demo project, with `text` as its build file and the working directory in it.
+fn prepare_build_project(sim: *HostSim, text: []const u8) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    golden_files.put_dir("/home", 0o755);
+    golden_files.put_dir("/home/alice", 0o755);
+    golden_files.put_dir(build_project, 0o755);
+    golden_files.put_file(build_project ++ "/zbx.lock", 0o644, ".{ .version = 1 }\n");
+    golden_files.put_file(build_project ++ "/main.go", 0o644, "package main\n");
+    golden_files.put_file("/home/alice/secret", 0o600, "key\n");
+    golden_files.put_symlink(build_project ++ "/escape", "../secret");
+    if (text.len > 0) golden_files.put_file(build_project ++ "/zbx.build.zon", 0o644, text);
+    const set = sim.world.processes[0].cwd.set(build_project);
+    assert(set);
+}
+
+fn prepare_build_missing(sim: *HostSim) void {
+    prepare_build_project(sim, "");
+}
+
+fn prepare_build_cycle(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{
+        \\        .{ .name = "a", .base = "alpine:3.20", .run = .{"true"}, .needs = .{"b"} },
+        \\        .{ .name = "b", .base = "alpine:3.20", .run = .{"true"}, .needs = .{"a"} },
+        \\    },
+        \\    .image = .{},
+        \\}
+        \\
+    );
+}
+
+fn prepare_build_escape(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{
+        \\        .{ .name = "a", .base = "alpine:3.20", .run = .{"true"}, .inputs = .{"escape"} },
+        \\    },
+        \\    .image = .{},
+        \\}
+        \\
+    );
+}
+
+fn prepare_build_config(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{},
+        \\    .image = .{ .config = .{ .user = "root" } },
+        \\}
+        \\
+    );
+}
+
+const build_graph_args = [_][:0]const u8{ "build", "--graph" };
+
+const build_cases = [_]Case{
+    .{ .code = .E0801, .args = &build_graph_args, .prepare = prepare_build_missing, .exit = 1 },
+    .{ .code = .E0802, .args = &build_graph_args, .prepare = prepare_build_cycle, .exit = 1 },
+    .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
+    .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
+};
 
 const exec_plan = @import("runtime/exec_plan.zig");
 

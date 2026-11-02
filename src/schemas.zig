@@ -640,6 +640,32 @@ const lock_show_schema =
     \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}}}}}
 ;
 
+const build_graph_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/build-graph/1","version":1,
+    \\"title":"zbx build --graph --output json",
+    \\"description":"stdout: the checked build file as a graph. A refusal is on stderr.",
+    \\"type":"object","required":["schema","path","nodes","edges"],
+    \\"properties":{"schema":{"const":"zbx.build_graph/1"},
+    \\"path":{"type":"string","description":"the build file, resolved"},
+    \\"nodes":{"type":"array",
+    \\"description":"the steps in the order a build starts them (ties by name), then the image",
+    \\"items":{"type":"object","required":["name","kind","base"],
+    \\"properties":{"name":{"type":"string","description":"the step's; the image's is image"},
+    \\"kind":{"enum":["step","image"]},
+    \\"base":{"type":["string","null"],"description":"an image reference; null: an empty base"},
+    \\"inputs":{"type":"array","items":{"type":"string"},
+    \\"description":"a step's: project-relative paths, as written"},
+    \\"needs":{"type":"array","items":{"type":"string"},"description":"a step's, as written"},
+    \\"network":{"type":"boolean","description":"a step's"},
+    \\"adds":{"type":"array","description":"the image's, in order",
+    \\"items":{"type":"object","required":["from","to"],
+    \\"properties":{"from":{"type":"string"},"to":{"type":"string"}}}}}}},
+    \\"edges":{"type":"array","description":"from a step to a node that needs it or adds it",
+    \\"items":{"type":"object","required":["from","to"],
+    \\"properties":{"from":{"type":"string"},"to":{"type":"string"}}}}}}
+;
+
 const vm_status_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/vm-status/1","version":1,
@@ -715,6 +741,7 @@ const table = [_]Entry{
     .{ .command = "pull", .text = pull_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
+    .{ .command = "build-graph", .text = build_graph_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
     .{ .command = "state-rm", .text = state_rm_schema },
     .{ .command = "state-restore", .text = state_restore_schema },
@@ -726,7 +753,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 27);
+    assert(table.len == 28);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -755,7 +782,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 27), table.len);
+    try testing.expectEqual(@as(usize, 28), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

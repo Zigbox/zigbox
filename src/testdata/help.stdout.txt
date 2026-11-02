@@ -16,6 +16,7 @@ commands:
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
+  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
   schema <cmd>    print the JSON schema of a command's output
   explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
                   document, see zbx schema explain)
@@ -132,6 +133,13 @@ pull:
   the entry; the manifest digest is printed, or with --output json the object of
   "zbx schema pull", which has the tree's digest
   ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
+
+build:
+  zbx build --graph [-f <file>]
+  reads zbx.build.zon in the project directory (the one with zbx.lock, else the working
+  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
+  prints the steps in the order a build starts them, then the image, without running
+  anything (--output json: nodes and edges, see zbx schema build-graph)
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]

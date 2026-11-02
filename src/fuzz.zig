@@ -32,6 +32,7 @@ const reference_fuzz = @import("fuzz_reference.zig");
 const registry_fuzz = @import("fuzz_registry.zig");
 const layer_fuzz = @import("fuzz_layer.zig");
 const lock_fuzz = @import("fuzz_lock.zig");
+const build_file_fuzz = @import("fuzz_build_file.zig");
 const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
@@ -73,6 +74,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "registry", .run_iteration = registry_fuzz.fuzz_registry },
     .{ .name = "layer", .run_iteration = layer_fuzz.fuzz_layer },
     .{ .name = "lock", .run_iteration = lock_fuzz.fuzz_lock },
+    .{ .name = "build_file", .run_iteration = build_file_fuzz.fuzz_build_file },
     .{ .name = "pull_report", .run_iteration = pull_report_fuzz.fuzz_pull_report },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },

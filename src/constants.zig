@@ -773,6 +773,66 @@ pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.
 pub const net_addresses_max: u32 = 8;
 
+// Build files (M7 slice 1, docs/briefs/M7-build.md): `zbx.build.zon`, read by
+// `src/build/file.zig`. Every list a file can hold has a bound here, and the parser refuses a
+// file past one with its line and column.
+/// The largest build file read. Its canonical rendering can be longer (indentation), so the
+/// parser itself accepts up to `build_render_bytes_max`.
+pub const build_file_bytes_max: u32 = 64 * 1024;
+/// The decoded bytes of every string in one file together.
+pub const build_pool_bytes: u32 = 64 * 1024;
+/// One string: an argv entry, an env entry, a path, a reference.
+pub const build_string_bytes_max: u32 = 4096;
+pub const build_steps_max: u32 = 64;
+/// A step's name: `[a-z0-9-]`, as a directory name under `/in` and in the report's column.
+pub const build_step_name_bytes_max: u32 = 32;
+pub const build_step_inputs_max: u32 = 64;
+/// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
+/// fewer than a run's mounts (`mounts_max`).
+pub const build_step_needs_max: u32 = 6;
+pub const build_step_argv_max: u32 = 64;
+pub const build_step_env_max: u32 = 32;
+/// `image.add`: step outputs spliced into the result.
+pub const build_image_adds_max: u32 = 32;
+/// `image.config`: `entrypoint` and `cmd` entries, `env` entries, and `labels`.
+pub const build_config_argv_max: u32 = 64;
+pub const build_config_env_max: u32 = 64;
+pub const build_config_labels_max: u32 = 32;
+/// A label's key: `[a-z0-9._/-]`.
+pub const build_label_key_bytes_max: u32 = 128;
+/// The decimal digits of `.version`.
+/// How much of a refused value a build file problem keeps, to name it.
+pub const build_problem_word_bytes_max: u32 = 64;
+pub const build_version_digits_max: u32 = 4;
+/// The strings one file can hold, from the bounds above.
+pub const build_strings_max: u32 = 2 + build_steps_max *
+    (2 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
+        build_step_env_max) + 2 * build_image_adds_max + 2 * build_config_argv_max +
+    build_config_env_max + 2 * build_config_labels_max + 2;
+/// The canonical rendering of the largest file the parser accepts: every string escaped four
+/// bytes a byte with its quotes and separator, and the fixed text of every field and step.
+pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings_max +
+    build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
+
+comptime {
+    // `/src`, `/out` and every needed step's `/in/<name>` are a run's mounts.
+    assert(build_step_needs_max + 2 <= mounts_max);
+    assert(build_step_needs_max < build_steps_max);
+    assert(build_image_adds_max <= build_steps_max);
+    // An input is a path: a string bound at least the path bound.
+    assert(build_string_bytes_max >= path_bytes_max);
+    assert(build_string_bytes_max <= build_pool_bytes);
+    assert(build_step_name_bytes_max < build_string_bytes_max);
+    assert(build_label_key_bytes_max < build_string_bytes_max);
+    // The parser reads its own rendering back, so the file bound is the smaller.
+    assert(build_file_bytes_max < build_render_bytes_max);
+    assert(build_pool_bytes <= build_render_bytes_max);
+    // A u32 offset holds any position in the rendering.
+    assert(build_render_bytes_max < std.math.maxInt(u32));
+    assert(build_problem_word_bytes_max <= std.math.maxInt(u8));
+    assert(build_problem_word_bytes_max > build_step_name_bytes_max);
+}
+
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;

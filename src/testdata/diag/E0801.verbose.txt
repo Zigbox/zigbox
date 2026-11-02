@@ -1,0 +1,8 @@
+error[ZBX-E0801]: can't read the build file
+  while  reading the build file 'zbx.build.zon'
+  cause  'zbx.build.zon' is not there
+  path   zbx.build.zon
+  dir    /home/alice/hello
+  fix    write zbx.build.zon in the project directory; its format is in:   zbx explain E0801
+  more   zbx explain E0801
+  docs   https://zigbox.github.io/zigbox/errors/E0801.html

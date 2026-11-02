@@ -1,0 +1,510 @@
+//! The diagnostics of a build file that cannot be used: `E0801` (it cannot be read or parsed),
+//! `E0802` (its graph is invalid), `E0803` (an input is refused) and `E0807` (its
+//! `image.config` is invalid). Each names the file as the project sees it, the place in it
+//! (line and column, counting from 1), what is wrong in a sentence, and what to change. Values
+//! from the file are echoed cut and with unprintable bytes as `?`.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const constants = @import("../constants.zig");
+const codes = @import("../diag/codes.zig");
+const text_util = @import("../text.zig");
+const file_mod = @import("file.zig");
+const graph_mod = @import("graph.zig");
+const inputs_mod = @import("inputs.zig");
+const lexer_mod = @import("lexer.zig");
+const fs_mod = @import("../store/fs.zig");
+const Diag = @import("../diag/diag.zig").Diag;
+
+const BuildFile = file_mod.BuildFile;
+const Field = file_mod.Field;
+const Level = file_mod.Level;
+const ProblemKind = file_mod.ProblemKind;
+
+/// The room a sentence is put together in before the diagnostic cuts it to its field.
+const sentence_bytes_max = 512;
+const Echo = [constants.arg_echo_bytes_max]u8;
+
+comptime {
+    assert(sentence_bytes_max > constants.diag_field_bytes_max);
+    assert(constants.build_problem_word_bytes_max <= constants.arg_echo_bytes_max);
+}
+
+/// The code of a parse problem: the graph's and `image.config`'s are their own.
+pub fn parse_code(kind: ProblemKind) codes.Code {
+    assert(@tagName(kind).len > 0);
+    const code: codes.Code = switch (kind) {
+        .too_many_needs => .E0802,
+        .config_workdir, .config_user, .config_env, .config_label_key => .E0807,
+        .config_label_twice => .E0807,
+        else => .E0801,
+    };
+    assert(switch (code) {
+        .E0801, .E0802, .E0807 => true,
+        else => false,
+    });
+    return code;
+}
+
+/// Why the build file itself could not be had.
+pub const ReadFailure = enum {
+    /// The project directory cannot be worked out (the working directory cannot be read).
+    no_project,
+    /// `-f` names a file outside the project directory.
+    outside,
+    missing,
+    unreadable,
+    /// Its links lead round, or its path is too long.
+    bad_path,
+    /// A directory, a FIFO or another thing that is not a file.
+    not_file,
+    /// Longer than `build_file_bytes_max`.
+    too_large,
+};
+
+/// `E0801` for a file that could not be read. `shown` is its path as the user knows it.
+pub fn read_failure(
+    diag: *Diag,
+    shown: []const u8,
+    project: []const u8,
+    failure: ReadFailure,
+) void {
+    assert(diag.code == null);
+    assert(shown.len > 0);
+    var shown_echo: Echo = undefined;
+    var project_echo: Echo = undefined;
+    const path = text_util.sanitise(&shown_echo, shown);
+    const directory = if (project.len > 0) text_util.sanitise(&project_echo, project) else "?";
+    diag.raise(.E0801);
+    diag.while_("reading the build file '{s}'", .{path});
+    switch (failure) {
+        .no_project => diag.cause("the working directory cannot be read", .{}),
+        .outside => diag.cause("'{s}' is outside the project directory '{s}'", .{
+            path, directory,
+        }),
+        .missing => diag.cause("'{s}' is not there", .{path}),
+        .unreadable => diag.cause("'{s}' cannot be read", .{path}),
+        .not_file => diag.cause("'{s}' is not a file", .{path}),
+        .bad_path => diag.cause("the path '{s}' leads round its links, or is too long", .{path}),
+        .too_large => diag.cause("'{s}' is longer than {d} bytes", .{
+            path, constants.build_file_bytes_max,
+        }),
+    }
+    diag.context("path", "{s}", .{path});
+    if (project.len > 0) diag.context("dir", "{s}", .{directory});
+    switch (failure) {
+        .no_project => diag.fix(.{ .sentence = "run zbx build from the project's directory" }),
+        .outside => diag.fix(.{ .sentence = "name a build file inside the project with -f" }),
+        .missing => diag.fix(.{
+            .sentence = "write zbx.build.zon in the project directory; its format is in:",
+            .command = "zbx explain E0801",
+        }),
+        .unreadable => diag.fix(.{ .sentence = "make the file readable by you" }),
+        .not_file => diag.fix(.{ .sentence = "name the build file itself with -f" }),
+        .bad_path => diag.fix(.{ .sentence = "name the file by a path without a link loop" }),
+        .too_large => diag.fix(.{ .sentence = "split the work into fewer, larger steps" }),
+    }
+    assert(diag.code.? == .E0801);
+}
+
+/// `E0801`, `E0802` or `E0807` for a file that the parser refused.
+pub fn parse_problem(diag: *Diag, shown: []const u8, problem: *const file_mod.Problem) void {
+    assert(diag.code == null);
+    assert(problem.line > 0);
+    var shown_echo: Echo = undefined;
+    const path = text_util.sanitise(&shown_echo, shown);
+    var sentence: [sentence_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&sentence);
+    // A sentence longer than the room is cut, as the diagnostic would cut it anyway.
+    describe(&writer, problem) catch {};
+    const code = parse_code(problem.kind);
+    diag.raise(code);
+    diag.while_("reading the build file '{s}'", .{path});
+    diag.cause("'{s}' line {d}, column {d}: {s}", .{
+        path, problem.line, problem.column, writer.buffered(),
+    });
+    diag.context("path", "{s}", .{path});
+    diag.context("at", "line {d}, column {d}", .{ problem.line, problem.column });
+    parse_fix(diag, problem);
+    assert(diag.code.? == code);
+}
+
+fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
+    assert(diag.code != null);
+    assert(problem.line > 0);
+    switch (problem.kind) {
+        .unknown_field => {
+            var fields: [sentence_bytes_max]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&fields);
+            // The longest list, a step's, is seven short names: it fits.
+            write_fields(&writer, problem.level.allowed()) catch unreachable;
+            fix_sentence(diag, "use a field that {s} takes: {s}", .{
+                level_name(problem.level), writer.buffered(),
+            });
+        },
+        .newer_version => diag.fix(.{
+            .sentence = "use a newer zbx, or write the file for version 1",
+        }),
+        .bad_reference => diag.fix(.{
+            .sentence = "name an image as zbx pull takes it, for example alpine:3.20",
+        }),
+        .too_many_needs => diag.fix(.{
+            .sentence = "need fewer steps, and have one of them gather what the others make",
+        }),
+        else => {
+            fix_sentence(diag, "change the build file at line {d}, column {d}", .{
+                problem.line, problem.column,
+            });
+            diag.fix_with("see the format:", "zbx explain {t}", .{parse_code(problem.kind)});
+        },
+    }
+}
+
+/// A fix in prose, put together from values; cut to the diagnostic's field.
+fn fix_sentence(diag: *Diag, comptime format: []const u8, args: anytype) void {
+    assert(diag.code != null);
+    var sentence: [constants.diag_field_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&sentence);
+    // A sentence longer than the field is cut, as the diagnostic would cut it anyway.
+    writer.print(format, args) catch {};
+    assert(writer.buffered().len > 0);
+    diag.fix(.{ .sentence = writer.buffered() });
+}
+
+fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Writer.Error!void {
+    assert(problem.line > 0);
+    assert(problem.word_len <= problem.word.len);
+    var word_echo: Echo = undefined;
+    const word = text_util.sanitise(&word_echo, problem.word_text());
+    const field = if (problem.field) |known| @tagName(known) else "?";
+    const level = level_name(problem.level);
+    switch (problem.kind) {
+        .syntax => try writer.print("expected {s}, found {s}", .{
+            expected_name(problem.expected), found_name(problem.found),
+        }),
+        .unknown_field => try writer.print("{s} has no field .{s}", .{ level, word }),
+        .duplicate_field => try writer.print(".{s} is given twice in {s}", .{ field, level }),
+        .missing_field => try writer.print("{s} has no .{s}, which it needs", .{ level, field }),
+        .bad_escape => try writer.writeAll("a string has an escape zbx does not read; " ++
+            "the escapes are \\n \\r \\t \\\\ \\' \\\" and \\xNN"),
+        .bad_string => try writer.writeAll("a string holds a control byte, or bytes that " ++
+            "are not UTF-8; write a control byte as \\xNN"),
+        .nul_byte => try writer.writeAll("a string holds a NUL byte (\\x00), which no " ++
+            "argument, path or variable can hold"),
+        .string_too_long => try writer.print("a string is longer than {d} bytes", .{
+            constants.build_string_bytes_max,
+        }),
+        .list_too_long => try writer.print(".{s} has more than {d} entries", .{
+            field, list_max(problem.level, problem.field),
+        }),
+        .text_too_long => try writer.print("the strings of the file come to more than {d} bytes", .{
+            constants.build_pool_bytes,
+        }),
+        else => try describe_value(writer, problem.kind, word),
+    }
+}
+
+/// The problems of a value the parser read whole: `word` is the value, echoed.
+fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !void {
+    assert(@tagName(kind).len > 0);
+    assert(word.len <= constants.arg_echo_bytes_max);
+    switch (kind) {
+        .bad_version => try writer.writeAll(".version is not a whole number from 1"),
+        .newer_version => try writer.print(".version is {s}, and this zbx reads version {d}", .{
+            word, file_mod.version,
+        }),
+        .bad_step_name => try writer.print("the step name \"{s}\" is not 1 to {d} of a-z, 0-9 " ++
+            "and -", .{ word, constants.build_step_name_bytes_max }),
+        .reserved_step_name => try writer.writeAll("no step can be named \"image\": " ++
+            "that name is the result's"),
+        .bad_reference => try writer.print(".base \"{s}\" is not an image reference", .{word}),
+        .empty_run => try writer.writeAll(".run needs a command, and its first word " ++
+            "cannot be empty"),
+        .bad_env => try writer.print("the env entry \"{s}\" is not NAME=VALUE", .{word}),
+        .bad_target => try writer.print(".to \"{s}\" is not an absolute path written plainly " ++
+            "(no empty, . or .. part)", .{word}),
+        .too_many_needs => try writer.print("a step needs more than {d} steps, the most " ++
+            "that can be mounted at /in", .{constants.build_step_needs_max}),
+        .config_workdir => try writer.print("image.config .workdir \"{s}\" is not an " ++
+            "absolute path written plainly", .{word}),
+        .config_user => try writer.print("image.config .user \"{s}\" is not UID:GID in " ++
+            "numbers; names are not looked up in a build", .{word}),
+        .config_env => try writer.print("image.config .env entry \"{s}\" is not NAME=VALUE", .{
+            word,
+        }),
+        .config_label_key => try writer.print("the label key \"{s}\" is not 1 to {d} of " ++
+            "a-z, 0-9 and . _ / -", .{ word, constants.build_label_key_bytes_max }),
+        .config_label_twice => try writer.print("the label \"{s}\" is given twice", .{word}),
+        // `describe` writes the others.
+        else => unreachable,
+    }
+}
+
+/// `E0802` for a file whose steps do not make a graph.
+pub fn graph_problem(
+    diag: *Diag,
+    shown: []const u8,
+    file: *const BuildFile,
+    problem: *const graph_mod.Problem,
+) void {
+    assert(diag.code == null);
+    assert(problem.at.line > 0);
+    var shown_echo: Echo = undefined;
+    const path = text_util.sanitise(&shown_echo, shown);
+    var sentence: [sentence_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&sentence);
+    // A cycle of 64 long names is cut, as the diagnostic would cut it anyway.
+    describe_graph(&writer, file, problem) catch {};
+    diag.raise(.E0802);
+    diag.while_("ordering the steps of '{s}'", .{path});
+    diag.cause("'{s}' line {d}, column {d}: {s}", .{
+        path, problem.at.line, problem.at.column, writer.buffered(),
+    });
+    diag.context("path", "{s}", .{path});
+    diag.context("at", "line {d}, column {d}", .{ problem.at.line, problem.at.column });
+    graph_fix(diag, file, problem);
+    assert(diag.code.? == .E0802);
+}
+
+fn describe_graph(
+    writer: *std.Io.Writer,
+    file: *const BuildFile,
+    problem: *const graph_mod.Problem,
+) std.Io.Writer.Error!void {
+    assert(problem.at.len <= constants.build_string_bytes_max);
+    var at_echo: Echo = undefined;
+    var step_echo: Echo = undefined;
+    const at = text_util.sanitise(&at_echo, file.text(problem.at));
+    const step = if (problem.kind == .unknown_add)
+        ""
+    else
+        step_text(&step_echo, file, problem.step);
+    switch (problem.kind) {
+        .duplicate_step => try writer.print(
+            "two steps are named \"{s}\" (the first at line {d})",
+            .{ at, file.steps[problem.other].name.line },
+        ),
+        .unknown_need => try writer.print("step \"{s}\" needs \"{s}\", and no step is named " ++
+            "that", .{ step, at }),
+        .need_twice => try writer.print(
+            "step \"{s}\" lists \"{s}\" in .needs twice",
+            .{ step, at },
+        ),
+        .unknown_add => try writer.print("image.add takes from \"{s}\", and no step is named " ++
+            "that", .{at}),
+        .cycle => {
+            try writer.writeAll("the steps need each other round: ");
+            for (problem.cycle_slice()) |index| {
+                try writer.print("{s} -> ", .{step_text(&step_echo, file, index)});
+            }
+            try writer.writeAll(step_text(&step_echo, file, problem.cycle_slice()[0]));
+        },
+    }
+}
+
+fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Problem) void {
+    assert(diag.code != null);
+    var at_echo: Echo = undefined;
+    var step_echo: Echo = undefined;
+    const at = text_util.sanitise(&at_echo, file.text(problem.at));
+    switch (problem.kind) {
+        .duplicate_step => diag.fix(.{ .sentence = "give each step a name of its own" }),
+        .unknown_need, .unknown_add => diag.fix(.{
+            .sentence = "name a step of the file, or add a step by that name",
+        }),
+        .need_twice => fix_sentence(diag, "list \"{s}\" once in step \"{s}\"'s .needs", .{
+            at, step_text(&step_echo, file, problem.step),
+        }),
+        .cycle => fix_sentence(diag, "remove a need that closes the round, such as \"{s}\" " ++
+            "from step \"{s}\"'s .needs", .{ at, step_text(&step_echo, file, problem.step) }),
+    }
+}
+
+/// `E0803` for an input that the disk refused. `project` is the resolved project directory.
+pub fn input_problem(
+    diag: *Diag,
+    project: []const u8,
+    file: *const BuildFile,
+    problem: *const inputs_mod.Problem,
+) void {
+    assert(diag.code == null);
+    assert(project.len > 0);
+    var input_echo: Echo = undefined;
+    var step_echo: Echo = undefined;
+    var project_echo: Echo = undefined;
+    const input = text_util.sanitise(&input_echo, file.text(problem.input));
+    const step = step_text(&step_echo, file, problem.step);
+    const directory = text_util.sanitise(&project_echo, project);
+    var sentence: [sentence_bytes_max]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&sentence);
+    // A sentence longer than the room is cut, as the diagnostic would cut it anyway.
+    describe_input(&writer, problem, directory) catch {};
+    diag.raise(.E0803);
+    diag.while_("checking the inputs of step \"{s}\"", .{step});
+    diag.cause("input \"{s}\" of step \"{s}\" {s}", .{ input, step, writer.buffered() });
+    diag.context("input", "{s}", .{input});
+    diag.context("step", "{s}", .{step});
+    diag.context("dir", "{s}", .{directory});
+    diag.context("at", "line {d}, column {d}", .{ problem.input.line, problem.input.column });
+    input_fix(diag, problem.kind, step);
+    assert(diag.code.? == .E0803);
+}
+
+fn describe_input(
+    writer: *std.Io.Writer,
+    problem: *const inputs_mod.Problem,
+    directory: []const u8,
+) std.Io.Writer.Error!void {
+    assert(directory.len > 0);
+    var resolved_echo: Echo = undefined;
+    switch (problem.kind) {
+        .not_plain => try writer.writeAll("is not a plain relative path: no leading /, no " ++
+            "empty, . or .. part, no trailing /"),
+        .outside => try writer.print("resolves to '{s}', outside the project directory '{s}'", .{
+            text_util.sanitise(&resolved_echo, problem.resolved.text()), directory,
+        }),
+        .missing => try writer.print("is not there in the project directory '{s}'", .{directory}),
+        .unreadable => try writer.writeAll("cannot be looked at"),
+        .loop => try writer.writeAll("has links that lead round"),
+        .too_long => try writer.print("resolves to a path longer than {d} bytes", .{
+            constants.path_bytes_max,
+        }),
+        .bad_kind => try writer.print("is {s}; an input is a file or a directory", .{
+            kind_name(problem.file_kind),
+        }),
+        .input_twice => try writer.writeAll("is listed twice"),
+    }
+}
+
+fn input_fix(diag: *Diag, kind: inputs_mod.ProblemKind, step: []const u8) void {
+    assert(diag.code != null);
+    assert(step.len > 0);
+    switch (kind) {
+        .not_plain => diag.fix(.{ .sentence = "write it from the project directory down, " ++
+            "as src/main.go is written" }),
+        .outside => diag.fix(.{ .sentence = "copy what it names into the project, and " ++
+            "list the copy" }),
+        .missing => fix_sentence(diag, "create it, or take it out of step \"{s}\"'s .inputs", .{
+            step,
+        }),
+        .unreadable => diag.fix(.{ .sentence = "make it and the directories above it " ++
+            "readable by you" }),
+        .loop, .too_long => diag.fix(.{ .sentence = "list the file a link leads to, by " ++
+            "its own path" }),
+        .bad_kind => diag.fix(.{ .sentence = "list the files or directories the step " ++
+            "reads instead" }),
+        .input_twice => fix_sentence(diag, "list it once in step \"{s}\"'s .inputs", .{step}),
+    }
+}
+
+fn step_text(storage: *Echo, file: *const BuildFile, step: u8) []const u8 {
+    assert(step < file.steps_count);
+    const name = file.text(file.steps[step].name);
+    assert(name.len > 0);
+    return text_util.sanitise(storage, name);
+}
+
+fn write_fields(writer: *std.Io.Writer, fields: []const Field) std.Io.Writer.Error!void {
+    assert(fields.len > 0);
+    assert(fields.len <= @typeInfo(Field).@"enum".field_names.len);
+    for (fields, 0..) |field, index| {
+        if (index > 0) try writer.writeByte(' ');
+        try writer.print(".{t}", .{field});
+    }
+}
+
+/// The most entries `field`'s list takes at `level`.
+fn list_max(level: Level, field: ?Field) u32 {
+    assert(@tagName(level).len > 0);
+    const known = field orelse return 0;
+    const result: u32 = switch (known) {
+        .steps => constants.build_steps_max,
+        .inputs => constants.build_step_inputs_max,
+        .needs => constants.build_step_needs_max,
+        .env => if (level == .config)
+            constants.build_config_env_max
+        else
+            constants.build_step_env_max,
+        .run => constants.build_step_argv_max,
+        .add => constants.build_image_adds_max,
+        .entrypoint, .cmd => constants.build_config_argv_max,
+        .labels => constants.build_config_labels_max,
+        else => 0,
+    };
+    assert(result <= constants.build_strings_max);
+    return result;
+}
+
+fn level_name(level: Level) []const u8 {
+    assert(@tagName(level).len > 0);
+    const name = switch (level) {
+        .file => "the file",
+        .step => "a step",
+        .image => "image",
+        .add => "an image.add entry",
+        .config => "image.config",
+        .label => "a label",
+    };
+    assert(name.len > 0);
+    return name;
+}
+
+fn expected_name(expected: file_mod.Expected) []const u8 {
+    assert(@tagName(expected).len > 0);
+    const name = switch (expected) {
+        .open => ".{",
+        .field_or_close => "a field (.name) or }",
+        .equals => "=",
+        .comma_or_close => ", or }",
+        .string => "a string",
+        .string_or_close => "a string or }",
+        .string_list => ".{ for a list of strings",
+        .step_list => ".{ for the list of steps",
+        .add_list => ".{ for the list of adds",
+        .label_list => ".{ for the list of labels",
+        .step_or_close => ".{ for a step, or }",
+        .add_or_close => ".{ for an add, or }",
+        .label_or_close => ".{ for a label, or }",
+        .integer => "a number",
+        .boolean => "true or false",
+        .end => "the end of the file",
+        .comma => ",",
+        .close => "}",
+    };
+    assert(name.len > 0);
+    return name;
+}
+
+fn found_name(tag: lexer_mod.Tag) []const u8 {
+    assert(@tagName(tag).len > 0);
+    const name = switch (tag) {
+        .open => ".{",
+        .field => "a field name",
+        .equals => "=",
+        .comma => ",",
+        .close => "}",
+        .string => "a string",
+        .integer => "a number",
+        .true_word => "true",
+        .false_word => "false",
+        .end => "the end of the file",
+        .invalid => "something that is not ZON",
+    };
+    assert(name.len > 0);
+    return name;
+}
+
+fn kind_name(kind: fs_mod.FileKind) []const u8 {
+    assert(@tagName(kind).len > 0);
+    const name = switch (kind) {
+        .file => "a file",
+        .dir => "a directory",
+        .symlink => "a link",
+        .char_device => "a character device",
+        .block_device => "a block device",
+        .fifo => "a FIFO",
+        .socket => "a socket",
+    };
+    assert(name.len > 0);
+    return name;
+}

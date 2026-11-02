@@ -6,6 +6,16 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 
 
+## M7 · The build file: where it is, what it may name, and which code refuses what (slice 1)
+
+*Decided 2026-11-02, implementer; for review.*
+
+- **Where:** `zbx.build.zon` in the project directory (the nearest `zbx.lock`, else the working directory). `-f PATH` is resolved from the working directory with every link followed and must land inside the project directory, because every path in the file is the project's. Outside is E0801, naming both.
+- **Codes:** a file that cannot be read or does not parse is E0801. Its graph (a duplicate step, an unknown need or add, a need twice, a cycle, and more than `build_step_needs_max` needs) is E0802. An input that is not plain, escapes the project, is missing or unreadable is E0803. A value of `image.config` that cannot become an image config (workdir not absolute, user not `UID:GID` in numbers, env without `KEY=`, a bad or repeated label key) is E0807, registered in slice 1 because the owner asked for config validation here.
+- **`zbx build` without `--graph`** is E0006 (a missing argument), with the `--graph` fix. Slice 1 runs nothing.
+- **Shown paths:** messages show the build file and inputs relative to the project; `zbx.build_graph/1` has the absolute path.
+- **A project at `/`** is accepted for builds (unlike `--mount`); slice 2 should decide whether a build from `/` is refused.
+
 ## M4b · Mac: public DNS fallback when the Mac has no IPv4 resolver
 
 *Decided 2026-10-30, after the `mac.yml` run 41136813336 (15 of 31 steps failed with ZBX-E0502).*
