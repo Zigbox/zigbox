@@ -800,9 +800,9 @@ pub const build_config_env_max: u32 = 64;
 pub const build_config_labels_max: u32 = 32;
 /// A label's key: `[a-z0-9._/-]`.
 pub const build_label_key_bytes_max: u32 = 128;
-/// The decimal digits of `.version`.
 /// How much of a refused value a build file problem keeps, to name it.
 pub const build_problem_word_bytes_max: u32 = 64;
+/// The decimal digits of `.version`.
 pub const build_version_digits_max: u32 = 4;
 /// The strings one file can hold, from the bounds above.
 pub const build_strings_max: u32 = 2 + build_steps_max *
