@@ -454,6 +454,8 @@ pub const VTable = struct {
     bring_up_loopback: *const fn (context: *anyopaque) Error!void,
     symlink: *const fn (context: *anyopaque, target: [:0]const u8, link: [:0]const u8) Error!void,
     set_hostname: *const fn (context: *anyopaque, name: []const u8) Error!void,
+    /// Sets the calling process's file mode creation mask (`umask`); it cannot fail.
+    set_umask: *const fn (context: *anyopaque, mask: u16) void,
     /// Marks every descriptor above 2 close-on-exec (`close_range`), so none reaches the command.
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
@@ -1006,6 +1008,12 @@ pub const Host = struct {
         assert(name.len > 0);
         assert(name.len <= constants.container_name_bytes_max);
         try host.vtable.set_hostname(host.context, name);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn set_umask(host: Host, mask: u16) void {
+        assert(mask <= 0o777);
+        host.vtable.set_umask(host.context, mask);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

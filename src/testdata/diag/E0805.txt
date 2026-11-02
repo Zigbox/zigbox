@@ -1,0 +1,7 @@
+error[ZBX-E0805]: build step "fetch" failed: exit 6
+  cause  curl: (6) Could not resolve host: example.org; the step has no network:
+         build steps run with network none unless they ask
+  fix    if the step needs the network, add  .network = true  to step "fetch" in zbx.build.zon
+         read the step's whole output in its log   cat /home/user/.local/share/zbx/build/logs/fetch.log
+  more   zbx explain E0805 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0805.html

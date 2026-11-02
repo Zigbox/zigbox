@@ -1,0 +1,6 @@
+error[ZBX-E0806]: a build step's output is refused
+  cause  step "compile" left a FIFO at /out/run/control; an output holds only
+         files, directories and links
+  fix    have the step remove it, or make it somewhere other than /out
+  more   zbx explain E0806 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0806.html

@@ -155,6 +155,10 @@ pub fn from_diag(out: *Diagnostic, source: *const Diag) void {
     out.blame = entry.blame;
     out.summary.print("{s}", .{entry.summary});
     assert(!out.summary.truncated); // The registry's comptime check bounds every summary.
+    if (source.headline.len > 0) {
+        out.summary = .{};
+        out.summary.print("{s}", .{source.headline.slice()});
+    }
     copy_list(&out.causes, &source.causes);
     copy_list(&out.whiles, &source.whiles);
     copy_list(&out.pairs, &source.pairs);

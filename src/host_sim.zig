@@ -385,6 +385,7 @@ pub const HostSim = struct {
         .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
+        .set_umask = set_umask,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
         .pipe_has_reader = pipe_has_reader,
@@ -937,6 +938,13 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.set_hostname(name)) |errno| return sim.model_error(errno);
+    }
+
+    fn set_umask(context: *anyopaque, mask: u16) void {
+        const sim = from_context(context);
+        assert(mask <= 0o777);
+        sim.world.umask = mask;
+        assert(sim.world.umask == mask);
     }
 
     fn seal_descriptors(context: *anyopaque) host.Error!void {

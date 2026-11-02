@@ -345,6 +345,8 @@ pub const World = struct {
     current: u8,
     pipes: [pipes_max]SimPipe,
     hostnames: [2]host.Text,
+    /// The last file mode creation mask a process set (`set_umask`), or null.
+    umask: ?u16,
     /// What a command that started ends with.
     command_exit: host.ExitStatus,
     /// Mounting `/dev/pts` is refused (an environment without devpts for users).
@@ -477,6 +479,7 @@ pub const World = struct {
         world.current = 0;
         for (&world.pipes) |*pipe| pipe.used = false;
         world.hostnames = .{ host.Text.from_slice("simhost"), host.Text.from_slice("simhost") };
+        world.umask = null;
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
         world.overlay_refused = false;

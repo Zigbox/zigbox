@@ -185,6 +185,9 @@ pub const Code = enum(u8) {
     E0801,
     E0802,
     E0803,
+    E0804,
+    E0805,
+    E0806,
     E0807,
     E1001,
     E1002,
@@ -2789,6 +2792,53 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0804,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step's base is not locked",
+        .explanation =
+        \\Each step's .base is a reference that zbx.lock pins: a tag or a digest
+        \\reference, with the manifest and tree it resolved to. A build never
+        \\resolves a tag itself, so a base the lock does not list is refused
+        \\before anything runs. zbx pull <ref> pulls the image and records it in
+        \\zbx.lock; commit the lock with the build file so every build of the
+        \\project uses the same base.
+        ,
+    },
+    .{
+        .code = .E0805,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step failed",
+        .explanation =
+        \\A step runs its .run command in a container made from its base, with its
+        \\inputs read-only at /src, each needed step's output at /in/<name>, and
+        \\/out to write its output into. Only a step whose command exits 0 has an
+        \\output. The first line says how it ended: its exit code, a signal, out
+        \\of memory, the process limit, or the step's timeout (30 minutes), in the
+        \\words zbx run uses.
+        \\
+        \\A step has no network unless it says .network = true, so a step that
+        \\fetches something fails as one that cannot resolve a name. The step's
+        \\whole output is kept in its log.
+        ,
+    },
+    .{
+        .code = .E0806,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step's output is refused",
+        .explanation =
+        \\What a step leaves in /out becomes its output tree, owned by 0:0, with
+        \\the modes the step wrote and no extended attributes. A tree holds files,
+        \\directories and symbolic links only, so a device file, a FIFO or a
+        \\socket left in /out fails the step instead of being dropped: a later
+        \\step or the image would miss it. An output larger than the store's
+        \\limits on files, paths or depth is refused as the store refuses any
+        \\tree (E0415).
+        ,
+    },
+    .{
         .code = .E0807,
         .severity = .@"error",
         .blame = .user,
@@ -3260,7 +3310,7 @@ pub fn can_end_run(code: Code) bool {
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
-        .E0801, .E0802, .E0803, .E0807 => false,
+        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

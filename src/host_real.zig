@@ -119,6 +119,7 @@ pub const HostReal = struct {
         .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
+        .set_umask = set_umask,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
         .pipe_has_reader = pipe_has_reader,
@@ -636,6 +637,14 @@ pub const HostReal = struct {
         assert(name.len > 0);
         assert(name.len <= constants.container_name_bytes_max);
         try check(linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len));
+    }
+
+    fn set_umask(context: *anyopaque, mask: u16) void {
+        _ = from_context(context);
+        assert(mask <= 0o777);
+        // umask(2) always succeeds and returns the previous mask, which nothing here needs.
+        const previous = linux.syscall1(.umask, mask);
+        assert(previous <= 0o777);
     }
 
     fn seal_descriptors(context: *anyopaque) host.Error!void {

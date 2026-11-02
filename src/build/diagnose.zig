@@ -603,3 +603,157 @@ fn kind_name(kind: fs_mod.FileKind) []const u8 {
     assert(name.len > 0);
     return name;
 }
+
+// ---- A step (E0804 to E0806) ------------------------------------------------------------------
+
+/// `E0804`: the base of a step is not in `zbx.lock`. A build never resolves a tag itself.
+pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8) void {
+    assert(diag.code == null);
+    assert(step.len > 0);
+    assert(reference.len > 0);
+    var reference_echo: Echo = undefined;
+    const shown = text_util.sanitise(&reference_echo, reference);
+    diag.raise(.E0804);
+    diag.while_("resolving the base of build step \"{s}\"", .{step});
+    diag.cause("base \"{s}\" of step \"{s}\" is not in zbx.lock, and a build never resolves " ++
+        "a tag itself", .{ shown, step });
+    diag.context("step", "{s}", .{step});
+    diag.context("base", "{s}", .{shown});
+    diag.fix_with("pull it, which pins it in zbx.lock", "zbx pull {s}", .{shown});
+    assert(diag.code.? == .E0804);
+}
+
+/// How a step's container ended, when it did not exit 0.
+pub const StepEnd = union(enum) {
+    exited: u8,
+    signaled: u8,
+    /// The memory limit, if the step had one.
+    oom: ?u64,
+    pid_limit: ?u32,
+    /// The step ran past its timeout, in milliseconds.
+    timed_out: u32,
+    /// zbx could not wait for it to the end.
+    lost,
+};
+
+/// What `step_failed` says about the step besides how it ended.
+pub const StepFailure = struct {
+    step: []const u8,
+    /// The build file as the project sees it (`zbx.build.zon`).
+    file: []const u8,
+    end: StepEnd,
+    network: bool,
+    /// The step's last line of output, empty for none.
+    last_line: []const u8,
+    /// The step's log, empty for none.
+    log: []const u8,
+};
+
+/// `E0805`: a step's command failed. The first line says how, the causes in M2's words.
+pub fn step_failed(diag: *Diag, failure: *const StepFailure) void {
+    assert(diag.code == null);
+    assert(failure.step.len > 0);
+    assert(failure.file.len > 0);
+    const step = failure.step;
+    var short: [48]u8 = undefined;
+    var long: [96]u8 = undefined;
+    diag.raise(.E0805);
+    diag.set_headline("build step \"{s}\" failed: {s}", .{ step, end_short(&short, failure.end) });
+    diag.while_("running build step \"{s}\"", .{step});
+    diag.cause("{s}", .{end_long(&long, failure.end)});
+    // The newest cause is what the default view shows: the step's last line, as the brief's
+    // example has it, and the missing network beside it.
+    const no_network = "the step has no network: build steps run with network none unless they ask";
+    if (failure.last_line.len > 0) {
+        var line_echo: [constants.diag_field_bytes_max]u8 = undefined;
+        const line = text_util.sanitise(&line_echo, failure.last_line);
+        if (failure.network) {
+            diag.cause("{s}", .{line});
+        } else {
+            diag.cause("{s}; " ++ no_network, .{line});
+        }
+    } else if (!failure.network) {
+        diag.cause(no_network, .{});
+    }
+    diag.context("step", "{s}", .{step});
+    diag.context("file", "{s}", .{failure.file});
+    if (failure.log.len > 0) diag.context("log", "{s}", .{failure.log});
+    if (!failure.network) {
+        fix_sentence(diag, "if the step needs the network, add  .network = true  to step " ++
+            "\"{s}\" in {s}", .{ step, failure.file });
+    }
+    if (failure.log.len > 0) {
+        diag.fix_with("read the step's whole output in its log", "cat {s}", .{failure.log});
+    } else {
+        diag.fix(.{ .sentence = "run the step's command in its base with zbx run to see why" });
+    }
+    assert(diag.code.? == .E0805);
+}
+
+fn end_short(buffer: *[48]u8, end: StepEnd) []const u8 {
+    assert(buffer.len >= 48);
+    // Cannot fail: a few words and two numbers fit 48 bytes.
+    const text = switch (end) {
+        .exited => |code| std.fmt.bufPrint(buffer, "exit {d}", .{code}),
+        .signaled => |number| std.fmt.bufPrint(buffer, "signal {d} (SIG{s})", .{
+            number, signal_name(number),
+        }),
+        .oom => std.fmt.bufPrint(buffer, "out of memory", .{}),
+        .pid_limit => std.fmt.bufPrint(buffer, "process limit reached", .{}),
+        .timed_out => std.fmt.bufPrint(buffer, "timed out", .{}),
+        .lost => std.fmt.bufPrint(buffer, "lost", .{}),
+    } catch unreachable; // Same bound as above.
+    assert(text.len > 0);
+    return text;
+}
+
+/// M2's words for how a container ended (`zbx run`'s note), without the `zbx:` prefix.
+fn end_long(buffer: *[96]u8, end: StepEnd) []const u8 {
+    assert(buffer.len >= 96);
+    // Cannot fail: a sentence and two numbers fit 96 bytes.
+    const text = switch (end) {
+        .exited => |code| std.fmt.bufPrint(buffer, "the step's command exited with code {d}", .{
+            code,
+        }),
+        .signaled => |number| std.fmt.bufPrint(buffer, "the container was killed by signal " ++
+            "{d} (SIG{s})", .{ number, signal_name(number) }),
+        .oom => |limit| if (limit) |bytes|
+            std.fmt.bufPrint(buffer, "killed: out of memory (limit {d} MiB)", .{bytes >> 20})
+        else
+            std.fmt.bufPrint(buffer, "killed: out of memory", .{}),
+        .pid_limit => |limit| if (limit) |count|
+            std.fmt.bufPrint(buffer, "stopped: process limit reached (limit {d})", .{count})
+        else
+            std.fmt.bufPrint(buffer, "stopped: process limit reached", .{}),
+        .timed_out => |ms| std.fmt.bufPrint(buffer, "stopped: timed out after {d} ms", .{ms}),
+        .lost => std.fmt.bufPrint(buffer, "zbx lost the step's container before it ended", .{}),
+    } catch unreachable; // Same bound as above.
+    assert(text.len > 0);
+    return text;
+}
+
+fn signal_name(number: u8) []const u8 {
+    assert(number > 0);
+    const code: std.os.linux.SIG = @fromBackingInt(number);
+    const name = std.enums.tagName(std.os.linux.SIG, code) orelse "?";
+    assert(name.len > 0);
+    return name;
+}
+
+/// `E0806`: a step left in `/out` what an output cannot hold. `relative` is its path below
+/// `/out`, starting with `/`; `kind` names it ("FIFO").
+pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind: []const u8) void {
+    assert(diag.code == null);
+    assert(step.len > 0);
+    assert(relative.len > 0);
+    var path_echo: Echo = undefined;
+    const path = text_util.sanitise(&path_echo, relative);
+    diag.raise(.E0806);
+    diag.while_("importing the output of build step \"{s}\"", .{step});
+    diag.cause("step \"{s}\" left a {s} at /out{s}; an output holds only files, directories " ++
+        "and links", .{ step, kind, path });
+    diag.context("step", "{s}", .{step});
+    diag.context("path", "/out{s}", .{path});
+    diag.fix(.{ .sentence = "have the step remove it, or make it somewhere other than /out" });
+    assert(diag.code.? == .E0806);
+}

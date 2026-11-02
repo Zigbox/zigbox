@@ -349,6 +349,7 @@ pub fn start(
     assert(diag.code == null);
     init_handle(host, container, options, handle);
     try choose_name(host, container.name, handle, diag);
+    try check_identity(container, diag);
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
@@ -444,6 +445,8 @@ fn build_plan(
         } else null,
         .state = handle.volumes.input_slice(),
         .mounts = handle.resolution.inputs[0..handle.mounts.len],
+        .hostname = container.hostname,
+        .umask = container.umask,
     };
     handle.plan.build(&input);
     assert(handle.plan.count == handle.plan.steps_expected());
@@ -619,6 +622,19 @@ pub fn failed_start(diag: *const Diag) ExitReason {
 }
 
 // ---- Checks --------------------------------------------------------------------------------
+
+/// A hostname the caller gives is held to the rules of a name, and a umask to its nine bits.
+fn check_identity(container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    if (container.umask) |mask| assert(mask <= 0o777);
+    if (container.hostname) |name| {
+        if (spec_mod.name_problem(name)) |problem| {
+            diagnose.name_invalid(diag, name, problem);
+            return error.StartFailed;
+        }
+    }
+    assert(diag.code == null);
+}
 
 fn choose_name(host: Host, given: ?[]const u8, handle: *Handle, diag: *Diag) Error!void {
     assert(diag.code == null);
@@ -930,6 +946,21 @@ fn begin_record(handle: *Handle) void {
     warning.reset();
     diagnose.records_skipped(&warning, dir.text(), &skipped);
     handle.report(&warning);
+}
+
+/// After `wait`: the run leaves nothing behind. Its record, its logs and the container's layer
+/// go, as pruning would take them (M7: a build step, whose log the caller has copied). Best
+/// effort: what cannot be removed stays as the record of an ordinary run, for pruning later.
+pub fn discard(handle: *Handle) void {
+    assert(handle.status == .stopped);
+    assert(handle.name_len > 0);
+    const dir = handle.record_dir orelse return;
+    var pruned: records.Pruned = undefined;
+    pruned.single(handle.name_slice());
+    reclaim_layers(handle, &pruned);
+    remove_pasta_logs(handle, &dir, &pruned);
+    remove_logs(handle, &dir, &pruned);
+    records.remove(handle.host, &dir, handle.name_slice()) catch {};
 }
 
 /// A record that was pruned takes its pasta log with it, if it had one. Best effort: a log that

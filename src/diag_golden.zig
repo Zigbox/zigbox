@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
+const build_diagnose = @import("build/diagnose.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -671,6 +672,9 @@ const build_cases = [_]Case{
     .{ .code = .E0801, .args = &build_graph_args, .prepare = prepare_build_missing, .exit = 1 },
     .{ .code = .E0802, .args = &build_graph_args, .prepare = prepare_build_cycle, .exit = 1 },
     .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
+    .{ .code = .E0804, .args = &.{}, .direct = build_base_not_locked, .exit = 1 },
+    .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
+    .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
 };
 
@@ -2052,6 +2056,28 @@ fn expect_direct(
         std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
         return err;
     };
+}
+
+/// E0804 to E0806 come from a build's steps, which slice 3's `zbx build` runs: until then the
+/// golden is the diagnostic as `build/diagnose.zig` builds it.
+fn build_base_not_locked(diag: *Diag) void {
+    build_diagnose.base_not_locked(diag, "fetch", "docker.io/library/alpine:3.20");
+}
+
+fn build_step_failed(diag: *Diag) void {
+    const failure: build_diagnose.StepFailure = .{
+        .step = "fetch",
+        .file = "zbx.build.zon",
+        .end = .{ .exited = 6 },
+        .network = false,
+        .last_line = "curl: (6) Could not resolve host: example.org",
+        .log = "/home/user/.local/share/zbx/build/logs/fetch.log",
+    };
+    build_diagnose.step_failed(diag, &failure);
+}
+
+fn build_output_refused(diag: *Diag) void {
+    build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
 }
 
 fn build_warnings_dropped(diag: *Diag) void {

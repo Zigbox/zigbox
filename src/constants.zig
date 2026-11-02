@@ -792,6 +792,12 @@ pub const build_step_inputs_max: u32 = 64;
 pub const build_step_needs_max: u32 = 6;
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
+/// A step's limits (docs/briefs/M7-build.md, "What a step is"): a step that runs past the timeout
+/// is ended (SIGTERM, then SIGKILL) and fails with E0805, as do one out of memory or PIDs. CPU is
+/// not limited: a build step is meant to use the machine.
+pub const build_step_timeout_ms: u32 = 30 * 60 * 1000;
+pub const build_step_memory_bytes: u64 = 1 << 30;
+pub const build_step_pids: u32 = 1024;
 /// `image.add`: step outputs spliced into the result.
 pub const build_image_adds_max: u32 = 32;
 /// `image.config`: `entrypoint` and `cmd` entries, `env` entries, and `labels`.
@@ -1090,7 +1096,8 @@ comptime {
     const carry_items = diag_causes_count_max + diag_whiles_count_max;
     const carry_text = carry_items * (diag_field_bytes_max + 3) +
         diag_context_count_max * (diag_key_bytes_max + diag_field_bytes_max + 4) +
-        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 8) + 16;
+        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 8) +
+        diag_summary_bytes_max + 3 + 16;
     assert(carry_text <= diag_carry_bytes_max);
     assert(diag_skip_depth_max > 0);
     assert(diag_skip_depth_max <= 16); // The skipper's stack is this many bytes.
@@ -1335,4 +1342,12 @@ comptime {
     assert(vm_idle_timeout_ms <= vm_idle_timeout_ms_max);
     assert(vm_idle_timeout_ms_min >= vm_idle_check_ms / 2);
     assert(vm_user_name_bytes_max + vm_home_bytes_max + 64 <= vm_line_bytes_max);
+}
+
+comptime {
+    assert(build_step_memory_bytes >= limit_memory_bytes_min);
+    assert(build_step_memory_bytes <= limit_memory_bytes_max);
+    assert(build_step_pids >= limit_pids_min);
+    assert(build_step_pids <= limit_pids_max);
+    assert(build_step_timeout_ms > 0);
 }

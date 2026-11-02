@@ -1183,6 +1183,14 @@ pub const Pruned = struct {
         pruned.count += 1;
     }
 
+    /// One run's name, for a caller that removes that run itself (`run.discard`).
+    pub fn single(pruned: *Pruned, stem: []const u8) void {
+        assert(spec_mod.name_problem(stem) == null);
+        pruned.count = 0;
+        pruned.add(stem);
+        assert(pruned.count == 1);
+    }
+
     pub fn name(pruned: *const Pruned, index: u32) []const u8 {
         assert(index < pruned.count);
         return pruned.names[index][0..pruned.lengths[index]];
@@ -1269,6 +1277,16 @@ fn oldest_of(listing: *const host_mod.DirListing, entries: []const Entry) ?usize
     }
     if (best) |at| assert(!entries[at].keep);
     return best;
+}
+
+/// Deletes the record of the run called `name` (M7: a build step, which leaves none behind).
+pub fn remove(host: Host, dir: *const Dir, name: []const u8) host_mod.Error!void {
+    assert(spec_mod.name_problem(name) == null);
+    assert(dir.len > 0);
+    var storage: [constants.container_name_bytes_max + constants.record_suffix.len]u8 = undefined;
+    @memcpy(storage[0..name.len], name);
+    @memcpy(storage[name.len..][0..constants.record_suffix.len], constants.record_suffix);
+    try remove_record(host, dir, storage[0 .. name.len + constants.record_suffix.len]);
 }
 
 fn remove_record(host: Host, dir: *const Dir, file_name: []const u8) host_mod.Error!void {

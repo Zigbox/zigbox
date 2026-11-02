@@ -115,6 +115,8 @@ pub const Kind = enum {
     die_with_parent,
     await_release,
     set_hostname,
+    /// Only when the input asks: the file mode creation mask the command inherits.
+    set_umask,
     make_mounts_private,
     bind_rootfs,
     /// In a plan that runs a tree from the store: the overlay replaces the bind of a rootfs.
@@ -363,6 +365,17 @@ pub const Input = struct {
     state: []const StateInput = &.{},
     /// The other mounts, in the order given, each already looked at (`mounts.resolve`).
     mounts: []const MountInput = &.{},
+    /// The hostname, when it is not the name (a build step's, M7).
+    hostname: ?[]const u8 = null,
+    /// The file mode creation mask the command starts with; null leaves the caller's.
+    umask: ?u16 = null,
+
+    fn hostname_text(input: *const Input) []const u8 {
+        const result = input.hostname orelse input.name;
+        assert(result.len > 0);
+        assert(spec.name_problem(result) == null);
+        return result;
+    }
 };
 
 /// What a mount is, once the host has been looked at: a bind of a directory or of a file are
@@ -439,6 +452,11 @@ pub const Plan = struct {
     /// Whether the command starts in a working directory, and whether it runs as a user.
     has_workdir: bool,
     workdir: Text,
+    /// The container's hostname: its name, unless the input gave another.
+    hostname_ref: Text,
+    /// Whether the child sets the file mode creation mask, and to what.
+    has_umask: bool,
+    umask: u16,
     has_user: bool,
     user_uid: u32,
     user_gid: u32,
@@ -493,6 +511,9 @@ pub const Plan = struct {
         plan.overlay = input.overlay != null;
         plan.network = input.network;
         plan.has_workdir = input.workdir.len > 0;
+        plan.has_umask = input.umask != null;
+        plan.umask = input.umask orelse 0;
+        if (plan.has_umask) assert(plan.umask <= 0o777);
         plan.has_user = if (input.user) |user| user.uid != 0 or user.gid != 0 else false;
         plan.user_uid = if (input.user) |user| user.uid else 0;
         plan.user_gid = if (input.user) |user| user.gid else 0;
@@ -502,6 +523,7 @@ pub const Plan = struct {
         // Offset 0 is the empty text, so a step with nothing to say has a valid reference.
         assert(plan.add_text(&.{""}).offset == 0);
         plan.name = plan.add_text(&.{input.name});
+        plan.hostname_ref = plan.add_text(&.{input.hostname_text()});
         plan.workdir = plan.add_text(&.{input.workdir});
         plan.build_etc_texts(input);
         plan.build_scope(input);
@@ -555,7 +577,7 @@ pub const Plan = struct {
         const base = if (plan.full) steps_count_full else steps_count_single;
         const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) +
-            2 * @as(u32, @intFromBool(plan.has_user));
+            2 * @as(u32, @intFromBool(plan.has_user)) + @as(u32, @intFromBool(plan.has_umask));
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
@@ -665,7 +687,7 @@ pub const Plan = struct {
 
     fn build_etc_texts(plan: *Plan, input: *const Input) void {
         var buffer: netfiles.Buffer = undefined;
-        plan.etc_texts[0] = plan.add_text(&.{netfiles.hosts(&buffer, input.name)});
+        plan.etc_texts[0] = plan.add_text(&.{netfiles.hosts(&buffer, input.hostname_text())});
         const resolv = netfiles.resolv_conf(input.network, input.host_resolv);
         plan.etc_texts[1] = plan.add_text(&.{resolv});
         assert(plan.etc_texts[0].len > 0);
@@ -696,7 +718,7 @@ pub const Plan = struct {
     }
 
     pub fn hostname(plan: *const Plan) []const u8 {
-        const name = plan.text(plan.name);
+        const name = plan.text(plan.hostname_ref);
         assert(name.len > 0);
         assert(name.len <= constants.container_name_bytes_max);
         return name;
@@ -815,7 +837,8 @@ pub const Plan = struct {
         const proc = plan.add_text(&.{ rootfs_text, "/proc" });
         plan.push(.die_with_parent, empty_text, empty_text, 0);
         plan.push(.await_release, empty_text, empty_text, 0);
-        plan.push(.set_hostname, plan.name, empty_text, 0);
+        plan.push(.set_hostname, plan.hostname_ref, empty_text, 0);
+        if (plan.has_umask) plan.push(.set_umask, empty_text, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
         if (plan.isolated()) plan.push(.bring_up_loopback, empty_text, empty_text, 0);
         if (overlay) |layers| {
@@ -1117,7 +1140,7 @@ pub const Plan = struct {
             count += 1;
         }
         if (!overridden(input.env, "HOSTNAME")) {
-            plan.envp[count] = plan.add_string(&.{ "HOSTNAME=", input.name });
+            plan.envp[count] = plan.add_string(&.{ "HOSTNAME=", input.hostname_text() });
             count += 1;
         }
         if (input.term) |term| {
@@ -1271,6 +1294,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
+        .set_umask => "setting the file mode creation mask",
         .make_mounts_private => "making the container's mounts private",
         .bind_rootfs => "bind-mounting the rootfs onto itself",
         .mount_overlay => "mounting the overlay filesystem of the tree",

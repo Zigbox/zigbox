@@ -84,6 +84,21 @@ pub const Options = struct {
     /// them, whatever the upper layer holds there, with everything below. They are the mount
     /// points zbx made for the container's mounts, which are not the container's changes.
     exclude: []const []const u8 = &.{},
+    /// Keep no extended attributes at all, and say nothing about them (M7: a build step's
+    /// output, so the tree does not depend on what the build host's file system adds).
+    drop_xattrs: bool = false,
+    /// Set: a device, FIFO or socket fails the import through this hook instead of being left
+    /// out with a warning (M7: E0806, a build step's output).
+    refuse_special: ?Refuse = null,
+    /// Clear: no root record is written (M7: a build step's output is rooted by its cache entry).
+    save_root: bool = true,
+};
+
+/// Raises the diagnostic for a file the import refuses: `relative` is its path below the
+/// imported directory, starting with `/`, and `kind` names what it is ("FIFO").
+pub const Refuse = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, diag: *Diag, relative: []const u8, kind: []const u8) void,
 };
 
 pub const Result = struct {
@@ -284,15 +299,21 @@ const Run = struct {
         run.result.skipped += 1;
         if (!run.may_show()) return;
         run.warning.reset();
-        const word: []const u8 = switch (kind) {
-            .char_device => "character device",
-            .block_device => "block device",
-            .fifo => "FIFO",
-            .socket => "socket",
-            .file, .dir, .symlink => unreachable, // Only the kinds the store leaves out come here.
-        };
-        diagnose.skipped_file(&run.warning, path, word);
+        diagnose.skipped_file(&run.warning, path, kind_word(kind));
         run.emit();
+    }
+
+    /// A file the store leaves out: a warning, or, with `refuse_special`, the import fails.
+    fn special_file(run: *Run, path: []const u8, length: u32, kind: fs_mod.FileKind) Error!void {
+        assert(path.len > 0);
+        assert(kind != .file);
+        const refuse = run.options.refuse_special orelse return run.warn_file(path, kind);
+        const root = run.ws.frames[0].path_len;
+        assert(length > root);
+        const start = if (run.ws.path[root - 1] == '/') root - 1 else root;
+        refuse.call(refuse.context, run.diag, run.ws.path[start..length], kind_word(kind));
+        assert(run.diag.code != null);
+        return error.Failed;
     }
 
     fn warn_xattr(run: *Run, path: []const u8, name: []const u8, fault: diagnose.XattrFault) void {
@@ -536,9 +557,9 @@ const Run = struct {
             .char_device => if (run.merging and stat.rdev_major == 0 and stat.rdev_minor == 0) {
                 run.result.whiteouts += 1; // A deletion: no entry, and the parent's is gone.
             } else {
-                run.warn_file(path, stat.kind);
+                try run.special_file(path, length, stat.kind);
             },
-            .block_device, .fifo, .socket => run.warn_file(path, stat.kind),
+            .block_device, .fifo, .socket => try run.special_file(path, length, stat.kind),
         }
     }
 
@@ -773,6 +794,7 @@ const Run = struct {
         const ws = run.ws;
         ws.builder.reset();
         run.marks = Marks.none;
+        if (run.options.drop_xattrs) return ws.builder.finish(&ws.blob);
         const listed = run.store.fs.list_xattrs(path, &ws.xattr_names) catch |err| {
             if (err == error.NotFound) return run.vanished(path);
             run.warn_xattr(path, "(the list)", .unreadable);
@@ -867,7 +889,7 @@ pub fn import(
     try diagnose.hold(diag, store, .shared, "import", "importing a directory");
     defer lock.release(store);
     var run = try walk(store, ws, source, options, result, diag);
-    try run.save_root(options.label orelse source);
+    if (options.save_root) try run.save_root(options.label orelse source);
     assert(run.depth == 0);
 }
 
@@ -885,6 +907,7 @@ pub fn commit(
     assert(diag.code == null);
     assert(upper.len > 0);
     assert(options.parent != null);
+    assert(!options.drop_xattrs); // A commit reads overlayfs's attributes for its whiteouts.
     try diagnose.hold(diag, store, .shared, "commit", "committing a container's changes");
     defer lock.release(store);
     const run = try walk(store, ws, upper, options, result, diag);
@@ -925,6 +948,19 @@ fn walk(
     while (run.depth > 0) try run.step();
     run.flush_warnings();
     return run;
+}
+
+fn kind_word(kind: fs_mod.FileKind) []const u8 {
+    assert(kind != .file);
+    const word: []const u8 = switch (kind) {
+        .char_device => "character device",
+        .block_device => "block device",
+        .fifo => "FIFO",
+        .socket => "socket",
+        .file, .dir, .symlink => unreachable, // Only the kinds the store leaves out come here.
+    };
+    assert(word.len > 0);
+    return word;
 }
 
 fn align_up(value: u32, alignment: u32) u32 {
