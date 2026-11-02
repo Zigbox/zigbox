@@ -8,13 +8,23 @@ These are decisions the owner has made ahead of the milestone that needs them. E
 
 ## M7 · The build file: where it is, what it may name, and which code refuses what (slice 1)
 
-*Decided 2026-11-02, implementer; for review.*
+*Decided 2026-11-02, implementer; accepted by the supervisor 2026-11-02, except the project at `/`, which is now refused (below).*
 
-- **Where:** `zbx.build.zon` in the project directory (the nearest `zbx.lock`, else the working directory). `-f PATH` is resolved from the working directory with every link followed and must land inside the project directory, because every path in the file is the project's. Outside is E0801, naming both.
-- **Codes:** a file that cannot be read or does not parse is E0801. Its graph (a duplicate step, an unknown need or add, a need twice, a cycle, and more than `build_step_needs_max` needs) is E0802. An input that is not plain, escapes the project, is missing or unreadable is E0803. A value of `image.config` that cannot become an image config (workdir not absolute, user not `UID:GID` in numbers, env without `KEY=`, a bad or repeated label key) is E0807, registered in slice 1 because the owner asked for config validation here.
-- **`zbx build` without `--graph`** is E0006 (a missing argument), with the `--graph` fix. Slice 1 runs nothing.
-- **Shown paths:** messages show the build file and inputs relative to the project; `zbx.build_graph/1` has the absolute path.
-- **A project at `/`** is accepted for builds (unlike `--mount`); slice 2 should decide whether a build from `/` is refused.
+- **Where:** `zbx.build.zon` in the project directory (the nearest `zbx.lock`, else the working directory). `-f PATH` is resolved from the working directory with every link followed and must land inside the project directory, because every path in the file is the project's. Outside is E0801, naming the path given, where it led, and the project directory. `-f` given twice is E0003.
+- **Codes:** a file that cannot be read or does not parse is E0801. Its graph (a duplicate step, an unknown need or add, a need twice, a cycle, and more than `build_step_needs_max` needs) is E0802. An input that is not plain, escapes the project, names the project directory itself, overlaps another input, is missing or unreadable is E0803. A value of `image.config` that cannot become an image config (workdir not absolute, user not `UID:GID` in numbers, env not `KEY=VALUE` with a plain key, a bad or repeated label key) is E0807, registered in slice 1 because the owner asked for config validation here. An env key repeated within one list is E0801 at both levels.
+- **`zbx build` without `--graph`** is E0006 (a missing argument), with the `--graph` fix. Slice 1 runs nothing. This, and `build`'s help text, must change in the slice where the build runs.
+- **Shown paths:** messages show the build file and inputs relative to the project; `zbx.build_graph/1` has the absolute path. The error context `dir` holds the project path whole, up to the diagnostic's field (`diag_field_bytes_max`, which bounds every diagnostic field); only the prose echo is cut to `arg_echo_bytes_max`.
+- **A project at `/` is refused** (supervisor, 2026-11-02), as `--mount` refuses `/`: inside `/` every host path is "inside the project", so the outside checks would pass for anything. `load.locate` refuses it as E0801 (cause: the project directory is /; fix: run from the project, or create zbx.lock there), before the file is read.
+- **Strings:** after escapes are decoded, every string must be valid UTF-8 (`\x80` alone is refused). Control bytes (below 0x20, and 0x7f) are allowed only in argv lists (`run`, `entrypoint`, `cmd`) and env entries, where a `sh -c` script needs line ends; the key of an env entry is held to `[A-Za-z_][A-Za-z0-9_]*`, so only the value can hold them. A name, a reference, a path, an input, a need and a label are refused with one. `\x` takes exactly two hex digits; `.version` has no leading zero. Parse accepts only what render writes.
+
+## M7 · Decisions for slice 2, taken in slice 1's review
+
+*Decided 2026-11-02, supervisor.*
+
+- **A step's env cannot set the fixed environment.** The keys the brief fixes for every step (`HOME`, `TZ`, `LC_ALL`, `SOURCE_DATE_EPOCH`, `ZBX_BUILD_STEP`; `file.fixed_env`) are refused in a step's `.env` at parse, as E0801 `env_fixed`, naming the key and saying it is fixed: a value the step would never see is a surprise. `image.config.env` may set them; it is the image's own environment. `PATH` is not fixed by the brief, so a step may set it.
+- **Overlapping inputs** are compared by resolved path: two inputs of one step that resolve to the same object, or one inside the other (`src` with `src/main.go`), are E0803 `input_twice` naming both. Implemented in slice 1, since inputs are resolved there.
+- **Symlinks inside directory inputs** are imported as symlinks and never followed; the link text goes into the key. Devices, FIFOs and sockets inside a directory input are E0803 `bad_kind`.
+- **Against TOCTOU**, slice 2 imports inputs from a project directory fd with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, and computes the key from what it imported, not from what slice 1's check saw.
 
 ## M4b · Mac: public DNS fallback when the Mac has no IPv4 resolver
 
