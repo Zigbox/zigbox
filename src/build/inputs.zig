@@ -41,6 +41,12 @@ pub const ProblemKind = enum {
     /// The step lists it twice, or two of its inputs overlap once resolved: the same object, or
     /// one inside the other (`src` and `src/main.go`). `other` is the earlier one.
     input_twice,
+    /// A directory input holds `resolved`, a `file_kind` that is not a file, a directory or a
+    /// link (found while it is imported).
+    holds_bad_kind,
+    /// `resolved` changed while the build read it: it went away, or was swapped for something
+    /// else, between two looks.
+    changed,
 };
 
 pub const Problem = struct {

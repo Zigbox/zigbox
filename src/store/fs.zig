@@ -64,6 +64,22 @@ pub const PathAttributes = struct {
     set_owner: bool = true,
 };
 
+/// How `open_beneath` opens a path below a directory. Every one resolves with the kernel's
+/// `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`: no absolute link, no `..` and no `/proc` link
+/// may leave the directory (`EXDEV`), so a build input cannot name a file outside the project.
+pub const Beneath = enum {
+    /// A handle on the path, links followed (beneath): a declared input may be a link.
+    path_follow,
+    /// A handle on the entry itself, never what a link at the last part points to.
+    path_entry,
+    /// A file for reading, links followed (beneath). A FIFO does not block (non-blocking
+    /// open). The caller compares the inode with its `path_entry` handle's, so a file swapped
+    /// for a link or a FIFO in between is seen.
+    read,
+    /// A directory for listing, links followed (beneath); compared as for `read`.
+    directory,
+};
+
 pub const VTable = struct {
     lstat: *const fn (context: *anyopaque, path: [:0]const u8) Error!Stat,
     read_dir: *const fn (context: *anyopaque, path: [:0]const u8, visitor: Visitor) Error!void,
@@ -136,6 +152,21 @@ pub const VTable = struct {
         exclusive: bool,
         holder: []const u8,
     ) Error!Fd,
+    /// Opens a directory by path, to resolve paths beneath it (`open_beneath`).
+    open_directory: *const fn (context: *anyopaque, path: [:0]const u8) Error!Fd,
+    /// Opens `path` (relative) below the directory `dir` (see `Beneath`).
+    open_beneath: *const fn (
+        context: *anyopaque,
+        dir: Fd,
+        path: [:0]const u8,
+        how: Beneath,
+    ) Error!Fd,
+    /// What `lstat` reports, for an open file (any `Beneath` handle).
+    fstat: *const fn (context: *anyopaque, fd: Fd) Error!Stat,
+    /// `read_dir` for a directory opened with `Beneath.directory`.
+    read_dir_fd: *const fn (context: *anyopaque, fd: Fd, visitor: Visitor) Error!void,
+    /// `read_link` for a link opened with `Beneath.path_entry`.
+    read_link_fd: *const fn (context: *anyopaque, fd: Fd, buffer: []u8) Error!u32,
     last_errno: *const fn (context: *anyopaque) u16,
 };
 
@@ -534,6 +565,75 @@ pub const Fs = struct {
     }
 
     /// The raw errno of the most recent failed call, 0 after a success.
+    pub fn open_directory(fs: Fs, path: [:0]const u8) Error!Fd {
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            return fs.vtable.open_directory(fs.context, path) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+        }
+        return error.IoFailed;
+    }
+
+    pub fn open_beneath(fs: Fs, dir: Fd, path: [:0]const u8, how: Beneath) Error!Fd {
+        assert(dir < std.math.maxInt(i32));
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        assert(path[0] != '/');
+        for (0..constants.store_io_retries_max + 1) |_| {
+            return fs.vtable.open_beneath(fs.context, dir, path, how) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+        }
+        return error.IoFailed;
+    }
+
+    pub fn fstat(fs: Fs, fd: Fd) Error!Stat {
+        assert(fd < std.math.maxInt(i32));
+        for (0..constants.store_io_retries_max + 1) |_| {
+            const found = fs.vtable.fstat(fs.context, fd) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            assert(found.mode <= 0o7777);
+            return found;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn read_dir_fd(fs: Fs, fd: Fd, visitor: Visitor) Error!void {
+        assert(fd < std.math.maxInt(i32));
+        for (0..constants.store_io_retries_max + 1) |_| {
+            fs.vtable.read_dir_fd(fs.context, fd, visitor) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            return;
+        }
+        return error.IoFailed;
+    }
+
+    pub fn read_link_fd(fs: Fs, fd: Fd, buffer: []u8) Error![]const u8 {
+        assert(fd < std.math.maxInt(i32));
+        assert(buffer.len > 0);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            const length = fs.vtable.read_link_fd(
+                fs.context,
+                fd,
+                buffer,
+            ) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            assert(length <= buffer.len);
+            return buffer[0..length];
+        }
+        return error.IoFailed;
+    }
+
     pub fn last_errno(fs: Fs) u16 {
         assert(@intFromPtr(fs.vtable) != 0);
         const errno = fs.vtable.last_errno(fs.context);

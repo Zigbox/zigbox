@@ -48,6 +48,7 @@ pub const errno_loop: u16 = 40;
 pub const errno_inval: u16 = 22;
 pub const errno_nodata: u16 = 61;
 pub const errno_mlink: u16 = 31;
+pub const errno_xdev: u16 = 18;
 
 pub const Faults = struct {
     /// The call at this write point (zero-based) fails with `fail_errno`, and is not applied.
@@ -196,6 +197,11 @@ pub const SimFs = struct {
         .set_path_xattr = set_path_xattr,
         .lock = lock,
         .last_errno = last_errno,
+        .open_directory = open_directory,
+        .open_beneath = open_beneath,
+        .fstat = fstat,
+        .read_dir_fd = read_dir_fd,
+        .read_link_fd = read_link_fd,
     };
 
     // ---- Setting up a tree, and looking at it (tests only; no faults, no write points) ------
@@ -569,6 +575,10 @@ pub const SimFs = struct {
     fn read_dir(context: *anyopaque, path: [:0]const u8, visitor: fs_mod.Visitor) Error!void {
         const sim = from_context(context);
         try sim.begin_call();
+        return sim.list_children(path, visitor);
+    }
+
+    fn list_children(sim: *SimFs, path: []const u8, visitor: fs_mod.Visitor) Error!void {
         const is_root = std.mem.eql(u8, path, "/");
         if (!is_root) {
             const index = sim.find(path) orelse return sim.fail(errno_noent);
@@ -678,6 +688,157 @@ pub const SimFs = struct {
         if (node.unreadable) return sim.fail(errno_acces);
         if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
         return sim.take_slot(index, false);
+    }
+
+    fn open_directory(context: *anyopaque, path: [:0]const u8) Error!Fd {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const index = sim.find(path) orelse return sim.fail(errno_noent);
+        const node = &sim.nodes[index];
+        if (node.kind != .dir) return sim.fail(errno_notdir);
+        if (node.unreadable) return sim.fail(errno_acces);
+        return sim.take_slot(index, false);
+    }
+
+    /// The kernel's `RESOLVE_BENEATH` walk, modelled: relative links are followed (at most
+    /// `symlinks_followed_max`), an absolute one or a `..` above the base is `EXDEV`.
+    fn open_beneath(
+        context: *anyopaque,
+        dir: Fd,
+        path: [:0]const u8,
+        how: fs_mod.Beneath,
+    ) Error!Fd {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const base = sim.slot_of(dir).node;
+        assert(sim.nodes[base].kind == .dir);
+        const index = try sim.resolve_beneath(base, path, how == .path_entry);
+        const node = &sim.nodes[index];
+        switch (how) {
+            .path_follow, .path_entry => {},
+            .read => {
+                if (node.kind == .dir) return sim.fail(errno_isdir);
+                if (node.unreadable) return sim.fail(errno_acces);
+                if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
+            },
+            .directory => {
+                if (node.kind != .dir) return sim.fail(errno_notdir);
+                if (node.unreadable) return sim.fail(errno_acces);
+            },
+        }
+        return sim.take_slot(index, false);
+    }
+
+    const Walk = struct {
+        /// The path reached so far (absolute, in the model's names).
+        at: [constants.sim_fs_path_bytes_max]u8 = undefined,
+        at_len: u32 = 0,
+        /// The parts still to walk, from `rest_at` on.
+        rest: [constants.sim_fs_path_bytes_max * 2]u8 = undefined,
+        rest_at: u32 = 0,
+        rest_len: u32 = 0,
+        /// Parts below the base: a `..` at zero leaves it.
+        depth: u32 = 0,
+    };
+
+    fn resolve_beneath(sim: *SimFs, base: u32, path: []const u8, no_follow_last: bool) Error!u32 {
+        assert(path.len > 0);
+        var walk: Walk = .{};
+        const base_text = sim.nodes[base].text();
+        if (path.len > walk.rest.len) return sim.fail(36);
+        @memcpy(walk.at[0..base_text.len], base_text);
+        walk.at_len = @intCast(base_text.len);
+        @memcpy(walk.rest[0..path.len], path);
+        walk.rest_len = @intCast(path.len);
+        var current: u32 = base;
+        var followed: u32 = 0;
+        for (0..constants.path_resolve_steps_max) |_| {
+            const part = next_part(&walk) orelse return current;
+            if (std.mem.eql(u8, part, ".")) continue;
+            if (std.mem.eql(u8, part, "..")) {
+                if (walk.depth == 0) return sim.fail(errno_xdev);
+                walk.depth -= 1;
+                const parent = std.mem.lastIndexOfScalar(u8, walk.at[0..walk.at_len], '/').?;
+                walk.at_len = @intCast(parent);
+                current = sim.find(walk.at[0..walk.at_len]).?;
+                continue;
+            }
+            if (sim.nodes[current].kind != .dir) return sim.fail(errno_notdir);
+            if (walk.at_len + 1 + part.len > walk.at.len) return sim.fail(36);
+            walk.at[walk.at_len] = '/';
+            @memcpy(walk.at[walk.at_len + 1 ..][0..part.len], part);
+            const index = sim.find(walk.at[0 .. walk.at_len + 1 + part.len]) orelse
+                return sim.fail(errno_noent);
+            const last = walk.rest_at >= walk.rest_len;
+            if (sim.nodes[index].kind != .symlink or (last and no_follow_last)) {
+                walk.at_len += @intCast(1 + part.len);
+                walk.depth += 1;
+                current = index;
+                continue;
+            }
+            followed += 1;
+            if (followed > constants.symlinks_followed_max) return sim.fail(errno_loop);
+            const node = &sim.nodes[index];
+            const target = sim.pool[node.data_at..][0..node.data_len];
+            if (target.len == 0 or target[0] == '/') return sim.fail(errno_xdev);
+            if (!prepend_rest(&walk, target)) return sim.fail(36);
+        }
+        return sim.fail(errno_loop);
+    }
+
+    fn next_part(walk: *Walk) ?[]const u8 {
+        assert(walk.rest_at <= walk.rest_len);
+        while (walk.rest_at < walk.rest_len and walk.rest[walk.rest_at] == '/') walk.rest_at += 1;
+        if (walk.rest_at == walk.rest_len) return null;
+        const from = walk.rest_at;
+        const end = std.mem.indexOfScalarPos(u8, walk.rest[0..walk.rest_len], from, '/') orelse
+            walk.rest_len;
+        walk.rest_at = @intCast(end);
+        assert(end > from);
+        return walk.rest[from..end];
+    }
+
+    /// Puts a link's target in front of the parts not walked yet.
+    fn prepend_rest(walk: *Walk, target: []const u8) bool {
+        assert(target.len > 0);
+        const left = walk.rest_len - walk.rest_at;
+        if (target.len + 1 + left > walk.rest.len) return false;
+        std.mem.copyBackwards(
+            u8,
+            walk.rest[target.len + 1 ..][0..left],
+            walk.rest[walk.rest_at..walk.rest_len],
+        );
+        @memcpy(walk.rest[0..target.len], target);
+        walk.rest[target.len] = '/';
+        walk.rest_at = 0;
+        walk.rest_len = @intCast(target.len + 1 + left);
+        return true;
+    }
+
+    fn fstat(context: *anyopaque, fd: Fd) Error!fs_mod.Stat {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.stat_node(sim.slot_of(fd).node);
+    }
+
+    fn read_dir_fd(context: *anyopaque, fd: Fd, visitor: fs_mod.Visitor) Error!void {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const node = &sim.nodes[sim.slot_of(fd).node];
+        if (node.kind != .dir) return sim.fail(errno_notdir);
+        var path: [constants.sim_fs_path_bytes_max]u8 = undefined;
+        @memcpy(path[0..node.path_len], node.text());
+        return sim.list_children(path[0..node.path_len], visitor);
+    }
+
+    fn read_link_fd(context: *anyopaque, fd: Fd, buffer: []u8) Error!u32 {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const node = &sim.nodes[sim.slot_of(fd).node];
+        if (node.kind != .symlink) return sim.fail(errno_inval);
+        if (node.data_len >= buffer.len) return error.FileTooLarge;
+        @memcpy(buffer[0..node.data_len], sim.pool[node.data_at..][0..node.data_len]);
+        return node.data_len;
     }
 
     fn slot_of(sim: *SimFs, fd: Fd) *Open {

@@ -254,6 +254,8 @@ test {
     _ = @import("build/graph.zig");
     _ = @import("build/inputs.zig");
     _ = @import("build/key.zig");
+    _ = @import("build/input_tree.zig");
+    _ = @import("build/input_tree_tests.zig");
     _ = @import("build/diagnose.zig");
     _ = @import("build/load.zig");
     _ = @import("build_commands.zig");

@@ -453,6 +453,14 @@ fn describe_input(
             "name the same file, or one is inside the other", .{
             text_util.sanitise(&other_echo, file.text(problem.other)),
         }),
+        .holds_bad_kind => try writer.print("holds '{s}', which is {s}; an input holds only " ++
+            "files, directories and links", .{
+            text_util.sanitise(&resolved_echo, problem.resolved.text()),
+            kind_name(problem.file_kind),
+        }),
+        .changed => try writer.print("changed while the build read it, at '{s}'", .{
+            text_util.sanitise(&resolved_echo, problem.resolved.text()),
+        }),
     }
 }
 
@@ -477,6 +485,10 @@ fn input_fix(diag: *Diag, kind: inputs_mod.ProblemKind, step: []const u8) void {
             "reads, not the project itself" }),
         .input_twice => fix_sentence(diag, "list each file once in step \"{s}\"'s .inputs: " ++
             "a directory, or files inside it, not both", .{step}),
+        .holds_bad_kind => diag.fix(.{ .sentence = "move it out of the input, or list the " ++
+            "files beside it instead of the directory" }),
+        .changed => diag.fix(.{ .sentence = "run the build again once nothing else is " ++
+            "changing the project directory" }),
     }
 }
 
