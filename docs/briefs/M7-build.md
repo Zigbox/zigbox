@@ -8,7 +8,7 @@ Read these first:
 
 Do not start M8: no provenance record, no signing, no policy. `demo-m0` to `demo-m6b`, the top-20 check and the Mac demos must keep passing.
 
-**Owner decisions (2026-11-02):** the build file is ZON, with comments allowed (open question 1); the result is a tree plus a declared config (open question 3, revised). **This brief assumes the owner's answer to open question 2** (Go). If the owner answers otherwise, the supervisor revises the brief before slice 1 starts.
+**Owner decisions (2026-11-02):** the build file is ZON, with comments allowed (open question 1); the result is a tree plus a declared config (open question 3, revised); open questions 2 and 4 to 8 are taken as recommended.
 
 ## Goal and demo (from the spec, live doc rev 91)
 
@@ -203,16 +203,16 @@ Record any cut in `docs/demos/m7.md`.
 - **The Mac slice** (slice 5), to a later session.
 - **`build_parallel_max` from CPU count**: a fixed 4.
 
-## Open questions for the owner
+## Open questions for the owner (all decided 2026-11-02)
 
 1. **Build file format** (the spec's open question, "decide before M7 starts"). *Decided (owner, 2026-11-02): ZON, comments allowed.* The reasoning: **ZON**, a restricted subset with a hand-written bounded parser: Zig's own notation, no dependency, already the shape of `zbx.lock`, and Zigcube can reuse it for its service file (Part II's open question). Starlark means writing an interpreter; a typed config language means designing one.
-2. **Demo language.** The spec allows Zig or Go. Recommend **Go**: an official pinned image, and `-trimpath -buildvcs=false -buildid=` builds are reproducible as documented. Zig has no official image; Alpine's `zig` package needs a `network = true` step to install, which the demo would then have to warn about.
+2. **Demo language.** *Decided (owner, 2026-11-02): as recommended.* The spec allows Zig or Go. Recommend **Go**: an official pinned image, and `-trimpath -buildvcs=false -buildid=` builds are reproducible as documented. Zig has no official image; Alpine's `zig` package needs a `network = true` step to install, which the demo would then have to warn about.
 3. **What a build produces.** *Decided (owner, 2026-11-02): a tree plus a declared `image.config`* (entrypoint, cmd, env, workdir, user, labels), stored as a build record and named by its digest; see "The result: a tree and its config". No tag, no lock entry, no OCI export in M7. Metadata that is not declared in the file (time, host, git commit, builder) stays out of the result; the commit belongs to M8's provenance.
-4. **Times in the store.** Recommend that store objects and farm entries carry the fixed time `SOURCE_DATE_EPOCH` (1980-01-01). It closes the leak for build steps and is visible to `zbx run` containers as well (files there have unspecified times today, whatever import wrote). The alternative, copying inputs per step with fixed times, costs a copy of every input and leaves the base image's times leaking.
-5. **Step 6's `curl`.** Neither `alpine` nor `golang:*-alpine` has `curl`; both have busybox `wget`. Recommend the live doc say "runs `wget`" (or "fetches a URL"), rather than pulling a third image for `curl`.
-6. **Does M7 need the Mac to be "demonstrated"?** M6b did. Recommend **no**: `demo-m7` green on Linux demonstrates M7; slice 5 follows when the Mac session has time.
-7. **Zigcube's simulation-fleet worker image for GHCR.** `zbx build` can build it, but getting it to GHCR needs push or OCI export, which the spec's Non-goals put after M8. Recommend: not in M7; dogfood by building it (a good second test project) and keep the GHCR image on Docker until push exists. If the owner wants it sooner, an `zbx store export --oci <digest> DIR` (an OCI layout another tool pushes) is the smallest change, and is a spec change.
-8. **Network steps and the cache.** Recommend caching them like any step, marked `net` and warned about (`W0801`), so a rebuild does not refetch. The alternative, never caching them, makes every dependent a miss on every build.
+4. **Times in the store.** *Decided (owner, 2026-11-02): as recommended.* Recommend that store objects and farm entries carry the fixed time `SOURCE_DATE_EPOCH` (1980-01-01). It closes the leak for build steps and is visible to `zbx run` containers as well (files there have unspecified times today, whatever import wrote). The alternative, copying inputs per step with fixed times, costs a copy of every input and leaves the base image's times leaking.
+5. **Step 6's `curl`.** *Decided (owner, 2026-11-02): as recommended.* Neither `alpine` nor `golang:*-alpine` has `curl`; both have busybox `wget`. Recommend the live doc say "runs `wget`" (or "fetches a URL"), rather than pulling a third image for `curl`.
+6. **Does M7 need the Mac to be "demonstrated"?** *Decided (owner, 2026-11-02): as recommended.* M6b did. Recommend **no**: `demo-m7` green on Linux demonstrates M7; slice 5 follows when the Mac session has time.
+7. **Zigcube's simulation-fleet worker image for GHCR.** *Decided (owner, 2026-11-02): as recommended.* `zbx build` can build it, but getting it to GHCR needs push or OCI export, which the spec's Non-goals put after M8. Recommend: not in M7; dogfood by building it (a good second test project) and keep the GHCR image on Docker until push exists. If the owner wants it sooner, an `zbx store export --oci <digest> DIR` (an OCI layout another tool pushes) is the smallest change, and is a spec change.
+8. **Network steps and the cache.** *Decided (owner, 2026-11-02): as recommended.* Recommend caching them like any step, marked `net` and warned about (`W0801`), so a rebuild does not refetch. The alternative, never caching them, makes every dependent a miss on every build.
 
 ## Spec notes (flagged, not changed)
 
