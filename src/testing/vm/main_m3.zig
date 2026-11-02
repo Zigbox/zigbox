@@ -100,8 +100,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
     var session: Session = undefined;
-    try session.start(init, out, overlay, accel, .{
-        .user_data = @import("cloud_init.zig").user_data,
+    try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .old_binary = old_binary,
         .rootfs = rootfs,

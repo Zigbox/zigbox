@@ -17,7 +17,6 @@
 const std = @import("std");
 const Io = std.Io;
 const checks_m2 = @import("checks_m2.zig");
-const cloud_init = @import("cloud_init.zig");
 const harness = @import("harness.zig");
 const image = @import("image.zig");
 const limits = @import("limits.zig");
@@ -76,8 +75,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     defer if (!options.keep_overlay) Io.Dir.cwd().deleteFile(io, overlay) catch {};
 
     var session: Session = undefined;
-    try session.start(init, out, overlay, accel, .{
-        .user_data = cloud_init.user_data,
+    try session_mod.start(&session, init, out, overlay, accel, .{
         .binary = binary,
         .rootfs = rootfs,
     });

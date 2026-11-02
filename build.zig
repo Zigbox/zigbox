@@ -39,12 +39,13 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
     }
     add_library_module(b, options, target, optimize);
+    const vm_module = add_vm_module(b);
 
-    add_test_step(b, options, target, optimize);
+    add_test_step(b, options, target, optimize, vm_module);
     add_tidy_step(b);
     const fuzz = add_fuzz_step(b, options, target);
     add_release_step(b, options);
-    add_demo_step(b, options);
+    add_demo_step(b, options, vm_module);
     add_errors_site_steps(b);
     add_dbus_live_step(b, options);
     add_check_step(b, fuzz);
@@ -69,6 +70,20 @@ fn add_library_module(
     });
 }
 
+/// The VM test harness as a module named `zigbox_vm`: boot an Ubuntu 24.04 guest under QEMU,
+/// provision it with cloud-init, run commands on its console, copy files in, tear it down. The
+/// demos below are built on it, and Zigcube's real-runtime smoke test imports it with
+/// `b.dependency("zigbox", .{}).module("zigbox_vm")` (docs/vm-module.md). Target and optimize
+/// mode come from the module that imports it.
+fn add_vm_module(b: *std.Build) *std.Build.Module {
+    return b.addModule("zigbox_vm", .{
+        .root_source_file = b.path(vm_module_root),
+        .link_libc = false,
+    });
+}
+
+const vm_module_root = "src/testing/vm/lib/zigbox_vm.zig";
+
 fn zbx_module(
     b: *std.Build,
     options: *std.Build.Step.Options,
@@ -91,6 +106,7 @@ fn zbx_module(
 /// skipped by name and the macOS root runs; `-Dtarget=aarch64-linux` compiles the first kind
 /// without running it. On Linux, the macOS root is not built.
 const roots = [_][]const u8{
+    "src/testing/vm/lib/zigbox_vm.zig",
     "src/testing/vm/main.zig",
     "src/testing/vm/main_m1.zig",
     "src/testing/vm/main_m2.zig",
@@ -115,6 +131,7 @@ const roots = [_][]const u8{
 };
 
 const linux_only = [_][]const u8{
+    "src/testing/vm/lib/zigbox_vm.zig",
     "src/testing/vm/main.zig",
     "src/testing/vm/main_m1.zig",
     "src/testing/vm/main_m2.zig",
@@ -144,6 +161,7 @@ fn add_test_step(
     options: *std.Build.Step.Options,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    vm_module: *std.Build.Module,
 ) void {
     const test_step = b.step("test", "Run unit, snapshot and simulation tests");
     const for_macos = target.result.os.tag == .macos;
@@ -164,6 +182,10 @@ fn add_test_step(
             .root_source_file = b.path("src/runtime/policy/seccomp.zon"),
         });
         if (std.mem.eql(u8, root, macos_root)) link_macos(module, add_vm_image(b, options));
+        // The demos are built on the VM module; the module's own root needs no import of itself.
+        if (std.mem.startsWith(u8, root, "src/testing/vm/main")) {
+            module.addImport("zigbox_vm", vm_module);
+        }
         if (std.mem.eql(u8, root, kernel_build_root)) {
             module.addImport("build_options", kernel_pin_options(b).createModule());
         }
@@ -334,7 +356,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
 /// stripped ReleaseSafe binaries, the ones that ship. -Daccel=kvm|tcg|auto chooses the accelerator:
 /// auto means KVM and fails with a one-line message if /dev/kvm is unusable; tcg (software
 /// emulation, much slower) must be asked for explicitly.
-fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
+fn add_demo_step(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    vm_module: *std.Build.Module,
+) void {
     const Accel = enum { auto, kvm, tcg };
     const accel_help = "VM accelerator for the demos: auto (default), kvm, tcg";
     const accel = b.option(Accel, "accel", accel_help) orelse .auto;
@@ -364,6 +390,7 @@ fn add_demo_step(b: *std.Build, options: *std.Build.Step.Options) void {
                 .root_source_file = b.path(demo.root),
                 .target = harness_target,
                 .optimize = .ReleaseSafe,
+                .imports = &.{.{ .name = "zigbox_vm", .module = vm_module }},
             }),
         });
         harness.dependOn(&vm.step);
