@@ -18,6 +18,7 @@ const assemble_mod = @import("assemble.zig");
 const result_mod = @import("result.zig");
 const tree_mod = @import("../store/tree.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const Digest = @import("../store/digest.zig").Digest;
 
 const BuildFile = file_mod.BuildFile;
 const Field = file_mod.Field;
@@ -609,26 +610,85 @@ fn kind_name(kind: fs_mod.FileKind) []const u8 {
 
 // ---- A step (E0804 to E0806) ------------------------------------------------------------------
 
-/// `E0804`: the base of a step is not in `zbx.lock` (`locked` false), or is there but its image
-/// is not in the store (`locked` true). A build never resolves a tag itself.
-pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8, locked: bool) void {
+/// `E0804`: the base of a step (`step` null: of the image) is not in `zbx.lock` (`locked`
+/// false), or is there but its image is not in the store (`locked` true). A build never
+/// resolves a tag itself.
+pub fn base_not_locked(diag: *Diag, step: ?[]const u8, reference: []const u8, locked: bool) void {
     assert(diag.code == null);
-    assert(step.len > 0);
     assert(reference.len > 0);
     var reference_echo: Echo = undefined;
     const shown = text_util.sanitise(&reference_echo, reference);
+    var while_storage: [constants.build_step_name_bytes_max + 16]u8 = undefined;
+    var owner_storage: [constants.build_step_name_bytes_max + 16]u8 = undefined;
+    const owner = if (step) |name|
+        std.fmt.bufPrint(&owner_storage, "step \"{s}\"", .{name}) catch unreachable // Fits.
+    else
+        "the image";
+    const doing = if (step) |name|
+        std.fmt.bufPrint(&while_storage, "build step \"{s}\"", .{name}) catch unreachable // Fits.
+    else
+        "the image";
+    assert(owner.len > 0);
     diag.raise(.E0804);
-    diag.while_("resolving the base of build step \"{s}\"", .{step});
+    diag.while_("resolving the base of {s}", .{doing});
     if (locked) {
-        diag.cause("base \"{s}\" of step \"{s}\" is in zbx.lock but its image is not in " ++
-            "the store", .{ shown, step });
+        diag.cause("base \"{s}\" of {s} is in zbx.lock but its image is not in the store", .{
+            shown, owner,
+        });
     } else {
-        diag.cause("base \"{s}\" of step \"{s}\" is not in zbx.lock, and a build never " ++
-            "resolves a tag itself", .{ shown, step });
+        diag.cause("base \"{s}\" of {s} is not in zbx.lock, and a build never resolves a " ++
+            "tag itself", .{ shown, owner });
     }
-    diag.context("step", "{s}", .{step});
+    if (step) |name| diag.context("step", "{s}", .{name});
     diag.context("base", "{s}", .{shown});
     diag.fix_with("pull it, which pins it in zbx.lock", "zbx pull {s}", .{shown});
+    assert(diag.code.? == .E0804);
+}
+
+/// `E0422` or `E0423`: a build result record that cannot be used: it does not hash to its name
+/// or does not parse (`newer` false: damaged), or a newer zbx wrote it (`newer` true).
+pub fn result_unusable(diag: *Diag, digest: Digest, newer: bool) void {
+    assert(diag.code == null);
+    if (newer) {
+        diag.raise(.E0423);
+        diag.while_("reading the build result", .{});
+        diag.cause("build result {s} was written by a newer zbx", .{digest.text()});
+        diag.context("digest", "{s}", .{digest.text()});
+        diag.fix(.{ .sentence = "upgrade zbx to read it, or build the project again" });
+    } else {
+        diag.raise(.E0422);
+        diag.while_("reading the build result", .{});
+        diag.cause("build result {s} is damaged", .{digest.text()});
+        diag.context("digest", "{s}", .{digest.text()});
+        diag.fix(.{ .sentence = "build the project again to write the record anew" });
+    }
+    assert(diag.code != null);
+}
+
+/// `E0804`: the registry answered a pull by the lock's digest with another manifest, so the
+/// lock names an index (or a manifest of another platform) and not the image to build on.
+pub fn locked_manifest_mismatch(
+    diag: *Diag,
+    reference: []const u8,
+    returned: []const u8,
+    locked: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(returned.len >= "sha256:".len + 12);
+    assert(locked.len >= "sha256:".len + 12);
+    var reference_echo: Echo = undefined;
+    const shown = text_util.sanitise(&reference_echo, reference);
+    diag.raise(.E0804);
+    diag.while_("pulling the locked base \"{s}\"", .{shown});
+    // The cause is cut at a line; the digests are whole in the context lines below it.
+    const short = "sha256:".len + 12;
+    diag.cause("locked base {s}: registry returned manifest {s}, lock says {s}", .{
+        shown, returned[0..short], locked[0..short],
+    });
+    diag.context("base", "{s}", .{shown});
+    diag.context("got", "{s}", .{returned});
+    diag.context("lock", "{s}", .{locked});
+    diag.fix_with("pin it again", "zbx pull {s}", .{shown});
     assert(diag.code.? == .E0804);
 }
 
@@ -640,15 +700,20 @@ fn kind_word(kind: tree_mod.Kind) []const u8 {
     };
 }
 
+/// An add of `image.add`, as the build file writes it.
+pub const AddText = struct { from: []const u8, to: []const u8 };
+
 /// `E0807` for an `image.add` list that cannot make one image: two adds (or an add and the base)
 /// want different things at one path, or the result passes the store's bounds. `index` is the
-/// add that failed, `from` and `to` its fields.
+/// add that failed, `from` and `to` its fields. `earlier` is the add that put what is already
+/// at a conflicting path there, null when the base did.
 pub fn assembly_refused(
     diag: *Diag,
     failure: *const assemble_mod.Failure,
     index: u32,
     from: []const u8,
     to: []const u8,
+    earlier: ?AddText,
 ) void {
     assert(diag.code == null);
     assert(failure.* != .io);
@@ -660,17 +725,7 @@ pub fn assembly_refused(
     diag.raise(.E0807);
     diag.while_("assembling the image of the build file", .{});
     switch (failure.*) {
-        .conflict => |conflict| {
-            var path_echo: Echo = undefined;
-            const path = text_util.sanitise(&path_echo, conflict.path[0..conflict.path_len]);
-            diag.cause("the image already has a {s} at {s}; .image.add {s} -> {s} brings a {s}", .{
-                kind_word(conflict.present), path,                        from_shown,
-                to_shown,                    kind_word(conflict.brought),
-            });
-            diag.context("path", "{s}", .{path});
-            diag.fix(.{ .sentence = "give the two adds different paths, or remove one of them " ++
-                "in .image.add of zbx.build.zon" });
-        },
+        .conflict => |conflict| conflict_refused(diag, conflict, from_shown, to_shown, earlier),
         .too_deep => {
             diag.cause("the image would be deeper than {d} directories at .image.add {s} -> {s}", .{
                 constants.store_depth_max, from_shown, to_shown,
@@ -687,6 +742,37 @@ pub fn assembly_refused(
     }
     diag.context("add", "{d}", .{index + 1});
     assert(diag.code.? == .E0807);
+}
+
+fn conflict_refused(
+    diag: *Diag,
+    conflict: assemble_mod.Conflict,
+    from_shown: []const u8,
+    to_shown: []const u8,
+    earlier: ?AddText,
+) void {
+    var path_echo: Echo = undefined;
+    const path = text_util.sanitise(&path_echo, conflict.path[0..conflict.path_len]);
+    var source_storage: [2 * constants.arg_echo_bytes_max + 32]u8 = undefined;
+    var from_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const source = if (earlier) |add| std.fmt.bufPrint(&source_storage, ".image.add {s} -> {s}", .{
+        text_util.sanitise(&from_echo, add.from),
+        text_util.sanitise(&to_echo, add.to),
+    }) catch unreachable else "the base image"; // The buffer holds two echoes.
+    diag.cause("{s} has a {s} at {s}; .image.add {s} -> {s} brings a {s}", .{
+        source,     kind_word(conflict.present), path,
+        from_shown, to_shown,                    kind_word(conflict.brought),
+    });
+    diag.context("path", "{s}", .{path});
+    diag.context("first", "{s}", .{source});
+    if (earlier == null) {
+        diag.fix(.{ .sentence = "give the add another destination in .image.add, " ++
+            "or build on a base that does not have that path" });
+    } else {
+        diag.fix(.{ .sentence = "give the two adds different paths, or remove one of them " ++
+            "in .image.add of zbx.build.zon" });
+    }
 }
 
 /// `E0807` for an `image.config` that does not fit its record once the base's settings are

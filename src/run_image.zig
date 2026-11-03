@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const build_diagnose = @import("build/diagnose.zig");
 const constants = @import("constants.zig");
 const doctor = @import("doctor.zig");
 const host_mod = @import("host.zig");
@@ -125,9 +126,13 @@ pub fn prepare_result(
     var errno: u16 = 0;
     result.load(&store, digest, &ws.record, &ws.record_bytes, &errno) catch |err| switch (err) {
         error.NotFound => return false,
-        error.Damaged, error.Newer, error.Unreadable => {
-            const cause = if (err == error.Unreadable) error.IoFailed else error.FileTooLarge;
-            store_diagnose.cannot_read(diag, &store, "reading the build result", cause, errno);
+        error.Damaged, error.Newer => {
+            build_diagnose.result_unusable(diag, digest, err == error.Newer);
+            return error.Failed;
+        },
+        error.Unreadable => {
+            const failed = error.IoFailed;
+            store_diagnose.cannot_read(diag, &store, "reading the build result", failed, errno);
             return error.Failed;
         },
     };

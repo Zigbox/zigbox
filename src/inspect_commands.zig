@@ -54,9 +54,13 @@ pub fn run(host: Host, ws: *Workspace, operand: []const u8, json: bool, diag: *D
             build_diagnose.result_operand(diag, operand, true);
             return error.Failed;
         },
-        error.Damaged, error.Newer, error.Unreadable => {
-            const cause = if (err == error.Unreadable) error.IoFailed else error.FileTooLarge;
-            store_diagnose.cannot_read(diag, &store, "reading the build result", cause, errno);
+        error.Damaged, error.Newer => {
+            build_diagnose.result_unusable(diag, digest, err == error.Newer);
+            return error.Failed;
+        },
+        error.Unreadable => {
+            const failed = error.IoFailed;
+            store_diagnose.cannot_read(diag, &store, "reading the build result", failed, errno);
             return error.Failed;
         },
     };

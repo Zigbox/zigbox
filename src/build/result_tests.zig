@@ -99,3 +99,21 @@ test "labels are kept in key order and a key twice is refused" {
     }
     try testing.expect(record.config.add_label("zz", "v") == null);
 }
+
+test "an encoding that overflows names the field that did not fit" {
+    // Goal: the E0807 for a config too large blames the field that overflowed, not always the
+    // labels. Method: encode into a buffer with room for the header only, then one byte short.
+    try resolved();
+    record.tree = Digest.of("tree");
+    var full: [constants.build_result_bytes_max]u8 = undefined;
+    const length = (try result.encode(&record, &full)).len;
+    var field: result.Refusal = .labels;
+    const header = result.magic.len + 4 + constants.store_digest_bytes;
+    try testing.expectError(error.TooLarge, result.encode_field(&record, full[0..header], &field));
+    try testing.expectEqual(result.Refusal.entrypoint, field);
+    try testing.expectError(
+        error.TooLarge,
+        result.encode_field(&record, full[0 .. length - 1], &field),
+    );
+    try testing.expect(field != .entrypoint);
+}

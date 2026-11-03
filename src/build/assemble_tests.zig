@@ -212,12 +212,43 @@ test "a conflict reads as one E0807 line naming the path, the add and the kinds"
     try testing.expectError(error.Failed, result);
     var diag: Diag = undefined;
     diag.reset();
-    diagnose.assembly_refused(&diag, &failure, ws.failed_add, "compile", "/");
+    // With no earlier add, the base is the first source.
+    const adds = [_]assemble.Add{.{ .source = wrong, .to = "/" }};
+    try testing.expect(assemble.earlier_source(context, &adds, 0, "/sh") == null);
+    diagnose.assembly_refused(&diag, &failure, ws.failed_add, "compile", "/", null);
     try testing.expectEqual(.E0807, diag.code.?);
     const cause = diag.last_cause().?;
-    const expected = "the image already has a file at /sh; .image.add compile -> / brings a file";
+    const expected = "the base image has a file at /sh; .image.add compile -> / brings a file";
     try testing.expectEqualStrings(expected, cause);
     diag.reset();
     diagnose.config_too_large(&diag, .labels);
     try testing.expectEqual(.E0807, diag.code.?);
+}
+
+test "a conflict between two adds names both, found through the destination" {
+    // Goal: E0807 names the add that came first, not only the second. Method: add one puts `sh`
+    // under /usr/bin (a destination three parts deep for its tree), add two brings the same
+    // path from another step; `earlier_source` finds add one and not the base.
+    const context = start();
+    const base = try directory(&.{.{ .name = "etc", .child = try directory(&.{}, false) }}, true);
+    const first = try directory(&.{.{ .name = "sh", .content = "one" }}, true);
+    const second = try directory(&.{
+        .{ .name = "bin", .child = try directory(&.{.{ .name = "sh", .content = "two" }}, false) },
+    }, true);
+    const adds = [_]assemble.Add{
+        .{ .source = first, .to = "/usr/bin" },
+        .{ .source = second, .to = "/usr" },
+    };
+    try testing.expectError(error.Failed, assemble.assemble(context, base, &adds));
+    try testing.expectEqual(1, ws.failed_add);
+    const path = failure.conflict.path[0..failure.conflict.path_len];
+    try testing.expectEqualStrings("/usr/bin/sh", path);
+    try testing.expectEqual(0, assemble.earlier_source(context, &adds, 1, path).?);
+    var diag: Diag = undefined;
+    diag.reset();
+    const before: diagnose.AddText = .{ .from = "tool", .to = "/usr/bin" };
+    diagnose.assembly_refused(&diag, &failure, 1, "other", "/usr", before);
+    const expected = ".image.add tool -> /usr/bin has a file at /usr/bin/sh; " ++
+        ".image.add other -> /usr brings a file";
+    try testing.expectEqualStrings(expected, diag.last_cause().?);
 }

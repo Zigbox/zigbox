@@ -172,6 +172,8 @@ pub fn resolve(
 const Encoder = struct {
     out: []u8,
     len: u32,
+    /// The field being written: the one that overflowed if a write fails.
+    field: Refusal = .entrypoint,
 
     fn bytes(encoder: *Encoder, data: []const u8) error{TooLarge}!void {
         assert(encoder.len <= encoder.out.len);
@@ -201,17 +203,34 @@ const Encoder = struct {
 
 /// The record's bytes in `buffer`; `TooLarge` only for a config past the bounds of the file.
 pub fn encode(record: *const Record, buffer: []u8) error{TooLarge}![]const u8 {
+    var field: Refusal = undefined;
+    return encode_field(record, buffer, &field);
+}
+
+/// `encode`, and on `TooLarge` the field that did not fit in `field`.
+pub fn encode_field(
+    record: *const Record,
+    buffer: []u8,
+    field: *Refusal,
+) error{TooLarge}![]const u8 {
     assert(buffer.len >= magic.len + 4 + constants.store_digest_bytes);
     var encoder: Encoder = .{ .out = buffer, .len = 0 };
+    errdefer field.* = encoder.field;
     try encoder.bytes(magic);
     try encoder.int(record_version);
     try encoder.bytes(&record.tree.bytes);
     const settings = &record.config.settings;
+    encoder.field = .entrypoint;
     try encoder.list(settings, .entrypoint);
+    encoder.field = .cmd;
     try encoder.list(settings, .cmd);
+    encoder.field = .env;
     try encoder.list(settings, .env);
+    encoder.field = .workdir;
     try encoder.string(settings.get(.workdir));
+    encoder.field = .user;
     try encoder.string(settings.get(.user));
+    encoder.field = .labels;
     try encoder.int(record.config.labels_count);
     for (0..record.config.labels_count) |at| {
         try encoder.string(record.config.label_key(@intCast(at)));

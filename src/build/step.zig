@@ -616,6 +616,7 @@ fn import_output(store: *Store, job: *Job, diag: *Diag) Error!void {
         .drop_xattrs = true,
         .refuse_special = .{ .context = &refusal, .call = Refusal.call },
         .save_root = true,
+        .keep_existing_root = true,
         .label = labelled,
     };
     const ws = job.ws;

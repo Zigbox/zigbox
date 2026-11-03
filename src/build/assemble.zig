@@ -100,6 +100,50 @@ pub fn assemble(context: Context, base: ?Digest, adds: []const Add) Error!Digest
     return image;
 }
 
+/// Which earlier add put what is at `path` (as a `Conflict` holds it) into the image: the last
+/// of `adds[0..failed]` whose destination and tree have that path, or null for the base. Only
+/// for the message of a conflict, so it reads trees without being quick; any failure to read
+/// answers null.
+pub fn earlier_source(context: Context, adds: []const Add, failed: u32, path: []const u8) ?u32 {
+    assert(failed < adds.len);
+    assert(path.len > 0);
+    assert(path[0] == '/');
+    var at = failed;
+    while (at > 0) {
+        at -= 1;
+        if (has_path(context, adds[at], path)) return at;
+    }
+    return null;
+}
+
+/// Whether the tree the add makes (its source under its destination) has `path`.
+fn has_path(context: Context, add: Add, path: []const u8) bool {
+    var wanted = std.mem.tokenizeScalar(u8, path, '/');
+    var given = std.mem.tokenizeScalar(u8, add.to, '/');
+    while (given.next()) |part| {
+        const want = wanted.next() orelse return true; // The path is a directory on the way.
+        if (!std.mem.eql(u8, want, part)) return false;
+    }
+    var current = add.source;
+    while (wanted.next()) |name| {
+        var errno: u16 = 0;
+        const bytes = trees.load(context.store, current, &context.ws.dst, &errno) catch {
+            return false;
+        };
+        var decoder: tree.Decoder = undefined;
+        decoder.init(bytes) catch return false;
+        var entry: tree.Entry = undefined;
+        const found = while (decoder.next(&entry) catch return false) {
+            if (std.mem.eql(u8, entry.name, name)) break true;
+        } else false;
+        if (!found) return false;
+        if (wanted.peek() == null) return true;
+        if (entry.kind != .dir) return false;
+        current = entry.subtree;
+    }
+    return true; // The path is the add's destination itself.
+}
+
 fn io_failed(context: Context, err: host_mod.Error, step: []const u8) Error {
     assert(step.len > 0);
     const errno = context.store.fs.last_errno();

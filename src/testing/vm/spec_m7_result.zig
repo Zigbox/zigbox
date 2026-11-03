@@ -2,6 +2,8 @@
 //! project, `compile` and `notice` into an image with a config, as the user `demo` in the net
 //! project (`zn`), with `alpine:3.20`.
 //!
+//!   0. The pulled base is removed from the store, so the build pulls it by the lock's digest:
+//!      one `pulling alpine:3.20@sha256:...` line on stderr (`--output json` keeps stdout clean).
 //!   1. `zbx build --output json` exits 0; `compile`, `notice` and `image` are all `miss`, and
 //!      the `[start_ms, end_ms]` intervals of `compile` and `notice` overlap (each sleeps).
 //!   2. `zbx run <result digest>` runs the config's entrypoint and prints `hello from zigbox`.
@@ -54,10 +56,21 @@ const build_file =
     "        .config = .{ .entrypoint = .{ \"/usr/local/bin/hello\" },\n" ++
     "                     .env = .{ \"GREETING_STYLE=plain\" } },\n    },\n}\nEOF\n";
 
+/// Drops the pulled base from the store, so the build below must pull it by the lock's digest.
+const script_drop =
+    prelude ++
+    "L=$($Z store ls --output json | grep -o '\"digest\":\"b3:[a-f0-9]*\",\"kind\":" ++
+    "\"[a-z]*\",\"time\":[0-9]*,\"files\":[0-9]*,\"bytes\":[0-9]*,\"source\":" ++
+    "\"[^\"]*alpine[^\"]*\"' | sed 's/.*\"digest\":\"\\([^\"]*\\)\".*/\\1/')\n" ++
+    "echo base_dropped=$(echo $L | wc -w)\n" ++
+    "for D in $L; do $Z store rm $D > /dev/null 2>&1; done\n" ++
+    "echo base_left=$($Z store ls --output json | grep -c 'alpine')\n";
+
 const script_build =
     prelude ++ build_file ++
     "$Z build --output json > /tmp/r1.out 2> /tmp/r1.err\n" ++
     "echo result_status=$?\n" ++
+    "echo result_pulls=$(grep -c '^pulling alpine:3.20@sha256:' /tmp/r1.err)\n" ++
     "echo result_rows=$(grep -o '\"step\":\"[a-z]*\",\"cache\":\"[a-z]*\"' /tmp/r1.out |" ++
     " tr -d '\"' | sed 's/step://;s/,cache:/:/' | sort | tr '\\n' ' ')\n" ++
     "echo result_digest=$(sed -n 's/.*\"build_result\":{\"digest\":\"\\([^\"]*\\)\".*/\\1/p'" ++
@@ -77,6 +90,7 @@ const script_use =
     "rm -f $P/zbx.build.zon\n";
 
 comptime {
+    std.debug.assert(script_drop.len <= script_bytes_max);
     std.debug.assert(script_build.len <= script_bytes_max);
     std.debug.assert(script_use.len <= script_bytes_max);
 }
@@ -94,6 +108,10 @@ fn span(output: []const u8, key: []const u8) ![2]u64 {
 
 /// The assertions of the part, over the script's output.
 pub fn check_result(output: []const u8) !void {
+    const dropped = spec.value_of(output, "base_dropped") orelse return error.KeyMissing;
+    if (std.mem.eql(u8, dropped, "0")) return error.BaseNotDropped;
+    try spec.expect_value(output, "base_left", "0");
+    try spec.expect_value(output, "result_pulls", "1");
     try spec.expect_value(output, "result_status", "0");
     try spec.expect_value(output, "result_rows", "compile:miss image:miss notice:miss");
     const digest = spec.value_of(output, "result_digest") orelse return error.KeyMissing;
@@ -122,7 +140,7 @@ pub fn step_result(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const chown = "chown demo:demo /home/demo/build-m7r-*.sh && " ++
         "chmod 755 /home/demo/build-m7r-*.sh";
     _ = try common.expect_exit(session, out, step_name, "rm -f " ++ results_path, 0);
-    const scripts = [_][]const u8{ script_build, script_use };
+    const scripts = [_][]const u8{ script_drop, script_build, script_use };
     inline for (scripts, 0..) |text, at| {
         const path = std.fmt.comptimePrint("/home/demo/build-m7r-{d}.sh", .{at});
         try H.put_file(session, path, text);
@@ -138,7 +156,8 @@ pub fn step_result(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 
 const sample = "b3:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 const good =
-    "result_status=0\nresult_rows=compile:miss image:miss notice:miss\n" ++
+    "base_dropped=1\nbase_left=0\nresult_pulls=1\nresult_status=0\n" ++
+    "result_rows=compile:miss image:miss notice:miss\n" ++
     "result_digest=" ++ sample ++ "\nspan_compile=10 3400\nspan_notice=12 3300\n" ++
     "result_run=hello from zigbox\n" ++
     "result_inspect={\"schema\":\"zbx.build_result/1\",\"digest\":\"" ++ sample ++
@@ -172,6 +191,9 @@ test "check_result refuses each property that is broken" {
         .{ .text = replaced("GREETING_STYLE=plain", "GREETING=1"), .err = error.InspectWrong },
         .{ .text = replaced("(3 hits", "(2 hits"), .err = error.AgainWrong },
         .{ .text = replaced("result_digest=b3:", "result_digest=b4:"), .err = error.DigestWrong },
+        .{ .text = replaced("base_dropped=1", "base_dropped=0"), .err = error.BaseNotDropped },
+        .{ .text = replaced("base_left=0", "base_left=1"), .err = wrong },
+        .{ .text = replaced("result_pulls=1", "result_pulls=0"), .err = wrong },
     };
     for (cases) |case| try std.testing.expectError(case.err, check_result(case.text));
 }

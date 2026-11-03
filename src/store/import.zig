@@ -92,6 +92,9 @@ pub const Options = struct {
     refuse_special: ?Refuse = null,
     /// Clear: no root record is written (M7: a build step's output is rooted by its cache entry).
     save_root: bool = true,
+    /// Set: a root record the tree already has is left as it is, whoever made it (M7: a build
+    /// step's output may be a tree the user rooted; the build must not replace their record).
+    keep_existing_root: bool = false,
 };
 
 /// Raises the diagnostic for a file the import refuses: `relative` is its path below the
@@ -856,9 +859,23 @@ const Run = struct {
 
     // ---- The root ---------------------------------------------------------------------------
 
-    fn save_root(run: *Run, source: []const u8) Error!void {
+    fn save_root(run: *Run, source: []const u8, keep_existing: bool) Error!void {
         assert(source.len > 0);
         assert(run.depth == 0);
+        var root: roots.Root = undefined;
+        if (keep_existing) {
+            var errno: u16 = 0;
+            // Any answer but "not there" means a record is, or cannot be told apart from one.
+            roots.load(run.store, run.result.digest, &root, &errno) catch |err| {
+                if (err != error.NotFound) return;
+                return run.write_root(source);
+            };
+            return;
+        }
+        return run.write_root(source);
+    }
+
+    fn write_root(run: *Run, source: []const u8) Error!void {
         var root: roots.Root = undefined;
         root.digest = run.result.digest;
         root.kind = .import;
@@ -889,7 +906,9 @@ pub fn import(
     try diagnose.hold(diag, store, .shared, "import", "importing a directory");
     defer lock.release(store);
     var run = try walk(store, ws, source, options, result, diag);
-    if (options.save_root) try run.save_root(options.label orelse source);
+    if (options.save_root) {
+        try run.save_root(options.label orelse source, options.keep_existing_root);
+    }
     assert(run.depth == 0);
 }
 

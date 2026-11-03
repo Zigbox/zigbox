@@ -2467,7 +2467,8 @@ fn check_user_flag(invocation: *const Invocation, diag: *Diag) RunError!void {
     const echo = echo_of(&storage, text);
     diag.raise(.E0015);
     diag.while_("reading the command line", .{});
-    diag.cause("--user '{s}': a directory or a tree has no image to look the user up in", .{echo});
+    const kind = if (operand.len == 0) "a directory" else "a digest";
+    diag.cause("--user '{s}': {s} has no image to look the user up in", .{ echo, kind });
     diag.context("arg", "{s}", .{echo});
     diag.fix(.{
         .sentence = "run an image by name, which --user can look a name up in:",
@@ -3346,7 +3347,7 @@ test "snapshot: explain prints the registry text on stdout, exit 0" {
 test "snapshot: explain --output json is the zbx.explain/1 document; schemas for it and lock" {
     // Goal: the machine form of `explain` is exactly the checked-in document, wherever the option
     // stands; an unknown code is still a diagnostic and prints nothing on stdout; the schemas
-    // `zbx schema` prints for it and for `lock show` are the checked-in text.
+    // `zbx schema` prints for it, `lock show`, `build` and `inspect` are the checked-in text.
     var sim: HostSim = undefined;
     const want = @embedFile("testdata/explain_E0001.json.txt");
     const before = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E0001" };
@@ -3365,6 +3366,8 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
     const goldens = [_]struct { topic: [:0]const u8, text: []const u8 }{
         .{ .topic = "explain", .text = @embedFile("testdata/schema_explain.stdout.txt") },
         .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
+        .{ .topic = "build", .text = @embedFile("testdata/schema_build.stdout.txt") },
+        .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };

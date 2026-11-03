@@ -138,6 +138,7 @@ pub fn run_steps(
         .row_failed = null,
         .json = json,
         .started_ms = host.monotonic_ms(),
+        .started_s = host.time_now(),
         .name_width = name_width(&loaded.file),
         .hits = 0,
         .misses = 0,
@@ -268,6 +269,8 @@ pub const Context = struct {
     row_failed: ?Error,
     json: bool,
     started_ms: u64,
+    /// The wall clock at the start, in the seconds a root record keeps (`unroot`).
+    started_s: u64,
     name_width: u8,
     hits: u32,
     misses: u32,
@@ -498,10 +501,10 @@ pub const Context = struct {
     /// Reads the locked base's image record into `ws.image`. An image the lock names and the
     /// store lacks is pulled by the locked manifest digest; one the lock does not name is
     /// refused (E0804), because a build never resolves a tag itself.
-    fn load_base(
+    pub fn load_base(
         context: *Context,
         reference: []const u8,
-        name: []const u8,
+        name: ?[]const u8,
     ) Error!*const lock_file.Entry {
         const ws = context.ws;
         const at = ws.locking.lock.find(reference) orelse {
@@ -523,7 +526,7 @@ pub const Context = struct {
     }
 
     /// A lock entry that cannot be pulled by digest (its reference does not parse again).
-    fn stale_lock(context: *Context, name: []const u8, reference: []const u8) Error {
+    fn stale_lock(context: *Context, name: ?[]const u8, reference: []const u8) Error {
         diagnose.base_not_locked(context.diag, name, reference, true);
         return error.Failed;
     }
@@ -539,7 +542,7 @@ pub const Context = struct {
     fn pull_locked(
         context: *Context,
         reference: []const u8,
-        name: []const u8,
+        name: ?[]const u8,
         entry: *const lock_file.Entry,
     ) Error!void {
         const ws = context.ws;
@@ -561,6 +564,7 @@ pub const Context = struct {
             .platform = .{ .architecture = architecture },
             .mirrors = mirrors orelse "",
         };
+        try context.say_pulling(by_digest);
         var pulled: pull_lib.Result = undefined;
         const import_ws = &ws.step.import;
         const host = context.host;
@@ -569,7 +573,25 @@ pub const Context = struct {
         pull_lib.pull(host, facts, &pulling, null, &ws.pull, import_ws, &pulled, diag) catch {
             return error.Failed;
         };
-        assert(pulled.manifest_digest.eql(entry.manifest));
+        if (!pulled.manifest_digest.eql(entry.manifest)) {
+            const returned = pulled.manifest_digest.text();
+            const locked = entry.manifest.text();
+            diagnose.locked_manifest_mismatch(context.diag, reference, &returned, &locked);
+            return error.Failed;
+        }
+    }
+
+    /// `pulling <base>@<digest>`: a pull can take a while, and the report has no row for it. On
+    /// stderr under `--output json`, so stdout stays one record per line.
+    fn say_pulling(context: *Context, by_digest: []const u8) Error!void {
+        var line: [constants.reference_bytes_max + 16]u8 = undefined;
+        const format = "pulling {s}\n";
+        const text = std.fmt.bufPrint(&line, format, .{by_digest}) catch unreachable; // Fits.
+        if (!context.json) return context.emit(text);
+        context.host.write_all(.stderr, text) catch |err| {
+            errors.output_failed(context.diag, .stderr, err, context.host.last_errno());
+            return error.OutputFailed;
+        };
     }
 
     fn import_inputs(context: *Context, index: u8) Error!Digest {
@@ -617,14 +639,17 @@ pub const Context = struct {
     }
 
     /// The entry roots the output now: drops the root the step's import left (N8). Only a root
-    /// that is the step's own (its source starts with `build:`) goes, and a failure to drop it is
-    /// no failure of the build: the next `store gc` shows the root and the user may remove it.
+    /// this build made goes: its source starts with `build:` and it was written at or after the
+    /// build's start; a root the user made earlier (the import left it as it was) stays. A
+    /// failure to drop it is no failure of the build: the next `store gc` shows the root and the
+    /// user may remove it.
     fn unroot(context: *Context, output: Digest) void {
         const store = context.store;
         var root: roots.Root = undefined;
         var errno: u16 = 0;
         roots.load(store, output, &root, &errno) catch return;
         if (!std.mem.startsWith(u8, root.source_text(), step_mod.output_root_prefix)) return;
+        if (root.time < context.started_s) return;
         roots.remove(store, output) catch {};
     }
 
@@ -711,7 +736,7 @@ pub const Context = struct {
     /// The image step: the base, the adds and the config become the image tree and the build
     /// record. Runs after every step has an output, in this process, under one shared lock so
     /// that a gc cannot take the trees assembled before the cache entry roots them.
-    fn build_image(context: *Context) Error!void {
+    pub fn build_image(context: *Context) Error!void {
         const ws = context.ws;
         const file = &context.loaded.file;
         ws.timings[image_slot].start_ms = context.elapsed();
@@ -719,7 +744,7 @@ pub const Context = struct {
         var base: *const images.Settings = &ws.empty_settings;
         ws.empty_settings.clear();
         if (file.image.base) |text| {
-            _ = try context.load_base(file.text(text), "image");
+            _ = try context.load_base(file.text(text), null);
             base_tree = ws.image.tree;
             base = &ws.image.settings;
         }
@@ -729,8 +754,10 @@ pub const Context = struct {
         }
         const adds = try context.fill_adds();
         ws.record.tree = std.mem.zeroes(Digest);
-        const config_bytes = result_mod.encode(&ws.record, &ws.record_bytes) catch {
-            diagnose.config_too_large(context.diag, .labels);
+        var overflowed: result_mod.Refusal = undefined;
+        const encoded = result_mod.encode_field(&ws.record, &ws.record_bytes, &overflowed);
+        const config_bytes = encoded catch {
+            diagnose.config_too_large(context.diag, overflowed);
             return error.Failed;
         };
         const spec: key_mod.ImageSpec = .{
@@ -806,13 +833,28 @@ pub const Context = struct {
                 },
                 else => {
                     const file = &context.loaded.file;
-                    const add = file.adds_slice()[ws.assembly.failed_add];
+                    const failed = ws.assembly.failed_add;
+                    const add = file.adds_slice()[failed];
+                    var earlier: ?diagnose.AddText = null;
+                    if (ws.assembly_failure == .conflict) {
+                        const conflict = &ws.assembly_failure.conflict;
+                        const path = conflict.path[0..conflict.path_len];
+                        const found = assemble.earlier_source(assembling, adds, failed, path);
+                        if (found) |at| {
+                            const before = file.adds_slice()[at];
+                            earlier = .{
+                                .from = file.text(before.from),
+                                .to = file.text(before.to),
+                            };
+                        }
+                    }
                     diagnose.assembly_refused(
                         context.diag,
                         &ws.assembly_failure,
-                        ws.assembly.failed_add,
+                        failed,
                         file.text(add.from),
                         file.text(add.to),
+                        earlier,
                     );
                 },
             }
@@ -830,13 +872,37 @@ pub const Context = struct {
                 &digest.text(), context.hits, context.misses, total,
             }) catch unreachable; // `row_bytes` holds it.
         } else {
-            writer.print("built {s}  ({d} hits, {d} misses, {d}.{d} s)\n", .{
-                &digest.text(), context.hits, context.misses, total / 1000, total % 1000 / 100,
+            var hits: [16]u8 = undefined;
+            var misses: [16]u8 = undefined;
+            writer.print("built {s}  ({s}, {s}, {d}.{d} s)\n", .{
+                &digest.text(),
+                count_text(&hits, context.hits, "hit", "hits"),
+                count_text(&misses, context.misses, "miss", "misses"),
+                total / 1000,
+                total % 1000 / 100,
             }) catch unreachable; // `row_bytes` holds it.
         }
         return context.emit(writer.buffered());
     }
 };
+
+/// `1 hit`, `2 hits`: the count and its noun, the singular only for one.
+fn count_text(buffer: *[16]u8, count: u32, one: []const u8, many: []const u8) []const u8 {
+    assert(one.len < many.len);
+    const word = if (count == 1) one else many;
+    return std.fmt.bufPrint(buffer, "{d} {s}", .{ count, word }) catch unreachable; // Fits.
+}
+
+test "the footer counts say hit once and hits otherwise" {
+    // Goal: the grammar of the footer's counts. Method: 0, 1 and 2 of each noun.
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("0 hits", count_text(&buffer, 0, "hit", "hits"));
+    try std.testing.expectEqualStrings("1 hit", count_text(&buffer, 1, "hit", "hits"));
+    try std.testing.expectEqualStrings("2 hits", count_text(&buffer, 2, "hit", "hits"));
+    try std.testing.expectEqualStrings("1 miss", count_text(&buffer, 1, "miss", "misses"));
+    try std.testing.expectEqualStrings("2 misses", count_text(&buffer, 2, "miss", "misses"));
+    try std.testing.expectEqualStrings("0 misses", count_text(&buffer, 0, "miss", "misses"));
+}
 
 fn fill_lists(
     file: *const file_mod.BuildFile,
