@@ -87,6 +87,7 @@ jobs:
           - seccomp
           - tree
           - store
+          - peer
           - commit
           - gc
           - reference
