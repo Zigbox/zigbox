@@ -118,6 +118,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .die_with_parent => try host.die_with_parent(),
         .await_release => try await_release(child),
         .set_hostname => try host.set_hostname(plan.hostname()),
+        .set_umask => host.set_umask(plan.umask),
         .make_mounts_private => try mount(host, .make_private, target, null),
         .bind_rootfs => try mount(host, .bind_tree, target, plan.text(step.source)),
         .mount_overlay => try mount(host, .overlay, target, plan.text(step.source)),

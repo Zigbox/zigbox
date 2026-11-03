@@ -40,6 +40,7 @@ const gc = @import("store/gc.zig");
 const logs_commands = @import("logs_commands.zig");
 const exec_commands = @import("exec_commands.zig");
 const pull_commands = @import("pull_commands.zig");
+const build_commands = @import("build_commands.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const Sha256 = @import("registry/digest.zig").Sha256;
 
@@ -64,6 +65,7 @@ const help_text =
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
+    \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
     \\                  document, see zbx schema explain)
@@ -181,6 +183,13 @@ const help_text =
     \\  "zbx schema pull", which has the tree's digest
     \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
     \\
+    \\build:
+    \\  zbx build --graph [-f <file>]
+    \\  reads zbx.build.zon in the project directory (the one with zbx.lock, else the working
+    \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
+    \\  prints the steps in the order a build starts them, then the image, without running
+    \\  anything (--output json: nodes and edges, see zbx schema build-graph)
+    \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
     \\  --last          the most recent run; <name> is the run called that
@@ -209,6 +218,7 @@ comptime {
 }
 
 pub const Command = enum {
+    build,
     bundle,
     commit,
     doctor,
@@ -400,6 +410,12 @@ pub const PullArgs = struct {
     resolve_only: bool = false,
 };
 
+/// What `build` was given: `--graph`, and `-f`'s file.
+pub const BuildArgs = struct {
+    graph: bool = false,
+    file: ?[]const u8 = null,
+};
+
 pub const Invocation = struct {
     command: Command,
     /// The one operand of `explain`; null for commands that take none.
@@ -415,6 +431,8 @@ pub const Invocation = struct {
     pull: PullArgs,
     /// Set only when `command` is `state`.
     state: StateArgs,
+    /// Set only when `command` is `build`.
+    build: BuildArgs,
 };
 
 pub const ParseError = error{
@@ -478,6 +496,9 @@ const Token = union(enum) {
     resolve_only,
     /// `-o`, whose value is the next argument: `state export`'s file.
     out_next,
+    /// `--graph`, and `-f` whose value is the next argument: `build`'s.
+    graph,
+    file_next,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -529,6 +550,8 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
+    if (std.mem.eql(u8, argument, "--graph")) return .graph;
+    if (std.mem.eql(u8, argument, "-f")) return .file_next;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -552,6 +575,7 @@ fn output_format_named(value: []const u8) ?OutputFormat {
 fn command_named(name: []const u8) ?Command {
     assert(name.len <= constants.arg_bytes_max); // collect() refuses longer arguments.
     var found: ?Command = null;
+    if (std.mem.eql(u8, name, "build")) found = .build;
     if (std.mem.eql(u8, name, "bundle")) found = .bundle;
     if (std.mem.eql(u8, name, "commit")) found = .commit;
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
@@ -576,7 +600,7 @@ fn command_named(name: []const u8) ?Command {
 fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
-        .bundle, .doctor, .help, .ps, .run, .version => 0,
+        .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .lock, .logs, .exec => 1,
         .store, .state => 2,
     };
@@ -613,10 +637,10 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next, .out_next => {
+            .confirm_next, .out_next, .file_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash, .resolve_only, .by_image => {},
+            .confirm_inline, .trash, .resolve_only, .by_image, .graph => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
             .operand => {
@@ -629,6 +653,22 @@ pub fn scan_options(args: []const []const u8) Options {
     // `exec` passes its command's code through as `run` does, so it uses the same codes.
     options.runs_container = first != null and (first.? == .run or first.? == .exec);
     return options;
+}
+
+/// `--output=VALUE`, or `--output VALUE` with the value the next argument: checked here, and
+/// read again by `scan_options`.
+fn take_output(diag: *Diag, args: []const []const u8, index: *usize) ParseError!void {
+    assert(index.* < args.len);
+    switch (classify(args[index.*])) {
+        .output_inline => |value| try check_output_value(diag, value),
+        .output_next => {
+            if (index.* + 1 == args.len) return bad_output_value(diag, null);
+            index.* += 1;
+            try check_output_value(diag, args[index.*]);
+        },
+        else => unreachable, // The caller matched one of the two.
+    }
+    assert(index.* < args.len);
 }
 
 /// Maps the arguments after the program name to an invocation. Pure; on failure the diagnostic
@@ -645,6 +685,7 @@ pub fn parse(
     var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
     var bundle_args: BundleArgs = .{};
     var pull_args: PullArgs = .{};
+    var build_args: BuildArgs = .{};
     var gc_args: GcArgs = .{};
     var export_file: ?[]const u8 = null;
     var index: usize = 0;
@@ -654,12 +695,7 @@ pub fn parse(
         const is_bundle = count > 0 and command_named(operands[0]) == .bundle;
         switch (classify(argument)) {
             .verbose => {},
-            .output_inline => |value| try check_output_value(diag, value),
-            .output_next => {
-                if (index + 1 == args.len) return bad_output_value(diag, null);
-                index += 1;
-                try check_output_value(diag, args[index]);
-            },
+            .output_inline, .output_next => try take_output(diag, args, &index),
             .run_option_next, .run_option_inline, .env_next, .env_inline => {
                 try take_run_or_env(diag, &run_args, operands[0..count], args, &index);
             },
@@ -686,6 +722,9 @@ pub fn parse(
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
             .out_next => try take_out_option(diag, &export_file, operands[0..count], args, &index),
             .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
+            .graph, .file_next => {
+                try take_build_option(diag, &build_args, operands[0..count], args, &index);
+            },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -698,6 +737,7 @@ pub fn parse(
     invocation.run = run_args;
     invocation.bundle = bundle_args;
     invocation.pull = pull_args;
+    invocation.build = build_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
     invocation.state.out = export_file;
@@ -756,6 +796,51 @@ fn take_out_option(
     if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
     index.* += 1;
     export_file.* = args[index.*];
+}
+
+/// `--graph` and `-f FILE`, which only `build` takes.
+fn take_build_option(
+    diag: *Diag,
+    build_args: *BuildArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    const token = classify(argument);
+    assert(switch (token) {
+        .graph, .file_next => true,
+        else => false,
+    });
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .build) return unknown_option(diag, argument);
+    if (token == .graph) {
+        build_args.graph = true;
+        return;
+    }
+    if (build_args.file != null) return file_twice(diag);
+    if (index.* + 1 == args.len) return missing_option_value(diag, "-f");
+    index.* += 1;
+    if (args[index.*].len == 0) return missing_option_value(diag, "-f");
+    build_args.file = args[index.*];
+}
+
+/// `-f` a second time: one build file per build, and the second would be silently ignored.
+fn file_twice(diag: *Diag) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    diag.cause("-f given twice; a build reads one build file", .{});
+    diag.context("cmd", "{s}", .{"build"});
+    diag.context("arg", "{s}", .{"-f"});
+    diag.fix(.{
+        .sentence = "give -f once, with the build file:",
+        .command = "zbx build --graph -f build/zbx.build.zon",
+        .template = true,
+    });
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
 }
 
 /// `--resolve-only`, which only `pull` takes.
@@ -1550,6 +1635,12 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         diag.fix(
             .{ .sentence = "name one run, or take the latest:", .command = "zbx bundle --last" },
         );
+    } else if (command == .build) {
+        diag.fix(.{
+            .sentence = "give -f once, with the build file:",
+            .command = "zbx build --graph -f build/zbx.build.zon",
+            .template = true,
+        });
     } else if (operands_count(command) == 0) {
         diag.fix_with("run it on its own:", "zbx {s}", .{name});
     } else if (command == .stop) {
@@ -1572,7 +1663,16 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     return error.UnexpectedArgument;
 }
 
-const Missing = enum { code, rootfs, command, target, container, topic, reference, action };
+const Missing = enum {
+    code,
+    rootfs,
+    command,
+    target,
+    container,
+    topic,
+    reference,
+    action,
+};
 
 /// What `pull` lacks: its reference.
 fn missing_pull(diag: *Diag, missing: Missing) void {
@@ -1657,6 +1757,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 
     if (command == .schema) assert(missing == .topic);
     if (command == .lock) assert(missing == .action);
+    assert(command != .build);
     if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
 
     assert(command != .doctor);
@@ -1702,10 +1803,13 @@ fn missing_option_value(diag: *Diag, option: []const u8) ParseError {
     diag.while_("reading the command line", .{});
     diag.cause("{s} needs a value, and none follows it", .{option});
     const export_option = std.mem.eql(u8, option, "-o");
+    const build_option = std.mem.eql(u8, option, "-f");
     diag.fix(.{
         .sentence = "give it a value:",
         .command = if (export_option)
             "zbx state export pgdata -o pgdata.tar.gz"
+        else if (build_option)
+            "zbx build --graph -f build/zbx.build.zon"
         else
             "zbx run --rootfs ./alpine --name web-1 -- /bin/sh",
         .template = true,
@@ -1818,6 +1922,8 @@ pub const Storage = struct {
     logs: logs_commands.Workspace,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
+    /// `zbx build`: the build file, its graph and the checks' findings.
+    build: build_commands.Workspace,
     /// A run's `--mount` sources, resolved before the image is looked for (`resolve_writable`),
     /// and the run's mounts with those sources in place of what was typed.
     run_mounts: mounts.Resolution,
@@ -1910,6 +2016,14 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             invocation.options.output == .json,
             diag,
         ) catch |err| return lock_error(err),
+        .build => build_commands.run(
+            host,
+            &storage.build,
+            invocation.build,
+            invocation.options.output == .json,
+            &storage.handle.facts,
+            diag,
+        ) catch |err| return build_error(err),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -1931,6 +2045,14 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .state => return run_state(host, invocation, storage, diag),
     }
     return constants.exit_ok;
+}
+
+fn build_error(err: build_commands.Error) RunError {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.Failed => error.CommandFailed,
+        error.OutputFailed => error.OutputFailed,
+    };
 }
 
 fn lock_error(err: lock_commands.Error) RunError {

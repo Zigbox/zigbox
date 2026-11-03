@@ -1,0 +1,6 @@
+error[ZBX-E0803]: a build input is refused
+  cause  input "escape" of step "a" resolves to '/home/alice/secret', outside
+         the project directory '/home/alice/hello'
+  fix    copy what it names into the project, and list the copy
+  more   zbx explain E0803 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0803.html

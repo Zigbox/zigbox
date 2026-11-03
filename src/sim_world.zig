@@ -239,6 +239,8 @@ pub const Process = struct {
     /// The write ends of the pipes that were this process's standard output and error
     /// (`SpawnFlags.output`): held while the command lives, so the readers see its end.
     output_ends: [2]?u32,
+    /// Its standard input was made /dev/null at its birth (`SpawnFlags.stdin_null`).
+    stdin_null: bool,
     /// The PID namespace the process is in, named by the host pid of its init (0: the host's),
     /// and the one its children are born in (another after `join_namespace(.pid)`). When an
     /// init ends, the kernel kills every other process of its namespace.
@@ -345,6 +347,8 @@ pub const World = struct {
     current: u8,
     pipes: [pipes_max]SimPipe,
     hostnames: [2]host.Text,
+    /// The last file mode creation mask a process set (`set_umask`), or null.
+    umask: ?u16,
     /// What a command that started ends with.
     command_exit: host.ExitStatus,
     /// Mounting `/dev/pts` is refused (an environment without devpts for users).
@@ -477,6 +481,7 @@ pub const World = struct {
         world.current = 0;
         for (&world.pipes) |*pipe| pipe.used = false;
         world.hostnames = .{ host.Text.from_slice("simhost"), host.Text.from_slice("simhost") };
+        world.umask = null;
         world.command_exit = .{ .exited = 0 };
         world.devpts_refused = false;
         world.overlay_refused = false;
@@ -515,6 +520,19 @@ pub const World = struct {
         world.exiting_until_ms = 0;
         world.oom_kills = 0;
         world.pids_max_hits = 0;
+        world.init_helpers();
+        world.init_exec();
+        // The host's own process is alive from the start, in the host's namespaces.
+        const first = &world.processes[0];
+        first.state = .running;
+        first.pid = world.take_pid();
+        _ = first.cwd.set("/");
+        assert(world.tables[0].count == 0);
+        assert(world.processes[1].state == .unused);
+    }
+
+    /// The parts of the model the helpers use: the keeper, pasta and the cgroup's leftovers.
+    fn init_helpers(world: *World) void {
         world.cgroup_stays = false;
         world.ended_memory_max = null;
         world.keeper_fork_errno = null;
@@ -527,14 +545,8 @@ pub const World = struct {
         world.pasta_stays = false;
         world.pasta_starts = 0;
         world.pasta_version_line = "pasta 2024_09_06.6b38f07\n";
-        world.init_exec();
-        // The host's own process is alive from the start, in the host's namespaces.
-        const first = &world.processes[0];
-        first.state = .running;
-        first.pid = world.take_pid();
-        _ = first.cwd.set("/");
-        assert(world.tables[0].count == 0);
-        assert(world.processes[1].state == .unused);
+        assert(world.ports_taken_count == 0);
+        assert(world.pasta_starts == 0);
     }
 
     /// The parts of the model `exec` uses: namespace handles, standard input, the terminal.
@@ -885,6 +897,7 @@ pub const World = struct {
         child.holds = parent.holds;
         child.table = parent.table;
         child.uts = parent.uts;
+        child.stdin_null = flags.stdin_null;
         if (flags.output) |pipes| {
             child.output_ends = .{ pipes.stdout, pipes.stderr };
             if (pipes.stdout) |handle| assert(parent.holds[end_index(handle)]);
@@ -2328,6 +2341,7 @@ fn unused_process() Process {
         .ports = undefined,
         .ports_count = 0,
         .output_ends = .{ null, null },
+        .stdin_null = false,
         .pid_namespace = 0,
         .children_pid_namespace = 0,
         .joined = 0,

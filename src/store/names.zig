@@ -89,7 +89,7 @@ pub const NameList = struct {
         var at_offset: u32 = 0;
         for (0..list.count) |index| {
             offsets[index] = at_offset;
-            at_offset += 1 + list.bytes[at_offset];
+            at_offset += 1 + @as(u32, list.bytes[at_offset]); // A name may be 255 bytes.
         }
         assert(at_offset == list.used);
         std.mem.sortUnstable(u32, offsets[0..list.count], list, offset_less);
@@ -104,6 +104,25 @@ pub const NameList = struct {
 };
 
 const testing = std.testing;
+
+test "a name of the longest length is sorted" {
+    // Goal: regression. The length byte of a 255-byte name was added to 1 as a u8 and
+    // overflowed, so any directory holding such a name crashed the importer. Method: two names
+    // of the longest length and a short one, sorted.
+    var storage: [600]u8 = undefined;
+    var list = NameList.init(&storage, 4);
+    const util = @import("../test_util.zig");
+    const longest = util.repeat('y', constants.store_name_bytes_max);
+    list.add(longest);
+    list.add("a");
+    list.add(util.repeat('x', constants.store_name_bytes_max));
+    try testing.expect(list.complete());
+    var offsets: [4]u32 = undefined;
+    const order = list.sorted(&offsets);
+    try testing.expectEqual(@as(usize, 3), order.len);
+    try testing.expectEqualStrings("a", list.at(order[0]));
+    try testing.expectEqualStrings(longest, list.at(order[2]));
+}
 
 test "names are kept whole, sorted by bytes, and the limits are flags" {
     // Goal: the collector's contract. Method: names in a shuffled order, then each limit.

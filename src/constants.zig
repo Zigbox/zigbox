@@ -523,10 +523,12 @@ pub const store_chunk_bytes: u32 = 1024 * 1024;
 /// The most chunks one object has, so the longest file is 4 GiB.
 pub const store_chunks_max: u32 = 4096;
 pub const store_file_bytes_max: u64 = @as(u64, store_chunk_bytes) * store_chunks_max;
-/// Every file of the store is stamped with this modification time (2000-01-01T00:00:00Z), so a
-/// materialized tree does not depend on when it was imported. Zero is avoided: some tools treat
-/// the epoch as "no time".
-pub const store_mtime_seconds: u64 = 946_684_800;
+/// Every file of the store, and every entry of a materialized tree, is stamped with this
+/// modification time, `SOURCE_DATE_EPOCH` (1980-01-01T00:00:00Z, the earliest time `zip`
+/// stores), so a farm does not depend on when it was imported and a build step sees no host
+/// time. Zero is avoided: some tools treat the epoch as "no time". Releases up to 0.2.0 stamped
+/// 2000-01-01; a farm built since repairs the objects it links.
+pub const store_mtime_seconds: u64 = build_source_date_epoch;
 /// The tree encoding's version byte.
 pub const store_tree_version: u8 = 1;
 
@@ -773,6 +775,92 @@ pub const blob_io_bytes: u32 = 64 * 1024;
 /// How many hosts one name may resolve to that are tried.
 pub const net_addresses_max: u32 = 8;
 
+// Build files (M7 slice 1, docs/briefs/M7-build.md): `zbx.build.zon`, read by
+// `src/build/file.zig`. Every list a file can hold has a bound here, and the parser refuses a
+// file past one with its line and column.
+/// The largest build file read. Its canonical rendering can be longer (indentation), so the
+/// parser itself accepts up to `build_render_bytes_max`.
+pub const build_file_bytes_max: u32 = 64 * 1024;
+/// The decoded bytes of every string in one file together.
+pub const build_pool_bytes: u32 = 64 * 1024;
+/// One string: an argv entry, an env entry, a path, a reference.
+pub const build_string_bytes_max: u32 = 4096;
+pub const build_steps_max: u32 = 64;
+/// A step's name: `[a-z0-9-]`, as a directory name under `/in` and in the report's column.
+pub const build_step_name_bytes_max: u32 = 32;
+pub const build_step_inputs_max: u32 = 64;
+/// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
+/// fewer than a run's mounts (`mounts_max`).
+pub const build_step_needs_max: u32 = 6;
+pub const build_step_argv_max: u32 = 64;
+pub const build_step_env_max: u32 = 32;
+/// A step's limits (docs/briefs/M7-build.md, "What a step is"): a step that runs past the timeout
+/// is ended (SIGTERM, then SIGKILL) and fails with E0805, as do one out of memory or PIDs. CPU is
+/// not limited: a build step is meant to use the machine.
+pub const build_step_timeout_ms: u32 = 30 * 60 * 1000;
+pub const build_step_memory_bytes: u64 = 1 << 30;
+pub const build_step_pids: u32 = 1024;
+/// `image.add`: step outputs spliced into the result.
+pub const build_image_adds_max: u32 = 32;
+/// `image.config`: `entrypoint` and `cmd` entries, `env` entries, and `labels`.
+pub const build_config_argv_max: u32 = 64;
+pub const build_config_env_max: u32 = 64;
+pub const build_config_labels_max: u32 = 32;
+/// A label's key: `[a-z0-9._/-]`.
+pub const build_label_key_bytes_max: u32 = 128;
+/// How much of a refused value a build file problem keeps, to name it.
+pub const build_problem_word_bytes_max: u32 = 64;
+/// The decimal digits of `.version`.
+pub const build_version_digits_max: u32 = 4;
+/// Bumped when what a step means changes (its mounts, its fixed environment, how its output is
+/// imported), so that no cache entry of the old meaning is a hit. A zbx patch release keeps it,
+/// and with it the cache.
+pub const build_step_format_version: u32 = 1;
+/// `SOURCE_DATE_EPOCH` for every step, 1980-01-01T00:00:00Z: the earliest time `zip` stores.
+/// Every file a step sees carries it as its mtime (`store_mtime_seconds`).
+pub const build_source_date_epoch: u64 = 315_532_800;
+/// A key's preimage (`build/key.zig`): one step's strings are at most the file's pool, its
+/// base's env at most an image's settings, and the rest (digests, needs, the fixed environment,
+/// the length prefixes) fits in the margin.
+pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max +
+    16 * 1024;
+/// A build cache entry (`build/cache.zig`): its fixed fields and a key's preimage.
+pub const build_cache_entry_bytes_max: u32 = 64 + build_key_preimage_bytes_max;
+/// The entries in `build/cache/` that gc follows. Each names a tree that gc keeps, so past this
+/// gc refuses (naming the limit) rather than free a tree an entry might still name.
+pub const build_cache_entries_max: u32 = 8192;
+/// The strings one file can hold, from the bounds above.
+pub const build_strings_max: u32 = 2 + build_steps_max *
+    (2 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
+        build_step_env_max) + 2 * build_image_adds_max + 2 * build_config_argv_max +
+    build_config_env_max + 2 * build_config_labels_max + 2;
+/// The canonical rendering of the largest file the parser accepts: every string escaped four
+/// bytes a byte with its quotes and separator, and the fixed text of every field and step.
+pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings_max +
+    build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
+
+comptime {
+    assert(build_cache_entry_bytes_max < store_tree_bytes_max);
+    assert(build_cache_entry_bytes_max < store_arena_bytes_max);
+    assert(build_cache_entries_max > build_steps_max);
+    // `/src`, `/out` and every needed step's `/in/<name>` are a run's mounts.
+    assert(build_step_needs_max + 2 <= mounts_max);
+    assert(build_step_needs_max < build_steps_max);
+    assert(build_image_adds_max <= build_steps_max);
+    // An input is a path: a string bound at least the path bound.
+    assert(build_string_bytes_max >= path_bytes_max);
+    assert(build_string_bytes_max <= build_pool_bytes);
+    assert(build_step_name_bytes_max < build_string_bytes_max);
+    assert(build_label_key_bytes_max < build_string_bytes_max);
+    // The parser reads its own rendering back, so the file bound is the smaller.
+    assert(build_file_bytes_max < build_render_bytes_max);
+    assert(build_pool_bytes <= build_render_bytes_max);
+    // A u32 offset holds any position in the rendering.
+    assert(build_render_bytes_max < std.math.maxInt(u32));
+    assert(build_problem_word_bytes_max <= std.math.maxInt(u8));
+    assert(build_problem_word_bytes_max > build_step_name_bytes_max);
+}
+
 // Fuzz runner.
 pub const fuzz_iterations_default: u32 = 10_000;
 pub const fuzz_iterations_max: u32 = 100_000_000;
@@ -1018,7 +1106,8 @@ comptime {
     const carry_items = diag_causes_count_max + diag_whiles_count_max;
     const carry_text = carry_items * (diag_field_bytes_max + 3) +
         diag_context_count_max * (diag_key_bytes_max + diag_field_bytes_max + 4) +
-        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 8) + 16;
+        diag_fixes_count_max * (diag_field_bytes_max + diag_command_bytes_max + 8) +
+        diag_summary_bytes_max + 3 + 16;
     assert(carry_text <= diag_carry_bytes_max);
     assert(diag_skip_depth_max > 0);
     assert(diag_skip_depth_max <= 16); // The skipper's stack is this many bytes.
@@ -1263,4 +1352,12 @@ comptime {
     assert(vm_idle_timeout_ms <= vm_idle_timeout_ms_max);
     assert(vm_idle_timeout_ms_min >= vm_idle_check_ms / 2);
     assert(vm_user_name_bytes_max + vm_home_bytes_max + 64 <= vm_line_bytes_max);
+}
+
+comptime {
+    assert(build_step_memory_bytes >= limit_memory_bytes_min);
+    assert(build_step_memory_bytes <= limit_memory_bytes_max);
+    assert(build_step_pids >= limit_pids_min);
+    assert(build_step_pids <= limit_pids_max);
+    assert(build_step_timeout_ms > 0);
 }

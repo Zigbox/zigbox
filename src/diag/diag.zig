@@ -119,6 +119,7 @@ pub const Whiles = List(Text, constants.diag_whiles_count_max, .newest);
 pub const Pairs = List(Pair, constants.diag_context_count_max, .oldest);
 pub const Fixes = List(Fix, constants.diag_fixes_count_max, .oldest);
 pub const Saved = text_util.Bounded(constants.state_path_bytes_max + 128);
+pub const Headline = text_util.Bounded(constants.diag_summary_bytes_max);
 
 /// Words the renderer uses as labels of its own, so a context key may not be one.
 pub const reserved_keys = [_][]const u8{ "while", "cause", "fix", "more", "report" };
@@ -134,6 +135,9 @@ pub const Diag = struct {
     /// Set only on ZBX-E0202, when the cause is a command that was not found: a container run
     /// then exits 127 where a command that cannot be run exits 126.
     command_missing: bool,
+    /// The first line in place of the code's summary, empty for the summary (M7: E0805 says
+    /// which step failed and how, `build step "fetch" failed: exit 4`). Cut to a summary's bound.
+    headline: Headline,
 
     /// Initialises in place: the struct is several kilobytes.
     pub fn reset(diag: *Diag) void {
@@ -144,9 +148,18 @@ pub const Diag = struct {
         diag.fixes.reset();
         diag.saved = .{};
         diag.command_missing = false;
+        diag.headline = .{};
         assert(diag.saved.len == 0);
         assert(diag.causes.count == 0);
         assert(diag.code == null);
+    }
+
+    /// Sets the first line, in place of the code's summary. Printable text, like every field.
+    pub fn set_headline(diag: *Diag, comptime format: []const u8, args: anytype) void {
+        assert(diag.code != null);
+        diag.headline = .{};
+        put(&diag.headline, format, args);
+        assert(diag.headline.len > 0);
     }
 
     /// Says that the E0202 being built is a command that was not found.
@@ -287,6 +300,9 @@ pub const Diag = struct {
         var writer = std.Io.Writer.fixed(out);
         // Cannot fail: the buffer holds the most a diagnostic can be (checked below).
         writer.print("{s}\n", .{codes.full_name(diag.code.?)}) catch unreachable;
+        if (diag.headline.len > 0) {
+            writer.print("h\t{s}\n", .{diag.headline.slice()}) catch unreachable; // Same bound.
+        }
         for (diag.whiles.slice()) |item| {
             writer.print("w\t{s}\n", .{item.slice()}) catch unreachable; // Same bound.
         }
@@ -323,6 +339,7 @@ pub const Diag = struct {
             if (line.len < 3 or line[1] != '\t') return false;
             const rest = line[2..];
             switch (line[0]) {
+                'h' => diag.set_headline("{s}", .{rest}),
                 'w' => diag.while_("{s}", .{rest}),
                 'c' => diag.cause("{s}", .{rest}),
                 'k' => {

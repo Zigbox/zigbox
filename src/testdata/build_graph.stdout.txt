@@ -1,0 +1,3 @@
+compile   base golang:1.23-alpine   inputs go.mod main.go
+notice    base alpine:3.20          inputs VERSION LICENSE
+image     base alpine:3.20          adds compile -> /usr/local/bin, notice -> /

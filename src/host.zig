@@ -163,6 +163,9 @@ pub const SpawnFlags = struct {
     /// parent keeps the read ends and closes the write ends itself. Null: the child's streams
     /// are the parent's.
     output: ?OutputPipes = null,
+    /// The child's standard input is /dev/null before it runs `entry`, not the parent's (a build
+    /// step must not read the terminal or a pipe of whoever started `zbx`).
+    stdin_null: bool = false,
     /// The child's parent is the caller's parent, not the caller (`CLONE_PARENT`): `exec`'s
     /// joiner forks the command this way, so that `zbx` waits for it directly. It takes no
     /// namespace flag: the child is born in the namespaces the caller joined.
@@ -454,6 +457,8 @@ pub const VTable = struct {
     bring_up_loopback: *const fn (context: *anyopaque) Error!void,
     symlink: *const fn (context: *anyopaque, target: [:0]const u8, link: [:0]const u8) Error!void,
     set_hostname: *const fn (context: *anyopaque, name: []const u8) Error!void,
+    /// Sets the calling process's file mode creation mask (`umask`); it cannot fail.
+    set_umask: *const fn (context: *anyopaque, mask: u16) void,
     /// Marks every descriptor above 2 close-on-exec (`close_range`), so none reaches the command.
     seal_descriptors: *const fn (context: *anyopaque) Error!void,
     /// Asks the kernel to kill this process when its parent dies (`PR_SET_PDEATHSIG`).
@@ -1006,6 +1011,12 @@ pub const Host = struct {
         assert(name.len > 0);
         assert(name.len <= constants.container_name_bytes_max);
         try host.vtable.set_hostname(host.context, name);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn set_umask(host: Host, mask: u16) void {
+        assert(mask <= 0o777);
+        host.vtable.set_umask(host.context, mask);
         assert(host.vtable.last_errno(host.context) == 0);
     }
 

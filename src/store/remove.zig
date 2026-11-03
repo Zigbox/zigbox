@@ -116,7 +116,7 @@ const Run = struct {
             run.depth -= 1;
             return;
         }
-        const length = frame.names.bytes[frame.at];
+        const length: u32 = frame.names.bytes[frame.at]; // Widened: a name may be 255 bytes.
         const name = frame.names.bytes[frame.at + 1 ..][0..length];
         frame.at += 1 + length;
         var path_len = frame.path_len;
@@ -227,4 +227,29 @@ test "a failure names the path and the error" {
     );
     try testing.expect(std.mem.startsWith(u8, test_failure.path_text(), "/d/"));
     try testing.expectEqual(@as(u16, 13), test_failure.errno);
+}
+
+test "real kernel: a name of 255 bytes is removed" {
+    // Goal: regression. The step past a name added its length byte to 1 as a u8, which
+    // overflowed for the longest name and crashed the removal. The simulator's paths are too
+    // short to hold such a name. Method: a directory in /tmp with a file of a 255-byte name,
+    // removed.
+    const linux = std.os.linux;
+    var real: @import("../host_real.zig").HostReal = .{};
+    const fs = real.interface().filesystem();
+    var storage: [64:0]u8 = @splat(0);
+    const text = try std.fmt.bufPrint(&storage, "/tmp/zbx-remove-{d}", .{linux.getpid()});
+    const root = storage[0..text.len :0];
+    try fs.make_directory(root, true);
+    const opened = linux.open(root, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(opened));
+    const name = @import("../test_util.zig").repeat('n', constants.store_name_bytes_max);
+    const flags: linux.O = .{ .CREAT = true, .CLOEXEC = true };
+    const created = linux.openat(@intCast(opened), name, flags, 0o644);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(created));
+    _ = linux.close(@intCast(created));
+    _ = linux.close(@intCast(opened));
+    try tree(fs, &test_ws, &test_arena, root, &test_failure);
+    try testing.expectError(error.NotFound, fs.lstat(root));
+    try testing.expectEqual(@as(u32, 0), real.open_count);
 }

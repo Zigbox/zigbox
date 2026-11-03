@@ -182,6 +182,13 @@ pub const Code = enum(u8) {
     W0701,
     W0702,
     W0703,
+    E0801,
+    E0802,
+    E0803,
+    E0804,
+    E0805,
+    E0806,
+    E0807,
     E1001,
     E1002,
     E1003,
@@ -2730,6 +2737,127 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0801,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't read the build file",
+        .explanation =
+        \\zbx build reads zbx.build.zon in the project directory (the nearest
+        \\directory up with a zbx.lock, else the working directory), or the file
+        \\named with -f, which must be inside the project. It is a small subset of
+        \\ZON: structs, strings, string lists, true and false, and .version = 1,
+        \\with // comments. The cause names the line and column and what was
+        \\expected there, or the value that is refused and why.
+        \\
+        \\The fields: .version and .image are required, .steps is optional. A
+        \\step has .name ([a-z0-9-], at most 32 bytes, not "image"), .base (an
+        \\image reference), .run (an argv), and optionally .inputs, .needs, .env
+        \\(KEY=VALUE) and .network. .image has an optional .base, .add (each with
+        \\.from, a step, and .to, an absolute path) and .config.
+        \\
+        \\Print what a file says, once it reads, with zbx build --graph.
+        ,
+    },
+    .{
+        .code = .E0802,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the build graph is invalid",
+        .explanation =
+        \\The steps of a build file form a graph: each step can name steps it
+        \\needs, whose outputs it sees under /in/<name>, and .image.add takes
+        \\outputs from steps. The graph is refused when two steps have the same
+        \\name, a need or an add names no step, a step lists a need twice or more
+        \\than 6, or steps need each other round. A cycle is named in need order:
+        \\a -> b -> a means a needs b and b needs a.
+        \\
+        \\Nothing runs before the whole graph is valid. zbx build --graph prints
+        \\it, in the order a build starts the steps.
+        ,
+    },
+    .{
+        .code = .E0803,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build input is refused",
+        .explanation =
+        \\A step's .inputs are files or directories of the project, written as
+        \\paths relative to the project directory (src/main.go: no leading /, no
+        \\. or .. part). Each is resolved with every symbolic link followed, and
+        \\must be there, be a file or a directory, and stay inside the project. A
+        \\link that leads out is refused naming where it leads, as a --mount
+        \\outside the project is: a build sees only what the project holds.
+        \\
+        \\Inputs are checked before anything runs.
+        ,
+    },
+    .{
+        .code = .E0804,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step's base is not locked",
+        .explanation =
+        \\Each step's .base is a reference that zbx.lock pins: a tag or a digest
+        \\reference, with the manifest and tree it resolved to. A build never
+        \\resolves a tag itself, so a base the lock does not list is refused
+        \\before anything runs. zbx pull <ref> pulls the image and records it in
+        \\zbx.lock; commit the lock with the build file so every build of the
+        \\project uses the same base.
+        ,
+    },
+    .{
+        .code = .E0805,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step failed",
+        .explanation =
+        \\A step runs its .run command in a container made from its base, with its
+        \\inputs read-only at /src, each needed step's output at /in/<name>, and
+        \\/out to write its output into. Only a step whose command exits 0 has an
+        \\output. The first line says how it ended: its exit code, a signal, out
+        \\of memory, the process limit, or the step's timeout (30 minutes), in the
+        \\words zbx run uses.
+        \\
+        \\A step has no network unless it says .network = true, so a step that
+        \\fetches something fails as one that cannot resolve a name. The step's
+        \\whole output is kept in its log.
+        \\
+        \\The step is also refused, with this code, when its environment is too
+        \\large: the base image's variables, the step's .env and the fixed ones
+        \\together are more than a command can be given. Remove variables from
+        \\.env or use a base with a smaller environment.
+        ,
+    },
+    .{
+        .code = .E0806,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a build step's output is refused",
+        .explanation =
+        \\What a step leaves in /out becomes its output tree, owned by 0:0, with
+        \\the modes the step wrote and no extended attributes. A tree holds files,
+        \\directories and symbolic links only, so a device file, a FIFO or a
+        \\socket left in /out fails the step instead of being dropped: a later
+        \\step or the image would miss it. An output larger than the store's
+        \\limits on files, paths or depth is refused as the store refuses any
+        \\tree (E0415).
+        ,
+    },
+    .{
+        .code = .E0807,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the image can't be made as declared",
+        .explanation =
+        \\.image in the build file declares the result: a base, the step outputs
+        \\added to it, and an optional .config saying how it runs. .config is
+        \\refused when a field is not what it can be: .workdir must be an
+        \\absolute path, .user is uid:gid in numbers (names are not looked up at
+        \\build time), each .env entry is KEY=VALUE, and a label key is
+        \\[a-z0-9._/-] and given once. The cause names the field and why.
+        ,
+    },
+    .{
         .code = .E1001,
         .severity = .@"error",
         .blame = .environment,
@@ -3187,6 +3315,7 @@ pub fn can_end_run(code: Code) bool {
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
+        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

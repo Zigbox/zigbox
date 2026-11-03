@@ -219,6 +219,12 @@ pub const Spec = struct {
     project: []const u8 = "",
     /// The user as the caller names it (`--user`, or the image's `User`), for a refusal's message.
     user_text: []const u8 = "",
+    /// The container's hostname (M7: a build step's is `build`), held to the rules of a name.
+    /// Null: the container's name, as before.
+    hostname: ?[]const u8 = null,
+    /// The file mode creation mask the command starts with (M7: a build step's is 022, so what
+    /// it writes does not depend on the caller's). Null: the caller's, inherited.
+    umask: ?u16 = null,
 };
 
 /// Null if `path` can be a working directory: absolute, no NUL, no ".." part, and short.

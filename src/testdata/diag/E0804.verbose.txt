@@ -1,0 +1,9 @@
+error[ZBX-E0804]: a build step's base is not locked
+  while  resolving the base of build step "fetch"
+  cause  base "docker.io/library/alpine:3.20" of step "fetch" is not in
+         zbx.lock, and a build never resolves a tag itself
+  step   fetch
+  base   docker.io/library/alpine:3.20
+  fix    pull it, which pins it in zbx.lock   zbx pull docker.io/library/alpine:3.20
+  more   zbx explain E0804
+  docs   https://zigbox.github.io/zigbox/errors/E0804.html

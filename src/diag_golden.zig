@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
+const build_diagnose = @import("build/diagnose.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -602,7 +603,80 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases;
+
+const build_project = "/home/alice/hello";
+
+/// The demo project, with `text` as its build file and the working directory in it.
+fn prepare_build_project(sim: *HostSim, text: []const u8) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    golden_files.put_dir("/home", 0o755);
+    golden_files.put_dir("/home/alice", 0o755);
+    golden_files.put_dir(build_project, 0o755);
+    golden_files.put_file(build_project ++ "/zbx.lock", 0o644, ".{ .version = 1 }\n");
+    golden_files.put_file(build_project ++ "/main.go", 0o644, "package main\n");
+    golden_files.put_file("/home/alice/secret", 0o600, "key\n");
+    golden_files.put_symlink(build_project ++ "/escape", "../secret");
+    if (text.len > 0) golden_files.put_file(build_project ++ "/zbx.build.zon", 0o644, text);
+    const set = sim.world.processes[0].cwd.set(build_project);
+    assert(set);
+}
+
+fn prepare_build_missing(sim: *HostSim) void {
+    prepare_build_project(sim, "");
+}
+
+fn prepare_build_cycle(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{
+        \\        .{ .name = "a", .base = "alpine:3.20", .run = .{"true"}, .needs = .{"b"} },
+        \\        .{ .name = "b", .base = "alpine:3.20", .run = .{"true"}, .needs = .{"a"} },
+        \\    },
+        \\    .image = .{},
+        \\}
+        \\
+    );
+}
+
+fn prepare_build_escape(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{
+        \\        .{ .name = "a", .base = "alpine:3.20", .run = .{"true"}, .inputs = .{"escape"} },
+        \\    },
+        \\    .image = .{},
+        \\}
+        \\
+    );
+}
+
+fn prepare_build_config(sim: *HostSim) void {
+    prepare_build_project(sim,
+        \\.{
+        \\    .version = 1,
+        \\    .steps = .{},
+        \\    .image = .{ .config = .{ .user = "root" } },
+        \\}
+        \\
+    );
+}
+
+const build_graph_args = [_][:0]const u8{ "build", "--graph" };
+
+const build_cases = [_]Case{
+    .{ .code = .E0801, .args = &build_graph_args, .prepare = prepare_build_missing, .exit = 1 },
+    .{ .code = .E0802, .args = &build_graph_args, .prepare = prepare_build_cycle, .exit = 1 },
+    .{ .code = .E0803, .args = &build_graph_args, .prepare = prepare_build_escape, .exit = 1 },
+    .{ .code = .E0804, .args = &.{}, .direct = build_base_not_locked, .exit = 1 },
+    .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
+    .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
+    .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
+};
 
 const exec_plan = @import("runtime/exec_plan.zig");
 
@@ -1982,6 +2056,28 @@ fn expect_direct(
         std.debug.print("GOLDEN {s} {s}\n", .{ name, @tagName(style) });
         return err;
     };
+}
+
+/// E0804 to E0806 come from a build's steps, which slice 3's `zbx build` runs: until then the
+/// golden is the diagnostic as `build/diagnose.zig` builds it.
+fn build_base_not_locked(diag: *Diag) void {
+    build_diagnose.base_not_locked(diag, "fetch", "docker.io/library/alpine:3.20", false);
+}
+
+fn build_step_failed(diag: *Diag) void {
+    const failure: build_diagnose.StepFailure = .{
+        .step = "fetch",
+        .file = "zbx.build.zon",
+        .end = .{ .exited = 6 },
+        .network = false,
+        .last_line = "curl: (6) Could not resolve host: example.org",
+        .log = "/home/user/.local/share/zbx/build/logs/0123456789abcdef/fetch.log",
+    };
+    build_diagnose.step_failed(diag, &failure);
+}
+
+fn build_output_refused(diag: *Diag) void {
+    build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
 }
 
 fn build_warnings_dropped(diag: *Diag) void {

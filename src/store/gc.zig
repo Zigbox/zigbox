@@ -4,7 +4,12 @@
 //! What is kept. A tree is kept if it is below a *root* (a record in `roots/`) or below a tree a
 //! *live container* runs (the caller lists those). Everything such a tree names is kept: its
 //! subtrees, its file objects, their chunk lists, and a root's or live container's materialized
-//! directory in `cache/`. What is not kept is the plan:
+//! directory in `cache/`. The cache entries of builds (`build/cache/<key hex>`, `build/cache.zig`)
+//! are roots too, each for the tree it names; the directory is the root, with no record of a
+//! kind of its own. An entry that does not parse roots nothing, and one whose tree is missing
+//! (an older gc took it) roots nothing either. More than `build_cache_entries_max` entries is
+//! refused, naming the limit, because a tree an entry might still name must not be freed
+//! unseen. What is not kept is the plan:
 //!   - file objects no kept tree names (and their chunk lists), and chunk lists with no object;
 //!   - tree objects no kept tree reaches;
 //!   - materialized directories (`cache/<digest>`) of a tree that is neither a root nor live;
@@ -40,6 +45,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
+const build_cache = @import("../build/cache.zig");
 const generation = @import("generation.zig");
 const images = @import("images.zig");
 const layout = @import("layout.zig");
@@ -169,6 +175,12 @@ const fixed_bytes: u32 = removal_bytes + tops_bytes + blobs_bytes;
 pub const tables_bytes_min: u32 = fixed_bytes + 64 * 1024;
 
 comptime {
+    // The build cache's entries are listed in the names and offsets of a pass, and their trees
+    // join the roots' and the images' in `tops` (a set is at most three quarters full).
+    assert(constants.build_cache_entries_max * (constants.store_name_bytes_max + 1) <= names_bytes);
+    assert(constants.build_cache_entries_max * 4 <= offsets_bytes);
+    assert(constants.build_cache_entries_max + 2 * constants.store_roots_max <=
+        @divFloor(@divExact(tops_bytes, @sizeOf(sets.KeySet.Key)) * 3, 4));
     assert(arena_bytes <= constants.store_arena_bytes_max);
     assert(tables_bytes_min < constants.store_gc_tables_bytes);
 }
@@ -548,6 +560,46 @@ fn reach(run: *Run) Error!void {
     }
     for (run.live) |digest| try mark_tree(run, digest);
     try reach_images(run);
+    try reach_build_cache(run);
+}
+
+const cache_entries_text = std.fmt.comptimePrint(
+    "the build cache entries (gc follows at most {d}; remove some from build/cache)",
+    .{constants.build_cache_entries_max},
+);
+
+/// Build cache entries keep the trees they name. A name that is not a key's hex, an entry that
+/// is gone, too long or does not parse, and a tree that is not in the store roots nothing: the
+/// lookup that would use it reads a miss. Anything else that goes wrong is a refusal, since
+/// guessing that a tree is not wanted could free one that is.
+fn reach_build_cache(run: *Run) Error!void {
+    assert(run.tops.slots.len > 0);
+    assert(run.ws.tree_buffer.len >= constants.build_cache_entry_bytes_max);
+    const offsets = run.offsets[0..constants.build_cache_entries_max];
+    const directory = build_cache.directory_name;
+    const found = shards.read(run.store, run.names, offsets, directory, null) catch |err| {
+        if (err == error.FileTooLarge) {
+            run.failure.* = .{ .too_big = cache_entries_text };
+            return error.Failed;
+        }
+        return run.io("listing the build cache", err);
+    };
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const key = Digest.from_hex(found.name(index)) orelse continue;
+        var path: PathBuf = undefined;
+        const read = run.store.fs.read_whole(
+            run.store.build_cache_path(&path, key),
+            run.ws.tree_buffer[0..constants.build_cache_entry_bytes_max],
+        );
+        const bytes = read catch |err| switch (err) {
+            error.NotFound, error.FileTooLarge => continue,
+            else => return run.io("reading a build cache entry", err),
+        };
+        var entry: build_cache.Entry = undefined;
+        if (build_cache.parse(bytes, key, &entry) != .ok) continue;
+        try mark_tree_from(run, entry.tree, .tolerate_missing);
+    }
 }
 
 /// Image records keep their trees and their blobs.
@@ -589,12 +641,26 @@ fn keep_blob(run: *Run, blob: Sha256) Error!void {
 fn mark_tree(run: *Run, digest: Digest) Error!void {
     assert(run.tops.slots.len > 0);
     assert(digest.bytes.len == constants.store_digest_bytes);
+    return mark_tree_from(run, digest, .require);
+}
+
+/// Whether a tree that is not in the store is a refusal (a root's must be) or nothing to keep
+/// (a cache entry's may have been collected by an older gc).
+const Missing = enum { require, tolerate_missing };
+
+fn mark_tree_from(run: *Run, digest: Digest, missing: Missing) Error!void {
+    assert(run.tops.slots.len > 0);
+    assert(digest.bytes.len == constants.store_digest_bytes);
     if (run.tops.put(digest, 0) == .full) {
         run.failure.* = .{ .too_big = "the roots" };
         return error.Failed;
     }
     var failed: walk.Failure = undefined;
     walk.walk(run.store, &run.ws.tree_buffer, run.stack, &run.trees, digest, run, &failed) catch {
+        // What the walk marked before it stopped stays marked: keeping more is safe.
+        if (missing == .tolerate_missing) {
+            if (failed.kind == .missing) return;
+        }
         run.failure.* = .{ .tree = failed };
         return error.Failed;
     };

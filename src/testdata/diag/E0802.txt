@@ -1,0 +1,6 @@
+error[ZBX-E0802]: the build graph is invalid
+  cause  'zbx.build.zon' line 4, column 77: the steps need each other round: a
+         -> b -> a
+  fix    remove a need that closes the round, such as "b" from step "a"'s .needs
+  more   zbx explain E0802 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0802.html

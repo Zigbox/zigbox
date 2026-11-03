@@ -50,6 +50,11 @@ const vtable: fs.VTable = .{
     .set_path_xattr = set_path_xattr,
     .lock = lock,
     .last_errno = last_errno,
+    .open_directory = open_directory,
+    .open_beneath = open_beneath,
+    .fstat = fstat,
+    .read_dir_fd = read_dir_fd,
+    .read_link_fd = read_link_fd,
 };
 
 fn from_context(context: *anyopaque) *HostReal {
@@ -82,6 +87,18 @@ fn kind_of(mode: u32) fs.FileKind {
 fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
     _ = from_context(context);
     assert(path.len > 0);
+    return stat_at(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW);
+}
+
+fn fstat(context: *anyopaque, fd: fs.Fd) host.Error!fs.Stat {
+    const self = from_context(context);
+    assert(self.open_count > 0);
+    return stat_at(@intCast(fd), "", linux.AT.SYMLINK_NOFOLLOW | linux.AT.EMPTY_PATH);
+}
+
+fn stat_at(dir: i32, path: [:0]const u8, flags: u32) host.Error!fs.Stat {
+    assert(flags & linux.AT.SYMLINK_NOFOLLOW != 0);
+    if (path.len == 0) assert(flags & linux.AT.EMPTY_PATH != 0);
     const mask: linux.STATX = .{
         .TYPE = true,
         .MODE = true,
@@ -94,7 +111,7 @@ fn lstat(context: *anyopaque, path: [:0]const u8) host.Error!fs.Stat {
         .BLOCKS = true,
     };
     var buffer: linux.Statx = undefined;
-    try check(linux.statx(linux.AT.FDCWD, path.ptr, linux.AT.SYMLINK_NOFOLLOW, mask, &buffer));
+    try check(linux.statx(dir, path.ptr, flags, mask, &buffer));
     // The kernel must honour the mask for these fields; a clear bit would mean garbage.
     assert(buffer.mask.TYPE);
     assert(buffer.mask.MODE);
@@ -126,6 +143,19 @@ fn read_dir(context: *anyopaque, path: [:0]const u8, visitor: fs.Visitor) host.E
         _ = linux.close(descriptor);
         self.open_count -= 1;
     }
+    return list_entries(descriptor, visitor);
+}
+
+fn read_dir_fd(context: *anyopaque, fd: fs.Fd, visitor: fs.Visitor) host.Error!void {
+    const self = from_context(context);
+    assert(self.open_count > 0);
+    // A directory descriptor is read once, from its start: the importer opens one per listing.
+    return list_entries(@intCast(fd), visitor);
+}
+
+fn list_entries(descriptor: i32, visitor: fs.Visitor) host.Error!void {
+    assert(descriptor >= 0);
+    assert(@intFromPtr(visitor.call) != 0);
     var buffer: [32 * 1024]u8 align(8) = undefined;
     // Every call that does not end the listing returns at least one entry, and a directory
     // holds at most as many entries as the store accepts plus what the caller refuses to read:
@@ -157,6 +187,66 @@ fn read_link(context: *anyopaque, path: [:0]const u8, buffer: []u8) host.Error!u
     try check(result);
     // A target that fills the buffer may have been cut: say so rather than store a wrong one.
     if (result == buffer.len) return error.FileTooLarge;
+    return @intCast(result);
+}
+
+fn read_link_fd(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
+    const self = from_context(context);
+    assert(self.open_count > 0);
+    assert(buffer.len > 0);
+    // An empty path reads the link the `O_PATH | O_NOFOLLOW` descriptor itself names.
+    const result = linux.readlinkat(@intCast(fd), "", buffer.ptr, buffer.len);
+    try check(result);
+    if (result == buffer.len) return error.FileTooLarge;
+    return @intCast(result);
+}
+
+fn open_directory(context: *anyopaque, path: [:0]const u8) host.Error!fs.Fd {
+    const self = from_context(context);
+    assert(path.len > 0);
+    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    const result = linux.open(path.ptr, flags, 0);
+    try check(result);
+    assert(result <= std.math.maxInt(i32));
+    self.open_count += 1;
+    return @intCast(result);
+}
+
+/// `struct open_how` (openat2(2)); std.os.linux has no wrapper for the call.
+const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
+const resolve_no_magiclinks: u64 = 0x02;
+const resolve_beneath: u64 = 0x08;
+
+fn open_beneath(
+    context: *anyopaque,
+    dir: fs.Fd,
+    path: [:0]const u8,
+    how: fs.Beneath,
+) host.Error!fs.Fd {
+    const self = from_context(context);
+    assert(path.len > 0);
+    assert(path[0] != '/');
+    const flags: linux.O = switch (how) {
+        .path_follow => .{ .PATH = true, .CLOEXEC = true },
+        .path_entry => .{ .PATH = true, .NOFOLLOW = true, .CLOEXEC = true },
+        .read => .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+        .directory => .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+    };
+    const open_how: OpenHow = .{
+        .flags = @as(u32, @bitCast(flags)),
+        .mode = 0,
+        .resolve = resolve_beneath | resolve_no_magiclinks,
+    };
+    const result = linux.syscall4(
+        .openat2,
+        @as(usize, @intCast(dir)),
+        @intFromPtr(path.ptr),
+        @intFromPtr(&open_how),
+        @sizeOf(OpenHow),
+    );
+    try check(result);
+    assert(result <= std.math.maxInt(i32));
+    self.open_count += 1;
     return @intCast(result);
 }
 
@@ -432,4 +522,52 @@ fn sync_directory(context: *anyopaque, path: [:0]const u8) host.Error!void {
     _ = linux.close(descriptor);
     self.open_count -= 1;
     try result;
+}
+
+test "real kernel: open_beneath stays below the directory and reads links as links" {
+    // Goal: the openat2 flags are right. Method: in a directory in /tmp, a file, a link to it,
+    // a link out by `..` and one by an absolute path; open each beneath the directory.
+    const testing = std.testing;
+    var real: HostReal = .{};
+    const files = interface(&real);
+    var storage: [64]u8 = undefined;
+    const written = try std.fmt.bufPrint(&storage, "/tmp/zbx-beneath-{d}", .{linux.getpid()});
+    storage[written.len] = 0;
+    const directory: [:0]const u8 = storage[0..written.len :0];
+    try files.make_directory(directory, true);
+    const names = [_][:0]const u8{ "file", "in", "up", "abs" };
+    defer {
+        for (names) |name| {
+            var path: [96:0]u8 = @splat(0);
+            const text = std.fmt.bufPrint(&path, "{s}/{s}", .{ directory, name }) catch "";
+            if (text.len > 0) files.unlink(path[0..text.len :0]) catch {};
+        }
+        files.remove_directory(directory) catch {};
+    }
+    var path: [96:0]u8 = @splat(0);
+    const file_path = try std.fmt.bufPrint(&path, "{s}/file", .{directory});
+    const fd = try files.create(path[0..file_path.len :0], 0o644);
+    try files.write_all(fd, "hello");
+    files.close(fd);
+    const targets = [_][:0]const u8{ "file", "../etc", "/etc" };
+    for (names[1..], targets) |name, target| {
+        const link_path = try std.fmt.bufPrint(&path, "{s}/{s}", .{ directory, name });
+        path[link_path.len] = 0;
+        try files.symlink(target, path[0..link_path.len :0]);
+    }
+    const dir = try files.open_directory(directory);
+    defer files.close(dir);
+    const entry = try files.open_beneath(dir, "in", .path_entry);
+    try testing.expectEqual(fs.FileKind.symlink, (try files.fstat(entry)).kind);
+    var target: [64]u8 = undefined;
+    try testing.expectEqualStrings("file", try files.read_link_fd(entry, &target));
+    files.close(entry);
+    const followed = try files.open_beneath(dir, "in", .read);
+    try testing.expectEqual(@as(u64, 5), (try files.fstat(followed)).size);
+    files.close(followed);
+    for ([_][:0]const u8{ "up", "abs" }) |name| {
+        try testing.expectError(error.IoFailed, files.open_beneath(dir, name, .path_follow));
+        try testing.expectEqual(@as(u16, 18), files.last_errno()); // EXDEV
+    }
+    try testing.expectEqual(@as(u32, 1), real.open_count);
 }

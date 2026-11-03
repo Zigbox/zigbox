@@ -12,6 +12,87 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 
 
 
+## M7 · Slice 2: review fixes and the composition
+
+*Decided in the slice 2 review.*
+
+- **Composition.** `zbx build` (without `--graph`) is `build/compose.zig`: per step, in graph order, base from `zbx.lock` (E0804 when not locked, or locked but its image is not in the store: the fix is `zbx pull`; pull by locked digest is slice 3), key, input import, cache lookup, `run_step`, record. One row per step, `<step>  hit|built  <digest>`. A failure stops the build.
+- **`TERM=dumb`** is in the key's fixed environment (`key.fixed_env`) and cannot be set by a step's `.env`: the run added the host's TERM, so one key gave different outputs on different hosts.
+- **stdin is /dev/null** for a step (`SpawnFlags.stdin_null`), not the caller's.
+- **Logs are keyed by build file**: `build/logs/<group>/<step>.log`, the group being 16 hex digits of the digest of the build file's absolute path; two projects' steps of one name no longer share a log.
+- **Locks.** A step holds the store lock shared while it runs; `step.sweep` takes it exclusive, once per build before its steps, and does nothing if busy (another build is running). The sweep child takes no lock of its own (it would deadlock against the parent's exclusive hold).
+- **A failed start** discards the run record if one was saved.
+- **A SIGKILLed `zbx`** leaves its `build-*` run record; the run layer's reconciliation of dead runs handles it as for any run. Not solved here. The sim tests plant leftover work directories and a log temporary and sweep them; the real SIGKILL is a VM check.
+- **Nested inputs through a link** are refused as overlapping by their written text (E0803) before any resolution.
+- **An over-limit `/out` is E0415** (accepted); the brief and E0806's text say so.
+- **Farm format marker (required before demo-m7's golden digest and slice 4's upgrade path).** Farm directories made before this slice keep their 2000-01-01 mtimes; new ones are stamped differently. A marker for the farm format (rebuild or restamp old farms) must exist before a golden digest or an upgrade is promised.
+- **Not done, on purpose:** no cache pruning; `store verify` and `store du` do not know the cache. Both are noted in `docs/demos/m7.md`.
+
+## M7 · Slice 2c: how a step runs (for review)
+
+*Decided 2026-11-02 by the slice 2c implementer, for review.* The brief was silent on these; each is the smaller option.
+
+- **`/out` and the project rule.** The step's run names its work directory, `build/work/<container name>`, as `Spec.project`, and `/out` is a `.mount` of `build/work/<name>/out`. The rule that a writable mount is inside the project holds as it is: no rule was widened.
+- **Hostname and umask.** `Spec` gains two additive fields, `hostname` (checked as a container name is) and `umask`. The umask is a step of the child's plan (`set_umask`), only when `Spec.umask` is set, so every earlier plan is unchanged. A step runs with hostname `build` and umask 022.
+- **Limits.** A step's memory (1 GiB), PIDs (1024) and timeout (30 minutes) are new constants, `build_step_*`. CPU is not limited. A run's limits have no defaults, so "the default limits" of the brief are these.
+- **The E0805 headline.** The brief's stderr starts `error[ZBX-E0805]: build step "fetch" failed: exit 6`, which is not the registry's summary. `Diag` gains a headline, which overrides the summary in every renderer and goes over the store child's pipe. M2's long wording ("ran out of memory at its limit of ...") is the first cause.
+- **The step log.** The parent copies the run's log, both streams in order, as plain text to `build/logs/<group>/<step>.log` (a temporary file and a rename), and keeps its last line for E0805. The run's own record and logs are then discarded (`run.discard`): a step leaves nothing in `zbx ps -a`.
+- **The output import.** In the store's child: owners 0:0, no xattrs (`drop_xattrs`), and no root record (`save_root = false`); the cache entry roots the tree. A device, FIFO or socket under `/out` is E0806 with its path relative to `/out` (`refuse_special`). Between the import and the cache entry, gc may remove the tree; the entry's lookup then misses.
+- **Output limits keep E0415.** A tree over the store's file, path or depth limits is E0415 (`too_big`), as for any import. E0806 is only a file kind the store refuses. The brief lists "a limit on files or depth" under E0806; E0806's explanation says the limits stay E0415.
+- **The work directory** is removed in the store's child on every path after the prepare, best effort: one left behind by a crash (SIGKILL of `zbx`) is removed by the next build's sweep (`step.sweep`, below).
+- **Cuts, for slice 3:** a step's stdin is the caller's; looking a base up in `zbx.lock` (E0804) is the scheduler's, so this slice has only the diagnostic.
+
+## M7 · Slice 2c: farm times (for review)
+
+- **The store already stamped a fixed time**, 2000-01-01 (`store_mtime_seconds`), on objects, directories and symlinks of a farm. The change is the value: `store_mtime_seconds` is now `build_source_date_epoch` (1980-01-01), so objects written by import and every file the store writes get it at no new cost, and `ensure` adds the one missing stamp, on each file's link.
+- **Files are stamped through the existing `Fs.set_path_attributes`** (`mode = null`, `set_owner = false`; `utimensat` with `AT_SYMLINK_NOFOLLOW`), not a new interface call: the sim already records the time on every name of the inode, and it is already a write point for the crash and fault tests. A failure is `E0417` ("setting a file's time") and the temp farm is discarded like any other.
+- **Link and object are one inode**, so the stamp repairs an object written by 0.2.0 (2000) the first time a new farm links it. No import change.
+- **Symlinks and directories** are stamped on themselves (symlinks by `AT_SYMLINK_NOFOLLOW`; directories after their entries, as before, so making an entry cannot move their time).
+- **Not repaired: a farm that 0.2.0 already built** stays as it is (2000 on its directories and symlinks), since `ensure` does not touch a farm it finds. Its files may be repaired by another farm that shares the objects. A step on such a base would see mixed times; if that matters, build steps should use a new cache path or a farm marker (owner's call).
+- **Store verify** in the simulator now expects 1980 on objects; a real store from 0.2.0 has 2000 and nothing reads that time, so no real check changes.
+
+## M7 · Slice 2c: cache entries
+
+*Decided 2026-11-02, owner (the root), with the encoding by the slice 2c implementer, for review.*
+
+- Owner, 2026-11-02: "cache dir is the root; no new root kind; old gc may drop cached trees, which read as misses".
+- **Where.** `build/cache/<key hex>` in the store (`layout.build_cache_directory`), created lazily by the first `record`. `roots.zig` is unchanged: gc lists the directory and marks the tree each entry names (`gc.reach_build_cache`).
+- **Format.** `"zbx-build-cache\x00"`, u32 version (1, little endian), the 32-byte tree digest, u32 preimage length, then the key's preimage (`key.Key.preimage()`) and nothing after it. `parse` accepts only what `render` writes: magic, version, length within `build_key_preimage_bytes_max` and at least the key magic and a version, exact remaining bytes, the key magic, and the preimage hashing to the entry's name. A version above 1 is `newer`, a miss.
+- **Malformed is a miss, not an error.** A damaged, newer, truncated or mismatched entry (including a stored preimage that differs from the key's) is a miss, and `record` replaces it. Errors are for what the cache cannot judge: an unreadable entry, or a tree that cannot be walked (damaged, unreadable). A hit walks the tree and checks every object is present (the `verify` presence check), so a tree an older gc took is `tree_incomplete`, a miss.
+- **Races.** Written to a temp file, fsynced, renamed (`write_atomic`). `record` looks up first and keeps a whole entry that is already there ("first wins"; it returns the tree now named), so two racing writers both succeed and a reader sees one whole entry.
+- **gc.** At most `build_cache_entries_max` (8192) entries are followed; one more is refused (`too_big`, naming the limit and `build/cache`), because freeing a tree an unseen entry names is the unsafe choice. A name that is not a hex digest, an entry that is gone or too large, or does not parse, roots nothing. An entry whose tree is missing roots nothing. A damaged tree refuses the plan, like a root's.
+- **Accepted.** An older 0.2.x gc does not know the directory and may collect cached trees; they read as misses and the step rebuilds. There is no pruning of the cache yet, and `verify` and `usage` do not read entries.
+
+## M7 · Slice 2: how a step's inputs are imported (for review)
+
+*Decided 2026-11-02 by the slice 2 implementer, for review.* The brief was silent on these; each is the smaller option.
+
+- **Follow rules.** Every open goes through `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` from the project directory's handle. A declared input is opened following links (beneath), so an input that is a link to a file or directory inside the project still works. Entries found inside a directory input are opened without following: a link there is recorded as a link, its text in the key. The open that reads a file or lists a directory follows links beneath and then compares its inode with the entry's handle, so a swap between the two opens is caught.
+- **New refusals, still E0803.** A path that leaves the project at import time (an absolute link, `..` past the project, a file that vanished or became a link or a directory) is the new problem kind `changed` ("changed while the build read it"), not `outside`: the check before the build said it was inside. A device, FIFO or socket inside a directory input is the new kind `holds_bad_kind`, naming the entry and its kind.
+- **Store limits and failures reuse the store's diagnostics:** E0415 (`too_big`) for a tree, path or depth limit, and `write_failed` for a store write.
+- **Modes in the tree.** Files are 0644, or 0755 when the owner's execute bit is set (what a checkout keeps). Directories are 0755 and links 0777. Every owner is 0 and no xattrs are kept. Times are not in the tree.
+- **Roots.** The importer does not root the tree it writes; the caller roots what it keeps (the cache entry, slice 2b/3). Until then gc may remove an import tree that nothing references.
+
+## M7 · The build file: where it is, what it may name, and which code refuses what (slice 1)
+
+*Decided 2026-11-02, implementer; accepted by the supervisor 2026-11-02, except the project at `/`, which is now refused (below).*
+
+- **Where:** `zbx.build.zon` in the project directory (the nearest `zbx.lock`, else the working directory). `-f PATH` is resolved from the working directory with every link followed and must land inside the project directory, because every path in the file is the project's. Outside is E0801, naming the path given, where it led, and the project directory. `-f` given twice is E0003.
+- **Codes:** a file that cannot be read or does not parse is E0801. Its graph (a duplicate step, an unknown need or add, a need twice, a cycle, and more than `build_step_needs_max` needs) is E0802. An input that is not plain, escapes the project, names the project directory itself, overlaps another input, is missing or unreadable is E0803. A value of `image.config` that cannot become an image config (workdir not absolute, user not `UID:GID` in numbers, env not `KEY=VALUE` with a plain key, a bad or repeated label key) is E0807, registered in slice 1 because the owner asked for config validation here. An env key repeated within one list is E0801 at both levels.
+- **`zbx build` without `--graph`** is E0006 (a missing argument), with the `--graph` fix. Slice 1 runs nothing. This, and `build`'s help text, must change in the slice where the build runs.
+- **Shown paths:** messages show the build file and inputs relative to the project; `zbx.build_graph/1` has the absolute path. The error context `dir` holds the project path whole, up to the diagnostic's field (`diag_field_bytes_max`, which bounds every diagnostic field); only the prose echo is cut to `arg_echo_bytes_max`.
+- **A project at `/` is refused** (supervisor, 2026-11-02), as `--mount` refuses `/`: inside `/` every host path is "inside the project", so the outside checks would pass for anything. `load.locate` refuses it as E0801 (cause: the project directory is /; fix: run from the project, or create zbx.lock there), before the file is read.
+- **Strings:** after escapes are decoded, every string must be valid UTF-8 (`\x80` alone is refused). Control bytes (below 0x20, and 0x7f) are allowed only in argv lists (`run`, `entrypoint`, `cmd`) and env entries, where a `sh -c` script needs line ends; the key of an env entry is held to `[A-Za-z_][A-Za-z0-9_]*`, so only the value can hold them. A name, a reference, a path, an input, a need and a label are refused with one. `\x` takes exactly two hex digits; `.version` has no leading zero. Parse accepts only what render writes.
+
+## M7 · Decisions for slice 2, taken in slice 1's review
+
+*Decided 2026-11-02, supervisor.*
+
+- **A step's env cannot set the fixed environment.** The keys the brief fixes for every step (`HOME`, `TZ`, `LC_ALL`, `TERM`, `SOURCE_DATE_EPOCH`, `ZBX_BUILD_STEP`; `file.fixed_env`) are refused in a step's `.env` at parse, as E0801 `env_fixed`, naming the key and saying it is fixed: a value the step would never see is a surprise. `image.config.env` may set them; it is the image's own environment. `PATH` is not fixed by the brief, so a step may set it.
+- **Overlapping inputs** are compared by resolved path: two inputs of one step that resolve to the same object, or one inside the other (`src` with `src/main.go`), are E0803 `input_twice` naming both. Implemented in slice 1, since inputs are resolved there.
+- **Symlinks inside directory inputs** are imported as symlinks and never followed; the link text goes into the key. Devices, FIFOs and sockets inside a directory input are E0803 `bad_kind`.
+- **Against TOCTOU**, slice 2 imports inputs from a project directory fd with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, and computes the key from what it imported, not from what slice 1's check saw.
+
 ## M4b · Mac: public DNS fallback when the Mac has no IPv4 resolver
 
 *Decided 2026-10-30, after the `mac.yml` run 41136813336 (15 of 31 steps failed with ZBX-E0502).*

@@ -244,3 +244,27 @@ test {
     _ = @import("vm_ports.zig");
     _ = @import("vm_image/cpio.zig");
 }
+
+test {
+    // The build file, its graph and `zbx build --graph` (M7).
+    _ = @import("build/lexer.zig");
+    _ = @import("build/file.zig");
+    _ = @import("build/file_tests.zig");
+    _ = @import("build/render.zig");
+    _ = @import("build/graph.zig");
+    _ = @import("build/inputs.zig");
+    _ = @import("build/key.zig");
+    _ = @import("build/cache.zig");
+    _ = @import("build/cache_tests.zig");
+    _ = @import("build/cache_bounds_tests.zig");
+    _ = @import("build/input_tree.zig");
+    _ = @import("build/input_tree_tests.zig");
+    _ = @import("build/input_tree_bounds_tests.zig");
+    _ = @import("build/diagnose.zig");
+    _ = @import("build/load.zig");
+    _ = @import("build/step.zig");
+    _ = @import("build/step_tests.zig");
+    _ = @import("build/compose.zig");
+    _ = @import("build_commands.zig");
+    _ = @import("build_tests.zig");
+}

@@ -28,10 +28,12 @@ const tree_fuzz = @import("fuzz_tree.zig");
 const store_fuzz = @import("fuzz_store.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
+const build_cache_fuzz = @import("fuzz_build_cache.zig");
 const reference_fuzz = @import("fuzz_reference.zig");
 const registry_fuzz = @import("fuzz_registry.zig");
 const layer_fuzz = @import("fuzz_layer.zig");
 const lock_fuzz = @import("fuzz_lock.zig");
+const build_file_fuzz = @import("fuzz_build_file.zig");
 const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
@@ -73,7 +75,9 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "registry", .run_iteration = registry_fuzz.fuzz_registry },
     .{ .name = "layer", .run_iteration = layer_fuzz.fuzz_layer },
     .{ .name = "lock", .run_iteration = lock_fuzz.fuzz_lock },
+    .{ .name = "build_file", .run_iteration = build_file_fuzz.fuzz_build_file },
     .{ .name = "pull_report", .run_iteration = pull_report_fuzz.fuzz_pull_report },
+    .{ .name = "build_cache", .run_iteration = build_cache_fuzz.fuzz_build_cache },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
     .{ .name = "parse_controllers", .run_iteration = parse_fuzz.fuzz_parse_controllers },

@@ -8,6 +8,9 @@
 //!   <root>/trees/ab/<62 hex>          a tree object (the encoding of `tree.zig`)
 //!   <root>/roots/<64 hex>             a root record: why the tree is kept
 //!   <root>/cache/                     materialized trees
+//!   <root>/build/cache/<64 hex>       a build cache entry: the output tree of one build step and
+//!                                     the preimage of its key; a root for that tree
+//!                                     (`build/cache.zig`)
 //!   <root>/lock                       flock: shared by writers, exclusive for gc apply, restore
 //!   <root>/generation                 the counter every write to the store raises
 //!   <root>/trash/<gc id>/             what gc moved, until it expires
@@ -32,6 +35,10 @@ const PathBuf = fs_mod.PathBuf;
 
 pub const store_suffix = "/zbx/store";
 pub const subdirectories = [_][]const u8{ "objects", "trees", "roots", "cache", "trash", "tmp" };
+/// A build cache entry's directory, made when the first entry is written (the store of a
+/// release without builds does not have it), and its parent.
+pub const build_directory = "build";
+pub const build_cache_directory = "build/cache";
 pub const format_file = "store.zon";
 pub const chunks_suffix = ".chunks";
 
@@ -205,6 +212,14 @@ pub const Store = struct {
         assert(id.bytes.len == constants.store_digest_bytes);
         const hex = id.hex();
         return store.path(buffer, &.{ "/roots/", &hex });
+    }
+
+    /// `build/cache/<key hex>`: the entry of the build step whose key is `key`.
+    pub fn build_cache_path(store: *const Store, buffer: *PathBuf, key: Digest) [:0]const u8 {
+        assert(store.root_len > 1);
+        assert(key.bytes.len == constants.store_digest_bytes);
+        const hex = key.hex();
+        return store.path(buffer, &.{ "/", build_cache_directory, "/", &hex });
     }
 
     /// A fresh name for a file being written: `tmp/<pid>-<n>`.

@@ -173,6 +173,28 @@ pub fn put(
     id: Digest,
     failure: *Failure,
 ) PutError!void {
+    assert(source.len > 0);
+    return put_from(store, io, scratch, .{ .path = source }, content, attrs, id, failure);
+}
+
+/// Where `put_from` reads the file: a path, or a path opened beneath a directory
+/// (`Fs.open_beneath`, so that it cannot leave it).
+pub const Source = union(enum) {
+    path: [:0]const u8,
+    beneath: struct { dir: fs_mod.Fd, path: [:0]const u8 },
+};
+
+/// `put`, with the file read from `source`.
+pub fn put_from(
+    store: *Store,
+    io: []u8,
+    scratch: []Digest,
+    source: Source,
+    content: *const Content,
+    attrs: Attrs,
+    id: Digest,
+    failure: *Failure,
+) PutError!void {
     assert(content.chunks.len == chunk_count(content.size, store.chunk_bytes));
     assert(object_id(content.hash, attrs).eql(id));
     const fs = store.fs;
@@ -256,14 +278,18 @@ fn copy_to(
     store: *Store,
     io: []u8,
     scratch: []Digest,
-    source: [:0]const u8,
+    source: Source,
     temporary: [:0]const u8,
     content: *const Content,
     attrs: Attrs,
     failure: *Failure,
 ) PutError!void {
     const fs = store.fs;
-    const input = fs.open_read(source) catch |err| {
+    const opened = switch (source) {
+        .path => |path| fs.open_read(path),
+        .beneath => |beneath| fs.open_beneath(beneath.dir, beneath.path, .read),
+    };
+    const input = opened catch |err| {
         fail(failure, fs, err);
         return error.SourceFailed;
     };

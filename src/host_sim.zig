@@ -131,7 +131,31 @@ const sink_vtable: store_fs.VTable = .{
     .set_path_xattr = sink_set_path_xattr,
     .lock = sink_lock,
     .last_errno = sink_errno,
+    .open_directory = sink_open_directory,
+    .open_beneath = sink_open_beneath,
+    .fstat = sink_fstat,
+    .read_dir_fd = sink_read_dir_fd,
+    .read_link_fd = sink_read_link_fd,
 };
+
+fn sink_open_directory(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_open_beneath(
+    _: *anyopaque,
+    _: store_fs.Fd,
+    _: [:0]const u8,
+    _: store_fs.Beneath,
+) host.Error!store_fs.Fd {
+    return error.NotFound;
+}
+fn sink_fstat(_: *anyopaque, _: store_fs.Fd) host.Error!store_fs.Stat {
+    return error.NotFound;
+}
+fn sink_read_dir_fd(_: *anyopaque, _: store_fs.Fd, _: store_fs.Visitor) host.Error!void {}
+fn sink_read_link_fd(_: *anyopaque, _: store_fs.Fd, _: []u8) host.Error!u32 {
+    return error.NotFound;
+}
 
 fn sink_errno(_: *anyopaque) u16 {
     return 0;
@@ -361,6 +385,7 @@ pub const HostSim = struct {
         .bring_up_loopback = bring_up_loopback,
         .symlink = symlink,
         .set_hostname = set_hostname,
+        .set_umask = set_umask,
         .seal_descriptors = seal_descriptors,
         .die_with_parent = die_with_parent,
         .pipe_has_reader = pipe_has_reader,
@@ -913,6 +938,13 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.world.set_hostname(name)) |errno| return sim.model_error(errno);
+    }
+
+    fn set_umask(context: *anyopaque, mask: u16) void {
+        const sim = from_context(context);
+        assert(mask <= 0o777);
+        sim.world.umask = mask;
+        assert(sim.world.umask == mask);
     }
 
     fn seal_descriptors(context: *anyopaque) host.Error!void {
