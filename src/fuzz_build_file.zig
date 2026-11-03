@@ -412,7 +412,8 @@ fn check_parse_refusal(problem: *const file_mod.Problem) void {
 }
 
 fn check_graph_refusal(file: *const BuildFile, problem: *const graph_mod.Problem) void {
-    assert(file.steps_count > 0);
+    // A cycle or a duplicate needs steps; an add from a step that is not there may have none.
+    if (file.steps_count == 0) assert(problem.kind == .unknown_add);
     diag.reset();
     diagnose.graph_problem(&diag, "zbx.build.zon", file, problem);
     assert(diag.code == .E0802);
