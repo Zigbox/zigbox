@@ -29,7 +29,6 @@ const zn = net_user.zn;
 const step_name = "BUILD7";
 
 const base = "alpine:3.20";
-const script_path = "/home/demo/build-m7.sh";
 
 /// Writes `/hello` and, so that a container can run the tree, a busybox and its loader.
 const quick_run = "mkdir -p /out/bin /out/lib && cp /bin/busybox /out/bin/ && " ++
@@ -52,12 +51,19 @@ fn build_file(comptime command: []const u8) []const u8 {
         "EOF\n";
 }
 
-const script =
+/// Each script is at most `script_bytes_max` (a typed file is base64 in 2 KiB); they append their
+/// `key=value` lines to `results_path`, which the part prints at the end.
+const results_path = "/tmp/m7.out";
+const script_bytes_max = 1400;
+const prelude =
     "#!/bin/sh\n" ++
     "Z=/home/demo/zn\n" ++
     "P=/home/demo/net-project\n" ++
     "B=" ++ common.store_dir ++ "/build\n" ++
-    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n" ++
+    "exec >> " ++ results_path ++ "\n" ++
+    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n";
+const script_miss =
+    prelude ++
     build_file(quick_run) ++
     "$Z build > /tmp/b1.out 2> /tmp/b1.err\n" ++
     "echo first_status=$?\n" ++
@@ -71,7 +77,10 @@ const script =
     "echo log_first=$(stat -c '%y %s' $L)\n" ++
     "echo tree_owner=$($Z run $D -- /bin/busybox stat -c '%u:%g' /hello | tail -n 1)\n" ++
     "echo tree_text=$($Z run $D -- /bin/busybox cat /hello | tail -n 1)\n" ++
-    "$Z ps --all > /tmp/ps1.txt 2>&1\n" ++
+    "$Z ps --all > /tmp/ps1.txt 2>&1\n";
+const script_hit =
+    prelude ++
+    "L=$(ls $B/logs/*/compile.log)\n" ++
     "$Z build > /tmp/b2.out 2> /tmp/b2.err\n" ++
     "echo second_status=$?\n" ++
     "echo second_row=$(grep '^compile ' /tmp/b2.out)\n" ++
@@ -79,7 +88,9 @@ const script =
     "$Z ps --all > /tmp/ps2.txt 2>&1\n" ++
     "echo records_second=$(grep -c 'build-' /tmp/ps2.txt)\n" ++
     "echo ps_lines_second=$(wc -l < /tmp/ps2.txt)\n" ++
-    "echo log_second=$(stat -c '%y %s' $L)\n" ++
+    "echo log_second=$(stat -c '%y %s' $L)\n";
+const script_kill =
+    prelude ++
     build_file(slow_run) ++
     "$Z build > /dev/null 2>&1 &\n" ++
     "PID=$!\n" ++
@@ -93,6 +104,12 @@ const script =
     "echo third_status=$?\n" ++
     "echo work_third=$(ndir $B/work)\n" ++
     "rm -f $P/zbx.build.zon\n";
+
+comptime {
+    std.debug.assert(script_miss.len <= script_bytes_max);
+    std.debug.assert(script_hit.len <= script_bytes_max);
+    std.debug.assert(script_kill.len <= script_bytes_max);
+}
 
 /// What the part's script printed, as `key=value` lines. Returns the text after `key=` on the
 /// line that starts with it, or null.
@@ -173,10 +190,16 @@ pub fn step_build(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\n{s}: BUILD7: zbx build, one step: miss, hit, SIGKILL\n", .{H.demo_name});
     try net_user.make_net_wrapper(session, out);
     _ = try common.expect_exit(session, out, step_name, zn ++ " pull " ++ base, 0);
-    try H.put_file(session, script_path, script);
-    const chown = "chown demo:demo " ++ script_path ++ " && chmod 755 " ++ script_path;
-    _ = try common.expect_exit(session, out, step_name, chown, 0);
-    const ran = try state.expect_long(session, out, H.as_demo ++ script_path, 0, 900);
+    const chown = "chown demo:demo /home/demo/build-m7-*.sh && chmod 755 /home/demo/build-m7-*.sh";
+    _ = try common.expect_exit(session, out, step_name, "rm -f " ++ results_path, 0);
+    const scripts = [_][]const u8{ script_miss, script_hit, script_kill };
+    inline for (scripts, 0..) |text, at| {
+        const path = std.fmt.comptimePrint("/home/demo/build-m7-{d}.sh", .{at});
+        try H.put_file(session, path, text);
+        _ = try common.expect_exit(session, out, step_name, chown, 0);
+        _ = try state.expect_long(session, out, H.as_demo ++ path, 0, 900);
+    }
+    const ran = try state.expect_long(session, out, "cat " ++ results_path, 0, 60);
     check_build(ran.output) catch |err| {
         return fail_step(out, step_name, "expected a miss, a hit and a swept work dir", err);
     };
