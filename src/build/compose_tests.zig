@@ -257,9 +257,10 @@ test "abort ends every worker, reaps it and closes its pipe" {
 }
 
 test "a tag, not a length, tells an output from a diagnostic" {
-    // Goal: no diagnostic passes for an output, and none is lost for its length. Method: an
-    // answer-sized failure (a tagged diagnostic padded to `answer_bytes`) still decodes as the
-    // worker's; an answer-sized message without the output tag is no output.
+    // Goal: no diagnostic passes for an output, and none is lost for its length. Method: a clean
+    // exit with an answer-sized tagged failure still decodes as the worker's; an answer-sized
+    // message without the output tag is no output; a valid diagnostic without the failure tag
+    // is not the worker's.
     start();
     var made: Diag = undefined;
     made.reset();
@@ -271,7 +272,7 @@ test "a tag, not a length, tells an output from a diagnostic" {
     exact[0] = compose.tag_failure;
     @memcpy(exact[1..][0..short.len], short);
     const slot = worker_ended(0, 7, &exact);
-    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expect(!settle(slot, .{ .exited = 0 }).ok);
     try testing.expect(diag.code.? == .E0805);
     start();
     var untagged = answer_of(Digest.of("x"));
@@ -279,11 +280,52 @@ test "a tag, not a length, tells an output from a diagnostic" {
     const other = worker_ended(0, 7, &untagged);
     try testing.expect(!settle(other, .{ .exited = 0 }).ok);
     try testing.expect(diag.code.? == .E0419);
+    start();
+    var bare: [compose.failure_bytes_max]u8 = undefined;
+    bare[0] = 0; // Not the failure tag; a valid diagnostic follows.
+    @memcpy(bare[1..][0..short.len], short);
+    const no_tag = worker_ended(0, 7, bare[0 .. 1 + short.len]);
+    try testing.expect(!settle(no_tag, .{ .exited = 1 }).ok);
+    try testing.expect(diag.code.? == .E0419);
 }
 
-test "a row that failed is the build's error, even when a step failed too" {
-    // Goal: `zbx build | head -1` reports the closed output, not a step failure. Method: both a
-    // failed step and a failed row; `finish` answers OutputFailed. Without the row, Failed.
+fn set_path(path: *@TypeOf(loaded.project), text: []const u8) void {
+    @memset(&path.bytes, 0);
+    @memcpy(path.bytes[0..text.len], text);
+    path.len = @intCast(text.len);
+}
+
+test "a failing step reaches the user as the step's own diagnostic" {
+    // Goal: the worker writes its failure behind the failure tag, so a real step failure is not
+    // E0419 "worker ended with no answer". Method: run `worker_entry` itself, through
+    // `fork_worker` and the sim's `fork_child`, on a step that fails (no data directory is
+    // found, E0421); the child's exit and bytes settle in the parent.
+    start();
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    const spec: key_mod.Spec = .{
+        .platform = "linux/amd64",
+        .base_tree = Digest.of("base"),
+        .base_env = &.{},
+        .input_tree = Digest.of("input"),
+        .needs = &.{},
+        .argv = &.{"true"},
+        .env = &.{},
+        .network = false,
+        .name = "compile",
+    };
+    try context.fork_worker(0, &spec);
+    const slot = &composed.slots[0];
+    const status = try sim.interface().wait_for(slot.pid);
+    try testing.expect(status == .exited and status.exited != 0);
+    try testing.expect(!settle(slot, status).ok);
+    try testing.expect(diag.code.? == .E0421);
+}
+
+test "a failed row changes the error value `finish` returns, not the diagnostic" {
+    // Goal: pin what the row ordering does. Method: a failed step and a failed row; `finish`
+    // answers OutputFailed (the value `run_slice` discards; the user reads `diag`, which keeps
+    // the first failure). Without the row, Failed. A failed `hit` row never sets `row_failed`.
     start();
     const failed: @import("schedule.zig").Outcome = .{
         .failed = 0,

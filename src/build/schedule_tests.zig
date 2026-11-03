@@ -33,7 +33,6 @@ const Fake = struct {
     began_before_needs: bool,
     over_bound: bool,
     under_used: bool,
-    ended_unstarted: bool,
     begin_order: [steps_max]u8,
     begin_count: u8,
     ended_ok: u8,
@@ -108,8 +107,6 @@ const Fake = struct {
                 pick -= 1;
                 continue;
             }
-            // Only a step that began as running can end: a hit never ran.
-            if (!fake.began[step]) fake.ended_unstarted = true;
             fake.running[step] = false;
             fake.running_count -= 1;
             const index: u8 = @intCast(step);
@@ -183,7 +180,6 @@ fn fake_for(plan: *const schedule.Plan, random: std.Random, bound: u8) Fake {
         .began_before_needs = false,
         .over_bound = false,
         .under_used = false,
-        .ended_unstarted = false,
         .begin_order = @splat(0),
         .begin_count = 0,
         .ended_ok = 0,
@@ -213,7 +209,6 @@ fn expect_guarantees(fake: *const Fake, result: schedule.Outcome) !void {
     try testing.expect(!fake.began_before_needs);
     try testing.expect(!fake.over_bound);
     try testing.expect(!fake.under_used);
-    try testing.expect(!fake.ended_unstarted);
     try testing.expect(!fake.began_after_failure);
     try testing.expectEqual(@as(u8, 0), fake.running_count);
     // The first failure by time is the build's, not one a later wait happened to find.

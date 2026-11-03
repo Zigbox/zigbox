@@ -236,7 +236,10 @@ pub const Context = struct {
     }
 
     /// The build's answer once the scheduler is done. A row that could not be written fails its
-    /// step, but the error is the output's, not the step's, so it is told first.
+    /// step; only the returned error value is then the output's (`OutputFailed`), not the
+    /// step's. What the user reads is `diag`, which keeps the first failure (a later row failure
+    /// goes to `side_diag`). A failed `hit` row never sets `row_failed`: `begin_step` turns its
+    /// error into `Failed`, so the ordering covers `built` rows only.
     pub fn finish(context: *Context, outcome: schedule.Outcome) Error!void {
         if (context.row_failed) |err| return err;
         if (outcome.failed == null and !outcome.aborted) return;
@@ -299,7 +302,7 @@ pub const Context = struct {
         return .running;
     }
 
-    fn fork_worker(
+    pub fn fork_worker(
         context: *Context,
         index: u8,
         spec: *const key_mod.Spec,
