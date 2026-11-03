@@ -140,7 +140,7 @@ const debug_command = "sh -c 'apt-get install -y strace >/dev/null 2>&1; " ++
     " grep -B4 EPERM /tmp/s.log | cut -c1-220 | head -30'";
 
 fn debug_pull(session: *Session, out: *Io.Writer) !void {
-    _ = try common.run_shown(session, out, debug_command);
+    _ = try state.expect_long_split(session, out, debug_command, 0, build_timeout_s);
 }
 
 pub fn step_first(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
