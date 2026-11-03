@@ -942,3 +942,63 @@ test "variants of the project file: a step added, the steps swapped" {
     const again = swap_steps(&again_buffer, swapped) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(project_file, again);
 }
+
+const ExplainEntry = struct {
+    schema: []const u8,
+    code: []const u8,
+    severity: []const u8,
+    blame: []const u8,
+    summary: []const u8,
+    explanation: []const u8,
+    docs: []const u8,
+};
+
+/// `zbx explain <code> --output json` agrees with a diagnostic of that code in everything the
+/// code fixes: the schema, code, severity, blame and docs. Its summary is the code's own
+/// ("a build step failed"), not the instance's (`build step "fetch" failed: exit 1`), so it
+/// need only be there.
+pub fn check_explain_entry(
+    arena: Allocator,
+    stdout: []const u8,
+    diagnostic: json.Diagnostic,
+) !void {
+    const options: std.json.ParseOptions = .{ .allocate = .alloc_always };
+    const doc = std.json.parseFromSliceLeaky(ExplainEntry, arena, stdout, options) catch {
+        return error.JsonWrong;
+    };
+    if (!std.mem.eql(u8, doc.schema, "zbx.explain/1")) return error.ExplainWrong;
+    if (!std.mem.eql(u8, doc.code, diagnostic.code)) return error.ExplainWrong;
+    if (!std.mem.eql(u8, doc.severity, diagnostic.severity)) return error.ExplainWrong;
+    if (!std.mem.eql(u8, doc.blame, diagnostic.blame)) return error.ExplainWrong;
+    if (!std.mem.eql(u8, doc.docs, diagnostic.docs)) return error.ExplainWrong;
+    if (doc.summary.len == 0 or doc.explanation.len == 0) return error.ExplainWrong;
+}
+
+test "explain agrees with the diagnostic except for the instance's summary" {
+    // Goal: the agent's explain check accepts what the VM run printed (the code's generic
+    // summary against the instance's) and refuses another code or a missing explanation.
+    // Method: the run's explain line against a diagnostic built from the run's own fields.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const docs = "https://zigbox.github.io/zigbox/errors/E0805.html";
+    const diagnostic: json.Diagnostic = .{
+        .code = "ZBX-E0805",
+        .severity = "error",
+        .blame = "user",
+        .summary = "build step \"fetch\" failed: exit 1",
+        .context = .null,
+        .fixes = &.{},
+        .docs = docs,
+    };
+    const line = "{\"schema\":\"zbx.explain/1\",\"code\":\"ZBX-E0805\",\"severity\":\"error\"," ++
+        "\"blame\":\"user\",\"summary\":\"a build step failed\",\"explanation\":\"A step.\"," ++
+        "\"docs\":\"" ++ docs ++ "\"}\n";
+    try check_explain_entry(arena, line, diagnostic);
+    const other = try std.mem.replaceOwned(u8, arena, line, "E0805\",\"sev", "E0806\",\"sev");
+    const wrong = check_explain_entry(arena, other, diagnostic);
+    try std.testing.expectError(error.ExplainWrong, wrong);
+    const bare = try std.mem.replaceOwned(u8, arena, line, "A step.", "");
+    const empty = check_explain_entry(arena, bare, diagnostic);
+    try std.testing.expectError(error.ExplainWrong, empty);
+}
