@@ -12,6 +12,22 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 
 
 
+## M7 · Slice 2: review fixes and the composition
+
+*Decided in the slice 2 review.*
+
+- **Composition.** `zbx build` (without `--graph`) is `build/compose.zig`: per step, in graph order, base from `zbx.lock` (E0804 when not locked, or locked but its image is not in the store: the fix is `zbx pull`; pull by locked digest is slice 3), key, input import, cache lookup, `run_step`, record. One row per step, `<step>  hit|built  <digest>`. A failure stops the build.
+- **`TERM=dumb`** is in the key's fixed environment (`key.fixed_env`) and cannot be set by a step's `.env`: the run added the host's TERM, so one key gave different outputs on different hosts.
+- **stdin is /dev/null** for a step (`SpawnFlags.stdin_null`), not the caller's.
+- **Logs are keyed by build file**: `build/logs/<group>/<step>.log`, the group being 16 hex digits of the digest of the build file's absolute path; two projects' steps of one name no longer share a log.
+- **Locks.** A step holds the store lock shared while it runs; `step.sweep` takes it exclusive, once per build before its steps, and does nothing if busy (another build is running). The sweep child takes no lock of its own (it would deadlock against the parent's exclusive hold).
+- **A failed start** discards the run record if one was saved.
+- **A SIGKILLed `zbx`** leaves its `build-*` run record; the run layer's reconciliation of dead runs handles it as for any run. Not solved here. The sim tests plant leftover work directories and a log temporary and sweep them; the real SIGKILL is a VM check.
+- **Nested inputs through a link** are refused as overlapping by their written text (E0803) before any resolution.
+- **An over-limit `/out` is E0415** (accepted); the brief and E0806's text say so.
+- **Farm format marker (required before demo-m7's golden digest and slice 4's upgrade path).** Farm directories made before this slice keep their 2000-01-01 mtimes; new ones are stamped differently. A marker for the farm format (rebuild or restamp old farms) must exist before a golden digest or an upgrade is promised.
+- **Not done, on purpose:** no cache pruning; `store verify` and `store du` do not know the cache. Both are noted in `docs/demos/m7.md`.
+
 ## M7 · Slice 2c: how a step runs (for review)
 
 *Decided 2026-11-02 by the slice 2c implementer, for review.* The brief was silent on these; each is the smaller option.
@@ -20,10 +36,10 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 - **Hostname and umask.** `Spec` gains two additive fields, `hostname` (checked as a container name is) and `umask`. The umask is a step of the child's plan (`set_umask`), only when `Spec.umask` is set, so every earlier plan is unchanged. A step runs with hostname `build` and umask 022.
 - **Limits.** A step's memory (1 GiB), PIDs (1024) and timeout (30 minutes) are new constants, `build_step_*`. CPU is not limited. A run's limits have no defaults, so "the default limits" of the brief are these.
 - **The E0805 headline.** The brief's stderr starts `error[ZBX-E0805]: build step "fetch" failed: exit 6`, which is not the registry's summary. `Diag` gains a headline, which overrides the summary in every renderer and goes over the store child's pipe. M2's long wording ("ran out of memory at its limit of ...") is the first cause.
-- **The step log.** The parent copies the run's log, both streams in order, as plain text to `build/logs/<step>.log` (a temporary file and a rename), and keeps its last line for E0805. The run's own record and logs are then discarded (`run.discard`): a step leaves nothing in `zbx ps -a`.
+- **The step log.** The parent copies the run's log, both streams in order, as plain text to `build/logs/<group>/<step>.log` (a temporary file and a rename), and keeps its last line for E0805. The run's own record and logs are then discarded (`run.discard`): a step leaves nothing in `zbx ps -a`.
 - **The output import.** In the store's child: owners 0:0, no xattrs (`drop_xattrs`), and no root record (`save_root = false`); the cache entry roots the tree. A device, FIFO or socket under `/out` is E0806 with its path relative to `/out` (`refuse_special`). Between the import and the cache entry, gc may remove the tree; the entry's lookup then misses.
 - **Output limits keep E0415.** A tree over the store's file, path or depth limits is E0415 (`too_big`), as for any import. E0806 is only a file kind the store refuses. The brief lists "a limit on files or depth" under E0806; E0806's explanation says the limits stay E0415.
-- **The work directory** is removed in the store's child on every path after the prepare, best effort: one left behind by a crash is gc's.
+- **The work directory** is removed in the store's child on every path after the prepare, best effort: one left behind by a crash (SIGKILL of `zbx`) is removed by the next build's sweep (`step.sweep`, below).
 - **Cuts, for slice 3:** a step's stdin is the caller's; looking a base up in `zbx.lock` (E0804) is the scheduler's, so this slice has only the diagnostic.
 
 ## M7 · Slice 2c: farm times (for review)
@@ -72,7 +88,7 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 
 *Decided 2026-11-02, supervisor.*
 
-- **A step's env cannot set the fixed environment.** The keys the brief fixes for every step (`HOME`, `TZ`, `LC_ALL`, `SOURCE_DATE_EPOCH`, `ZBX_BUILD_STEP`; `file.fixed_env`) are refused in a step's `.env` at parse, as E0801 `env_fixed`, naming the key and saying it is fixed: a value the step would never see is a surprise. `image.config.env` may set them; it is the image's own environment. `PATH` is not fixed by the brief, so a step may set it.
+- **A step's env cannot set the fixed environment.** The keys the brief fixes for every step (`HOME`, `TZ`, `LC_ALL`, `TERM`, `SOURCE_DATE_EPOCH`, `ZBX_BUILD_STEP`; `file.fixed_env`) are refused in a step's `.env` at parse, as E0801 `env_fixed`, naming the key and saying it is fixed: a value the step would never see is a surprise. `image.config.env` may set them; it is the image's own environment. `PATH` is not fixed by the brief, so a step may set it.
 - **Overlapping inputs** are compared by resolved path: two inputs of one step that resolve to the same object, or one inside the other (`src` with `src/main.go`), are E0803 `input_twice` naming both. Implemented in slice 1, since inputs are resolved there.
 - **Symlinks inside directory inputs** are imported as symlinks and never followed; the link text goes into the key. Devices, FIFOs and sockets inside a directory input are E0803 `bad_kind`.
 - **Against TOCTOU**, slice 2 imports inputs from a project directory fd with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, and computes the key from what it imported, not from what slice 1's check saw.

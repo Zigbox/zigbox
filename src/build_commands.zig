@@ -12,13 +12,18 @@ const host_mod = @import("host.zig");
 const text_util = @import("text.zig");
 const file_mod = @import("build/file.zig");
 const load_mod = @import("build/load.zig");
+const compose = @import("build/compose.zig");
+const doctor = @import("doctor.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
 const Host = host_mod.Host;
 const BuildFile = file_mod.BuildFile;
 
 pub const Error = error{ Failed, OutputFailed };
-pub const Workspace = load_mod.Workspace;
+pub const Workspace = struct {
+    loaded: load_mod.Workspace,
+    composed: compose.Workspace,
+};
 
 /// The name the graph gives the image: no step can have it.
 const image_name = "image";
@@ -86,16 +91,29 @@ const Out = struct {
     }
 };
 
-/// Loads the build file (`given`: `-f`'s value, or empty) and prints its graph.
-pub fn run_graph(
+/// `zbx build`: with `--graph`, prints the graph; otherwise builds the steps in order, a row
+/// each. `args.file` is `-f`'s value.
+pub fn run(
     host: Host,
     workspace: *Workspace,
-    given: []const u8,
+    args: anytype,
     json: bool,
+    facts: *doctor.Facts,
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
-    load_mod.load(host, host.filesystem(), given, workspace, diag) catch return error.Failed;
+    const given: []const u8 = args.file orelse "";
+    load_mod.load(host, host.filesystem(), given, &workspace.loaded, diag) catch {
+        return error.Failed;
+    };
+    if (args.graph) return print_graph(host, &workspace.loaded, json, diag);
+    compose.run_steps(host, facts, &workspace.loaded, &workspace.composed, diag) catch |err| {
+        return if (err == error.OutputFailed) error.OutputFailed else error.Failed;
+    };
+}
+
+fn print_graph(host: Host, workspace: *const load_mod.Workspace, json: bool, diag: *Diag) Error!void {
+    assert(diag.code == null);
     var out: Out = .{ .host = host, .diag = diag, .buffer = undefined, .len = 0 };
     if (json) try graph_json(&out, workspace) else try graph_text(&out, workspace);
     try out.flush();
@@ -108,7 +126,7 @@ fn base_of(file: *const BuildFile) []const u8 {
     return base;
 }
 
-fn graph_text(out: *Out, workspace: *const Workspace) Error!void {
+fn graph_text(out: *Out, workspace: *const load_mod.Workspace) Error!void {
     const file = &workspace.file;
     const graph = &workspace.graph;
     assert(graph.count == file.steps_count);
@@ -186,7 +204,7 @@ const Row = struct {
     }
 };
 
-fn graph_json(out: *Out, workspace: *const Workspace) Error!void {
+fn graph_json(out: *Out, workspace: *const load_mod.Workspace) Error!void {
     const file = &workspace.file;
     const graph = &workspace.graph;
     assert(graph.count == file.steps_count);
@@ -236,7 +254,7 @@ fn json_list(
 
 /// Every edge, from what is needed to what needs it: in the nodes' order, then each node's
 /// needs in the file's order; the image's are its adds, each step once.
-fn json_edges(out: *Out, workspace: *const Workspace) Error!void {
+fn json_edges(out: *Out, workspace: *const load_mod.Workspace) Error!void {
     const file = &workspace.file;
     const graph = &workspace.graph;
     var count: u32 = 0;

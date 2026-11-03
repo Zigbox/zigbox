@@ -2061,7 +2061,7 @@ fn expect_direct(
 /// E0804 to E0806 come from a build's steps, which slice 3's `zbx build` runs: until then the
 /// golden is the diagnostic as `build/diagnose.zig` builds it.
 fn build_base_not_locked(diag: *Diag) void {
-    build_diagnose.base_not_locked(diag, "fetch", "docker.io/library/alpine:3.20");
+    build_diagnose.base_not_locked(diag, "fetch", "docker.io/library/alpine:3.20", false);
 }
 
 fn build_step_failed(diag: *Diag) void {

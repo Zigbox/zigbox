@@ -406,7 +406,8 @@ test "a crash or failure at any write of an entry leaves it absent or whole" {
     // each write point in turn, once as a crash (the machine dies, unsynced bytes torn) and once
     // as a failed call. Afterwards the store is whole, and the entry is either not there or the
     // complete new one; a second record after the fault finishes the job. With a stale entry
-    // (its tree gone) in place, the old entry or the new one is there, never half of one.
+    // (its tree gone) in place, it is a `tree_incomplete` miss before the record, and the
+    // entry afterwards is the new one or still the stale one, never half of one.
     for ([_]bool{ false, true }) |stale| {
         for ([_]bool{ true, false }) |crash| {
             var point: u32 = 0;
@@ -425,6 +426,8 @@ test "a crash or failure at any write of an entry leaves it absent or whole" {
                         cache.render(&render_buffer, gone, key.preimage()),
                     );
                     old = null;
+                    const before = do_lookup(&key);
+                    try testing.expectEqual(cache.Miss.tree_incomplete, before.miss);
                 }
                 const finished = faulty_record(point, crash, output);
                 if (crash and !finished) files.restart();

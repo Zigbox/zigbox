@@ -606,8 +606,9 @@ fn kind_name(kind: fs_mod.FileKind) []const u8 {
 
 // ---- A step (E0804 to E0806) ------------------------------------------------------------------
 
-/// `E0804`: the base of a step is not in `zbx.lock`. A build never resolves a tag itself.
-pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8) void {
+/// `E0804`: the base of a step is not in `zbx.lock` (`locked` false), or is there but its image
+/// is not in the store (`locked` true). A build never resolves a tag itself.
+pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8, locked: bool) void {
     assert(diag.code == null);
     assert(step.len > 0);
     assert(reference.len > 0);
@@ -615,8 +616,13 @@ pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8) voi
     const shown = text_util.sanitise(&reference_echo, reference);
     diag.raise(.E0804);
     diag.while_("resolving the base of build step \"{s}\"", .{step});
-    diag.cause("base \"{s}\" of step \"{s}\" is not in zbx.lock, and a build never resolves " ++
-        "a tag itself", .{ shown, step });
+    if (locked) {
+        diag.cause("base \"{s}\" of step \"{s}\" is in zbx.lock but its image is not in " ++
+            "the store", .{ shown, step });
+    } else {
+        diag.cause("base \"{s}\" of step \"{s}\" is not in zbx.lock, and a build never " ++
+            "resolves a tag itself", .{ shown, step });
+    }
     diag.context("step", "{s}", .{step});
     diag.context("base", "{s}", .{shown});
     diag.fix_with("pull it, which pins it in zbx.lock", "zbx pull {s}", .{shown});

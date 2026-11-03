@@ -2821,6 +2821,11 @@ pub const registry = [_]Entry{
         \\A step has no network unless it says .network = true, so a step that
         \\fetches something fails as one that cannot resolve a name. The step's
         \\whole output is kept in its log.
+        \\
+        \\The step is also refused, with this code, when its environment is too
+        \\large: the base image's variables, the step's .env and the fixed ones
+        \\together are more than a command can be given. Remove variables from
+        \\.env or use a base with a smaller environment.
         ,
     },
     .{

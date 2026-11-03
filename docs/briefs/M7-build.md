@@ -149,7 +149,7 @@ error[ZBX-E0805]: build step "fetch" failed: exit 4
   docs   https://zigbox.github.io/zigbox/errors/E0805.html
 ```
 
-- `E0806` a step's output is refused (a device file, FIFO or socket in `/out`, or a limit on files or depth exceeded).
+- `E0806` a step's output is refused (a device file, FIFO or socket in `/out`; an `/out` over the store's limits on files, paths or depth is E0415, as for any import).
 - `E0807` the image assembly conflicts (the path and both sources), or `image.config` is invalid (the field and why: a relative `workdir`, a non-numeric `user`, an env entry without `=`).
 - `W0801` the build has network steps (named).
 

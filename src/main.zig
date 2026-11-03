@@ -264,6 +264,7 @@ test {
     _ = @import("build/load.zig");
     _ = @import("build/step.zig");
     _ = @import("build/step_tests.zig");
+    _ = @import("build/compose.zig");
     _ = @import("build_commands.zig");
     _ = @import("build_tests.zig");
 }

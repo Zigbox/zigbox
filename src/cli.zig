@@ -870,10 +870,6 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .exec) try check_exec_args(diag, &invocation.run);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
-    // Slice 1 of M7 prints the graph; running a build comes with the next slices.
-    if (invocation.command == .build and !invocation.build.graph) {
-        return missing_argument(diag, .build, .graph);
-    }
 }
 
 /// What `store gc` was given besides its words.
@@ -1676,7 +1672,6 @@ const Missing = enum {
     topic,
     reference,
     action,
-    graph,
 };
 
 /// What `pull` lacks: its reference.
@@ -1762,7 +1757,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 
     if (command == .schema) assert(missing == .topic);
     if (command == .lock) assert(missing == .action);
-    if (command == .build) assert(missing == .graph);
+    assert(command != .build);
     if (command == .pull) assert(@backingInt(missing) >= @backingInt(Missing.reference));
 
     assert(command != .doctor);
@@ -1793,11 +1788,6 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
         },
         .reference => missing_pull(diag, missing),
         .action => missing_lock(diag),
-        .graph => {
-            diag.cause("'build' runs nothing yet: this zbx checks a build file and prints its " ++
-                "graph, with --graph", .{});
-            diag.fix(.{ .sentence = "check the build file:", .command = "zbx build --graph" });
-        },
         .command => missing_command_words(diag, command),
     }
     diag.context("cmd", "{s}", .{@tagName(command)});
@@ -2026,11 +2016,12 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             invocation.options.output == .json,
             diag,
         ) catch |err| return lock_error(err),
-        .build => build_commands.run_graph(
+        .build => build_commands.run(
             host,
             &storage.build,
-            invocation.build.file orelse "",
+            invocation.build,
             invocation.options.output == .json,
+            &storage.handle.facts,
             diag,
         ) catch |err| return build_error(err),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
