@@ -68,6 +68,7 @@ fn start() void {
         .group = "g",
         .row_failed = null,
         .json = false,
+        .verbose = false,
         .started_ms = sim.interface().monotonic_ms(),
         .started_s = sim.interface().time_now(),
         .name_width = 7,
@@ -604,4 +605,34 @@ test "a damaged result record is E0422 and a newer one E0423 that says to upgrad
     diagnose.result_unusable(&diag, digest, true);
     try testing.expectEqual(.E0423, diag.code.?);
     try testing.expect(std.mem.endsWith(u8, diag.last_cause().?, "was written by a newer zbx"));
+}
+
+test "a network step's row ends with net, and a step without network has no marker" {
+    // Goal: the report marks a step that ran with the network (the brief's `net`). Method: the
+    // same settle as the clean exit, with the step's `network` set.
+    start();
+    loaded.file.steps[0].network = true;
+    const answer = answer_of(made_output());
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expectEqualStrings("  compile   miss   0.00 s   net\n", sim.stdout());
+    try testing.expect(composed.timings[0].network);
+}
+
+test "W0801 is printed once on stderr, naming the network steps, and never on stdout" {
+    // Goal: a build with network steps warns before it runs them, once, in the mode asked; one
+    // without says nothing. Method: set `network` on the steps of the example and render.
+    start();
+    context.warn_network();
+    try testing.expectEqualStrings("", sim.stderr());
+    loaded.file.steps[0].network = true;
+    loaded.file.steps[1].network = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "warning[ZBX-W0801]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "compile, notice") != null);
+    try testing.expectEqualStrings("", sim.stdout());
+    sim.stderr_len = 0;
+    context.json = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-W0801\""));
+    try testing.expectEqualStrings("", sim.stdout());
 }

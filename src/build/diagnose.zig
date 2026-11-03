@@ -940,6 +940,58 @@ fn signal_name(number: u8) []const u8 {
     return name;
 }
 
+/// `W0801`: the build has steps with `network = true`. `names` is their names in the build's
+/// order, joined by `, ` and cut to fit (`network_names`); `count` is how many there are.
+pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    assert(names.len > 0);
+    diag.raise(.W0801);
+    diag.while_("planning the build", .{});
+    // The newest cause is what the default view shows, so it is the one that names the steps.
+    diag.cause("their output depends on what the network returns, not only on the inputs", .{});
+    diag.cause("steps that use the network: {s}", .{names});
+    diag.context("steps", "{d}", .{count});
+    diag.fix(.{
+        .sentence = "pin what they fetch, or fetch it once outside the build as an input",
+    });
+    assert(diag.code.? == .W0801);
+}
+
+/// The names of the network steps, joined by `, ` into `out`; when they do not fit, the ones
+/// that do and `, ...`. Returns the used prefix, empty for no names.
+pub fn network_names(out: []u8, names: []const []const u8) []const u8 {
+    assert(out.len >= 8);
+    const more = ", ...";
+    var length: usize = 0;
+    for (names, 0..) |name, at| {
+        assert(name.len > 0);
+        const separator: usize = if (at == 0) 0 else 2;
+        const last = at + 1 == names.len;
+        const reserve: usize = if (last) 0 else more.len;
+        if (length + separator + name.len + reserve > out.len) {
+            if (at == 0) {
+                // Not even the first name fits: cut the name itself.
+                const dots = "...";
+                const kept = out.len - dots.len;
+                @memcpy(out[0..kept], name[0..kept]);
+                @memcpy(out[kept..][0..dots.len], dots);
+                return out[0..out.len];
+            }
+            if (length + more.len > out.len) length = out.len - more.len;
+            @memcpy(out[length..][0..more.len], more);
+            return out[0 .. length + more.len];
+        }
+        if (at > 0) {
+            out[length] = ',';
+            out[length + 1] = ' ';
+        }
+        @memcpy(out[length + separator ..][0..name.len], name);
+        length += separator + name.len;
+    }
+    return out[0..length];
+}
+
 /// `E0806`: a step left in `/out` what an output cannot hold. `relative` is its path below
 /// `/out`, starting with `/`; `kind` names it ("FIFO").
 pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind: []const u8) void {
@@ -982,4 +1034,19 @@ pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
     }
     diag.context("cmd", "inspect", .{});
     diag.context("arg", "{s}", .{echo});
+}
+
+test "network_names joins the names and cuts what does not fit with an ellipsis" {
+    // Goal: the W0801 cause always fits its field, names the steps in order, and says when it
+    // left some out. Method: names that fit exactly, one past, and a single name too long.
+    var out: [20]u8 = undefined;
+    try std.testing.expectEqualStrings("a", network_names(&out, &.{"a"}));
+    try std.testing.expectEqualStrings("fetch, other", network_names(&out, &.{ "fetch", "other" }));
+    const exact = network_names(&out, &.{ "aaaaaaaa", "bbbbbbbb" }); // 18 bytes.
+    try std.testing.expectEqualStrings("aaaaaaaa, bbbbbbbb", exact);
+    const cut = network_names(&out, &.{ "aaaaaaaa", "bbbbbbbb", "c" });
+    try std.testing.expectEqualStrings("aaaaaaaa, ...", cut);
+    const long = network_names(&out, &.{&@as([25]u8, @splat('x'))});
+    try std.testing.expectEqualStrings("xxxxxxxxxxxxxxxxx...", long);
+    try std.testing.expect(long.len <= out.len);
 }

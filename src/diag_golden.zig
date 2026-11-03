@@ -676,6 +676,7 @@ const build_cases = [_]Case{
     .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
+    .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
 };
 
 const exec_plan = @import("runtime/exec_plan.zig");
@@ -2074,6 +2075,10 @@ fn build_step_failed(diag: *Diag) void {
         .log = "/home/user/.local/share/zbx/build/logs/0123456789abcdef/fetch.log",
     };
     build_diagnose.step_failed(diag, &failure);
+}
+
+fn build_network_steps(diag: *Diag) void {
+    build_diagnose.network_steps(diag, "fetch, vendor", 2);
 }
 
 fn build_output_refused(diag: *Diag) void {

@@ -191,7 +191,22 @@ pub const StartOptions = struct {
     mirror: bool = false,
     /// The container's standard input is /dev/null (a build step), not this process's.
     stdin_null: bool = false,
+    /// Also write that output, line by line with this prefix on each line, to this process's
+    /// standard error as it comes (`zbx build --verbose`, the prefix `<step> | `). Unlike
+    /// `mirror`, the container's streams are always pipes, even when they would be a
+    /// terminal; empty is off. At most `stream_prefix_bytes_max`.
+    stream_prefix: []const u8 = "",
 };
+
+/// The longest `StartOptions.stream_prefix`: a build step's name and ` | `.
+pub const stream_prefix_bytes_max = constants.build_step_name_bytes_max + 3;
+/// The most one write of a streamed line carries, prefix included; a longer line is written in
+/// pieces, the prefix only on its first.
+const stream_write_bytes_max = 1024;
+
+comptime {
+    assert(stream_prefix_bytes_max < stream_write_bytes_max);
+}
 
 pub const Note = text_util.Bounded(160);
 
@@ -259,6 +274,11 @@ pub const Handle = struct {
     log_active: bool,
     log_warned: bool,
     mirror: bool,
+    /// The prefix of streamed lines (`StartOptions.stream_prefix`), and whether each of the two
+    /// streams (stdout, stderr) is in the middle of a line.
+    stream_prefix: [stream_prefix_bytes_max]u8,
+    stream_prefix_len: u8,
+    stream_mid_line: [2]bool,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -1000,6 +1020,10 @@ fn reset_log(handle: *Handle, options: StartOptions) void {
     handle.log_active = false;
     handle.log_warned = false;
     handle.mirror = options.mirror;
+    assert(options.stream_prefix.len <= stream_prefix_bytes_max);
+    @memcpy(handle.stream_prefix[0..options.stream_prefix.len], options.stream_prefix);
+    handle.stream_prefix_len = @intCast(options.stream_prefix.len);
+    handle.stream_mid_line = .{ false, false };
     assert(!handle.log_active);
     assert(handle.log_warned == false);
 }
@@ -1074,6 +1098,7 @@ fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) boo
             keep = false;
         };
     }
+    if (handle.stream_prefix_len > 0) stream_lines(handle, stream, bytes);
     if (!handle.log_active) return keep;
     const which: logfile.Stream = if (stream == .stdout) .stdout else .stderr;
     const time = @min(handle.host.time_now(), constants.log_time_max - 1);
@@ -1088,6 +1113,73 @@ fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) boo
         warn_log_not_kept(handle, logs.text(), failure);
     };
     return keep;
+}
+
+/// Writes `bytes` to standard error with the stream prefix at the start of each line. Each write
+/// holds one line (or a piece of a long one), so two steps' lines do not mix inside a line. A
+/// write that fails loses the line and nothing else: the log is the record of the output.
+fn stream_lines(handle: *Handle, stream: host_mod.Stream, bytes: []const u8) void {
+    assert(bytes.len > 0);
+    assert(handle.stream_prefix_len > 0);
+    const which: usize = if (stream == .stdout) 0 else 1;
+    const prefix = handle.stream_prefix[0..handle.stream_prefix_len];
+    var buffer: [stream_write_bytes_max]u8 = undefined;
+    var rest = bytes;
+    while (rest.len > 0) {
+        const next = stream_piece(&buffer, prefix, &handle.stream_mid_line[which], rest);
+        handle.host.write_all(.stderr, buffer[0..next.length]) catch {};
+        rest = rest[next.consumed..];
+    }
+}
+
+const StreamPiece = struct { length: usize, consumed: usize };
+
+/// Fills `buffer` with the next write for `rest`: the prefix when a line starts, then up to the
+/// end of the line (the newline included) or what fits. `mid_line` says whether the previous
+/// piece stopped inside a line, and is updated.
+fn stream_piece(
+    buffer: *[stream_write_bytes_max]u8,
+    prefix: []const u8,
+    mid_line: *bool,
+    rest: []const u8,
+) StreamPiece {
+    assert(rest.len > 0);
+    assert(prefix.len <= stream_prefix_bytes_max);
+    var length: usize = 0;
+    if (!mid_line.*) {
+        @memcpy(buffer[0..prefix.len], prefix);
+        length = prefix.len;
+    }
+    const line_end = std.mem.indexOfScalar(u8, rest, '\n');
+    const consumed = @min(if (line_end) |at| at + 1 else rest.len, buffer.len - length);
+    assert(consumed > 0);
+    @memcpy(buffer[length..][0..consumed], rest[0..consumed]);
+    mid_line.* = rest[consumed - 1] != '\n';
+    return .{ .length = length + consumed, .consumed = consumed };
+}
+
+test "stream_piece puts the prefix before each line, once, across chunks and long lines" {
+    // Goal: `--verbose` output reads `<step> | <line>` however the container's writes are cut.
+    // Method: feed chunks that end mid-line, with several lines, and a line longer than a write.
+    var buffer: [stream_write_bytes_max]u8 = undefined;
+    var mid_line = false;
+    const first = stream_piece(&buffer, "a | ", &mid_line, "one\ntw");
+    try std.testing.expectEqualStrings("a | one\n", buffer[0..first.length]);
+    try std.testing.expect(!mid_line);
+    const second = stream_piece(&buffer, "a | ", &mid_line, "tw");
+    try std.testing.expectEqualStrings("a | tw", buffer[0..second.length]);
+    try std.testing.expect(mid_line);
+    const third = stream_piece(&buffer, "a | ", &mid_line, "o\n");
+    try std.testing.expectEqualStrings("o\n", buffer[0..third.length]);
+    try std.testing.expect(!mid_line);
+    var long: [stream_write_bytes_max + 10]u8 = @splat('x');
+    long[long.len - 1] = '\n';
+    const head = stream_piece(&buffer, "a | ", &mid_line, &long);
+    try std.testing.expectEqual(stream_write_bytes_max, head.length);
+    try std.testing.expect(mid_line);
+    const tail = stream_piece(&buffer, "a | ", &mid_line, long[head.consumed..]);
+    try std.testing.expectEqual(long.len - head.consumed, tail.length);
+    try std.testing.expect(!mid_line);
 }
 
 /// A record that was pruned no longer needs the layers kept for it: they go, from inside the

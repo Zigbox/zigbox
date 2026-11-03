@@ -2049,7 +2049,10 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             host,
             &storage.build,
             invocation.build,
-            invocation.options.output == .json,
+            .{
+                .json = invocation.options.output == .json,
+                .verbose = invocation.options.verbose,
+            },
             &storage.handle.facts,
             diag,
         ) catch |err| return build_error(err),
