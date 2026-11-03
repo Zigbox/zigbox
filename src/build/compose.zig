@@ -169,6 +169,8 @@ const Job = struct {
 /// file count, or the encoded diagnostic. The exit code is 0 only with an answer.
 fn worker_entry(raw: *anyopaque) u8 {
     const job: *Job = @ptrCast(@alignCast(raw));
+    // A killed build takes its workers with it, as it took its one step before.
+    job.host.die_with_parent() catch return 1;
     var diag: Diag = undefined;
     diag.reset();
     var result: step_mod.Result = undefined;
