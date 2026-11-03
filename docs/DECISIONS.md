@@ -12,6 +12,13 @@ Zigcube's real-runtime smoke test (C2 slice 1) boots the same Ubuntu 24.04 guest
 
 
 
+## M7 · Slice 3 (partial): the scheduler
+
+- **Parallel steps are worker processes, not threads.** A miss forks a worker (`Host.fork_child`) that runs `step.run_step` on a copy of the parent's memory and answers on a close-on-exec pipe: 40 bytes (output digest, u64 file count) or an encoded diagnostic with a non-zero exit. The parent resolves base, inputs, key and cache lookup serially (so a hit never forks), waits for the first worker with the new `Host.wait_any` (pidfd_open + ppoll + wait4; the sim returns an I/O error because it has no children), records the cache entry under the shared store lock, and prints the row. No `Session` change was needed.
+- **`schedule.zig` is a pure function over an `Executor`** (begin returns hit or running; wait returns an index and an ok flag), so `schedule_tests.zig` drives it with a fake executor. Steps start in plan order while fewer than the bound run; after a failure nothing new starts, running steps are waited for, and the first failure is the build's.
+- **The bound is `constants.build_parallel_max` (4)**, not the CPU count: there is no `online_cpus` on `Host`. Revisit if a one-CPU runner suffers.
+- **Rows.** Text rows are unchanged. `--output json` writes one `zbx.build/1` `step` record per line (`step`, `cache`, `key`, `output`, `start_ms`, `end_ms`, `network`), times from the build's start, so overlap is checkable.
+
 ## M7 · Slice 2: review fixes and the composition
 
 *Decided in the slice 2 review.*

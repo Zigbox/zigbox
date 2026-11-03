@@ -318,6 +318,9 @@ pub const Event = union(enum) {
     output: u32,
 };
 
+/// A child `wait_any` reaped: its place in the pids it was given, and how it ended.
+pub const Reaped = struct { index: u8, status: ExitStatus };
+
 /// Which side of `fork_supervisor` a process is on.
 pub const Role = enum {
     /// The caller that asked for a detached run; it goes on, and the supervisor is its child.
@@ -527,6 +530,9 @@ pub const VTable = struct {
     /// with its standard streams on /dev/null, that goes on with the same memory. The caller
     /// must be single-threaded. The real host's supervisor ends with `exit_now`.
     fork_supervisor: *const fn (context: *anyopaque) Error!Role,
+    /// Waits for the first of `pids` (children of this process) to end, by pidfd, and reaps it.
+    /// Null when `timeout_ms` (above zero) passed first.
+    wait_any: *const fn (context: *anyopaque, pids: []const Pid, timeout_ms: u32) Error!?Reaped,
     /// Ends the process now with `code`. The real host does not return; the simulator does, so
     /// that a test can look at what the supervisor left behind.
     exit_now: *const fn (context: *anyopaque, code: u8) void,
@@ -1224,6 +1230,23 @@ pub const Host = struct {
         const role = try host.vtable.fork_supervisor(host.context);
         assert(host.vtable.last_errno(host.context) == 0);
         return role;
+    }
+
+    /// The first of `pids` to end, reaped; null on timeout. `pids` holds at most 32.
+    pub fn wait_any(host: Host, pids: []const Pid, timeout_ms: u32) Error!?Reaped {
+        assert(pids.len > 0);
+        assert(pids.len <= 32);
+        assert(timeout_ms <= constants.wait_timeout_ms_max);
+        for (0..constants.wait_interrupts_max + 1) |_| {
+            const waited = host.vtable.wait_any(host.context, pids, timeout_ms);
+            const reaped = waited catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            if (reaped) |found| assert(found.index < pids.len);
+            return reaped;
+        }
+        return error.IoFailed;
     }
 
     pub fn exit_now(host: Host, code: u8) void {

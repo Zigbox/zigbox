@@ -4,9 +4,10 @@
 //! (`cache.zig`) either has the output (a hit starts no container) or `step.run_step` makes it
 //! and the cache records it. One line per step says which: `<step>  hit|built  <output digest>`.
 //!
-//! This is not the scheduler (slice 3): steps run one at a time, a failure stops the build, a
-//! base that the lock names but the store lacks is refused with the pull that fixes it (the
-//! pull by locked digest is slice 3's), and there is no image output yet (slice 4).
+//! Steps run through `schedule.zig`: hits are found here, a miss runs in a worker process, a
+//! failure starts nothing new. A base that the lock names but the store lacks is refused with the
+//! pull that fixes it (the pull by locked digest is still to do), and there is no image output
+//! yet.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -30,6 +31,9 @@ const step_mod = @import("step.zig");
 const input_tree = @import("input_tree.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
+const schedule = @import("schedule.zig");
+const pull_lib = @import("../pull.zig");
+const import_mod = @import("../store/import.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -53,16 +57,25 @@ pub const Workspace = struct {
     needs: [constants.build_step_needs_max]key_mod.Need,
     key: key_mod.Key,
     row: [row_bytes]u8,
+    slots: [constants.build_parallel_max]Slot,
+    plan: schedule.Plan,
+    side_diag: Diag,
 };
 
-const row_bytes = constants.build_step_name_bytes_max + 16 + constants.store_digest_text_bytes;
+const row_bytes = constants.build_step_name_bytes_max + 400;
 
-/// Builds every step of the loaded build file, in graph order, writing one row per step.
+/// Builds every step of the loaded build file with the scheduler (`schedule.zig`): hits are
+/// found here, in this process; a miss runs in a worker process (`worker_entry`) that this process
+/// waits for with pidfds. A row is written as each step ends. `json` writes `zbx.build/1`
+/// records instead of the text rows.
 pub fn run_steps(
     host: Host,
     facts: *doctor.Facts,
     loaded: *const load_mod.Workspace,
     ws: *Workspace,
+    pull_ws: *pull_lib.Workspace,
+    import_ws: *import_mod.Workspace,
+    json: bool,
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
@@ -87,10 +100,93 @@ pub fn run_steps(
         .diag = diag,
         .store = &store,
         .group = group,
+        .pull = pull_ws,
+        .import = import_ws,
+        .json = json,
+        .began = host.monotonic_ms(),
+        .hits = 0,
+        .misses = 0,
+        .row_failed = null,
     };
+    for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
-    for (loaded.graph.order_slice()) |index| try context.build_step(index);
+    make_plan(loaded, &ws.plan);
+    const executor: schedule.Executor = .{
+        .context = &context,
+        .begin = Context.begin_step,
+        .wait = Context.wait_step,
+    };
+    const outcome = schedule.run(&ws.plan, parallel_bound(host), executor);
+    context.hits = outcome.hits;
+    context.misses = outcome.built;
+    if (outcome.failed != null) {
+        if (diag.code == null) {
+            diag.raise(.B0001);
+            diag.cause("a build step failed with no diagnostic", .{});
+        }
+        return error.Failed;
+    }
+    if (context.row_failed) |err| return err;
 }
+
+/// How many steps may run at once: the constant, and never more than the CPUs online.
+fn parallel_bound(host: Host) u8 {
+    _ = host;
+    return constants.build_parallel_max;
+}
+
+fn make_plan(loaded: *const load_mod.Workspace, plan: *schedule.Plan) void {
+    const graph = &loaded.graph;
+    plan.count = graph.count;
+    for (graph.order_slice(), 0..) |index, at| plan.order[at] = index;
+    for (0..graph.count) |index| {
+        const needs = graph.needs_slice(&loaded.file, @intCast(index));
+        for (needs, 0..) |need, at| plan.needs[index][at] = need;
+        plan.needs_count[index] = @intCast(needs.len);
+    }
+    assert(plan.valid());
+}
+
+/// A miss that is running in a worker process.
+const Slot = struct {
+    active: bool,
+    index: u8,
+    pid: host_mod.Pid,
+    report: host_mod.Pipe,
+    key: key_mod.Key,
+    started: u64,
+};
+
+/// What the worker needs: it runs on a copy of this process's memory.
+const Job = struct {
+    request: *const step_mod.Request,
+    ws: *step_mod.Workspace,
+    write: host_mod.Handle,
+    host: Host,
+};
+
+/// The worker: runs the step as a container and answers on the pipe, the output's digest and its
+/// file count, or the encoded diagnostic. The exit code is 0 only with an answer.
+fn worker_entry(raw: *anyopaque) u8 {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    var diag: Diag = undefined;
+    diag.reset();
+    var result: step_mod.Result = undefined;
+    step_mod.run_step(job.request, job.ws, &result, &diag) catch {
+        var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
+        const encoded = diag.encode(&bytes);
+        job.host.write_handle_all(job.write, encoded) catch {};
+        return diag.exit_code();
+    };
+    var answer: [answer_bytes]u8 = undefined;
+    @memcpy(answer[0..constants.store_digest_bytes], &result.output.bytes);
+    std.mem.writeInt(u64, answer[constants.store_digest_bytes..][0..8], result.files, .little);
+    job.host.write_handle_all(job.write, &answer) catch return 1;
+    return 0;
+}
+
+/// The answer on the pipe: the output's digest, then its file count.
+const answer_bytes = constants.store_digest_bytes + 8;
 
 const Context = struct {
     host: Host,
@@ -100,6 +196,13 @@ const Context = struct {
     diag: *Diag,
     store: *Store,
     group: []const u8,
+    pull: *pull_lib.Workspace,
+    import: *import_mod.Workspace,
+    json: bool,
+    began: u64,
+    hits: u8,
+    misses: u8,
+    row_failed: ?Error,
 
     fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
@@ -109,6 +212,16 @@ const Context = struct {
             .file = context.loaded.shown(),
             .group = context.group,
         };
+    }
+
+    fn begin_step(raw: *anyopaque, index: u8) schedule.Error!schedule.Begin {
+        const context: *Context = @ptrCast(@alignCast(raw));
+        return context.begin(index) catch error.Failed;
+    }
+
+    fn wait_step(raw: *anyopaque) schedule.Error!schedule.Ended {
+        const context: *Context = @ptrCast(@alignCast(raw));
+        return context.wait() catch error.Failed;
     }
 
     /// Clears what a killed build left in `build/work`, before this one starts steps.
@@ -128,7 +241,8 @@ const Context = struct {
         step_mod.sweep(&sweep_request, &context.ws.step, context.diag) catch return error.Failed;
     }
 
-    fn build_step(context: *Context, index: u8) Error!void {
+    /// Resolves the step's key; a cached output is a hit, anything else starts a worker.
+    fn begin(context: *Context, index: u8) Error!schedule.Begin {
         const loaded = context.loaded;
         const ws = context.ws;
         const file = &loaded.file;
@@ -146,6 +260,7 @@ const Context = struct {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
             return error.Failed;
         };
+        const started = context.host.monotonic_ms();
         var failure: cache.Failure = undefined;
         const found = cache.lookup(context.store, &ws.cache, &ws.key, &failure) catch {
             return context.cache_failed(&failure);
@@ -153,17 +268,124 @@ const Context = struct {
         switch (found) {
             .hit => |output| {
                 ws.outputs[index] = output;
-                return context.row(name, "hit", output);
+                try context.row(index, "hit", output, started);
+                return .hit;
             },
             .miss => {},
         }
-        const run_request = context.request(&spec);
-        step_mod.run_step(&run_request, &ws.step, &ws.result, context.diag) catch {
+        try context.fork_worker(index, &spec, started);
+        return .running;
+    }
+
+    fn fork_worker(
+        context: *Context,
+        index: u8,
+        spec: *const key_mod.Spec,
+        started: u64,
+    ) Error!void {
+        const ws = context.ws;
+        const slot = for (&ws.slots) |*candidate| {
+            if (!candidate.active) break candidate;
+        } else unreachable; // The bound never exceeds the slots.
+        const host = context.host;
+        const report = host.pipe() catch |err| {
+            store_diagnose.worker_ended(context.diag, .{ .step = .{
+                .name = "pipe",
+                .err = err,
+                .errno = host.last_errno(),
+            } });
             return error.Failed;
         };
-        const output = try context.record(ws.result.output);
-        ws.outputs[index] = output;
-        try context.row(name, "built", output);
+        const run_request = context.request(spec);
+        var job: Job = .{
+            .request = &run_request,
+            .ws = &ws.step,
+            .write = report.write,
+            .host = host,
+        };
+        const pid = host.fork_child(false, worker_entry, &job) catch |err| {
+            host.close(report.read);
+            host.close(report.write);
+            store_diagnose.worker_ended(context.diag, .{ .step = .{
+                .name = "starting a build step's worker",
+                .err = err,
+                .errno = host.last_errno(),
+            } });
+            return error.Failed;
+        };
+        host.close(report.write);
+        slot.* = .{
+            .active = true,
+            .index = index,
+            .pid = pid,
+            .report = report,
+            .key = ws.key,
+            .started = started,
+        };
+    }
+
+    /// Waits for the first worker to end and settles its step.
+    fn wait(context: *Context) Error!schedule.Ended {
+        const ws = context.ws;
+        const host = context.host;
+        var pids: [constants.build_parallel_max]host_mod.Pid = undefined;
+        var which: [constants.build_parallel_max]u8 = undefined;
+        var count: u8 = 0;
+        for (&ws.slots, 0..) |*slot, at| {
+            if (!slot.active) continue;
+            pids[count] = slot.pid;
+            which[count] = @intCast(at);
+            count += 1;
+        }
+        assert(count > 0);
+        const reaped = host.wait_any(pids[0..count], 0) catch |err| {
+            store_diagnose.worker_ended(context.diag, .{ .step = .{
+                .name = "waiting for a build step",
+                .err = err,
+                .errno = host.last_errno(),
+            } });
+            return error.Failed;
+        } orelse unreachable; // A wait with no time does not time out.
+        const slot = &ws.slots[which[reaped.index]];
+        slot.active = false;
+        defer host.close(slot.report.read);
+        var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
+        var length: usize = 0;
+        while (length < bytes.len) {
+            const got = host.read_some(slot.report.read, bytes[length..]) catch break;
+            if (got == 0) break;
+            length += got;
+        }
+        // A second failure is told to nobody: the first diagnostic is the build's.
+        const outer = context.diag;
+        if (outer.code != null) {
+            ws.side_diag.reset();
+            context.diag = &ws.side_diag;
+        }
+        defer context.diag = outer;
+        const ok = reaped.status == .exited and reaped.status.exited == 0;
+        if (!ok or length != answer_bytes) {
+            if (length > 0 and length != answer_bytes and context.diag.decode(bytes[0..length])) {
+                return .{ .index = slot.index, .ok = false };
+            }
+            context.diag.reset();
+            const fault: store_diagnose.WorkerFault = switch (reaped.status) {
+                .signaled => |number| .{ .signaled = number },
+                .exited => .{ .report = "a build step's worker ended with no answer" },
+            };
+            store_diagnose.worker_ended(context.diag, fault);
+            return .{ .index = slot.index, .ok = false };
+        }
+        var output: Digest = undefined;
+        @memcpy(&output.bytes, bytes[0..constants.store_digest_bytes]);
+        ws.key = slot.key;
+        const kept = context.record(output) catch return .{ .index = slot.index, .ok = false };
+        ws.outputs[slot.index] = kept;
+        context.row(slot.index, "built", kept, slot.started) catch |err| {
+            context.row_failed = err;
+            return .{ .index = slot.index, .ok = false };
+        };
+        return .{ .index = slot.index, .ok = true };
     }
 
     /// The base's image, from the lock: its platform, tree and environment.
@@ -252,17 +474,60 @@ const Context = struct {
         return error.Failed;
     }
 
-    fn row(context: *Context, name: []const u8, what: []const u8, output: Digest) Error!void {
+    fn row(
+        context: *Context,
+        index: u8,
+        what: []const u8,
+        output: Digest,
+        started: u64,
+    ) Error!void {
+        const ended = context.host.monotonic_ms();
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
         const text = output.text();
-        const format = "{s}  {s}  {s}\n";
-        const line = std.fmt.bufPrint(&context.ws.row, format, .{ name, what, &text }) catch
-            unreachable; // `row_bytes` holds a name, a word and a digest.
+        const times: Times = .{
+            .start = started -| context.began,
+            .end = ended -| context.began,
+            .network = context.loaded.file.steps[index].network,
+        };
+        const key = &context.ws.key;
+        const line = if (context.json)
+            json_row(&context.ws.row, name, what, key, &text, times)
+        else
+            std.fmt.bufPrint(&context.ws.row, "{s}  {s}  {s}\n", .{ name, what, &text }) catch
+                unreachable; // `row_bytes` holds a name, a word and a digest.
         context.host.write_all(.stdout, line) catch |err| {
             errors.output_failed(context.diag, .stdout, err, context.host.last_errno());
             return error.OutputFailed;
         };
     }
 };
+
+const Times = struct { start: u64, end: u64, network: bool };
+
+/// One `zbx.build/1` record: `cache` is `hit` or `miss`, the times are from the build's start.
+fn json_row(
+    buffer: []u8,
+    name: []const u8,
+    what: []const u8,
+    key: *const key_mod.Key,
+    output: []const u8,
+    times: Times,
+) []const u8 {
+    const key_text = key.digest.text();
+    const cache_word = if (std.mem.eql(u8, what, "hit")) "hit" else "miss";
+    const format = "{{\"schema\":\"zbx.build/1\",\"record\":\"step\",\"step\":\"{s}\"," ++
+        "\"cache\":\"{s}\",\"key\":\"{s}\",\"output\":\"{s}\",\"start_ms\":{d}," ++
+        "\"end_ms\":{d},\"network\":{s}}}\n";
+    return std.fmt.bufPrint(buffer, format, .{
+        name,
+        cache_word,
+        &key_text,
+        output,
+        times.start,
+        times.end,
+        if (times.network) "true" else "false",
+    }) catch unreachable; // `row_bytes` is sized for it (checked below).
+}
 
 fn fill_lists(
     file: *const file_mod.BuildFile,

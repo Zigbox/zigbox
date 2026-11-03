@@ -256,6 +256,7 @@ test {
     _ = @import("build/key.zig");
     _ = @import("build/cache.zig");
     _ = @import("build/cache_tests.zig");
+    _ = @import("build/schedule_tests.zig");
     _ = @import("build/cache_bounds_tests.zig");
     _ = @import("build/input_tree.zig");
     _ = @import("build/input_tree_tests.zig");

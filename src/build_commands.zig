@@ -14,6 +14,8 @@ const file_mod = @import("build/file.zig");
 const load_mod = @import("build/load.zig");
 const compose = @import("build/compose.zig");
 const doctor = @import("doctor.zig");
+const pull_lib = @import("pull.zig");
+const import_mod = @import("store/import.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
 const Host = host_mod.Host;
@@ -96,6 +98,8 @@ const Out = struct {
 pub fn run(
     host: Host,
     workspace: *Workspace,
+    pull_ws: *pull_lib.Workspace,
+    import_ws: *import_mod.Workspace,
     args: anytype,
     json: bool,
     facts: *doctor.Facts,
@@ -107,7 +111,9 @@ pub fn run(
         return error.Failed;
     };
     if (args.graph) return print_graph(host, &workspace.loaded, json, diag);
-    compose.run_steps(host, facts, &workspace.loaded, &workspace.composed, diag) catch |err| {
+    const composed = &workspace.composed;
+    const loaded = &workspace.loaded;
+    compose.run_steps(host, facts, loaded, composed, pull_ws, import_ws, json, diag) catch |err| {
         return if (err == error.OutputFailed) error.OutputFailed else error.Failed;
     };
 }

@@ -410,6 +410,7 @@ pub const HostSim = struct {
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
+        .wait_any = wait_any,
         .exit_now = exit_now,
         .signal_state = signal_state,
         .time_now = time_now,
@@ -1118,6 +1119,19 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.world.fork_errno) |errno| return sim.model_error(errno);
         return sim.world.fork_role;
+    }
+
+    /// The simulator has no children to wait for: the scheduler's tests drive its executor.
+    fn wait_any(
+        context: *anyopaque,
+        pids: []const host.Pid,
+        timeout_ms: u32,
+    ) host.Error!?host.Reaped {
+        const sim = from_context(context);
+        _ = pids;
+        _ = timeout_ms;
+        try sim.begin_call();
+        return sim.model_error(constants.errno_io);
     }
 
     fn exit_now(context: *anyopaque, code: u8) void {
