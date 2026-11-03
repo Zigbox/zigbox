@@ -70,7 +70,7 @@ const refusals = [_]Refusal{
     .{
         .file = unlocked_file,
         .code = "ZBX-E0804",
-        .wants = &.{ "busybox:1.36", "not in zbx.lock", "zbx pull docker.io/library/busybox:1.36" },
+        .wants = &.{ "busybox:1.36", "not in zbx.lock", "zbx pull busybox:1.36" },
     },
 };
 
