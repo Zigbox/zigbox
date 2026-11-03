@@ -258,6 +258,9 @@ test {
     _ = @import("build/cache_tests.zig");
     _ = @import("build/schedule_tests.zig");
     _ = @import("build/cache_bounds_tests.zig");
+    _ = @import("build/result_tests.zig");
+    _ = @import("build/assemble_tests.zig");
+    _ = @import("build/assemble.zig");
     _ = @import("build/input_tree.zig");
     _ = @import("build/input_tree_tests.zig");
     _ = @import("build/input_tree_bounds_tests.zig");

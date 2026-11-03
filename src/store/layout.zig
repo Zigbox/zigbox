@@ -11,6 +11,8 @@
 //!   <root>/build/cache/<64 hex>       a build cache entry: the output tree of one build step and
 //!                                     the preimage of its key; a root for that tree
 //!                                     (`build/cache.zig`)
+//!   <root>/build/results/<64 hex>     a build result: the tree and the config of a built image,
+//!                                     named by the digest of those bytes (`build/result.zig`)
 //!   <root>/lock                       flock: shared by writers, exclusive for gc apply, restore
 //!   <root>/generation                 the counter every write to the store raises
 //!   <root>/trash/<gc id>/             what gc moved, until it expires
@@ -39,6 +41,7 @@ pub const subdirectories = [_][]const u8{ "objects", "trees", "roots", "cache", 
 /// release without builds does not have it), and its parent.
 pub const build_directory = "build";
 pub const build_cache_directory = "build/cache";
+pub const build_results_directory = "build/results";
 pub const format_file = "store.zon";
 pub const chunks_suffix = ".chunks";
 
@@ -220,6 +223,14 @@ pub const Store = struct {
         assert(key.bytes.len == constants.store_digest_bytes);
         const hex = key.hex();
         return store.path(buffer, &.{ "/", build_cache_directory, "/", &hex });
+    }
+
+    /// `build/results/<result digest hex>`: the record of a built image.
+    pub fn build_result_path(store: *const Store, buffer: *PathBuf, result: Digest) [:0]const u8 {
+        assert(store.root_len > 1);
+        assert(result.bytes.len == constants.store_digest_bytes);
+        const hex = result.hex();
+        return store.path(buffer, &.{ "/", build_results_directory, "/", &hex });
     }
 
     /// A fresh name for a file being written: `tmp/<pid>-<n>`.

@@ -827,6 +827,16 @@ pub const build_source_date_epoch: u64 = 315_532_800;
 /// the length prefixes) fits in the margin.
 pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max +
     16 * 1024;
+/// A build result record (`build/result.zig`): the tree digest and the resolved config in their
+/// canonical encoding. Its strings come from the build file's pool and the base image's
+/// settings; the rest (the magic, counts, digests, length prefixes) fits in the margin.
+pub const build_result_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max + 16 * 1024;
+/// The bytes of a result's labels (keys and values, together): the pool bound, since they come
+/// from the build file.
+pub const build_result_label_bytes_max: u32 = build_pool_bytes;
+/// Directories two trees of an assembly may have in common at one level (`build/assemble.zig`);
+/// past this a merge is refused rather than grow without bound.
+pub const build_merge_common_max: u32 = 256;
 /// A build cache entry (`build/cache.zig`): its fixed fields and a key's preimage.
 pub const build_cache_entry_bytes_max: u32 = 64 + build_key_preimage_bytes_max;
 /// The entries in `build/cache/` that gc follows. Each names a tree that gc keeps, so past this
@@ -843,6 +853,9 @@ pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings
     build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
 
 comptime {
+    assert(build_result_bytes_max < store_tree_bytes_max);
+    assert(build_result_label_bytes_max <= build_pool_bytes);
+    assert(build_merge_common_max <= store_dir_entries_max);
     assert(build_cache_entry_bytes_max < store_tree_bytes_max);
     assert(build_cache_entry_bytes_max < store_arena_bytes_max);
     assert(build_cache_entries_max > build_steps_max);
