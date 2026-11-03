@@ -66,8 +66,6 @@ fn start() void {
         .diag = &diag,
         .store = &store,
         .group = "g",
-        .pull = undefined,
-        .import = &import_workspace,
         .row_failed = null,
     };
     key_mod.compute(&.{
@@ -109,17 +107,20 @@ fn worker_ended(at: usize, pid: host_mod.Pid, bytes: []const u8) *compose.Slot {
 
 fn answer_of(output: Digest) [compose.answer_bytes]u8 {
     var bytes: [compose.answer_bytes]u8 = @splat(0);
-    @memcpy(bytes[0..constants.store_digest_bytes], &output.bytes);
-    std.mem.writeInt(u64, bytes[constants.store_digest_bytes..][0..8], 3, .little);
+    bytes[0] = compose.tag_output;
+    @memcpy(bytes[1..], &output.bytes);
     return bytes;
 }
 
-fn encoded_failure(bytes: *[constants.diag_carry_bytes_max]u8) []const u8 {
+/// What a failing worker writes: the failure tag, then the encoded diagnostic.
+fn encoded_failure(bytes: *[compose.failure_bytes_max]u8) []const u8 {
     var made: Diag = undefined;
     made.reset();
     made.raise(.E0805);
     made.cause("the step said so", .{});
-    return made.encode(bytes);
+    bytes[0] = compose.tag_failure;
+    const encoded = made.encode(bytes[1..][0..constants.diag_carry_bytes_max]);
+    return bytes[0 .. 1 + encoded.len];
 }
 
 fn settle(slot: *compose.Slot, status: host_mod.ExitStatus) @import("schedule.zig").Ended {
@@ -174,7 +175,7 @@ test "garbage, a short answer, no answer and a signal each fail the step with E0
 test "a diagnostic the worker wrote is the step's, whatever its length" {
     // Goal: a worker that failed on its own says why. Method: an encoded E0805 and a non-zero
     // exit; a clean exit with the same bytes is no output either.
-    var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
+    var bytes: [compose.failure_bytes_max]u8 = undefined;
     const encoded = encoded_failure(&bytes);
     for ([_]u8{ 1, 0 }) |code| {
         start();
@@ -253,4 +254,46 @@ test "abort ends every worker, reaps it and closes its pipe" {
     for (composed.slots[0..2]) |slot| try testing.expect(!slot.active);
     try testing.expect(!sim.interface().pipe_has_reader(reports[0].write));
     try testing.expect(!sim.interface().pipe_has_reader(reports[1].write));
+}
+
+test "a tag, not a length, tells an output from a diagnostic" {
+    // Goal: no diagnostic passes for an output, and none is lost for its length. Method: an
+    // answer-sized failure (a tagged diagnostic padded to `answer_bytes`) still decodes as the
+    // worker's; an answer-sized message without the output tag is no output.
+    start();
+    var made: Diag = undefined;
+    made.reset();
+    made.raise(.E0805);
+    made.cause("x", .{});
+    var raw: [constants.diag_carry_bytes_max]u8 = undefined;
+    const short = made.encode(&raw);
+    var exact: [compose.answer_bytes]u8 = @splat('\n');
+    exact[0] = compose.tag_failure;
+    @memcpy(exact[1..][0..short.len], short);
+    const slot = worker_ended(0, 7, &exact);
+    try testing.expect(!settle(slot, .{ .exited = 1 }).ok);
+    try testing.expect(diag.code.? == .E0805);
+    start();
+    var untagged = answer_of(Digest.of("x"));
+    untagged[0] = 0;
+    const other = worker_ended(0, 7, &untagged);
+    try testing.expect(!settle(other, .{ .exited = 0 }).ok);
+    try testing.expect(diag.code.? == .E0419);
+}
+
+test "a row that failed is the build's error, even when a step failed too" {
+    // Goal: `zbx build | head -1` reports the closed output, not a step failure. Method: both a
+    // failed step and a failed row; `finish` answers OutputFailed. Without the row, Failed.
+    start();
+    const failed: @import("schedule.zig").Outcome = .{
+        .failed = 0,
+        .aborted = false,
+        .hits = 0,
+        .built = 0,
+    };
+    context.row_failed = error.OutputFailed;
+    try testing.expectError(error.OutputFailed, context.finish(failed));
+    context.row_failed = null;
+    try testing.expectError(error.Failed, context.finish(failed));
+    try testing.expect(diag.code != null);
 }

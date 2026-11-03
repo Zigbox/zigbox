@@ -1,6 +1,6 @@
 //! The scheduler of `zbx build` (docs/briefs/M7-build.md, "Running the graph"): which steps start
 //! when. It is a pure loop over an `Executor` that does the work, so the real executor (worker
-//! processes waited on with pidfds, `workers.zig`) and a test's fake one run the same code.
+//! processes waited on with pidfds, `compose.zig`) and a test's fake one run the same code.
 //!
 //! - A step starts only when every step it needs is done, and at most `bound` run at once.
 //! - `begin` may answer `hit`: the step is done at once and nothing ran.
