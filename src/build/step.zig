@@ -348,7 +348,8 @@ fn step_end(handle: *const run.Handle, reason: run.ExitReason) ?diagnose.StepEnd
 
 /// Copies the run's log, both streams in order, to `build/logs/<group>/<step>.log` as plain
 /// text, and keeps its last line. It is written inside the work directory first, so that what a
-/// crash leaves is swept with it. Best effort: a step whose log cannot be kept still has its output.
+/// crash leaves is swept with it. Best effort: a step whose log cannot be kept still has its
+/// output.
 fn copy_log(request: *const Request, store: *const Store, ws: *Workspace) void {
     assert(ws.handle.status == .stopped);
     ws.last_line_len = 0;

@@ -78,6 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>A step runs its .run command in a container made from its base, with its inputs read-only at /src, each needed step's output at /in/&lt;name&gt;, and /out to write its output into. Only a step whose command exits 0 has an output. The first line says how it ended: its exit code, a signal, out of memory, the process limit, or the step's timeout (30 minutes), in the words zbx run uses.</p>
 <p>A step has no network unless it says .network = true, so a step that fetches something fails as one that cannot resolve a name. The step's whole output is kept in its log.</p>
+<p>The step is also refused, with this code, when its environment is too large: the base image's variables, the step's .env and the fixed ones together are more than a command can be given. Remove variables from .env or use a base with a smaller environment.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0805</pre>

@@ -112,7 +112,12 @@ pub fn run(
     };
 }
 
-fn print_graph(host: Host, workspace: *const load_mod.Workspace, json: bool, diag: *Diag) Error!void {
+fn print_graph(
+    host: Host,
+    workspace: *const load_mod.Workspace,
+    json: bool,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
     var out: Out = .{ .host = host, .diag = diag, .buffer = undefined, .len = 0 };
     if (json) try graph_json(&out, workspace) else try graph_text(&out, workspace);

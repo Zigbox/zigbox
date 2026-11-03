@@ -181,7 +181,8 @@ const Context = struct {
                 diagnose.base_not_locked(context.diag, name, reference, true);
             } else {
                 const operation = "reading the base image's record";
-                store_diagnose.write_failed(context.diag, context.store, operation, error.IoFailed, errno);
+                const failed = error.IoFailed;
+                store_diagnose.write_failed(context.diag, context.store, operation, failed, errno);
             }
             return error.Failed;
         };
@@ -198,7 +199,8 @@ const Context = struct {
         const fs = context.host.filesystem();
         const project = fs.open_directory(loaded.project.text()) catch |err| {
             const operation = "opening the project directory";
-            store_diagnose.write_failed(context.diag, context.store, operation, err, fs.last_errno());
+            const errno = fs.last_errno();
+            store_diagnose.write_failed(context.diag, context.store, operation, err, errno);
             return error.Failed;
         };
         defer fs.close(project);
@@ -252,7 +254,8 @@ const Context = struct {
 
     fn row(context: *Context, name: []const u8, what: []const u8, output: Digest) Error!void {
         const text = output.text();
-        const line = std.fmt.bufPrint(&context.ws.row, "{s}  {s}  {s}\n", .{ name, what, &text }) catch
+        const format = "{s}  {s}  {s}\n";
+        const line = std.fmt.bufPrint(&context.ws.row, format, .{ name, what, &text }) catch
             unreachable; // `row_bytes` holds a name, a word and a digest.
         context.host.write_all(.stdout, line) catch |err| {
             errors.output_failed(context.diag, .stdout, err, context.host.last_errno());

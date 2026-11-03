@@ -520,7 +520,8 @@ test "an environment of 64 variables runs and one of 65 is refused naming the st
     var storage: [constants.env_vars_count_max + 1][16]u8 = undefined;
     var base: [constants.env_vars_count_max + 1][]const u8 = undefined;
     for (0..base.len) |index| {
-        base[index] = std.fmt.bufPrint(&storage[index], "V{d}=x", .{index}) catch unreachable;
+        base[index] = std.fmt.bufPrint(&storage[index], "V{d}=x", .{index}) catch
+            unreachable; // Short names.
     }
     const fits = constants.env_vars_count_max - fixed;
     const sizes = [_]usize{ fits, fits + 1 };

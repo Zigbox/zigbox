@@ -97,8 +97,9 @@ test "build --graph refuses a file that cannot be read, parsed, ordered or have 
 }
 
 test "build -f must name a file inside the project, and build alone says what it does" {
-    // Goal: `-f` outside the project is E0801 naming both; `build` alone looks for the file and
-    // names it when it is missing; `--graph` on another command is E0004. Method: the CLI on the sim.
+    // Goal: `-f` outside the project is E0801 naming both; `build` alone loads the file, then
+    // reads the lock (E0518 in this world); `--graph` on another command is E0004.
+    // Method: the CLI on the sim.
     world(3);
     files.put_dir("/home/alice/other", 0o755);
     files.put_file("/home/alice/other/zbx.build.zon", 0o644, file_tests.example);
@@ -107,9 +108,9 @@ test "build -f must name a file inside the project, and build alone says what it
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0801") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "outside the project") != null);
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build" }));
-    // With no build file in the project, `build` looks for it like `--graph` does.
+    // `build` loads the file like `--graph`, then reads the lock (unreadable in this world).
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0006") == null);
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "zbx.build.zon") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0518") != null);
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "ps", "--graph" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0004") != null);
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--graph", "-f" }));
@@ -118,7 +119,6 @@ test "build -f must name a file inside the project, and build alone says what it
 
 fn expect_stderr(needle: []const u8) !void {
     if (std.mem.indexOf(u8, sim.stderr(), needle) == null) {
-        std.debug.print("STDERR: {s}\n", .{sim.stderr()});
         return error.TestUnexpectedResult;
     }
 }
