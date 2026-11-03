@@ -50,7 +50,7 @@ const no_input = " </dev/null";
 const zbx_old = up5.zbx_old;
 
 const start_old = zbx_old ++ " run -d --name " ++ container ++ " --state " ++ volume ++
-    ":/data " ++ alpine ++ " -- sh -c 'echo " ++ marker ++ " > /data/marker; sleep 1000'";
+    ":/data " ++ alpine ++ " -- sh -c 'echo " ++ log_line ++ "; echo " ++ marker ++ " > /data/marker; sleep 1000'";
 /// `exec` reads the marker, waiting up to thirty seconds for the old container to have written it.
 const read_marker = "for i in $(seq 30); do " ++ z ++ " exec " ++ container ++
     " -- cat /data/marker" ++ no_input ++ " && break; sleep 1; done";
