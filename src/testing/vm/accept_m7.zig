@@ -10,7 +10,7 @@
 //!   - every file the builds put in the store is the user's; and after every build above no
 //!     work directory is left, and no step's run record.
 //!
-//! The 0.0 ownership inside the tree (`0:0`) is BUILD7's (spec_m7.zig). Every assertion is a
+//! The 0:0 ownership inside the tree is BUILD7's (spec_m7.zig). Every assertion is a
 //! function of checks_m7.zig with a unit test.
 
 const std = @import("std");

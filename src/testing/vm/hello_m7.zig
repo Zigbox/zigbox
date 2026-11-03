@@ -135,21 +135,12 @@ const step2 = "HELLO7 2";
 const step3 = "HELLO7 3";
 const step4 = "HELLO7 4";
 
-const debug_command = "sh -c 'apt-get install -y strace >/dev/null 2>&1; " ++
-    "strace -f -o /tmp/s.log " ++ zh ++ " build --verbose --output json 2>&1 | tail -5 | cut -c1-600;" ++
-    " grep -B4 EPERM /tmp/s.log | cut -c1-220 | head -30'";
-
-fn debug_pull(session: *Session, out: *Io.Writer) !void {
-    _ = try state.expect_long_split(session, out, debug_command, 0, build_timeout_s);
-}
-
 pub fn step_first(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print(
         "\n{s}: HELLO7: the brief's steps 1 to 4, on the Go hello-world\n",
         .{H.demo_name},
     );
     try install_project(session, out);
-    try debug_pull(session, out);
     try first_build(session, out);
     try second_build(session, out);
     try readme_edit(session, out);
