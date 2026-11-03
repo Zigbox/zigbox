@@ -27,6 +27,7 @@ const namespace = @import("store/namespace.zig");
 const open = @import("store/open.zig");
 const pull_commands = @import("pull_commands.zig");
 const reference_mod = @import("registry/reference.zig");
+const result = @import("build/result.zig");
 const registry_diagnose = @import("registry/diagnose.zig");
 const spec = @import("runtime/spec.zig");
 const store_diagnose = @import("store/diagnose.zig");
@@ -49,6 +50,8 @@ pub const Workspace = struct {
     words: [constants.command_words_count_max][]const u8,
     env: [constants.env_vars_count_max]spec.Label,
     tree: [constants.store_digest_text_bytes]u8,
+    record: result.Record,
+    record_bytes: [constants.build_result_bytes_max + 1]u8,
     home: [image_user.home_bytes_max + 5]u8,
 };
 
@@ -98,6 +101,43 @@ fn load_record(
         },
     };
     return .ok;
+}
+
+/// Prepares a run of a build result: `operand` is the full digest of a record under
+/// `build/results`, and the container runs the record's tree with the record's config. False
+/// when `operand` is not such a digest or the store has no such record (the operand then names a
+/// plain tree); the other ways a record cannot be used raise the diagnostic.
+pub fn prepare_result(
+    host: Host,
+    ws: *Workspace,
+    operand: []const u8,
+    given: []const []const u8,
+    out: *Prepared,
+    diag: *Diag,
+) Error!bool {
+    assert(diag.code == null);
+    assert(operand.len <= constants.arg_bytes_max);
+    const digest = Digest.parse(operand) orelse return false;
+    var store: Store = undefined;
+    if (!store.locate(host)) return false;
+    const present = open.check(&store, .existing, diag) catch return error.Failed;
+    if (!present) return false;
+    var errno: u16 = 0;
+    result.load(&store, digest, &ws.record, &ws.record_bytes, &errno) catch |err| switch (err) {
+        error.NotFound => return false,
+        error.Damaged, error.Newer, error.Unreadable => {
+            const cause = if (err == error.Unreadable) error.IoFailed else error.FileTooLarge;
+            store_diagnose.cannot_read(diag, &store, "reading the build result", cause, errno);
+            return error.Failed;
+        },
+    };
+    // The record's settings and tree stand where an image's do; it has no config blob.
+    ws.image.settings = ws.record.config.settings;
+    ws.image.tree = ws.record.tree;
+    ws.image.config = std.mem.zeroes(Sha256);
+    try compose(&store, ws, operand, given, null, out, diag);
+    out.manifest = null;
+    return true;
 }
 
 /// Finds the image `operand` names and prepares what the container is started with.

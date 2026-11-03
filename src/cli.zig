@@ -2338,6 +2338,12 @@ fn run_container(
     if (invocation.operand) |operand| {
         if (operand.len > 0 and !is_tree_operand(operand)) {
             try prepare_image(host, invocation, storage, operand, &prepared, diag);
+        } else if (operand.len > 0) {
+            // A full digest may name a build result: its tree runs with its config.
+            const ws = &storage.run_image;
+            _ = run_image.prepare_result(host, ws, operand, given.command, &prepared, diag) catch {
+                return error.StartFailed;
+            };
         }
     }
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
