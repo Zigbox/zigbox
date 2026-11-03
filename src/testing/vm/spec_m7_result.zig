@@ -40,10 +40,13 @@ fn step(comptime name: []const u8, comptime command: []const u8) []const u8 {
         "          .run = .{ \"sh\", \"-c\", \"sleep 3; " ++ command ++ "\" } },\n";
 }
 
+const compile_command = "mkdir -p /out && " ++
+    "printf '#!/bin/sh\\\\necho hello from zigbox\\\\n' > /out/hello; chmod 755 /out/hello";
+
 const build_file =
     "cat > $P/zbx.build.zon <<'EOF'\n" ++
     ".{\n    .version = 1,\n    .steps = .{\n" ++
-    step("compile", "mkdir -p /out && echo hello from zigbox > /out/hello; chmod 755 /out/hello") ++
+    step("compile", compile_command) ++
     step("notice", "mkdir -p /out/etc && echo 1 > /out/etc/notice") ++
     "    },\n    .image = .{\n        .base = \"alpine:3.20\",\n" ++
     "        .add = .{ .{ .from = \"compile\", .to = \"/usr/local/bin\" },\n" ++
