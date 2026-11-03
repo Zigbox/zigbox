@@ -311,9 +311,8 @@ fn copy_log(request: *const Request, store: *const Store, ws: *Workspace) void {
     fs.make_directory(store.path(&dir, &.{"/build"}), true) catch return;
     fs.make_directory(store.path(&dir, &.{"/build/logs"}), true) catch return;
     var temporary: PathBuf = undefined;
-    const temporary_path = std.fmt.bufPrintSentinel(&temporary, "{s}.{s}", .{
-        ws.paths.log_text(), ws.paths.name_slice(),
-    }, 0) catch return;
+    temporary.set(&.{ ws.paths.log_text(), ".", ws.paths.name_slice() }) catch return;
+    const temporary_path = temporary.text();
     const fd = fs.create(temporary_path, 0o644) catch return;
     var written = true;
     logfile.open_log(&ws.reader, request.host, ws.paths.name_slice()) catch {
@@ -327,7 +326,7 @@ fn copy_log(request: *const Request, store: *const Store, ws: *Workspace) void {
     if (written) fs.rename(temporary_path, ws.paths.log_text()) catch {
         written = false;
     };
-    if (!written) fs.remove_file(temporary_path) catch {};
+    if (!written) fs.unlink(temporary_path) catch {};
 }
 
 fn copy_records(fs: fs_mod.Fs, fd: fs_mod.Fd, ws: *Workspace) bool {
@@ -469,7 +468,10 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     const host = job.request.host;
     if (diag.code == null) {
         // If this write fails the parent says the worker ended without an answer.
-        host.write_handle_all(job.report.write, answer[0..answer_len]) catch {};
+        // Only an import has an answer; the host refuses to write nothing.
+        if (answer_len > 0) {
+            host.write_handle_all(job.report.write, answer[0..answer_len]) catch {};
+        }
         return constants.exit_ok;
     }
     var bytes: [constants.diag_carry_bytes_max]u8 = undefined;

@@ -518,6 +518,19 @@ pub const World = struct {
         world.exiting_until_ms = 0;
         world.oom_kills = 0;
         world.pids_max_hits = 0;
+        world.init_helpers();
+        world.init_exec();
+        // The host's own process is alive from the start, in the host's namespaces.
+        const first = &world.processes[0];
+        first.state = .running;
+        first.pid = world.take_pid();
+        _ = first.cwd.set("/");
+        assert(world.tables[0].count == 0);
+        assert(world.processes[1].state == .unused);
+    }
+
+    /// The parts of the model the helpers use: the keeper, pasta and the cgroup's leftovers.
+    fn init_helpers(world: *World) void {
         world.cgroup_stays = false;
         world.ended_memory_max = null;
         world.keeper_fork_errno = null;
@@ -530,14 +543,8 @@ pub const World = struct {
         world.pasta_stays = false;
         world.pasta_starts = 0;
         world.pasta_version_line = "pasta 2024_09_06.6b38f07\n";
-        world.init_exec();
-        // The host's own process is alive from the start, in the host's namespaces.
-        const first = &world.processes[0];
-        first.state = .running;
-        first.pid = world.take_pid();
-        _ = first.cwd.set("/");
-        assert(world.tables[0].count == 0);
-        assert(world.processes[1].state == .unused);
+        assert(world.ports_taken_count == 0);
+        assert(world.pasta_starts == 0);
     }
 
     /// The parts of the model `exec` uses: namespace handles, standard input, the terminal.
