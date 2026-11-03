@@ -37,6 +37,7 @@ const step_mod = @import("step.zig");
 const input_tree = @import("input_tree.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
+const render = @import("../diag/render.zig");
 const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
 const result_mod = @import("result.zig");
@@ -97,6 +98,15 @@ pub const Timing = struct {
     network: bool,
 };
 
+/// What the caller asks of the build besides the file.
+pub const Options = struct {
+    /// `--output json`: one `zbx.build/1` record per line on stdout.
+    json: bool,
+    /// `--verbose`: stream each step's output to stderr, a `<step> | ` before each line, and
+    /// render a warning with its whole cause chain.
+    verbose: bool,
+};
+
 /// The most a report line holds: a JSON step record (two digests, a name, numbers) is the
 /// longest, with room to spare.
 const row_bytes = 640;
@@ -110,7 +120,7 @@ pub fn run_steps(
     facts: *doctor.Facts,
     loaded: *const load_mod.Workspace,
     ws: *Workspace,
-    json: bool,
+    options: Options,
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
@@ -136,7 +146,8 @@ pub fn run_steps(
         .store = &store,
         .group = group,
         .row_failed = null,
-        .json = json,
+        .json = options.json,
+        .verbose = options.verbose,
         .started_ms = host.monotonic_ms(),
         .started_s = host.time_now(),
         .name_width = name_width(&loaded.file),
@@ -146,6 +157,7 @@ pub fn run_steps(
     for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
     try context.header();
+    context.warn_network();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -268,6 +280,7 @@ pub const Context = struct {
     group: []const u8,
     row_failed: ?Error,
     json: bool,
+    verbose: bool,
     started_ms: u64,
     /// The wall clock at the start, in the seconds a root record keeps (`unroot`).
     started_s: u64,
@@ -275,13 +288,14 @@ pub const Context = struct {
     hits: u32,
     misses: u32,
 
-    fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
+    pub fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
             .host = context.host,
             .facts = context.facts,
             .spec = spec,
             .file = context.loaded.shown(),
             .group = context.group,
+            .stream = context.verbose,
         };
     }
 
@@ -685,6 +699,36 @@ pub const Context = struct {
         return context.emit(line);
     }
 
+    /// `W0801` once, on stderr, before any step runs, when the build file has steps with
+    /// `network = true`. Only a warning: a stderr that cannot be written loses it and the build
+    /// goes on.
+    pub fn warn_network(context: *Context) void {
+        const file = &context.loaded.file;
+        var names: [constants.build_steps_max][]const u8 = undefined;
+        var count: u32 = 0;
+        for (file.steps_slice()) |*step| {
+            if (!step.network) continue;
+            names[count] = file.text(step.name);
+            count += 1;
+        }
+        if (count == 0) return;
+        comptime assert(constants.diag_field_bytes_max >= diagnose.network_label.len + 8);
+        var joined: [constants.diag_field_bytes_max - diagnose.network_label.len]u8 = undefined;
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.network_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);
+        const mode: render.Mode = if (context.json)
+            .json
+        else if (context.verbose)
+            .verbose
+        else
+            .text;
+        const color = mode != .json and context.host.color_enabled(.stderr);
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        const text = render.render(&warning, mode, color, &buffer);
+        context.host.write_all(.stderr, text) catch return;
+    }
+
     fn emit(context: *Context, line: []const u8) Error!void {
         context.host.write_all(.stdout, line) catch |err| {
             errors.output_failed(context.diag, .stdout, err, context.host.last_errno());
@@ -726,9 +770,11 @@ pub const Context = struct {
             const took = timing.end_ms - timing.start_ms;
             writer.print("  {s}", .{name}) catch unreachable; // Fits `row_bytes`.
             writer.splatByteAll(' ', context.name_width - name.len) catch unreachable; // Fits.
-            writer.print("{s}{s: <4}{s}{d}.{d:0>2} s\n", .{
+            writer.print("{s}{s: <4}{s}{d}.{d:0>2} s", .{
                 name_gap, word, name_gap, took / 1000, took % 1000 / 10,
             }) catch unreachable; // Fits.
+            if (timing.network) writer.print("{s}net", .{name_gap}) catch unreachable; // Fits.
+            writer.writeByte('\n') catch unreachable; // Fits.
         }
         return context.emit(writer.buffered());
     }

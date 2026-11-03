@@ -191,7 +191,15 @@ pub const StartOptions = struct {
     mirror: bool = false,
     /// The container's standard input is /dev/null (a build step), not this process's.
     stdin_null: bool = false,
+    /// Also write that output, line by line with this prefix on each line, to this process's
+    /// standard error as it comes (`zbx build --verbose`, the prefix `<step> | `). Unlike
+    /// `mirror`, the container's streams are always pipes, even when they would be a
+    /// terminal; empty is off. At most `stream_prefix_bytes_max`.
+    stream_prefix: []const u8 = "",
 };
+
+/// The longest `StartOptions.stream_prefix`: a build step's name and ` | `.
+pub const stream_prefix_bytes_max = constants.stream_prefix_bytes_max;
 
 pub const Note = text_util.Bounded(160);
 
@@ -259,6 +267,15 @@ pub const Handle = struct {
     log_active: bool,
     log_warned: bool,
     mirror: bool,
+    /// The prefix of streamed lines (`StartOptions.stream_prefix`); the line each of the two
+    /// streams (stdout, stderr) is in the middle of (prefix included, `stream_line_len` bytes,
+    /// none when no line is open); and whether streaming has stopped for good because standard
+    /// error cannot be written to.
+    stream_prefix: [stream_prefix_bytes_max]u8,
+    stream_prefix_len: u8,
+    stream_line: [2][constants.stream_write_bytes_max]u8,
+    stream_line_len: [2]u32,
+    stream_stopped: bool,
     /// This run's own room for the doctor's facts (200 KiB), so that runs on two threads share
     /// nothing. It is why a `Handle` is large: keep it off the stack.
     facts: doctor.Facts,
@@ -509,9 +526,12 @@ pub fn wait(handle: *Handle) ExitReason {
     const host = handle.host;
     host.begin_step(@intCast(handle.plan.count - 1)); // The `reap` step.
     // A terminal that closes is a write that fails, not a signal that ends this process.
-    if (handle.mirror) host.ignore_broken_pipe(true);
+    const copies = handle.mirror or handle.stream_prefix_len > 0;
+    if (copies) host.ignore_broken_pipe(true);
     const result = handle.session.wait(handle.wait_options);
-    if (handle.mirror) host.ignore_broken_pipe(false);
+    // The last partial lines go while a closed pipe is still an error, not a signal.
+    stream_finish(handle);
+    if (copies) host.ignore_broken_pipe(false);
     close_log(handle);
     host.begin_step(host_mod.step_none);
     // The container is gone (or zbx lost it, and `abandon` below ends it): pasta goes now, and
@@ -1000,6 +1020,11 @@ fn reset_log(handle: *Handle, options: StartOptions) void {
     handle.log_active = false;
     handle.log_warned = false;
     handle.mirror = options.mirror;
+    assert(options.stream_prefix.len <= stream_prefix_bytes_max);
+    @memcpy(handle.stream_prefix[0..options.stream_prefix.len], options.stream_prefix);
+    handle.stream_prefix_len = @intCast(options.stream_prefix.len);
+    handle.stream_line_len = .{ 0, 0 };
+    handle.stream_stopped = false;
     assert(!handle.log_active);
     assert(handle.log_warned == false);
 }
@@ -1074,6 +1099,7 @@ fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) boo
             keep = false;
         };
     }
+    if (handle.stream_prefix_len > 0) stream_lines(handle, stream, bytes);
     if (!handle.log_active) return keep;
     const which: logfile.Stream = if (stream == .stdout) .stdout else .stderr;
     const time = @min(handle.host.time_now(), constants.log_time_max - 1);
@@ -1088,6 +1114,122 @@ fn log_sink(context: *anyopaque, stream: host_mod.Stream, bytes: []const u8) boo
         warn_log_not_kept(handle, logs.text(), failure);
     };
     return keep;
+}
+
+/// Writes `bytes` to standard error, whole lines only, each behind the stream prefix. A stream's
+/// partial line waits in its buffer, so that two steps' lines never mix: each write is one line
+/// (or, for a line too long for the buffer, one piece of it with a newline of its own), at most
+/// `stream_write_bytes_max` and so atomic on a pipe. A write that fails stops streaming for the
+/// rest of the run (the log is the record of the output), and never fails the build.
+fn stream_lines(handle: *Handle, stream: host_mod.Stream, bytes: []const u8) void {
+    assert(bytes.len > 0);
+    assert(handle.stream_prefix_len > 0);
+    if (handle.stream_stopped) return;
+    const which: usize = if (stream == .stdout) 0 else 1;
+    const prefix = handle.stream_prefix[0..handle.stream_prefix_len];
+    const line = &handle.stream_line[which];
+    const length = &handle.stream_line_len[which];
+    var rest = bytes;
+    while (rest.len > 0) {
+        if (length.* == 0) {
+            @memcpy(line[0..prefix.len], prefix);
+            length.* = @intCast(prefix.len);
+        }
+        const step = stream_take(line, length, rest);
+        rest = rest[step.consumed..];
+        if (!step.complete) continue;
+        handle.host.write_all(.stderr, line[0..length.*]) catch {
+            handle.stream_stopped = true;
+            return;
+        };
+        length.* = 0;
+    }
+}
+
+/// Writes what a stream still holds as a line of its own, when the step has ended.
+fn stream_finish(handle: *Handle) void {
+    if (handle.stream_prefix_len == 0) return;
+    for (0..2) |which| {
+        const length = &handle.stream_line_len[which];
+        if (length.* == 0) continue;
+        assert(length.* < constants.stream_write_bytes_max);
+        handle.stream_line[which][length.*] = '\n';
+        length.* += 1;
+        if (!handle.stream_stopped) {
+            handle.host.write_all(.stderr, handle.stream_line[which][0..length.*]) catch {
+                handle.stream_stopped = true;
+            };
+        }
+        length.* = 0;
+    }
+}
+
+const StreamTake = struct { consumed: usize, complete: bool };
+
+/// Moves bytes of `rest` into the open line (`length` bytes, the prefix among them) up to its
+/// end. The line is complete, with its newline added, when `rest` held one, or when the buffer
+/// is full and more bytes follow. One byte stays free for the newline.
+fn stream_take(
+    line: *[constants.stream_write_bytes_max]u8,
+    length: *u32,
+    rest: []const u8,
+) StreamTake {
+    assert(rest.len > 0);
+    assert(length.* > 0);
+    assert(length.* < line.len);
+    const room = line.len - 1 - length.*;
+    const newline = std.mem.indexOfScalar(u8, rest, '\n');
+    const take = if (newline) |at| @min(at, room) else @min(rest.len, room);
+    @memcpy(line[length.*..][0..take], rest[0..take]);
+    length.* += @intCast(take);
+    const ended = if (newline) |at| at <= room else false;
+    const full = length.* == line.len - 1 and take < rest.len;
+    if (!ended and !full) return .{ .consumed = take, .complete = false };
+    line[length.*] = '\n';
+    length.* += 1;
+    return .{ .consumed = if (ended) take + 1 else take, .complete = true };
+}
+
+test "stream_take cuts lines, keeps a partial one, and splits a line longer than the buffer" {
+    // Goal: `--verbose` writes whole lines, each with its prefix, however the container's
+    // writes are cut. Method: feed chunks that end mid-line; then a line exactly as long as
+    // the room, one byte longer, and a very long one.
+    var line: [constants.stream_write_bytes_max]u8 = @splat(0xAA);
+    var length: u32 = 4;
+    @memcpy(line[0..4], "a | ");
+    const first = stream_take(&line, &length, "one\ntw");
+    try std.testing.expect(first.complete);
+    try std.testing.expectEqual(@as(usize, 4), first.consumed);
+    try std.testing.expectEqualStrings("a | one\n", line[0..length]);
+    length = 4;
+    const second = stream_take(&line, &length, "tw");
+    try std.testing.expect(!second.complete);
+    try std.testing.expectEqualStrings("a | tw", line[0..length]);
+    const third = stream_take(&line, &length, "o\nrest");
+    try std.testing.expect(third.complete);
+    try std.testing.expectEqualStrings("a | two\n", line[0..length]);
+    // The room is the buffer less the prefix and the newline; a line of exactly that many bytes
+    // fits with its own newline, one more is cut with a newline added.
+    const room = constants.stream_write_bytes_max - 1 - 4;
+    var long: [room + 2]u8 = @splat('x');
+    long[room] = '\n';
+    length = 4;
+    const exact = stream_take(&line, &length, long[0 .. room + 1]);
+    try std.testing.expect(exact.complete);
+    try std.testing.expectEqual(@as(usize, room + 1), exact.consumed);
+    try std.testing.expectEqual(constants.stream_write_bytes_max, length);
+    long[room] = 'y';
+    long[room + 1] = '\n';
+    length = 4;
+    const cut = stream_take(&line, &length, &long);
+    try std.testing.expect(cut.complete);
+    try std.testing.expectEqual(@as(usize, room), cut.consumed);
+    try std.testing.expectEqual(@as(u8, '\n'), line[length - 1]);
+    // A full buffer with nothing after it waits for the rest of its line.
+    length = 4;
+    const waits = stream_take(&line, &length, long[0..room]);
+    try std.testing.expect(!waits.complete);
+    try std.testing.expectEqual(constants.stream_write_bytes_max - 1, length);
 }
 
 /// A record that was pruned no longer needs the layers kept for it: they go, from inside the

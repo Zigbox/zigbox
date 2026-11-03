@@ -21,6 +21,8 @@ const layout = @import("../store/layout.zig");
 const load_mod = @import("load.zig");
 const support = @import("../store/test_support.zig");
 const digest_mod = @import("../store/digest.zig");
+const cache = @import("cache.zig");
+const verify = @import("../store/verify.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
@@ -68,6 +70,7 @@ fn start() void {
         .group = "g",
         .row_failed = null,
         .json = false,
+        .verbose = false,
         .started_ms = sim.interface().monotonic_ms(),
         .started_s = sim.interface().time_now(),
         .name_width = 7,
@@ -604,4 +607,124 @@ test "a damaged result record is E0422 and a newer one E0423 that says to upgrad
     diagnose.result_unusable(&diag, digest, true);
     try testing.expectEqual(.E0423, diag.code.?);
     try testing.expect(std.mem.endsWith(u8, diag.last_cause().?, "was written by a newer zbx"));
+}
+
+test "a network step's row ends with net, and a step without network has no marker" {
+    // Goal: the report marks a step that ran with the network (the brief's `net`). Method: the
+    // same settle as the clean exit, with the step's `network` set.
+    start();
+    loaded.file.steps[0].network = true;
+    const answer = answer_of(made_output());
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expectEqualStrings("  compile   miss   0.00 s   net\n", sim.stdout());
+    try testing.expect(composed.timings[0].network);
+}
+
+test "W0801 is printed once on stderr, naming the network steps, and never on stdout" {
+    // Goal: a build with network steps warns before it runs them, once, in the mode asked; one
+    // without says nothing. Method: set `network` on the steps of the example and render.
+    start();
+    context.warn_network();
+    try testing.expectEqualStrings("", sim.stderr());
+    loaded.file.steps[0].network = true;
+    loaded.file.steps[1].network = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "warning[ZBX-W0801]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "compile, notice") != null);
+    try testing.expectEqualStrings("", sim.stdout());
+    sim.stderr_len = 0;
+    context.json = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-W0801\""));
+    try testing.expectEqualStrings("", sim.stdout());
+}
+
+var verify_workspace: verify.Workspace = undefined;
+
+/// One step from its import to its cache entry, as the worker and then the parent do them, on the
+/// simulated store. False when a crash (or any failure) stopped it somewhere on the way.
+fn step_to_entry() bool {
+    var result: import.Result = undefined;
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = "build:compile",
+    };
+    import.import(&store, &import_workspace, "/src", options, &result, &diag) catch {
+        diag.reset();
+        return false;
+    };
+    diag.reset();
+    const answer = answer_of(result.digest);
+    const slot = worker_ended(0, 7, &answer);
+    const ended = settle(slot, .{ .exited = 0 });
+    diag.reset();
+    context.row_failed = null;
+    return ended.ok;
+}
+
+test "a step that dies at any write point, built again, gives the output of a clean build" {
+    // Goal: the result digest depends on the inputs only, whatever crashed on the way (the
+    // brief's "worker crashes"). Method: a clean step (import of /out, root, cache entry) counts
+    // its write points; then for each point the machine dies there, the process starts again on
+    // what the disk kept, and the step runs again on the same store. The entry must name the
+    // clean build's tree, that tree must be whole, and `store verify` must find no damage.
+    start();
+    support.make_source(&files, 0);
+    try testing.expect(step_to_entry());
+    const clean = composed.outputs[0];
+    const points = files.mutations;
+    try testing.expect(points > 10);
+    var crashed_runs: u32 = 0;
+    for (0..points) |at| {
+        start();
+        support.make_source(&files, 0);
+        files.faults.crash_mutation = @intCast(at);
+        // A crash in the last, best-effort write (dropping the build's root) still ends the step
+        // as done; every other one fails it. Either way the machine died.
+        _ = step_to_entry();
+        try testing.expect(files.crashed);
+        crashed_runs += 1;
+        // The process that starts again is another process: its temporary names (`tmp/<pid>-<n>`)
+        // do not collide with what the dead one left.
+        files.restart();
+        sim.world.processes[0].pid += 1;
+        store.at(sim.interface(), root_path);
+        try testing.expect(step_to_entry());
+        try testing.expect(composed.outputs[0].eql(clean));
+        var failure: cache.Failure = undefined;
+        const found = try cache.lookup(&store, &composed.cache, &composed.key, &failure);
+        try testing.expect(found == .hit);
+        try testing.expect(found.hit.eql(clean));
+        var totals: verify.Totals = undefined;
+        var verify_failure: verify.Failure = undefined;
+        const arena = &import_workspace.arena;
+        try verify.verify(&store, &verify_workspace, arena, &totals, &verify_failure);
+        try testing.expectEqual(@as(u32, 0), totals.damaged);
+    }
+    try testing.expectEqual(@as(u32, @intCast(points)), crashed_runs);
+}
+
+test "--verbose reaches the step's request: verbose asks to stream, and nothing else does" {
+    // Goal: the wiring from the flag to the step. The step's own streaming is tested in
+    // step_tests.zig; this fails if `request` stops passing `verbose` on. Method: the request a
+    // context makes with `verbose` set and cleared.
+    start();
+    const spec: key_mod.Spec = .{
+        .platform = "linux/amd64",
+        .base_tree = Digest.of("base"),
+        .base_env = &.{},
+        .input_tree = Digest.of("input"),
+        .needs = &.{},
+        .argv = &.{"true"},
+        .env = &.{},
+        .network = false,
+        .name = "compile",
+    };
+    context.verbose = true;
+    try testing.expect(context.request(&spec).stream);
+    context.verbose = false;
+    try testing.expect(!context.request(&spec).stream);
 }

@@ -97,10 +97,11 @@ pub fn run(
     host: Host,
     workspace: *Workspace,
     args: anytype,
-    json: bool,
+    options: compose.Options,
     facts: *doctor.Facts,
     diag: *Diag,
 ) Error!void {
+    const json = options.json;
     assert(diag.code == null);
     const given: []const u8 = args.file orelse "";
     load_mod.load(host, host.filesystem(), given, &workspace.loaded, diag) catch {
@@ -109,7 +110,7 @@ pub fn run(
     if (args.graph) return print_graph(host, &workspace.loaded, json, diag);
     const composed = &workspace.composed;
     const loaded = &workspace.loaded;
-    compose.run_steps(host, facts, loaded, composed, json, diag) catch |err| {
+    compose.run_steps(host, facts, loaded, composed, options, diag) catch |err| {
         return if (err == error.OutputFailed) error.OutputFailed else error.Failed;
     };
 }

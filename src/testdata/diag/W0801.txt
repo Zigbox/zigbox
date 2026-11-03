@@ -1,0 +1,5 @@
+warning[ZBX-W0801]: the build has steps that use the network
+  cause  steps that use the network: fetch, vendor
+  fix    pin what they fetch, or fetch it once outside the build as an input
+  more   zbx explain W0801 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0801.html

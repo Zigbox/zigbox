@@ -79,6 +79,9 @@ pub const Request = struct {
     /// Where the logs of this build file's steps are kept (`log_group`), `log_group_bytes`.
     group: []const u8,
     warn: ?run.Warn = null,
+    /// Stream the step's output to standard error as it runs, each line after `<step> | `
+    /// (`zbx build --verbose`). The log is kept either way.
+    stream: bool = false,
 };
 
 pub const log_group_bytes = 16;
@@ -238,8 +241,11 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
             .pids = constants.build_step_pids,
         },
     };
+    var prefix_storage: [run.stream_prefix_bytes_max]u8 = undefined;
+    const prefix = if (request.stream) stream_prefix(&prefix_storage, spec.name) else "";
     const options: run.StartOptions = .{
         .warn = request.warn,
+        .stream_prefix = prefix,
         .timeout_ms = constants.build_step_timeout_ms,
         .image_workspace = &ws.image,
         .keep_log = true,
@@ -255,6 +261,13 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
     const reason = run.wait(&ws.handle);
     assert(ws.handle.status == .stopped);
     return reason;
+}
+
+/// `<step> | `, the start of each streamed line.
+fn stream_prefix(out: *[run.stream_prefix_bytes_max]u8, name: []const u8) []const u8 {
+    assert(name.len > 0);
+    assert(name.len <= constants.build_step_name_bytes_max);
+    return std.fmt.bufPrint(out, "{s} | ", .{name}) catch unreachable; // `name` is bounded.
 }
 
 /// Refuses, naming the step and the file, an environment the run would refuse with no step in
@@ -747,4 +760,14 @@ test "a step's mounts: /src, each need at /in/<name>, and /out last as the proje
     try testing.expect(std.mem.startsWith(u8, mounts[0].source, "/data/zbx/cache/"));
     for (mounts[0..3]) |mount| try testing.expect(mount.kind == .bind);
     try testing.expect(mounts[3].kind == .mount);
+}
+
+test "the stream prefix is the step name, a bar and a space" {
+    // Goal: `--verbose` lines read `<step> | <line>`, as the brief says. Method: format the
+    // longest name and a short one.
+    var out: [run.stream_prefix_bytes_max]u8 = undefined;
+    try std.testing.expectEqualStrings("compile | ", stream_prefix(&out, "compile"));
+    const longest: [constants.build_step_name_bytes_max]u8 = @splat('n');
+    const expected = longest ++ " | ".*;
+    try std.testing.expectEqualStrings(&expected, stream_prefix(&out, &longest));
 }

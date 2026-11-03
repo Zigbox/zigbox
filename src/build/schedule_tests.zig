@@ -13,8 +13,9 @@ const testing = std.testing;
 
 const steps_max = constants.build_steps_max;
 
-/// What a step does: found cached, runs and succeeds, runs and fails, or fails to start.
-const Outcome = enum { hit, ok, fail, begin_fail };
+/// What a step does: found cached, runs and succeeds, runs and fails, fails to start, or runs
+/// and its worker dies without an answer (the executor reports that as a failed step).
+const Outcome = enum { hit, ok, fail, begin_fail, crash };
 
 const Fake = struct {
     plan: *const schedule.Plan,
@@ -74,7 +75,7 @@ const Fake = struct {
                 fake.first_failed = fake.first_failed orelse index;
                 return error.Failed;
             },
-            .ok, .fail => {
+            .ok, .fail, .crash => {
                 fake.running[index] = true;
                 fake.running_count += 1;
                 if (fake.running_count > fake.bound) fake.over_bound = true;
@@ -110,7 +111,7 @@ const Fake = struct {
             fake.running[step] = false;
             fake.running_count -= 1;
             const index: u8 = @intCast(step);
-            if (fake.outcome[step] == .fail) {
+            if (fake.outcome[step] == .fail or fake.outcome[step] == .crash) {
                 fake.first_failed = fake.first_failed orelse index;
                 return .{ .index = index, .ok = false };
             }
@@ -346,4 +347,52 @@ test "the biggest graphs: 64 steps, wide and as a chain, at the bound" {
     const result = schedule.run(&plan, constants.build_parallel_max, executor(&chain));
     try expect_guarantees(&chain, result);
     try testing.expectEqual(@as(u8, steps_max), result.built);
+}
+
+/// One number for a finished build: its steps' outputs in index order.
+fn result_digest(fake: *const Fake) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    for (0..fake.plan.count) |step| hasher.update(std.mem.asBytes(&fake.output[step]));
+    return hasher.final();
+}
+
+test "worker crashes: the scheduler stops cleanly and a rebuild finishes the same plan" {
+    // Goal: the scheduler's guarantees hold when workers die, and a rerun reaches the same
+    // result. The fake executor stands in for the store, so this proves scheduler recovery only;
+    // compose_tests crashes the real step at every write point and checks the output digest.
+    // Method: 3000 seeds; a clean build gives the digest; a build where some workers die
+    // without an answer fails with the guarantees held (nothing new starts, none outlives it);
+    // a rebuild treats what the crashed build finished as hits and must give the same digest.
+    var seed: u64 = 1;
+    var crashed_builds: u32 = 0;
+    while (seed <= 3000) : (seed += 1) {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+        var plan: schedule.Plan = undefined;
+        random_plan(random, &plan);
+        const bound = random.intRangeAtMost(u8, 1, constants.build_parallel_max);
+        var clean = fake_for(&plan, random, bound);
+        const clean_result = schedule.run(&plan, bound, executor(&clean));
+        try expect_guarantees(&clean, clean_result);
+        try testing.expect(clean_result.failed == null);
+        var crashing = fake_for(&plan, random, bound);
+        for (0..plan.count) |step| {
+            if (random.uintLessThan(u8, 6) == 0) crashing.outcome[step] = .crash;
+        }
+        const crashed_result = schedule.run(&plan, bound, executor(&crashing));
+        try expect_guarantees(&crashing, crashed_result);
+        if (crashed_result.failed != null) {
+            crashed_builds += 1;
+            try testing.expect(crashing.outcome[crashed_result.failed.?] == .crash);
+        }
+        var again = fake_for(&plan, random, bound);
+        for (0..plan.count) |step| {
+            if (crashing.done[step]) again.outcome[step] = .hit;
+        }
+        const again_result = schedule.run(&plan, bound, executor(&again));
+        try expect_guarantees(&again, again_result);
+        try testing.expect(again_result.failed == null);
+        try testing.expectEqual(result_digest(&clean), result_digest(&again));
+    }
+    try testing.expect(crashed_builds > 0);
 }

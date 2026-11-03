@@ -189,6 +189,7 @@ pub const Code = enum(u8) {
     E0805,
     E0806,
     E0807,
+    W0801,
     E1001,
     E1002,
     E1003,
@@ -2858,6 +2859,24 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W0801,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the build has steps that use the network",
+        .explanation =
+        \\A step with .network = true in the build file runs with the network (through
+        \\pasta), so what it produces can depend on what the network returned that
+        \\day, not only on the build's inputs. zbx still caches such a step like any
+        \\other, so a rebuild does not fetch again and the result digest stays put
+        \\until an input changes; the report marks the step "net". A fresh machine
+        \\with an empty cache can build a different result.
+        \\
+        \\The cause names the steps. To make the build reproducible, pin what the
+        \\step fetches (a version, or a checksum the command verifies), or fetch it
+        \\once, outside the build, and list the file as an input.
+        ,
+    },
+    .{
         .code = .E1001,
         .severity = .@"error",
         .blame = .environment,
@@ -3315,7 +3334,7 @@ pub fn can_end_run(code: Code) bool {
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
-        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807 => false,
+        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,
