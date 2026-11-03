@@ -68,7 +68,8 @@ test "a digest with no record, and a name that is no digest, are not results" {
     const other = Digest.of("nothing").text();
     const ran = try run_image.prepare_result(sim.interface(), &ws, &other, &.{}, &prepared, &diag);
     try testing.expect(!ran);
-    const named = try run_image.prepare_result(sim.interface(), &ws, "alpine", &.{}, &prepared, &diag);
+    const host = sim.interface();
+    const named = try run_image.prepare_result(host, &ws, "alpine", &.{}, &prepared, &diag);
     try testing.expect(!named);
     try testing.expect(diag.code == null);
 }

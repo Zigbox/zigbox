@@ -182,6 +182,8 @@ test {
     _ = @import("lock_file.zig");
     _ = @import("image_user.zig");
     _ = @import("run_image.zig");
+    _ = @import("inspect_commands.zig");
+    _ = @import("inspect_tests.zig");
     _ = @import("run_image_tests.zig");
     _ = @import("image_diagnose.zig");
     _ = @import("store/image_find.zig");

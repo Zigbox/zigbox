@@ -871,3 +871,29 @@ pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind:
     diag.fix(.{ .sentence = "have the step remove it, or make it somewhere other than /out" });
     assert(diag.code.? == .E0806);
 }
+
+/// ZBX-E0005: the operand of `inspect` is no build result: not a full digest, or no record of
+/// that name in the store.
+pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
+    assert(diag.code == null);
+    var storage: Echo = undefined;
+    const echo = text_util.sanitise(&storage, operand);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    if (absent) {
+        diag.cause("the store has no build result '{s}'", .{echo});
+        diag.fix(.{
+            .sentence = "build the project, and use the digest it prints:",
+            .command = "zbx build",
+        });
+    } else {
+        diag.cause("'{s}' is not the digest of a build result: b3: and 64 hex digits", .{echo});
+        diag.fix(.{
+            .sentence = "give the digest `zbx build` printed:",
+            .command = "zbx inspect b3:<64 hex>",
+            .template = true,
+        });
+    }
+    diag.context("cmd", "inspect", .{});
+    diag.context("arg", "{s}", .{echo});
+}

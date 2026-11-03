@@ -834,6 +834,10 @@ pub const build_result_bytes_max: u32 = build_pool_bytes + image_settings_bytes_
 /// The bytes of a result's labels (keys and values, together): the pool bound, since they come
 /// from the build file.
 pub const build_result_label_bytes_max: u32 = build_pool_bytes;
+/// The room `zbx inspect` gathers a result's config in: every byte of the settings and labels
+/// escaped to six, and the fixed text around them.
+pub const inspect_output_bytes_max: u32 =
+    (image_settings_bytes_max + build_result_label_bytes_max) * 6 + 4096;
 /// Directories two trees of an assembly may have in common at one level (`build/assemble.zig`);
 /// past this a merge is refused rather than grow without bound.
 pub const build_merge_common_max: u32 = 256;

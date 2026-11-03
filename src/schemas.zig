@@ -717,6 +717,53 @@ const vm_config_schema =
     \\"properties":{"cpus":{"type":"integer"},"memory_bytes":{"type":"integer"}}}}}
 ;
 
+const build_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/build/1","version":1,
+    \\"title":"zbx build --output json",
+    \\"description":"stdout: a line per ended step and for the image, then the result digest.",
+    \\"$comment":"A refused or failed build is one diagnostic on stderr, the error document.",
+    \\"$comment":"One object schema, no $ref: oneOf names the members that tell the lines apart.",
+    \\"type":"object",
+    \\"properties":{"schema":{"const":"zbx.build/1"},
+    \\"step":{"type":"string","description":"a step's name; the image's is image"},
+    \\"cache":{"enum":["hit","miss"]},
+    \\"key":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"the cache key"},
+    \\"output":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"the output tree"},
+    \\"start_ms":{"type":"integer","description":"milliseconds since the build began"},
+    \\"end_ms":{"type":"integer","description":"a hit starts and ends when it is found"},
+    \\"network":{"type":"boolean","description":"the step was given the network"},
+    \\"build_result":{"type":"object","required":["digest","hits","misses","elapsed_ms"],
+    \\"properties":{"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the result digest: zbx run and zbx inspect take it"},
+    \\"hits":{"type":"integer"},"misses":{"type":"integer"},"elapsed_ms":{"type":"integer"}}},
+    \\
+++ diagnostic_properties ++
+    \\},
+    \\"oneOf":[{"required":["schema","step","cache","key","output","start_ms","end_ms","network"]},
+    \\{"required":["schema","build_result"]},{
+++ diagnostic_required ++
+    \\}]}
+;
+
+const inspect_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/inspect/1","version":1,
+    \\"title":"zbx inspect --output json",
+    \\"description":"stdout: a build result, one line. A refusal is on stderr.",
+    \\"type":"object","required":["schema","digest","tree","config"],
+    \\"properties":{"schema":{"const":"zbx.build_result/1"},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"the result digest"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"the image tree"},
+    \\"config":{"type":"object",
+    \\"required":["entrypoint","cmd","env","workdir","user","labels"],
+    \\"properties":{"entrypoint":{"type":"array","items":{"type":"string"}},
+    \\"cmd":{"type":"array","items":{"type":"string"}},
+    \\"env":{"type":"array","items":{"type":"string"},"description":"NAME=value"},
+    \\"workdir":{"type":"string"},"user":{"type":"string"},
+    \\"labels":{"type":"object","additionalProperties":{"type":"string"}}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -742,6 +789,8 @@ const table = [_]Entry{
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
     .{ .command = "build-graph", .text = build_graph_schema },
+    .{ .command = "build", .text = build_schema },
+    .{ .command = "inspect", .text = inspect_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
     .{ .command = "state-rm", .text = state_rm_schema },
     .{ .command = "state-restore", .text = state_restore_schema },
@@ -753,7 +802,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 28);
+    assert(table.len == 30);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -782,7 +831,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 28), table.len);
+    try testing.expectEqual(@as(usize, 30), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {
