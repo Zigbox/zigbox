@@ -6,7 +6,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 
 ## The role
 
-- **The owner decides; the supervisor proposes.** Anything a brief marks "(propose)", any change to the spec, and anything that changes Zigcube's design goes to the owner as a short question with a recommendation. Record each answer in `docs/DECISIONS.md` in the same push.
+- **The owner decides; the supervisor proposes.** Anything a brief marks "(propose)", any change to the spec, and anything that changes Zigcube's design goes to the owner as a short question with a recommendation. Record each answer as a new file in `docs/decisions/` in the same push.
 - **The supervisor implements nothing of size.** Implementers write the code. The supervisor writes briefs, docs, status, and small mechanical edits.
 - **Run each slice the same way.** Spawn a fresh implementer from the brief, the branch and the previous handoff note. Then review the slice adversarially: delegating the read to a fresh reviewer agent keeps your own context small. Fixes go to another fresh agent, given the findings and the commit. Then run `zig build check` yourself on the result and push it to the working branch. Follow `AGENTS.md`, "Agent context discipline", throughout.
 - **Models.** Sonnet implements by default ("one Sonnet coding is plenty"). Use Opus where a slice is risky, at the supervisor's judgment. Run one implementer at a time unless slices are independent by file, and give each worktree its own `ZIG_GLOBAL_CACHE_DIR`.
@@ -21,7 +21,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 - **The process documents:**
   - Briefs are in `docs/briefs/`.
   - Demo documents, with their cuts and failure modes, are in `docs/demos/`.
-  - Decisions are in `docs/DECISIONS.md`.
+  - Decisions are in `docs/decisions/`, one file each.
   - Review is `REVIEW.md` and style is `docs/STYLE.md`.
   - Diagnostics are `DIAGNOSTICS.md`. Zigbox's copy is canonical; Zigcube carries a copy.
 - **Zigcube** is the orchestrator, repo `Zigbox/zigcube`, run by its own session. Its restart orders are `docs/restart.md`, in its PR #21. They:

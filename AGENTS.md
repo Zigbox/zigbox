@@ -50,7 +50,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 An agent re-reads its whole context on every turn, so cost grows with context size, not with the work done. Keep implementer context small.
 
 - **One agent per slice.** The supervisor spawns a fresh implementer for each slice of a milestone. Do not resume a finished implementer for the next slice or for follow-up fixes.
-- **Hand off through the repo.** Before stopping, the implementer commits its work and ends its report with a handoff note: decisions made, traps found, what's next. Lasting decisions go in `docs/DECISIONS.md`. The next implementer starts from the brief, the branch and that note.
+- **Hand off through the repo.** Before stopping, the implementer commits its work and ends its report with a handoff note: decisions made, traps found, what's next. Lasting decisions go in `docs/decisions/`, one file per decision (`YYYY-MM-DD-<slug>.md`, see its README), never in a shared file, so parallel branches do not conflict. The next implementer starts from the brief, the branch and that note.
 - **Context ceiling.** Stop at about 250K tokens of context or 60 turns, whichever comes first. At that point, reach the next safe stopping place, commit, write the handoff note and report. The supervisor enforces this and starts a new implementer rather than extending the current one.
 - **Small fixes get new agents.** For a bug or review finding, spawn a fresh agent with the symptom and the relevant commit. Do not send it back to the agent that wrote the code.
 - **Keep noisy output out of context.** Redirect `zig build` and test output to a file and read only the failing lines. Do not paste full logs.

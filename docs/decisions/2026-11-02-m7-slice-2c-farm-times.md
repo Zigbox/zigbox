@@ -1,0 +1,8 @@
+# M7 · Slice 2c: farm times (for review)
+
+- **The store already stamped a fixed time**, 2000-01-01 (`store_mtime_seconds`), on objects, directories and symlinks of a farm. The change is the value: `store_mtime_seconds` is now `build_source_date_epoch` (1980-01-01), so objects written by import and every file the store writes get it at no new cost, and `ensure` adds the one missing stamp, on each file's link.
+- **Files are stamped through the existing `Fs.set_path_attributes`** (`mode = null`, `set_owner = false`; `utimensat` with `AT_SYMLINK_NOFOLLOW`), not a new interface call: the sim already records the time on every name of the inode, and it is already a write point for the crash and fault tests. A failure is `E0417` ("setting a file's time") and the temp farm is discarded like any other.
+- **Link and object are one inode**, so the stamp repairs an object written by 0.2.0 (2000) the first time a new farm links it. No import change.
+- **Symlinks and directories** are stamped on themselves (symlinks by `AT_SYMLINK_NOFOLLOW`; directories after their entries, as before, so making an entry cannot move their time).
+- **Not repaired: a farm that 0.2.0 already built** stays as it is (2000 on its directories and symlinks), since `ensure` does not touch a farm it finds. Its files may be repaired by another farm that shares the objects. A step on such a base would see mixed times; if that matters, build steps should use a new cache path or a farm marker (owner's call).
+- **Store verify** in the simulator now expects 1980 on objects; a real store from 0.2.0 has 2000 and nothing reads that time, so no real check changes.
