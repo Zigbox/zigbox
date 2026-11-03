@@ -394,6 +394,7 @@ pub const HostReal = struct {
         // clone3 returns twice. In the child (result 0) nothing below this line runs: the entry
         // function does the setup and the child ends here, never returning into the caller.
         if (result == 0) {
+            if (flags.stdin_null) redirect_stdin_null();
             if (flags.output) |pipes| redirect_output(pipes);
             linux.exit_group(entry(entry_context));
         }
@@ -1327,6 +1328,17 @@ comptime {
 /// In the new child, before anything else: its standard output and error become the pipes'
 /// write ends. Raw system calls only. A child that cannot do it ends, and the parent sees its
 /// exit status, not a command that wrote to the wrong place.
+/// In the child: descriptor 0 becomes /dev/null. Only raw system calls, as in the child anywhere.
+fn redirect_stdin_null() void {
+    const opened = linux.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.errno(opened) != .SUCCESS) linux.exit_group(70);
+    const null_fd: i32 = @intCast(opened);
+    if (null_fd != 0) {
+        if (linux.errno(linux.dup2(null_fd, 0)) != .SUCCESS) linux.exit_group(70);
+        _ = linux.close(null_fd);
+    }
+}
+
 fn redirect_output(pipes: host.OutputPipes) void {
     if (pipes.stdout) |handle| {
         if (linux.errno(linux.dup2(@intCast(handle), 1)) != .SUCCESS) linux.exit_group(70);

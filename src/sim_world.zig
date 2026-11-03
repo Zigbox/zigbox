@@ -239,6 +239,8 @@ pub const Process = struct {
     /// The write ends of the pipes that were this process's standard output and error
     /// (`SpawnFlags.output`): held while the command lives, so the readers see its end.
     output_ends: [2]?u32,
+    /// Its standard input was made /dev/null at its birth (`SpawnFlags.stdin_null`).
+    stdin_null: bool,
     /// The PID namespace the process is in, named by the host pid of its init (0: the host's),
     /// and the one its children are born in (another after `join_namespace(.pid)`). When an
     /// init ends, the kernel kills every other process of its namespace.
@@ -895,6 +897,7 @@ pub const World = struct {
         child.holds = parent.holds;
         child.table = parent.table;
         child.uts = parent.uts;
+        child.stdin_null = flags.stdin_null;
         if (flags.output) |pipes| {
             child.output_ends = .{ pipes.stdout, pipes.stderr };
             if (pipes.stdout) |handle| assert(parent.holds[end_index(handle)]);
@@ -2338,6 +2341,7 @@ fn unused_process() Process {
         .ports = undefined,
         .ports_count = 0,
         .output_ends = .{ null, null },
+        .stdin_null = false,
         .pid_namespace = 0,
         .children_pid_namespace = 0,
         .joined = 0,

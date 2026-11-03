@@ -690,6 +690,39 @@ pub fn step_failed(diag: *Diag, failure: *const StepFailure) void {
     assert(diag.code.? == .E0805);
 }
 
+/// `E0805`: the step never started, because its environment (the base's, the file's and the
+/// fixed one, merged) is more than a command can be given. `count` is the merged variables and
+/// `key` the first one that does not fit (empty if the count itself is over the limit).
+pub fn step_env_refused(
+    diag: *Diag,
+    step: []const u8,
+    file: []const u8,
+    count: u32,
+    key: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(step.len > 0);
+    assert(file.len > 0);
+    diag.raise(.E0805);
+    diag.set_headline("build step \"{s}\" failed: its environment is too large", .{step});
+    diag.while_("starting build step \"{s}\"", .{step});
+    if (count > constants.env_vars_count_max) {
+        diag.cause("the base image's environment, the step's .env and the fixed variables make " ++
+            "{d} variables; a container's command takes at most {d}", .{
+            count, constants.env_vars_count_max,
+        });
+    } else {
+        var key_echo: Echo = undefined;
+        diag.cause("variable \"{s}\" of the step's environment, or the environment's total " ++
+            "size, is more than a command can be given", .{text_util.sanitise(&key_echo, key)});
+    }
+    diag.context("step", "{s}", .{step});
+    diag.context("file", "{s}", .{file});
+    fix_sentence(diag, "remove variables from .env of step \"{s}\" in {s}, or use a base " ++
+        "with a smaller environment", .{ step, file });
+    assert(diag.code.? == .E0805);
+}
+
 fn end_short(buffer: *[48]u8, end: StepEnd) []const u8 {
     assert(buffer.len >= 48);
     // Cannot fail: a few words and two numbers fit 48 bytes.

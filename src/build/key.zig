@@ -68,6 +68,9 @@ pub const fixed_env = [_][]const u8{
     "HOME=/root",
     "TZ=UTC",
     "LC_ALL=C",
+    // The run adds the host's TERM unless the environment sets one, which would make the same
+    // key give different outputs on a laptop and on CI.
+    "TERM=dumb",
     std.fmt.comptimePrint("SOURCE_DATE_EPOCH={d}", .{constants.build_source_date_epoch}),
 };
 pub const step_variable = "ZBX_BUILD_STEP=";
@@ -289,7 +292,7 @@ test "key: the preimage is stable" {
     try testing.expectEqualStrings(golden_key_hex, &hex);
 }
 
-const golden_key_hex = "6f999a6ac1d63413a803e9d5970f37aeafe02214a3a995029c05386fbb9eb59a";
+const golden_key_hex = "194ac22196c404210391daba27f1cf37063c58587354af771b84a9bdf46aab99";
 
 test "key: a spec past the bounds is refused, at the bound it is not" {
     // Goal: an oversized spec from a library caller is an error, never an overflow. Method: an

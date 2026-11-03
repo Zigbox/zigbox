@@ -189,6 +189,8 @@ pub const StartOptions = struct {
     /// foreground `zbx run`). Without a log there is nothing to copy: the container writes to
     /// the terminal itself, as before logs existed.
     mirror: bool = false,
+    /// The container's standard input is /dev/null (a build step), not this process's.
+    stdin_null: bool = false,
 };
 
 pub const Note = text_util.Bounded(160);
@@ -374,6 +376,7 @@ pub fn start(
     begin_record(handle);
     const capture = open_log(handle, options);
     handle.session.start(host, &handle.plan, &handle.facts, capture);
+    handle.session.stdin_null = options.stdin_null;
     handle.session.execute(diag, run_info(handle)) catch |err| {
         close_log(handle);
         handle.ended = failed_start(diag); // Asserts that the diagnostic has a code.

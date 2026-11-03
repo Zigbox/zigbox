@@ -5,8 +5,8 @@ error[ZBX-E0805]: build step "fetch" failed: exit 6
          build steps run with network none unless they ask
   step   fetch
   file   zbx.build.zon
-  log    /home/user/.local/share/zbx/build/logs/fetch.log
+  log    /home/user/.local/share/zbx/build/logs/0123456789abcdef/fetch.log
   fix    if the step needs the network, add  .network = true  to step "fetch" in zbx.build.zon
-         read the step's whole output in its log   cat /home/user/.local/share/zbx/build/logs/fetch.log
+         read the step's whole output in its log   cat /home/user/.local/share/zbx/build/logs/0123456789abcdef/fetch.log
   more   zbx explain E0805
   docs   https://zigbox.github.io/zigbox/errors/E0805.html

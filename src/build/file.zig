@@ -838,7 +838,7 @@ fn check_step_name(parser: *Parser, name: Text) Refused!void {
 /// The variables every step is given after the build file's, which a step's `.env` cannot set
 /// (docs/briefs/M7-build.md, "A fixed environment").
 pub const fixed_env = [_][]const u8{
-    "HOME", "TZ", "LC_ALL", "SOURCE_DATE_EPOCH", "ZBX_BUILD_STEP",
+    "HOME", "TZ", "LC_ALL", "TERM", "SOURCE_DATE_EPOCH", "ZBX_BUILD_STEP",
 };
 
 /// An env list: each entry `KEY=VALUE` with a plain key, no key twice, and in a step no key of

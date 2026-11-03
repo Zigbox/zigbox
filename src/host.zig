@@ -163,6 +163,9 @@ pub const SpawnFlags = struct {
     /// parent keeps the read ends and closes the write ends itself. Null: the child's streams
     /// are the parent's.
     output: ?OutputPipes = null,
+    /// The child's standard input is /dev/null before it runs `entry`, not the parent's (a build
+    /// step must not read the terminal or a pipe of whoever started `zbx`).
+    stdin_null: bool = false,
     /// The child's parent is the caller's parent, not the caller (`CLONE_PARENT`): `exec`'s
     /// joiner forks the command this way, so that `zbx` waits for it directly. It takes no
     /// namespace flag: the child is born in the namespaces the caller joined.

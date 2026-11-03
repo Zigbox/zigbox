@@ -2071,7 +2071,7 @@ fn build_step_failed(diag: *Diag) void {
         .end = .{ .exited = 6 },
         .network = false,
         .last_line = "curl: (6) Could not resolve host: example.org",
-        .log = "/home/user/.local/share/zbx/build/logs/fetch.log",
+        .log = "/home/user/.local/share/zbx/build/logs/0123456789abcdef/fetch.log",
     };
     build_diagnose.step_failed(diag, &failure);
 }

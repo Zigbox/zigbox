@@ -11,8 +11,10 @@
 //!   `/out` the work directory (writable). The run's project directory is the work directory, so
 //!   the writable mount's rule ("inside the project") holds without being widened. Its
 //!   environment is the base's, then the file's, then the fixed one (`key.fixed_env`).
-//! - **After**, on every path: the run's log is copied as plain text to `build/logs/<step>.log`
-//!   (the last line kept for the diagnostic), and the run leaves nothing (`run.discard`). Then,
+//! - **After**, on every path: the run's log is copied as plain text to
+//!   `build/logs/<group>/<step>.log`, where the group is a digest of the build file's absolute
+//!   path (`log_group`), so two projects' steps of one name keep apart (the last line is kept
+//!   for the diagnostic), and the run leaves nothing (`run.discard`). Then,
 //!   in the store's namespace again: after a zero exit `/out` is imported (owners 0:0, no
 //!   attributes, no root record: the cache entry roots it; a device, FIFO or socket is E0806),
 //!   and the work directory is removed. A non-zero end is E0805.
@@ -36,6 +38,7 @@ const import_mod = @import("../store/import.zig");
 const remove = @import("../store/remove.zig");
 const open = @import("../store/open.zig");
 const store_diagnose = @import("../store/diagnose.zig");
+const lock = @import("../store/lock.zig");
 const digest_mod = @import("../store/digest.zig");
 const key_mod = @import("key.zig");
 const diagnose = @import("diagnose.zig");
@@ -47,6 +50,9 @@ const PathBuf = fs_mod.PathBuf;
 
 pub const Error = error{Failed};
 
+// What a step means is fixed by the constants below, the mount layout in `build_mounts`, the
+// environment in `key.fixed_env` and the limits in `start_and_wait`. Changing any of them
+// changes what a cached output means: bump `constants.build_step_format_version` with it.
 pub const hostname = "build";
 pub const umask: u16 = 0o022;
 /// A step's container name: this, the step's name, `-`, and random hex.
@@ -69,8 +75,21 @@ pub const Request = struct {
     spec: *const key_mod.Spec,
     /// The build file as the project sees it, for the diagnostic's fix (`zbx.build.zon`).
     file: []const u8,
+    /// Where the logs of this build file's steps are kept (`log_group`), `log_group_bytes`.
+    group: []const u8,
     warn: ?run.Warn = null,
 };
+
+pub const log_group_bytes = 16;
+
+/// The log directory's name for a build file: a digest of its absolute path.
+pub fn log_group(out: *[log_group_bytes]u8, absolute_file: []const u8) []const u8 {
+    assert(absolute_file.len > 0);
+    assert(absolute_file[0] == '/');
+    const digest = Digest.of(absolute_file).text();
+    @memcpy(out, digest[0..log_group_bytes]);
+    return out;
+}
 
 pub const Result = struct {
     output: Digest,
@@ -140,6 +159,11 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
         return error.Failed;
     }
     try name_paths(request, &store, ws);
+    try check_env(request, ws, diag);
+    // A sweep of the work directories (`sweep`) takes the lock exclusively, so a step in flight
+    // keeps its own directory.
+    try store_diagnose.hold(diag, &store, .shared, "build", "running a build step");
+    defer lock.release(&store);
     try in_store(request, ws, .prepare, diag);
     defer cleanup(request, ws);
     const reason = try start_and_wait(request, ws, diag);
@@ -178,7 +202,8 @@ fn name_paths(request: *const Request, store: *const Store, ws: *Workspace) Erro
     paths.image = spec.base_tree.text();
     _ = store.path(&paths.work, &.{ "/build/work/", name });
     _ = store.path(&paths.out, &.{ "/build/work/", name, "/out" });
-    _ = store.path(&paths.log, &.{ "/build/logs/", spec.name, ".log" });
+    assert(request.group.len == log_group_bytes);
+    _ = store.path(&paths.log, &.{ "/build/logs/", request.group, "/", spec.name, ".log" });
     _ = materialize.farm_path(store, &paths.src, spec.input_tree);
     for (spec.needs, 0..) |need, index| {
         _ = materialize.farm_path(store, &paths.needs[index], need.output);
@@ -218,11 +243,31 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
         .image_workspace = &ws.image,
         .keep_log = true,
         .mirror = false,
+        .stdin_null = true,
     };
-    run.start(request.host, &container, options, &ws.handle, diag) catch return error.Failed;
+    run.start(request.host, &container, options, &ws.handle, diag) catch {
+        // A start that fails after the record began has saved a `start_failed` record; the
+        // step leaves none. The log of a start that never ran is of no use.
+        if (ws.handle.status == .stopped) run.discard(&ws.handle);
+        return error.Failed;
+    };
     const reason = run.wait(&ws.handle);
     assert(ws.handle.status == .stopped);
     return reason;
+}
+
+/// Refuses, naming the step and the file, an environment the run would refuse with no step in
+/// sight (`spec.env_problem`: more than `env_vars_count_max` merged variables, or too many
+/// bytes with the command). An argv the run will refuse itself is left to it.
+fn check_env(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
+    const spec = request.spec;
+    assert(diag.code == null);
+    if (spec_mod.command_problem(spec.argv) != null) return;
+    const count = build_env(spec, &ws.env);
+    const problem = spec_mod.env_problem(ws.env[0..count], spec.argv) orelse return;
+    const key = if (problem < count) ws.env[problem].key else "";
+    diagnose.step_env_refused(diag, spec.name, request.file, count, key);
+    return error.Failed;
 }
 
 /// The base's environment, then the file's, then the fixed one: a later key replaces an
@@ -301,8 +346,9 @@ fn step_end(handle: *const run.Handle, reason: run.ExitReason) ?diagnose.StepEnd
 
 // ---- The log ------------------------------------------------------------------------------------
 
-/// Copies the run's log, both streams in order, to `build/logs/<step>.log` as plain text, and
-/// keeps its last line. Best effort: a step whose log cannot be kept still has its output.
+/// Copies the run's log, both streams in order, to `build/logs/<group>/<step>.log` as plain
+/// text, and keeps its last line. It is written inside the work directory first, so that what a
+/// crash leaves is swept with it. Best effort: a step whose log cannot be kept still has its output.
 fn copy_log(request: *const Request, store: *const Store, ws: *Workspace) void {
     assert(ws.handle.status == .stopped);
     ws.last_line_len = 0;
@@ -310,8 +356,9 @@ fn copy_log(request: *const Request, store: *const Store, ws: *Workspace) void {
     var dir: PathBuf = undefined;
     fs.make_directory(store.path(&dir, &.{"/build"}), true) catch return;
     fs.make_directory(store.path(&dir, &.{"/build/logs"}), true) catch return;
+    fs.make_directory(store.path(&dir, &.{ "/build/logs/", request.group }), true) catch return;
     var temporary: PathBuf = undefined;
-    temporary.set(&.{ ws.paths.log_text(), ".", ws.paths.name_slice() }) catch return;
+    temporary.set(&.{ ws.paths.work_text(), "/log" }) catch return;
     const temporary_path = temporary.text();
     const fd = fs.create(temporary_path, 0o644) catch return;
     var written = true;
@@ -361,7 +408,7 @@ fn keep_last_line(ws: *Workspace, payload: []const u8) void {
 
 // ---- In the store's namespace -------------------------------------------------------------------
 
-const Action = enum { prepare, import, remove };
+const Action = enum { prepare, import, remove, sweep };
 
 /// What the child gets. It has its own copy of memory, so what it learns comes back through
 /// `report`: a diagnostic on failure, the import's digest and file count on success.
@@ -377,12 +424,12 @@ const answer_bytes = constants.store_digest_bytes + 8;
 
 comptime {
     assert(answer_bytes < constants.diag_carry_bytes_max);
-    assert(@typeInfo(Action).@"enum".field_names.len == 3);
+    assert(@typeInfo(Action).@"enum".field_names.len == 4);
 }
 
 fn in_store(request: *const Request, ws: *Workspace, action: Action, diag: *Diag) Error!void {
     assert(diag.code == null);
-    assert(ws.paths.work.len > 0);
+    if (action != .sweep) assert(ws.paths.work.len > 0);
     const host = request.host;
     var job: Job = .{
         .request = request,
@@ -443,7 +490,7 @@ fn take_answer(ws: *Workspace, action: Action, answer: []const u8, diag: *Diag) 
 fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     _ = squash_owner; // The output is imported with owners 0:0 either way.
     const job: *Job = @ptrCast(@alignCast(context));
-    assert(job.ws.paths.work.len > 0);
+    if (job.action != .sweep) assert(job.ws.paths.work.len > 0);
     var diag: Diag = undefined;
     diag.reset();
     var answer: [answer_bytes]u8 = undefined;
@@ -481,26 +528,29 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
 
 fn execute(store: *Store, job: *Job, diag: *Diag) Error!void {
     assert(diag.code == null);
-    assert(job.ws.paths.out.len > job.ws.paths.work.len);
+    if (job.action != .sweep) assert(job.ws.paths.out.len > job.ws.paths.work.len);
     switch (job.action) {
         .prepare => try prepare(store, job, diag),
         .import => try import_output(store, job, diag),
-        .remove => {
-            const ws = &job.ws.image.materialize;
-            var failure: remove.Failure = undefined;
-            const work = job.ws.paths.work_text();
-            remove.tree(store.fs, &ws.removal, &ws.arena, work, &failure) catch {
-                store_diagnose.write_failed(
-                    diag,
-                    store,
-                    "removing a build step's work directory",
-                    failure.err,
-                    failure.errno,
-                );
-                return error.Failed;
-            };
+        .remove => try remove_work(store, job, job.ws.paths.work_text(), diag),
+        .sweep => {
+            // Under the exclusive lock the parent holds: nothing here may take the lock.
+            var dir: PathBuf = undefined;
+            try remove_work(store, job, store.path(&dir, &.{"/build/work"}), diag);
         },
     }
+}
+
+fn remove_work(store: *Store, job: *Job, path: [:0]const u8, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(std.mem.indexOf(u8, path, "/build/work") != null);
+    const ws = &job.ws.image.materialize;
+    var failure: remove.Failure = undefined;
+    remove.tree(store.fs, &ws.removal, &ws.arena, path, &failure) catch {
+        const operation = "removing a build step's work directory";
+        store_diagnose.write_failed(diag, store, operation, failure.err, failure.errno);
+        return error.Failed;
+    };
 }
 
 /// The farms the container mounts, and an empty work directory with its `out`.
@@ -582,6 +632,27 @@ fn cleanup(request: *const Request, ws: *Workspace) void {
     var diag: Diag = undefined;
     diag.reset();
     in_store(request, ws, .remove, &diag) catch {};
+}
+
+/// Clears `build/work`, which a crashed or killed step leaves its directory in, with the log
+/// temporary inside it. Call it before a build starts steps. It takes the store lock
+/// exclusively, so no step is in flight; if the lock is busy a build is running, and its
+/// directories are not leftovers, so nothing is done and nothing is said.
+pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    var store: Store = undefined;
+    if (!store.locate(request.host)) {
+        store_diagnose.no_data_directory(diag);
+        return error.Failed;
+    }
+    lock.hold(&store, .exclusive, "build sweep") catch |err| {
+        if (err == error.Busy) return;
+        const operation = "taking the store lock";
+        store_diagnose.write_failed(diag, &store, operation, store.lock_error, store.lock_errno);
+        return error.Failed;
+    };
+    defer lock.release(&store);
+    try in_store(request, ws, .sweep, diag);
 }
 
 // ---- Tests ----------------------------------------------------------------------------------

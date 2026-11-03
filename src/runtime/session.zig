@@ -104,6 +104,8 @@ pub const Session = struct {
     capture: bool,
     /// Which of the two streams (stdout, stderr) are pipes; the other is left as it was.
     capture_stream: [2]bool,
+    /// The container's standard input is /dev/null (set by the caller after `start`).
+    stdin_null: bool,
     /// The read ends of those pipes, until the stream ends; and the write ends, from the pipes'
     /// making until the child has its copies.
     output_read: [2]?host_mod.Handle,
@@ -143,6 +145,7 @@ pub const Session = struct {
         session.timed_out = false;
         session.capture = capture[0] or capture[1];
         session.capture_stream = capture;
+        session.stdin_null = false;
         session.output_read = .{ null, null };
         session.output_write = .{ null, null };
         assert(!session.open.any());
@@ -318,6 +321,7 @@ pub const Session = struct {
             .uts = true,
             .ipc = true,
             .net = session.plan.isolated(),
+            .stdin_null = session.stdin_null,
             .output = if (session.capture) .{
                 .stdout = session.output_write[0],
                 .stderr = session.output_write[1],

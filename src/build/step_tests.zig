@@ -19,6 +19,7 @@ const fs_mod = @import("../store/fs.zig");
 const fs_sim = @import("../store/fs_sim.zig");
 const import_mod = @import("../store/import.zig");
 const layout = @import("../store/layout.zig");
+const lock = @import("../store/lock.zig");
 const materialize = @import("../store/materialize.zig");
 const support = @import("../store/test_support.zig");
 const tree = @import("../store/tree.zig");
@@ -32,7 +33,8 @@ const Digest = digest_mod.Digest;
 const store_root = support.user_store;
 const state = "/home/alice/.local/state/zbx/containers";
 const work_root = store_root ++ "/build/work";
-const log_path = store_root ++ "/build/logs/fetch.log";
+const group = "0123456789abcdef";
+const log_path = store_root ++ "/build/logs/" ++ group ++ "/fetch.log";
 
 var sim: host_sim.HostSim = undefined;
 var twin: host_sim.HostSim = undefined;
@@ -47,6 +49,7 @@ var diag: Diag = undefined;
 var host_files: [sim_run.files.len + 2]host_sim.File = undefined;
 var farm_text: [constants.store_path_bytes_max]u8 = undefined;
 var out_text: [constants.store_path_bytes_max]u8 = undefined;
+var need_text: [constants.store_path_bytes_max]u8 = undefined;
 const dir: u32 = 0o040755;
 var roots_at_start: u32 = 0;
 var tree_buffer: [constants.store_tree_bytes_max]u8 = undefined;
@@ -159,6 +162,7 @@ fn run_it(spec: *const key_mod.Spec) step.Error!void {
         .facts = &facts,
         .spec = spec,
         .file = "zbx.build.zon",
+        .group = group,
     };
     diag.reset();
     return step.run_step(&request, &workspace, &result, &diag);
@@ -170,6 +174,7 @@ const Output = struct {
 
     fn write(context: *anyopaque) void {
         const output: *const Output = @ptrCast(@alignCast(context));
+        capture_container();
         const out = find_out().?;
         var path: [constants.sim_fs_path_bytes_max]u8 = undefined;
         files.put_dir(join(&path, out, "/bin"), 0o755);
@@ -369,5 +374,204 @@ test "a work directory that cannot be made is one coded diagnostic and nothing s
     try testing.expect(files.kind_of(log_path) == null);
     try testing.expect(!record_exists(&fixture));
     try testing.expectEqual(@as(?[]const u8, null), sim_run.leak(&sim, &before));
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+/// What the hook saw of the step's command, which is gone by the time the step returns.
+var captured_env: [2048]u8 = undefined;
+var captured_len: usize = 0;
+var captured_stdin_null = false;
+var captured_found = false;
+
+/// Copies the step's command process: the one whose environment names the step.
+fn capture_container() void {
+    captured_found = false;
+    for (&sim.world.processes) |*process| {
+        if (std.mem.indexOf(u8, process.envp(), "ZBX_BUILD_STEP=fetch") == null) continue;
+        captured_len = process.envp().len;
+        @memcpy(captured_env[0..captured_len], process.envp());
+        captured_stdin_null = process.stdin_null;
+        captured_found = true;
+    }
+}
+
+fn has_entry(bytes: []const u8, entry: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, line, "\x00"), entry)) return true;
+    }
+    return false;
+}
+
+test "the host's TERM never reaches a step: the same environment under two terminals" {
+    // Goal: a step's environment (and so its key) does not depend on the developer's terminal.
+    // Method: the same step run with the host's TERM set to two values; the command's
+    // environment is byte for byte the same, and says TERM=dumb.
+    var first: [2048]u8 = undefined;
+    var first_len: usize = 0;
+    const terms = [_][]const u8{ "xterm-256color", "screen" };
+    for (terms, 0..) |term, index| {
+        const fixture = try setup(30, "fetch");
+        var variables: [8]host_sim.EnvironmentVariable = undefined;
+        const kept = sim.environment_variables;
+        @memcpy(variables[0..kept.len], kept);
+        variables[kept.len] = .{ .name = "TERM", .value = term };
+        sim.environment_variables = variables[0 .. kept.len + 1];
+        var output: Output = .{};
+        arm(&output);
+        const spec = spec_for(&fixture);
+        try run_it(&spec);
+        try testing.expect(captured_found);
+        const bytes = captured_env[0..captured_len];
+        try testing.expect(has_entry(bytes, "TERM=dumb"));
+        try testing.expect(std.mem.indexOf(u8, bytes, term) == null);
+        if (index == 0) {
+            first_len = bytes.len;
+            @memcpy(first[0..bytes.len], bytes);
+        } else {
+            try testing.expectEqualStrings(first[0..first_len], bytes);
+        }
+    }
+}
+
+test "a step's command has /dev/null for standard input" {
+    // Goal: a step never reads the developer's terminal. Method: after a clean step the
+    // command's process was born with stdin_null.
+    const fixture = try setup(31, "fetch");
+    var output: Output = .{};
+    arm(&output);
+    const spec = spec_for(&fixture);
+    try run_it(&spec);
+    try testing.expect(captured_found);
+    try testing.expect(captured_stdin_null);
+}
+
+test "a failed start after the record began leaves no run record" {
+    // Goal: a step whose command cannot start (E0202) discards the record the start saved.
+    // Method: a command that is not in the image; the step fails with the run's own code, and
+    // the record, the work directory and the descriptors are gone.
+    const fixture = try setup(32, "fetch");
+    const before = sim_run.baseline(&sim);
+    var spec = spec_for(&fixture);
+    spec.argv = &.{"nothere"};
+    try testing.expectError(error.Failed, run_it(&spec));
+    try testing.expect(diag.code != null);
+    try expect_clean(&fixture, &before);
+}
+
+test "a pid limit is E0805 in its own words" {
+    // Goal: the process limit has its wording. Method: the model reports forks refused.
+    const fixture = try setup(33, "fetch");
+    const before = sim_run.baseline(&sim);
+    sim.world.pids_max_hits = 3;
+    const spec = spec_for(&fixture);
+    try testing.expectError(error.Failed, run_it(&spec));
+    try testing.expectEqual(@as(?codes.Code, .E0805), diag.code);
+    try testing.expect(std.mem.indexOf(u8, diag.headline.slice(), "process limit reached") != null);
+    try expect_clean(&fixture, &before);
+}
+
+test "network = true gives the container the user network, and none otherwise" {
+    // Goal: the network flag reaches the run. Method: one step without the flag and one with;
+    // the run's handle says which network each was given.
+    const wants = [_]bool{ false, true };
+    for (wants, 0..) |network, index| {
+        const fixture = try setup(34 + index * 100, "fetch");
+        var output: Output = .{};
+        arm(&output);
+        var spec = spec_for(&fixture);
+        spec.network = network;
+        try run_it(&spec);
+        const expected: @TypeOf(workspace.handle.network) = if (network) .user else .none;
+        try testing.expect(workspace.handle.network == expected);
+    }
+}
+
+test "a need's output is mounted at /in/<name>" {
+    // Goal: `needs` reaches the container. Method: a need whose farm the step's store makes;
+    // the step runs and the mount list held by the run names /in/deps.
+    const fixture = try setup(35, "fetch");
+    var output: Output = .{};
+    arm(&output);
+    var spec = spec_for(&fixture);
+    const needs = [_]key_mod.Need{.{ .name = "deps", .output = fixture.base }};
+    spec.needs = &needs;
+    var farm: fs_mod.PathBuf = undefined;
+    _ = materialize.farm_path(&store, &farm, fixture.base);
+    @memcpy(need_text[0..farm.len], farm.text());
+    sim.world.add_node(farm.text(), .dir);
+    var extra: [sim_run.files.len + 3]host_sim.File = undefined;
+    @memcpy(extra[0..host_files.len], &host_files);
+    extra[host_files.len] = .{ .path = need_text[0..farm.len], .content = "", .mode = dir };
+    sim.files = &extra;
+    try run_it(&spec);
+    try testing.expectEqual(@as(?codes.Code, null), diag.code);
+    var seen = false;
+    for (workspace.mounts[0..3]) |mount| {
+        if (std.mem.eql(u8, mount.target, "/in/deps")) seen = true;
+    }
+    try testing.expect(seen);
+}
+
+test "an environment of 64 variables runs and one of 65 is refused naming the step" {
+    // Goal: the run's limit is the build layer's diagnostic. Method: a base environment sized
+    // so the merged one (with the fixed variables and the step's name) is 64, then 65.
+    const fixed = key_mod.fixed_env.len + 1;
+    var storage: [constants.env_vars_count_max + 1][16]u8 = undefined;
+    var base: [constants.env_vars_count_max + 1][]const u8 = undefined;
+    for (0..base.len) |index| {
+        base[index] = std.fmt.bufPrint(&storage[index], "V{d}=x", .{index}) catch unreachable;
+    }
+    const fits = constants.env_vars_count_max - fixed;
+    const sizes = [_]usize{ fits, fits + 1 };
+    for (sizes, 0..) |size, index| {
+        const fixture = try setup(36 + index, "fetch");
+        const before = sim_run.baseline(&sim);
+        var output: Output = .{};
+        arm(&output);
+        var spec = spec_for(&fixture);
+        spec.base_env = base[0..size];
+        if (index == 0) {
+            try run_it(&spec);
+        } else {
+            try testing.expectError(error.Failed, run_it(&spec));
+            try testing.expectEqual(@as(?codes.Code, .E0805), diag.code);
+            const headline = diag.headline.slice();
+            try testing.expect(std.mem.indexOf(u8, headline, "\"fetch\"") != null);
+            try testing.expect(std.mem.indexOf(u8, headline, "environment is too large") != null);
+            try expect_clean(&fixture, &before);
+        }
+    }
+}
+
+test "a sweep clears what a killed step left, and a live step's lock stops it" {
+    // Goal: leftovers of a crashed build (a work directory with its log temporary) are removed
+    // by the next build's sweep, and a sweep never runs under a step in flight. A real SIGKILL
+    // of zbx leaves exactly these files; the VM demo kills a real build. Method: plant two
+    // work directories; a shared hold makes the sweep do nothing; without it they are gone.
+    const fixture = try setup(40, "fetch");
+    files.put_dir(store_root ++ "/build", 0o755);
+    files.put_dir(work_root, 0o755);
+    files.put_dir(work_root ++ "/build-old-1", 0o755);
+    files.put_dir(work_root ++ "/build-old-1/out", 0o755);
+    files.put_file(work_root ++ "/build-old-1/log", 0o644, "partial");
+    files.put_dir(work_root ++ "/build-old-2", 0o755);
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    var other: layout.Store = undefined;
+    other.at(sim.interface(), store_root);
+    try lock.hold(&other, .shared, "build");
+    diag.reset();
+    try step.sweep(&request, &workspace, &diag);
+    try testing.expectEqual(@as(u32, 4), work_dirs());
+    lock.release(&other);
+    try step.sweep(&request, &workspace, &diag);
+    try testing.expectEqual(@as(u32, 0), work_dirs());
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }

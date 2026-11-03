@@ -153,7 +153,11 @@ fn overlap(
     assert(earlier.len < constants.build_step_inputs_max);
     const resolved = problem.resolved.text();
     assert(project.is_inside(project_path, resolved));
+    const written = file.text(problem.input);
     for (earlier) |input| {
+        // Overlap as written too: `a` and `a/b` are two writes of `b` into the input tree even
+        // when `a/b` is a link that resolves elsewhere in the project.
+        if (written_overlap(written, file.text(input))) return input;
         var kind: fs_mod.FileKind = undefined;
         const other = &problem.other_resolved;
         resolve_input(fs, project_path, file.text(input), other, &kind) catch continue;
@@ -161,6 +165,17 @@ fn overlap(
         if (project.is_inside(resolved, other.text())) return input;
     }
     return null;
+}
+
+/// Two plain relative paths where the same, or one is a directory prefix of the other.
+fn written_overlap(left: []const u8, right: []const u8) bool {
+    assert(left.len > 0);
+    assert(right.len > 0);
+    const short = if (left.len <= right.len) left else right;
+    const long = if (left.len <= right.len) right else left;
+    if (!std.mem.startsWith(u8, long, short)) return false;
+    if (long.len == short.len) return true;
+    return long[short.len] == '/';
 }
 
 fn kind_of(err: Error) ProblemKind {
@@ -289,4 +304,24 @@ test "the inputs of a file are checked step by step and named when refused" {
     files.crashed = true;
     try testing.expectEqual(Result.refused, try check_inputs("\"go.mod\"", &problem));
     try testing.expectEqual(ProblemKind.unreadable, problem.kind);
+}
+
+test "a nested input through a link is an overlap as written" {
+    // Goal: regression for a panic in the input tree's writer (the same name written twice).
+    // Method: `src` and `src/link`, where `src/link` is a link to a directory elsewhere in the
+    // project, so the resolved paths do not overlap but the written ones do.
+    tree();
+    files.put_dir(proj ++ "/other", 0o755);
+    files.put_symlink(proj ++ "/src/link", "../other");
+    var problem: Problem = undefined;
+    try testing.expectEqual(Result.refused, try check_inputs("\"src\", \"src/link\"", &problem));
+    try testing.expectEqual(ProblemKind.input_twice, problem.kind);
+    try testing.expectEqualStrings("src/link", test_file.text(problem.input));
+    try testing.expectEqualStrings("src", test_file.text(problem.other));
+    try testing.expectEqual(Result.refused, try check_inputs("\"src/link\", \"src\"", &problem));
+    try testing.expectEqualStrings("src", test_file.text(problem.input));
+    // A name that only shares a prefix is no overlap.
+    try testing.expect(!written_overlap("src", "src2"));
+    try testing.expect(written_overlap("src", "src/a"));
+    try testing.expect(written_overlap("a/b", "a/b"));
 }
