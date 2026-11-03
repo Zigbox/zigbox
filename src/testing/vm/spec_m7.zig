@@ -67,23 +67,23 @@ const script_miss =
     build_file(quick_run) ++
     "$Z build > /tmp/b1.out 2> /tmp/b1.err\n" ++
     "echo first_status=$?\n" ++
-    "echo first_row=$(grep '^compile ' /tmp/b1.out)\n" ++
+    "echo \"first_row=$(grep '^compile ' /tmp/b1.out)\"\n" ++
     "D=$(awk '$1 == \"compile\" { print $3 }' /tmp/b1.out)\n" ++
     "echo work_first=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps1.txt 2>&1\n" ++
     "echo records_first=$(grep -c 'build-' /tmp/ps1.txt)\n" ++
-    "echo ps_lines_first=$(wc -l < /tmp/ps1.txt)\n" ++
     "L=$(ls $B/logs/*/compile.log)\n" ++
     "echo log_first=$(stat -c '%y %s' $L)\n" ++
     "echo tree_owner=$($Z run $D -- /bin/busybox stat -c '%u:%g' /hello | tail -n 1)\n" ++
     "echo tree_text=$($Z run $D -- /bin/busybox cat /hello | tail -n 1)\n" ++
-    "$Z ps --all > /tmp/ps1.txt 2>&1\n";
+    "$Z ps --all > /tmp/ps1.txt 2>&1\n" ++
+    "echo ps_lines_first=$(wc -l < /tmp/ps1.txt)\n";
 const script_hit =
     prelude ++
     "L=$(ls $B/logs/*/compile.log)\n" ++
     "$Z build > /tmp/b2.out 2> /tmp/b2.err\n" ++
     "echo second_status=$?\n" ++
-    "echo second_row=$(grep '^compile ' /tmp/b2.out)\n" ++
+    "echo \"second_row=$(grep '^compile ' /tmp/b2.out)\"\n" ++
     "echo work_second=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps2.txt 2>&1\n" ++
     "echo records_second=$(grep -c 'build-' /tmp/ps2.txt)\n" ++
