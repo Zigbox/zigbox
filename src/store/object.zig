@@ -355,6 +355,18 @@ pub fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host
     };
 }
 
+/// True if the store holds the object `id`. An object is renamed into place whole, so what is
+/// found is complete.
+pub fn has(store: *const Store, id: Digest) host_mod.Error!bool {
+    assert(store.root_len > 1);
+    var path: PathBuf = undefined;
+    _ = store.fs.lstat(store.object_path(&path, id)) catch |err| {
+        if (err == error.NotFound) return false;
+        return err;
+    };
+    return true;
+}
+
 /// The chunk hashes of an object that has them stored; `Unsupported`-free: an object of one
 /// chunk or none has no list (the caller derives it from the tree entry).
 pub fn read_chunk_list(
