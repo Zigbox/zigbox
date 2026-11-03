@@ -1,0 +1,6 @@
+.{
+    // The result digest of the demo project (src/testing/vm/m7_project), as a recorded green run of
+    // `zig build demo-m7` printed it. Empty until there is such a run: the part then prints the
+    // digest it got and fails.
+    .digest = "",
+}
