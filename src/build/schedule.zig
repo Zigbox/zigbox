@@ -5,7 +5,9 @@
 //! - A step starts only when every step it needs is done, and at most `bound` run at once.
 //! - `begin` may answer `hit`: the step is done at once and nothing ran.
 //! - After a failure nothing new starts; the steps already running are waited for, and the first
-//!   failure is the build's.
+//!   failure to end is the build's.
+//! - A wait that fails cannot say which worker ended: the executor aborts every running worker
+//!   (kills, reaps, closes) and the build is `aborted`, with the executor's diagnostic.
 //! - Steps are tried in the plan's order (topological, ties by name), so a run with one worker
 //!   builds exactly what the serial loop of slice 2 built, in the same order.
 
@@ -55,11 +57,16 @@ pub const Executor = struct {
     begin: *const fn (context: *anyopaque, index: u8) Error!Begin,
     /// Blocks until one running step ends; the executor records its output if it succeeded.
     wait: *const fn (context: *anyopaque) Error!Ended,
+    /// Ends every running step, reaped and its resources released, after a `wait` that failed.
+    /// Called at most once, and only with steps running; it cannot fail (best effort).
+    abort: *const fn (context: *anyopaque) void,
 };
 
 pub const Outcome = struct {
-    /// The first step that failed, if any.
+    /// The first step to end in failure, or whose start failed, if any.
     failed: ?u8,
+    /// A wait failed and the running steps were aborted; no step is to blame.
+    aborted: bool,
     hits: u8,
     built: u8,
 };
@@ -71,7 +78,7 @@ pub fn run(plan: *const Plan, bound: u8, executor: Executor) Outcome {
     assert(bound >= 1);
     assert(bound <= constants.build_parallel_max);
     var state: [constants.build_steps_max]State = @splat(.pending);
-    var outcome: Outcome = .{ .failed = null, .hits = 0, .built = 0 };
+    var outcome: Outcome = .{ .failed = null, .aborted = false, .hits = 0, .built = 0 };
     var running: u8 = 0;
     var finished: u8 = 0;
     // Each pass either starts a step or waits for one, so the loop is bounded by twice the steps.
@@ -104,9 +111,11 @@ pub fn run(plan: *const Plan, bound: u8, executor: Executor) Outcome {
         }
         if (running == 0) break;
         const ended = executor.wait(executor.context) catch {
-            // A wait that cannot say which step ended: the build stops; nothing is left running
-            // that the executor knows of.
-            outcome.failed = outcome.failed orelse first_running(&state, plan);
+            // A wait that cannot say which step ended: the build stops, and every worker still
+            // running is ended, so none outlives the build. No step is blamed.
+            executor.abort(executor.context);
+            running = 0;
+            outcome.aborted = true;
             break;
         };
         assert(ended.index < plan.count);
@@ -123,14 +132,8 @@ pub fn run(plan: *const Plan, bound: u8, executor: Executor) Outcome {
         if (finished == plan.count) break;
     }
     if (running != 0) assert(outcome.failed != null);
+    if (outcome.aborted) assert(running == 0);
     return outcome;
-}
-
-fn first_running(state: *const [constants.build_steps_max]State, plan: *const Plan) u8 {
-    for (plan.order[0..plan.count]) |step| {
-        if (state[step] == .running) return step;
-    }
-    return plan.order[0];
 }
 
 fn ready(plan: *const Plan, state: *const [constants.build_steps_max]State, step: u8) bool {

@@ -794,11 +794,12 @@ pub const build_step_inputs_max: u32 = 64;
 pub const build_step_needs_max: u32 = 6;
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
+/// Steps that run at once: fixed at 4 (a cut from the brief, which also bounds it by the online
+/// CPUs; nothing checks the CPUs yet, see docs/demos/m7.md).
+pub const build_parallel_max: u32 = 4;
 /// A step's limits (docs/briefs/M7-build.md, "What a step is"): a step that runs past the timeout
 /// is ended (SIGTERM, then SIGKILL) and fails with E0805, as do one out of memory or PIDs. CPU is
 /// not limited: a build step is meant to use the machine.
-/// Steps that run at once; never more than the online CPUs (the scheduler checks both).
-pub const build_parallel_max: u32 = 4;
 pub const build_step_timeout_ms: u32 = 30 * 60 * 1000;
 pub const build_step_memory_bytes: u64 = 1 << 30;
 pub const build_step_pids: u32 = 1024;
