@@ -1,0 +1,5 @@
+# M4b · Mac: the guest's MTU is 1280 on every network
+
+*Decided 2026-10-30, by the supervisor, after `zbx pull` timed out on an IPv6-only 464XLAT tether (ZBX-E0503 at registry-1.docker.io:443).*
+
+`vm_guest_init.zig` sets `eth0` to MTU 1280 (`SIOCSIFMTU`, constant `interface_mtu`) while it configures the network, always. Measured in the guest on that network: busybox `wget` over TLS answered in 3 s, but plain HTTP to the registry's IPv4 address answered with a 1200-byte padded header and got nothing with 1440 or 2500 bytes; the same to its IPv6 address always answered. Full-size IPv4 packets are lost on the translated path and path MTU discovery does not rescue it. zbx's TLS ClientHello is over 1500 bytes (std's `x25519_ml_kem768` key share carries a 1184-byte ML-KEM-768 key, plus x25519, secp256r1 and secp384r1 shares: `std/crypto/tls/Client.zig`), while busybox's is small. 1280 is the smallest MTU every IPv6 path carries and costs about 0.4% more header overhead than 1400. Containers reach the network through the guest's stack (`--net host`, pasta), so they inherit it. A failing `SIOCSIFMTU` fails the network setup, like the address and netmask ioctls.
