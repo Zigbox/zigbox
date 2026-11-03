@@ -60,6 +60,8 @@ const Tag = enum(u8) {
     env = 7,
     network = 8,
     fixed_env = 9,
+    image_adds = 10,
+    image_config = 11,
 };
 
 /// The fixed environment a step sees after the image's and the build file's, as `KEY=VALUE`.
@@ -160,6 +162,43 @@ pub fn compute(spec: *const Spec, key: *Key) Error!void {
     try encoder.int(@intCast(step_variable.len + spec.name.len));
     try encoder.bytes(step_variable);
     try encoder.bytes(spec.name);
+    key.len = encoder.len;
+    key.digest = Digest.of(key.preimage());
+    assert(key.len > magic.len);
+}
+
+/// What the image step sees: the base's tree (the zero digest for no base), each `image.add`
+/// in the file's order (a later add merges over the earlier ones, so the order counts) as the
+/// source step's output and the destination, and the digest of the image config's encoding.
+pub const ImageAdd = struct {
+    source: Digest,
+    to: []const u8,
+};
+
+pub const ImageSpec = struct {
+    base_tree: Digest,
+    adds: []const ImageAdd,
+    /// `Digest.of` the config's bytes (the result record without its tree).
+    config: Digest,
+};
+
+/// Fills `key` with the preimage of the image step and its digest. The preimage starts with
+/// `magic` like a step's, so a cache entry's reader needs one check for both.
+pub fn compute_image(spec: *const ImageSpec, key: *Key) Error!void {
+    assert(spec.adds.len <= constants.build_image_adds_max);
+    var encoder: Encoder = .{ .out = &key.bytes, .len = 0 };
+    try encoder.bytes(magic);
+    try encoder.int(constants.build_step_format_version);
+    try encoder.tag(.base_tree);
+    try encoder.digest(spec.base_tree);
+    try encoder.tag(.image_adds);
+    try encoder.int(@intCast(spec.adds.len));
+    for (spec.adds) |add| {
+        try encoder.digest(add.source);
+        try encoder.string(add.to);
+    }
+    try encoder.tag(.image_config);
+    try encoder.digest(spec.config);
     key.len = encoder.len;
     key.digest = Digest.of(key.preimage());
     assert(key.len > magic.len);
@@ -314,4 +353,38 @@ test "key: a spec past the bounds is refused, at the bound it is not" {
     try testing.expect(accepted > 0);
     try testing.expect(accepted < big.len);
     try testing.expectEqual(@as(u32, constants.build_key_preimage_bytes_max), key_storage[0].len);
+}
+
+test "key: the image key changes with the base, each add, its order and the config" {
+    const adds = [_]ImageAdd{
+        .{ .source = sample_digest(5), .to = "/usr/bin" },
+        .{ .source = sample_digest(6), .to = "/etc" },
+    };
+    var spec: ImageSpec = .{ .base_tree = sample_digest(1), .adds = &adds, .config = sample_digest(9) };
+    const first = try image_key_of(&spec, 0);
+    try testing.expect(first.eql(try image_key_of(&spec, 1)));
+    try testing.expect(key_storage[0].len > magic.len);
+    try testing.expect(std.mem.startsWith(u8, key_storage[0].preimage(), magic));
+    var other = spec;
+    other.base_tree = sample_digest(2);
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+    other = spec;
+    other.config = sample_digest(8);
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+    const moved = [_]ImageAdd{ adds[0], .{ .source = adds[1].source, .to = "/etc/x" } };
+    other.adds = &moved;
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+    const swapped = [_]ImageAdd{ adds[1], adds[0] };
+    other.adds = &swapped;
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+    const sourced = [_]ImageAdd{ .{ .source = sample_digest(7), .to = "/usr/bin" }, adds[1] };
+    other.adds = &sourced;
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+    other.adds = adds[0..1];
+    try testing.expect(!first.eql(try image_key_of(&other, 1)));
+}
+
+fn image_key_of(spec: *const ImageSpec, slot: u1) !Digest {
+    try compute_image(spec, &key_storage[slot]);
+    return key_storage[slot].digest;
 }

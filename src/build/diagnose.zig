@@ -14,6 +14,9 @@ const graph_mod = @import("graph.zig");
 const inputs_mod = @import("inputs.zig");
 const lexer_mod = @import("lexer.zig");
 const fs_mod = @import("../store/fs.zig");
+const assemble_mod = @import("assemble.zig");
+const result_mod = @import("result.zig");
+const tree_mod = @import("../store/tree.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 
 const BuildFile = file_mod.BuildFile;
@@ -627,6 +630,77 @@ pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8, loc
     diag.context("base", "{s}", .{shown});
     diag.fix_with("pull it, which pins it in zbx.lock", "zbx pull {s}", .{shown});
     assert(diag.code.? == .E0804);
+}
+
+fn kind_word(kind: tree_mod.Kind) []const u8 {
+    return switch (kind) {
+        .file => "file",
+        .dir => "directory",
+        .symlink => "link",
+    };
+}
+
+/// `E0807` for an `image.add` list that cannot make one image: two adds (or an add and the base)
+/// want different things at one path, or the result passes the store's bounds. `index` is the
+/// add that failed, `from` and `to` its fields.
+pub fn assembly_refused(
+    diag: *Diag,
+    failure: *const assemble_mod.Failure,
+    index: u32,
+    from: []const u8,
+    to: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(failure.* != .io and failure.* != .damaged);
+    var from_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const from_shown = text_util.sanitise(&from_echo, from);
+    const to_shown = text_util.sanitise(&to_echo, to);
+    diag.raise(.E0807);
+    diag.while_("assembling the image of the build file", .{});
+    switch (failure.*) {
+        .conflict => |conflict| {
+            var path_echo: Echo = undefined;
+            const path = text_util.sanitise(&path_echo, conflict.path[0..conflict.path_len]);
+            diag.cause("the image already has a {s} at {s}; .image.add {s} -> {s} brings a {s}", .{
+                kind_word(conflict.present), path,           from_shown,
+                to_shown,                    kind_word(conflict.brought),
+            });
+            diag.context("path", "{s}", .{path});
+            diag.fix(.{ .sentence = "give the two adds different paths, or remove one of them " ++
+                "in .image.add of zbx.build.zon" });
+        },
+        .too_deep => {
+            diag.cause("the image would be deeper than {d} directories at .image.add {s} -> {s}", .{
+                constants.store_depth_max, from_shown, to_shown,
+            });
+            diag.fix(.{ .sentence = "shorten the destination in .image.add of zbx.build.zon" });
+        },
+        .too_large, .too_common => {
+            diag.cause("the image is too large to assemble at .image.add {s} -> {s}", .{
+                from_shown, to_shown,
+            });
+            diag.fix(.{ .sentence = "add fewer or smaller directories to .image.add" });
+        },
+        .io, .damaged => unreachable,
+    }
+    diag.context("add", "{d}", .{index + 1});
+    assert(diag.code.? == .E0807);
+}
+
+/// `E0807` for an `image.config` that does not fit its record once the base's settings are
+/// merged in: `field` is the one that is too large.
+pub fn config_too_large(diag: *Diag, field: result_mod.Refusal) void {
+    assert(diag.code == null);
+    assert(@tagName(field).len > 0);
+    diag.raise(.E0807);
+    diag.while_("resolving the config of the image", .{});
+    diag.cause("the image's {s} does not fit the image record once merged with the base's", .{
+        @tagName(field),
+    });
+    diag.context("field", "{s}", .{@tagName(field)});
+    diag.fix(.{ .sentence = "shorten .image.config in zbx.build.zon, or use a smaller base" });
+    assert(diag.code.? == .E0807);
 }
 
 /// How a step's container ended, when it did not exit 0.

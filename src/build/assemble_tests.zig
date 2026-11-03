@@ -9,6 +9,8 @@ const fs_sim = @import("../store/fs_sim.zig");
 const host_sim = @import("../host_sim.zig");
 const layout = @import("../store/layout.zig");
 const tree = @import("../store/tree.zig");
+const diagnose = @import("diagnose.zig");
+const Diag = @import("../diag/diag.zig").Diag;
 const trees = @import("../store/trees.zig");
 const object = @import("../store/object.zig");
 
@@ -141,8 +143,13 @@ test "a directory where the base has a file is a conflict" {
     const base = try directory(&.{.{ .name = "x", .content = "x" }}, true);
     const inner = try directory(&.{.{ .name = "y", .content = "y" }}, false);
     const out = try directory(&.{.{ .name = "x", .child = inner }}, true);
-    const result = assemble.assemble(context, base, &.{.{ .source = out, .to = "/" }});
+    const fine = try directory(&.{.{ .name = "q", .content = "q" }}, true);
+    const result = assemble.assemble(context, base, &.{
+        .{ .source = fine, .to = "/" },
+        .{ .source = out, .to = "/" },
+    });
     try testing.expectError(error.Failed, result);
+    try testing.expectEqual(1, ws.failed_add); // The second add is the one that clashes.
     try testing.expect(failure.conflict.present == .file);
     try testing.expect(failure.conflict.brought == .dir);
 }
@@ -163,4 +170,52 @@ test "a path deeper than the store allows is refused" {
     try testing.expect(failure == .too_deep);
     const ok = try assemble.assemble(context, null, &.{.{ .source = out, .to = path[0..2 * 60] }});
     try testing.expect(ok.bytes[0] != 0 or ok.bytes[1] != 0);
+}
+
+/// A root with `count` directories `d000`.., each holding the file `name`.
+fn many_dirs(count: usize, name: []const u8) !Digest {
+    var items: [constants.build_merge_common_max + 1]Item = undefined;
+    var names: [constants.build_merge_common_max + 1][4]u8 = undefined;
+    const child = try directory(&.{.{ .name = name, .content = name }}, false);
+    for (0..count) |at| {
+        _ = std.fmt.bufPrint(&names[at], "d{d:0>3}", .{at}) catch unreachable;
+        items[at] = .{ .name = &names[at], .child = child };
+    }
+    return directory(items[0..count], true);
+}
+
+test "directories in common are bounded: at the bound merges, past it is refused" {
+    // Goal: `build_merge_common_max`. Method: two roots with that many common differing
+    // directories merge; one more is `too_common`.
+    const context = start();
+    const limit = constants.build_merge_common_max;
+    const base = try many_dirs(limit, "a");
+    const add = try many_dirs(limit, "b");
+    const merged = try assemble.assemble(context, base, &.{.{ .source = add, .to = "/" }});
+    var text: [8]u8 = undefined;
+    try testing.expectEqualStrings("a b", try names_at(merged, &.{"d000"}, &text));
+    const past_base = try many_dirs(limit + 1, "a");
+    const past_add = try many_dirs(limit + 1, "b");
+    const past = assemble.assemble(context, past_base, &.{.{ .source = past_add, .to = "/" }});
+    try testing.expectError(error.Failed, past);
+    try testing.expect(failure == .too_common);
+}
+
+test "a conflict reads as one E0807 line naming the path, the add and the kinds" {
+    // Goal: the user-facing text. Method: raise the diagnostic for the /usr/bin/sh clash.
+    const context = start();
+    const base = try directory(&.{.{ .name = "sh", .content = "sh" }}, true);
+    const wrong = try directory(&.{.{ .name = "sh", .content = "other" }}, true);
+    const result = assemble.assemble(context, base, &.{.{ .source = wrong, .to = "/" }});
+    try testing.expectError(error.Failed, result);
+    var diag: Diag = undefined;
+    diag.reset();
+    diagnose.assembly_refused(&diag, &failure, ws.failed_add, "compile", "/");
+    try testing.expectEqual(.E0807, diag.code.?);
+    const cause = diag.last_cause().?;
+    try testing.expectEqualStrings("the image already has a file at /sh; .image.add compile -> / " ++
+        "brings a file", cause);
+    diag.reset();
+    diagnose.config_too_large(&diag, .labels);
+    try testing.expectEqual(.E0807, diag.code.?);
 }

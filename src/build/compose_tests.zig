@@ -67,7 +67,13 @@ fn start() void {
         .store = &store,
         .group = "g",
         .row_failed = null,
+        .json = false,
+        .started_ms = sim.interface().monotonic_ms(),
+        .name_width = 7,
+        .hits = 0,
+        .misses = 0,
     };
+    composed.timings = @splat(std.mem.zeroes(compose.Timing));
     key_mod.compute(&.{
         .platform = "linux/amd64",
         .base_tree = Digest.of("base"),
@@ -140,10 +146,25 @@ test "a clean exit with a whole answer is recorded and its row written" {
     try testing.expect(composed.outputs[0].eql(output));
     try testing.expect(!slot.active);
     try testing.expect(diag.code == null);
-    const format = "compile  built  {s}\n";
-    const want = try std.fmt.allocPrint(testing.allocator, format, .{output.text()});
-    defer testing.allocator.free(want);
-    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expectEqualStrings("  compile   miss   0.00 s\n", sim.stdout());
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    try testing.expect(composed.timings[0].output.eql(output));
+}
+
+test "with json the step ends as one zbx.build/1 line with its times and key" {
+    // Goal: the machine report. Method: the same settle in json mode; one line, whole fields.
+    start();
+    context.json = true;
+    composed.timings[0].start_ms = 0;
+    const output = made_output();
+    const answer = answer_of(output);
+    const slot = worker_ended(0, 7, &answer);
+    try testing.expect(settle(slot, .{ .exited = 0 }).ok);
+    const line = sim.stdout();
+    const head = "{\"schema\":\"zbx.build/1\",\"step\":\"compile\",\"cache\":\"miss\",\"key\":\"b3:";
+    try testing.expect(std.mem.startsWith(u8, line, head));
+    try testing.expect(std.mem.indexOf(u8, line, "\"start_ms\":0,\"end_ms\":0,\"network\":false}\n") != null);
+    try testing.expect(std.mem.indexOf(u8, line, &output.text()) != null);
 }
 
 test "garbage, a short answer, no answer and a signal each fail the step with E0419" {

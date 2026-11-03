@@ -53,6 +53,8 @@ pub const Workspace = struct {
     frames: [frames_max]Frame,
     path: [path_bytes]u8,
     names: [constants.store_depth_max + 1][]const u8,
+    /// The add that a failure is about: its index in `adds`. Set by `assemble`.
+    failed_add: u32,
 };
 
 pub const Conflict = struct {
@@ -87,8 +89,10 @@ pub const Context = struct {
 /// The image tree: `base` (or an empty tree) with `adds` laid over it in order.
 pub fn assemble(context: Context, base: ?Digest, adds: []const Add) Error!Digest {
     assert(adds.len <= constants.build_image_adds_max);
+    context.ws.failed_add = 0;
     var image = base orelse try write_empty(context);
-    for (adds) |add| {
+    for (adds, 0..) |add, at| {
+        context.ws.failed_add = @intCast(at);
         const leaf = try canonical(context, add.source);
         const top = try wrap(context, leaf, add.to);
         image = try merge(context, image, top);
