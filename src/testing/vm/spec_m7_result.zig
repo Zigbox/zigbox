@@ -70,7 +70,7 @@ const script_use =
     "echo result_inspect=$($Z inspect $D --output json 2>&1)\n" ++
     "$Z build > /tmp/r2.out 2> /tmp/r2.err\n" ++
     "echo again_status=$?\n" ++
-    "echo again_footer=$(grep '^built ' /tmp/r2.out)\n" ++
+    "echo \"again_footer=$(grep '^built ' /tmp/r2.out)\"\n" ++
     "rm -f $P/zbx.build.zon\n";
 
 comptime {

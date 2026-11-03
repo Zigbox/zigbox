@@ -1099,8 +1099,10 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     }
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     // An image named by a tag has a command of its own, so the words after `--` are optional;
-    // a rootfs and a tree digest have none.
-    const has_default = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
+    // a rootfs and a tree digest have none, unless the full digest names a build result, which
+    // the run finds out in the store.
+    const named = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
+    const has_default = named or (digest != null and digest_prefix.Digest.parse(digest.?) != null);
     if (run_args.command.len == 0 and !has_default) {
         return missing_argument(diag, .run, .command);
     }
@@ -2383,9 +2385,14 @@ fn run_container(
         } else if (operand.len > 0) {
             // A full digest may name a build result: its tree runs with its config.
             const ws = &storage.run_image;
-            _ = run_image.prepare_result(host, ws, operand, given.command, &prepared, diag) catch {
+            const command = given.command;
+            const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
+            if (!(found catch return error.StartFailed) and command.len == 0) {
+                // A tree that is not a build result has no command of its own.
+                const raised = missing_argument(diag, .run, .command);
+                assert(raised == error.MissingArgument);
                 return error.StartFailed;
-            };
+            }
         }
     }
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
@@ -3851,6 +3858,10 @@ test "parse: ps, stop, schema, -d and the times take what the brief says" {
     try testing.expect(try parse_case(&.{ "schema", "ps" }, &invocation) == null);
     try testing.expect(try parse_case(&.{ "inspect", "b3:a" }, &invocation) == null);
     try testing.expect(invocation.command == .inspect);
+    // A full digest may name a build result, which has a command of its own.
+    const full = "b3:abababababababababababababababababababababababababababababababab";
+    try testing.expect(try parse_case(&.{ "run", full }, &invocation) == null);
+    try testing.expect(invocation.command == .run);
     const detached_line = [_][]const u8{ "run", "-d", "--rootfs", "r", "--", "x" };
     try testing.expect(try parse_case(&detached_line, &invocation) == null);
     try testing.expect(invocation.run.detach);
