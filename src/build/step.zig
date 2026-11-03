@@ -16,7 +16,8 @@
 //!   path (`log_group`), so two projects' steps of one name keep apart (the last line is kept
 //!   for the diagnostic), and the run leaves nothing (`run.discard`). Then,
 //!   in the store's namespace again: after a zero exit `/out` is imported (owners 0:0, no
-//!   attributes, no root record: the cache entry roots it; a device, FIFO or socket is E0806),
+//!   attributes, a root labelled `build:<step>` until the parent writes the cache entry, which
+//!   then roots it (N8); a device, FIFO or socket is E0806),
 //!   and the work directory is removed. A non-zero end is E0805.
 
 const std = @import("std");
@@ -596,16 +597,27 @@ fn made_nothing(store: *const Store, diag: *Diag, err: fs_mod.Error) Error {
     return error.Failed;
 }
 
+/// The source of the root a step's import leaves until the cache entry holds the output.
+pub const output_root_prefix = "build:";
+
 fn import_output(store: *Store, job: *Job, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(job.action == .import);
     var refusal: Refusal = .{ .step = job.request.spec.name };
+    // The output is rooted until the parent has written the cache entry, which then holds it
+    // (N8): `compose.zig` removes a root whose source starts with `output_root_prefix`.
+    var label: [output_root_prefix.len + constants.build_step_name_bytes_max]u8 = undefined;
+    const labelled = std.fmt.bufPrint(&label, output_root_prefix ++ "{s}", .{
+        job.request.spec.name,
+    }) catch unreachable; // The buffer holds the prefix and the longest name.
     const options: import_mod.Options = .{
         .squash_owner = true,
         .warn = null,
         .drop_xattrs = true,
         .refuse_special = .{ .context = &refusal, .call = Refusal.call },
-        .save_root = false,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = labelled,
     };
     const ws = job.ws;
     const out = ws.paths.out_text();

@@ -1,7 +1,7 @@
 //! The M7 demo's build part (`BUILD7`; slice 2 of docs/briefs/M7-build.md): `zbx build` on a
 //! one-step build file, as the user `demo`, in the net project (`zn`), with `alpine:3.20`.
 //!
-//!   1. The first `zbx build` exits 0 and prints `compile  built  <digest>`.
+//!   1. The first `zbx build --output json` exits 0; its `compile` row is a `miss`.
 //!   2. The digest is the step's output tree: `/hello` is in it, owned 0:0 (read by running
 //!      the tree with the busybox the step copied into it), and no `build-*` run record and no
 //!      work directory is left.
@@ -61,14 +61,18 @@ const prelude =
     "P=/home/demo/net-project\n" ++
     "B=" ++ common.store_dir ++ "/build\n" ++
     "exec >> " ++ results_path ++ "\n" ++
-    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n";
+    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n" ++
+    "cmp() { grep '\"step\":\"compile\"' $1 | sed " ++
+    "'s/.*\"cache\":\"\\([a-z]*\\)\".*\"output\":\"\\([^\"]*\\)\".*/\\1 \\2/'; }\n";
 const script_miss =
     prelude ++
     build_file(quick_run) ++
-    "$Z build > /tmp/b1.out 2> /tmp/b1.err\n" ++
+    "$Z build --output json > /tmp/b1.out 2> /tmp/b1.err\n" ++
     "echo first_status=$?\n" ++
-    "echo \"first_row=$(grep '^compile ' /tmp/b1.out)\"\n" ++
-    "D=$(awk '$1 == \"compile\" { print $3 }' /tmp/b1.out)\n" ++
+    "R=$(cmp /tmp/b1.out)\n" ++
+    "echo first_row=compile:${R% *}\n" ++
+    "D=${R#* }\n" ++
+    "echo first_digest=$D\n" ++
     "echo work_first=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps1.txt 2>&1\n" ++
     "echo records_first=$(grep -c 'build-' /tmp/ps1.txt)\n" ++
@@ -81,9 +85,11 @@ const script_miss =
 const script_hit =
     prelude ++
     "L=$(ls $B/logs/*/compile.log)\n" ++
-    "$Z build > /tmp/b2.out 2> /tmp/b2.err\n" ++
+    "$Z build --output json > /tmp/b2.out 2> /tmp/b2.err\n" ++
     "echo second_status=$?\n" ++
-    "echo \"second_row=$(grep '^compile ' /tmp/b2.out)\"\n" ++
+    "R=$(cmp /tmp/b2.out)\n" ++
+    "echo second_row=compile:${R% *}\n" ++
+    "echo second_digest=${R#* }\n" ++
     "echo work_second=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps2.txt 2>&1\n" ++
     "echo records_second=$(grep -c 'build-' /tmp/ps2.txt)\n" ++
@@ -113,7 +119,7 @@ comptime {
 
 /// What the part's script printed, as `key=value` lines. Returns the text after `key=` on the
 /// line that starts with it, or null.
-fn value_of(output: []const u8, key: []const u8) ?[]const u8 {
+pub fn value_of(output: []const u8, key: []const u8) ?[]const u8 {
     std.debug.assert(key.len > 0);
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |raw| {
@@ -125,35 +131,29 @@ fn value_of(output: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-fn expect_value(output: []const u8, key: []const u8, want: []const u8) !void {
+pub fn expect_value(output: []const u8, key: []const u8, want: []const u8) !void {
     const found = value_of(output, key) orelse return error.KeyMissing;
     if (!std.mem.eql(u8, found, want)) return error.ValueWrong;
 }
 
-/// The digest of a row `compile  <word>  b3:<64 hex>`, if the row has that shape.
-fn row_digest(row: []const u8, word: []const u8) ?[]const u8 {
-    var parts = std.mem.splitSequence(u8, row, "  ");
-    const name = parts.next() orelse return null;
-    const what = parts.next() orelse return null;
-    const digest = parts.next() orelse return null;
-    if (parts.next() != null) return null;
-    if (!std.mem.eql(u8, name, "compile")) return null;
-    if (!std.mem.eql(u8, what, word)) return null;
-    if (digest.len != 67) return null;
-    if (!std.mem.startsWith(u8, digest, "b3:")) return null;
-    for (digest[3..]) |byte| if (!std.ascii.isHex(byte)) return null;
-    return digest;
+/// Whether `text` is `b3:` and 64 hex digits.
+pub fn is_digest(text: []const u8) bool {
+    if (text.len != 67) return false;
+    if (!std.mem.startsWith(u8, text, "b3:")) return false;
+    for (text[3..]) |byte| if (!std.ascii.isHex(byte)) return false;
+    return true;
 }
 
 /// The assertions of the part, over the script's output.
 pub fn check_build(output: []const u8) !void {
     try expect_value(output, "first_status", "0");
-    const built = row_digest(value_of(output, "first_row") orelse "", "built");
     try expect_value(output, "second_status", "0");
-    const hit = row_digest(value_of(output, "second_row") orelse "", "hit");
-    if (built == null) return error.RowWrong;
-    if (hit == null) return error.RowWrong;
-    if (!std.mem.eql(u8, built.?, hit.?)) return error.DigestChanged;
+    try expect_value(output, "first_row", "compile:miss");
+    try expect_value(output, "second_row", "compile:hit");
+    const built = value_of(output, "first_digest") orelse return error.KeyMissing;
+    const again = value_of(output, "second_digest") orelse return error.KeyMissing;
+    if (!is_digest(built)) return error.RowWrong;
+    if (!std.mem.eql(u8, built, again)) return error.DigestChanged;
     try expect_value(output, "tree_owner", "0:0");
     try expect_value(output, "tree_text", "hello");
     try check_clean(output);
@@ -208,10 +208,10 @@ pub fn step_build(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 
 const sample_digest = "b3:abababababababababababababababababababababababababababababababab";
 const good =
-    "first_status=0\nfirst_row=compile  built  " ++ sample_digest ++ "\n" ++
+    "first_status=0\nfirst_row=compile:miss\nfirst_digest=" ++ sample_digest ++ "\n" ++
     "work_first=0\nrecords_first=0\nps_lines_first=3\nlog_first=t 10\n" ++
     "tree_owner=0:0\ntree_text=hello\n" ++
-    "second_status=0\nsecond_row=compile  hit  " ++ sample_digest ++ "\n" ++
+    "second_status=0\nsecond_row=compile:hit\nsecond_digest=" ++ sample_digest ++ "\n" ++
     "work_second=0\nrecords_second=0\nps_lines_second=3\nlog_second=t 10\n" ++
     "work_killed=1\nthird_status=0\nwork_third=0\n";
 
@@ -231,6 +231,7 @@ test "check_build refuses each property that is broken" {
     // Goal: every assertion is needed; a transcript with one property broken is refused, with
     // the error that names it.
     const wrong = error.ValueWrong;
+    const changed = error.DigestChanged;
     const cases = [_]struct { text: []const u8, err: anyerror }{
         .{ .text = replaced("tree_owner=0:0", "tree_owner=1000:1000"), .err = wrong },
         .{ .text = replaced("work_first=0", "work_first=1"), .err = wrong },
@@ -239,8 +240,9 @@ test "check_build refuses each property that is broken" {
         .{ .text = replaced("log_second=t 10", "log_second=t 11"), .err = wrong },
         .{ .text = replaced("work_third=0", "work_third=2"), .err = wrong },
         .{ .text = replaced("work_killed=1", "work_killed=0"), .err = error.StepNeverStarted },
-        .{ .text = replaced("compile  hit", "compile  built"), .err = error.RowWrong },
-        .{ .text = replaced("hit  b3:ab", "hit  b3:cd"), .err = error.DigestChanged },
+        .{ .text = replaced("compile:hit", "compile:miss"), .err = wrong },
+        .{ .text = replaced("second_digest=b3:ab", "second_digest=b3:cd"), .err = changed },
+        .{ .text = replaced("first_digest=b3:", "first_digest=b4:"), .err = error.RowWrong },
     };
     for (cases) |case| try std.testing.expectError(case.err, check_build(case.text));
 }

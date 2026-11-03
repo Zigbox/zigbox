@@ -102,7 +102,6 @@ pub fn run(
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
-    if (json and !args.graph) return json_refused(diag);
     const given: []const u8 = args.file orelse "";
     load_mod.load(host, host.filesystem(), given, &workspace.loaded, diag) catch {
         return error.Failed;
@@ -110,27 +109,9 @@ pub fn run(
     if (args.graph) return print_graph(host, &workspace.loaded, json, diag);
     const composed = &workspace.composed;
     const loaded = &workspace.loaded;
-    compose.run_steps(host, facts, loaded, composed, diag) catch |err| {
+    compose.run_steps(host, facts, loaded, composed, json, diag) catch |err| {
         return if (err == error.OutputFailed) error.OutputFailed else error.Failed;
     };
-}
-
-/// `--output json` for a build that runs: the record of a build (`zbx schema build`) lands with
-/// the build result, and its step records are not frozen before it.
-fn json_refused(diag: *Diag) Error {
-    assert(diag.code == null);
-    diag.raise(.E0003);
-    diag.while_("reading the command line", .{});
-    diag.cause("--output json is not available for a build that runs yet; it comes with the " ++
-        "build record", .{});
-    diag.context("cmd", "build", .{});
-    diag.context("arg", "--output json", .{});
-    diag.fix(.{
-        .sentence = "print the graph as JSON, or build with text rows:",
-        .command = "zbx build --graph --output json",
-    });
-    assert(diag.code.? == .E0003);
-    return error.Failed;
 }
 
 fn print_graph(

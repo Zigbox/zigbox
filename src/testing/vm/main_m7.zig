@@ -15,6 +15,7 @@ const harness = @import("harness.zig");
 const image = @import("image.zig");
 const limits = @import("limits.zig");
 const session_mod = @import("session.zig");
+const result = @import("spec_m7_result.zig");
 const spec = @import("spec_m7.zig");
 
 const Session = session_mod.Session;
@@ -79,6 +80,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
 /// The parts, in order. A part is `fn (*Session, *Io.Writer, *H.Timer) !void`.
 const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     spec.step_build,
+    result.step_result,
 };
 
 fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !void {
@@ -89,4 +91,5 @@ fn steps(session: *Session, out: *Io.Writer, timer: *H.Timer, with_ca: bool) !vo
 test {
     // The file this demo is made of carries its own unit tests; a test root reaches them here.
     _ = @import("spec_m7.zig");
+    _ = @import("spec_m7_result.zig");
 }

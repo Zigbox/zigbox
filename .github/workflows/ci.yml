@@ -78,6 +78,7 @@ jobs:
           - run
           - record
           - logs
+          - result
           - exec
           - state
           - vm

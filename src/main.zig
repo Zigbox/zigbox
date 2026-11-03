@@ -182,6 +182,9 @@ test {
     _ = @import("lock_file.zig");
     _ = @import("image_user.zig");
     _ = @import("run_image.zig");
+    _ = @import("inspect_commands.zig");
+    _ = @import("inspect_tests.zig");
+    _ = @import("run_image_tests.zig");
     _ = @import("image_diagnose.zig");
     _ = @import("store/image_find.zig");
     _ = @import("testing/vm/checks_m4.zig");
@@ -258,6 +261,9 @@ test {
     _ = @import("build/cache_tests.zig");
     _ = @import("build/schedule_tests.zig");
     _ = @import("build/cache_bounds_tests.zig");
+    _ = @import("build/result_tests.zig");
+    _ = @import("build/assemble_tests.zig");
+    _ = @import("build/assemble.zig");
     _ = @import("build/input_tree.zig");
     _ = @import("build/input_tree_tests.zig");
     _ = @import("build/input_tree_bounds_tests.zig");

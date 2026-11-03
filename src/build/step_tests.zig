@@ -233,8 +233,11 @@ fn record_exists(fixture: *const Fixture) bool {
 /// descriptor, or a host change.
 fn expect_clean(fixture: *const Fixture, before: *const sim_run.Baseline) !void {
     try testing.expectEqual(@as(u32, 0), work_dirs());
-    // The step roots nothing: the cache entry does.
-    try testing.expectEqual(roots_at_start, support.count_files(&files, store_root ++ "/roots"));
+    // A step that imported roots its output as `build:<step>` until the parent writes the cache
+    // entry (N8); a step that failed roots nothing.
+    const rooted: u32 = if (diag.code == null) 1 else 0;
+    const roots_now = support.count_files(&files, store_root ++ "/roots");
+    try testing.expectEqual(roots_at_start + rooted, roots_now);
     try testing.expect(!record_exists(fixture));
     try testing.expectEqual(@as(?[]const u8, null), sim_run.leak(&sim, before));
     try testing.expectEqual(@as(u32, 0), files.open_count());
@@ -274,6 +277,11 @@ test "a step that exits 0 imports /out, keeps its log, and leaves nothing" {
     try testing.expectEqual(@as(?codes.Code, null), diag.code);
     try testing.expectEqual(@as(u64, 2), result.files);
     try expect_tree_in_store(result.output);
+    var root_path: [128]u8 = undefined;
+    const hex = result.output.hex();
+    const rooted_at = try std.fmt.bufPrint(&root_path, store_root ++ "/roots/{s}", .{&hex});
+    const record = files.content_of(rooted_at) orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, record, "build:fetch") != null);
     try testing.expectEqualStrings("compiling\ndone\n", files.content_of(log_path).?);
     try expect_clean(&fixture, &before);
 }
