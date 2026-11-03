@@ -555,16 +555,20 @@ pub const Context = struct {
             "ZBX_REGISTRY_MIRRORS",
             constants.registry_mirrors_bytes_max,
         );
+        const architecture = manifest.architecture_of_platform(entry.platform_text());
         const pulling: pull_lib.Request = .{
             .reference = by_digest,
-            .platform = .{ .architecture = manifest.architecture_of_platform(entry.platform_text()) },
+            .platform = .{ .architecture = architecture },
             .mirrors = mirrors orelse "",
         };
         var pulled: pull_lib.Result = undefined;
         const import_ws = &ws.step.import;
         const host = context.host;
-        pull_lib.pull(host, context.facts, &pulling, null, &ws.pull, import_ws, &pulled, context.diag) catch
+        const facts = context.facts;
+        const diag = context.diag;
+        pull_lib.pull(host, facts, &pulling, null, &ws.pull, import_ws, &pulled, diag) catch {
             return error.Failed;
+        };
         assert(pulled.manifest_digest.eql(entry.manifest));
     }
 
@@ -604,7 +608,8 @@ pub const Context = struct {
         try store_diagnose.hold(context.diag, store, .shared, "build", "recording a build step");
         defer lock.release(store);
         var failure: cache.Failure = undefined;
-        const kept = cache.record(store, &context.ws.cache, &context.ws.key, output, &failure) catch {
+        const ws = context.ws;
+        const kept = cache.record(store, &ws.cache, &ws.key, output, &failure) catch {
             return context.cache_failed(&failure);
         };
         context.unroot(output);
@@ -667,7 +672,8 @@ pub const Context = struct {
     fn report(context: *Context, index: u32, hit: bool, output: Digest) Error!void {
         const ws = context.ws;
         const file = &context.loaded.file;
-        assert(index < file.steps_count or index == image_slot);
+        assert(index <= image_slot);
+        if (index != image_slot) assert(index < file.steps_count);
         const timing = &ws.timings[index];
         timing.end_ms = context.elapsed();
         if (hit) timing.start_ms = timing.end_ms;
@@ -693,11 +699,11 @@ pub const Context = struct {
             }) catch unreachable; // `row_bytes` holds the longest record.
         } else {
             const took = timing.end_ms - timing.start_ms;
-            writer.print("  {s}", .{name}) catch unreachable;
-            writer.splatByteAll(' ', context.name_width - name.len) catch unreachable;
+            writer.print("  {s}", .{name}) catch unreachable; // Fits `row_bytes`.
+            writer.splatByteAll(' ', context.name_width - name.len) catch unreachable; // Fits.
             writer.print("{s}{s: <4}{s}{d}.{d:0>2} s\n", .{
                 name_gap, word, name_gap, took / 1000, took % 1000 / 10,
-            }) catch unreachable;
+            }) catch unreachable; // Fits.
         }
         return context.emit(writer.buffered());
     }
@@ -791,7 +797,9 @@ pub const Context = struct {
         return assemble.assemble(assembling, base, adds) catch {
             const store = context.store;
             switch (ws.assembly_failure) {
-                .io => |io| store_diagnose.write_failed(context.diag, store, io.step, io.err, io.errno),
+                .io => |io| {
+                    store_diagnose.write_failed(context.diag, store, io.step, io.err, io.errno);
+                },
                 .damaged => {
                     const operation = "reading an image tree";
                     store_diagnose.write_failed(context.diag, store, operation, error.IoFailed, 0);

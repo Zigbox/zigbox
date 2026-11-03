@@ -360,7 +360,11 @@ test "key: the image key changes with the base, each add, its order and the conf
         .{ .source = sample_digest(5), .to = "/usr/bin" },
         .{ .source = sample_digest(6), .to = "/etc" },
     };
-    var spec: ImageSpec = .{ .base_tree = sample_digest(1), .adds = &adds, .config = sample_digest(9) };
+    var spec: ImageSpec = .{
+        .base_tree = sample_digest(1),
+        .adds = &adds,
+        .config = sample_digest(9),
+    };
     const first = try image_key_of(&spec, 0);
     try testing.expect(first.eql(try image_key_of(&spec, 1)));
     try testing.expect(key_storage[0].len > magic.len);

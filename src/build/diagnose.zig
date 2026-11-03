@@ -651,7 +651,8 @@ pub fn assembly_refused(
     to: []const u8,
 ) void {
     assert(diag.code == null);
-    assert(failure.* != .io and failure.* != .damaged);
+    assert(failure.* != .io);
+    assert(failure.* != .damaged);
     var from_echo: Echo = undefined;
     var to_echo: Echo = undefined;
     const from_shown = text_util.sanitise(&from_echo, from);
@@ -663,7 +664,7 @@ pub fn assembly_refused(
             var path_echo: Echo = undefined;
             const path = text_util.sanitise(&path_echo, conflict.path[0..conflict.path_len]);
             diag.cause("the image already has a {s} at {s}; .image.add {s} -> {s} brings a {s}", .{
-                kind_word(conflict.present), path,           from_shown,
+                kind_word(conflict.present), path,                        from_shown,
                 to_shown,                    kind_word(conflict.brought),
             });
             diag.context("path", "{s}", .{path});

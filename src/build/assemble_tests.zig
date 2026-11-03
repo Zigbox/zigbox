@@ -105,7 +105,8 @@ test "an add merges into a directory the base has and makes the ones it lacks" {
     var text: [256]u8 = undefined;
     try testing.expectEqualStrings("VERSION usr", try names_at(image, &.{}, &text));
     try testing.expectEqualStrings("bin local", try names_at(image, &.{"usr"}, &text));
-    try testing.expectEqualStrings("hello", try names_at(image, &.{ "usr", "local", "bin" }, &text));
+    const deep = try names_at(image, &.{ "usr", "local", "bin" }, &text);
+    try testing.expectEqualStrings("hello", deep);
     try testing.expectEqualStrings("sh", try names_at(image, &.{ "usr", "bin" }, &text));
     const again = try assemble.assemble(context, base, &adds);
     try testing.expect(again.eql(image)); // A function of its inputs only.
@@ -168,7 +169,8 @@ test "a path deeper than the store allows is refused" {
     const deep = assemble.assemble(context, null, &.{.{ .source = out, .to = path[0..length] }});
     try testing.expectError(error.Failed, deep);
     try testing.expect(failure == .too_deep);
-    const ok = try assemble.assemble(context, null, &.{.{ .source = out, .to = path[0..2 * 60] }});
+    const shallow: assemble.Add = .{ .source = out, .to = path[0 .. 2 * 60] };
+    const ok = try assemble.assemble(context, null, &.{shallow});
     try testing.expect(ok.bytes[0] != 0 or ok.bytes[1] != 0);
 }
 
@@ -178,7 +180,7 @@ fn many_dirs(count: usize, name: []const u8) !Digest {
     var names: [constants.build_merge_common_max + 1][4]u8 = undefined;
     const child = try directory(&.{.{ .name = name, .content = name }}, false);
     for (0..count) |at| {
-        _ = std.fmt.bufPrint(&names[at], "d{d:0>3}", .{at}) catch unreachable;
+        _ = std.fmt.bufPrint(&names[at], "d{d:0>3}", .{at}) catch unreachable; // Four bytes.
         items[at] = .{ .name = &names[at], .child = child };
     }
     return directory(items[0..count], true);
@@ -213,8 +215,8 @@ test "a conflict reads as one E0807 line naming the path, the add and the kinds"
     diagnose.assembly_refused(&diag, &failure, ws.failed_add, "compile", "/");
     try testing.expectEqual(.E0807, diag.code.?);
     const cause = diag.last_cause().?;
-    try testing.expectEqualStrings("the image already has a file at /sh; .image.add compile -> / " ++
-        "brings a file", cause);
+    const expected = "the image already has a file at /sh; .image.add compile -> / brings a file";
+    try testing.expectEqualStrings(expected, cause);
     diag.reset();
     diagnose.config_too_large(&diag, .labels);
     try testing.expectEqual(.E0807, diag.code.?);

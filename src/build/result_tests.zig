@@ -94,7 +94,7 @@ test "labels are kept in key order and a key twice is refused" {
     var count: u32 = 2;
     while (count < constants.build_config_labels_max) : (count += 1) {
         var key: [8]u8 = undefined;
-        const name = std.fmt.bufPrint(&key, "k{d:0>3}", .{count}) catch unreachable;
+        const name = std.fmt.bufPrint(&key, "k{d:0>3}", .{count}) catch unreachable; // Four bytes.
         try testing.expect(record.config.add_label(name, "v") != null);
     }
     try testing.expect(record.config.add_label("zz", "v") == null);

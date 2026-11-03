@@ -161,9 +161,11 @@ test "with json the step ends as one zbx.build/1 line with its times and key" {
     const slot = worker_ended(0, 7, &answer);
     try testing.expect(settle(slot, .{ .exited = 0 }).ok);
     const line = sim.stdout();
-    const head = "{\"schema\":\"zbx.build/1\",\"step\":\"compile\",\"cache\":\"miss\",\"key\":\"b3:";
+    const head = "{\"schema\":\"zbx.build/1\",\"step\":\"compile\",\"cache\":\"miss\"," ++
+        "\"key\":\"b3:";
     try testing.expect(std.mem.startsWith(u8, line, head));
-    try testing.expect(std.mem.indexOf(u8, line, "\"start_ms\":0,\"end_ms\":0,\"network\":false}\n") != null);
+    const tail = "\"start_ms\":0,\"end_ms\":0,\"network\":false}\n";
+    try testing.expect(std.mem.indexOf(u8, line, tail) != null);
     try testing.expect(std.mem.indexOf(u8, line, &output.text()) != null);
 }
 
