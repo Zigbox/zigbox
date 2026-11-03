@@ -177,6 +177,7 @@ pub const SimFs = struct {
         .get_xattr = get_xattr,
         .open_read = open_read,
         .read = read,
+        .read_at = read_at,
         .create = create,
         .open_append = open_append,
         .write = write,
@@ -860,6 +861,22 @@ pub const SimFs = struct {
         }
         @memcpy(buffer[0..length], sim.pool[node.data_at + slot.offset ..][0..length]);
         slot.offset += length;
+        return length;
+    }
+
+    fn read_at(context: *anyopaque, fd: Fd, offset: u64, buffer: []u8) Error!u32 {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const slot = sim.slot_of(fd);
+        const node = &sim.nodes[slot.node];
+        if (sim.roll(sim.faults.read_error_per_mille)) return sim.fail(errno_io);
+        const start: u64 = @min(offset, node.data_len);
+        const left = node.data_len - start;
+        var length: u32 = @intCast(@min(left, buffer.len));
+        if (length > 1 and sim.roll(sim.faults.short_read_per_mille)) {
+            length = sim.prng.random().intRangeAtMost(u32, 1, length - 1);
+        }
+        @memcpy(buffer[0..length], sim.pool[node.data_at + start ..][0..length]);
         return length;
     }
 

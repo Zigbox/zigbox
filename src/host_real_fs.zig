@@ -30,6 +30,7 @@ const vtable: fs.VTable = .{
     .get_xattr = get_xattr,
     .open_read = open_read,
     .read = read,
+    .read_at = read_at,
     .create = create,
     .open_append = open_append,
     .write = write,
@@ -294,6 +295,16 @@ fn read(context: *anyopaque, fd: fs.Fd, buffer: []u8) host.Error!u32 {
     assert(self.open_count > 0);
     assert(buffer.len > 0);
     const result = linux.read(@intCast(fd), buffer.ptr, buffer.len);
+    try check(result);
+    assert(result <= buffer.len);
+    return @intCast(result);
+}
+
+fn read_at(context: *anyopaque, fd: fs.Fd, offset: u64, buffer: []u8) host.Error!u32 {
+    const self = from_context(context);
+    assert(self.open_count > 0);
+    assert(buffer.len > 0);
+    const result = linux.pread(@intCast(fd), buffer.ptr, buffer.len, @intCast(offset));
     try check(result);
     assert(result <= buffer.len);
     return @intCast(result);

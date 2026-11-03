@@ -98,6 +98,9 @@ pub const VTable = struct {
     /// swapped for a link after `lstat` is not followed.
     open_read: *const fn (context: *anyopaque, path: [:0]const u8) Error!Fd,
     read: *const fn (context: *anyopaque, fd: Fd, buffer: []u8) Error!u32,
+    /// Reads from byte `offset` of the file without moving the descriptor's own position
+    /// (`pread`); zero is the end of the file.
+    read_at: *const fn (context: *anyopaque, fd: Fd, offset: u64, buffer: []u8) Error!u32,
     /// Creates a new file for writing with the given permission bits (before any umask the
     /// process has: the real host clears it). Fails if the path exists.
     create: *const fn (context: *anyopaque, path: [:0]const u8, mode: u16) Error!Fd,
@@ -282,6 +285,48 @@ pub const Fs = struct {
             return count;
         }
         return error.IoFailed;
+    }
+
+    /// Reads up to `buffer.len` bytes from byte `offset`; zero is the end of the file.
+    pub fn read_at(fs: Fs, fd: Fd, offset: u64, buffer: []u8) Error!u32 {
+        assert(buffer.len > 0);
+        assert(buffer.len <= constants.store_io_buffer_bytes);
+        assert(offset <= constants.store_file_bytes_max);
+        for (0..constants.store_io_retries_max + 1) |_| {
+            const count = fs.vtable.read_at(
+                fs.context,
+                fd,
+                offset,
+                buffer,
+            ) catch |err| switch (err) {
+                error.Interrupted => continue,
+                else => return err,
+            };
+            assert(count <= buffer.len);
+            return count;
+        }
+        return error.IoFailed;
+    }
+
+    /// Reads from byte `offset` until `buffer` is full or the file ends; returns the bytes read.
+    pub fn read_full_at(fs: Fs, fd: Fd, offset: u64, buffer: []u8) Error!usize {
+        assert(buffer.len > 0);
+        assert(offset + buffer.len <= constants.store_file_bytes_max);
+        var filled: usize = 0;
+        var calls: usize = 0;
+        while (filled < buffer.len) {
+            // A read that returns bytes makes progress; the bound covers one-byte reads.
+            calls += 1;
+            if (calls > buffer.len + constants.store_io_retries_max) return error.Stalled;
+            const room = buffer[filled..];
+            const at = offset + filled;
+            const piece = room[0..@min(room.len, constants.store_io_buffer_bytes)];
+            const count = try fs.read_at(fd, at, piece);
+            if (count == 0) break;
+            filled += count;
+        }
+        assert(filled <= buffer.len);
+        return filled;
     }
 
     /// Opens the existing file at `path` to append to it.
