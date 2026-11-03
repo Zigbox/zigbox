@@ -590,6 +590,32 @@ test "a sweep clears what a killed step left, and a live step's lock stops it" {
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
 
+test "a sweep of a store that does not exist yet is not an error" {
+    // Goal: a clean machine's first `zbx build` has no store directory, so no lock file; the
+    // sweep finds nothing and says nothing (the VM demo's second machine was refused with E0417).
+    // Method: the sweep on a simulated host whose store filesystem is empty.
+    sim_run.init(&sim, 41);
+    files.init(41);
+    sim.store_fs = &files;
+    const fixture: Fixture = .{
+        .base = Digest.of("base"),
+        .input = Digest.of("input"),
+        .name = undefined,
+        .name_len = 0,
+    };
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    diag.reset();
+    try step.sweep(&request, &workspace, &diag);
+    try testing.expect(diag.code == null);
+}
+
 test "with stream on, each step's output is on stderr behind its name, and stdout is untouched" {
     // Goal: `--verbose` for two steps, through `run_step` and the run's log sink. Method: two
     // steps (each its own simulated host, as the model resets between them) write lines on both

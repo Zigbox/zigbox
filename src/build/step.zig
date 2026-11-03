@@ -663,7 +663,8 @@ fn cleanup(request: *const Request, ws: *Workspace) void {
 /// Clears `build/work`, which a crashed or killed step leaves its directory in, with the log
 /// temporary inside it. Call it before a build starts steps. It takes the store lock
 /// exclusively, so no step is in flight; if the lock is busy a build is running, and its
-/// directories are not leftovers, so nothing is done and nothing is said.
+/// directories are not leftovers, so nothing is done and nothing is said. A store that does not
+/// exist yet (a clean machine's first build) has nothing to sweep, and is not an error.
 pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     assert(diag.code == null);
     var store: Store = undefined;
@@ -673,6 +674,8 @@ pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     }
     lock.hold(&store, .exclusive, "build sweep") catch |err| {
         if (err == error.Busy) return;
+        // A machine that has never written the store has no lock file and no leftovers.
+        if (store.lock_error == error.NotFound) return;
         const operation = "taking the store lock";
         store_diagnose.write_failed(diag, &store, operation, store.lock_error, store.lock_errno);
         return error.Failed;
