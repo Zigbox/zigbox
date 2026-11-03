@@ -2019,8 +2019,6 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .build => build_commands.run(
             host,
             &storage.build,
-            &storage.pull.library,
-            &storage.store.import,
             invocation.build,
             invocation.options.output == .json,
             &storage.handle.facts,

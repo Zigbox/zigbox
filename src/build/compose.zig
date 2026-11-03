@@ -32,8 +32,6 @@ const input_tree = @import("input_tree.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
 const schedule = @import("schedule.zig");
-const pull_lib = @import("../pull.zig");
-const import_mod = @import("../store/import.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -62,7 +60,11 @@ pub const Workspace = struct {
     side_diag: Diag,
 };
 
-const row_bytes = constants.build_step_name_bytes_max + 400;
+/// A row is `<name>  <word>  <digest>\n`; the word is `hit` or `built`.
+const row_separator = "  ";
+const row_word_bytes_max = "built".len;
+const row_bytes = constants.build_step_name_bytes_max + row_separator.len + row_word_bytes_max +
+    row_separator.len + constants.store_digest_text_bytes + "\n".len;
 
 /// Builds every step of the loaded build file with the scheduler (`schedule.zig`): hits are
 /// found here, in this process; a miss runs in a worker process (`worker_entry`) that this process
@@ -72,8 +74,6 @@ pub fn run_steps(
     facts: *doctor.Facts,
     loaded: *const load_mod.Workspace,
     ws: *Workspace,
-    pull_ws: *pull_lib.Workspace,
-    import_ws: *import_mod.Workspace,
     diag: *Diag,
 ) Error!void {
     assert(diag.code == null);
@@ -98,8 +98,6 @@ pub fn run_steps(
         .diag = diag,
         .store = &store,
         .group = group,
-        .pull = pull_ws,
-        .import = import_ws,
         .row_failed = null,
     };
     for (&ws.slots) |*slot| slot.active = false;
@@ -112,14 +110,7 @@ pub fn run_steps(
         .abort = Context.abort_step,
     };
     const outcome = schedule.run(&ws.plan, parallel_bound(host), executor);
-    if (outcome.failed != null or outcome.aborted) {
-        if (diag.code == null) {
-            diag.raise(.B0001);
-            diag.cause("a build step failed with no diagnostic", .{});
-        }
-        return error.Failed;
-    }
-    if (context.row_failed) |err| return err;
+    return context.finish(outcome);
 }
 
 /// How many steps may run at once: the constant (a cut: the CPUs online are not counted).
@@ -157,8 +148,8 @@ const Job = struct {
     host: Host,
 };
 
-/// The worker: runs the step as a container and answers on the pipe, the output's digest and its
-/// file count, or the encoded diagnostic. The exit code is 0 only with an answer.
+/// The worker: runs the step as a container and answers on the pipe, the output's digest or the
+/// encoded diagnostic, each behind a tag byte. The exit code is 0 only with an answer.
 fn worker_entry(raw: *anyopaque) u8 {
     const job: *Job = @ptrCast(@alignCast(raw));
     // A killed build takes its workers with it, as it took its one step before.
@@ -167,34 +158,43 @@ fn worker_entry(raw: *anyopaque) u8 {
     diag.reset();
     var result: step_mod.Result = undefined;
     step_mod.run_step(job.request, job.ws, &result, &diag) catch {
-        var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
-        const encoded = diag.encode(&bytes);
-        job.host.write_handle_all(job.write, encoded) catch {};
+        var bytes: [failure_bytes_max]u8 = undefined;
+        bytes[0] = tag_failure;
+        const encoded = diag.encode(bytes[1..][0..constants.diag_carry_bytes_max]);
+        job.host.write_handle_all(job.write, bytes[0 .. 1 + encoded.len]) catch {};
         return diag.exit_code();
     };
     var answer: [answer_bytes]u8 = undefined;
-    @memcpy(answer[0..constants.store_digest_bytes], &result.output.bytes);
-    std.mem.writeInt(u64, answer[constants.store_digest_bytes..][0..8], result.files, .little);
+    answer[0] = tag_output;
+    @memcpy(answer[1..], &result.output.bytes);
     job.host.write_handle_all(job.write, &answer) catch return 1;
     return 0;
 }
 
-/// The answer on the pipe: the output's digest, then its file count.
-pub const answer_bytes = constants.store_digest_bytes + 8;
+/// The first byte of what a worker writes: an output's digest follows, or an encoded diagnostic.
+/// A tag, not a length, tells them apart, so no diagnostic can pass for an output or the reverse.
+pub const tag_output: u8 = 1;
+pub const tag_failure: u8 = 2;
+
+/// The answer on the pipe: the tag, then the output's digest.
+pub const answer_bytes = 1 + constants.store_digest_bytes;
+
+/// The most a worker writes: the tag and a diagnostic.
+pub const failure_bytes_max = 1 + constants.diag_carry_bytes_max;
 
 pub const Answer = union(enum) { output: Digest, failed };
 
-/// What a worker's end and the bytes it wrote mean. Only a clean exit with exactly an answer is
-/// an output; otherwise the bytes are the worker's diagnostic if they decode as one, else the
-/// worker is blamed (a signal, or an exit with no answer). `diag` is set on `.failed`.
+/// What a worker's end and the bytes it wrote mean. Only a clean exit with exactly a tagged
+/// answer is an output; a tagged diagnostic that decodes is the worker's; anything else blames
+/// the worker (a signal, or an exit with no answer). `diag` is set on `.failed`.
 pub fn decode_answer(status: host_mod.ExitStatus, bytes: []const u8, diag: *Diag) Answer {
     const clean = status == .exited and status.exited == 0;
-    if (clean and bytes.len == answer_bytes) {
+    if (clean and bytes.len == answer_bytes and bytes[0] == tag_output) {
         var output: Digest = undefined;
-        @memcpy(&output.bytes, bytes[0..constants.store_digest_bytes]);
+        @memcpy(&output.bytes, bytes[1..]);
         return .{ .output = output };
     }
-    if (bytes.len > 0 and diag.decode(bytes)) return .failed;
+    if (bytes.len > 1 and bytes[0] == tag_failure and diag.decode(bytes[1..])) return .failed;
     diag.reset();
     const fault: store_diagnose.WorkerFault = switch (status) {
         .signaled => |number| .{ .signaled = number },
@@ -213,8 +213,6 @@ pub const Context = struct {
     diag: *Diag,
     store: *Store,
     group: []const u8,
-    pull: *pull_lib.Workspace,
-    import: *import_mod.Workspace,
     row_failed: ?Error,
 
     fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
@@ -235,6 +233,21 @@ pub const Context = struct {
     fn wait_step(raw: *anyopaque) schedule.Error!schedule.Ended {
         const context: *Context = @ptrCast(@alignCast(raw));
         return context.wait() catch error.Failed;
+    }
+
+    /// The build's answer once the scheduler is done. A row that could not be written fails its
+    /// step; only the returned error value is then the output's (`OutputFailed`), not the
+    /// step's. What the user reads is `diag`, which keeps the first failure (a later row failure
+    /// goes to `side_diag`). A failed `hit` row never sets `row_failed`: `begin_step` turns its
+    /// error into `Failed`, so the ordering covers `built` rows only.
+    pub fn finish(context: *Context, outcome: schedule.Outcome) Error!void {
+        if (context.row_failed) |err| return err;
+        if (outcome.failed == null and !outcome.aborted) return;
+        if (context.diag.code == null) {
+            context.diag.raise(.B0001);
+            context.diag.cause("a build step failed with no diagnostic", .{});
+        }
+        return error.Failed;
     }
 
     /// Clears what a killed build left in `build/work`, before this one starts steps.
@@ -289,7 +302,7 @@ pub const Context = struct {
         return .running;
     }
 
-    fn fork_worker(
+    pub fn fork_worker(
         context: *Context,
         index: u8,
         spec: *const key_mod.Spec,
@@ -384,7 +397,7 @@ pub const Context = struct {
         assert(slot.active);
         slot.active = false;
         defer host.close(slot.report.read);
-        var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
+        var bytes: [failure_bytes_max]u8 = undefined;
         var length: usize = 0;
         while (length < bytes.len) {
             const got = host.read_some(slot.report.read, bytes[length..]) catch break;
@@ -506,7 +519,9 @@ pub const Context = struct {
     ) Error!void {
         const name = context.loaded.file.text(context.loaded.file.steps[index].name);
         const text = output.text();
-        const format = "{s}  {s}  {s}\n";
+        assert(what.len <= row_word_bytes_max);
+        assert(name.len <= constants.build_step_name_bytes_max);
+        const format = "{s}" ++ row_separator ++ "{s}" ++ row_separator ++ "{s}\n";
         const line = std.fmt.bufPrint(&context.ws.row, format, .{ name, what, &text }) catch
             unreachable; // `row_bytes` holds a name, a word and a digest.
         context.host.write_all(.stdout, line) catch |err| {
@@ -538,5 +553,6 @@ fn fill_needs(loaded: *const load_mod.Workspace, index: u8, ws: *Workspace) []co
 }
 
 comptime {
-    assert(row_bytes > constants.store_digest_text_bytes);
+    assert(row_bytes > constants.build_step_name_bytes_max + constants.store_digest_text_bytes);
+    assert(answer_bytes == 1 + constants.store_digest_bytes);
 }
