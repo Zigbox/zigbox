@@ -1,7 +1,7 @@
 //! The M7 demo's build part (`BUILD7`; slice 2 of docs/briefs/M7-build.md): `zbx build` on a
 //! one-step build file, as the user `demo`, in the net project (`zn`), with `alpine:3.20`.
 //!
-//!   1. The first `zbx build` exits 0 and prints `compile  built  <digest>`.
+//!   1. The first `zbx build --output json` exits 0; its `compile` row is a `miss`.
 //!   2. The digest is the step's output tree: `/hello` is in it, owned 0:0 (read by running
 //!      the tree with the busybox the step copied into it), and no `build-*` run record and no
 //!      work directory is left.
@@ -61,14 +61,17 @@ const prelude =
     "P=/home/demo/net-project\n" ++
     "B=" ++ common.store_dir ++ "/build\n" ++
     "exec >> " ++ results_path ++ "\n" ++
-    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n";
+    "ndir() { ls -A \"$1\" 2>/dev/null | wc -l; }\n" ++
+    "cmp() { grep '\"step\":\"compile\"' $1 | sed " ++
+    "'s/.*\"cache\":\"\\([a-z]*\\)\".*\"output\":\"\\([^\"]*\\)\".*/\\1 \\2/'; }\n";
 const script_miss =
     prelude ++
     build_file(quick_run) ++
-    "$Z build > /tmp/b1.out 2> /tmp/b1.err\n" ++
+    "$Z build --output json > /tmp/b1.out 2> /tmp/b1.err\n" ++
     "echo first_status=$?\n" ++
-    "echo first_row=$(awk '$1 == \"compile\" { print $1 \":\" $2 }' /tmp/b1.out)\n" ++
-    "D=$(awk '$1 == \"built\" { print $2 }' /tmp/b1.out)\n" ++
+    "R=$(cmp /tmp/b1.out)\n" ++
+    "echo first_row=compile:${R% *}\n" ++
+    "D=${R#* }\n" ++
     "echo first_digest=$D\n" ++
     "echo work_first=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps1.txt 2>&1\n" ++
@@ -82,10 +85,11 @@ const script_miss =
 const script_hit =
     prelude ++
     "L=$(ls $B/logs/*/compile.log)\n" ++
-    "$Z build > /tmp/b2.out 2> /tmp/b2.err\n" ++
+    "$Z build --output json > /tmp/b2.out 2> /tmp/b2.err\n" ++
     "echo second_status=$?\n" ++
-    "echo second_row=$(awk '$1 == \"compile\" { print $1 \":\" $2 }' /tmp/b2.out)\n" ++
-    "echo second_digest=$(awk '$1 == \"built\" { print $2 }' /tmp/b2.out)\n" ++
+    "R=$(cmp /tmp/b2.out)\n" ++
+    "echo second_row=compile:${R% *}\n" ++
+    "echo second_digest=${R#* }\n" ++
     "echo work_second=$(ndir $B/work)\n" ++
     "$Z ps --all > /tmp/ps2.txt 2>&1\n" ++
     "echo records_second=$(grep -c 'build-' /tmp/ps2.txt)\n" ++
