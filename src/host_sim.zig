@@ -279,6 +279,9 @@ pub const HostSim = struct {
     gid_value: u32,
     environment_variables: []const EnvironmentVariable,
     step_fault_fired: bool,
+    /// What the next `wait_any` reaps; null: the simulator has no children and it fails with
+    /// an I/O error. Taken by the call that uses it. A test scripts a worker's end with it.
+    reaped_next: ?host.Reaped,
     /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
     /// uses it; null for a host with none.
     store_fs: ?*fs_sim.SimFs,
@@ -316,6 +319,7 @@ pub const HostSim = struct {
         sim.gid_value = 1000;
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
+        sim.reaped_next = null;
         sim.store_fs = null;
         sim.log_fs = null;
         sim.wire = null;
@@ -410,6 +414,7 @@ pub const HostSim = struct {
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
+        .wait_any = wait_any,
         .exit_now = exit_now,
         .signal_state = signal_state,
         .time_now = time_now,
@@ -1118,6 +1123,22 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.world.fork_errno) |errno| return sim.model_error(errno);
         return sim.world.fork_role;
+    }
+
+    /// The simulator has no children to wait for: the scheduler's tests drive its executor, and
+    /// a test of the real one scripts the end of a worker in `reaped_next`.
+    fn wait_any(
+        context: *anyopaque,
+        pids: []const host.Pid,
+        timeout_ms: u32,
+    ) host.Error!?host.Reaped {
+        const sim = from_context(context);
+        _ = timeout_ms;
+        try sim.begin_call();
+        const reaped = sim.reaped_next orelse return sim.model_error(constants.errno_io);
+        assert(reaped.index < pids.len);
+        sim.reaped_next = null;
+        return reaped;
     }
 
     fn exit_now(context: *anyopaque, code: u8) void {

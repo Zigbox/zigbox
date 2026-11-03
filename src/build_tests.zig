@@ -117,6 +117,17 @@ test "build -f must name a file inside the project, and build alone says what it
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0005") != null);
 }
 
+test "build --output json is refused before anything runs, and --graph still takes it" {
+    // Goal: `zbx.build/1` is not frozen before the build record: a build that runs refuses
+    // JSON in one E0003 line. Method: the CLI on the sim; nothing on stdout.
+    world(4);
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--output", "json" }));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0003") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--output json") != null);
+    try testing.expectEqual(@as(u8, 0), run(&.{ "zbx", "build", "--graph", "--output", "json" }));
+}
+
 fn expect_stderr(needle: []const u8) !void {
     if (std.mem.indexOf(u8, sim.stderr(), needle) == null) {
         return error.TestUnexpectedResult;

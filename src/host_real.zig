@@ -144,6 +144,7 @@ pub const HostReal = struct {
         .sleep_ms = sleep_ms,
         .monotonic_ms = monotonic_ms,
         .fork_supervisor = fork_supervisor,
+        .wait_any = wait_any,
         .exit_now = exit_process,
         .signal_state = signal_state,
         .time_now = time_now,
@@ -988,6 +989,46 @@ pub const HostReal = struct {
         for ([_]i32{ 0, 1, 2 }) |target| try check(linux.dup2(null_fd, target));
         if (null_fd > 2) _ = linux.close(null_fd);
         return .supervisor;
+    }
+
+    /// One pidfd per child and one `ppoll`: the first that ends is reaped and returned.
+    fn wait_any(
+        context: *anyopaque,
+        pids: []const host.Pid,
+        timeout_ms: u32,
+    ) host.Error!?host.Reaped {
+        _ = from_context(context);
+        assert(pids.len > 0);
+        assert(pids.len <= 32);
+        var polls: [32]linux.pollfd = undefined;
+        var opened: usize = 0;
+        defer for (polls[0..opened]) |entry| {
+            _ = linux.close(entry.fd);
+        };
+        for (pids) |pid| {
+            assert(pid > 0);
+            const made = linux.pidfd_open(@intCast(pid), 0);
+            try check(made);
+            polls[opened] = .{ .fd = @intCast(made), .events = linux.POLL.IN, .revents = 0 };
+            opened += 1;
+        }
+        var limit: linux.timespec = undefined;
+        var limit_ptr: ?*linux.timespec = null;
+        if (timeout_ms > 0) {
+            limit = timespec_of(timeout_ms);
+            limit_ptr = &limit;
+        }
+        const waited = linux.ppoll(&polls, @intCast(opened), limit_ptr, null);
+        try check(waited);
+        if (waited == 0) return null;
+        for (polls[0..opened], 0..) |entry, index| {
+            if (entry.revents == 0) continue;
+            var status: i32 = 0;
+            const result = linux.wait4(@intCast(pids[index]), &status, 0, null);
+            try check(result);
+            return .{ .index = @intCast(index), .status = try decode_status(status) };
+        }
+        return error.IoFailed;
     }
 
     fn exit_process(context: *anyopaque, code: u8) void {
