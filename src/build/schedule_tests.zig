@@ -356,8 +356,10 @@ fn result_digest(fake: *const Fake) u64 {
     return hasher.final();
 }
 
-test "worker crashes: a build run again after them has the digest of a clean build" {
-    // Goal: the result digest is a function of the inputs only, whatever crashed on the way.
+test "worker crashes: the scheduler stops cleanly and a rebuild finishes the same plan" {
+    // Goal: the scheduler's guarantees hold when workers die, and a rerun reaches the same
+    // result. The fake executor stands in for the store, so this proves scheduler recovery only;
+    // compose_tests crashes the real step at every write point and checks the output digest.
     // Method: 3000 seeds; a clean build gives the digest; a build where some workers die
     // without an answer fails with the guarantees held (nothing new starts, none outlives it);
     // a rebuild treats what the crashed build finished as hits and must give the same digest.

@@ -81,6 +81,7 @@ pub const import = @import("import.zig");
 pub const diff = @import("diff.zig");
 pub const usage = @import("usage.zig");
 pub const walk = @import("walk.zig");
+pub const materialize = @import("materialize.zig");
 pub const namespace = @import("namespace.zig");
 pub const diagnose = @import("diagnose.zig");
 

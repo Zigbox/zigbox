@@ -940,6 +940,9 @@ fn signal_name(number: u8) []const u8 {
     return name;
 }
 
+/// The start of W0801's last cause; the names follow it, so they have the field less this.
+pub const network_label = "steps that use the network: ";
+
 /// `W0801`: the build has steps with `network = true`. `names` is their names in the build's
 /// order, joined by `, ` and cut to fit (`network_names`); `count` is how many there are.
 pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
@@ -950,7 +953,7 @@ pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
     diag.while_("planning the build", .{});
     // The newest cause is what the default view shows, so it is the one that names the steps.
     diag.cause("their output depends on what the network returns, not only on the inputs", .{});
-    diag.cause("steps that use the network: {s}", .{names});
+    diag.cause(network_label ++ "{s}", .{names});
     diag.context("steps", "{d}", .{count});
     diag.fix(.{
         .sentence = "pin what they fetch, or fetch it once outside the build as an input",
@@ -973,10 +976,10 @@ pub fn network_names(out: []u8, names: []const []const u8) []const u8 {
             if (at == 0) {
                 // Not even the first name fits: cut the name itself.
                 const dots = "...";
-                const kept = out.len - dots.len;
+                const kept = @min(out.len - dots.len, name.len);
                 @memcpy(out[0..kept], name[0..kept]);
                 @memcpy(out[kept..][0..dots.len], dots);
-                return out[0..out.len];
+                return out[0 .. kept + dots.len];
             }
             if (length + more.len > out.len) length = out.len - more.len;
             @memcpy(out[length..][0..more.len], more);
@@ -1049,4 +1052,11 @@ test "network_names joins the names and cuts what does not fit with an ellipsis"
     const long = network_names(&out, &.{&@as([25]u8, @splat('x'))});
     try std.testing.expectEqualStrings("xxxxxxxxxxxxxxxxx...", long);
     try std.testing.expect(long.len <= out.len);
+    // The boundary: the first name fits alone but not with the `, ...` that a later name needs,
+    // and is shorter than the room for a cut name. It is kept whole, then the dots.
+    var small: [8]u8 = @splat('#');
+    const short_first = network_names(&small, &.{ "abcd", "e" });
+    try std.testing.expectEqualStrings("abcd...", short_first);
+    const same = network_names(&small, &.{ "abcde", "f" }); // kept == out.len - 3 == 5.
+    try std.testing.expectEqualStrings("abcde...", same);
 }

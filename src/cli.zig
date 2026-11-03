@@ -192,8 +192,10 @@ const help_text =
     \\  prints the steps in the order a build starts them, then the image, without running
     \\  anything (--output json: nodes and edges, see zbx schema build-graph)
     \\  zbx build [-f <file>]
-    \\  builds the steps, then the image: one row per step (hit or miss, and its time) and the
-    \\  result digest; --output json: one zbx.build/1 line per step (see zbx schema build).
+    \\  builds the steps, then the image: one row per step (hit or miss, its time, and net for a
+    \\  step with network = true) and the result digest; --output json: one zbx.build/1 line per
+    \\  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
+    \\  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
     \\  prints its tree and config (--output json: see zbx schema inspect)
     \\

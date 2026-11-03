@@ -157,12 +157,17 @@ fn spec_for(fixture: *const Fixture) key_mod.Spec {
 }
 
 fn run_it(spec: *const key_mod.Spec) step.Error!void {
+    return run_streaming(spec, false);
+}
+
+fn run_streaming(spec: *const key_mod.Spec, stream: bool) step.Error!void {
     const request: step.Request = .{
         .host = sim.interface(),
         .facts = &facts,
         .spec = spec,
         .file = "zbx.build.zon",
         .group = group,
+        .stream = stream,
     };
     diag.reset();
     return step.run_step(&request, &workspace, &result, &diag);
@@ -583,4 +588,66 @@ test "a sweep clears what a killed step left, and a live step's lock stops it" {
     try step.sweep(&request, &workspace, &diag);
     try testing.expectEqual(@as(u32, 0), work_dirs());
     try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "with stream on, each step's output is on stderr behind its name, and stdout is untouched" {
+    // Goal: `--verbose` for two steps, through `run_step` and the run's log sink. Method: two
+    // steps (each its own simulated host, as the model resets between them) write lines on both
+    // streams, cut in the middle of a line, the last without a newline. Stderr must hold whole
+    // lines each behind `<step> | `, the unfinished one closed with a newline, stdout nothing,
+    // and the log the exact bytes. Removing the `stream_lines` call or `.stream` fails it.
+    const names = [_][]const u8{ "fetch", "pack" };
+    for (names, 0..) |name, index| {
+        const fixture = try setup(30 + index, name);
+        const chunks = [_]sim_world.OutChunk{
+            .{ .stream = .stdout, .bytes = "compil" },
+            .{ .stream = .stdout, .bytes = "ing\nsecond\n" },
+            .{ .stream = .stderr, .bytes = "warn: x\n" },
+            .{ .stream = .stdout, .bytes = "no newline" },
+        };
+        set_output(&chunks);
+        var spec = spec_for(&fixture);
+        spec.name = name;
+        sim.world.command_exit = .{ .exited = 1 };
+        try testing.expectError(error.Failed, run_streaming(&spec, true));
+        var expected: [256]u8 = undefined;
+        const lines = try std.fmt.bufPrint(
+            &expected,
+            "{0s} | compiling\n{0s} | second\n{0s} | warn: x\n{0s} | no newline\n",
+            .{name},
+        );
+        try testing.expectEqualStrings(lines, sim.stderr());
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+        var log: [128]u8 = undefined;
+        const log_format = store_root ++ "/build/logs/" ++ group ++ "/{s}.log";
+        const log_text = text_of(&log, log_format, .{name});
+        try testing.expectEqualStrings(
+            "compiling\nsecond\nwarn: x\nno newline",
+            files.content_of(log_text).?,
+        );
+    }
+}
+
+test "a stderr that returns EPIPE stops the streaming and never fails the step" {
+    // Goal: `zbx build --verbose 2>&1 | head` must not kill zbx or fail the build. Method:
+    // every write to stderr fails with EPIPE (the simulator notes whether SIGPIPE was ignored
+    // when that happened); the step still succeeds, its output is imported and its log is whole.
+    const fixture = try setup(40, "fetch");
+    const chunks = [_]sim_world.OutChunk{
+        .{ .stream = .stdout, .bytes = "one\n" },
+        .{ .stream = .stdout, .bytes = "two\n" },
+    };
+    set_output(&chunks);
+    var output: Output = .{};
+    arm(&output);
+    sim.faults.write_error_per_mille = 1000;
+    sim.faults.write_fault_stream = .stderr;
+    sim.faults.write_errno = sim_world.errno_pipe;
+    const spec = spec_for(&fixture);
+    try run_streaming(&spec, true);
+    try testing.expectEqual(@as(?codes.Code, null), diag.code);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqualStrings("one\ntwo\n", files.content_of(log_path).?);
+    try testing.expect(!sim.sigpipe_would_kill);
+    try testing.expect(!sim.world.broken_pipe_ignored); // Back to the default at the end.
 }

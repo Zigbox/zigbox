@@ -288,7 +288,7 @@ pub const Context = struct {
     hits: u32,
     misses: u32,
 
-    fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
+    pub fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
             .host = context.host,
             .facts = context.facts,
@@ -712,7 +712,8 @@ pub const Context = struct {
             count += 1;
         }
         if (count == 0) return;
-        var joined: [constants.diag_field_bytes_max - 32]u8 = undefined;
+        comptime assert(constants.diag_field_bytes_max >= diagnose.network_label.len + 8);
+        var joined: [constants.diag_field_bytes_max - diagnose.network_label.len]u8 = undefined;
         var warning: Diag = undefined;
         warning.reset();
         diagnose.network_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);

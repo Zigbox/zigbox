@@ -129,8 +129,9 @@ pub const state = @import("state/state.zig");
 /// step's run, and the scheduler, for a caller that is not the command line. The caller reads
 /// the file with `build.file.parse`, orders it with `build.graph.order`, works out a step's key
 /// with `build.key.compute`, runs a step with `build.step.run_step` (its own `Workspace`, `Diag`
-/// and store) and drives the steps with `build.schedule.run`. Nothing here prints or reads the
-/// environment; a failure is a coded `Diag`. `docs/demos/m7.md` has the limits.
+/// and store) and drives the steps with `build.schedule.run`. Nothing here reads the environment,
+/// and nothing prints unless the request sets `stream`: then each line of the step's output goes
+/// to stderr behind `<step> | `. A failure is a coded `Diag`. `docs/demos/m7.md` has the limits.
 pub const build = struct {
     pub const file = @import("build/file.zig");
     pub const graph = @import("build/graph.zig");

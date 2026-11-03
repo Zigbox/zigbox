@@ -788,6 +788,14 @@ pub const build_string_bytes_max: u32 = 4096;
 pub const build_steps_max: u32 = 64;
 /// A step's name: `[a-z0-9-]`, as a directory name under `/in` and in the report's column.
 pub const build_step_name_bytes_max: u32 = 32;
+/// The longest `--verbose` prefix: a step's name and ` | `.
+pub const stream_prefix_bytes_max: u32 = build_step_name_bytes_max + 3;
+/// The most one streamed write carries: the prefix, a line or a piece of one, and its newline.
+/// It is also the size of each stream's line buffer. At most the kernel's `PIPE_BUF`, so that a
+/// write to a pipe is never split and two steps' lines never mix inside a line.
+pub const stream_write_bytes_max: u32 = 1024;
+/// `PIPE_BUF` on Linux: the largest write to a pipe the kernel keeps whole.
+pub const pipe_buf_bytes: u32 = 4096;
 pub const build_step_inputs_max: u32 = 64;
 /// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
 /// fewer than a run's mounts (`mounts_max`).
@@ -871,6 +879,9 @@ comptime {
     assert(build_string_bytes_max >= path_bytes_max);
     assert(build_string_bytes_max <= build_pool_bytes);
     assert(build_step_name_bytes_max < build_string_bytes_max);
+    // A streamed line holds the prefix, at least one byte of the line and its newline.
+    assert(stream_prefix_bytes_max + 2 <= stream_write_bytes_max);
+    assert(stream_write_bytes_max <= pipe_buf_bytes);
     assert(build_label_key_bytes_max < build_string_bytes_max);
     // The parser reads its own rendering back, so the file bound is the smaller.
     assert(build_file_bytes_max < build_render_bytes_max);
