@@ -143,6 +143,17 @@ test "a library caller pulls an image: the result, the record, the store, and no
     try testing.expect(result.counts.files > 0);
     try testing.expect(result.counts.directories > 0);
 
+    // Z5: each blob's digest, whole length and outcome (all three came over the wire).
+    var blob_index: u32 = 0;
+    while (blob_index <= result.layer_count) : (blob_index += 1) {
+        const blob = result.blob(blob_index);
+        try testing.expectEqual(pull.BlobOutcome.downloaded, blob.outcome);
+        try testing.expect(blob.bytes > 0);
+    }
+    try testing.expectEqual(result.resolved.config_size, result.blob(0).bytes);
+    try testing.expect(result.blob(0).digest.eql(result.config_digest));
+    try testing.expectEqual(result.resolved.layers[1].size, result.blob(2).bytes);
+
     var store: Store = undefined;
     try testing.expect(store.locate(caller.sim.interface()));
     var errno: u16 = 0;
@@ -164,6 +175,10 @@ test "a library caller pulls an image: the result, the record, the store, and no
     try testing.expect(caller.pull_once(reference, .{}));
     try testing.expect(caller.result.tree.eql(result.tree));
     try testing.expectEqual(@as(u32, 2), caller.wire.requests);
+    blob_index = 0;
+    while (blob_index <= result.layer_count) : (blob_index += 1) {
+        try testing.expectEqual(pull.BlobOutcome.cached, result.blob(blob_index).outcome);
+    }
     try testing.expectEqual(@as(u32, 0), zbx_lock_files(caller));
 }
 
