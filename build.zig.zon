@@ -9,6 +9,7 @@
         "src",
         "docs",
         "LICENSE",
+        "vm",
     },
     .fingerprint = 0xde40c4aa10161344,
 }
