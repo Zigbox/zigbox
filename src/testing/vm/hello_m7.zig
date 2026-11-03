@@ -136,9 +136,8 @@ const step3 = "HELLO7 3";
 const step4 = "HELLO7 4";
 
 const debug_command = "sh -c 'apt-get install -y strace >/dev/null 2>&1; " ++
-    "strace -f -o /tmp/s.log " ++ zh ++ " pull " ++
-    "docker.io/library/golang@sha256:a7ecaac5efda22510d8c903bdc6b19026543f1eac3317d47363680df22161bd8" ++
-    " 2>&1 | tail -3; grep -B3 EPERM /tmp/s.log | cut -c1-200 | head -20; which strace'";
+    "strace -f -o /tmp/s.log " ++ zh ++ " build --verbose --output json 2>&1 | tail -5 | cut -c1-600;" ++
+    " grep -B4 EPERM /tmp/s.log | cut -c1-220 | head -30'";
 
 fn debug_pull(session: *Session, out: *Io.Writer) !void {
     _ = try common.run_shown(session, out, debug_command);
