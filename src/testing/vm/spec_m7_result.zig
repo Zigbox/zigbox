@@ -3,7 +3,8 @@
 //! project (`zn`), with `alpine:3.20`.
 //!
 //!   0. The pulled base is removed from the store, so the build pulls it by the lock's digest:
-//!      one `pulling alpine:3.20@sha256:...` line on stderr (`--output json` keeps stdout clean).
+//!      one `pulling <registry>/library/alpine@sha256:...` line on stderr (`--output json`
+//!      keeps stdout clean).
 //!   1. `zbx build --output json` exits 0; `compile`, `notice` and `image` are all `miss`, and
 //!      the `[start_ms, end_ms]` intervals of `compile` and `notice` overlap (each sleeps).
 //!   2. `zbx run <result digest>` runs the config's entrypoint and prints `hello from zigbox`.
@@ -70,7 +71,7 @@ const script_build =
     prelude ++ build_file ++
     "$Z build --output json > /tmp/r1.out 2> /tmp/r1.err\n" ++
     "echo result_status=$?\n" ++
-    "echo result_pulls=$(grep -c '^pulling alpine:3.20@sha256:' /tmp/r1.err)\n" ++
+    "echo result_pulls=$(grep -c '^pulling .*/alpine@sha256:' /tmp/r1.err)\n" ++
     "echo result_rows=$(grep -o '\"step\":\"[a-z]*\",\"cache\":\"[a-z]*\"' /tmp/r1.out |" ++
     " tr -d '\"' | sed 's/step://;s/,cache:/:/' | sort | tr '\\n' ' ')\n" ++
     "echo result_digest=$(sed -n 's/.*\"build_result\":{\"digest\":\"\\([^\"]*\\)\".*/\\1/p'" ++
