@@ -62,6 +62,24 @@ An agent re-reads its whole context on every turn, so cost grows with context si
 - [README.md](README.md) holds the status of every milestone and slice: what is built and reviewed, what is in review, and what is not started. The supervisor updates it in the same push that changes the status. Never mark anything "demonstrated" until its `demo-mN` job is green in CI.
 - The project site (`site/index.html`, the `SITE` and `MILESTONES` data at the top of its script) shows the same status. Update it in the same push as the README: the milestone's `status`, its `slices` count, and, once a demo is green in CI, its `demo` lines taken from that run's recorded output with `recorded` linking to the run. Never show output that was not recorded as recorded. Pages deploys only from `main`.
 
+## Releases (owner, 2026-11-04)
+
+A release tag is cut only from a commit that is all of:
+
+- **Sim-clean.** `zig build check` passes on it, and an extended seeded run of every fuzzer and
+  simulation test (`zig build fuzz -- all <iterations>`, at least 100 times the per-commit
+  default) finds nothing. When Zigcube moves its pin to the release, Zigcube's simulation fleet
+  must be clean on the commit that moves it.
+- **Jepsen-clean,** once the Jepsen battery exists (Zigcube's C5 prerequisite): it passes on a
+  Zigcube commit pinned to this release.
+- **Reviewed adversarially by two independent Opus reviewers.** Each is a fresh session given the
+  diff since the last release and the briefs, not the other's findings nor the implementers'
+  conclusions. Every MUST from either is fixed, or the owner accepts it in writing in
+  `docs/decisions/`, before the tag.
+
+The release PR quotes the fuzz run's last line, the Jepsen result when it applies, and both
+review verdicts.
+
 ## Git
 
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
