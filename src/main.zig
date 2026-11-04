@@ -154,6 +154,7 @@ test {
     _ = @import("pull_unpack.zig");
     _ = @import("pull.zig");
     _ = @import("pull_report.zig");
+    _ = @import("fuzz_pull_report.zig");
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");

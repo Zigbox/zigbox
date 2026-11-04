@@ -13,7 +13,10 @@
 //!      exit code is 0 and the bytes are what a writer can write: warnings within their share,
 //!      then exactly one result record, nothing after it.
 //!   4. Any refusal of the worker is E0419, a failure the child sent is its own code, and a
-//!      refused report leaves a diagnostic with a cause.
+//!      refused report leaves a diagnostic with a cause. A refusal that is not E0419 is taken
+//!      from bytes a writer can write that end in a failure, with a failing exit code. The report
+//!      has no checksum, so damage that turns the child's code into another error's (E0515 into
+//!      E0512) is such a report, and the reader rightly passes that code on.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -137,26 +140,51 @@ fn check_undamaged(random: std.Random, made: Made) void {
     }
 }
 
-/// Whether `bytes` is a report a writer can write that ends in a result: warnings within their
-/// share, one result record, nothing after it. Written apart from the reader.
-fn writer_could_write(bytes: []const u8) bool {
+/// The last record of a report a writer can write: warnings within their share, then one record
+/// that is not a warning, nothing after it. Null for any other bytes. Written apart from the
+/// reader.
+const Last = struct { kind: u8, payload: []const u8 };
+
+fn writer_last_record(bytes: []const u8) ?Last {
     const header = constants.pull_report_header_bytes;
     var at: usize = 0;
     var warnings_bytes: usize = 0;
     while (at < bytes.len) {
-        if (bytes.len - at < header) return false;
+        if (bytes.len - at < header) return null;
         const length = @as(usize, bytes[at + 1]) | @as(usize, bytes[at + 2]) << 8;
-        if (length == 0) return false;
-        if (length > constants.diag_carry_bytes_max) return false;
-        if (bytes.len - at < header + length) return false;
+        if (length == 0) return null;
+        if (length > constants.diag_carry_bytes_max) return null;
+        if (bytes.len - at < header + length) return null;
         const kind = bytes[at];
+        const payload = bytes[at + header ..][0..length];
         at += header + length;
-        if (kind == 3) return length == constants.pull_report_result_bytes and at == bytes.len;
-        if (kind != 1) return false;
+        if (kind != 1) {
+            if (at != bytes.len) return null;
+            return .{ .kind = kind, .payload = payload };
+        }
         warnings_bytes += header + length;
-        if (warnings_bytes > constants.pull_report_warnings_bytes_max) return false;
+        if (warnings_bytes > constants.pull_report_warnings_bytes_max) return null;
     }
-    return false;
+    return null;
+}
+
+/// Whether `bytes` is a report a writer can write that ends in a result.
+fn writer_could_write(bytes: []const u8) bool {
+    const last = writer_last_record(bytes) orelse return false;
+    return last.kind == 3 and last.payload.len == constants.pull_report_result_bytes;
+}
+
+/// Whether `bytes` is a report a writer can write that ends in the failure `code`: the first
+/// line of the failure record names the code, and the code is an error, as the writer sends.
+fn writer_could_fail(bytes: []const u8, code: codes.Code) bool {
+    const last = writer_last_record(bytes) orelse return false;
+    if (last.kind != 2) return false;
+    const line_end = std.mem.indexOfScalar(u8, last.payload, '\n') orelse last.payload.len;
+    const line = last.payload[0..line_end];
+    if (line.len > constants.arg_bytes_max) return false;
+    if (codes.parse(line) != code) return false;
+    const severity = codes.entry(code).severity;
+    return severity == .@"error" or severity == .bug;
 }
 
 fn damage(random: std.Random, made: Made) []const u8 {
@@ -197,8 +225,12 @@ fn check_damaged(random: std.Random, made: Made) void {
         assert(writer_could_write(bytes));
     } else {
         const found = diag.code.?;
-        // The child's own failure, or the parent's word on the worker.
-        if (found != .E0419) assert(found == .E0515);
+        // The parent's word on the worker, or a failure a child could have sent: damage can turn
+        // the child's E0515 into another error's code, and nothing in the report can tell.
+        if (found != .E0419) {
+            assert(code != constants.exit_ok);
+            assert(writer_could_fail(bytes, found));
+        }
     }
 }
 
@@ -208,4 +240,37 @@ pub fn fuzz_pull_report(seed: u64) void {
     const made = make_report(random);
     check_undamaged(random, made);
     check_damaged(random, made);
+}
+
+test "a failure whose code was damaged into another error's is passed on as that error" {
+    // Goal: the oracle's case found by the extended run (seed 14614030729940359617, iteration
+    // 13408, and seeds 13083933630150633528 and 7342584040481045520): flipped bytes turned the
+    // child's E0515 into E0512, which the reader cannot tell from a child that failed with
+    // E0512. Method: a failure report with that one change, read with a failing exit; it is
+    // E0512, and the oracle accepts it; the same with a code that is a warning is E0419.
+    rig.setup();
+    var failing: Diag = undefined;
+    failing.reset();
+    failing.raise(.E0515);
+    failing.cause("an entry would leave the root", .{});
+    rig.writer.failure(&failing);
+    const bytes = rig.report(&buffer);
+    const at = std.mem.indexOf(u8, bytes, "E0515").?;
+    @memcpy(damaged[0..bytes.len], bytes);
+    damaged[at + 4] = '2';
+    var seen: Seen = .{};
+    try std.testing.expect(!read(55, damaged[0..bytes.len], &seen));
+    try std.testing.expectEqual(@as(?codes.Code, .E0512), diag.code);
+    try std.testing.expect(writer_could_fail(damaged[0..bytes.len], .E0512));
+    try std.testing.expect(!writer_could_fail(damaged[0..bytes.len], .E0515));
+    @memcpy(damaged[at .. at + 5], "W0501");
+    seen = .{};
+    try std.testing.expect(!read(55, damaged[0..bytes.len], &seen));
+    try std.testing.expectEqual(@as(?codes.Code, .E0419), diag.code);
+    try std.testing.expect(!writer_could_fail(damaged[0..bytes.len], .W0501));
+}
+
+test "the pull_report fuzzer runs a few hundred seeds without a failed property" {
+    // Goal: the properties hold on a spread of reports; `zig build fuzz -- pull_report` runs more.
+    for (1..300) |seed| fuzz_pull_report(seed);
 }

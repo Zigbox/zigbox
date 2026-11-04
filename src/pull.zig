@@ -743,6 +743,25 @@ test "read_report: a failure is believed only when it is an error and ends the r
     try expect_worker_refused(15, failing[0 .. failure.len + 1], "damaged report");
 }
 
+test "read_report: a failure damaged into another error's code is that error, not E0419" {
+    // Goal: the report has no checksum, so a failure record whose code byte was damaged into
+    // another error's (E0515 into E0512; the pull_report fuzzer's extended run, seed
+    // 14614030729940359617) is a report a child failing with E0512 writes, and is read as
+    // such. One damaged into a warning's code is not an error the child could end with: E0419.
+    var buffer: [constants.pull_report_bytes_max]u8 = @splat(0x55);
+    const bytes = build_report(&buffer, 0, .failure);
+    const at = std.mem.indexOf(u8, bytes, "E0515").?;
+    buffer[at + 4] = '2';
+    var seen: Seen = .{};
+    var diag: Diag = undefined;
+    var done: report_mod.Done = undefined;
+    const err = read_for_test(55, bytes, &seen, &diag, &done);
+    try testing.expectEqual(@as(?Error, error.Failed), err);
+    try testing.expectEqual(@as(?codes.Code, .E0512), diag.code);
+    @memcpy(buffer[at .. at + 5], "W0501");
+    try expect_worker_refused(55, bytes, "failure that cannot be read");
+}
+
 test "read_report: every other ending is a specific refusal of the worker" {
     // Goal: every exit path of the report reader. Method: reports from the real writer, and
     // hand-damaged copies, each against the exit code that makes it wrong: a non-zero exit with
