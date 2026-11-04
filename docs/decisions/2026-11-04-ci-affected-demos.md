@@ -24,3 +24,9 @@ Adding the `full-ci` label starts a run (`pull_request` has `labeled` among its 
   which is empty on a restore-key hit.
 - Each demo job has its own cache name (`demo-m0` ... `demo-m7`), so each saves its own entry
   instead of nine jobs racing for one key. The save step prints the entry size (`Sent N of N`).
+
+## Cache follow-ups 2 (same PR)
+
+- The `Release builds and size check` step showing 0 s was not a dropped gate: the step still builds both release targets and runs `size_check` (run 141 logs: two `size_check: ... bytes (limit 4194304): ok` lines, for x86_64 and aarch64). The compile was already done by the restored cache; the check itself is a fast process.
+- The demo jobs no longer use the Zig cache. Their entries were 0.7 to 1.5 GB each, which would evict each other under the repository's 10 GB cap, and the VM time dominates a demo job anyway. The remaining entries are about 50 to 170 MB each.
+- The Zig toolchain is cached as one shared entry keyed on version and checksum, since the ziglang.org download took 1.5 to 4.5 minutes on some runners.

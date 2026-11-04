@@ -176,9 +176,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m0
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -214,9 +211,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m1
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -257,9 +251,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m2
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -306,9 +297,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m3
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -358,9 +346,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m4
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -411,9 +396,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m5
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -451,9 +433,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m6
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -491,9 +470,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m6b
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -529,9 +505,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
-      - uses: ./.github/actions/zig-cache
-        with:
-          name: demo-m7
       - name: Install QEMU
         run: |
           sudo apt-get update
