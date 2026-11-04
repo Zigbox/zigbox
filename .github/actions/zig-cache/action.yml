@@ -22,11 +22,11 @@ runs:
         path: |
           ~/.cache/zig
           .zig-cache
-          !.zig-cache/zbx-vm
-          !.zig-cache/zbx-old-tree-*
-        key: zig-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          !.zig-cache/zbx-vm/**
+          !.zig-cache/zbx-old-tree-*/**
+        key: zig-v2-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
         restore-keys: |
-          zig-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-
+          zig-v2-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-
     # Zig never deletes from its cache, so a chain of restores that start from the previous entry
     # only grows. Past this size the restored entry is dropped and the job starts cold, which then
     # saves a fresh, small entry. GitHub keeps 10 GB for the repository.
@@ -34,6 +34,9 @@ runs:
       if: steps.cache.outputs.cache-matched-key != ''
       shell: bash
       run: |
+        # Never restored: git worktrees whose .git points outside the cache, and the VM images
+        # (their own cache steps restore those, after this one).
+        rm -rf .zig-cache/zbx-old-tree-* .zig-cache/zbx-vm
         limit_mb=1500
         size_mb=$(du -smc ~/.cache/zig .zig-cache 2>/dev/null | tail -1 | cut -f1)
         echo "zig-cache: restored ${size_mb} MB from ${{ steps.cache.outputs.cache-matched-key }}"
