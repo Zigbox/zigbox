@@ -1,3 +1,4 @@
+//! (Touched only to exercise the CI build cache and path filter.)
 //! The step graph of a build file: what only the whole file can tell. Every `needs` entry and
 //! every `add.from` must name a step of the file, a step name is used once, and the steps must
 //! not need themselves round a cycle. `order` checks all of it and gives the steps in
