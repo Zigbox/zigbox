@@ -200,7 +200,7 @@ fn newer_version(text: []const u8) bool {
 
 fn parse_line(line: []const u8, entry: *Entry) ParseError!void {
     assert(line.len > 0);
-    assert(line.len > 0);
+    assert(constants.exec_history_entries_max > 0);
     if (line.len > line_bytes_max) return error.Malformed;
     var fields = std.mem.splitScalar(u8, line, ' ');
     entry.started = try parse_time(fields.next());
@@ -227,8 +227,11 @@ fn parse_time(field: ?[]const u8) ParseError!u64 {
 }
 
 fn parse_exit(text: []const u8) ParseError!Exit {
-    assert(text.len > 0);
     assert(constants.signal_number_max > 1);
+    assert(version > 0);
+    // A line cut after its second time (`"5 6 "`) has an empty field here: damaged text is an
+    // operating error, never a failed assertion.
+    if (text.len == 0) return error.Malformed;
     if (std.mem.eql(u8, text, "lost")) return .lost;
     const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.Malformed;
     const number_text = text[colon + 1 ..];
@@ -490,6 +493,24 @@ test "parse refuses what render never writes" {
     };
     for (bad) |text| try testing.expectError(error.Malformed, parse(text, &history));
     try testing.expectError(error.Newer, parse("zbx-exec-history 2\n", &history));
+}
+
+test "parse refuses a line whose exit field is empty" {
+    // Goal: regression for the exec fuzzer's seed 9558446633459673927 (iteration 5945): a line
+    // that ends after the second time and its space has an empty exit field, which `parse_exit`
+    // used to assert on (a crash) instead of refusing. Method: the minimal such lines, with and
+    // without a command, and one more damaged field in each position.
+    var history: History = undefined;
+    history.count = 0;
+    const bad = [_][]const u8{
+        header ++ "5 6 \n",
+        header ++ "5 6  \"ls\"\n",
+        header ++ "5 6\n",
+        header ++ "5 \n",
+        header ++ " \n",
+    };
+    for (bad) |text| try testing.expectError(error.Malformed, parse(text, &history));
+    try testing.expectEqual(@as(u32, 0), history.count);
 }
 
 test "an entry keeps whole words within its bound" {
