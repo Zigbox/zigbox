@@ -797,6 +797,9 @@ const Run = struct {
         if (run.options.drop_xattrs) return ws.builder.finish(&ws.blob);
         const listed = run.store.fs.list_xattrs(path, &ws.xattr_names) catch |err| {
             if (err == error.NotFound) return run.vanished(path);
+            if (!attribute_refused(err)) {
+                return run.source_failure("listxattr of", path, err, run.store.fs.last_errno());
+            }
             run.warn_xattr(path, "(the list)", .unreadable);
             return &xattrs.empty;
         };
@@ -807,6 +810,17 @@ const Run = struct {
             start = end + 1;
         }
         return ws.builder.finish(&ws.blob);
+    }
+
+    /// Whether a failed attribute read is the file system declining to show the attribute, which
+    /// leaves it out with a warning. Any other failure (an I/O error, an interrupted call that
+    /// ran out of retries) says nothing about the attribute: leaving it out would give the tree
+    /// a digest that depends on the luck of the read, so the import fails instead.
+    fn attribute_refused(err: host_mod.Error) bool {
+        return switch (err) {
+            error.AccessDenied, error.Unsupported, error.NoData => true,
+            else => false,
+        };
     }
 
     /// Overlayfs's own attributes are never imported, but a commit reads what they say.
@@ -845,7 +859,13 @@ const Run = struct {
         const value = run.store.fs.get_xattr(path, name, &ws.xattr_value) catch |err| switch (err) {
             error.NotFound => return run.vanished(path),
             error.FileTooLarge => return run.warn_xattr(path, name, .value_too_long),
-            else => return run.warn_xattr(path, name, .unreadable),
+            else => |other| {
+                if (!attribute_refused(other)) {
+                    const errno = run.store.fs.last_errno();
+                    return run.source_failure("getxattr of", path, other, errno);
+                }
+                return run.warn_xattr(path, name, .unreadable);
+            },
         };
         ws.builder.add(name, value) catch |err| switch (err) {
             error.TooMany => run.warn_xattr(path, name, .too_many),
