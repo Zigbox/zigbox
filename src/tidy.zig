@@ -27,8 +27,11 @@ const source_bytes_max: u32 = 1024 * 1024;
 const files_max: u32 = 10_000;
 
 /// Shell scripts are banned (build tooling is Zig). A path listed here is allowed, and each
-/// entry needs a written reason next to it. Empty on purpose.
-const shell_allowlist = [_][]const u8{".github/ci-changes.sh"};
+/// entry needs a written reason next to it.
+const shell_allowlist = [_][]const u8{
+    // CI's path classification runs in the `changes` job, before Zig is installed.
+    ".github/ci-changes.sh",
+};
 
 /// The files that make up the shipped `zbx` binary. Their functions must average at least
 /// `asserts_per_function_min` runtime assertions (docs/STYLE.md). Test and tooling code is
