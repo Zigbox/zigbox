@@ -13,3 +13,14 @@ Pull-request CI took about 23 minutes of wall time: 51 jobs with no `needs`, abo
 The owner accepted that a break the affected set did not select can first show on `main`, after the merge. `full-ci` is the way to ask for the full set on a risky pull request. The rules err toward running; when a demo is found to have missed a break, widen its rule in `ci-changes.sh`.
 
 Adding the `full-ci` label starts a run (`pull_request` has `labeled` among its types), and so does any other label; the newer run cancels the older one.
+
+## Cache follow-ups (same PR)
+
+- Negated cache paths need `/**` to exclude a directory's contents (`!.zig-cache/zbx-vm/**`,
+  `!.zig-cache/zbx-old-tree-*/**`); without it a restored `zbx-old-tree-<commit>` pointed its
+  `.git` at a worktree that no longer existed. The key prefix is `zig-v2-` so no entry saved
+  before that fix is restored.
+- The size guard runs after every restore and checks the directories, not `cache-matched-key`,
+  which is empty on a restore-key hit.
+- Each demo job has its own cache name (`demo-m0` ... `demo-m7`), so each saves its own entry
+  instead of nine jobs racing for one key. The save step prints the entry size (`Sent N of N`).

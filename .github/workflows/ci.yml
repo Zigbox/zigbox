@@ -178,7 +178,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m0
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -216,7 +216,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m1
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -259,7 +259,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m2
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -308,7 +308,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m3
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -360,7 +360,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m4
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -413,7 +413,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m5
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -453,7 +453,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m6
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -493,7 +493,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m6b
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -531,7 +531,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
-          name: demo
+          name: demo-m7
       - name: Install QEMU
         run: |
           sudo apt-get update
