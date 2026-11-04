@@ -7,7 +7,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 - **Style and testing follow [docs/STYLE.md](docs/STYLE.md)** (TigerStyle, adapted). Read it before writing code. Review rejects code that breaks it.
 - Work one milestone at a time, from its brief in `docs/briefs/`. Do not start a later milestone or build anything listed under Non-goals.
 - A milestone is done only when its demo script runs live in the test VM. Unit tests passing, or code that compiles, is never reported as a passed demo. Say exactly what was and was not run.
-- Each demo script becomes an automated test, `zig build demo-mN`. Never break an earlier demo: all prior `demo-mN` tests run in CI.
+- Each demo script becomes an automated test, `zig build demo-mN`. Never break an earlier demo. CI runs only the demos a pull request can affect (path rules in `.github/ci-changes.sh`); a push to `main`, a pull request from a `claude/release-*` branch and a pull request labelled `full-ci` run all of them, so a break the affected set missed shows on `main`. If you are unsure, add the `full-ci` label.
 - Error messages are part of the demo: one line saying what was refused and why, never an `errno` dump.
 - When scope is in doubt, cut scope and keep the demo. Record the cut in the milestone's demo document, `docs/demos/mN.md`.
 - Zig version is pinned in `build.zig.zon` (`minimum_zig_version`) and CI. Do not upgrade during a milestone.
@@ -84,5 +84,5 @@ review verdicts.
 
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
 - Never report an unpushed commit as pushed.
-- CI (`ci.yml`) runs only on pull requests and on `main`, never on a plain branch push. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited. The exception is `vm.yml`: a push to a `vm/*` scratch branch runs one demo, for checking work in progress (see the implementer section).
+- CI (`ci.yml`) runs only on pull requests and on `main`, never on a plain branch push. A pull request runs the VM demos its changed paths can affect, and nothing but the `changes` job when it changes only docs; `main`, `claude/release-*` pull requests and `full-ci` pull requests run all demos (docs/decisions/2026-11-04-ci-affected-demos.md). Zig jobs restore a build cache keyed on `build.zig`, `build.zig.zon` and `src/**`. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited. The exception is `vm.yml`: a push to a `vm/*` scratch branch runs one demo, for checking work in progress (see the implementer section).
 - A commit that only records status (README.md and `site/index.html` updated after a CI result) carries `[skip ci]` in its message, so it does not start a run of its own. Never use `[skip ci]` on a commit that changes code, tests, the harness, CI or generated files.

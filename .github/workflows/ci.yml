@@ -1,5 +1,14 @@
 # Zigbox CI. Every action is pinned to a full commit SHA (the tag is in the comment); Zig is
-# installed from a verified tarball (.github/actions/setup-zig); QEMU from apt. No other shell.
+# installed from a verified tarball (.github/actions/setup-zig); QEMU from apt. No other shell
+# but .github/ci-changes.sh, which the `changes` job runs to decide what the rest does.
+#
+# What runs (docs/decisions/2026-11-04-ci-affected-demos.md):
+#   - A pull request that changes only docs (a .md outside src/, anything under site/ outside
+#     site/errors/) runs nothing but `changes`.
+#   - A pull request runs the VM demos its changed paths can affect, chosen by ci-changes.sh.
+#   - A push to main, a pull request from a claude/release-* branch and a pull request labelled
+#     full-ci run everything.
+#   - Every Zig job restores the build cache (.github/actions/zig-cache).
 name: ci
 
 # CI runs on pull requests and on main only: a pushed branch without a PR runs nothing, so
@@ -8,22 +17,65 @@ name: ci
 on:
   push:
     branches: [main]
+  # `labeled` so that adding full-ci to a pull request starts the full run.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # Which of the jobs below run. Fast (seconds); every other job needs it.
+  changes:
+    name: what changed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.pick.outputs.code }}
+      demo_m0: ${{ steps.pick.outputs.demo_m0 }}
+      demo_m1: ${{ steps.pick.outputs.demo_m1 }}
+      demo_m2: ${{ steps.pick.outputs.demo_m2 }}
+      demo_m3: ${{ steps.pick.outputs.demo_m3 }}
+      demo_m4: ${{ steps.pick.outputs.demo_m4 }}
+      demo_m5: ${{ steps.pick.outputs.demo_m5 }}
+      demo_m6: ${{ steps.pick.outputs.demo_m6 }}
+      demo_m6b: ${{ steps.pick.outputs.demo_m6b }}
+      demo_m7: ${{ steps.pick.outputs.demo_m7 }}
+    steps:
+      # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
+      # base, so HEAD^1..HEAD is exactly what the pull request changes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Pick the jobs
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git diff --name-only HEAD^1 HEAD | tee /dev/stderr | .github/ci-changes.sh
+          else
+            .github/ci-changes.sh < /dev/null
+          fi
+          cat "$GITHUB_OUTPUT"
+
   build:
     name: build (both targets, size gate)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: build
       - name: Build
         run: zig build
       # Cross-compiles x86_64 and aarch64 in ReleaseSafe, stripped, and fails if either binary
@@ -33,94 +85,81 @@ jobs:
 
   tidy:
     name: tidy
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: tidy
       - name: Formatting, line and function length, banned patterns, assertion density
         run: zig build tidy
 
   test:
     name: test
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: test
       - name: Unit, snapshot and simulation tests
         run: zig build test --summary all
 
   errors-site:
     name: errors site is up to date
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: errors-site
       # site/errors/<code>.html is generated from the diagnostic registry. Fails, naming the
       # first page, if a checked-in page is missing or differs: run `zig build errors-site`.
       - name: Generated pages match the registry
         run: zig build errors-site-check
 
   fuzz:
-    name: fuzz (${{ matrix.fuzzer }})
+    name: fuzz (every fuzzer, fresh seeds)
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        fuzzer:
-          - host_read
-          - host_write
-          - cli
-          - publish
-          - text
-          - doctor
-          - diag
-          - diagnostic
-          - run
-          - record
-          - logs
-          - result
-          - exec
-          - state
-          - vm
-          - redact
-          - dbus
-          - seccomp
-          - tree
-          - store
-          - peer
-          - commit
-          - gc
-          - reference
-          - registry
-          - layer
-          - lock
-          - build_file
-          - pull_report
-          - build_cache
-          - parse_sysctl
-          - parse_kernel
-          - parse_controllers
-          - parse_subid
-          - parse_passwd
-          - parse_seccomp
-          - parse_capability
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
-      # A random seed, printed first by the runner; a failure replays with
-      # `zig build fuzz -- <fuzzer> <seed>`. 10,000 iterations is the default.
-      - name: Fuzz ${{ matrix.fuzzer }}
-        run: zig build fuzz -- ${{ matrix.fuzzer }}
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: fuzz
+      # One job runs every fuzzer in turn (`all`), 10,000 iterations each, as the per-fuzzer jobs
+      # did. Each fuzzer draws a fresh random seed and prints `fuzz: <name> seed=<n> ...` before it
+      # starts, flushed, so the last `fuzz:` line before a failure names the fuzzer and its seed;
+      # replay it with `zig build fuzz -- <name> <seed> 10000`.
+      - name: Fuzz every fuzzer
+        run: zig build fuzz -- all 10000
 
   # The D-Bus client against a real dbus-daemon (a private session bus), which is what shows that
   # the simulator's bus and the real one agree: Hello, calls, AddMatch, signals, and bytes the
   # bus accepts or refuses. See src/dbus_live.zig.
   dbus-live:
     name: D-Bus client against a real dbus-daemon
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: dbus-live
       - name: Install dbus-daemon
         run: |
           sudo apt-get update
@@ -130,6 +169,8 @@ jobs:
 
   demo-m0:
     name: demo-m0 (Ubuntu 24.04 VM, KVM)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m0 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -163,6 +204,8 @@ jobs:
   # with no secret in it. See docs/demos/m1.md.
   demo-m1:
     name: demo-m1 (Ubuntu 24.04 VM, KVM, Alpine rootfs)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m1 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -201,6 +244,8 @@ jobs:
   # is installed with apk inside a zbx run, over the VM's network. See docs/demos/m2.md.
   demo-m2:
     name: demo-m2 (Ubuntu 24.04 VM, KVM, Alpine rootfs, limits)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m2 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -241,6 +286,8 @@ jobs:
   # over the VM's network. See docs/demos/m3.md.
   demo-m3:
     name: demo-m3 (Ubuntu 24.04 VM, KVM, Alpine rootfs, store)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m3 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -287,6 +334,8 @@ jobs:
   # runs, keyed by src/testing/vm/zbx.lock (the images the demo pulls). See docs/demos/m4.md.
   demo-m4:
     name: demo-m4 (Ubuntu 24.04 VM, KVM, pull, upgrade, agent test)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m4 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -335,6 +384,8 @@ jobs:
   # is small, so no blob cache disk.
   demo-m5:
     name: demo-m5 (Ubuntu 24.04 VM, KVM, upgrade from M4)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m5 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -370,6 +421,8 @@ jobs:
   # large image, so no blob cache disk.
   demo-m6:
     name: demo-m6 (Ubuntu 24.04 VM, KVM, upgrade from M5)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m6 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -405,6 +458,8 @@ jobs:
   # mirror.gcr.io, as for demo-m6.
   demo-m6b:
     name: demo-m6b (Ubuntu 24.04 VM, KVM, upgrade from M6)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m6b == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -438,6 +493,8 @@ jobs:
   # mirror.gcr.io, as for demo-m6.
   demo-m7:
     name: demo-m7 (Ubuntu 24.04 VM, KVM, upgrade from 0.2.0)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m7 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
