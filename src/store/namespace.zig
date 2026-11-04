@@ -19,14 +19,34 @@
 //! ## For Zigcube (Z6)
 //!
 //! A program that writes the store (a fetch worker: `put_chunk`, `put_tree`, `import_image`)
-//! calls `run` itself, once per process, from its main thread before it starts any other: it
-//! passes a `Work` whose `call` does the store's writes and returns an exit code, and a
-//! `doctor.Facts` it owns. `call` gets `squash_owner`: set `Options.squash_owner` of an import
-//! from it, since a host with the one-id map records every owner as 0. The work returns to the
-//! parent through its exit code and whatever it wrote to the store or to a pipe it was given (the
-//! child is a copy of the parent: what it sets in memory is not seen by the parent). Reads of
-//! what the work wrote may be done in the parent afterwards. There is no long-lived store
-//! process: a second call to `run` is a second child.
+//! calls `run` itself and does all of one batch of writes in the `Work` it passes (`call` returns
+//! an exit code), with a `doctor.Facts` it owns.
+//!
+//! - **Owner.** Only the tree import, `store/import.zig`'s `Options.squash_owner`, takes an
+//!   owner: set it from the `squash_owner` argument of `call`, since a host with the one-id map
+//!   records every owner as 0. `put_chunk`, `put_tree` and `import_image` take no owner: the ids
+//!   they store come from the file system they run on, which inside `run` is the mapped one.
+//! - **One process, one thread, one batch.** `run` makes its child with `clone3`, and a
+//!   namespace may only be made by a single-threaded process. So each batch of store writes
+//!   needs a fresh process that has started no thread: start the worker by re-exec (a new
+//!   `zbx` or agent process), never by `fork` from a multi-threaded parent, and call `run` from
+//!   its main thread before any pool exists. The cost is one `clone3` and one id map (a
+//!   `newuidmap` and `newgidmap` run on a host with the subordinate ranges) for every `run`.
+//!   A worker that needs many writes does them all in one `Work`.
+//! - **Results.** The child is a copy of the parent, so what it sets in memory is not seen by
+//!   the parent. It returns an exit code, what it wrote to the store (the parent reads that
+//!   afterwards) or bytes through a pipe the caller made before `run` (handles are inherited):
+//!
+//!   ```zig
+//!   const pipe = try host.pipe();                  // before `run`, in the parent
+//!   // in `call`, in the child:  host.write_handle_all(pipe.write, &digest.bytes) catch return 1;
+//!   const code = try run(host, &facts, work, null, &diag);
+//!   host.close(pipe.write);                        // the parent's copy, so read sees the end
+//!   const count = try host.read_some(pipe.read, &buffer); // the child's bytes (0 if none)
+//!   host.close(pipe.read);
+//!   ```
+//!
+//! There is no long-lived store process: a second call to `run` is a second child.
 //! `decisions/2026-11-04-z6-store-namespace.md` gives the reasons.
 
 const std = @import("std");
@@ -393,7 +413,11 @@ const StoreWork = struct {
         var failure: @import("object.zig").Failure = undefined;
         _ = trees.put_checked(job.store, job.tree.*, job.bytes, &failure) catch return 1;
         var refusal: image_peer.Failure = undefined;
-        const options: image_peer.Options = .{ .tags = .drop, .entries_max = 16 };
+        const options: image_peer.Options = .{
+            .expected_manifest = Sha256.of("manifest"),
+            .tags = .drop,
+            .entries_max = 16,
+        };
         const text = job.text;
         const memory = &store_memory;
         const tree = job.tree.*;
@@ -404,8 +428,12 @@ const StoreWork = struct {
 };
 
 test "store writes done in the child are in the store the parent reads afterwards" {
-    // Goal: Z6's shape. Method: a fetch-worker-like `Work` puts a tree and imports an image
-    // record for it inside `run`; the parent then finds both through the same store.
+    // Goal: the API shape of Z6: a `Work` that writes the store compiles against `run`, gets
+    // its `squash_owner`, and its writes are readable by the caller. Method: a fetch-worker-like
+    // `Work` puts a tree and imports an image record for it inside `run`; the parent then finds
+    // both through the same store. This does NOT prove isolation: the simulated host runs the
+    // child in this process, sharing memory, so a missing child would pass too. The real
+    // `clone3` and id maps are what the VM demos run.
     var sim: HostSim = undefined;
     sim_run.init(&sim, 1);
     store_files.init(1);

@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">an image record from a peer was not taken</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>An image record says which tree an image became and how to run it (its entrypoint, command, environment, directory and user). A node that fetched the tree from a peer takes the peer's record so that the tree runs like a pulled image and is kept by gc. The record is not trusted: it is taken only if it reads as a record, names the tree that was fetched, that tree and every file below it are whole in the store, and no record of the same manifest names another tree. The message says which of these failed.</p>
+<p>An image record says which tree an image became and how to run it (its entrypoint, command, environment, directory and user). A node that fetched the tree from a peer takes the peer's record so that the tree runs like a pulled image and is kept by gc. The record is not trusted: it is taken only if it reads as a record, names the tree that was fetched and the image (manifest) the node asked for, that tree and every file below it are whole in the store, and no record of the same manifest names another tree. The message says which of these failed.</p>
 <p>Nothing was written. Fetch what is missing and import the record again, or ask the peer for a record of the tree you fetched. A record of the same manifest that names another tree is the node's own: the node keeps it, and the peer's tree is not taken over it.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

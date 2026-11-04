@@ -28,6 +28,7 @@ const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host_sim = @import("host_sim.zig");
 const image_peer = @import("store/image_peer.zig");
+const reference_mod = @import("registry/reference.zig");
 const images = @import("store/images.zig");
 const Sha256 = @import("registry/digest.zig").Sha256;
 const chunk_read = @import("store/chunk_read.zig");
@@ -395,6 +396,15 @@ fn random_image(random: std.Random, whole: Digest) []const u8 {
     return images.render(&image, &image_text);
 }
 
+/// True if every tag of `image` reads as a reference, as `image_peer` requires of kept tags.
+fn tags_are_references(image: *const images.Image) bool {
+    for (0..image.tag_count) |index| {
+        var reference: reference_mod.Reference = undefined;
+        reference_mod.parse(image.tag_text(@intCast(index)), &reference) catch return false;
+    }
+    return true;
+}
+
 fn fuzz_image(random: std.Random) void {
     var writer = tree.Writer.init(&tree_bytes);
     const empty = writer.finish(); // A directory with no entries: whole with no objects.
@@ -430,19 +440,31 @@ fn fuzz_image(random: std.Random) void {
     }
     const before = image_files();
     const tags: image_peer.TagPolicy = if (random.boolean()) .keep else .drop;
-    const options: image_peer.Options = .{ .tags = tags, .entries_max = 16 };
+    // The trusted manifest is usually the one the record names, sometimes another.
+    const elsewhere = random.uintLessThan(u8, 4) == 0;
+    const trusted = if (elsewhere) Sha256.of("elsewhere") else parsed.manifest;
+    const options: image_peer.Options = .{
+        .expected_manifest = trusted,
+        .tags = tags,
+        .entries_max = 16,
+    };
     var refusal: image_peer.Failure = undefined;
     if (image_peer.import_record(&store, &peer_memory, text, asked, options, &refusal)) |taken| {
         assert(parse == .ok);
         assert(parsed.tree.eql(asked));
+        assert(parsed.manifest.eql(trusted)); // A record for another image is never taken.
+        assert(taken.manifest.eql(trusted));
         assert(taken.tree.eql(asked));
         var loaded: images.Image = undefined;
         var errno: u16 = 0;
         images.load(&store, parsed.manifest, &loaded, &errno) catch unreachable; // Just saved.
         assert(loaded.tree.eql(asked));
     } else |_| {
-        const named = parse == .ok and parsed.tree.eql(asked);
-        assert(!named); // Only a record for another tree, or no record, is refused.
+        const named = parse == .ok and parsed.tree.eql(asked) and parsed.manifest.eql(trusted);
+        // Only no record, another tree or another image is refused, or, when the tags are kept,
+        // a tag that is no reference: a flipped byte can make one.
+        const bad_tag = tags == .keep and parse == .ok and !tags_are_references(&parsed);
+        if (named) assert(bad_tag); // Only a bad tag refuses a record naming tree and image.
         assert(image_files() == before); // A refusal writes nothing.
     }
 }

@@ -1820,9 +1820,10 @@ pub const registry = [_]Entry{
         \\entrypoint, command, environment, directory and user). A node that fetched
         \\the tree from a peer takes the peer's record so that the tree runs like a
         \\pulled image and is kept by gc. The record is not trusted: it is taken
-        \\only if it reads as a record, names the tree that was fetched, that tree
-        \\and every file below it are whole in the store, and no record of the same
-        \\manifest names another tree. The message says which of these failed.
+        \\only if it reads as a record, names the tree that was fetched and the image
+        \\(manifest) the node asked for, that tree and every file below it are whole
+        \\in the store, and no record of the same manifest names another tree. The
+        \\message says which of these failed.
         \\
         \\Nothing was written. Fetch what is missing and import the record again, or
         \\ask the peer for a record of the tree you fetched. A record of the same

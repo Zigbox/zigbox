@@ -160,7 +160,7 @@ pub const meta_bytes_max = 512;
 pub const arena_bytes: u32 = names_bytes + offsets_bytes + stack_bytes;
 const names_bytes: u32 = remove.arena_bytes;
 const offsets_bytes: u32 = 1024 * 1024;
-const stack_bytes: u32 = 1024 * 1024;
+pub const stack_bytes: u32 = 1024 * 1024;
 
 /// What `Workspace.tables` holds, front to back: the memory a removal borrows, the roots and the
 /// blobs that images keep (fixed), then the sets of objects and of trees, which are sized to the

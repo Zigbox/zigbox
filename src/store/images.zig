@@ -380,7 +380,9 @@ fn record_path(store: *const Store, buffer: *PathBuf, manifest: Sha256) [:0]cons
 }
 
 /// Fills `image.tags` with those of the record kept for `manifest`, or none if there is no record
-/// or it does not read: a pull of the same manifest again keeps what was pulled before. Every
+/// or it does not read: a pull of the same manifest again keeps what was pulled before. Two
+/// writers of one manifest at once (a pull and a pull, or a pull and an import) can each read the
+/// old tags, and the later save wins: a tag is lost until it is next pulled. Every
 /// other field is the caller's to set.
 pub fn carry_tags(store: *const Store, manifest: Sha256, image: *Image) void {
     assert(manifest.bytes.len == constants.oci_digest_bytes);
@@ -627,6 +629,10 @@ test "real version-1 text from M4 reads" {
     try testing.expectEqual(@as(u32, 1), back.layer_count);
     try testing.expectEqualStrings("/bin/sh", back.settings.word(.cmd, 0));
     try testing.expectEqualStrings("/", back.settings.get(.workdir));
+    // The checks `parse` gained with Z4 (every field once, a platform that is not empty) hold
+    // for what M4 wrote: this is the text of a real release, not one this code rendered.
+    try testing.expectEqualStrings("linux/amd64", back.platform_text());
+    try testing.expectEqual(@as(u64, 1761600000), back.time);
     var buffer: [constants.image_record_bytes_max]u8 = undefined;
     const written = render(&back, &buffer);
     try testing.expect(std.mem.indexOf(u8, written, ".version = 2,") != null);

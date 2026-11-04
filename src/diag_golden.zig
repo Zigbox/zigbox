@@ -2101,6 +2101,7 @@ fn store_image_refused(diag: *Diag) void {
     const failure: @import("store/image_peer.zig").Failure = .{
         .refusal = .wrong_tree,
         .digest = Digest.of("another tree"),
+        .manifest = .{ .bytes = @splat(0) },
         .size = 0,
         .err = error.IoFailed,
         .errno = 0,

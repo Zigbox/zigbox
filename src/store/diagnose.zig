@@ -921,12 +921,23 @@ pub fn image_refused(
             "the record is for the tree {s}, not the one that was fetched",
             .{failure.digest.text()},
         ),
+        .wrong_manifest => diag.cause(
+            "the record is for the image {s}, not the one that was asked for",
+            .{failure.manifest.text()},
+        ),
         .incomplete => diag.cause(
             "{s} is not in the store, so the tree is not whole",
             .{failure.digest.text()},
         ),
         .tree_damaged => diag.cause("the tree {s} is damaged", .{failure.digest.text()}),
-        .tree_too_big => diag.cause("the tree has more entries than the call allows", .{}),
+        .too_many_entries => diag.cause(
+            "the tree has more than the {d} entries the call allows",
+            .{failure.size},
+        ),
+        .stack_full => diag.cause(
+            "the tree has more than {d} directories waiting to be read at once",
+            .{failure.size},
+        ),
         .conflict => diag.cause(
             "a record of the same manifest already names the tree {s}",
             .{failure.digest.text()},
@@ -942,7 +953,10 @@ fn fix_for(refusal: image_peer.Refusal) []const u8 {
     return switch (refusal) {
         .no_record, .malformed, .newer, .too_large, .wrong_tree => "ask the peer for the " ++
             "record of the tree that was fetched",
-        .incomplete, .tree_damaged, .tree_too_big => "fetch the missing parts of the tree, " ++
+        .wrong_manifest => "ask the peer for the record of the image that was asked for",
+        .too_many_entries => "import with a higher entries limit, or ask for a smaller image",
+        .stack_full => "ask for an image with fewer directories side by side",
+        .incomplete, .tree_damaged => "fetch the missing parts of the tree, " ++
             "then import the record again",
         .conflict, .local_unusable => "keep the record the store has; run 'zbx store verify'" ++
             " to see whether it is sound",

@@ -13,6 +13,10 @@ const fs_mod = @import("fs.zig");
 const fs_sim = @import("fs_sim.zig");
 const gc = @import("gc.zig");
 const image_find = @import("image_find.zig");
+const object_mod = @import("object.zig");
+const tree_mod = @import("tree.zig");
+const trees = @import("trees.zig");
+const xattrs = @import("xattrs.zig");
 const image_peer = @import("image_peer.zig");
 const images = @import("images.zig");
 const import = @import("import.zig");
@@ -40,11 +44,15 @@ var run_workspace: run_image.Workspace = undefined;
 var text_buffer: [constants.image_record_bytes_max]u8 = undefined;
 var diag: Diag = undefined;
 
-const options: image_peer.Options = .{ .tags = .drop, .entries_max = 100 };
+const entries_max: u32 = 100;
+/// The manifest the caller trusts (Zigcube's assignment names it); a test changes it to ask for
+/// another image. `start` sets it to the manifest `record_for` is given most often.
+var expected: Sha256 = undefined;
 
 /// A store that has a tree (imported from a source, then its root dropped, as a tree fetched
 /// from a peer has none) and no image record. Returns the tree.
 fn start() Digest {
+    expected = Sha256.of("manifest");
     gc_workspace.tables = &gc_tables;
     sim.init(1, &.{});
     files.init(1);
@@ -96,7 +104,11 @@ fn import_with(
     tags: image_peer.TagPolicy,
     failure: *image_peer.Failure,
 ) image_peer.Error!image_peer.Imported {
-    const these: image_peer.Options = .{ .tags = tags, .entries_max = options.entries_max };
+    const these: image_peer.Options = .{
+        .expected_manifest = expected,
+        .tags = tags,
+        .entries_max = entries_max,
+    };
     return image_peer.import_record(&store, &memory, text, tree, these, failure);
 }
 
@@ -270,10 +282,15 @@ test "a tree that is not whole is refused: an object gone, a tree gone or damage
     tree = start();
     const small = record_for(tree, "manifest", null);
     var limited: image_peer.Failure = undefined;
-    const tight: image_peer.Options = .{ .tags = .keep, .entries_max = 1 };
+    const tight: image_peer.Options = .{
+        .expected_manifest = expected,
+        .tags = .keep,
+        .entries_max = 1,
+    };
     const attempt = image_peer.import_record(&store, &memory, small, tree, tight, &limited);
     try testing.expectError(error.Failed, attempt);
-    try testing.expectEqual(image_peer.Refusal.tree_too_big, limited.refusal);
+    try testing.expectEqual(image_peer.Refusal.too_many_entries, limited.refusal);
+    try testing.expectEqual(@as(u64, 1), limited.size);
     try testing.expectEqual(@as(u32, 0), written());
 }
 
@@ -324,6 +341,7 @@ test "export gives the newest record of a tree, and the import of it is the same
     try testing.expect(parsed.manifest.eql(Sha256.of("newer")));
     const copy = try testing.allocator.dupe(u8, text);
     defer testing.allocator.free(copy);
+    expected = Sha256.of("newer");
     const taken = try import_with(copy, tree, .keep, &failure);
     try testing.expect(!taken.created); // The record was there: it is updated in place.
     try testing.expect(taken.manifest.eql(Sha256.of("newer")));
@@ -346,6 +364,164 @@ test "a store busy with a gc refuses the import, and a failing disk is a store f
     files.faults.fail_errno = 28; // ENOSPC
     failure = try refused(text, tree);
     try testing.expectEqual(image_peer.Refusal.store_failed, failure.refusal);
+}
+
+test "a record for another image than the one asked for is refused, and writes nothing" {
+    // Goal: the peer does not decide which image a tree is. Method: the caller trusts one
+    // manifest; a record naming another manifest for the same whole tree (a well-known digest,
+    // or any number of invented ones) is refused with the manifest it named, and the files
+    // under images/ and roots/ do not change; the record of the trusted manifest imports.
+    const tree = start();
+    const before = written();
+    for ([_][]const u8{ "well known", "invented 1", "invented 2" }) |name| {
+        const failure = try refused(record_for(tree, name, null), tree);
+        try testing.expectEqual(image_peer.Refusal.wrong_manifest, failure.refusal);
+        try testing.expect(failure.manifest.eql(Sha256.of(name)));
+    }
+    try testing.expectEqual(before, written());
+    var errno: u16 = 0;
+    var back: images.Image = undefined;
+    const unknown = Sha256.of("well known");
+    try testing.expectError(error.NotFound, images.load(&store, unknown, &back, &errno));
+    var taken_failure: image_peer.Failure = undefined;
+    const good = try import_with(record_for(tree, "manifest", null), tree, .drop, &taken_failure);
+    try testing.expect(good.manifest.eql(expected));
+    try testing.expect(written() > before);
+    // The manifest is checked after the tree: a record wrong in both says the tree.
+    const both = try refused(record_for(Digest.of("other"), "well known", null), tree);
+    try testing.expectEqual(image_peer.Refusal.wrong_tree, both.refusal);
+}
+
+test "under keep a tag that is no image reference is refused; under drop it is not looked at" {
+    // Goal: a peer's tag becomes a name on this node, so it must read as a reference. Method:
+    // a tag with a space and an uppercase repository; refused under `.keep` with nothing
+    // written, taken (and dropped) under `.drop`.
+    const tree = start();
+    const before = written();
+    for ([_][]const u8{ "has space:1", "UPPER/case:1" }) |tag| {
+        const text = record_for(tree, "manifest", tag);
+        const failure = try refused(text, tree);
+        try testing.expectEqual(image_peer.Refusal.malformed, failure.refusal);
+        try testing.expectEqual(before, written());
+    }
+    try take(record_for(tree, "manifest", "has space:1"), tree, .drop);
+    var back: images.Image = undefined;
+    var errno: u16 = 0;
+    try images.load(&store, Sha256.of("manifest"), &back, &errno);
+    try testing.expectEqual(@as(u32, 0), back.tag_count);
+}
+
+var wide_bytes: [constants.store_tree_bytes_max]u8 = undefined;
+
+/// Stores a tree of `count` directory entries, all naming a subtree the store does not have
+/// except the last, which names `last`; returns its digest.
+fn put_wide(count: u32, last: Digest) Digest {
+    var writer = tree_mod.Writer.init(&wide_bytes);
+    for (0..count) |index| {
+        var name: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&name, "d{d:0>5}", .{index}) catch unreachable; // Fits.
+        // The tree is far under `store_tree_bytes_max`, so neither call can run out of room.
+        writer.begin(text, .dir, 0o755, 0, 0, &xattrs.empty) catch unreachable;
+        const subtree = if (index + 1 == count) last else Digest.of("absent");
+        writer.end_dir(subtree) catch unreachable; // Room, as above.
+    }
+    const bytes = writer.finish();
+    const digest = Digest.of(bytes);
+    var failure: object_mod.Failure = undefined;
+    _ = trees.put_checked(&store, digest, bytes, &failure) catch unreachable; // Valid.
+    return digest;
+}
+
+test "the walk keeps image_import_stack_max subtrees pending: the bound is taken, one past is not" {
+    // Goal: the bound of REVIEW.md "Bounds", at it and one past, and that it is gc's. Method: a
+    // root of 16384 directories whose last holds 16384 whose last holds `k` more; the walk
+    // pops the last each time, so the stack peaks at 2 * 16384 - 2 + k. With k = 2 it is
+    // exactly the bound and the walk goes on to find the first absent subtree (`incomplete`);
+    // with k = 3 the third push finds the stack full, and the refusal names the bound.
+    comptime assert(constants.image_import_stack_max == 2 * constants.store_dir_entries_max);
+    comptime assert(constants.image_import_stack_max * @sizeOf(Digest) == gc.stack_bytes);
+    const entries: u32 = constants.store_dir_entries_max;
+    const wide: image_peer.Options = .{
+        .expected_manifest = expected,
+        .tags = .drop,
+        .entries_max = 4 * entries,
+    };
+    for ([_]u32{ 2, 3 }) |extra| {
+        // A fresh store each time: the simulated disk holds the two wide trees and no more.
+        _ = start();
+        const before = written();
+        const deepest = put_wide(extra, Digest.of("absent"));
+        const middle = put_wide(entries, deepest);
+        const top = put_wide(entries, middle);
+        var failure: image_peer.Failure = undefined;
+        const text = record_for(top, "manifest", null);
+        const attempt = image_peer.import_record(&store, &memory, text, top, wide, &failure);
+        try testing.expectError(error.Failed, attempt);
+        const want: image_peer.Refusal = if (extra == 2) .incomplete else .stack_full;
+        try testing.expectEqual(want, failure.refusal);
+        if (extra == 3) {
+            try testing.expectEqual(@as(u64, constants.image_import_stack_max), failure.size);
+        }
+        try testing.expectEqual(before, written());
+    }
+}
+
+test "a failing write at any step leaves a kept tree, never a root without a record" {
+    // Goal: a store failure may leave something written, but never a tree gc would take, and
+    // the same import again finishes the job. Method: the write point that fails is moved one
+    // step at a time over the whole import; after each failure, either nothing was written, or
+    // the image record is there (and gc takes nothing); the import without the fault then
+    // writes the record and the root.
+    var step: u32 = 0;
+    while (step < 64) : (step += 1) {
+        const tree = start();
+        const text = record_for(tree, "manifest", null);
+        files.faults.fail_mutation = files.mutations + step;
+        files.faults.fail_errno = 28; // ENOSPC
+        var failure: image_peer.Failure = undefined;
+        const first = import_with(text, tree, .drop, &failure);
+        files.faults.fail_mutation = null;
+        if (first) |_| {
+            try testing.expect(step > 2); // The faults reached at least the records.
+            return;
+        } else |_| {}
+        try testing.expectEqual(image_peer.Refusal.store_failed, failure.refusal);
+        var back: images.Image = undefined;
+        var errno: u16 = 0;
+        const loaded = images.load(&store, expected, &back, &errno);
+        const has_record = if (loaded) |_| true else |_| false;
+        var root: roots.Root = undefined;
+        const has_root = if (roots.load(&store, tree, &root, &errno)) |_| true else |_| false;
+        if (has_root) try testing.expect(has_record); // The record is written first.
+        if (has_record) try testing.expectEqual(@as(u64, 0), try plan_total());
+        if (!has_record) try testing.expectEqual(@as(u32, 0), written());
+        _ = try import_with(text, tree, .drop, &failure); // Again, no fault: finishes.
+        try images.load(&store, expected, &back, &errno);
+        try roots.load(&store, tree, &root, &errno);
+        try testing.expectEqual(@as(u32, 2), written());
+    }
+    return error.TestUnexpectedResult; // The import never got past its faults.
+}
+
+test "a root that can not be read is a store failure; one that is damaged is left alone" {
+    // Goal: a failing read is not taken for an absent root (REVIEW.md: every failure is
+    // coded). Method: the import is made once to write the root; with the record removed, the
+    // root is made unreadable (store failure), then replaced by text that is no root (the
+    // import succeeds and leaves that text where it is).
+    const tree = start();
+    const text = record_for(tree, "manifest", null);
+    try take(text, tree, .drop);
+    var buffer: fs_mod.PathBuf = undefined;
+    const path = try testing.allocator.dupe(u8, store.root_record_path(&buffer, tree));
+    defer testing.allocator.free(path);
+    images.remove(&store, expected) catch unreachable; // The record is there.
+    files.set_unreadable(path);
+    const failure = try refused(text, tree);
+    try testing.expectEqual(image_peer.Refusal.store_failed, failure.refusal);
+    files.remove_path(path);
+    files.put_file(path, 0o644, "not a root record");
+    try take(text, tree, .drop);
+    try testing.expectEqualStrings("not a root record", files.content_of(path).?);
 }
 
 comptime {
