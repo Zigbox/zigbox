@@ -92,7 +92,40 @@ fn add_node(
     }
 }
 
-const Fault = enum { none, harmless, fail_point, crash_point, small_disk };
+const Fault = enum { none, harmless, fail_point, crash_point, small_disk, attribute };
+
+/// What an attribute fault makes an attribute read fail with. A refusal (EACCES) and a list
+/// too long to read (ERANGE, E2BIG) leave attributes out with a warning; an I/O error, or a call
+/// interrupted past the retry bound, fails the import and never changes its digest.
+const attribute_errnos = [_]u16{
+    fs_sim.errno_io,
+    fs_sim.errno_intr,
+    fs_sim.errno_acces,
+    fs_sim.errno_range,
+    fs_sim.errno_too_big,
+};
+
+/// What an injected fault allows: `skip`, that attributes are left out and the import still
+/// succeeds; `fail`, that the import fails or gives the expected digest.
+pub const Allows = enum { skip, fail };
+
+/// Makes `target`'s attribute reads fail: the list, each attribute's value, or both (the list
+/// fails first). An `E2BIG` from `getxattr` is not a list too long, so it fails the import.
+pub fn inject_attribute_fault(random: std.Random, target: *fs_sim.SimFs) Allows {
+    assert(target.faults.xattr_errno == 0);
+    assert(target.faults.get_xattr_errno == 0);
+    const errno = attribute_errnos[random.uintLessThan(usize, attribute_errnos.len)];
+    const hard = errno == fs_sim.errno_io or errno == fs_sim.errno_intr; // An oracle.
+    switch (random.uintLessThan(u8, 3)) {
+        0 => target.faults.xattr_errno = errno,
+        1 => target.faults.list_xattrs_errno = errno,
+        else => {
+            target.faults.get_xattr_errno = errno;
+            if (errno == fs_sim.errno_too_big) return .fail;
+        },
+    }
+    return if (hard) .fail else .skip;
+}
 
 fn clean_import(target_store: *layout.Store) import.Result {
     var result: import.Result = undefined;
@@ -134,6 +167,36 @@ pub fn fuzz_store(seed: u64) void {
     if (random.boolean()) prepopulate(random);
 
     const fault = random.enumValue(Fault);
+    const allows = inject(random, fault, points);
+
+    var result: import.Result = undefined;
+    diag.reset();
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    const outcome = import.import(&store, &workspace, "/src", options, &result, &diag);
+    if (outcome) |_| {
+        if (!result.digest.eql(expected.digest)) {
+            assert(allows == .skip); // Only a documented skip of attributes changes the digest.
+            assert(result.xattrs_skipped > 0);
+        }
+    } else |_| {
+        assert(diag.code != null);
+        assert(fault != .none); // Only a fault makes an import fail.
+        assert(allows == .fail); // A skip is a warning, never a failure.
+    }
+    files.restart();
+    files.faults = .{};
+    assert(files.open_count() == 0);
+    support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
+    const again = clean_import(&store);
+    assert(again.digest.eql(expected.digest));
+    support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
+    assert(files.open_count() == 0);
+}
+
+/// Sets `files`'s faults for `fault`. Returns what the import may do under them.
+fn inject(random: std.Random, fault: Fault, points: u32) Allows {
+    assert(points > 0);
+    assert(files.faults.fail_mutation == null);
     switch (fault) {
         .none => {},
         .harmless => {
@@ -150,26 +213,9 @@ pub fn fuzz_store(seed: u64) void {
             points + 4,
         ),
         .small_disk => files.faults.bytes_max = files.bytes_live + random.uintLessThan(u64, 200),
+        .attribute => return inject_attribute_fault(random, &files),
     }
-
-    var result: import.Result = undefined;
-    diag.reset();
-    const options: import.Options = .{ .squash_owner = false, .warn = null };
-    const outcome = import.import(&store, &workspace, "/src", options, &result, &diag);
-    if (outcome) |_| {
-        assert(result.digest.eql(expected.digest));
-    } else |_| {
-        assert(diag.code != null);
-        assert(fault != .none); // Only a fault makes an import fail.
-    }
-    files.restart();
-    files.faults = .{};
-    assert(files.open_count() == 0);
-    support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
-    const again = clean_import(&store);
-    assert(again.digest.eql(expected.digest));
-    support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
-    assert(files.open_count() == 0);
+    return .fail;
 }
 
 /// Puts another tree's import in the store: the source loses some files, is imported, and gets

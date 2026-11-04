@@ -60,7 +60,11 @@ pub fn import(request: *const Request, diag: *Diag) Error!Digest {
         },
     };
     defer host.close(job.report.read);
-    const work: namespace.Work = .{ .context = &job, .call = job_call };
+    const work: namespace.Work = .{
+        .context = &job,
+        .call = job_call,
+        .store = request.store,
+    };
     const code = namespace.run(host, request.facts, work, null, diag) catch {
         host.close(job.report.write);
         return error.Failed;

@@ -228,11 +228,10 @@ fn import_tree(target: *layout.Store, path: []const u8) Digest {
     return result.digest;
 }
 
-fn commit(parent: Digest) import.Error!Digest {
-    var result: import.Result = undefined;
+fn commit(parent: Digest, result: *import.Result) import.Error!Digest {
     diag.reset();
     const options: import.Options = .{ .squash_owner = false, .warn = null, .parent = parent };
-    try import.commit(&store, &workspace, "/upper", options, &result, &diag);
+    try import.commit(&store, &workspace, "/upper", options, result, &diag);
     return result.digest;
 }
 
@@ -278,7 +277,7 @@ fn check_diff(parent: Digest, committed: Digest) void {
     assert(same.added + same.removed + same.changed == 0);
 }
 
-const Fault = enum { none, harmless, fail_point, crash_point };
+const Fault = enum { none, harmless, fail_point, crash_point, attribute };
 
 pub fn fuzz_commit(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
@@ -318,6 +317,7 @@ pub fn fuzz_commit(seed: u64) void {
 
 fn run_commit(random: std.Random, parent: Digest, oracle: Digest, chunk_bytes: u32) void {
     const fault = random.enumValue(Fault);
+    var allows: fuzz_store.Allows = .fail;
     switch (fault) {
         .none => {},
         .harmless => {
@@ -329,10 +329,17 @@ fn run_commit(random: std.Random, parent: Digest, oracle: Digest, chunk_bytes: u
             random.uintLessThan(u32, 24),
         .crash_point => files.faults.crash_mutation = files.mutations +
             random.uintLessThan(u32, 24),
+        .attribute => allows = fuzz_store.inject_attribute_fault(random, &files),
     }
-    if (commit(parent)) |digest| {
-        assert(digest.eql(oracle));
+    var result: import.Result = undefined;
+    if (commit(parent, &result)) |_| {
+        // Only a documented skip of attributes (an opaque mark among them) changes the digest.
+        if (!result.digest.eql(oracle)) {
+            assert(allows == .skip);
+            assert(result.xattrs_skipped > 0);
+        }
     } else |_| {
+        assert(allows == .fail); // A skip is a warning, never a failure.
         assert(diag.code != null);
         assert(fault != .none); // Only a fault makes a commit fail.
     }
@@ -340,7 +347,7 @@ fn run_commit(random: std.Random, parent: Digest, oracle: Digest, chunk_bytes: u
     files.faults = .{};
     assert(files.open_count() == 0);
     support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
-    const again = commit(parent) catch unreachable; // Nothing is wrong any more.
+    const again = commit(parent, &result) catch unreachable; // Nothing is wrong any more.
     assert(again.eql(oracle));
     support.check_whole(&files, root_path, chunk_bytes) catch unreachable; // The property.
     assert(files.open_count() == 0);

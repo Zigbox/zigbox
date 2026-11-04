@@ -50,7 +50,9 @@
 //!   has threads) sees host ids. Before its first `read_chunk` it sets
 //!   `store.owners = .{ .outside = outside_owners(host, &facts).map }`, so the owner of a one-chunk
 //!   object is mapped back to the container's ids its id commits to
-//!   (`decisions/2026-11-04-z9-chunk-read-outside.md`).
+//!   (`decisions/2026-11-04-z9-chunk-read-outside.md`). Keep a separate `Store` for the outside
+//!   reader: the one a `Work` uses in `run`'s child keeps `owners` `.inside`, and `run` asserts
+//!   that of `Work.store`.
 //!
 //! There is no long-lived store process: a second call to `run` is a second child.
 //! `decisions/2026-11-04-z6-store-namespace.md` gives the reasons.
@@ -74,6 +76,10 @@ pub const Error = error{Failed};
 pub const Work = struct {
     context: *anyopaque,
     call: *const fn (context: *anyopaque, squash_owner: bool) u8,
+    /// The store the child works on, when the caller opened it before `run`: its `owners` must
+    /// be `.inside`, since inside the namespace `lstat` gives the container's ids. Null when
+    /// the child opens its own store.
+    store: ?*const layout.Store = null,
 };
 
 /// Tells the caller of `run` about a warning (the one-id map).
@@ -149,6 +155,7 @@ pub fn run(
 ) Error!u8 {
     assert(@intFromPtr(work.context) != 0);
     assert(diag.code == null);
+    if (work.store) |store| assert(store.owners == .inside);
     var choice: ids.Choice = undefined;
     ids.choose(host, facts, &choice);
     if (choice.warned) {
@@ -522,7 +529,8 @@ test "store writes done in the child are in the store the parent reads afterward
     };
     var diag: Diag = undefined;
     diag.reset();
-    const work: Work = .{ .context = &job, .call = StoreWork.call };
+    try testing.expect(store.owners == .inside);
+    const work: Work = .{ .context = &job, .call = StoreWork.call, .store = &store };
     const code = try run(sim.interface(), &test_facts, work, null, &diag);
     try testing.expectEqual(@as(u8, 0), code);
     try testing.expect(!job.squash);

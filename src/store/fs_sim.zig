@@ -48,6 +48,8 @@ pub const errno_nospc: u16 = 28;
 pub const errno_loop: u16 = 40;
 pub const errno_inval: u16 = 22;
 pub const errno_nodata: u16 = 61;
+pub const errno_range: u16 = 34;
+pub const errno_too_big: u16 = 7;
 pub const errno_mlink: u16 = 31;
 pub const errno_xdev: u16 = 18;
 
@@ -86,6 +88,12 @@ pub const Faults = struct {
     /// Every `listxattr` and `getxattr` fails with this errno (zero for none), though the file
     /// system is otherwise sound: a flaky attribute read, as a failing disk gives.
     xattr_errno: u16 = 0,
+    /// Only `listxattr` fails with this errno (zero for none): `ERANGE` or `E2BIG` for a list
+    /// longer than the caller's buffer, or a flaky read of the list alone.
+    list_xattrs_errno: u16 = 0,
+    /// Only `getxattr` fails with this errno (zero for none), so a read of one attribute fails
+    /// after the list was read cleanly.
+    get_xattr_errno: u16 = 0,
     /// A change of owner outside a new user namespace is `EPERM` (not a write point: the
     /// kernel refuses before it changes anything). Null for the model's default, which allows it.
     owner_gate: ?OwnerGate = null,
@@ -655,6 +663,7 @@ pub const SimFs = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.faults.xattr_errno != 0) return sim.fail(sim.faults.xattr_errno);
+        if (sim.faults.list_xattrs_errno != 0) return sim.fail(sim.faults.list_xattrs_errno);
         const index = sim.find(path) orelse return sim.fail(errno_noent);
         const node = &sim.nodes[index];
         if (node.xattr_len == 0) return 0;
@@ -669,8 +678,6 @@ pub const SimFs = struct {
         return @intCast(used);
     }
 
-    const errno_range: u16 = 34;
-
     fn get_xattr(
         context: *anyopaque,
         path: [:0]const u8,
@@ -680,6 +687,7 @@ pub const SimFs = struct {
         const sim = from_context(context);
         try sim.begin_call();
         if (sim.faults.xattr_errno != 0) return sim.fail(sim.faults.xattr_errno);
+        if (sim.faults.get_xattr_errno != 0) return sim.fail(sim.faults.get_xattr_errno);
         const index = sim.find(path) orelse return sim.fail(errno_noent);
         const node = &sim.nodes[index];
         if (node.xattr_len == 0) return sim.fail(errno_nodata);
