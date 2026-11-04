@@ -1,0 +1,8 @@
+# Z6: store writes in the namespace child
+*Decided 2026-11-04, by the Z4/Z6 slice.*
+
+Zigcube's agent writes the store (`put_chunk`, `put_tree`, `import_image`) as the user whose namespace maps the ids a container sees, so ownership round-trips. Of the two options in the brief we took (b): **the fetch worker calls `store.namespace.run` itself**, once per process, from its main thread, with a `Work` that does the store's writes and returns an exit code. No new entry point was needed: `run` was already public (`store.namespace`) and gathers the id-map facts itself; what was missing was the contract, now the "For Zigcube (Z6)" section of `src/store/namespace.zig`, and a test of a `Work` that writes the store inside `run`.
+
+Why not (a), a long-lived single-threaded store process: Zigcube's shape is one process per fetch, so a daemon would add a protocol, a lifetime and a second place the store lock is held, for no gain; AGENTS.md also keeps namespace work in a single-threaded child and the thread pool in the parent, which (b) keeps by construction. A worker that needs many writes does them all in one `Work`.
+
+Limits: the child is a copy of the parent, so results come back through the exit code, the store, or a pipe the caller made. `Work.call` gets `squash_owner`; an import started from it must pass it to `Options.squash_owner`. The unit test uses the simulated host (the child runs in-process there); the real `clone3` and id maps are what every `zbx store` command already uses (`store_commands.zig`), exercised by the VM demos, and `vm/all-z6` ran them on this commit (see the report).
