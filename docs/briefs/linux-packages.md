@@ -40,25 +40,23 @@ before the brief is written.
   `zbx doctor` says what to add, as today.
 - The VM harness boots Ubuntu 24.04, which covers the deb. The rpm needs a second guest image.
 
-## Ask first (owner)
+## Settled (owner, 2026-11-04)
 
-1. **The signing tool.** `gpg` on the owner's machine (an external program STYLE.md does not
-   list), or a Zig-native OpenPGP signer (Ed25519, v4 signatures, a few hundred lines in `std`'s
-   crypto). Default: a Zig-native signer reading a key file the owner keeps offline, so the
-   release step needs nothing STYLE.md does not allow. M8 already brings Ed25519 keys and
-   `zbx sign`; the archive signer should share that code, though the archive key stays separate
-   from image-signing keys.
-2. **Where the repository is hosted.** Default: a static site under the project's GitHub Pages
-   (`/apt`, `/rpm`), with the public key beside it.
-3. **Which distributions are supported and tested.** Default: deb for Ubuntu 24.04 and Debian 12;
-   rpm for Fedora (current) and RHEL 9 compatibles (Rocky or Alma).
+1. **Signing tool: `gpg`** on the owner's machine, at release time only (STYLE.md lists it). The
+   Zig release step writes the bytes to sign and embeds or places the signatures `gpg` returns
+   (`InRelease`, `Release.gpg`, `repomd.xml.asc`, each rpm's header signature). The archive key
+   stays separate from M8's image-signing keys.
+2. **Hosting: GitHub Pages**, a static site under the project's Pages (`/apt`, `/rpm`), with the
+   public key beside it.
+3. **Distributions tested:** deb for Ubuntu 24.04 and Debian 12; rpm for Fedora (current) and
+   RHEL 9 compatibles (Rocky or Alma).
 
 ## Unknowns to settle first
 
 1. Whether the VM harness can boot a Fedora or Rocky cloud image as easily as Ubuntu's (cloud-init,
    kernel features `zbx` needs). If not, the rpm demo installs and runs `zbx doctor` only.
-2. Whether rpm's header signature can be made with the same Ed25519 key that dnf accepts on the
-   oldest supported RHEL compatible (RHEL 9's rpm accepts EdDSA; check, do not assume).
+2. Which key type the archive key is. RHEL 9's rpm may refuse EdDSA signatures; RSA 4096 is
+   accepted everywhere. Check on Rocky 9 before the owner makes the key; do not assume.
 
 ## Demo
 
