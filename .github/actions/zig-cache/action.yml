@@ -1,0 +1,44 @@
+name: Cache the Zig build
+description: >
+  Restores and saves Zig's global cache (~/.cache/zig) and the project's .zig-cache, so a job
+  recompiles only what a change touched. The key is the OS, the pinned Zig (the setup-zig action
+  names the version and its checksum), and the hash of build.zig, build.zig.zon and src/**; a
+  restore without an exact hit starts from the newest entry of the same job. Zig's cache is
+  content-addressed, so a restored entry can only skip work that an identical input already did:
+  a step that has side effects (tidy, fuzz, the VM demos, the size gate) runs every time, and a
+  test binary is skipped only when it is byte-identical to one that passed. The VM images keep
+  their own cache entries, and the old-release worktrees are never cached.
+inputs:
+  name:
+    description: Which job's cache this is. One entry per job kind, so two jobs never race to save the same key.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache ~/.cache/zig and .zig-cache
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          !.zig-cache/zbx-vm
+          !.zig-cache/zbx-old-tree-*
+        key: zig-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+        restore-keys: |
+          zig-${{ inputs.name }}-${{ runner.os }}-${{ hashFiles('.github/actions/setup-zig/action.yml') }}-
+    # Zig never deletes from its cache, so a chain of restores that start from the previous entry
+    # only grows. Past this size the restored entry is dropped and the job starts cold, which then
+    # saves a fresh, small entry. GitHub keeps 10 GB for the repository.
+    - name: Drop a restored cache that has grown too large
+      if: steps.cache.outputs.cache-matched-key != ''
+      shell: bash
+      run: |
+        limit_mb=1500
+        size_mb=$(du -smc ~/.cache/zig .zig-cache 2>/dev/null | tail -1 | cut -f1)
+        echo "zig-cache: restored ${size_mb} MB from ${{ steps.cache.outputs.cache-matched-key }}"
+        if [ "${size_mb}" -gt "${limit_mb}" ]; then
+          echo "zig-cache: over ${limit_mb} MB, starting cold"
+          rm -rf ~/.cache/zig
+          find .zig-cache -mindepth 1 -maxdepth 1 ! -name zbx-vm -exec rm -rf {} +
+        fi
