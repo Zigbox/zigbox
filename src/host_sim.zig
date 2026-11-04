@@ -111,6 +111,7 @@ const sink_vtable: store_fs.VTable = .{
     .get_xattr = sink_get_xattr,
     .open_read = sink_open_read,
     .read = sink_read,
+    .read_at = sink_read_at,
     .create = sink_create,
     .open_append = sink_open_append,
     .write = sink_write,
@@ -177,6 +178,9 @@ fn sink_open_read(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
     return error.NotFound;
 }
 fn sink_read(_: *anyopaque, _: store_fs.Fd, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_read_at(_: *anyopaque, _: store_fs.Fd, _: u64, _: []u8) host.Error!u32 {
     return 0;
 }
 fn sink_create(_: *anyopaque, _: [:0]const u8, _: u16) host.Error!store_fs.Fd {
@@ -256,6 +260,9 @@ pub const HostSim = struct {
     /// Result of prctl(PR_GET_SECCOMP).
     seccomp_result: host.Error!u32,
     terminal: bool,
+    /// Set when an injected write failed with EPIPE while SIGPIPE was not ignored: the real
+    /// process would have been killed by the signal, not handled the error.
+    sigpipe_would_kill: bool,
     /// With `terminal`: only this stream is one (null: both).
     terminal_only: ?host.Stream,
     /// The errno of the most recent call, 0 if it succeeded (`Host.last_errno`).
@@ -306,6 +313,7 @@ pub const HostSim = struct {
         sim.uid_value = 1000;
         sim.seccomp_result = 2;
         sim.terminal = false;
+        sim.sigpipe_would_kill = false;
         sim.terminal_only = null;
         sim.errno_last = 0;
         sim.no_color_value = false;
@@ -613,6 +621,10 @@ pub const HostSim = struct {
             sim.faults.write_fault_stream.? == stream;
         if (faulted) {
             if (sim.roll(sim.faults.write_error_per_mille)) {
+                // A real process that did not ignore SIGPIPE would be dead, not handling this.
+                if (sim.faults.write_errno == sim_world.errno_pipe) {
+                    if (!sim.world.broken_pipe_ignored) sim.sigpipe_would_kill = true;
+                }
                 return sim.inject_errno(sim.faults.write_errno);
             }
         }

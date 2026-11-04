@@ -1,0 +1,9 @@
+warning[ZBX-W0801]: the build has steps that use the network
+  while  planning the build
+  cause  their output depends on what the network returns, not only on the
+         inputs
+  cause  steps that use the network: fetch, vendor
+  steps  2
+  fix    pin what they fetch, or fetch it once outside the build as an input
+  more   zbx explain W0801
+  docs   https://zigbox.github.io/zigbox/errors/W0801.html

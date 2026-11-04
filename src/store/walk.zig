@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const digest_mod = @import("digest.zig");
 const layout = @import("layout.zig");
+const object = @import("object.zig");
 const tree = @import("tree.zig");
 const trees = @import("trees.zig");
 
@@ -40,7 +41,81 @@ pub fn walk(
     visitor: anytype,
     failure: *Failure,
 ) Error!void {
+    return walk_limited(
+        store,
+        buffer,
+        stack,
+        visited,
+        root,
+        visitor,
+        constants.store_walk_entries_max,
+        failure,
+    );
+}
+
+/// A file object a tree names, with what a fetcher or a summary needs: how many bytes, how
+/// many chunks (`chunks` reads their hashes of an object the store has; `has_object` says
+/// whether it does).
+pub const ObjectRef = struct {
+    id: Digest,
+    size: u64,
+    content: Digest,
+    chunk_count: u32,
+};
+
+/// Calls `visitor.object(&ref)` for every file entry of every tree reachable from `root`
+/// (once per entry: an object used in two places is seen twice, as `walk` does; a caller that
+/// wants each once keeps its own set), and stops with `too_many_entries` after `entries_max`
+/// entries of all kinds (a walk of exactly `entries_max` entries passes). Trees read are
+/// checked against their names, so a tree a peer sent that was stored damaged is a `damaged`
+/// failure, not a wrong answer.
+///
+/// The `*const ObjectRef` is valid only during the call: copy what is kept. When the walk stops
+/// with `too_many_entries` or `damaged`, the visitor has already seen the entries before the
+/// stop, so a caller that fails must discard what it collected.
+pub fn objects(
+    store: *const Store,
+    buffer: []u8,
+    stack: []Digest,
+    visited: anytype,
+    root: Digest,
+    visitor: anytype,
+    entries_max: u32,
+    failure: *Failure,
+) Error!void {
+    assert(entries_max > 0);
+    assert(entries_max <= constants.store_walk_entries_max);
+    const Adapter = struct {
+        inner: @TypeOf(visitor),
+        chunk_bytes: u32,
+
+        fn entry(adapter: *@This(), found: *const tree.Entry) void {
+            assert(adapter.chunk_bytes > 0);
+            if (found.kind != .file) return;
+            adapter.inner.object(&.{
+                .id = found.object,
+                .size = found.size,
+                .content = found.content,
+                .chunk_count = object.chunk_count(found.size, adapter.chunk_bytes),
+            });
+        }
+    };
+    var adapter: Adapter = .{ .inner = visitor, .chunk_bytes = store.chunk_bytes };
+    return walk_limited(store, buffer, stack, visited, root, &adapter, entries_max, failure);
+}
+
+fn walk_limited(
+    store: *const Store,
+    buffer: []u8,
+    stack: []Digest,
+    visited: anytype,
+    root: Digest,
+    visitor: anytype,
+    entries_max: u32,
+    failure: *Failure,
+) Error!void {
     assert(buffer.len >= constants.store_tree_bytes_max);
+    assert(entries_max <= constants.store_walk_entries_max);
     assert(stack.len > 0);
     var top: usize = 1;
     stack[0] = root;
@@ -66,9 +141,14 @@ pub fn walk(
         var entry: tree.Entry = undefined;
         while (decoder.next(&entry) catch return damaged(failure, digest)) {
             seen += 1;
-            if (seen > constants.store_walk_entries_max) {
+            if (seen > entries_max) {
                 failure.* = .{ .where = digest, .kind = .too_many_entries, .errno = 0 };
                 return error.Failed;
+            }
+            // A size no object can have is a tree no peer should have sent: damage, not a
+            // count the visitor would have to assert on.
+            if (entry.kind == .file and entry.size > file_bytes_max(store)) {
+                return damaged(failure, digest);
             }
             visitor.entry(&entry);
             if (entry.kind != .dir) continue;
@@ -80,6 +160,11 @@ pub fn walk(
             top += 1;
         }
     }
+}
+
+/// The longest file an object of this store can be: its chunks at the most chunks.
+fn file_bytes_max(store: *const Store) u64 {
+    return @as(u64, store.chunk_bytes) * constants.store_chunks_max;
 }
 
 /// True if the table of visited trees has `digest`; it is added if not.

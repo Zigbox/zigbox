@@ -676,6 +676,7 @@ const build_cases = [_]Case{
     .{ .code = .E0805, .args = &.{}, .direct = build_step_failed, .exit = 1 },
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
+    .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
 };
 
 const exec_plan = @import("runtime/exec_plan.zig");
@@ -1204,6 +1205,7 @@ const base_cases = [_]Case{
         .prepare = prepare_store_locked,
         .exit = 1,
     },
+    .{ .code = .E0437, .args = &.{}, .direct = store_image_refused, .exit = 1 },
     .{
         .code = .W0413,
         .args = &.{ "run", "--rootfs", "/srv/alpine", "--name", "web-1", "--", "/bin/sh" },
@@ -2076,12 +2078,35 @@ fn build_step_failed(diag: *Diag) void {
     build_diagnose.step_failed(diag, &failure);
 }
 
+fn build_network_steps(diag: *Diag) void {
+    build_diagnose.network_steps(diag, "fetch, vendor", 2);
+}
+
 fn build_output_refused(diag: *Diag) void {
     build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
 }
 
 fn build_warnings_dropped(diag: *Diag) void {
     image_diagnose.warnings_dropped(diag, 7);
+}
+
+/// E0437 comes from the library calls of Zigcube's contract (`store/image_peer.zig`), which no
+/// zbx command makes: the golden is the diagnostic as `store/diagnose.zig` builds it.
+fn store_image_refused(diag: *Diag) void {
+    const store_diagnose = @import("store/diagnose.zig");
+    var sim: HostSim = undefined;
+    sim.init(1, &.{});
+    var store: @import("store/layout.zig").Store = undefined;
+    store.at(sim.interface(), "/data/store");
+    const failure: @import("store/image_peer.zig").Failure = .{
+        .refusal = .wrong_tree,
+        .digest = Digest.of("another tree"),
+        .manifest = .{ .bytes = @splat(0) },
+        .size = 0,
+        .err = error.IoFailed,
+        .errno = 0,
+    };
+    store_diagnose.image_refused(diag, &store, &failure);
 }
 
 test "golden: every code in default, verbose and JSON output" {

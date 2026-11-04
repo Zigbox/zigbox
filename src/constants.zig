@@ -544,6 +544,8 @@ pub const store_symlink_target_bytes_max: u32 = 4095;
 pub const store_xattrs_max: u32 = 16;
 pub const store_xattr_name_bytes_max: u32 = 255;
 pub const store_xattr_value_bytes_max: u32 = 4096;
+/// Room for the names `listxattr` returns for one file: more than 16 names of 255 bytes.
+pub const store_xattr_names_bytes_max: u32 = 8192;
 /// The attributes' canonical encoding (count, then name and value of each, with lengths).
 pub const store_xattr_blob_bytes_max: u32 = 1 + store_xattrs_max * (4 + 255 + 4096);
 /// One encoded directory: the longest a tree object can be.
@@ -765,6 +767,12 @@ pub const image_settings_words_max: u32 = 48;
 /// oldest goes.
 pub const image_tags_max: u32 = 8;
 pub const images_max: u32 = 4096;
+/// Subtrees waiting on the stack of the walk that checks an image from a peer is complete
+/// (`store/image_peer.zig`); a tree with more directories pending than this is refused. It is
+/// the stack gc walks with (1 MiB of 32-byte ids), so a tree that a pull or gc accepts is not
+/// refused here: one directory holds `store_dir_entries_max` entries, and the walk pushes all
+/// the directories of a tree it has popped, so the stack needs more than twice that.
+pub const image_import_stack_max: u32 = 32768;
 /// `zbx.lock` (`lock_file.zig`): the entries it holds, the bytes of their references together,
 /// and the largest file read or written.
 pub const lock_entries_max: u32 = 256;
@@ -788,6 +796,14 @@ pub const build_string_bytes_max: u32 = 4096;
 pub const build_steps_max: u32 = 64;
 /// A step's name: `[a-z0-9-]`, as a directory name under `/in` and in the report's column.
 pub const build_step_name_bytes_max: u32 = 32;
+/// The longest `--verbose` prefix: a step's name and ` | `.
+pub const stream_prefix_bytes_max: u32 = build_step_name_bytes_max + 3;
+/// The most one streamed write carries: the prefix, a line or a piece of one, and its newline.
+/// It is also the size of each stream's line buffer. At most the kernel's `PIPE_BUF`, so that a
+/// write to a pipe is never split and two steps' lines never mix inside a line.
+pub const stream_write_bytes_max: u32 = 1024;
+/// `PIPE_BUF` on Linux: the largest write to a pipe the kernel keeps whole.
+pub const pipe_buf_bytes: u32 = 4096;
 pub const build_step_inputs_max: u32 = 64;
 /// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
 /// fewer than a run's mounts (`mounts_max`).
@@ -827,6 +843,20 @@ pub const build_source_date_epoch: u64 = 315_532_800;
 /// the length prefixes) fits in the margin.
 pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max +
     16 * 1024;
+/// A build result record (`build/result.zig`): the tree digest and the resolved config in their
+/// canonical encoding. Its strings come from the build file's pool and the base image's
+/// settings; the rest (the magic, counts, digests, length prefixes) fits in the margin.
+pub const build_result_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max + 16 * 1024;
+/// The bytes of a result's labels (keys and values, together): the pool bound, since they come
+/// from the build file.
+pub const build_result_label_bytes_max: u32 = build_pool_bytes;
+/// The room `zbx inspect` gathers a result's config in: every byte of the settings and labels
+/// escaped to six, and the fixed text around them.
+pub const inspect_output_bytes_max: u32 =
+    (image_settings_bytes_max + build_result_label_bytes_max) * 6 + 4096;
+/// Directories two trees of an assembly may have in common at one level (`build/assemble.zig`);
+/// past this a merge is refused rather than grow without bound.
+pub const build_merge_common_max: u32 = 256;
 /// A build cache entry (`build/cache.zig`): its fixed fields and a key's preimage.
 pub const build_cache_entry_bytes_max: u32 = 64 + build_key_preimage_bytes_max;
 /// The entries in `build/cache/` that gc follows. Each names a tree that gc keeps, so past this
@@ -843,6 +873,11 @@ pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings
     build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
 
 comptime {
+    assert(build_result_bytes_max < store_tree_bytes_max);
+    assert(image_import_stack_max <= store_arena_bytes_max / 2 / 32); // A stack of 32-byte ids.
+    assert(image_import_stack_max >= 2 * store_dir_entries_max);
+    assert(build_result_label_bytes_max <= build_pool_bytes);
+    assert(build_merge_common_max <= store_dir_entries_max);
     assert(build_cache_entry_bytes_max < store_tree_bytes_max);
     assert(build_cache_entry_bytes_max < store_arena_bytes_max);
     assert(build_cache_entries_max > build_steps_max);
@@ -854,6 +889,9 @@ comptime {
     assert(build_string_bytes_max >= path_bytes_max);
     assert(build_string_bytes_max <= build_pool_bytes);
     assert(build_step_name_bytes_max < build_string_bytes_max);
+    // A streamed line holds the prefix, at least one byte of the line and its newline.
+    assert(stream_prefix_bytes_max + 2 <= stream_write_bytes_max);
+    assert(stream_write_bytes_max <= pipe_buf_bytes);
     assert(build_label_key_bytes_max < build_string_bytes_max);
     // The parser reads its own rendering back, so the file bound is the smaller.
     assert(build_file_bytes_max < build_render_bytes_max);
@@ -1226,6 +1264,7 @@ comptime {
     assert(bundle_name_bytes_max < dir_name_bytes_max + 32);
 
     assert(store_digest_hex_bytes == store_digest_bytes * 2);
+    assert(store_xattr_names_bytes_max >= store_xattrs_max * (store_xattr_name_bytes_max + 1));
     assert(store_digest_text_bytes == store_digest_hex_bytes + "b3:".len);
     assert(store_prefix_hex_min < store_digest_hex_bytes);
     assert(store_chunk_bytes % 4096 == 0);

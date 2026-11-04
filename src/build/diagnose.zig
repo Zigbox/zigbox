@@ -14,7 +14,11 @@ const graph_mod = @import("graph.zig");
 const inputs_mod = @import("inputs.zig");
 const lexer_mod = @import("lexer.zig");
 const fs_mod = @import("../store/fs.zig");
+const assemble_mod = @import("assemble.zig");
+const result_mod = @import("result.zig");
+const tree_mod = @import("../store/tree.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const Digest = @import("../store/digest.zig").Digest;
 
 const BuildFile = file_mod.BuildFile;
 const Field = file_mod.Field;
@@ -606,27 +610,184 @@ fn kind_name(kind: fs_mod.FileKind) []const u8 {
 
 // ---- A step (E0804 to E0806) ------------------------------------------------------------------
 
-/// `E0804`: the base of a step is not in `zbx.lock` (`locked` false), or is there but its image
-/// is not in the store (`locked` true). A build never resolves a tag itself.
-pub fn base_not_locked(diag: *Diag, step: []const u8, reference: []const u8, locked: bool) void {
+/// `E0804`: the base of a step (`step` null: of the image) is not in `zbx.lock` (`locked`
+/// false), or is there but its image is not in the store (`locked` true). A build never
+/// resolves a tag itself.
+pub fn base_not_locked(diag: *Diag, step: ?[]const u8, reference: []const u8, locked: bool) void {
     assert(diag.code == null);
-    assert(step.len > 0);
     assert(reference.len > 0);
     var reference_echo: Echo = undefined;
     const shown = text_util.sanitise(&reference_echo, reference);
+    var while_storage: [constants.build_step_name_bytes_max + 16]u8 = undefined;
+    var owner_storage: [constants.build_step_name_bytes_max + 16]u8 = undefined;
+    const owner = if (step) |name|
+        std.fmt.bufPrint(&owner_storage, "step \"{s}\"", .{name}) catch unreachable // Fits.
+    else
+        "the image";
+    const doing = if (step) |name|
+        std.fmt.bufPrint(&while_storage, "build step \"{s}\"", .{name}) catch unreachable // Fits.
+    else
+        "the image";
+    assert(owner.len > 0);
     diag.raise(.E0804);
-    diag.while_("resolving the base of build step \"{s}\"", .{step});
+    diag.while_("resolving the base of {s}", .{doing});
     if (locked) {
-        diag.cause("base \"{s}\" of step \"{s}\" is in zbx.lock but its image is not in " ++
-            "the store", .{ shown, step });
+        diag.cause("base \"{s}\" of {s} is in zbx.lock but its image is not in the store", .{
+            shown, owner,
+        });
     } else {
-        diag.cause("base \"{s}\" of step \"{s}\" is not in zbx.lock, and a build never " ++
-            "resolves a tag itself", .{ shown, step });
+        diag.cause("base \"{s}\" of {s} is not in zbx.lock, and a build never resolves a " ++
+            "tag itself", .{ shown, owner });
     }
-    diag.context("step", "{s}", .{step});
+    if (step) |name| diag.context("step", "{s}", .{name});
     diag.context("base", "{s}", .{shown});
     diag.fix_with("pull it, which pins it in zbx.lock", "zbx pull {s}", .{shown});
     assert(diag.code.? == .E0804);
+}
+
+/// `E0422` or `E0423`: a build result record that cannot be used: it does not hash to its name
+/// or does not parse (`newer` false: damaged), or a newer zbx wrote it (`newer` true).
+pub fn result_unusable(diag: *Diag, digest: Digest, newer: bool) void {
+    assert(diag.code == null);
+    if (newer) {
+        diag.raise(.E0423);
+        diag.while_("reading the build result", .{});
+        diag.cause("build result {s} was written by a newer zbx", .{digest.text()});
+        diag.context("digest", "{s}", .{digest.text()});
+        diag.fix(.{ .sentence = "upgrade zbx to read it, or build the project again" });
+    } else {
+        diag.raise(.E0422);
+        diag.while_("reading the build result", .{});
+        diag.cause("build result {s} is damaged", .{digest.text()});
+        diag.context("digest", "{s}", .{digest.text()});
+        diag.fix(.{ .sentence = "build the project again to write the record anew" });
+    }
+    assert(diag.code != null);
+}
+
+/// `E0804`: the registry answered a pull by the lock's digest with another manifest, so the
+/// lock names an index (or a manifest of another platform) and not the image to build on.
+pub fn locked_manifest_mismatch(
+    diag: *Diag,
+    reference: []const u8,
+    returned: []const u8,
+    locked: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(returned.len >= "sha256:".len + 12);
+    assert(locked.len >= "sha256:".len + 12);
+    var reference_echo: Echo = undefined;
+    const shown = text_util.sanitise(&reference_echo, reference);
+    diag.raise(.E0804);
+    diag.while_("pulling the locked base \"{s}\"", .{shown});
+    // The cause is cut at a line; the digests are whole in the context lines below it.
+    const short = "sha256:".len + 12;
+    diag.cause("locked base {s}: registry returned manifest {s}, lock says {s}", .{
+        shown, returned[0..short], locked[0..short],
+    });
+    diag.context("base", "{s}", .{shown});
+    diag.context("got", "{s}", .{returned});
+    diag.context("lock", "{s}", .{locked});
+    diag.fix_with("pin it again", "zbx pull {s}", .{shown});
+    assert(diag.code.? == .E0804);
+}
+
+fn kind_word(kind: tree_mod.Kind) []const u8 {
+    return switch (kind) {
+        .file => "file",
+        .dir => "directory",
+        .symlink => "link",
+    };
+}
+
+/// An add of `image.add`, as the build file writes it.
+pub const AddText = struct { from: []const u8, to: []const u8 };
+
+/// `E0807` for an `image.add` list that cannot make one image: two adds (or an add and the base)
+/// want different things at one path, or the result passes the store's bounds. `index` is the
+/// add that failed, `from` and `to` its fields. `earlier` is the add that put what is already
+/// at a conflicting path there, null when the base did.
+pub fn assembly_refused(
+    diag: *Diag,
+    failure: *const assemble_mod.Failure,
+    index: u32,
+    from: []const u8,
+    to: []const u8,
+    earlier: ?AddText,
+) void {
+    assert(diag.code == null);
+    assert(failure.* != .io);
+    assert(failure.* != .damaged);
+    var from_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const from_shown = text_util.sanitise(&from_echo, from);
+    const to_shown = text_util.sanitise(&to_echo, to);
+    diag.raise(.E0807);
+    diag.while_("assembling the image of the build file", .{});
+    switch (failure.*) {
+        .conflict => |conflict| conflict_refused(diag, conflict, from_shown, to_shown, earlier),
+        .too_deep => {
+            diag.cause("the image would be deeper than {d} directories at .image.add {s} -> {s}", .{
+                constants.store_depth_max, from_shown, to_shown,
+            });
+            diag.fix(.{ .sentence = "shorten the destination in .image.add of zbx.build.zon" });
+        },
+        .too_large, .too_common => {
+            diag.cause("the image is too large to assemble at .image.add {s} -> {s}", .{
+                from_shown, to_shown,
+            });
+            diag.fix(.{ .sentence = "add fewer or smaller directories to .image.add" });
+        },
+        .io, .damaged => unreachable,
+    }
+    diag.context("add", "{d}", .{index + 1});
+    assert(diag.code.? == .E0807);
+}
+
+fn conflict_refused(
+    diag: *Diag,
+    conflict: assemble_mod.Conflict,
+    from_shown: []const u8,
+    to_shown: []const u8,
+    earlier: ?AddText,
+) void {
+    var path_echo: Echo = undefined;
+    const path = text_util.sanitise(&path_echo, conflict.path[0..conflict.path_len]);
+    var source_storage: [2 * constants.arg_echo_bytes_max + 32]u8 = undefined;
+    var from_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const source = if (earlier) |add| std.fmt.bufPrint(&source_storage, ".image.add {s} -> {s}", .{
+        text_util.sanitise(&from_echo, add.from),
+        text_util.sanitise(&to_echo, add.to),
+    }) catch unreachable else "the base image"; // The buffer holds two echoes.
+    diag.cause("{s} has a {s} at {s}; .image.add {s} -> {s} brings a {s}", .{
+        source,     kind_word(conflict.present), path,
+        from_shown, to_shown,                    kind_word(conflict.brought),
+    });
+    diag.context("path", "{s}", .{path});
+    diag.context("first", "{s}", .{source});
+    if (earlier == null) {
+        diag.fix(.{ .sentence = "give the add another destination in .image.add, " ++
+            "or build on a base that does not have that path" });
+    } else {
+        diag.fix(.{ .sentence = "give the two adds different paths, or remove one of them " ++
+            "in .image.add of zbx.build.zon" });
+    }
+}
+
+/// `E0807` for an `image.config` that does not fit its record once the base's settings are
+/// merged in: `field` is the one that is too large.
+pub fn config_too_large(diag: *Diag, field: result_mod.Refusal) void {
+    assert(diag.code == null);
+    assert(@tagName(field).len > 0);
+    diag.raise(.E0807);
+    diag.while_("resolving the config of the image", .{});
+    diag.cause("the image's {s} does not fit the image record once merged with the base's", .{
+        @tagName(field),
+    });
+    diag.context("field", "{s}", .{@tagName(field)});
+    diag.fix(.{ .sentence = "shorten .image.config in zbx.build.zon, or use a smaller base" });
+    assert(diag.code.? == .E0807);
 }
 
 /// How a step's container ended, when it did not exit 0.
@@ -779,6 +940,61 @@ fn signal_name(number: u8) []const u8 {
     return name;
 }
 
+/// The start of W0801's last cause; the names follow it, so they have the field less this.
+pub const network_label = "steps that use the network: ";
+
+/// `W0801`: the build has steps with `network = true`. `names` is their names in the build's
+/// order, joined by `, ` and cut to fit (`network_names`); `count` is how many there are.
+pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    assert(names.len > 0);
+    diag.raise(.W0801);
+    diag.while_("planning the build", .{});
+    // The newest cause is what the default view shows, so it is the one that names the steps.
+    diag.cause("their output depends on what the network returns, not only on the inputs", .{});
+    diag.cause(network_label ++ "{s}", .{names});
+    diag.context("steps", "{d}", .{count});
+    diag.fix(.{
+        .sentence = "pin what they fetch, or fetch it once outside the build as an input",
+    });
+    assert(diag.code.? == .W0801);
+}
+
+/// The names of the network steps, joined by `, ` into `out`; when they do not fit, the ones
+/// that do and `, ...`. Returns the used prefix, empty for no names.
+pub fn network_names(out: []u8, names: []const []const u8) []const u8 {
+    assert(out.len >= 8);
+    const more = ", ...";
+    var length: usize = 0;
+    for (names, 0..) |name, at| {
+        assert(name.len > 0);
+        const separator: usize = if (at == 0) 0 else 2;
+        const last = at + 1 == names.len;
+        const reserve: usize = if (last) 0 else more.len;
+        if (length + separator + name.len + reserve > out.len) {
+            if (at == 0) {
+                // Not even the first name fits: cut the name itself.
+                const dots = "...";
+                const kept = @min(out.len - dots.len, name.len);
+                @memcpy(out[0..kept], name[0..kept]);
+                @memcpy(out[kept..][0..dots.len], dots);
+                return out[0 .. kept + dots.len];
+            }
+            if (length + more.len > out.len) length = out.len - more.len;
+            @memcpy(out[length..][0..more.len], more);
+            return out[0 .. length + more.len];
+        }
+        if (at > 0) {
+            out[length] = ',';
+            out[length + 1] = ' ';
+        }
+        @memcpy(out[length + separator ..][0..name.len], name);
+        length += separator + name.len;
+    }
+    return out[0..length];
+}
+
 /// `E0806`: a step left in `/out` what an output cannot hold. `relative` is its path below
 /// `/out`, starting with `/`; `kind` names it ("FIFO").
 pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind: []const u8) void {
@@ -795,4 +1011,52 @@ pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind:
     diag.context("path", "/out{s}", .{path});
     diag.fix(.{ .sentence = "have the step remove it, or make it somewhere other than /out" });
     assert(diag.code.? == .E0806);
+}
+
+/// ZBX-E0005: the operand of `inspect` is no build result: not a full digest, or no record of
+/// that name in the store.
+pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {
+    assert(diag.code == null);
+    var storage: Echo = undefined;
+    const echo = text_util.sanitise(&storage, operand);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    if (absent) {
+        diag.cause("the store has no build result '{s}'", .{echo});
+        diag.fix(.{
+            .sentence = "build the project, and use the digest it prints:",
+            .command = "zbx build",
+        });
+    } else {
+        diag.cause("'{s}' is not the digest of a build result: b3: and 64 hex digits", .{echo});
+        diag.fix(.{
+            .sentence = "give the digest `zbx build` printed:",
+            .command = "zbx inspect b3:<64 hex>",
+            .template = true,
+        });
+    }
+    diag.context("cmd", "inspect", .{});
+    diag.context("arg", "{s}", .{echo});
+}
+
+test "network_names joins the names and cuts what does not fit with an ellipsis" {
+    // Goal: the W0801 cause always fits its field, names the steps in order, and says when it
+    // left some out. Method: names that fit exactly, one past, and a single name too long.
+    var out: [20]u8 = undefined;
+    try std.testing.expectEqualStrings("a", network_names(&out, &.{"a"}));
+    try std.testing.expectEqualStrings("fetch, other", network_names(&out, &.{ "fetch", "other" }));
+    const exact = network_names(&out, &.{ "aaaaaaaa", "bbbbbbbb" }); // 18 bytes.
+    try std.testing.expectEqualStrings("aaaaaaaa, bbbbbbbb", exact);
+    const cut = network_names(&out, &.{ "aaaaaaaa", "bbbbbbbb", "c" });
+    try std.testing.expectEqualStrings("aaaaaaaa, ...", cut);
+    const long = network_names(&out, &.{&@as([25]u8, @splat('x'))});
+    try std.testing.expectEqualStrings("xxxxxxxxxxxxxxxxx...", long);
+    try std.testing.expect(long.len <= out.len);
+    // The boundary: the first name fits alone but not with the `, ...` that a later name needs,
+    // and is shorter than the room for a cut name. It is kept whole, then the dots.
+    var small: [8]u8 = @splat('#');
+    const short_first = network_names(&small, &.{ "abcd", "e" });
+    try std.testing.expectEqualStrings("abcd...", short_first);
+    const same = network_names(&small, &.{ "abcde", "f" }); // kept == out.len - 3 == 5.
+    try std.testing.expectEqualStrings("abcde...", same);
 }

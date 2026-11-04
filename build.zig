@@ -116,6 +116,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
+    "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -142,6 +143,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
+    "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -353,7 +355,12 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
     .{
         .step = "demo-m7",
         .root = "src/testing/vm/main_m7.zig",
-        .help = "Run the M7 demo: zbx build, one step, miss then hit",
+        .help = "Run the M7 demo: zbx build, the six steps, two VMs, upgrade from 0.2.0",
+    },
+    .{
+        .step = "demo-z7",
+        .root = "src/testing/vm/main_z7.zig",
+        .help = "Run the Z7 check: a host port forwarded into the guest (docs/vm-module.md)",
     },
     .{
         .step = "top20",
@@ -440,6 +447,7 @@ fn old_commit_of(step: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, step, "demo-m5")) return releases.m5_commit;
     if (std.mem.eql(u8, step, "demo-m6")) return releases.m6_commit;
     if (std.mem.eql(u8, step, "demo-m6b")) return releases.m6b_commit;
+    if (std.mem.eql(u8, step, "demo-m7")) return releases.m7_commit;
     return null;
 }
 

@@ -15,6 +15,39 @@
 //!
 //! Single-threaded, as docs/SPEC.md requires of everything that makes a namespace: the caller is
 //! a program with one thread, or a thread that is the only one using this process's host.
+//!
+//! ## For Zigcube (Z6)
+//!
+//! A program that writes the store (a fetch worker: `put_chunk`, `put_tree`, `import_image`)
+//! calls `run` itself and does all of one batch of writes in the `Work` it passes (`call` returns
+//! an exit code), with a `doctor.Facts` it owns.
+//!
+//! - **Owner.** Only the tree import, `store/import.zig`'s `Options.squash_owner`, takes an
+//!   owner: set it from the `squash_owner` argument of `call`, since a host with the one-id map
+//!   records every owner as 0. `put_chunk`, `put_tree` and `import_image` take no owner: the ids
+//!   they store come from the file system they run on, which inside `run` is the mapped one.
+//! - **One process, one thread, one batch.** `run` makes its child with `clone3`, and a
+//!   namespace may only be made by a single-threaded process. So each batch of store writes
+//!   needs a fresh process that has started no thread: start the worker by re-exec (a new
+//!   `zbx` or agent process), never by `fork` from a multi-threaded parent, and call `run` from
+//!   its main thread before any pool exists. The cost is one `clone3` and one id map (a
+//!   `newuidmap` and `newgidmap` run on a host with the subordinate ranges) for every `run`.
+//!   A worker that needs many writes does them all in one `Work`.
+//! - **Results.** The child is a copy of the parent, so what it sets in memory is not seen by
+//!   the parent. It returns an exit code, what it wrote to the store (the parent reads that
+//!   afterwards) or bytes through a pipe the caller made before `run` (handles are inherited):
+//!
+//!   ```zig
+//!   const pipe = try host.pipe();                  // before `run`, in the parent
+//!   // in `call`, in the child:  host.write_handle_all(pipe.write, &digest.bytes) catch return 1;
+//!   const code = try run(host, &facts, work, null, &diag);
+//!   host.close(pipe.write);                        // the parent's copy, so read sees the end
+//!   const count = try host.read_some(pipe.read, &buffer); // the child's bytes (0 if none)
+//!   host.close(pipe.read);
+//!   ```
+//!
+//! There is no long-lived store process: a second call to `run` is a second child.
+//! `decisions/2026-11-04-z6-store-namespace.md` gives the reasons.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -352,4 +385,94 @@ test "a helper that refuses the map is E0419, the child is reaped, and nothing r
     try testing.expectEqual(@as(u32, 0), probe.calls);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
     try testing.expectEqual(@as(u32, 0), sim.world.unreaped_children());
+}
+
+const image_peer = @import("image_peer.zig");
+const images = @import("images.zig");
+const layout = @import("layout.zig");
+const store_support = @import("test_support.zig");
+const trees = @import("trees.zig");
+const tree_mod = @import("tree.zig");
+const fs_sim = @import("fs_sim.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
+
+var store_files: fs_sim.SimFs = undefined;
+var store_memory: image_peer.Memory = undefined;
+
+/// Work that writes the store in the child: a tree, then an image record for it.
+const StoreWork = struct {
+    store: *layout.Store,
+    tree: *const @import("digest.zig").Digest,
+    bytes: []const u8,
+    text: []const u8,
+    squash: bool = false,
+
+    fn call(context: *anyopaque, squash_owner: bool) u8 {
+        const job: *StoreWork = @ptrCast(@alignCast(context));
+        job.squash = squash_owner;
+        var failure: @import("object.zig").Failure = undefined;
+        _ = trees.put_checked(job.store, job.tree.*, job.bytes, &failure) catch return 1;
+        var refusal: image_peer.Failure = undefined;
+        const options: image_peer.Options = .{
+            .expected_manifest = Sha256.of("manifest"),
+            .tags = .drop,
+            .entries_max = 16,
+        };
+        const text = job.text;
+        const memory = &store_memory;
+        const tree = job.tree.*;
+        const taken = image_peer.import_record(job.store, memory, text, tree, options, &refusal);
+        _ = taken catch return 2;
+        return 0;
+    }
+};
+
+test "store writes done in the child are in the store the parent reads afterwards" {
+    // Goal: the API shape of Z6: a `Work` that writes the store compiles against `run`, gets
+    // its `squash_owner`, and its writes are readable by the caller. Method: a fetch-worker-like
+    // `Work` puts a tree and imports an image record for it inside `run`; the parent then finds
+    // both through the same store. This does NOT prove isolation: the simulated host runs the
+    // child in this process, sharing memory, so a missing child would pass too. The real
+    // `clone3` and id maps are what the VM demos run.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 1);
+    store_files.init(1);
+    sim.store_fs = &store_files;
+    store_files.put_dir("/data", 0o755);
+    store_support.make_store_directories(&store_files, "/data/store");
+    var store: layout.Store = undefined;
+    store.at(sim.interface(), "/data/store");
+    var bytes: [64]u8 = undefined;
+    var writer = tree_mod.Writer.init(&bytes);
+    const empty = writer.finish();
+    const whole = @import("digest.zig").Digest.of(empty);
+    var image: images.Image = undefined;
+    image.tag_count = 0;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = Sha256.of("config");
+    image.tree = whole;
+    image.time = 1;
+    image.layer_count = 0;
+    image.settings.clear();
+    var text: [constants.image_record_bytes_max]u8 = undefined;
+    var job: StoreWork = .{
+        .store = &store,
+        .tree = &whole,
+        .bytes = empty,
+        .text = images.render(&image, &text),
+    };
+    var diag: Diag = undefined;
+    diag.reset();
+    const work: Work = .{ .context = &job, .call = StoreWork.call };
+    const code = try run(sim.interface(), &test_facts, work, null, &diag);
+    try testing.expectEqual(@as(u8, 0), code);
+    try testing.expect(!job.squash);
+    try testing.expect(try trees.has(&store, whole));
+    var loaded: images.Image = undefined;
+    var errno: u16 = 0;
+    try images.load(&store, image.manifest, &loaded, &errno);
+    try testing.expect(loaded.tree.eql(whole));
+    try testing.expectEqual(@as(u32, 0), sim.open_count());
 }

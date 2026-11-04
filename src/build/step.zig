@@ -16,7 +16,8 @@
 //!   path (`log_group`), so two projects' steps of one name keep apart (the last line is kept
 //!   for the diagnostic), and the run leaves nothing (`run.discard`). Then,
 //!   in the store's namespace again: after a zero exit `/out` is imported (owners 0:0, no
-//!   attributes, no root record: the cache entry roots it; a device, FIFO or socket is E0806),
+//!   attributes, a root labelled `build:<step>` until the parent writes the cache entry, which
+//!   then roots it (N8); a device, FIFO or socket is E0806),
 //!   and the work directory is removed. A non-zero end is E0805.
 
 const std = @import("std");
@@ -78,6 +79,9 @@ pub const Request = struct {
     /// Where the logs of this build file's steps are kept (`log_group`), `log_group_bytes`.
     group: []const u8,
     warn: ?run.Warn = null,
+    /// Stream the step's output to standard error as it runs, each line after `<step> | `
+    /// (`zbx build --verbose`). The log is kept either way.
+    stream: bool = false,
 };
 
 pub const log_group_bytes = 16;
@@ -237,8 +241,11 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
             .pids = constants.build_step_pids,
         },
     };
+    var prefix_storage: [run.stream_prefix_bytes_max]u8 = undefined;
+    const prefix = if (request.stream) stream_prefix(&prefix_storage, spec.name) else "";
     const options: run.StartOptions = .{
         .warn = request.warn,
+        .stream_prefix = prefix,
         .timeout_ms = constants.build_step_timeout_ms,
         .image_workspace = &ws.image,
         .keep_log = true,
@@ -254,6 +261,13 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
     const reason = run.wait(&ws.handle);
     assert(ws.handle.status == .stopped);
     return reason;
+}
+
+/// `<step> | `, the start of each streamed line.
+fn stream_prefix(out: *[run.stream_prefix_bytes_max]u8, name: []const u8) []const u8 {
+    assert(name.len > 0);
+    assert(name.len <= constants.build_step_name_bytes_max);
+    return std.fmt.bufPrint(out, "{s} | ", .{name}) catch unreachable; // `name` is bounded.
 }
 
 /// Refuses, naming the step and the file, an environment the run would refuse with no step in
@@ -596,16 +610,27 @@ fn made_nothing(store: *const Store, diag: *Diag, err: fs_mod.Error) Error {
     return error.Failed;
 }
 
+/// The source of the root a step's import leaves until the cache entry holds the output.
+pub const output_root_prefix = "build:";
+
 fn import_output(store: *Store, job: *Job, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(job.action == .import);
     var refusal: Refusal = .{ .step = job.request.spec.name };
+    // The output is rooted until the parent has written the cache entry, which then holds it
+    // (N8): `compose.zig` removes a root whose source starts with `output_root_prefix`.
+    var label: [output_root_prefix.len + constants.build_step_name_bytes_max]u8 = undefined;
+    const labelled = std.fmt.bufPrint(&label, output_root_prefix ++ "{s}", .{
+        job.request.spec.name,
+    }) catch unreachable; // The buffer holds the prefix and the longest name.
     const options: import_mod.Options = .{
         .squash_owner = true,
         .warn = null,
         .drop_xattrs = true,
         .refuse_special = .{ .context = &refusal, .call = Refusal.call },
-        .save_root = false,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = labelled,
     };
     const ws = job.ws;
     const out = ws.paths.out_text();
@@ -638,7 +663,8 @@ fn cleanup(request: *const Request, ws: *Workspace) void {
 /// Clears `build/work`, which a crashed or killed step leaves its directory in, with the log
 /// temporary inside it. Call it before a build starts steps. It takes the store lock
 /// exclusively, so no step is in flight; if the lock is busy a build is running, and its
-/// directories are not leftovers, so nothing is done and nothing is said.
+/// directories are not leftovers, so nothing is done and nothing is said. A store that does not
+/// exist yet (a clean machine's first build) has nothing to sweep, and is not an error.
 pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     assert(diag.code == null);
     var store: Store = undefined;
@@ -648,6 +674,8 @@ pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     }
     lock.hold(&store, .exclusive, "build sweep") catch |err| {
         if (err == error.Busy) return;
+        // A machine that has never written the store has no lock file and no leftovers.
+        if (store.lock_error == error.NotFound) return;
         const operation = "taking the store lock";
         store_diagnose.write_failed(diag, &store, operation, store.lock_error, store.lock_errno);
         return error.Failed;
@@ -735,4 +763,14 @@ test "a step's mounts: /src, each need at /in/<name>, and /out last as the proje
     try testing.expect(std.mem.startsWith(u8, mounts[0].source, "/data/zbx/cache/"));
     for (mounts[0..3]) |mount| try testing.expect(mount.kind == .bind);
     try testing.expect(mounts[3].kind == .mount);
+}
+
+test "the stream prefix is the step name, a bar and a space" {
+    // Goal: `--verbose` lines read `<step> | <line>`, as the brief says. Method: format the
+    // longest name and a short one.
+    var out: [run.stream_prefix_bytes_max]u8 = undefined;
+    try std.testing.expectEqualStrings("compile | ", stream_prefix(&out, "compile"));
+    const longest: [constants.build_step_name_bytes_max]u8 = @splat('n');
+    const expected = longest ++ " | ".*;
+    try std.testing.expectEqualStrings(&expected, stream_prefix(&out, &longest));
 }

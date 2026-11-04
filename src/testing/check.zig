@@ -98,6 +98,15 @@ pub fn main(init: std.process.Init) !u8 {
         };
     }
     const as_user = !on_macos and !std.mem.eql(u8, user, "-") and std.os.linux.geteuid() == 0;
+    if (as_user and !user_can_run(io, user, zig)) {
+        // The usual cause is zig installed under a directory only root can enter (a temp
+        // directory of a root-only session); `runuser` would end in a bare EACCES.
+        try err.print("check: FAIL {s}{s} ({s} cannot run {s}: it is under a directory {s} " ++
+            "cannot read; install zig somewhere world-readable, or pass -Dcheck-user=-)\n", .{
+            commit, dirty, user, zig, user,
+        });
+        return 1;
+    }
     if (as_user) {
         test_as(gpa, io, zig, user) catch {
             try err.print("check: FAIL {s}{s} (zig build test as {s})\n", .{ commit, dirty, user });
@@ -130,6 +139,12 @@ fn note_cache(gpa: std.mem.Allocator, io: Io, err: *Io.Writer) void {
     err.print("check: note: .zig-cache/o holds {d} MiB; outside a build, rm -rf .zig-cache\n", .{
         bytes >> 20,
     }) catch {};
+}
+
+/// True if `user` can execute the file `path` (every directory above it must be searchable).
+fn user_can_run(io: Io, user: []const u8, path: []const u8) bool {
+    run(io, &.{ "runuser", "-u", user, "--", "test", "-x", path }, null) catch return false;
+    return true;
 }
 
 /// `zig build test` as `user` in a scratch worktree of HEAD that `user` owns.

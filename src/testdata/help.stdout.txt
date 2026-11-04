@@ -17,6 +17,7 @@ commands:
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   build --graph   check the project's zbx.build.zon and print its steps in order (see below)
+  inspect <id>    print a build result: its tree and the config it runs with
   schema <cmd>    print the JSON schema of a command's output
   explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
                   document, see zbx schema explain)
@@ -140,6 +141,13 @@ build:
   directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
   prints the steps in the order a build starts them, then the image, without running
   anything (--output json: nodes and edges, see zbx schema build-graph)
+  zbx build [-f <file>]
+  builds the steps, then the image: one row per step (hit or miss, its time, and net for a
+  step with network = true) and the result digest; --output json: one zbx.build/1 line per
+  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
+  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
+  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
+  prints its tree and config (--output json: see zbx schema inspect)
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]

@@ -542,6 +542,31 @@ test "the root record has the source, the time and the totals" {
     try testing.expectEqual(result.bytes, record.bytes);
 }
 
+test "keep_existing_root leaves the record of a root that is already there" {
+    // Goal: N8, a user's root of a tree is not rewritten by an import of the same tree under
+    // another label. Method: import as "mine"; import again with the option and the label
+    // "build:x" (the source stays "mine"); then without it (the label is replaced).
+    start(1, 0);
+    var warnings: Warnings = .{};
+    var result: import.Result = undefined;
+    var options = warnings.options(false);
+    options.label = "mine";
+    try import.import(&store, &workspace, "/src", options, &result, &diag);
+    options.label = "build:x";
+    options.keep_existing_root = true;
+    diag.reset();
+    try import.import(&store, &workspace, "/src", options, &result, &diag);
+    var record: roots.Root = undefined;
+    var errno: u16 = 0;
+    try roots.load(&store, result.digest, &record, &errno);
+    try testing.expectEqualStrings("mine", record.source_text());
+    options.keep_existing_root = false;
+    diag.reset();
+    try import.import(&store, &workspace, "/src", options, &result, &diag);
+    try roots.load(&store, result.digest, &record, &errno);
+    try testing.expectEqualStrings("build:x", record.source_text());
+}
+
 test "the chunk hashes of an object are its stored list, or the one hash that is implied" {
     // Goal: `chunk_hashes` (the library's `chunks(object_id)`) agrees with the bytes. Method: a
     // chunk of 8 bytes; a file of 20 bytes (stored list of three), one of 8 (implied, one hash)

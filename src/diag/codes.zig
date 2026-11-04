@@ -123,6 +123,7 @@ pub const Code = enum(u8) {
     E0434,
     E0435,
     E0436,
+    E0437,
     W0410,
     W0411,
     W0412,
@@ -189,6 +190,7 @@ pub const Code = enum(u8) {
     E0805,
     E0806,
     E0807,
+    W0801,
     E1001,
     E1002,
     E1003,
@@ -1809,6 +1811,27 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0437,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "an image record from a peer was not taken",
+        .explanation =
+        \\An image record says which tree an image became and how to run it (its
+        \\entrypoint, command, environment, directory and user). A node that fetched
+        \\the tree from a peer takes the peer's record so that the tree runs like a
+        \\pulled image and is kept by gc. The record is not trusted: it is taken
+        \\only if it reads as a record, names the tree that was fetched and the image
+        \\(manifest) the node asked for, that tree and every file below it are whole
+        \\in the store, and no record of the same manifest names another tree. The
+        \\message says which of these failed.
+        \\
+        \\Nothing was written. Fetch what is missing and import the record again, or
+        \\ask the peer for a record of the tree you fetched. A record of the same
+        \\manifest that names another tree is the node's own: the node keeps it, and
+        \\the peer's tree is not taken over it.
+        ,
+    },
+    .{
         .code = .W0410,
         .severity = .warning,
         .blame = .user,
@@ -2858,6 +2881,24 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W0801,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the build has steps that use the network",
+        .explanation =
+        \\A step with .network = true in the build file runs with the network (through
+        \\pasta), so what it produces can depend on what the network returned that
+        \\day, not only on the build's inputs. zbx still caches such a step like any
+        \\other, so a rebuild does not fetch again and the result digest stays put
+        \\until an input changes; the report marks the step "net". A fresh machine
+        \\with an empty cache can build a different result.
+        \\
+        \\The cause names the steps. To make the build reproducible, pin what the
+        \\step fetches (a version, or a checksum the command verifies), or fetch it
+        \\once, outside the build, and list the file as an input.
+        ,
+    },
+    .{
         .code = .E1001,
         .severity = .@"error",
         .blame = .environment,
@@ -3310,12 +3351,12 @@ pub fn can_end_run(code: Code) bool {
         .E0714, .E0715, .E0716, .W0703 => false,
         .E0402, .E0403, .E0404, .E0406 => false,
         .E0414, .E0418, .E0420, .E0426, .E0427, .E0428 => false,
-        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436 => false,
+        .E0429, .E0430, .E0431, .E0432, .E0433, .E0434, .E0435, .E0436, .E0437 => false,
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
-        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807 => false,
+        .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

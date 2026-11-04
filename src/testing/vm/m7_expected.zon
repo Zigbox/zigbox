@@ -1,0 +1,5 @@
+.{
+    // The result digest of the demo project (src/testing/vm/m7_project), as a recorded run of
+    // `zig build demo-m7` printed it in the clean VM (run 41738487959, equal to the first VM's).
+    .digest = "b3:55077a8f64392bb4607609b332a931ce613795fdaf80f5e7a4324a03fb47df62",
+}

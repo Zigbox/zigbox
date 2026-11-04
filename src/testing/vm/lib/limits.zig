@@ -32,6 +32,12 @@ pub const guest_memory_mib: u32 = 2048;
 pub const guest_cpus: u32 = 2;
 /// Extra raw disks a guest can be given (`/dev/vdb` onward).
 pub const disks_max: u32 = 4;
+/// TCP forwards from the host into one guest (`Seed.forwards`).
+pub const forwards_max: u32 = 8;
+/// One `,hostfwd=tcp:255.255.255.255:65535-:65535` argument, with room to spare.
+pub const forward_argument_bytes_max: u32 = 64;
+/// The refusal line for a bad forward (`forward.describe`).
+pub const forward_message_bytes_max: u32 = 160;
 
 /// The rendered cloud-init user data and meta data.
 pub const user_data_bytes_max: u32 = 16 * 1024;
@@ -47,6 +53,9 @@ comptime {
     assert(command_output_bytes_max < console_bytes_max);
     assert(command_bytes_max < 4096); // The tty line discipline truncates longer lines.
     assert(poll_step_ms > 0);
+    assert(forwards_max > 0);
+    assert(forwards_max <= 64); // A guest with more forwards than this wants a real network.
+    assert(forward_argument_bytes_max >= ",hostfwd=tcp:255.255.255.255:65535-:65535".len);
     assert(tcg_timeout_factor >= 1);
     assert(boot_timeout_kvm_s * tcg_timeout_factor < 24 * 60 * 60);
     assert(guest_memory_mib >= 1024);

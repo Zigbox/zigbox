@@ -35,6 +35,7 @@ const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
 const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
+const inspect_commands = @import("inspect_commands.zig");
 const run_image = @import("run_image.zig");
 const gc = @import("store/gc.zig");
 const logs_commands = @import("logs_commands.zig");
@@ -66,6 +67,7 @@ const help_text =
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
+    \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
     \\                  document, see zbx schema explain)
@@ -189,6 +191,13 @@ const help_text =
     \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
     \\  prints the steps in the order a build starts them, then the image, without running
     \\  anything (--output json: nodes and edges, see zbx schema build-graph)
+    \\  zbx build [-f <file>]
+    \\  builds the steps, then the image: one row per step (hit or miss, its time, and net for a
+    \\  step with network = true) and the result digest; --output json: one zbx.build/1 line per
+    \\  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
+    \\  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
+    \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
+    \\  prints its tree and config (--output json: see zbx schema inspect)
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -224,6 +233,7 @@ pub const Command = enum {
     doctor,
     explain,
     help,
+    inspect,
     lock,
     logs,
     exec,
@@ -581,6 +591,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "doctor")) found = .doctor;
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
+    if (std.mem.eql(u8, name, "inspect")) found = .inspect;
     if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "logs")) found = .logs;
     if (std.mem.eql(u8, name, "exec")) found = .exec;
@@ -601,7 +612,7 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull, .lock, .logs, .exec => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock, .logs, .exec, .inspect => 1,
         .store, .state => 2,
     };
     assert(count <= 2);
@@ -1090,8 +1101,10 @@ fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) Pa
     }
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     // An image named by a tag has a command of its own, so the words after `--` are optional;
-    // a rootfs and a tree digest have none.
-    const has_default = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
+    // a rootfs and a tree digest have none, unless the full digest names a build result, which
+    // the run finds out in the store.
+    const named = digest != null and digest.?.len > 0 and !is_tree_operand(digest.?);
+    const has_default = named or (digest != null and digest_prefix.Digest.parse(digest.?) != null);
     if (run_args.command.len == 0 and !has_default) {
         return missing_argument(diag, .run, .command);
     }
@@ -1365,6 +1378,7 @@ fn resolve(
             .stop, .commit, .logs, .exec => .container,
             .schema => .topic,
             .lock => .action,
+            .inspect => .result,
             .pull => .reference,
             else => .code,
         };
@@ -1654,6 +1668,12 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         });
     } else if (command == .schema) {
         diag.fix(.{ .sentence = "name one command:", .command = "zbx schema ps" });
+    } else if (command == .inspect) {
+        diag.fix(.{
+            .sentence = "inspect one result at a time:",
+            .command = "zbx inspect b3:<64 hex>",
+            .template = true,
+        });
     } else if (command == .lock) {
         diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
     } else {
@@ -1672,6 +1692,7 @@ const Missing = enum {
     topic,
     reference,
     action,
+    result,
 };
 
 /// What `pull` lacks: its reference.
@@ -1788,6 +1809,14 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
         },
         .reference => missing_pull(diag, missing),
         .action => missing_lock(diag),
+        .result => {
+            diag.cause("'inspect' needs the digest of a build result", .{});
+            diag.fix(.{
+                .sentence = "give the digest `zbx build` printed:",
+                .command = "zbx inspect b3:<64 hex>",
+                .template = true,
+            });
+        },
         .command => missing_command_words(diag, command),
     }
     diag.context("cmd", "{s}", .{@tagName(command)});
@@ -1924,6 +1953,7 @@ pub const Storage = struct {
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings.
     build: build_commands.Workspace,
+    inspect: inspect_commands.Workspace,
     /// A run's `--mount` sources, resolved before the image is looked for (`resolve_writable`),
     /// and the run's mounts with those sources in place of what was typed.
     run_mounts: mounts.Resolution,
@@ -1995,7 +2025,8 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
-        .explain, .bundle, .schema, .stop, .run, .commit, .pull, .lock, .logs, .exec => true,
+        .explain, .bundle, .schema, .stop, .run, .commit => true,
+        .pull, .lock, .logs, .exec, .inspect => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -2019,13 +2050,21 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .build => build_commands.run(
             host,
             &storage.build,
-            &storage.pull.library,
-            &storage.store.import,
             invocation.build,
-            invocation.options.output == .json,
+            .{
+                .json = invocation.options.output == .json,
+                .verbose = invocation.options.verbose,
+            },
             &storage.handle.facts,
             diag,
         ) catch |err| return build_error(err),
+        .inspect => inspect_commands.run(
+            host,
+            &storage.inspect,
+            invocation.operand.?,
+            invocation.options.output == .json,
+            diag,
+        ) catch |err| return inspect_error(err),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -2047,6 +2086,14 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .state => return run_state(host, invocation, storage, diag),
     }
     return constants.exit_ok;
+}
+
+fn inspect_error(err: inspect_commands.Error) RunError {
+    assert(@errorName(err).len > 0);
+    return switch (err) {
+        error.Failed => error.CommandFailed,
+        error.OutputFailed => error.OutputFailed,
+    };
 }
 
 fn build_error(err: build_commands.Error) RunError {
@@ -2340,6 +2387,17 @@ fn run_container(
     if (invocation.operand) |operand| {
         if (operand.len > 0 and !is_tree_operand(operand)) {
             try prepare_image(host, invocation, storage, operand, &prepared, diag);
+        } else if (operand.len > 0) {
+            // A full digest may name a build result: its tree runs with its config.
+            const ws = &storage.run_image;
+            const command = given.command;
+            const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
+            if (!(found catch return error.StartFailed) and command.len == 0) {
+                // A tree that is not a build result has no command of its own.
+                const raised = missing_argument(diag, .run, .command);
+                assert(raised == error.MissingArgument);
+                return error.StartFailed;
+            }
         }
     }
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
@@ -2414,7 +2472,8 @@ fn check_user_flag(invocation: *const Invocation, diag: *Diag) RunError!void {
     const echo = echo_of(&storage, text);
     diag.raise(.E0015);
     diag.while_("reading the command line", .{});
-    diag.cause("--user '{s}': a directory or a tree has no image to look the user up in", .{echo});
+    const kind = if (operand.len == 0) "a directory" else "a digest";
+    diag.cause("--user '{s}': {s} has no image to look the user up in", .{ echo, kind });
     diag.context("arg", "{s}", .{echo});
     diag.fix(.{
         .sentence = "run an image by name, which --user can look a name up in:",
@@ -3293,7 +3352,7 @@ test "snapshot: explain prints the registry text on stdout, exit 0" {
 test "snapshot: explain --output json is the zbx.explain/1 document; schemas for it and lock" {
     // Goal: the machine form of `explain` is exactly the checked-in document, wherever the option
     // stands; an unknown code is still a diagnostic and prints nothing on stdout; the schemas
-    // `zbx schema` prints for it and for `lock show` are the checked-in text.
+    // `zbx schema` prints for it, `lock show`, `build` and `inspect` are the checked-in text.
     var sim: HostSim = undefined;
     const want = @embedFile("testdata/explain_E0001.json.txt");
     const before = [_][:0]const u8{ "zbx", "--output", "json", "explain", "E0001" };
@@ -3312,6 +3371,8 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
     const goldens = [_]struct { topic: [:0]const u8, text: []const u8 }{
         .{ .topic = "explain", .text = @embedFile("testdata/schema_explain.stdout.txt") },
         .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
+        .{ .topic = "build", .text = @embedFile("testdata/schema_build.stdout.txt") },
+        .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };
@@ -3803,12 +3864,20 @@ test "parse: ps, stop, schema, -d and the times take what the brief says" {
     try testing.expectEqualStrings("250", invocation.run.grace.?);
     try testing.expectEqualStrings("900", invocation.run.timeout.?);
     try testing.expect(try parse_case(&.{ "schema", "ps" }, &invocation) == null);
+    try testing.expect(try parse_case(&.{ "inspect", "b3:a" }, &invocation) == null);
+    try testing.expect(invocation.command == .inspect);
+    // A full digest may name a build result, which has a command of its own.
+    const full = "b3:abababababababababababababababababababababababababababababababab";
+    try testing.expect(try parse_case(&.{ "run", full }, &invocation) == null);
+    try testing.expect(invocation.command == .run);
     const detached_line = [_][]const u8{ "run", "-d", "--rootfs", "r", "--", "x" };
     try testing.expect(try parse_case(&detached_line, &invocation) == null);
     try testing.expect(invocation.run.detach);
     const refused = [_]struct { args: []const []const u8, code: codes.Code }{
         .{ .args = &.{"stop"}, .code = .E0006 },
         .{ .args = &.{"schema"}, .code = .E0006 },
+        .{ .args = &.{"inspect"}, .code = .E0006 },
+        .{ .args = &.{ "inspect", "b3:a", "b3:b" }, .code = .E0003 },
         .{ .args = &.{ "stop", "a", "b" }, .code = .E0003 },
         .{ .args = &.{ "ps", "extra" }, .code = .E0003 },
         .{ .args = &.{ "ps", "--grace", "5" }, .code = .E0004 },

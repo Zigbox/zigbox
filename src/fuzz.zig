@@ -18,6 +18,7 @@ const diagnostic_fuzz = @import("fuzz_diagnostic.zig");
 const run_fuzz = @import("fuzz_run.zig");
 const record_fuzz = @import("fuzz_record.zig");
 const logs_fuzz = @import("fuzz_logs.zig");
+const result_fuzz = @import("fuzz_result.zig");
 const exec_fuzz = @import("fuzz_exec.zig");
 const state_fuzz = @import("fuzz_state.zig");
 const vm_fuzz = @import("fuzz_vm.zig");
@@ -26,6 +27,7 @@ const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
 const tree_fuzz = @import("fuzz_tree.zig");
 const store_fuzz = @import("fuzz_store.zig");
+const peer_fuzz = @import("fuzz_peer.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
 const build_cache_fuzz = @import("fuzz_build_cache.zig");
@@ -61,6 +63,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "run", .run_iteration = run_fuzz.fuzz_run },
     .{ .name = "record", .run_iteration = record_fuzz.fuzz_record },
     .{ .name = "logs", .run_iteration = logs_fuzz.fuzz_logs },
+    .{ .name = "result", .run_iteration = result_fuzz.fuzz_result },
     .{ .name = "exec", .run_iteration = exec_fuzz.fuzz_exec },
     .{ .name = "state", .run_iteration = state_fuzz.fuzz_state },
     .{ .name = "vm", .run_iteration = vm_fuzz.fuzz_vm },
@@ -69,6 +72,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
     .{ .name = "tree", .run_iteration = tree_fuzz.fuzz_tree },
     .{ .name = "store", .run_iteration = store_fuzz.fuzz_store },
+    .{ .name = "peer", .run_iteration = peer_fuzz.fuzz_peer },
     .{ .name = "commit", .run_iteration = commit_fuzz.fuzz_commit },
     .{ .name = "gc", .run_iteration = gc_fuzz.fuzz_gc },
     .{ .name = "reference", .run_iteration = reference_fuzz.fuzz_reference },

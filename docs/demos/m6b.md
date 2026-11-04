@@ -41,7 +41,7 @@ replaces that `User`. A name the image lacks is `E0216`, naming the image (the i
 unknown name stays `E0521`, blamed on the image).
 
 Cut: `--user` needs an image. A `--rootfs` directory or a bare tree digest is `E0015`
-("a directory or a tree has no image to look the user up in"); there is no image configuration
+("a directory has no image to look the user up in", or "a digest has none"); there is no image configuration
 to replace and the store's tree is only read for an image run.
 
 ### The record and the JSON

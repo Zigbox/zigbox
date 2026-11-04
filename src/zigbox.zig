@@ -125,6 +125,21 @@ pub const pull = @import("pull.zig");
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
+/// The build (M7): the build file's parser, the step graph and its order, the cache key, one
+/// step's run, and the scheduler, for a caller that is not the command line. The caller reads
+/// the file with `build.file.parse`, orders it with `build.graph.order`, works out a step's key
+/// with `build.key.compute`, runs a step with `build.step.run_step` (its own `Workspace`, `Diag`
+/// and store) and drives the steps with `build.schedule.run`. Nothing here reads the environment,
+/// and nothing prints unless the request sets `stream`: then each line of the step's output goes
+/// to stderr behind `<step> | `. A failure is a coded `Diag`. `docs/demos/m7.md` has the limits.
+pub const build = struct {
+    pub const file = @import("build/file.zig");
+    pub const graph = @import("build/graph.zig");
+    pub const key = @import("build/key.zig");
+    pub const step = @import("build/step.zig");
+    pub const schedule = @import("build/schedule.zig");
+};
+
 test "the module's surface is what the contract names" {
     // Goal: a rename or a removal in the runtime that Zigcube relies on fails here, loudly.
     _ = Spec;

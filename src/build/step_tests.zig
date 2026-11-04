@@ -157,12 +157,17 @@ fn spec_for(fixture: *const Fixture) key_mod.Spec {
 }
 
 fn run_it(spec: *const key_mod.Spec) step.Error!void {
+    return run_streaming(spec, false);
+}
+
+fn run_streaming(spec: *const key_mod.Spec, stream: bool) step.Error!void {
     const request: step.Request = .{
         .host = sim.interface(),
         .facts = &facts,
         .spec = spec,
         .file = "zbx.build.zon",
         .group = group,
+        .stream = stream,
     };
     diag.reset();
     return step.run_step(&request, &workspace, &result, &diag);
@@ -233,8 +238,11 @@ fn record_exists(fixture: *const Fixture) bool {
 /// descriptor, or a host change.
 fn expect_clean(fixture: *const Fixture, before: *const sim_run.Baseline) !void {
     try testing.expectEqual(@as(u32, 0), work_dirs());
-    // The step roots nothing: the cache entry does.
-    try testing.expectEqual(roots_at_start, support.count_files(&files, store_root ++ "/roots"));
+    // A step that imported roots its output as `build:<step>` until the parent writes the cache
+    // entry (N8); a step that failed roots nothing.
+    const rooted: u32 = if (diag.code == null) 1 else 0;
+    const roots_now = support.count_files(&files, store_root ++ "/roots");
+    try testing.expectEqual(roots_at_start + rooted, roots_now);
     try testing.expect(!record_exists(fixture));
     try testing.expectEqual(@as(?[]const u8, null), sim_run.leak(&sim, before));
     try testing.expectEqual(@as(u32, 0), files.open_count());
@@ -274,6 +282,11 @@ test "a step that exits 0 imports /out, keeps its log, and leaves nothing" {
     try testing.expectEqual(@as(?codes.Code, null), diag.code);
     try testing.expectEqual(@as(u64, 2), result.files);
     try expect_tree_in_store(result.output);
+    var root_path: [128]u8 = undefined;
+    const hex = result.output.hex();
+    const rooted_at = try std.fmt.bufPrint(&root_path, store_root ++ "/roots/{s}", .{&hex});
+    const record = files.content_of(rooted_at) orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, record, "build:fetch") != null);
     try testing.expectEqualStrings("compiling\ndone\n", files.content_of(log_path).?);
     try expect_clean(&fixture, &before);
 }
@@ -575,4 +588,117 @@ test "a sweep clears what a killed step left, and a live step's lock stops it" {
     try step.sweep(&request, &workspace, &diag);
     try testing.expectEqual(@as(u32, 0), work_dirs());
     try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "a sweep of a store that does not exist yet is not an error" {
+    // Goal: a clean machine's first `zbx build` has no store directory, so no lock file; the
+    // sweep finds nothing and says nothing (the VM demo's second machine was refused with E0417).
+    // Method: the sweep on a simulated host whose store filesystem is empty.
+    sim_run.init(&sim, 41);
+    files.init(41);
+    sim.store_fs = &files;
+    const fixture: Fixture = .{
+        .base = Digest.of("base"),
+        .input = Digest.of("input"),
+        .name = undefined,
+        .name_len = 0,
+    };
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    diag.reset();
+    const live_before = files.live_count();
+    try step.sweep(&request, &workspace, &diag);
+    try testing.expect(diag.code == null);
+    // The sweep must not create the store (or its lock file) to take the lock.
+    try testing.expectEqual(live_before, files.live_count());
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "a sweep whose lock file cannot be opened is E0417, not silence" {
+    // Goal: only a store that does not exist yet is skipped; a lock file that exists and is
+    // refused (EACCES) is a real fault the user must hear of. Method: the store's lock file
+    // exists and is unreadable.
+    const fixture = try setup(42, "fetch");
+    files.set_unreadable(store_root ++ "/lock");
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    diag.reset();
+    try testing.expectError(error.Failed, step.sweep(&request, &workspace, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0417), diag.code);
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+    diag.reset();
+}
+
+test "with stream on, each step's output is on stderr behind its name, and stdout is untouched" {
+    // Goal: `--verbose` for two steps, through `run_step` and the run's log sink. Method: two
+    // steps (each its own simulated host, as the model resets between them) write lines on both
+    // streams, cut in the middle of a line, the last without a newline. Stderr must hold whole
+    // lines each behind `<step> | `, the unfinished one closed with a newline, stdout nothing,
+    // and the log the exact bytes. Removing the `stream_lines` call or `.stream` fails it.
+    const names = [_][]const u8{ "fetch", "pack" };
+    for (names, 0..) |name, index| {
+        const fixture = try setup(30 + index, name);
+        const chunks = [_]sim_world.OutChunk{
+            .{ .stream = .stdout, .bytes = "compil" },
+            .{ .stream = .stdout, .bytes = "ing\nsecond\n" },
+            .{ .stream = .stderr, .bytes = "warn: x\n" },
+            .{ .stream = .stdout, .bytes = "no newline" },
+        };
+        set_output(&chunks);
+        var spec = spec_for(&fixture);
+        spec.name = name;
+        sim.world.command_exit = .{ .exited = 1 };
+        try testing.expectError(error.Failed, run_streaming(&spec, true));
+        var expected: [256]u8 = undefined;
+        const lines = try std.fmt.bufPrint(
+            &expected,
+            "{0s} | compiling\n{0s} | second\n{0s} | warn: x\n{0s} | no newline\n",
+            .{name},
+        );
+        try testing.expectEqualStrings(lines, sim.stderr());
+        try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+        var log: [128]u8 = undefined;
+        const log_format = store_root ++ "/build/logs/" ++ group ++ "/{s}.log";
+        const log_text = text_of(&log, log_format, .{name});
+        try testing.expectEqualStrings(
+            "compiling\nsecond\nwarn: x\nno newline",
+            files.content_of(log_text).?,
+        );
+    }
+}
+
+test "a stderr that returns EPIPE stops the streaming and never fails the step" {
+    // Goal: `zbx build --verbose 2>&1 | head` must not kill zbx or fail the build. Method:
+    // every write to stderr fails with EPIPE (the simulator notes whether SIGPIPE was ignored
+    // when that happened); the step still succeeds, its output is imported and its log is whole.
+    const fixture = try setup(40, "fetch");
+    const chunks = [_]sim_world.OutChunk{
+        .{ .stream = .stdout, .bytes = "one\n" },
+        .{ .stream = .stdout, .bytes = "two\n" },
+    };
+    set_output(&chunks);
+    var output: Output = .{};
+    arm(&output);
+    sim.faults.write_error_per_mille = 1000;
+    sim.faults.write_fault_stream = .stderr;
+    sim.faults.write_errno = sim_world.errno_pipe;
+    const spec = spec_for(&fixture);
+    try run_streaming(&spec, true);
+    try testing.expectEqual(@as(?codes.Code, null), diag.code);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqualStrings("one\ntwo\n", files.content_of(log_path).?);
+    try testing.expect(!sim.sigpipe_would_kill);
+    try testing.expect(!sim.world.broken_pipe_ignored); // Back to the default at the end.
 }

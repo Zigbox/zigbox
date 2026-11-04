@@ -1,0 +1,7 @@
+error[ZBX-E0437]: an image record from a peer was not taken
+  cause  the record is for the tree
+         b3:79f03b0881c95bdbc00c8957b4deec2ae0b905df18e6f3f932395442194b2309,
+         not the one that was fetched
+  fix    ask the peer for the record of the tree that was fetched
+  more   zbx explain E0437 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0437.html

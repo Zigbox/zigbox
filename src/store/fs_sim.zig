@@ -35,6 +35,7 @@ const Error = fs_mod.Error;
 const Fd = fs_mod.Fd;
 const FileKind = fs_mod.FileKind;
 
+pub const errno_perm: u16 = 1;
 pub const errno_io: u16 = 5;
 pub const errno_intr: u16 = 4;
 pub const errno_acces: u16 = 13;
@@ -49,6 +50,14 @@ pub const errno_inval: u16 = 22;
 pub const errno_nodata: u16 = 61;
 pub const errno_mlink: u16 = 31;
 pub const errno_xdev: u16 = 18;
+
+/// Who may change an owner: the real kernel lets only the root of the caller's user namespace do
+/// it, so a caller in no new namespace (an ordinary user) is refused. The file system model does
+/// not know the processes; the test says whether the current one is in a new user namespace.
+pub const OwnerGate = struct {
+    context: *anyopaque,
+    in_new_user_namespace: *const fn (context: *anyopaque) bool,
+};
 
 pub const Faults = struct {
     /// The call at this write point (zero-based) fails with `fail_errno`, and is not applied.
@@ -65,6 +74,9 @@ pub const Faults = struct {
     /// A writer appends a byte to every file right after it is opened for reading: what a file
     /// that is being written to looks like to a program that read its size a moment before.
     grow_on_open: bool = false,
+    /// A writer cuts the last byte off every file right after it is opened for reading: a file
+    /// that shrank between the size a program read and its read.
+    shrink_on_open: bool = false,
     /// The most names one inode may have; a `link` past it is `EMLINK` (ext4 allows 65000).
     link_max: ?u32 = null,
     /// A path with a symlink above its last part is a bug of the caller, as a real file system
@@ -74,6 +86,9 @@ pub const Faults = struct {
     /// Every `listxattr` and `getxattr` fails with this errno (zero for none), though the file
     /// system is otherwise sound: a flaky attribute read, as a failing disk gives.
     xattr_errno: u16 = 0,
+    /// A change of owner outside a new user namespace is `EPERM` (not a write point: the
+    /// kernel refuses before it changes anything). Null for the model's default, which allows it.
+    owner_gate: ?OwnerGate = null,
 };
 
 const Node = struct {
@@ -180,6 +195,7 @@ pub const SimFs = struct {
         .get_xattr = get_xattr,
         .open_read = open_read,
         .read = read,
+        .read_at = read_at,
         .create = create,
         .open_append = open_append,
         .write = write,
@@ -438,6 +454,15 @@ pub const SimFs = struct {
     }
 
     /// Appends to a node's data, moving it to the end of the pool first if it is not there.
+    fn shrink_if_faulty(sim: *SimFs, node: *Node) void {
+        if (!sim.faults.shrink_on_open) return;
+        if (node.kind != .file) return;
+        if (node.data_len == 0) return;
+        node.data_len -= 1;
+        node.synced_len = @min(node.synced_len, node.data_len);
+        sim.bytes_live -= 1;
+    }
+
     fn append(sim: *SimFs, node: *Node, bytes: []const u8) void {
         if (bytes.len == 0) return;
         const at_end = node.data_at + node.data_len == sim.pool_len;
@@ -692,6 +717,7 @@ pub const SimFs = struct {
         if (node.kind == .dir) return sim.fail(errno_isdir);
         if (node.unreadable) return sim.fail(errno_acces);
         if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
+        sim.shrink_if_faulty(node);
         return sim.take_slot(index, false);
     }
 
@@ -725,6 +751,7 @@ pub const SimFs = struct {
                 if (node.kind == .dir) return sim.fail(errno_isdir);
                 if (node.unreadable) return sim.fail(errno_acces);
                 if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
+                sim.shrink_if_faulty(node);
             },
             .directory => {
                 if (node.kind != .dir) return sim.fail(errno_notdir);
@@ -868,6 +895,22 @@ pub const SimFs = struct {
         return length;
     }
 
+    fn read_at(context: *anyopaque, fd: Fd, offset: u64, buffer: []u8) Error!u32 {
+        const sim = from_context(context);
+        try sim.begin_call();
+        const slot = sim.slot_of(fd);
+        const node = &sim.nodes[slot.node];
+        if (sim.roll(sim.faults.read_error_per_mille)) return sim.fail(errno_io);
+        const start: u64 = @min(offset, node.data_len);
+        const left = node.data_len - start;
+        var length: u32 = @intCast(@min(left, buffer.len));
+        if (length > 1 and sim.roll(sim.faults.short_read_per_mille)) {
+            length = sim.prng.random().intRangeAtMost(u32, 1, length - 1);
+        }
+        @memcpy(buffer[0..length], sim.pool[node.data_at + start ..][0..length]);
+        return length;
+    }
+
     fn open_append(context: *anyopaque, path: [:0]const u8) Error!Fd {
         const sim = from_context(context);
         try sim.begin_call();
@@ -914,6 +957,7 @@ pub const SimFs = struct {
             break :blk made;
         };
         if (sim.nodes[index].kind != .file) return sim.fail(errno_isdir);
+        if (sim.nodes[index].unreadable) return sim.fail(errno_acces);
         for (sim.opens) |other| {
             if (!other.used or other.node != index or other.lock == .none) continue;
             if (exclusive or other.lock == .exclusive) return sim.fail(errno_again);
@@ -972,6 +1016,9 @@ pub const SimFs = struct {
 
     fn set_owner(context: *anyopaque, fd: Fd, uid: u32, gid: u32) Error!void {
         const sim = from_context(context);
+        if (sim.faults.owner_gate) |gate| {
+            if (!gate.in_new_user_namespace(gate.context)) return sim.fail(errno_perm);
+        }
         try sim.begin_mutation();
         const node = &sim.nodes[sim.slot_of(fd).node];
         node.uid = uid;
@@ -1278,6 +1325,31 @@ test "a crash tears unsynced bytes and keeps synced ones, and nothing works unti
     try testing.expect(kept >= 8 and kept <= 16);
     try testing.expectEqualStrings("01234567", sim.content_of("/d/f").?[0..8]);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "a change of owner outside a new user namespace is refused when the gate says so" {
+    // Goal: the gate makes `set_owner` fail with EPERM only for a caller outside a new user
+    // namespace, and does not count it as a write point. Method: a gate on a flag, both values.
+    const sim = &test_sim;
+    sim.init(3);
+    sim.put_dir("/d", 0o755);
+    const fs = sim.interface();
+    const fd = try fs.create("/d/f", 0o600);
+    var inside = false;
+    const gate = struct {
+        fn call(context: *anyopaque) bool {
+            const flag: *const bool = @ptrCast(@alignCast(context));
+            return flag.*;
+        }
+    };
+    sim.faults.owner_gate = .{ .context = &inside, .in_new_user_namespace = gate.call };
+    const before = sim.mutations;
+    try testing.expectError(error.AccessDenied, fs.set_owner(fd, 0, 0));
+    try testing.expectEqual(@as(u16, errno_perm), fs.last_errno());
+    try testing.expectEqual(before, sim.mutations);
+    inside = true;
+    try fs.set_owner(fd, 0, 0);
+    fs.close(fd);
 }
 
 test "a full disk lets part of a write through, then refuses" {

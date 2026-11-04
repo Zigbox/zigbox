@@ -11,6 +11,7 @@ const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
+const lock = @import("lock.zig");
 const object = @import("object.zig");
 const tree = @import("tree.zig");
 
@@ -49,11 +50,73 @@ pub fn put(
     return true;
 }
 
+pub const CheckedError = error{
+    /// The bytes are longer than any tree object.
+    TooLarge,
+    /// The bytes do not hash to the digest they were offered under.
+    DigestMismatch,
+    /// The bytes hash right but are not a whole, valid tree encoding.
+    Malformed,
+    /// The store lock is held by a gc or a restore for longer than `store.lock_wait_ms`.
+    Busy,
+    StoreFailed,
+};
+
+/// `put` for bytes nobody here has vouched for (a tree a peer sent): the size, the hash and the
+/// encoding are checked and a failure is an error, never an assertion; nothing is written then.
+/// The lock is held shared for the call, as `put_chunk` does.
+pub fn put_checked(
+    store: *Store,
+    digest: Digest,
+    bytes: []const u8,
+    failure: *object.Failure,
+) CheckedError!bool {
+    assert(@intFromPtr(failure) != 0);
+    if (bytes.len > constants.store_tree_bytes_max) return error.TooLarge;
+    if (!Digest.of(bytes).eql(digest)) return error.DigestMismatch;
+    try check_encoding(bytes);
+    lock.hold(store, .shared, "put_tree") catch |err| switch (err) {
+        error.Busy => return error.Busy,
+        error.Failed => {
+            failure.* = .{ .err = store.lock_error, .errno = store.lock_errno };
+            return error.StoreFailed;
+        },
+    };
+    defer lock.release(store);
+    return put(store, digest, bytes, failure) catch |err| switch (err) {
+        error.StoreFailed => error.StoreFailed,
+        // `put` writes from memory: it has no source to fail and nothing to see change.
+        error.SourceFailed, error.Changed => unreachable,
+    };
+}
+
+/// Decodes every entry, which is what a reader of the tree will do.
+fn check_encoding(bytes: []const u8) CheckedError!void {
+    assert(bytes.len <= constants.store_tree_bytes_max);
+    var decoder: tree.Decoder = undefined;
+    decoder.init(bytes) catch return error.Malformed;
+    var entry: tree.Entry = undefined;
+    // Each pass takes at least one byte of `bytes`, which is finite.
+    while (decoder.next(&entry) catch return error.Malformed) {}
+}
+
 fn store_failed(failure: *object.Failure, fs: fs_mod.Fs, err: host_mod.Error) object.PutError {
     assert(@intFromPtr(failure) != 0);
     assert(@intFromPtr(fs.vtable) != 0);
     failure.* = .{ .err = err, .errno = fs.last_errno() };
     return error.StoreFailed;
+}
+
+/// True if the store holds the tree `digest`.
+pub fn has(store: *const Store, digest: Digest) host_mod.Error!bool {
+    assert(store.root_len > 1);
+    var path: PathBuf = undefined;
+    const stat = store.fs.lstat(store.tree_path(&path, digest)) catch |err| {
+        if (err == error.NotFound) return false;
+        return err;
+    };
+    // Anything but a file (a directory put there by hand) is not a tree the store holds.
+    return stat.kind == .file;
 }
 
 pub const LoadError = error{ NotFound, Damaged, Unreadable };

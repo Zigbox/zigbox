@@ -87,7 +87,7 @@ pub const Event = union(enum) {
     /// The registry answered: the manifest this platform gets. Valid during the call.
     resolved: *const manifest.Resolved,
     /// A blob is in the cache. Index 0 is the configuration, 1 and up the layers, `of` the count.
-    blob: struct { index: u32, of: u32, outcome: BlobOutcome },
+    blob: struct { index: u32, of: u32, outcome: BlobOutcome, bytes: u64 },
     /// A warning. Valid during the call.
     warning: *const Diag,
 };
@@ -131,6 +131,25 @@ pub const Result = struct {
     warnings_dropped: u32,
     /// What the image runs by default: entrypoint, cmd, env, working directory, user.
     settings: *const images.Settings,
+    /// Each blob as this pull saw it, copied so that a later pull in the same workspace cannot
+    /// change it (`blob` reads it). The first `layer_count + 1` are set.
+    blobs: [constants.registry_layers_max + 1]Blob,
+
+    /// One blob of the image: its digest, its length in the cache and how it came.
+    pub const Blob = struct {
+        digest: Sha256,
+        bytes: u64,
+        outcome: BlobOutcome,
+    };
+
+    /// Blob `index` of the pull: 0 is the configuration, 1 and up the layers in order, to
+    /// `layer_count` (so `layer_count + 1` blobs). The bytes are the blob's whole length in the
+    /// cache, whatever the outcome (a `resumed` blob moved less over the network).
+    pub fn blob(result: *const Result, index: u32) Blob {
+        assert(index <= result.layer_count);
+        assert(result.layer_count <= constants.registry_layers_max);
+        return result.blobs[index];
+    }
 
     /// "linux/amd64" or "linux/arm64".
     pub fn platform(result: *const Result) []const u8 {
@@ -247,6 +266,19 @@ fn fill_result(result: *Result, workspace: *const Workspace, done: *const report
     const resolved = &workspace.resolved;
     var buffer: [16]u8 = undefined;
     const platform = unpack.platform_text(&buffer, resolved.architecture);
+    var blobs: [constants.registry_layers_max + 1]Result.Blob = undefined;
+    blobs[0] = .{
+        .digest = resolved.config_digest,
+        .bytes = resolved.config_size,
+        .outcome = workspace.fetched.config,
+    };
+    for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
+        blobs[index + 1] = .{
+            .digest = layer.digest,
+            .bytes = layer.size,
+            .outcome = workspace.fetched.layers[index],
+        };
+    }
     result.* = .{
         .manifest_digest = resolved.manifest_digest,
         .config_digest = resolved.config_digest,
@@ -257,6 +289,7 @@ fn fill_result(result: *Result, workspace: *const Workspace, done: *const report
         .counts = done.counts,
         .warnings_dropped = done.warnings_dropped,
         .settings = &workspace.settings,
+        .blobs = blobs,
     };
     assert(result.layer_count > 0);
 }
@@ -556,7 +589,12 @@ fn fetch_all(
     ) catch return error.Failed;
     if (progress) |watcher| {
         const outcome = workspace.fetched.config;
-        const event: Event = .{ .blob = .{ .index = 0, .of = of, .outcome = outcome } };
+        const event: Event = .{ .blob = .{
+            .index = 0,
+            .of = of,
+            .outcome = outcome,
+            .bytes = resolved.config_size,
+        } };
         watcher.call(watcher.context, event);
     }
     for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
@@ -575,6 +613,7 @@ fn fetch_all(
                 .index = @intCast(index + 1),
                 .of = of,
                 .outcome = outcome,
+                .bytes = layer.size,
             } };
             watcher.call(watcher.context, event);
         }

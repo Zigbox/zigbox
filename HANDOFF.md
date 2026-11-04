@@ -6,7 +6,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 
 ## The role
 
-- **The owner decides; the supervisor proposes.** Anything a brief marks "(propose)", any change to the spec, and anything that changes Zigcube's design goes to the owner as a short question with a recommendation. Record each answer in `docs/DECISIONS.md` in the same push.
+- **The owner decides; the supervisor proposes.** Anything a brief marks "(propose)", any change to the spec, and anything that changes Zigcube's design goes to the owner as a short question with a recommendation. Record each answer as a new file in `docs/decisions/` in the same push.
 - **The supervisor implements nothing of size.** Implementers write the code. The supervisor writes briefs, docs, status, and small mechanical edits.
 - **Run each slice the same way.** Spawn a fresh implementer from the brief, the branch and the previous handoff note. Then review the slice adversarially: delegating the read to a fresh reviewer agent keeps your own context small. Fixes go to another fresh agent, given the findings and the commit. Then run `zig build check` yourself on the result and push it to the working branch. Follow `AGENTS.md`, "Agent context discipline", throughout.
 - **Models.** Sonnet implements by default ("one Sonnet coding is plenty"). Use Opus where a slice is risky, at the supervisor's judgment. Run one implementer at a time unless slices are independent by file, and give each worktree its own `ZIG_GLOBAL_CACHE_DIR`.
@@ -21,7 +21,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
 - **The process documents:**
   - Briefs are in `docs/briefs/`.
   - Demo documents, with their cuts and failure modes, are in `docs/demos/`.
-  - Decisions are in `docs/DECISIONS.md`.
+  - Decisions are in `docs/decisions/`, one file each.
   - Review is `REVIEW.md` and style is `docs/STYLE.md`.
   - Diagnostics are `DIAGNOSTICS.md`. Zigbox's copy is canonical; Zigcube carries a copy.
 - **Zigcube** is the orchestrator, repo `Zigbox/zigcube`, run by its own session. Its restart orders are `docs/restart.md`, in its PR #21. They:
@@ -50,6 +50,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
   - **Trap:** a status commit with `[skip ci]` at the head of a PR stops the PR's CI from running at all (GitHub reads the head commit), and the git proxy here refuses force pushes. Push a status commit to a PR only after its CI has run, or put it in the PR's last code push.
   - **Slice 6 (the Mac)** was done by the Mac session and merged (PR #27): `logs` and `exec` forwarded with the terminal and signals, and `demo-mac` (31 steps) runs M6b's five steps plus the terminal, signal and follow cases. PR #28 (merged) names a missing cgroup v2 first when a run finds no scope.
 - **Release 0.2.0** (writable mounts, `--user`, logs, exec): the version bump and this status are on the working branch's PR. Then the owner runs `zig build mac-release -Dnotarize=true`, publishes `v0.2.0` with the zip and its `.sha256`, and puts the new formula in `Zigbox/homebrew-tap`. Optionally tags `v0.0.0-m6b`.
+- **Release 0.3.0** (M7 builds, and the Z1–Z7 APIs for Zigcube C2; notes in `docs/releases/0.3.0.md`): the version bump is its own PR. Then the owner runs `zig build mac-release -Dnotarize=true`, publishes `v0.3.0` with the zip and its `.sha256` and those notes, and updates `Zigbox/homebrew-tap`.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
 ## Owner decisions to remember

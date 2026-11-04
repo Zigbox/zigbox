@@ -17,4 +17,7 @@
     // alpine:3.20 and starts a detached container with a `--state` volume; M6b's `zbx` has to read
     // the store, the version-7 run record and the volume, `exec` into that container and stop it.
     .m6b_commit = "bf57ec8",
+    // The same for `demo-m7`: 6da1ff2, "Version 0.2.0". Its `zbx` pulls alpine:3.20 and starts a
+    // container; M7's `zbx` has to read the store, the lock and the version-8 run record it leaves.
+    .m7_commit = "6da1ff2",
 }

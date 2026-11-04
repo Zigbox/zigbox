@@ -50,7 +50,7 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 An agent re-reads its whole context on every turn, so cost grows with context size, not with the work done. Keep implementer context small.
 
 - **One agent per slice.** The supervisor spawns a fresh implementer for each slice of a milestone. Do not resume a finished implementer for the next slice or for follow-up fixes.
-- **Hand off through the repo.** Before stopping, the implementer commits its work and ends its report with a handoff note: decisions made, traps found, what's next. Lasting decisions go in `docs/DECISIONS.md`. The next implementer starts from the brief, the branch and that note.
+- **Hand off through the repo.** Before stopping, the implementer commits its work and ends its report with a handoff note: decisions made, traps found, what's next. Lasting decisions go in `docs/decisions/`, one file per decision (`YYYY-MM-DD-<slug>.md`, see its README), never in a shared file, so parallel branches do not conflict. The next implementer starts from the brief, the branch and that note.
 - **Context ceiling.** Stop at about 250K tokens of context or 60 turns, whichever comes first. At that point, reach the next safe stopping place, commit, write the handoff note and report. The supervisor enforces this and starts a new implementer rather than extending the current one.
 - **Small fixes get new agents.** For a bug or review finding, spawn a fresh agent with the symptom and the relevant commit. Do not send it back to the agent that wrote the code.
 - **Keep noisy output out of context.** Redirect `zig build` and test output to a file and read only the failing lines. Do not paste full logs.
@@ -61,6 +61,24 @@ An agent re-reads its whole context on every turn, so cost grows with context si
 
 - [README.md](README.md) holds the status of every milestone and slice: what is built and reviewed, what is in review, and what is not started. The supervisor updates it in the same push that changes the status. Never mark anything "demonstrated" until its `demo-mN` job is green in CI.
 - The project site (`site/index.html`, the `SITE` and `MILESTONES` data at the top of its script) shows the same status. Update it in the same push as the README: the milestone's `status`, its `slices` count, and, once a demo is green in CI, its `demo` lines taken from that run's recorded output with `recorded` linking to the run. Never show output that was not recorded as recorded. Pages deploys only from `main`.
+
+## Releases (owner, 2026-11-04)
+
+A release tag is cut only from a commit that is all of:
+
+- **Sim-clean.** `zig build check` passes on it, and an extended seeded run of every fuzzer and
+  simulation test (`zig build fuzz -- all <iterations>`, at least 100 times the per-commit
+  default) finds nothing. When Zigcube moves its pin to the release, Zigcube's simulation fleet
+  must be clean on the commit that moves it.
+- **Jepsen-clean,** once the Jepsen battery exists (Zigcube's C5 prerequisite): it passes on a
+  Zigcube commit pinned to this release.
+- **Reviewed adversarially by two independent Opus reviewers.** Each is a fresh session given the
+  diff since the last release and the briefs, not the other's findings nor the implementers'
+  conclusions. Every MUST from either is fixed, or the owner accepts it in writing in
+  `docs/decisions/`, before the tag.
+
+The release PR quotes the fuzz run's last line, the Jepsen result when it applies, and both
+review verdicts.
 
 ## Git
 

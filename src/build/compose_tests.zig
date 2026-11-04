@@ -16,11 +16,17 @@ const file_mod = @import("file.zig");
 const file_tests = @import("file_tests.zig");
 const fs_sim = @import("../store/fs_sim.zig");
 const import = @import("../store/import.zig");
+const input_job = @import("input_job.zig");
+const input_tree = @import("input_tree.zig");
+const inputs_mod = @import("inputs.zig");
+const codes = @import("../diag/codes.zig");
 const key_mod = @import("key.zig");
 const layout = @import("../store/layout.zig");
 const load_mod = @import("load.zig");
 const support = @import("../store/test_support.zig");
 const digest_mod = @import("../store/digest.zig");
+const cache = @import("cache.zig");
+const verify = @import("../store/verify.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
@@ -66,10 +72,16 @@ fn start() void {
         .diag = &diag,
         .store = &store,
         .group = "g",
-        .pull = undefined,
-        .import = &import_workspace,
         .row_failed = null,
+        .json = false,
+        .verbose = false,
+        .started_ms = sim.interface().monotonic_ms(),
+        .started_s = sim.interface().time_now(),
+        .name_width = 7,
+        .hits = 0,
+        .misses = 0,
     };
+    composed.timings = @splat(std.mem.zeroes(compose.Timing));
     key_mod.compute(&.{
         .platform = "linux/amd64",
         .base_tree = Digest.of("base"),
@@ -109,17 +121,20 @@ fn worker_ended(at: usize, pid: host_mod.Pid, bytes: []const u8) *compose.Slot {
 
 fn answer_of(output: Digest) [compose.answer_bytes]u8 {
     var bytes: [compose.answer_bytes]u8 = @splat(0);
-    @memcpy(bytes[0..constants.store_digest_bytes], &output.bytes);
-    std.mem.writeInt(u64, bytes[constants.store_digest_bytes..][0..8], 3, .little);
+    bytes[0] = compose.tag_output;
+    @memcpy(bytes[1..], &output.bytes);
     return bytes;
 }
 
-fn encoded_failure(bytes: *[constants.diag_carry_bytes_max]u8) []const u8 {
+/// What a failing worker writes: the failure tag, then the encoded diagnostic.
+fn encoded_failure(bytes: *[compose.failure_bytes_max]u8) []const u8 {
     var made: Diag = undefined;
     made.reset();
     made.raise(.E0805);
     made.cause("the step said so", .{});
-    return made.encode(bytes);
+    bytes[0] = compose.tag_failure;
+    const encoded = made.encode(bytes[1..][0..constants.diag_carry_bytes_max]);
+    return bytes[0 .. 1 + encoded.len];
 }
 
 fn settle(slot: *compose.Slot, status: host_mod.ExitStatus) @import("schedule.zig").Ended {
@@ -139,10 +154,27 @@ test "a clean exit with a whole answer is recorded and its row written" {
     try testing.expect(composed.outputs[0].eql(output));
     try testing.expect(!slot.active);
     try testing.expect(diag.code == null);
-    const format = "compile  built  {s}\n";
-    const want = try std.fmt.allocPrint(testing.allocator, format, .{output.text()});
-    defer testing.allocator.free(want);
-    try testing.expectEqualStrings(want, sim.stdout());
+    try testing.expectEqualStrings("  compile   miss   0.00 s\n", sim.stdout());
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    try testing.expect(composed.timings[0].output.eql(output));
+}
+
+test "with json the step ends as one zbx.build/1 line with its times and key" {
+    // Goal: the machine report. Method: the same settle in json mode; one line, whole fields.
+    start();
+    context.json = true;
+    composed.timings[0].start_ms = 0;
+    const output = made_output();
+    const answer = answer_of(output);
+    const slot = worker_ended(0, 7, &answer);
+    try testing.expect(settle(slot, .{ .exited = 0 }).ok);
+    const line = sim.stdout();
+    const head = "{\"schema\":\"zbx.build/1\",\"step\":\"compile\",\"cache\":\"miss\"," ++
+        "\"key\":\"b3:";
+    try testing.expect(std.mem.startsWith(u8, line, head));
+    const tail = "\"start_ms\":0,\"end_ms\":0,\"network\":false}\n";
+    try testing.expect(std.mem.indexOf(u8, line, tail) != null);
+    try testing.expect(std.mem.indexOf(u8, line, &output.text()) != null);
 }
 
 test "garbage, a short answer, no answer and a signal each fail the step with E0419" {
@@ -174,7 +206,7 @@ test "garbage, a short answer, no answer and a signal each fail the step with E0
 test "a diagnostic the worker wrote is the step's, whatever its length" {
     // Goal: a worker that failed on its own says why. Method: an encoded E0805 and a non-zero
     // exit; a clean exit with the same bytes is no output either.
-    var bytes: [constants.diag_carry_bytes_max]u8 = undefined;
+    var bytes: [compose.failure_bytes_max]u8 = undefined;
     const encoded = encoded_failure(&bytes);
     for ([_]u8{ 1, 0 }) |code| {
         start();
@@ -253,4 +285,514 @@ test "abort ends every worker, reaps it and closes its pipe" {
     for (composed.slots[0..2]) |slot| try testing.expect(!slot.active);
     try testing.expect(!sim.interface().pipe_has_reader(reports[0].write));
     try testing.expect(!sim.interface().pipe_has_reader(reports[1].write));
+}
+
+test "a tag, not a length, tells an output from a diagnostic" {
+    // Goal: no diagnostic passes for an output, and none is lost for its length. Method: a clean
+    // exit with an answer-sized tagged failure still decodes as the worker's; an answer-sized
+    // message without the output tag is no output; a valid diagnostic without the failure tag
+    // is not the worker's.
+    start();
+    var made: Diag = undefined;
+    made.reset();
+    made.raise(.E0805);
+    made.cause("x", .{});
+    var raw: [constants.diag_carry_bytes_max]u8 = undefined;
+    const short = made.encode(&raw);
+    var exact: [compose.answer_bytes]u8 = @splat('\n');
+    exact[0] = compose.tag_failure;
+    @memcpy(exact[1..][0..short.len], short);
+    const slot = worker_ended(0, 7, &exact);
+    try testing.expect(!settle(slot, .{ .exited = 0 }).ok);
+    try testing.expect(diag.code.? == .E0805);
+    start();
+    var untagged = answer_of(Digest.of("x"));
+    untagged[0] = 0;
+    const other = worker_ended(0, 7, &untagged);
+    try testing.expect(!settle(other, .{ .exited = 0 }).ok);
+    try testing.expect(diag.code.? == .E0419);
+    start();
+    var bare: [compose.failure_bytes_max]u8 = undefined;
+    bare[0] = 0; // Not the failure tag; a valid diagnostic follows.
+    @memcpy(bare[1..][0..short.len], short);
+    const no_tag = worker_ended(0, 7, bare[0 .. 1 + short.len]);
+    try testing.expect(!settle(no_tag, .{ .exited = 1 }).ok);
+    try testing.expect(diag.code.? == .E0419);
+}
+
+fn set_path(path: *@TypeOf(loaded.project), text: []const u8) void {
+    @memset(&path.bytes, 0);
+    @memcpy(path.bytes[0..text.len], text);
+    path.len = @intCast(text.len);
+}
+
+test "a failing step reaches the user as the step's own diagnostic" {
+    // Goal: the worker writes its failure behind the failure tag, so a real step failure is not
+    // E0419 "worker ended with no answer". Method: run `worker_entry` itself, through
+    // `fork_worker` and the sim's `fork_child`, on a step that fails (no data directory is
+    // found, E0421); the child's exit and bytes settle in the parent.
+    start();
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    const spec: key_mod.Spec = .{
+        .platform = "linux/amd64",
+        .base_tree = Digest.of("base"),
+        .base_env = &.{},
+        .input_tree = Digest.of("input"),
+        .needs = &.{},
+        .argv = &.{"true"},
+        .env = &.{},
+        .network = false,
+        .name = "compile",
+    };
+    try context.fork_worker(0, &spec);
+    const slot = &composed.slots[0];
+    const status = try sim.interface().wait_for(slot.pid);
+    try testing.expect(status == .exited and status.exited != 0);
+    try testing.expect(!settle(slot, status).ok);
+    try testing.expect(diag.code.? == .E0421);
+}
+
+test "a failed row changes the error value `finish` returns, not the diagnostic" {
+    // Goal: pin what the row ordering does. Method: a failed step and a failed row; `finish`
+    // answers OutputFailed (the value `run_slice` discards; the user reads `diag`, which keeps
+    // the first failure). Without the row, Failed. A failed `hit` row never sets `row_failed`.
+    start();
+    const failed: @import("schedule.zig").Outcome = .{
+        .failed = 0,
+        .aborted = false,
+        .hits = 0,
+        .built = 0,
+    };
+    context.row_failed = error.OutputFailed;
+    try testing.expectError(error.OutputFailed, context.finish(failed));
+    context.row_failed = null;
+    try testing.expectError(error.Failed, context.finish(failed));
+    try testing.expect(diag.code != null);
+}
+
+const roots = @import("../store/roots.zig");
+const result_mod = @import("result.zig");
+
+/// A step's output imported as the worker does: rooted `build:compile`, unless a root exists.
+fn imported_as_step(fresh: bool) Digest {
+    if (fresh) support.make_source(&files, 0);
+    var result: import.Result = undefined;
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = "build:compile",
+    };
+    import.import(&store, &import_workspace, "/src", options, &result, &diag) catch {
+        unreachable; // The sample tree imports.
+    };
+    diag.reset();
+    return result.digest;
+}
+
+fn root_source(output: Digest, text: *[constants.store_source_bytes_max]u8) ?[]const u8 {
+    var root: roots.Root = undefined;
+    var errno: u16 = 0;
+    roots.load(&store, output, &root, &errno) catch return null;
+    @memcpy(text[0..root.source_len], root.source_text());
+    return text[0..root.source_len];
+}
+
+fn recorded(output: Digest) !void {
+    const answer = answer_of(output);
+    const slot = worker_ended(0, 7, &answer);
+    try testing.expect(settle(slot, .{ .exited = 0 }).ok);
+}
+
+test "N8: a root the user made of the output survives the step and its record" {
+    // Goal: the build never replaces or deletes the user's root of the same tree. Method: root
+    // /src as the user, import it as the step does (keeps the record), record the step.
+    start();
+    const output = made_output();
+    try testing.expect(imported_as_step(false).eql(output));
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    try testing.expectEqualStrings("/src", root_source(output, &text).?);
+    try recorded(output);
+    try testing.expectEqualStrings("/src", root_source(output, &text).?);
+}
+
+test "N8: the root the build made is removed once the entry holds the output" {
+    // Goal: the build's own root goes. Method: import as the step with no earlier root; it is
+    // `build:compile`; recording the step removes it.
+    start();
+    const output = imported_as_step(true);
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    try testing.expectEqualStrings("build:compile", root_source(output, &text).?);
+    try recorded(output);
+    try testing.expect(root_source(output, &text) == null);
+}
+
+test "N8: a build: root older than this build is left alone" {
+    // Goal: only a root this build made is removed. Method: the same root, made before the
+    // build's start (a user's, or a crashed build's); recording leaves it.
+    start();
+    const output = imported_as_step(true);
+    context.started_s += 100;
+    try recorded(output);
+    var text: [constants.store_source_bytes_max]u8 = undefined;
+    try testing.expectEqualStrings("build:compile", root_source(output, &text).?);
+}
+
+const image_only =
+    \\.{
+    \\    .version = 1,
+    \\    .steps = .{
+    \\        .{ .name = "compile", .base = "alpine:3.20", .inputs = .{"a"}, .run = .{"true"} },
+    \\        .{ .name = "notice", .base = "alpine:3.20", .inputs = .{"a"}, .run = .{"true"} },
+    \\    },
+    \\    .image = .{
+    \\        .add = .{
+    \\            .{ .from = "compile", .to = "/usr/bin" },
+    \\            .{ .from = "notice", .to = DEST },
+    \\        },
+    \\    },
+    \\}
+    \\
+;
+
+/// The build file with the second add's destination `dest`; the first step's output is the sample
+/// tree, the second's a tree whose `bin` is a file.
+fn image_started(dest: []const u8) void {
+    start();
+    var replaced: [1024]u8 = undefined;
+    const at = std.mem.indexOf(u8, image_only, "DEST").?;
+    const out = std.fmt.bufPrint(&replaced, "{s}\"{s}\"{s}", .{
+        image_only[0..at], dest, image_only[at + 4 ..],
+    }) catch unreachable; // Fits.
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(out, &loaded.file, &problem);
+    testing.expectEqual(file_mod.ParseResult.parsed, parsed) catch unreachable; // A valid file.
+    composed.outputs[0] = made_output();
+    // A tree with a file `bin`: under /usr/bin it clashes with the sample tree's directory.
+    files.put_dir("/other", 0o755);
+    files.put("/other/bin", .file, 0o644, .{ 0, 0 }, "x");
+    var result: import.Result = undefined;
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    import.import(&store, &import_workspace, "/other", options, &result, &diag) catch {
+        unreachable; // The small tree imports.
+    };
+    diag.reset();
+    composed.outputs[1] = result.digest;
+    sim.stdout_len = 0;
+}
+
+test "build_image: a miss, then a hit, the footer, and the result record saved" {
+    // Goal: the image step end to end on the simulated store. Method: build it twice; the first
+    // is a miss and says `1 miss`, the second a hit and says `1 hit`, with the same digest; the
+    // record under that digest loads and names the assembled tree.
+    image_started("/etc");
+    try context.build_image();
+    const first = sim.stdout();
+    try testing.expect(std.mem.indexOf(u8, first, "  image") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "miss") != null);
+    const footer = "built b3:";
+    const at = std.mem.indexOf(u8, first, footer).?;
+    const digest = Digest.parse(first[at + 6 ..][0..constants.store_digest_text_bytes]).?;
+    try testing.expect(std.mem.indexOf(u8, first[at..], "  (0 hits, 1 miss, ") != null);
+    var record: result_mod.Record = undefined;
+    var bytes: [constants.build_result_bytes_max + 1]u8 = undefined;
+    var errno: u16 = 0;
+    try result_mod.load(&store, digest, &record, &bytes, &errno);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    sim.stdout_len = 0;
+    context.hits = 0;
+    context.misses = 0;
+    try context.build_image();
+    const second = sim.stdout();
+    try testing.expect(std.mem.indexOf(u8, second, "hit") != null);
+    try testing.expect(std.mem.indexOf(u8, second, &digest.text()) != null);
+    try testing.expect(std.mem.indexOf(u8, second, "  (1 hit, 0 misses, ") != null);
+}
+
+test "build_image: adds that clash are E0807 naming both, reached through compose" {
+    // Goal: the conflict's text from the whole path, not only from `assemble`. Method: both
+    // steps' outputs added at /usr/bin; the second add refuses, naming the first.
+    image_started("/usr/bin");
+    try testing.expectError(error.Failed, context.build_image());
+    try testing.expectEqual(.E0807, diag.code.?);
+    const cause = diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, ".image.add compile -> /usr/bin has a") != null);
+    const second = ".image.add notice -> /usr/bin brings a";
+    try testing.expect(std.mem.indexOf(u8, cause, second) != null);
+}
+
+const images = @import("../store/images.zig");
+const net_sim = @import("../registry/net_sim.zig");
+const oci_digest = @import("../registry/digest.zig");
+const test_registry = @import("../registry/test_registry.zig");
+
+var registry: test_registry.TestRegistry = undefined;
+var wire: net_sim.SimNet = undefined;
+
+const locked_reference = test_registry.TestRegistry.reference(.open);
+
+const registry_environment = [_]host_sim.EnvironmentVariable{
+    .{ .name = "XDG_DATA_HOME", .value = "/data" },
+};
+
+/// A world whose network is the test registry, and whose lock names `locked_reference` as
+/// `manifest` (an item of the fixture), with the store empty of it.
+fn registry_started(manifest: []const u8) void {
+    start();
+    // The pull finds its store by the environment, so the store lives where the environment says.
+    sim.environment_variables = &registry_environment;
+    files.put_dir("/data/zbx", 0o755);
+    support.make_store_directories(&files, "/data/zbx/store");
+    store.at(sim.interface(), "/data/zbx/store");
+    registry.init();
+    wire.init(1, registry.responder());
+    sim.wire = &wire;
+    const parsed = oci_digest.Sha256.parse(manifest).?;
+    composed.locking.lock.clear();
+    composed.locking.lock.put(locked_reference, parsed, "linux/amd64", Digest.of("t")) catch {
+        unreachable; // One entry fits.
+    };
+}
+
+test "a locked base the store lacks is pulled by its manifest digest, and said so" {
+    // Goal: `pull_locked` end to end on the simulated registry. Method: the lock names the
+    // fixture's amd64 manifest; the store is empty; the base loads, the image record is there,
+    // and one line names the base and the digest (on stdout in text, stderr under json).
+    registry_started(&registry.fixture.oci.amd64.digest);
+    const entry = try context.load_base(locked_reference, "compile");
+    const want = oci_digest.Sha256.parse(&registry.fixture.oci.amd64.digest).?;
+    try testing.expect(entry.manifest.eql(want));
+    try testing.expect(composed.image.tree.bytes.len > 0);
+    const line = sim.stdout();
+    try testing.expect(std.mem.startsWith(u8, line, "pulling registry.test/fixture/open@sha256:"));
+    try testing.expect(std.mem.indexOf(u8, line, &registry.fixture.oci.amd64.digest) != null);
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    // The record is in the store now: a second load pulls nothing.
+    sim.stdout_len = 0;
+    _ = try context.load_base(locked_reference, "compile");
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+
+    registry_started(&registry.fixture.oci.amd64.digest);
+    context.json = true;
+    _ = try context.load_base(locked_reference, "compile");
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "pulling registry.test/fixture/open@"));
+}
+
+test "a lock holding an index digest is E0804 naming both manifests, never an assertion" {
+    // Goal: external input (zbx.lock) cannot panic a ReleaseSafe build. Method: the lock names
+    // the fixture's index; the registry answers the pull with the platform's manifest, which
+    // differs; the build is refused with the one-line cause.
+    registry_started(&registry.fixture.oci.index.digest);
+    try testing.expectError(error.Failed, context.load_base(locked_reference, "compile"));
+    try testing.expectEqual(.E0804, diag.code.?);
+    var expected: [256]u8 = undefined;
+    const format = "locked base {s}: registry returned manifest {s}, lock says {s}";
+    const head = std.fmt.bufPrint(&expected, format, .{
+        locked_reference,
+        registry.fixture.oci.amd64.digest[0..19],
+        registry.fixture.oci.index.digest[0..19],
+    }) catch unreachable; // Fits.
+    try testing.expectEqualStrings(head, diag.last_cause().?);
+}
+
+test "a damaged result record is E0422 and a newer one E0423 that says to upgrade" {
+    // Goal: finding 7, neither case is the "file too large" of a read that never happened.
+    // Method: raise both and read the code, the cause and the fix.
+    const digest = Digest.of("a result");
+    const diagnose = @import("diagnose.zig");
+    diag.reset();
+    diagnose.result_unusable(&diag, digest, false);
+    try testing.expectEqual(.E0422, diag.code.?);
+    try testing.expect(std.mem.endsWith(u8, diag.last_cause().?, " is damaged"));
+    diag.reset();
+    diagnose.result_unusable(&diag, digest, true);
+    try testing.expectEqual(.E0423, diag.code.?);
+    try testing.expect(std.mem.endsWith(u8, diag.last_cause().?, "was written by a newer zbx"));
+}
+
+test "a network step's row ends with net, and a step without network has no marker" {
+    // Goal: the report marks a step that ran with the network (the brief's `net`). Method: the
+    // same settle as the clean exit, with the step's `network` set.
+    start();
+    loaded.file.steps[0].network = true;
+    const answer = answer_of(made_output());
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expectEqualStrings("  compile   miss   0.00 s   net\n", sim.stdout());
+    try testing.expect(composed.timings[0].network);
+}
+
+test "W0801 is printed once on stderr, naming the network steps, and never on stdout" {
+    // Goal: a build with network steps warns before it runs them, once, in the mode asked; one
+    // without says nothing. Method: set `network` on the steps of the example and render.
+    start();
+    context.warn_network();
+    try testing.expectEqualStrings("", sim.stderr());
+    loaded.file.steps[0].network = true;
+    loaded.file.steps[1].network = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "warning[ZBX-W0801]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "compile, notice") != null);
+    try testing.expectEqualStrings("", sim.stdout());
+    sim.stderr_len = 0;
+    context.json = true;
+    context.warn_network();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-W0801\""));
+    try testing.expectEqualStrings("", sim.stdout());
+}
+
+var verify_workspace: verify.Workspace = undefined;
+
+/// One step from its import to its cache entry, as the worker and then the parent do them, on the
+/// simulated store. False when a crash (or any failure) stopped it somewhere on the way.
+fn step_to_entry() bool {
+    var result: import.Result = undefined;
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = "build:compile",
+    };
+    import.import(&store, &import_workspace, "/src", options, &result, &diag) catch {
+        diag.reset();
+        return false;
+    };
+    diag.reset();
+    const answer = answer_of(result.digest);
+    const slot = worker_ended(0, 7, &answer);
+    const ended = settle(slot, .{ .exited = 0 });
+    diag.reset();
+    context.row_failed = null;
+    return ended.ok;
+}
+
+test "a step that dies at any write point, built again, gives the output of a clean build" {
+    // Goal: the result digest depends on the inputs only, whatever crashed on the way (the
+    // brief's "worker crashes"). Method: a clean step (import of /out, root, cache entry) counts
+    // its write points; then for each point the machine dies there, the process starts again on
+    // what the disk kept, and the step runs again on the same store. The entry must name the
+    // clean build's tree, that tree must be whole, and `store verify` must find no damage.
+    start();
+    support.make_source(&files, 0);
+    try testing.expect(step_to_entry());
+    const clean = composed.outputs[0];
+    const points = files.mutations;
+    try testing.expect(points > 10);
+    var crashed_runs: u32 = 0;
+    for (0..points) |at| {
+        start();
+        support.make_source(&files, 0);
+        files.faults.crash_mutation = @intCast(at);
+        // A crash in the last, best-effort write (dropping the build's root) still ends the step
+        // as done; every other one fails it. Either way the machine died.
+        _ = step_to_entry();
+        try testing.expect(files.crashed);
+        crashed_runs += 1;
+        // The process that starts again is another process: its temporary names (`tmp/<pid>-<n>`)
+        // do not collide with what the dead one left.
+        files.restart();
+        sim.world.processes[0].pid += 1;
+        store.at(sim.interface(), root_path);
+        try testing.expect(step_to_entry());
+        try testing.expect(composed.outputs[0].eql(clean));
+        var failure: cache.Failure = undefined;
+        const found = try cache.lookup(&store, &composed.cache, &composed.key, &failure);
+        try testing.expect(found == .hit);
+        try testing.expect(found.hit.eql(clean));
+        var totals: verify.Totals = undefined;
+        var verify_failure: verify.Failure = undefined;
+        const arena = &import_workspace.arena;
+        try verify.verify(&store, &verify_workspace, arena, &totals, &verify_failure);
+        try testing.expectEqual(@as(u32, 0), totals.damaged);
+    }
+    try testing.expectEqual(@as(u32, @intCast(points)), crashed_runs);
+}
+
+test "a full disk during a step's output import is E0416, with no cache entry written" {
+    // Goal: the demo document's claim for a full disk: the import of /out fails as ZBX-E0416
+    // (no space), not as a generic write failure, and the step leaves no cache entry. Method:
+    // the sim disk holds a few bytes only, the step's import runs, and the key is looked up.
+    start();
+    support.make_source(&files, 0);
+    files.faults.bytes_max = files.bytes_live + 4;
+    try testing.expect(!step_to_entry_keeping_diag());
+    try testing.expectEqual(@as(?codes.Code, .E0416), diag.code);
+    var failure: cache.Failure = undefined;
+    const found = try cache.lookup(&store, &composed.cache, &composed.key, &failure);
+    try testing.expect(found == .miss);
+    diag.reset();
+}
+
+fn step_to_entry_keeping_diag() bool {
+    var result: import.Result = undefined;
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = "build:compile",
+    };
+    import.import(&store, &import_workspace, "/src", options, &result, &diag) catch return false;
+    return true;
+}
+
+fn in_new_user_namespace(raw: *anyopaque) bool {
+    const world: *host_sim.HostSim = @ptrCast(@alignCast(raw));
+    return world.world.processes[world.world.current].new_user;
+}
+
+test "a step's inputs are imported inside the new user namespace, where chown to 0:0 is allowed" {
+    // Goal: regression for the first live demo-m7 run, where the parent imported the inputs and
+    // the real kernel refused `fchown(0, 0)` (EPERM) for an ordinary user. Method: the sim file
+    // system refuses a change of owner from a process with no new user namespace; the inputs
+    // of step 0 are imported through `input_job.import`. It fails if the import runs in the
+    // parent (the old code), and passes when the namespace's child does it.
+    start();
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/go.mod", 0o644, "module x\n");
+    files.put_file("/p/main.go", 0o644, "package main\n");
+    set_path(&loaded.project, "/p");
+    files.faults.owner_gate = .{ .context = &sim, .in_new_user_namespace = in_new_user_namespace };
+    try testing.expect(!in_new_user_namespace(&sim)); // The parent has none.
+    var input: input_tree.Workspace = undefined;
+    var problem: inputs_mod.Problem = undefined;
+    const request: input_job.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .store = &store,
+        .loaded = &loaded,
+        .step = 0,
+        .ws = &input,
+        .problem = &problem,
+    };
+    const first = try input_job.import(&request, &diag);
+    try testing.expect(diag.code == null);
+    // Each import is its own child: a second one gives the same tree.
+    try testing.expect(first.eql(try input_job.import(&request, &diag)));
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "--verbose reaches the step's request: verbose asks to stream, and nothing else does" {
+    // Goal: the wiring from the flag to the step. The step's own streaming is tested in
+    // step_tests.zig; this fails if `request` stops passing `verbose` on. Method: the request a
+    // context makes with `verbose` set and cleared.
+    start();
+    const spec: key_mod.Spec = .{
+        .platform = "linux/amd64",
+        .base_tree = Digest.of("base"),
+        .base_env = &.{},
+        .input_tree = Digest.of("input"),
+        .needs = &.{},
+        .argv = &.{"true"},
+        .env = &.{},
+        .network = false,
+        .name = "compile",
+    };
+    context.verbose = true;
+    try testing.expect(context.request(&spec).stream);
+    context.verbose = false;
+    try testing.expect(!context.request(&spec).stream);
 }
