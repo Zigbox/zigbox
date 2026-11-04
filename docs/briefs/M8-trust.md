@@ -2,7 +2,7 @@
 
 Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md` (codes `09xx` are reserved for trust and policy; none is registered yet).
-- The M8 section of `docs/SPEC.md` (snapshot of live doc rev 86; the M8 section, "Production readiness", "Agent operability" and Zigcube's C6 read the same in rev 91), and C6 in Part II, which reuses M8's checks on every node.
+- The M8 section of `docs/SPEC.md` (the snapshot of live doc rev 91, since PR #55), and C6 in Part II, which reuses M8's checks on every node.
 - `docs/briefs/linux-packages.md` and the decisions `2026-11-04-linux-packages.md`, `-linux-packages-in-m8.md`, `-package-split.md`, `-package-signing-hosting.md` and `-release-0.3.1.md`. They are settled. This brief folds them in and does not reopen them.
 - `docs/decisions/2026-11-04-m8-owner-answers.md`: the owner's answers to this brief's questions (passphrase-encrypted keys, in-toto and DSSE now, prune deferred). This brief is written to them.
 - For slices 1, 2 and 4: the [DSSE protocol](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md), in-toto's [Statement](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md), [DigestSet](https://github.com/in-toto/attestation/blob/main/spec/v1/digest_set.md), [envelope](https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md) and [bundle](https://github.com/in-toto/attestation/blob/main/spec/v1/bundle.md) pages, and [SLSA provenance v1](https://slsa.dev/spec/v1.0/provenance). Read them from the source; do not write them from memory.
@@ -403,8 +403,7 @@ The brief above is written to these answers. It also makes the smaller choices t
 
 ## Spec notes (flagged, not changed)
 
-- **Packaging is not in the spec.** Neither the snapshot (rev 86) nor the live doc (rev 91) mentions deb, rpm, apt or dnf. The 2026-11-04 decisions put packages in M8 and say the live doc should gain them before this brief. It has not. The supervisor should add the scope, the demo step and the acceptance line above to M8 in the live doc.
-- **The snapshot is behind.** `docs/SPEC.md` is rev 86, and the live doc is rev 91. The M8, Production readiness, Agent operability and C6 sections read the same in both. The live doc adds **M6c · Private pull (Amazon ECR)** and changes the Non-goals line ("Pull-only from public registries until after M8, except authenticated pull from Amazon ECR"), plus Part II text about the simulation instance. Under AGENTS.md this is a conflict to report, not one this brief resolves. Nothing in M8 depends on it. The supervisor should refresh the snapshot.
+- **Packaging is not in the spec.** The spec (rev 91) does not mention deb, rpm, apt or dnf. The 2026-11-04 decisions put packages in M8 and say the live doc should gain them before this brief. It has not. The supervisor should add the scope, the demo step and the acceptance line above to M8 in the live doc.
 - **"Signatures are over tree digests"** leaves the run config (entrypoint, user, env) unsigned. The brief keeps the tree as the subject and lets a statement bind the result or manifest (Fixed decisions, "Why the binding"). The spec could say "over tree digests, optionally bound to the image's config".
 - **"Policy refusals happen before any process starts."** The tamper check must read objects owned by container ids, which only the store's namespace child can do. The brief reads the criterion as "before any workload process". The spec could say so.
 - **"Tamper with one file in the stored tree"** is also tampering with every materialized farm of it (hardlinks share the inode). The spec does not say what checking costs. The brief measured it (Fixed decisions, "The tamper check").
