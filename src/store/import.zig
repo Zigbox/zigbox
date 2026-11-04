@@ -789,8 +789,9 @@ const Run = struct {
     // ---- Extended attributes ----------------------------------------------------------------
 
     /// The canonical attribute section of the file at `path`, in `ws.blob`. What the store does
-    /// not keep is left out with a warning; nothing here fails the import except a file that
-    /// vanished.
+    /// not keep, and what the file system declines to show, is left out with a warning. A file
+    /// that vanished, or a read that failed for any other reason (`attribute_refused`), fails
+    /// the import.
     fn gather_xattrs(run: *Run, path: [:0]const u8) Error![]const u8 {
         assert(path.len > 0);
         assert(run.ws.xattr_names.len > 0);
@@ -800,8 +801,13 @@ const Run = struct {
         if (run.options.drop_xattrs) return ws.builder.finish(&ws.blob);
         const listed = run.store.fs.list_xattrs(path, &ws.xattr_names) catch |err| {
             if (err == error.NotFound) return run.vanished(path);
+            const errno = run.store.fs.last_errno();
+            if (list_too_long(err, errno)) {
+                run.warn_xattr(path, "(the list)", .too_many);
+                return &xattrs.empty;
+            }
             if (!attribute_refused(err)) {
-                return run.source_failure("listxattr of", path, err, run.store.fs.last_errno());
+                return run.source_failure("listxattr of", path, err, errno);
             }
             run.warn_xattr(path, "(the list)", .unreadable);
             return &xattrs.empty;
@@ -826,18 +832,44 @@ const Run = struct {
         };
     }
 
-    /// Overlayfs's own attributes are never imported, but a commit reads what they say.
+    /// Whether a failed `listxattr` says only that the names do not fit `ws.xattr_names`:
+    /// `ERANGE`, or `E2BIG` when the list is longer than the kernel will return at all. Both
+    /// follow from the file's attributes alone, so leaving them all out is deterministic, as a
+    /// file with too many attributes is. An `E2BIG` is `IoFailed` (`host.zig`), as `EIO` is, so
+    /// the errno tells them apart.
+    fn list_too_long(err: host_mod.Error, errno: u16) bool {
+        assert(errno < 4096);
+        if (err == error.FileTooLarge) return true;
+        if (err != error.IoFailed) return false;
+        return errno == errno_too_big;
+    }
+
+    const errno_too_big: u16 = 7;
+
+    /// Overlayfs's own attributes are never imported, but a commit reads what they say. A read
+    /// of the opaque mark fails as `collect`'s reads do: a refusal is a warning and the mark is
+    /// read as absent; any other failure fails the commit, because reading an I/O error as "not
+    /// opaque" would bring back the lower layer's deleted files.
     fn note_overlay(run: *Run, path: [:0]const u8, name: [:0]const u8) Error!void {
         assert(name.len > 0);
+        assert(path.len > 0);
         if (!run.merging) return;
         const marks = &run.marks;
         if (std.mem.eql(u8, name, "user.overlay.whiteout")) marks.whiteout = true;
         if (std.mem.eql(u8, name, "user.overlay.redirect")) marks.unsupported = "redirect";
         if (std.mem.eql(u8, name, "user.overlay.metacopy")) marks.unsupported = "metacopy";
         if (!std.mem.eql(u8, name, "user.overlay.opaque")) return;
-        const value = run.store.fs.get_xattr(path, name, &run.ws.xattr_value) catch |err| {
-            if (err == error.NotFound) return run.vanished(path);
-            return;
+        const buffer = &run.ws.xattr_value;
+        const value = run.store.fs.get_xattr(path, name, buffer) catch |err| switch (err) {
+            error.NotFound => return run.vanished(path),
+            error.FileTooLarge => return run.warn_xattr(path, name, .value_too_long),
+            else => |other| {
+                if (!attribute_refused(other)) {
+                    const errno = run.store.fs.last_errno();
+                    return run.source_failure("getxattr of", path, other, errno);
+                }
+                return run.warn_xattr(path, name, .unreadable);
+            },
         };
         marks.opaque_dir = std.mem.eql(u8, value, "y");
     }

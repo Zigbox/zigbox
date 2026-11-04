@@ -595,3 +595,39 @@ test "a commit whose attribute reads keep failing is refused, never committed wi
     const result = try commit_upper("/upper", parent);
     try testing.expect(result.digest.eql(expected));
 }
+
+test "a commit whose read of the opaque mark fails is refused, never committed without it" {
+    // Goal: a `getxattr` of `user.overlay.opaque` that fails with an I/O error, or is
+    // interrupted past the retry bound, fails the commit (E0414); it once read as "not opaque",
+    // so the lower layer's deleted files came back in the committed tree. A refusal (EACCES)
+    // stays a documented skip with a warning. Method: only `getxattr` fails, so the list is
+    // read cleanly and the opaque mark's own read is the one that fails; without the fault the
+    // commit gives the digest of a copy whose `/etc` holds only the upper layer's file.
+    const parent = start();
+    build_copy();
+    files.remove_path("/copy/etc/passwd");
+    files.remove_path("/copy/etc/shadow");
+    files.remove_path("/copy/etc/empty");
+    files.put_file("/copy/etc/hosts", 0o644, "localhost\n");
+    const expected = import_directory("/copy");
+    make_upper("/upper");
+    files.put_dir("/upper/etc", 0o755);
+    files.put_xattr("/upper/etc", "user.overlay.opaque", "y");
+    files.put_file("/upper/etc/hosts", 0o644, "localhost\n");
+
+    for ([_]u16{ fs_sim.errno_intr, fs_sim.errno_io }) |errno| {
+        files.faults.get_xattr_errno = errno;
+        try testing.expectError(error.Failed, commit_upper("/upper", parent));
+        try testing.expectEqual(codes.Code.E0414, diag.code.?);
+    }
+    files.faults.get_xattr_errno = fs_sim.errno_acces;
+    const skipped = try commit_upper("/upper", parent);
+    try testing.expect(!skipped.digest.eql(expected)); // A refusal is a documented skip.
+    try testing.expectEqual(@as(u64, 1), skipped.xattrs_skipped);
+    files.restart();
+
+    files.faults.get_xattr_errno = 0;
+    const result = try commit_upper("/upper", parent);
+    try testing.expect(result.digest.eql(expected));
+    try testing.expectEqual(@as(u64, 0), result.xattrs_skipped);
+}

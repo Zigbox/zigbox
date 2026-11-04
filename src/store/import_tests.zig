@@ -596,3 +596,35 @@ test "the chunk hashes of an object are its stored list, or the one hash that is
         }
     }
 }
+
+test "a list of attributes too long to read leaves them all out with a warning, every time" {
+    // Goal: a `listxattr` that says the names do not fit (ERANGE) or are more than the kernel
+    // returns (E2BIG) depends on the file alone, so the file's attributes are left out with
+    // W0411, as for a file with too many; it once failed the import with E0414. An I/O error or
+    // a call interrupted past the retry bound still fails it. Method: only `listxattr` fails,
+    // with each errno in turn; the two that skip give the digest of the same tree without
+    // attributes.
+    start(1, 0);
+    files.remove_xattrs_of("/src/bin/ls");
+    files.remove_xattrs_of("/src/bin/su");
+    var plain_warnings: Warnings = .{};
+    const plain = try run_import("/src", &plain_warnings);
+    try testing.expectEqual(@as(u64, 0), plain.xattrs_skipped);
+
+    for ([_]u16{ fs_sim.errno_range, fs_sim.errno_too_big }) |errno| {
+        start(1, 0);
+        files.faults.list_xattrs_errno = errno;
+        var warnings: Warnings = .{};
+        const result = try run_import("/src", &warnings);
+        try testing.expect(result.digest.eql(plain.digest));
+        try testing.expect(result.xattrs_skipped > 0);
+        try testing.expect(warnings.has(.W0411));
+    }
+    for ([_]u16{ fs_sim.errno_io, fs_sim.errno_intr }) |errno| {
+        start(1, 0);
+        files.faults.list_xattrs_errno = errno;
+        var warnings: Warnings = .{};
+        try testing.expectError(error.Failed, run_import("/src", &warnings));
+        try testing.expectEqual(codes.Code.E0414, diag.code.?);
+    }
+}
