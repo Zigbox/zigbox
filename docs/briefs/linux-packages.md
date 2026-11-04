@@ -11,6 +11,11 @@ before the brief is written.
   static ReleaseSafe `zbx` from `zig build release` (`/usr/bin/zbx`), its man page if one exists
   by then, and the licence. No maintainer scripts beyond what the formats require: `zbx` is one
   static file and an upgrade is a file swap (SPEC, "Upgrades are a file swap").
+- **`zigbox` becomes the dev omnibus in Zigcube's C3** (owner, 2026-11-04): C3 adds `zcube`,
+  `zcube-server` and `zcube-agent` to it and ships `zigcube-cli`, `zigcube-server` and
+  `zigcube-agent` for one role per host (Zigcube `docs/briefs/c3-linux-packages.md`). So the
+  package writer is a module Zigcube can import from the pinned `zigbox` package, not code inside
+  `zbx`'s build step only.
 - **Dependencies are soft.** `zbx` needs no shared library. The deb says
   `Recommends: uidmap, passt`; the rpm says `Recommends: shadow-utils, passt` (`newuidmap`,
   `newgidmap`, `pasta`). `zbx doctor` already reports what is missing; the package does not
