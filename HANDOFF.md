@@ -50,6 +50,7 @@ This is the handoff for the Zigbox **supervisor** session: the agent that writes
   - **Trap:** a status commit with `[skip ci]` at the head of a PR stops the PR's CI from running at all (GitHub reads the head commit), and the git proxy here refuses force pushes. Push a status commit to a PR only after its CI has run, or put it in the PR's last code push.
   - **Slice 6 (the Mac)** was done by the Mac session and merged (PR #27): `logs` and `exec` forwarded with the terminal and signals, and `demo-mac` (31 steps) runs M6b's five steps plus the terminal, signal and follow cases. PR #28 (merged) names a missing cgroup v2 first when a run finds no scope.
 - **Release 0.2.0** (writable mounts, `--user`, logs, exec): the version bump and this status are on the working branch's PR. Then the owner runs `zig build mac-release -Dnotarize=true`, publishes `v0.2.0` with the zip and its `.sha256`, and puts the new formula in `Zigbox/homebrew-tap`. Optionally tags `v0.0.0-m6b`.
+- **Release 0.3.0** (M7 builds, and the Z1–Z7 APIs for Zigcube C2; notes in `docs/releases/0.3.0.md`): the version bump is its own PR. Then the owner runs `zig build mac-release -Dnotarize=true`, publishes `v0.3.0` with the zip and its `.sha256` and those notes, and updates `Zigbox/homebrew-tap`.
 - **Afterwards:** M7 (build) and M8 (trust) are not started. Write M7's brief only when the owner says.
 
 ## Owner decisions to remember
