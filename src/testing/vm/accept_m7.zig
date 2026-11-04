@@ -38,9 +38,10 @@ const touch_inputs = H.as_demo ++ "sh -c 'cd " ++ copy_dir ++ " && " ++
     "touch go.mod main.go VERSION LICENSE'";
 // Each count runs the listing alone first (`&&`), so the command's own failure is the exit code
 // the harness asserts; a pipeline's status is its last command's, and would hide it. `grep -c`
-// exits 1 for a count of zero, which is the answer wanted here, and 2 for a real error.
-const count_work = "sh -c 'ls -A " ++ common.store_dir ++ "/build/work > /tmp/work.out && " ++
-    "wc -l < /tmp/work.out'";
+// exits 1 for a count of zero, which is the answer wanted here, and 2 for a real error. A
+// work directory that does not exist (the sweep removes it) has no leftovers: zero.
+const count_work = "sh -c 'if [ -d " ++ common.store_dir ++ "/build/work ]; then ls -A " ++
+    common.store_dir ++ "/build/work > /tmp/work.out && wc -l < /tmp/work.out; else echo 0; fi'";
 const count_records = H.as_demo ++ "sh -c '/home/demo/zh2 ps --all > /home/demo/ps.out && " ++
     "{ grep -c build- /home/demo/ps.out || test $? -eq 1; }'";
 const count_foreign = "sh -c 'find " ++ common.store_dir ++ "/objects -type f ! -uid 1000 " ++
