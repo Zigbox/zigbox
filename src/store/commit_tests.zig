@@ -560,3 +560,38 @@ test "a commit leaves the mount points of the container's mounts as the parent h
     const other = commit_excluding("/plain", parent, &[_][]const u8{"/scratch"});
     try testing.expect(!other.eql(plain));
 }
+
+test "a commit whose attribute reads keep failing is refused, never committed without them" {
+    // Goal: regression for fuzz_commit seed 4368094359180696877 at iteration 6834 (iteration
+    // seed 9942877619146442846): a `listxattr` that was interrupted more often than the retry
+    // bound allows was read as "no attributes", so the commit succeeded with a digest that
+    // lacked `user.k`. Method: the upper layer holds a rewritten file with an attribute; every
+    // attribute read is interrupted, then fails with EIO, then is refused (EACCES, which is
+    // still a skip with a warning); the first two must fail the commit and the same commit
+    // without the fault must give the digest of importing the changed copy.
+    const parent = start();
+    files.put_xattr("/src/etc/passwd", "user.k", "v");
+    const expected = import_directory("/src");
+    try testing.expect(!parent.eql(expected));
+    make_upper("/upper");
+    files.put_dir("/upper/etc", 0o755);
+    files.put_file("/upper/etc/passwd", 0o644, "root:x:0:0\n");
+    files.put_xattr("/upper/etc/passwd", "user.k", "v");
+
+    const interrupted: u16 = 4;
+    const io_error: u16 = 5;
+    for ([_]u16{ interrupted, io_error }) |errno| {
+        files.faults.xattr_errno = errno;
+        try testing.expectError(error.Failed, commit_upper("/upper", parent));
+        try testing.expectEqual(codes.Code.E0414, diag.code.?);
+    }
+    files.faults.xattr_errno = fs_sim.errno_acces;
+    const skipped = try commit_upper("/upper", parent);
+    try testing.expect(!skipped.digest.eql(expected)); // A refusal is a documented skip.
+    try testing.expect(skipped.xattrs_skipped > 0);
+    files.restart();
+
+    files.faults.xattr_errno = 0;
+    const result = try commit_upper("/upper", parent);
+    try testing.expect(result.digest.eql(expected));
+}
