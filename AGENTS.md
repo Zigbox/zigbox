@@ -80,6 +80,11 @@ A release tag is cut only from a commit that is all of:
 The release PR quotes the fuzz run's last line, the Jepsen result when it applies, and both
 review verdicts.
 
+Every release also gets a quick retro, written by the supervisor within a day of the release and
+kept short: what assumptions turned out to be off base, what each cost, and what changes because
+of it. It goes in `docs/retros/<version>.md` (one file per release), and any rule it changes lands
+in this file or `docs/decisions/` in the same PR.
+
 ## Git
 
 - Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
