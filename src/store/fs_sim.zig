@@ -65,6 +65,9 @@ pub const Faults = struct {
     /// A writer appends a byte to every file right after it is opened for reading: what a file
     /// that is being written to looks like to a program that read its size a moment before.
     grow_on_open: bool = false,
+    /// A writer cuts the last byte off every file right after it is opened for reading: a file
+    /// that shrank between the size a program read and its read.
+    shrink_on_open: bool = false,
     /// The most names one inode may have; a `link` past it is `EMLINK` (ext4 allows 65000).
     link_max: ?u32 = null,
     /// A path with a symlink above its last part is a bug of the caller, as a real file system
@@ -436,6 +439,15 @@ pub const SimFs = struct {
     }
 
     /// Appends to a node's data, moving it to the end of the pool first if it is not there.
+    fn shrink_if_faulty(sim: *SimFs, node: *Node) void {
+        if (!sim.faults.shrink_on_open) return;
+        if (node.kind != .file) return;
+        if (node.data_len == 0) return;
+        node.data_len -= 1;
+        node.synced_len = @min(node.synced_len, node.data_len);
+        sim.bytes_live -= 1;
+    }
+
     fn append(sim: *SimFs, node: *Node, bytes: []const u8) void {
         if (bytes.len == 0) return;
         const at_end = node.data_at + node.data_len == sim.pool_len;
@@ -688,6 +700,7 @@ pub const SimFs = struct {
         if (node.kind == .dir) return sim.fail(errno_isdir);
         if (node.unreadable) return sim.fail(errno_acces);
         if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
+        sim.shrink_if_faulty(node);
         return sim.take_slot(index, false);
     }
 
@@ -721,6 +734,7 @@ pub const SimFs = struct {
                 if (node.kind == .dir) return sim.fail(errno_isdir);
                 if (node.unreadable) return sim.fail(errno_acces);
                 if (sim.faults.grow_on_open and node.kind == .file) sim.append(node, "+");
+                sim.shrink_if_faulty(node);
             },
             .directory => {
                 if (node.kind != .dir) return sim.fail(errno_notdir);

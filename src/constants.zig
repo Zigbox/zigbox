@@ -544,6 +544,8 @@ pub const store_symlink_target_bytes_max: u32 = 4095;
 pub const store_xattrs_max: u32 = 16;
 pub const store_xattr_name_bytes_max: u32 = 255;
 pub const store_xattr_value_bytes_max: u32 = 4096;
+/// Room for the names `listxattr` returns for one file: more than 16 names of 255 bytes.
+pub const store_xattr_names_bytes_max: u32 = 8192;
 /// The attributes' canonical encoding (count, then name and value of each, with lengths).
 pub const store_xattr_blob_bytes_max: u32 = 1 + store_xattrs_max * (4 + 255 + 4096);
 /// One encoded directory: the longest a tree object can be.
@@ -1254,6 +1256,7 @@ comptime {
     assert(bundle_name_bytes_max < dir_name_bytes_max + 32);
 
     assert(store_digest_hex_bytes == store_digest_bytes * 2);
+    assert(store_xattr_names_bytes_max >= store_xattrs_max * (store_xattr_name_bytes_max + 1));
     assert(store_digest_text_bytes == store_digest_hex_bytes + "b3:".len);
     assert(store_prefix_hex_min < store_digest_hex_bytes);
     assert(store_chunk_bytes % 4096 == 0);

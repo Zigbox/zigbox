@@ -66,8 +66,13 @@ pub const ObjectRef = struct {
 /// Calls `visitor.object(&ref)` for every file entry of every tree reachable from `root`
 /// (once per entry: an object used in two places is seen twice, as `walk` does; a caller that
 /// wants each once keeps its own set), and stops with `too_many_entries` after `entries_max`
-/// entries of all kinds. Trees read are checked against their names, so a tree a peer sent
-/// that was stored damaged is a `damaged` failure, not a wrong answer.
+/// entries of all kinds (a walk of exactly `entries_max` entries passes). Trees read are
+/// checked against their names, so a tree a peer sent that was stored damaged is a `damaged`
+/// failure, not a wrong answer.
+///
+/// The `*const ObjectRef` is valid only during the call: copy what is kept. When the walk stops
+/// with `too_many_entries` or `damaged`, the visitor has already seen the entries before the
+/// stop, so a caller that fails must discard what it collected.
 pub fn objects(
     store: *const Store,
     buffer: []u8,
@@ -140,6 +145,11 @@ fn walk_limited(
                 failure.* = .{ .where = digest, .kind = .too_many_entries, .errno = 0 };
                 return error.Failed;
             }
+            // A size no object can have is a tree no peer should have sent: damage, not a
+            // count the visitor would have to assert on.
+            if (entry.kind == .file and entry.size > file_bytes_max(store)) {
+                return damaged(failure, digest);
+            }
             visitor.entry(&entry);
             if (entry.kind != .dir) continue;
             if (top == stack.len) {
@@ -150,6 +160,11 @@ fn walk_limited(
             top += 1;
         }
     }
+}
+
+/// The longest file an object of this store can be: its chunks at the most chunks.
+fn file_bytes_max(store: *const Store) u64 {
+    return @as(u64, store.chunk_bytes) * constants.store_chunks_max;
 }
 
 /// True if the table of visited trees has `digest`; it is added if not.

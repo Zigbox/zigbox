@@ -42,6 +42,11 @@ const Caller = struct {
     record: images.Image,
     diag: Diag,
     blobs_seen: u32,
+    /// What the progress callback reported for each blob index (config, then layers).
+    seen_bytes: [4]u64,
+    seen_outcome: [4]pull.BlobOutcome,
+    /// Set to cut every body the wire serves once the image is resolved (so the cut hits a blob).
+    cut_blobs: bool,
     warnings_seen: u32,
     last_warning: ?codes.Code,
     ok: bool,
@@ -68,6 +73,9 @@ const Caller = struct {
         caller.sim.store_fs = &caller.files;
         _ = caller.sim.world.processes[0].cwd.set(project);
         caller.blobs_seen = 0;
+        caller.seen_bytes = @splat(0);
+        caller.seen_outcome = @splat(.cached);
+        caller.cut_blobs = false;
         caller.warnings_seen = 0;
         caller.last_warning = null;
         caller.ok = false;
@@ -77,10 +85,14 @@ const Caller = struct {
     fn on_event(context: *anyopaque, event: pull.Event) void {
         const caller: *Caller = @ptrCast(@alignCast(context));
         switch (event) {
-            .resolved => {},
+            .resolved => if (caller.cut_blobs) {
+                caller.wire.faults.cut_per_mille = 1000;
+            },
             .blob => |blob| {
                 assert(blob.index < blob.of);
                 caller.blobs_seen += 1;
+                caller.seen_bytes[blob.index] = blob.bytes;
+                caller.seen_outcome[blob.index] = blob.outcome;
             },
             .warning => |diag| {
                 caller.warnings_seen += 1;
@@ -143,16 +155,24 @@ test "a library caller pulls an image: the result, the record, the store, and no
     try testing.expect(result.counts.files > 0);
     try testing.expect(result.counts.directories > 0);
 
-    // Z5: each blob's digest, whole length and outcome (all three came over the wire).
-    var blob_index: u32 = 0;
-    while (blob_index <= result.layer_count) : (blob_index += 1) {
-        const blob = result.blob(blob_index);
+    // Z5: each blob's digest, whole length and outcome, against the fixture's own blobs and
+    // against what the progress callback reported for the same index.
+    const image = &caller.registry.fixture.oci;
+    const items = [_]*const @TypeOf(image.config){
+        &image.config,
+        &image.layer_gzip,
+        &image.layer_zstd,
+    };
+    for (items, 0..) |item, blob_index| {
+        const blob = result.blob(@intCast(blob_index));
         try testing.expectEqual(pull.BlobOutcome.downloaded, blob.outcome);
-        try testing.expect(blob.bytes > 0);
+        try testing.expect(item.len > 0);
+        try testing.expectEqual(@as(u64, item.len), blob.bytes);
+        try testing.expectEqualStrings(&item.digest, &blob.digest.text());
+        try testing.expectEqual(blob.bytes, caller.seen_bytes[blob_index]);
+        try testing.expectEqual(blob.outcome, caller.seen_outcome[blob_index]);
     }
-    try testing.expectEqual(result.resolved.config_size, result.blob(0).bytes);
     try testing.expect(result.blob(0).digest.eql(result.config_digest));
-    try testing.expectEqual(result.resolved.layers[1].size, result.blob(2).bytes);
 
     var store: Store = undefined;
     try testing.expect(store.locate(caller.sim.interface()));
@@ -175,7 +195,7 @@ test "a library caller pulls an image: the result, the record, the store, and no
     try testing.expect(caller.pull_once(reference, .{}));
     try testing.expect(caller.result.tree.eql(result.tree));
     try testing.expectEqual(@as(u32, 2), caller.wire.requests);
-    blob_index = 0;
+    var blob_index: u32 = 0;
     while (blob_index <= result.layer_count) : (blob_index += 1) {
         try testing.expectEqual(pull.BlobOutcome.cached, result.blob(blob_index).outcome);
     }
@@ -351,4 +371,28 @@ test "a pipe too small for the report refuses the pull with the worker's diagnos
     try support.check_whole(&caller.files, store_root, 1 << 20);
     caller.sim.world.pipe_capacity_bytes = constants.pull_report_bytes_max;
     try testing.expect(caller.pull_once(test_registry.TestRegistry.reference(.open), .{}));
+}
+
+test "a pull that resumes a cut download reports the blob as resumed, with its whole length" {
+    // Goal: Z5's `resumed` outcome. Method: the first pull is cut in the first blob and fails; the
+    // second continues the partial file, so the configuration is `resumed` and the layers
+    // `downloaded`, and `bytes` is the whole blob (not what the second pull moved), both in the
+    // callback and in the result.
+    const caller = try Caller.create(2);
+    defer caller.destroy();
+    const reference = test_registry.TestRegistry.reference(.open);
+    caller.cut_blobs = true;
+    try testing.expect(!caller.pull_once(reference, .{}));
+    caller.cut_blobs = false;
+    caller.wire.faults.cut_per_mille = 0;
+    caller.blobs_seen = 0;
+    try testing.expect(caller.pull_once(reference, .{}));
+    const result = &caller.result;
+    const image = &caller.registry.fixture.oci;
+    try testing.expectEqual(pull.BlobOutcome.resumed, result.blob(0).outcome);
+    try testing.expectEqual(pull.BlobOutcome.resumed, caller.seen_outcome[0]);
+    try testing.expectEqual(@as(u64, image.config.len), result.blob(0).bytes);
+    try testing.expectEqual(@as(u64, image.config.len), caller.seen_bytes[0]);
+    try testing.expectEqual(pull.BlobOutcome.downloaded, result.blob(1).outcome);
+    try testing.expectEqual(@as(u64, image.layer_gzip.len), result.blob(1).bytes);
 }

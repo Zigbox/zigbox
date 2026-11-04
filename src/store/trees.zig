@@ -111,11 +111,12 @@ fn store_failed(failure: *object.Failure, fs: fs_mod.Fs, err: host_mod.Error) ob
 pub fn has(store: *const Store, digest: Digest) host_mod.Error!bool {
     assert(store.root_len > 1);
     var path: PathBuf = undefined;
-    _ = store.fs.lstat(store.tree_path(&path, digest)) catch |err| {
+    const stat = store.fs.lstat(store.tree_path(&path, digest)) catch |err| {
         if (err == error.NotFound) return false;
         return err;
     };
-    return true;
+    // Anything but a file (a directory put there by hand) is not a tree the store holds.
+    return stat.kind == .file;
 }
 
 pub const LoadError = error{ NotFound, Damaged, Unreadable };

@@ -360,11 +360,12 @@ pub fn apply(fs: fs_mod.Fs, fd: fs_mod.Fd, attrs: Attrs, failure: *Failure) host
 pub fn has(store: *const Store, id: Digest) host_mod.Error!bool {
     assert(store.root_len > 1);
     var path: PathBuf = undefined;
-    _ = store.fs.lstat(store.object_path(&path, id)) catch |err| {
+    const stat = store.fs.lstat(store.object_path(&path, id)) catch |err| {
         if (err == error.NotFound) return false;
         return err;
     };
-    return true;
+    // Anything but a file (a directory put there by hand) is not an object the store holds.
+    return stat.kind == .file;
 }
 
 /// The chunk hashes of an object that has them stored; `Unsupported`-free: an object of one

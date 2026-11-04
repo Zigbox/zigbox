@@ -131,9 +131,9 @@ pub const Result = struct {
     warnings_dropped: u32,
     /// What the image runs by default: entrypoint, cmd, env, working directory, user.
     settings: *const images.Settings,
-    /// The workspace's record of each blob (`blob` reads it): valid until its next pull.
-    resolved: *const manifest.Resolved,
-    fetched: *const unpack.Fetched,
+    /// Each blob as this pull saw it, copied so that a later pull in the same workspace cannot
+    /// change it (`blob` reads it). The first `layer_count + 1` are set.
+    blobs: [constants.registry_layers_max + 1]Blob,
 
     /// One blob of the image: its digest, its length in the cache and how it came.
     pub const Blob = struct {
@@ -148,17 +148,7 @@ pub const Result = struct {
     pub fn blob(result: *const Result, index: u32) Blob {
         assert(index <= result.layer_count);
         assert(result.layer_count <= constants.registry_layers_max);
-        if (index == 0) return .{
-            .digest = result.resolved.config_digest,
-            .bytes = result.resolved.config_size,
-            .outcome = result.fetched.config,
-        };
-        const layer = &result.resolved.layers[index - 1];
-        return .{
-            .digest = layer.digest,
-            .bytes = layer.size,
-            .outcome = result.fetched.layers[index - 1],
-        };
+        return result.blobs[index];
     }
 
     /// "linux/amd64" or "linux/arm64".
@@ -276,6 +266,19 @@ fn fill_result(result: *Result, workspace: *const Workspace, done: *const report
     const resolved = &workspace.resolved;
     var buffer: [16]u8 = undefined;
     const platform = unpack.platform_text(&buffer, resolved.architecture);
+    var blobs: [constants.registry_layers_max + 1]Result.Blob = undefined;
+    blobs[0] = .{
+        .digest = resolved.config_digest,
+        .bytes = resolved.config_size,
+        .outcome = workspace.fetched.config,
+    };
+    for (resolved.layers[0..resolved.layer_count], 0..) |layer, index| {
+        blobs[index + 1] = .{
+            .digest = layer.digest,
+            .bytes = layer.size,
+            .outcome = workspace.fetched.layers[index],
+        };
+    }
     result.* = .{
         .manifest_digest = resolved.manifest_digest,
         .config_digest = resolved.config_digest,
@@ -286,8 +289,7 @@ fn fill_result(result: *Result, workspace: *const Workspace, done: *const report
         .counts = done.counts,
         .warnings_dropped = done.warnings_dropped,
         .settings = &workspace.settings,
-        .resolved = resolved,
-        .fetched = &workspace.fetched,
+        .blobs = blobs,
     };
     assert(result.layer_count > 0);
 }

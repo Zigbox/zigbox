@@ -11,8 +11,9 @@
 //!
 //! A mismatch is `Damaged` and no byte is returned: every error clears `out`, so a caller that
 //! ignores the error still holds no bytes of an unverified chunk. The call takes no store lock:
-//! it only reads, and a gc that moves the object away after it was opened leaves the open file
-//! readable, so the call sees the object whole or `NotFound`, never a part.
+//! it only reads. It opens the object first, and a gc that removes the object after that leaves
+//! the open file readable; a chunk list that is gone then is told from damage by looking for
+//! the object again. So the call sees the object whole or `NotFound`, never a part.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -41,17 +42,20 @@ pub const Error = error{
 };
 
 /// Reads chunk `index` of the object `id` into `out`, which holds `store.chunk_bytes`, checks
-/// it, and returns its length. `io` is the scratch buffer (room for a chunk list).
+/// it, and returns its length. `io` is the scratch buffer (room for a chunk list) and
+/// `scratch` the room for gathering an object's attributes; both are the caller's, so a server
+/// keeps them per thread instead of on a stack.
 pub fn read_chunk(
     store: *const Store,
     io: []u8,
+    scratch: *xattrs.Scratch,
     id: Digest,
     index: u32,
     out: []u8,
 ) Error!usize {
     assert(io.len >= constants.store_chunks_max * constants.store_digest_bytes);
     assert(out.len >= store.chunk_bytes);
-    if (read_checked(store, io, id, index, out)) |length| {
+    if (read_checked(store, io, scratch, id, index, out)) |length| {
         assert(length > 0);
         assert(length <= store.chunk_bytes);
         return length;
@@ -66,6 +70,7 @@ pub fn read_chunk(
 fn read_checked(
     store: *const Store,
     io: []u8,
+    scratch: *xattrs.Scratch,
     id: Digest,
     index: u32,
     out: []u8,
@@ -81,16 +86,17 @@ fn read_checked(
     const length: usize = @intCast(chunks.chunk_length(store, stat.size, index));
     assert(length > 0);
     assert(length <= store.chunk_bytes);
-    const expected = try listed_hash(store, io, id, stat.size, count, index);
+    // Opened before the list is read: from here a gc cannot take the object's bytes away.
     const fd = fs.open_read(path) catch |err| return map(err);
     defer fs.close(fd);
+    const expected = try listed_hash(store, io, id, stat.size, count, index);
     const offset = @as(u64, index) * store.chunk_bytes;
     const got = fs.read_full_at(fd, offset, out[0..length]) catch |err| return map(err);
     if (got != length) return error.Damaged; // The file is shorter than its stat said.
     const refused = if (expected) |hash|
         !Digest.of(out[0..length]).eql(hash)
     else
-        !try id_holds(store, path, stat, id, out[0..length]);
+        !try id_holds(store, scratch, path, stat, id, out[0..length]);
     if (refused) return error.Damaged;
     return length;
 }
@@ -102,8 +108,9 @@ fn map(err: fs_mod.Error) Error {
     };
 }
 
-/// The hash the list gives chunk `index`, or null for an object that has no list.
-fn listed_hash(
+/// The hash the list gives chunk `index`, or null for an object that has no list. Public for the
+/// test of a gc that takes the object and its list away between the caller's reads.
+pub fn listed_hash(
     store: *const Store,
     io: []u8,
     id: Digest,
@@ -118,18 +125,31 @@ fn listed_hash(
     }
     var list_storage: PathBuf = undefined;
     const bytes = store.fs.read_whole(store.chunks_path(&list_storage, id), io) catch |err| {
-        if (err == error.NotFound) return error.Damaged; // A long object without its list.
-        return error.Unreadable;
+        switch (err) {
+            // A list longer than any list there can be is damage, not a read that failed.
+            error.FileTooLarge => return error.Damaged,
+            error.NotFound => return list_missing(store, id),
+            else => return error.Unreadable,
+        }
     };
     if (bytes.len != @as(usize, count) * constants.store_digest_bytes) return error.Damaged;
-    return .{ .bytes = bytes[index * constants.store_digest_bytes ..][0..32].* };
+    const at = index * constants.store_digest_bytes;
+    return .{ .bytes = bytes[at..][0..constants.store_digest_bytes].* };
 }
 
-/// True if an object with these bytes and the file's own metadata has the id `id`. The
-/// buffers for the attributes are large (about 160 KB), so they are this function's, on the
-/// stack, and only an object of one chunk pays for them.
+/// A long object whose list is not there: damage if the object is still in the store, but if a
+/// gc took the object (and so its list) the caller asked about something that is gone.
+fn list_missing(store: *const Store, id: Digest) Error {
+    var path_storage: PathBuf = undefined;
+    _ = store.fs.lstat(store.object_path(&path_storage, id)) catch |err| return map(err);
+    return error.Damaged;
+}
+
+/// True if an object with these bytes and the file's own metadata has the id `id`. Only an
+/// object of one chunk gets here; its attributes are gathered in the caller's `scratch`.
 fn id_holds(
     store: *const Store,
+    scratch: *xattrs.Scratch,
     path: [:0]const u8,
     stat: fs_mod.Stat,
     id: Digest,
@@ -137,27 +157,15 @@ fn id_holds(
 ) Error!bool {
     assert(bytes.len <= store.chunk_bytes);
     const content = Digest.of(bytes);
-    var builder: xattrs.Builder = undefined;
-    var blob: [constants.store_xattr_blob_bytes_max]u8 = undefined;
-    var names: [8192]u8 = undefined;
-    var value: [constants.store_xattr_value_bytes_max + 1]u8 = undefined;
-    const fs = store.fs;
-    builder.reset();
-    const listed = fs.list_xattrs(path, &names) catch |err| return map(err);
-    var start: usize = 0;
-    while (start < listed.len) {
-        const end = std.mem.indexOfScalarPos(u8, listed, start, 0) orelse break;
-        const name = listed[start..end :0];
-        start = end + 1;
-        if (name.len == 0 or xattrs.class_of(name) != .keep) continue;
-        const got = fs.get_xattr(path, name, &value) catch |err| return map(err);
-        builder.add(name, got) catch return error.Damaged;
-    }
+    const section = scratch.gather(store.fs, path) catch |err| switch (err) {
+        error.TooMany, error.NameTooLong, error.ValueTooLong => return error.Damaged,
+        else => |fs_err| return map(fs_err),
+    };
     const attrs: object.Attrs = .{
         .mode = stat.mode,
         .uid = stat.uid,
         .gid = stat.gid,
-        .xattrs = builder.finish(&blob),
+        .xattrs = section,
     };
     return object.object_id(content, attrs).eql(id);
 }
