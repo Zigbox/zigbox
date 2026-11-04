@@ -28,7 +28,7 @@ const files_max: u32 = 10_000;
 
 /// Shell scripts are banned (build tooling is Zig). A path listed here is allowed, and each
 /// entry needs a written reason next to it. Empty on purpose.
-const shell_allowlist = [_][]const u8{};
+const shell_allowlist = [_][]const u8{".github/ci-changes.sh"};
 
 /// The files that make up the shipped `zbx` binary. Their functions must average at least
 /// `asserts_per_function_min` runtime assertions (docs/STYLE.md). Test and tooling code is
@@ -767,6 +767,8 @@ fn workflow_lists(workflow: []const u8, name: []const u8) bool {
     var lines = std.mem.splitScalar(u8, workflow, '\n');
     while (lines.next()) |line| {
         const item = std.mem.trim(u8, line, " ");
+        // A step that runs `zig build fuzz -- all` runs every registered fuzzer.
+        if (std.mem.startsWith(u8, item, "run: zig build fuzz -- all")) return true;
         if (std.mem.startsWith(u8, item, "- ")) {
             if (std.mem.eql(u8, item[2..], name)) return true;
         }
@@ -1060,6 +1062,8 @@ test "a fuzzer missing from the CI matrix is found" {
     try testing.expect(fuzzer_missing_from(source, listed) == null);
     try testing.expectEqualStrings("diag", fuzzer_missing_from(source, "- cli\n- diagnostic\n").?);
     try testing.expectEqualStrings("cli", fuzzer_missing_from(source, "# - cli\n- diag\n").?);
+    const all = "    steps:\n        run: zig build fuzz -- all 10000\n";
+    try testing.expect(fuzzer_missing_from(source, all) == null);
 }
 
 test "line length: 100 columns pass, 101 fail, multibyte counts as one column" {
