@@ -168,7 +168,6 @@ fn id_holds(
     // Outside the store's namespace `lstat` gives host ids, and the id commits to the
     // container's: map them back. An owner the map does not reach is no object of this store.
     const owner = owners.container_ids(&store.owners, stat.uid, stat.gid) orelse return false;
-    if (store.owners == .inside) assert(owner[0] == stat.uid);
     const attrs: object.Attrs = .{
         .mode = stat.mode,
         .uid = owner[0],

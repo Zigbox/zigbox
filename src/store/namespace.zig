@@ -48,7 +48,7 @@
 //!
 //! - **Reading outside.** A reader that cannot enter the namespace (Zigcube's peer server, which
 //!   has threads) sees host ids. Before its first `read_chunk` it sets
-//!   `store.owners = .{ .outside = outside_owners(host, &facts) }`, so the owner of a one-chunk
+//!   `store.owners = .{ .outside = outside_owners(host, &facts).map }`, so the owner of a one-chunk
 //!   object is mapped back to the container's ids its id commits to
 //!   (`decisions/2026-11-04-z9-chunk-read-outside.md`).
 //!
@@ -83,9 +83,11 @@ pub const Warn = struct {
 };
 
 /// The store's id map seen from the host, for a reader outside the namespace (Zigcube's peer
-/// server: `store.owners = .{ .outside = outside_owners(host, &facts) }`). It is the map `run`
-/// would write now, from the same choice, so the two cannot disagree.
-pub fn outside_owners(host: Host, facts: *doctor.Facts) owners_mod.Map {
+/// server: `store.owners = .{ .outside = outside_owners(host, &facts).map }`). It is the map
+/// `run` would write now, from the same choice, so the two cannot disagree. `fallback` is the
+/// W0201 case: the choice fell back to the one-id map (range moved, or `newuidmap`/`newgidmap`
+/// missing or not setuid), so only objects owned by container root verify; the caller may log it.
+pub fn outside_owners(host: Host, facts: *doctor.Facts) Outside {
     var choice: ids.Choice = undefined;
     ids.choose(host, facts, &choice);
     const map: owners_mod.Map = .{
@@ -101,8 +103,14 @@ pub fn outside_owners(host: Host, facts: *doctor.Facts) owners_mod.Map {
     };
     if (choice.mapping == .single) assert(map.range == null);
     if (choice.mapping == .full) assert(map.range != null);
-    return map;
+    assert(choice.warned == (choice.mapping == .single));
+    return .{ .map = map, .fallback = choice.warned };
 }
+
+pub const Outside = struct {
+    map: owners_mod.Map,
+    fallback: bool,
+};
 
 const go_ahead: u8 = 1;
 const setup_failed: u8 = constants.child_exit_setup_failed;
@@ -403,13 +411,16 @@ test "the map a reader outside sees is the one run writes: the range, or the use
     // (alice, 1000, range at 100000) and the single-id host; the map's ids are the host's.
     var sim: HostSim = undefined;
     sim_run.init(&sim, 1);
-    const full = outside_owners(sim.interface(), &test_facts);
+    const full = outside_owners(sim.interface(), &test_facts).map;
+    try testing.expect(!outside_owners(sim.interface(), &test_facts).fallback);
     try testing.expectEqual(@as(u32, 1000), full.uid);
     try testing.expectEqual(@as(u32, 1000), full.gid);
     try testing.expectEqual(@as(u32, 100000), full.range.?.uid_start);
     try testing.expectEqual(@as(u32, 100000), full.range.?.gid_start);
     sim_run.init_single(&sim, 1);
-    const single = outside_owners(sim.interface(), &test_facts);
+    const single_outside = outside_owners(sim.interface(), &test_facts);
+    try testing.expect(single_outside.fallback);
+    const single = single_outside.map;
     try testing.expectEqual(@as(u32, 1000), single.uid);
     try testing.expectEqual(@as(?owners_mod.Range, null), single.range);
     try testing.expectEqual(@as(u32, 0), sim.open_count());

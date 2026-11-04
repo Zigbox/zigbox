@@ -114,6 +114,10 @@ pub const exec_history = @import("runtime/exec_history.zig");
 /// single-threaded child inside the user's namespace (`store.namespace`).
 pub const store = @import("store/store.zig");
 
+/// The doctor's `Facts`, which `store.namespace.outside_owners` fills. It is large: keep one in
+/// static storage or on the heap, not on a small thread's stack.
+pub const Facts = @import("doctor.zig").Facts;
+
 /// Pull (M6b): fetch an image into the store and record it, as `zbx pull` does, from a library
 /// call (`pull.pull`). The caller passes the request (reference, platform, mirrors), its own
 /// `pull.Workspace` (about 15 MiB: static storage or the heap), the store's `import.Workspace`
