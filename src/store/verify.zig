@@ -129,10 +129,7 @@ pub const Workspace = struct {
     frames: [8192]Frame,
     frame_paths: [1 << 20]u8,
     current: [constants.path_bytes_max + 1]u8,
-    builder: xattrs.Builder,
-    blob: [constants.store_xattr_blob_bytes_max]u8,
-    xattr_names: [8192]u8,
-    xattr_value: [constants.store_xattr_value_bytes_max + 1]u8,
+    xattr: xattrs.Scratch,
 
     pub fn damage_slice(ws: *const Workspace) []const Damage {
         assert(ws.damage_count <= ws.damage.len);
@@ -343,21 +340,8 @@ fn check_object(run: *Run, id: Digest, has_list: bool) void {
 /// The canonical attribute section of a stored object, as the importer would have built it.
 fn gather_xattrs(run: *Run, path: [:0]const u8) ?[]const u8 {
     assert(path.len > 0);
-    assert(run.ws.xattr_names.len > 0);
-    const ws = run.ws;
-    const fs = run.store.fs;
-    ws.builder.reset();
-    const listed = fs.list_xattrs(path, &ws.xattr_names) catch return null;
-    var start: usize = 0;
-    while (start < listed.len) {
-        const end = std.mem.indexOfScalarPos(u8, listed, start, 0) orelse break;
-        const name = listed[start..end :0];
-        start = end + 1;
-        if (name.len == 0 or xattrs.class_of(name) != .keep) continue;
-        const value = fs.get_xattr(path, name, &ws.xattr_value) catch return null;
-        ws.builder.add(name, value) catch return null;
-    }
-    return ws.builder.finish(&ws.blob);
+    assert(run.ws.xattr.names.len > 0);
+    return run.ws.xattr.gather(run.store.fs, path) catch null;
 }
 
 // ---- Trees and roots -----------------------------------------------------------------------

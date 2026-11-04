@@ -111,6 +111,7 @@ const sink_vtable: store_fs.VTable = .{
     .get_xattr = sink_get_xattr,
     .open_read = sink_open_read,
     .read = sink_read,
+    .read_at = sink_read_at,
     .create = sink_create,
     .open_append = sink_open_append,
     .write = sink_write,
@@ -177,6 +178,9 @@ fn sink_open_read(_: *anyopaque, _: [:0]const u8) host.Error!store_fs.Fd {
     return error.NotFound;
 }
 fn sink_read(_: *anyopaque, _: store_fs.Fd, _: []u8) host.Error!u32 {
+    return 0;
+}
+fn sink_read_at(_: *anyopaque, _: store_fs.Fd, _: u64, _: []u8) host.Error!u32 {
     return 0;
 }
 fn sink_create(_: *anyopaque, _: [:0]const u8, _: u16) host.Error!store_fs.Fd {

@@ -12,6 +12,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
+const fs_mod = @import("fs.zig");
 
 /// A section with no attributes: just the count byte.
 pub const empty = [1]u8{0};
@@ -129,6 +130,37 @@ pub const Iterator = struct {
         }
         iterator.at = start + length;
         return blob[start..][0..length];
+    }
+};
+
+/// The memory `Scratch.gather` works in. About 150 KB (the builder alone is 70 KB), so a caller
+/// keeps one per thread in its workspace and does not put it on a stack.
+pub const Scratch = struct {
+    builder: Builder,
+    blob: [constants.store_xattr_blob_bytes_max]u8,
+    names: [constants.store_xattr_names_bytes_max]u8,
+    value: [constants.store_xattr_value_bytes_max + 1]u8,
+
+    pub const Error = fs_mod.Error || AddError;
+
+    /// The canonical attribute section of the file at `path`, as the importer would have built
+    /// it: the attributes the store keeps (`class_of`), sorted. The slice is in `scratch`.
+    pub fn gather(scratch: *Scratch, fs: fs_mod.Fs, path: [:0]const u8) Scratch.Error![]const u8 {
+        assert(path.len > 0);
+        assert(scratch.names.len > 0);
+        scratch.builder.reset();
+        const listed = try fs.list_xattrs(path, &scratch.names);
+        var start: usize = 0;
+        while (start < listed.len) {
+            const end = std.mem.indexOfScalarPos(u8, listed, start, 0) orelse break;
+            const name = listed[start..end :0];
+            start = end + 1;
+            if (name.len == 0) continue;
+            if (class_of(name) != .keep) continue;
+            const value = try fs.get_xattr(path, name, &scratch.value);
+            try scratch.builder.add(name, value);
+        }
+        return scratch.builder.finish(&scratch.blob);
     }
 };
 

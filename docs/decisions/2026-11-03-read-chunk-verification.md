@@ -1,0 +1,6 @@
+# `read_chunk`: what a verified read checks
+*Decided 2026-11-03, by the Z1/Z5 slice.*
+
+`read_chunk(store, io, scratch, id, index, out) Error!usize` returns bytes only if they hash right; on any error `out` is zeroed, so unverified bytes never leave (a partial read followed by an error once did, see the regression test). A multi-chunk object is checked against the BLAKE3 hash in its `<id>.chunks` list. A single-chunk object has no list, so its chunk hash is its content hash, which the object id does not contain (the id hashes a header of content hash, mode, uid, gid, xattrs). The id is the only anchor, so `id_holds` recomputes the id from the bytes plus the object metadata and refuses a mismatch. Gathering the object's extended attributes needs about 150 KB (`xattrs.Scratch`, bounded by the xattr constants, not by `chunk_bytes`), which the caller passes in beside `io` so a peer server keeps one per pool thread and none is on a stack; `verify` uses the same `Scratch.gather`. Callers pass `io` of at least `store_chunks_max * 32` bytes and `out` of at least `chunk_bytes`; both are asserted. The object is opened before its chunk list is read; a missing list is `NotFound` if the object is gone too (a gc ran), `Damaged` if the object is still there. A list longer than any list is `Damaged`.
+
+See `src/store/chunk_read.zig`.

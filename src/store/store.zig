@@ -77,6 +77,7 @@ pub const shards = @import("shards.zig");
 pub const verify = @import("verify.zig");
 pub const gc = @import("gc.zig");
 pub const chunk_put = @import("chunks.zig");
+pub const chunk_read = @import("chunk_read.zig");
 pub const import = @import("import.zig");
 pub const diff = @import("diff.zig");
 pub const usage = @import("usage.zig");
@@ -95,8 +96,23 @@ pub const chunks = object.chunk_hashes;
 /// The verified write of one chunk of an object (the `put_chunk` of Zigcube's contract).
 pub const put_chunk = chunk_put.put_chunk;
 
+/// The verified read of one chunk of an object: BLAKE3 is checked before any byte is returned
+/// (the `read_chunk` of Zigcube's contract).
+pub const read_chunk = chunk_read.read_chunk;
+
+/// Whether the store holds an object or a tree (the `has` of Zigcube's contract).
+pub const has_object = object.has;
+pub const has_tree = trees.has;
+
+/// The file objects below a tree, with sizes and chunk counts, within an entry limit.
+pub const walk_objects = walk.objects;
+
 /// A tree object's bytes, checked against its digest (the `get_tree` of Zigcube's contract).
 pub const get_tree = trees.load;
+
+/// The write of a tree object that came from outside: a wrong size, hash or encoding is an
+/// error (the `put_tree` of Zigcube's contract).
+pub const put_tree = trees.put_checked;
 
 test {
     _ = digest;
@@ -115,6 +131,7 @@ test {
     _ = verify;
     _ = gc;
     _ = chunk_put;
+    _ = chunk_read;
     _ = import;
     _ = diff;
     _ = usage;
@@ -128,6 +145,7 @@ test {
     _ = @import("gc_tests.zig");
     _ = @import("lock_tests.zig");
     _ = @import("chunks_tests.zig");
+    _ = @import("zigcube_api_tests.zig");
     _ = @import("usage_tests.zig");
     _ = @import("test_support.zig");
 }

@@ -27,6 +27,7 @@ const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
 const tree_fuzz = @import("fuzz_tree.zig");
 const store_fuzz = @import("fuzz_store.zig");
+const peer_fuzz = @import("fuzz_peer.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
 const build_cache_fuzz = @import("fuzz_build_cache.zig");
@@ -71,6 +72,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "seccomp", .run_iteration = seccomp_fuzz.fuzz_seccomp },
     .{ .name = "tree", .run_iteration = tree_fuzz.fuzz_tree },
     .{ .name = "store", .run_iteration = store_fuzz.fuzz_store },
+    .{ .name = "peer", .run_iteration = peer_fuzz.fuzz_peer },
     .{ .name = "commit", .run_iteration = commit_fuzz.fuzz_commit },
     .{ .name = "gc", .run_iteration = gc_fuzz.fuzz_gc },
     .{ .name = "reference", .run_iteration = reference_fuzz.fuzz_reference },
