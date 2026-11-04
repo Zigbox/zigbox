@@ -41,8 +41,8 @@ const Digest = @import("store/digest.zig").Digest;
 const fs_sim = @import("store/fs_sim.zig");
 const layout = @import("store/layout.zig");
 const object = @import("store/object.zig");
-const object_mod = object;
-const owners = @import("store/owners.zig"); // `Counter.object` hides `object` inside it.
+const object_mod = object; // `Counter.object` hides `object` inside it.
+const owners = @import("store/owners.zig");
 const support = @import("store/test_support.zig");
 const tree = @import("store/tree.zig");
 const trees = @import("store/trees.zig");
@@ -74,6 +74,7 @@ pub fn fuzz_peer(seed: u64) void {
     store.at(sim.interface(), root_path);
     store.chunk_bytes = if (random.boolean()) 8 else 16;
     fuzz_read(random);
+    store.owners = .inside;
     fuzz_put(random);
     fuzz_image(random);
     assert(sim.open_count() == 0);
@@ -215,11 +216,13 @@ fn random_owner_id(random: std.Random) u32 {
 /// The reader is inside the store's namespace, or outside it with the one-id map or the full
 /// map of a user (or root) with a range.
 fn random_owners(random: std.Random) void {
+    // The user's gid is its own, not its uid (a mutant that maps one through the other fails).
     const own: u32 = if (random.boolean()) 0 else 1000;
+    const own_gid: u32 = own + random.uintAtMost(u32, 1);
     store.owners = switch (random.uintLessThan(u32, 3)) {
         0 => .inside,
-        1 => .{ .outside = .{ .uid = own, .gid = own, .range = null } },
-        else => .{ .outside = .{ .uid = own, .gid = own, .range = .{
+        1 => .{ .outside = .{ .uid = own, .gid = own_gid, .range = null } },
+        else => .{ .outside = .{ .uid = own, .gid = own_gid, .range = .{
             .uid_start = 100000,
             .gid_start = if (random.boolean()) 100000 else 300000,
         } } },
@@ -269,9 +272,29 @@ fn unmapped_owner(random: std.Random, id: Digest, count: u32, length: u32) void 
         .{ stray, host_owner[1] }
     else
         .{ host_owner[0], stray_group };
-    set_host_owner(id, owner);
-    for (0..count) |index| expect_chunk(id, @intCast(index), length, count > 1);
+    expect_refused(id, count, length, owner);
+    wrong_owner(random, id, count, length);
     set_host_owner(id, host_owner);
+}
+
+/// With `owner` as the file's owner: a one-chunk object is refused as `Damaged` with `out`
+/// zeroed (never mapped by a guess); an object of several chunks still reads.
+fn expect_refused(id: Digest, count: u32, length: u32, owner: [2]u32) void {
+    set_host_owner(id, owner);
+    for (0..count) |index| {
+        expect_chunk(id, @intCast(index), length, count > 1);
+        if (count == 1) assert(read(id, 0) == error.Damaged);
+    }
+}
+
+/// The neighbour of the right host id, in the range when there is one (a different container
+/// id, or none at the edge): the map must tell it from the right one.
+fn wrong_owner(random: std.Random, id: Digest, count: u32, length: u32) void {
+    const step: u32 = if (random.boolean()) 1 else std.math.maxInt(u32); // +1 or -1, wrapping.
+    var owner = host_owner;
+    if (random.boolean()) owner[0] +%= step else owner[1] +%= step;
+    assert(!std.mem.eql(u32, &owner, &host_owner));
+    expect_refused(id, count, length, owner);
 }
 
 fn put_object(bytes: []const u8, attrs: object.Attrs) Digest {
