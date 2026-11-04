@@ -10,6 +10,7 @@
 
 pub const accel = @import("accel.zig");
 pub const cloud_init = @import("cloud_init.zig");
+pub const forward = @import("forward.zig");
 pub const http_server = @import("http_server.zig");
 pub const image = @import("image.zig");
 pub const limits = @import("limits.zig");
@@ -17,6 +18,7 @@ pub const session = @import("session.zig");
 
 pub const Accel = accel.Accel;
 pub const Config = cloud_init.Config;
+pub const Forward = forward.Forward;
 pub const Pin = image.Pin;
 pub const Route = session.Route;
 pub const Seed = session.Seed;
@@ -26,6 +28,7 @@ pub const now_ms = session.now_ms;
 test {
     _ = @import("accel.zig");
     _ = @import("cloud_init.zig");
+    _ = @import("forward.zig");
     _ = @import("http_server.zig");
     _ = @import("image.zig");
     _ = @import("limits.zig");

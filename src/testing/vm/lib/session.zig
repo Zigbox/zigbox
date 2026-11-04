@@ -17,9 +17,11 @@ const limits = @import("limits.zig");
 const http_server = @import("http_server.zig");
 const cloud_init = @import("cloud_init.zig");
 const accel_mod = @import("accel.zig");
+const forward_mod = @import("forward.zig");
 
 pub const Accel = accel_mod.Accel;
 pub const Route = http_server.Route;
+pub const Forward = forward_mod.Forward;
 
 pub fn now_ms() u64 {
     var stamp: linux.timespec = undefined;
@@ -37,6 +39,10 @@ pub const Seed = struct {
     files: []const Route = &.{},
     /// Raw disk images the guest sees as extra disks, in order (`/dev/vdb`, `/dev/vdc`, ...).
     disks: []const []const u8 = &.{},
+    /// TCP forwards from the host into the guest (`forward.zig`), at most `limits.forwards_max`.
+    /// A bad list is refused with a coded line on `out` before anything starts. None: the
+    /// guest's network is exactly what it always was.
+    forwards: []const Forward = &.{},
 };
 
 pub const Session = struct {
@@ -69,6 +75,12 @@ pub const Session = struct {
         assert(seed.meta_data.len > 0);
         if (seed.files.len + limits.seed_routes > limits.http_routes_max) return error.TooManyFiles;
         if (seed.disks.len > limits.disks_max) return error.TooManyDisks;
+        if (forward_mod.validate(seed.forwards)) |refusal| {
+            var message: [limits.forward_message_bytes_max]u8 = undefined;
+            try out.print("vm: {s}\n", .{forward_mod.describe(refusal, seed.forwards, &message)});
+            try out.flush();
+            return error.BadForward;
+        }
         const arena = init.arena.allocator();
         session.* = .{
             .io = init.io,
@@ -91,7 +103,10 @@ pub const Session = struct {
         session.server.add_route("/meta-data", seed.meta_data);
         session.server.add_route("/vendor-data", "");
         for (seed.files) |file| session.server.add_route(file.path, file.body);
-        const argv = try qemu_argv(arena, overlay, accel, session.server.port, seed.disks);
+        const argv = try qemu_argv(arena, overlay, accel, session.server.port, .{
+            .disks = seed.disks,
+            .forwards = seed.forwards,
+        });
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{
             @tagName(accel), session.server.port,
         });
@@ -349,15 +364,23 @@ test "clean_output drops carriage returns and escape sequences, keeps text" {
     try std.testing.expectError(error.OutputTooLong, clean_output("abcdef", &tiny));
 }
 
+/// What `qemu_argv` adds to the fixed command line.
+pub const Extras = struct {
+    disks: []const []const u8 = &.{},
+    forwards: []const Forward = &.{},
+};
+
 pub fn qemu_argv(
     arena: std.mem.Allocator,
     overlay: []const u8,
     accel: Accel,
     port: u16,
-    disks: []const []const u8,
+    extras: Extras,
 ) ![]const []const u8 {
+    const disks = extras.disks;
     assert(overlay.len > 0);
     assert(disks.len <= limits.disks_max);
+    const netdev = try forward_mod.netdev_argument(arena, extras.forwards);
     const drive = try std.fmt.allocPrint(arena, "if=virtio,format=qcow2,file={s}", .{overlay});
     const seed = "type=1,serial=ds=nocloud;s=http://10.0.2.2:{d}/";
     const smbios = try std.fmt.allocPrint(arena, seed, .{port});
@@ -373,7 +396,7 @@ pub fn qemu_argv(
         "none",                       "-monitor",                     "none",
         "-chardev",                   "stdio,id=console0,signal=off", "-serial",
         "chardev:console0",           "-drive",                       drive,
-        "-netdev",                    "user,id=net0",                 "-device",
+        "-netdev",                    netdev,                         "-device",
         "virtio-net-pci,netdev=net0", "-smbios",                      smbios,
         "-no-reboot",
     };
@@ -393,8 +416,8 @@ test "qemu arguments select the accelerator and point cloud-init at the host" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const kvm = try qemu_argv(arena, "o.qcow2", .kvm, 4242, &.{});
-    const tcg = try qemu_argv(arena, "o.qcow2", .tcg, 4242, &.{});
+    const kvm = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{});
+    const tcg = try qemu_argv(arena, "o.qcow2", .tcg, 4242, .{});
     try std.testing.expectEqualStrings("qemu-system-x86_64", kvm[0]);
     try std.testing.expect(contains(kvm, "kvm") and contains(kvm, "host"));
     try std.testing.expect(contains(tcg, "tcg,thread=multi") and contains(tcg, "max"));
@@ -402,11 +425,11 @@ test "qemu arguments select the accelerator and point cloud-init at the host" {
     try std.testing.expect(contains(kvm, "if=virtio,format=qcow2,file=o.qcow2"));
     try std.testing.expectEqual(kvm.len, tcg.len);
     // An extra disk is a raw virtio drive, and only when one is named, in the order given.
-    const cached = try qemu_argv(arena, "o.qcow2", .kvm, 4242, &.{"blobs.img"});
+    const cached = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{ .disks = &.{"blobs.img"} });
     try std.testing.expectEqual(kvm.len + 2, cached.len);
     try std.testing.expect(contains(cached, "if=virtio,format=raw,file=blobs.img"));
     try std.testing.expect(!contains(kvm, "if=virtio,format=raw,file=blobs.img"));
-    const two = try qemu_argv(arena, "o.qcow2", .kvm, 4242, &.{ "a.img", "b.img" });
+    const two = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{ .disks = &.{ "a.img", "b.img" } });
     try std.testing.expectEqual(kvm.len + 4, two.len);
     try std.testing.expectEqualStrings("if=virtio,format=raw,file=a.img", two[kvm.len + 1]);
     try std.testing.expectEqualStrings("if=virtio,format=raw,file=b.img", two[kvm.len + 3]);
@@ -417,4 +440,39 @@ fn contains(argv: []const []const u8, wanted: []const u8) bool {
         if (std.mem.eql(u8, argument, wanted)) return true;
     }
     return false;
+}
+
+test "qemu arguments: no forwards is the command line of before, forwards change one argument" {
+    // Goal: the whole argv with no forwards is a frozen snapshot (it must stay byte-identical to
+    // what the harness always ran), and forwards alter only the -netdev value.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const plain = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{});
+    const drive = "if=virtio,format=qcow2,file=o.qcow2";
+    const smbios = "type=1,serial=ds=nocloud;s=http://10.0.2.2:4242/";
+    const expected = [_][]const u8{
+        "qemu-system-x86_64",         "-machine",                     "q35",
+        "-accel",                     "kvm",                          "-cpu",
+        "host",                       "-smp",                         "2",
+        "-m",                         "2048",                         "-display",
+        "none",                       "-monitor",                     "none",
+        "-chardev",                   "stdio,id=console0,signal=off", "-serial",
+        "chardev:console0",           "-drive",                       drive,
+        "-netdev",                    "user,id=net0",                 "-device",
+        "virtio-net-pci,netdev=net0", "-smbios",                      smbios,
+        "-no-reboot",
+    };
+    try std.testing.expectEqual(expected.len, plain.len);
+    for (expected, plain) |want, got| try std.testing.expectEqualStrings(want, got);
+    const forwarded = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{
+        .forwards = &.{.{ .host_port = 2222, .guest_port = 22 }},
+    });
+    try std.testing.expectEqual(plain.len, forwarded.len);
+    for (plain, forwarded, 0..) |want, got, index| {
+        if (std.mem.eql(u8, want, "user,id=net0")) {
+            try std.testing.expectEqualStrings("user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22", got);
+            try std.testing.expectEqualStrings("-netdev", forwarded[index - 1]);
+        } else try std.testing.expectEqualStrings(want, got);
+    }
 }
