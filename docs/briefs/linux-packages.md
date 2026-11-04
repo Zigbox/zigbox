@@ -1,8 +1,9 @@
-# Input: Linux packages for `zbx` (deb and rpm)
+# M8 input: Linux packages for `zbx` (deb and rpm)
 
-Owner, 2026-11-04: Zigbox's next release (the one after 0.3.0, alongside M8) ships `zbx` as a
-Debian package and an RPM, from a signed apt and dnf repository. This is a list to fold into that
-release's brief when it is written, not a brief. It is one or two slices.
+Owner, 2026-11-04: M8 ships `zbx` as a Debian package and an RPM, from a signed apt and dnf
+repository. This is a list to fold into M8's brief when it is written, not a brief. It is one or
+two slices. SPEC's M8 section does not list packaging yet; the live design doc should gain it
+before the brief is written.
 
 ## Scope
 
@@ -39,7 +40,9 @@ release's brief when it is written, not a brief. It is one or two slices.
 1. **The signing tool.** `gpg` on the owner's machine (an external program STYLE.md does not
    list), or a Zig-native OpenPGP signer (Ed25519, v4 signatures, a few hundred lines in `std`'s
    crypto). Default: a Zig-native signer reading a key file the owner keeps offline, so the
-   release step needs nothing STYLE.md does not allow.
+   release step needs nothing STYLE.md does not allow. M8 already brings Ed25519 keys and
+   `zbx sign`; the archive signer should share that code, though the archive key stays separate
+   from image-signing keys.
 2. **Where the repository is hosted.** Default: a static site under the project's GitHub Pages
    (`/apt`, `/rpm`), with the public key beside it.
 3. **Which distributions are supported and tested.** Default: deb for Ubuntu 24.04 and Debian 12;
