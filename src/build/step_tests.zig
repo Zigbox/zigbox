@@ -612,8 +612,33 @@ test "a sweep of a store that does not exist yet is not an error" {
         .group = group,
     };
     diag.reset();
+    const live_before = files.live_count();
     try step.sweep(&request, &workspace, &diag);
     try testing.expect(diag.code == null);
+    // The sweep must not create the store (or its lock file) to take the lock.
+    try testing.expectEqual(live_before, files.live_count());
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
+test "a sweep whose lock file cannot be opened is E0417, not silence" {
+    // Goal: only a store that does not exist yet is skipped; a lock file that exists and is
+    // refused (EACCES) is a real fault the user must hear of. Method: the store's lock file
+    // exists and is unreadable.
+    const fixture = try setup(42, "fetch");
+    files.set_unreadable(store_root ++ "/lock");
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    diag.reset();
+    try testing.expectError(error.Failed, step.sweep(&request, &workspace, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0417), diag.code);
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+    diag.reset();
 }
 
 test "with stream on, each step's output is on stderr behind its name, and stdout is untouched" {

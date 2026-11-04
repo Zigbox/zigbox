@@ -36,10 +36,17 @@ const setup = H.as_demo ++ "sh -c 'rm -rf " ++ copy_dir ++ " /home/demo/secret &
     "ln -s /home/demo/secret " ++ copy_dir ++ "/escape'";
 const touch_inputs = H.as_demo ++ "sh -c 'cd " ++ copy_dir ++ " && " ++
     "touch go.mod main.go VERSION LICENSE'";
-const count_work = "ls -A " ++ common.store_dir ++ "/build/work 2>/dev/null | wc -l";
-const count_records = H.as_demo ++ "sh -c '/home/demo/zh2 ps --all | grep -c build-; true'";
-const count_foreign = "find " ++ common.store_dir ++ "/objects -type f ! -uid 1000 | wc -l";
-const count_all = "find " ++ common.store_dir ++ "/objects -type f | wc -l";
+// Each count runs the listing alone first (`&&`), so the command's own failure is the exit code
+// the harness asserts; a pipeline's status is its last command's, and would hide it. `grep -c`
+// exits 1 for a count of zero, which is the answer wanted here, and 2 for a real error.
+const count_work = "sh -c 'ls -A " ++ common.store_dir ++ "/build/work > /tmp/work.out && " ++
+    "wc -l < /tmp/work.out'";
+const count_records = H.as_demo ++ "sh -c '/home/demo/zh2 ps --all > /home/demo/ps.out && " ++
+    "{ grep -c build- /home/demo/ps.out || test $? -eq 1; }'";
+const count_foreign = "sh -c 'find " ++ common.store_dir ++ "/objects -type f ! -uid 1000 " ++
+    "> /tmp/foreign.out && wc -l < /tmp/foreign.out'";
+const count_all = "sh -c 'find " ++ common.store_dir ++ "/objects -type f > /tmp/all.out && " ++
+    "wc -l < /tmp/all.out'";
 
 const cycle_file =
     ".{\n    .version = 1,\n    .steps = .{\n" ++

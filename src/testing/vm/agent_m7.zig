@@ -177,8 +177,10 @@ fn step_refused(session: *Session, out: *Io.Writer) !void {
     }
     const all = try json.diagnostics(arena, failed.streams.stderr);
     const explain = try common.format(session, "{s} explain ZBX-E0805 --output json", .{zha});
+    // A code with no explain entry makes `zbx explain` exit non-zero, which fails the exit-0
+    // assertion here before the entry is compared.
     const said = try state.expect_long_split(session, out, explain, 0, short_s);
-    checks.check_explain_entry(arena, said.streams.stdout, all[0]) catch |err| {
+    checks.check_explain_entry(arena, said.streams.stdout, all[0], "a build step failed") catch |err| {
         return fail_step(out, step, "expected explain to agree with the diagnostic", err);
     };
 }

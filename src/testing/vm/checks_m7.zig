@@ -250,7 +250,7 @@ pub fn check_overlap(report: *const Report, a: []const u8, b: []const u8) Error!
     if (second.start_ms >= first.end_ms) return error.NoOverlap;
 }
 
-/// Every step of the build was a hit, and (JSON only) it took less than a second.
+/// Every step of the build was a hit. (That it was fast is `check_fast`'s.)
 pub fn check_all_hits(report: *const Report) Error!void {
     if (report.count != 3) return error.ReportWrong;
     if (report.misses != 0) return error.CacheWrong;
@@ -955,12 +955,14 @@ const ExplainEntry = struct {
 
 /// `zbx explain <code> --output json` agrees with a diagnostic of that code in everything the
 /// code fixes: the schema, code, severity, blame and docs. Its summary is the code's own
-/// ("a build step failed"), not the instance's (`build step "fetch" failed: exit 1`), so it
-/// need only be there.
+/// (`summary_catalog`, "a build step failed"), not the instance's (`build step "fetch" failed:
+/// exit 1`). The harness is a module of its own and cannot import the catalog, so the caller
+/// states the catalog's summary; a drift in the catalog fails the demo here.
 pub fn check_explain_entry(
     arena: Allocator,
     stdout: []const u8,
     diagnostic: json.Diagnostic,
+    summary_catalog: []const u8,
 ) !void {
     const options: std.json.ParseOptions = .{ .allocate = .alloc_always };
     const doc = std.json.parseFromSliceLeaky(ExplainEntry, arena, stdout, options) catch {
@@ -971,7 +973,8 @@ pub fn check_explain_entry(
     if (!std.mem.eql(u8, doc.severity, diagnostic.severity)) return error.ExplainWrong;
     if (!std.mem.eql(u8, doc.blame, diagnostic.blame)) return error.ExplainWrong;
     if (!std.mem.eql(u8, doc.docs, diagnostic.docs)) return error.ExplainWrong;
-    if (doc.summary.len == 0 or doc.explanation.len == 0) return error.ExplainWrong;
+    if (!std.mem.eql(u8, doc.summary, summary_catalog)) return error.ExplainWrong;
+    if (doc.explanation.len == 0) return error.ExplainWrong;
 }
 
 test "explain agrees with the diagnostic except for the instance's summary" {
@@ -994,11 +997,14 @@ test "explain agrees with the diagnostic except for the instance's summary" {
     const line = "{\"schema\":\"zbx.explain/1\",\"code\":\"ZBX-E0805\",\"severity\":\"error\"," ++
         "\"blame\":\"user\",\"summary\":\"a build step failed\",\"explanation\":\"A step.\"," ++
         "\"docs\":\"" ++ docs ++ "\"}\n";
-    try check_explain_entry(arena, line, diagnostic);
+    const summary = "a build step failed";
+    try check_explain_entry(arena, line, diagnostic, summary);
     const other = try std.mem.replaceOwned(u8, arena, line, "E0805\",\"sev", "E0806\",\"sev");
-    const wrong = check_explain_entry(arena, other, diagnostic);
+    const wrong = check_explain_entry(arena, other, diagnostic, summary);
     try std.testing.expectError(error.ExplainWrong, wrong);
     const bare = try std.mem.replaceOwned(u8, arena, line, "A step.", "");
-    const empty = check_explain_entry(arena, bare, diagnostic);
+    const empty = check_explain_entry(arena, bare, diagnostic, summary);
     try std.testing.expectError(error.ExplainWrong, empty);
+    const instance = check_explain_entry(arena, line, diagnostic, diagnostic.summary);
+    try std.testing.expectError(error.ExplainWrong, instance);
 }
