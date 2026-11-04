@@ -180,7 +180,8 @@ fn step_refused(session: *Session, out: *Io.Writer) !void {
     // A code with no explain entry makes `zbx explain` exit non-zero, which fails the exit-0
     // assertion here before the entry is compared.
     const said = try state.expect_long_split(session, out, explain, 0, short_s);
-    checks.check_explain_entry(arena, said.streams.stdout, all[0], "a build step failed") catch |err| {
+    const summary = "a build step failed"; // The catalog's summary of E0805.
+    checks.check_explain_entry(arena, said.streams.stdout, all[0], summary) catch |err| {
         return fail_step(out, step, "expected explain to agree with the diagnostic", err);
     };
 }
