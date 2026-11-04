@@ -15,6 +15,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const digest_mod = @import("digest.zig");
 const layout = @import("layout.zig");
 const lock = @import("lock.zig");
+const image_peer = @import("image_peer.zig");
 
 const Digest = digest_mod.Digest;
 
@@ -885,4 +886,66 @@ pub fn gc_failed(
         ),
     }
     assert(diag.code != null);
+}
+
+/// ZBX-E0437 for an image record from a peer that was not taken or a tree that has none; a busy
+/// store is E0436 and a failed read or write E0416 or E0417, as elsewhere.
+pub fn image_refused(
+    diag: *Diag,
+    store: *const layout.Store,
+    failure: *const image_peer.Failure,
+) void {
+    assert(diag.code == null);
+    assert(store.root_len > 1);
+    const step = "reading or writing an image record";
+    switch (failure.refusal) {
+        .busy => return store_busy(diag, "taking an image record", lock.holder(store)),
+        .store_failed => return write_failed(diag, store, step, failure.err, failure.errno),
+        else => {},
+    }
+    diag.raise(.E0437);
+    diag.while_("taking an image record from a peer", .{});
+    switch (failure.refusal) {
+        .no_record => diag.cause("no image record names this tree", .{}),
+        .local_unusable => diag.cause(
+            "a record of this store for the image can't be read (it is damaged or newer)",
+            .{},
+        ),
+        .too_large => diag.cause(
+            "the record is {d} bytes, more than the {d} any record has",
+            .{ failure.size, constants.image_record_bytes_max },
+        ),
+        .malformed => diag.cause("the text is not an image record this zbx reads", .{}),
+        .newer => diag.cause("the record is from a newer zbx", .{}),
+        .wrong_tree => diag.cause(
+            "the record is for the tree {s}, not the one that was fetched",
+            .{failure.digest.text()},
+        ),
+        .incomplete => diag.cause(
+            "{s} is not in the store, so the tree is not whole",
+            .{failure.digest.text()},
+        ),
+        .tree_damaged => diag.cause("the tree {s} is damaged", .{failure.digest.text()}),
+        .tree_too_big => diag.cause("the tree has more entries than the call allows", .{}),
+        .conflict => diag.cause(
+            "a record of the same manifest already names the tree {s}",
+            .{failure.digest.text()},
+        ),
+        .busy, .store_failed => unreachable, // Handled above.
+    }
+    diag.context("path", "{s}", .{store.root_text()});
+    diag.fix(.{ .sentence = fix_for(failure.refusal) });
+    assert(diag.fixes.count > 0);
+}
+
+fn fix_for(refusal: image_peer.Refusal) []const u8 {
+    return switch (refusal) {
+        .no_record, .malformed, .newer, .too_large, .wrong_tree => "ask the peer for the " ++
+            "record of the tree that was fetched",
+        .incomplete, .tree_damaged, .tree_too_big => "fetch the missing parts of the tree, " ++
+            "then import the record again",
+        .conflict, .local_unusable => "keep the record the store has; run 'zbx store verify'" ++
+            " to see whether it is sound",
+        .busy, .store_failed => unreachable, // Not E0437.
+    };
 }

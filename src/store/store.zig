@@ -84,6 +84,7 @@ pub const usage = @import("usage.zig");
 pub const walk = @import("walk.zig");
 pub const materialize = @import("materialize.zig");
 pub const namespace = @import("namespace.zig");
+pub const image_peer = @import("image_peer.zig");
 pub const diagnose = @import("diagnose.zig");
 
 pub const Digest = digest.Digest;
@@ -114,6 +115,11 @@ pub const get_tree = trees.load;
 /// error (the `put_tree` of Zigcube's contract).
 pub const put_tree = trees.put_checked;
 
+/// Z4: the image record of a tree, for a peer (`export_image`), and the record from a peer for a
+/// tree that is whole here (`import_image`); `image_peer.zig` says what is checked.
+pub const export_image = image_peer.export_record;
+pub const import_image = image_peer.import_record;
+
 test {
     _ = digest;
     _ = tree;
@@ -137,6 +143,7 @@ test {
     _ = usage;
     _ = walk;
     _ = namespace;
+    _ = image_peer;
     _ = diagnose;
     _ = @import("names.zig");
     _ = @import("sets.zig");
@@ -147,6 +154,7 @@ test {
     _ = @import("chunks_tests.zig");
     _ = @import("zigcube_api_tests.zig");
     _ = @import("usage_tests.zig");
+    _ = @import("image_peer_tests.zig");
     _ = @import("test_support.zig");
 }
 
