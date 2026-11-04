@@ -2,7 +2,7 @@
 
 *Decided 2026-11-04, by the owner (answers) and the supervisor (what each changes).*
 
-The M8 brief (`docs/briefs/M8-trust.md`, PR #54) asked the owner eight questions. The answers are quoted below, then what each one changes. The brief has been rewritten to read as decided; this file is the record of why.
+The M8 brief (`docs/briefs/M8-trust.md`, PR #54) asked the owner eight questions. The answers are quoted below, then what each one changes. The brief has been rewritten to read as decided; this file is the record of why. Six follow-ups on the brief's smaller choices were answered the same day and are at the end; where one changes an answer above, the answer says so.
 
 ## 1. Where keys live and how they are protected
 
@@ -34,7 +34,7 @@ The M8 brief (`docs/briefs/M8-trust.md`, PR #54) asked the owner eight questions
 
   So BLAKE3 is allowed, with two consequences. First, we must document our encoding, which `docs/demos/m8.md` does. Second, a third-party consumer is told to *ignore* a key it does not recognize, so a statement whose only subject digest is BLAKE3-based gives that tool nothing to match. That is acceptable, because those tools do not run our trees. The `sha256` manifest binding is the one subject they can match. The key name stays `zbxTree` rather than `blake3`, for the reason given above: the value is not BLAKE3 over a file's bytes.
 - **The binding** is an optional second subject: `{"name": "result", "digest": {"zbxResult": "<hex>"}}` for an M7 result, or `{"name": "<reference>", "digest": {"sha256": "<manifest hex>"}}` for an image manifest. The manifest uses the standard `sha256` key, so OCI tools can match it. in-toto says a predicate applies to each subject. Our policy reads a second subject as a narrowing: a statement with one counts only for a run of that result or manifest, and a statement with only the tree counts for any config. A third-party tool will read the bound statement as covering the tree too, which is a weaker reading. It is harmless, because those tools do not run our trees. Statements have at most `statement_subjects_max` (2) subjects, tree first.
-- **Predicate types.** With provenance, the statement **is** the provenance: `predicateType` `https://slsa.dev/provenance/v1`, and the predicate is SLSA v1 provenance. Without it (a tree, a pulled image, or a result built before 0.4), `predicateType` is our own `https://zigbox.github.io/zigbox/attestation/sign/v1`, and its predicate holds only a claimed `signedAt` time.
+- **Predicate types.** With provenance, the statement **is** the provenance: `predicateType` `https://slsa.dev/provenance/v1`, and the predicate is SLSA v1 provenance. Without it (a tree, a pulled image, or a result built before 0.4), `predicateType` is our own sign type (first proposed under `zigbox.github.io`; follow-up 1 moves it to a proper project domain, not yet named), and its predicate holds only a claimed `signedAt` time.
 - **The provenance digest** is BLAKE3 over the provenance statement's payload bytes. `zbx build` writes that payload, unsigned, to `trust/provenance/<result hex>`. `zbx sign` wraps those exact bytes in an envelope, so the signed provenance carries itself rather than naming a record by digest. `require_provenance` is met by a trusted envelope whose predicate is SLSA v1 for this tree, with its binding matching. Rebuilding the same result later replaces the stored record, but it no longer voids the signature: the signed provenance still truly describes a build of this exact result. `inspect --provenance` says whether the signed provenance and the stored record are the same bytes.
 - **The key id in the envelope.** DSSE's `keyid` is an unauthenticated hint. We set it to the full public key text `zbx-ed25519:<64 hex>`, so that `trust import` and `verify` can check every signature without a key directory. Trust still comes only from the policy's key list.
 - **Records are still per tree.** `trust/signatures/<tree hex>` is an in-toto bundle, JSON Lines with one envelope per line, holding at most `signatures_per_tree_max` lines. `zbx trust export` writes the same format (`.intoto.jsonl`). So "an `--output in-toto` export later" is moot.
@@ -56,7 +56,7 @@ The M8 brief (`docs/briefs/M8-trust.md`, PR #54) asked the owner eight questions
 
 **Answer:** "Defer prune to C5."
 
-**What changes:** the recommendation stands (records are not roots, gc never removes them, export and import as a self-verifying bundle, `store.export_trust` and `store.import_trust` beside Z4's pair). Orphan records accumulate, bounded by `trust_records_max`, and `zbx store gc` reports how many there are. **The prune command is deferred to Zigcube's C5.** C5 is a Zigcube milestone, not a Zigbox one. The prune belongs in whichever Zigbox milestone or release C5 pins, and that is for the supervisor to name when C5 is briefed. Until then the orphan count is shown and nothing removes orphans. If a store reaches `trust_records_max`, signing and import refuse with `E0909`/`E0910`, naming the bound.
+**What changes** (rewritten after follow-up 6 below, which supersedes this answer): the recommendation stands (records are not roots, gc never removes them, export and import as a self-verifying bundle, `store.export_trust` and `store.import_trust` beside Z4's pair). The owner first deferred the prune to Zigcube's C5. On follow-up the owner moved it into M8: `zbx trust prune` removes orphan records (those whose tree is no longer in the store) only when asked, dry run by default and `--apply` to remove, under the store lock, bounded by `trust_records_max`, and adding no `E09xx` code. `zbx store gc` reports the orphan count and names `zbx trust prune`. If a store reaches `trust_records_max`, signing and import refuse with `E0910` and `E0909`, naming the bound and the prune. The design is in the brief (Records, gc, export and import), in slice 5.
 
 ## 7. How CI shows "no signature warning"
 
@@ -65,3 +65,22 @@ The M8 brief (`docs/briefs/M8-trust.md`, PR #54) asked the owner eight questions
 ## 8. How the signed repository reaches Pages
 
 **Answer:** "Yes." The recommendation stands: the owner uploads the signed `apt/` and `rpm/` trees as one release asset, and the Pages deploy on `main` copies the latest release's asset in byte for byte.
+
+## Follow-ups (2026-11-04)
+
+The supervisor asked the owner about six smaller choices the brief had made. The answers, verbatim, then what each changes.
+
+1. **Our predicate-type URIs under `zigbox.github.io`** (`https://zigbox.github.io/zigbox/attestation/sign/v1` and the `buildType` `https://zigbox.github.io/zigbox/build/v1`).
+   **Answer:** "No, we will use a proper domain."
+   **What changes:** the domain is not named yet. Both URIs become named constants in `constants.zig`, built from one `type_uri_base` (`"https://<project domain>"`) plus the paths `/attestation/sign/v1` and `/build/v1`. The docs write `<project domain>` as a placeholder; nobody invents a domain. Code, goldens, the demo and the tests read the constant. **The owner must name the domain before any slice ships a signature: it blocks slice 2.** The `zigbox.github.io` URIs in answer 2 above are replaced by these.
+2. **`zbxTree` as the tree's digest-set key.**
+   **Answer:** "👍🏻" Accepted as answer 2 describes.
+3. **Signed provenance surviving a rebuild** (the signature carries the provenance bytes, so a later build of the same result replaces the stored record without voiding the signature).
+   **Answer:** "👍🏻" Accepted.
+4. **DSSE `keyid` = the full public key text** `zbx-ed25519:<64 hex>`.
+   **Answer:** "👍🏻" Accepted.
+5. **argon2id defaults: 64 MiB, 3 passes, one lane, measured in slice 1** (a proposal goes to the supervisor if the cost is over about 1 s).
+   **Answer:** "👍🏻" Accepted.
+6. **Where the deferred prune lands.**
+   **Answer:** "M8"
+   **What changes:** this supersedes answer 6's "Defer prune to C5". `zbx trust prune [--apply]` is built in M8, in slice 5 (which grows from M to L), with a demo check in ACCEPT, and it leaves the brief's Non-goals. It is dry run by default because a prune gives up what gc deliberately keeps: a pruned signature no longer covers a later re-pull of the same image. Answer 6 above is rewritten to match.

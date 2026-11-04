@@ -4,7 +4,7 @@ Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md` (codes `09xx` are reserved for trust and policy; none is registered yet).
 - The M8 section of `docs/SPEC.md` (the snapshot of live doc rev 91, since PR #55), and C6 in Part II, which reuses M8's checks on every node.
 - `docs/briefs/linux-packages.md` and the decisions `2026-11-04-linux-packages.md`, `-linux-packages-in-m8.md`, `-package-split.md`, `-package-signing-hosting.md` and `-release-0.3.1.md`. They are settled. This brief folds them in and does not reopen them.
-- `docs/decisions/2026-11-04-m8-owner-answers.md`: the owner's answers to this brief's questions (passphrase-encrypted keys, in-toto and DSSE now, prune deferred). This brief is written to them.
+- `docs/decisions/2026-11-04-m8-owner-answers.md`: the owner's answers to this brief's questions (passphrase-encrypted keys, in-toto and DSSE now), and its "Follow-ups" section (our own type URIs under a proper project domain, not yet named, and the trust-record prune built in M8). This brief is written to them.
 - For slices 1, 2 and 4: the [DSSE protocol](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md), in-toto's [Statement](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md), [DigestSet](https://github.com/in-toto/attestation/blob/main/spec/v1/digest_set.md), [envelope](https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md) and [bundle](https://github.com/in-toto/attestation/blob/main/spec/v1/bundle.md) pages, and [SLSA provenance v1](https://slsa.dev/spec/v1.0/provenance). Read them from the source; do not write them from memory.
 - `docs/demos/m3.md` (what a tree digest holds), `docs/demos/m7.md` (the build record, the result digest, the cut `build` root and why the image cache entry keeps the tree), `docs/decisions/2026-11-04-z4-image-record-peer.md` (image records to and from a peer), and Z9's `2026-11-04-z9-chunk-read-outside.md` on its branch (reading objects outside the store's namespace).
 - `src/build/key.zig` and `src/build/cache.zig` (each cache entry keeps the key's preimage "so M8 can write provenance without rebuilding"), `src/build/result.zig`, `src/store/tree.zig`, `src/store/object.zig`, `src/store/verify.zig`, `src/store/walk.zig`, `src/store/images.zig`, `src/store/image_peer.zig`, `src/store/gc.zig`, `src/store/layout.zig`, `src/run_image.zig`, and `run_container` in `src/cli.zig`.
@@ -68,7 +68,8 @@ Owner, 2026-11-04: in-toto Statement v1 in a DSSE envelope, signed with Ed25519,
   (Shown with whitespace; the payload has none.)
   - **Subjects.** The first subject is always the tree, `{"name":"tree","digest":{"zbxTree":"<64 hex>"}}`. in-toto's DigestSet allows algorithms outside its list, provided their encoding is documented. A tree digest is BLAKE3 over zbx's tree encoding (`docs/demos/m3.md`), not over a file, so the key is `zbxTree` (after the spec's `gitTree`), not `blake3`. `docs/demos/m8.md` documents it: 64 lowercase hex digits, no `b3:` prefix. Plain BLAKE3 over a file's bytes, as provenance uses, takes the key `blake3`.
   - **The binding** is an optional second subject: `{"name":"result","digest":{"zbxResult":"<hex>"}}` for an M7 result, which commits to the tree and its config; or `{"name":"<reference>","digest":{"sha256":"<hex>"}}` for an image manifest, which commits to the OCI config. The second form is the standard `sha256` key that OCI tools match. There are at most `statement_subjects_max` (2) subjects, the tree first, and anything else is refused at parse.
-  - **Predicate.** When the subject has a provenance record, the statement **is** that record (`predicateType` `https://slsa.dev/provenance/v1`; see Provenance). Otherwise `predicateType` is `https://zigbox.github.io/zigbox/attestation/sign/v1` and the predicate is `{"signedAt":"<RFC 3339 UTC, seconds>"}`, a claim.
+  - **Predicate.** When the subject has a provenance record, the statement **is** that record (`predicateType` `https://slsa.dev/provenance/v1`; see Provenance). Otherwise `predicateType` is our own sign type, `https://<project domain>/attestation/sign/v1`, and the predicate is `{"signedAt":"<RFC 3339 UTC, seconds>"}`, a claim.
+  - **Our type URIs** (owner: "a proper domain", not `zigbox.github.io`). The sign predicate type and the provenance `buildType` (below) are named constants in `constants.zig`, built from one `type_uri_base` (`"https://<project domain>"`) plus a fixed path (`/attestation/sign/v1`, `/build/v1`). **`<project domain>` is a placeholder: the owner has not named the domain yet, and no slice may ship a signature until they do** (blocker for slice 2). Code, goldens, the demo and the tests read the constant and never spell the URI out, so naming the domain changes one line and the regenerated goldens. Once a signature has been made with a URI it is part of the format: changing it later is a format change.
 - **The envelope** is DSSE: `{"payloadType":"application/vnd.in-toto+json","payload":"<base64>","signatures":[{"keyid":"zbx-ed25519:<64 hex>","sig":"<base64>"}]}`. It holds one signature; a second key makes a second envelope. `keyid` is DSSE's unauthenticated hint. We set it to the full public text, so anyone holding the envelope can check the signature without a key directory. Trust comes only from policy. Base64 is `std.base64.standard`, with padding, and nothing else is accepted.
 - **The signed bytes** are DSSE's PAE: `"DSSEv1" SP LEN(type) SP type SP LEN(body) SP body`, with `type` the payload type and `body` the payload bytes as stored. Ed25519 (`std.crypto.sign.Ed25519`) signs exactly these. Verification decodes the payload, verifies the signature over PAE of those bytes, and only then parses them. Nothing is re-serialized before the check.
 - **The canonical JSON writer** (`src/trust/json.zig`) is ours, bounded and small. Members come in the order the schema gives, with no whitespace. Strings are UTF-8 checked at write and escape exactly `"`, `\` and bytes below 0x20 (as `\n`, `\t` and `\u00xx` in lowercase hex). There are integers only, no floats, and nesting is at most `json_depth_max`. DSSE needs no canonical form, since it signs bytes. We keep one so the same statement is the same bytes on every host, and so the reader accepts a payload or envelope only when our writer re-renders it byte for byte (REVIEW.md, "Parse accepts only what render can write"). It is not RFC 8785: members are in schema order, not sorted. Reading uses std's JSON scanner under fixed buffers, as `src/registry/` reads manifests. Payloads are at most `statement_bytes_max`, and envelopes at most `envelope_bytes_max` (the base64 of that plus a fixed overhead, computed in `constants.zig` with a `comptime` assert).
@@ -80,7 +81,7 @@ Owner, 2026-11-04: in-toto Statement v1 in a DSSE envelope, signed with Ed25519,
 ### Provenance
 
 - **What and when.** Every successful `zbx build` writes a provenance record for its result, whether the build was all hits or not. Everything in it comes from what the build already holds: each step's cache entry (the key preimage, which includes the base tree and its env, the input tree digest, each needed step's output digest, argv, env and network) and the build record. M7's step logs are not in it.
-- **Form.** The record is an in-toto Statement v1 with `predicateType` `https://slsa.dev/provenance/v1`, written by the canonical JSON writer. Its subjects are the tree and the result (`zbxTree`, then `zbxResult`), so signing it binds the result. Its predicate is SLSA v1 provenance: `buildDefinition` (`buildType` `https://zigbox.github.io/zigbox/build/v1`, `externalParameters`, `internalParameters`, `resolvedDependencies`) and `runDetails` (`builder.id`, `builder.version`, `metadata`, `byproducts`). Digest sets use `zbxTree` for trees, `sha256` for manifests and `blake3` for file bytes. Which field goes where is fixed in `docs/demos/m8.md` with a golden record. The content is:
+- **Form.** The record is an in-toto Statement v1 with `predicateType` `https://slsa.dev/provenance/v1`, written by the canonical JSON writer. Its subjects are the tree and the result (`zbxTree`, then `zbxResult`), so signing it binds the result. Its predicate is SLSA v1 provenance: `buildDefinition` (`buildType` `https://<project domain>/build/v1` (the constant above), `externalParameters`, `internalParameters`, `resolvedDependencies`) and `runDetails` (`builder.id`, `builder.version`, `metadata`, `byproducts`). Digest sets use `zbxTree` for trees, `sha256` for manifests and `blake3` for file bytes. Which field goes where is fixed in `docs/demos/m8.md` with a golden record. The content is:
   - **subject:** the tree digest and the result digest.
   - **builder:** `zbx` version, release commit and platform, plus the BLAKE3 of the running `zbx` binary (read from `/proc/self/exe`).
   - **build file:** its project-relative path and the BLAKE3 of its bytes.
@@ -183,8 +184,14 @@ An input that is absent, because gc took it, is `W0901` (it cannot be checked of
 
 ### Records, gc, export and import (owner)
 
-- **gc.** Signature and provenance records are not roots, and **gc never removes them**. They are small and bounded (`trust_records_max`), and keeping them is what makes a signature survive gc followed by a re-pull of the same image (the spec's criterion). `trust/verified/` entries go with their tree. `zbx store gc` lists the orphan count. At `trust_records_max`, `sign` (`E0910`) and `import` (`E0909`) refuse, naming the bound.
-- **Prune is deferred to Zigcube's C5** (owner). C5 is a Zigcube milestone; the prune lands in whichever Zigbox milestone or release C5 pins, which the supervisor names when C5 is briefed. M8 builds no prune.
+- **gc.** Signature and provenance records are not roots, and **gc never removes them**. They are small and bounded (`trust_records_max`), and keeping them is what makes a signature survive gc followed by a re-pull of the same image (the spec's criterion). `trust/verified/` entries go with their tree. `zbx store gc` prints the orphan count and names `zbx trust prune`. At `trust_records_max`, `sign` (`E0910`) and `import` (`E0909`) refuse, naming the bound and `zbx trust prune`.
+- **Prune is in M8** (owner follow-up, 2026-11-04, superseding the earlier "defer prune to C5"). `zbx trust prune [--apply]` is the only thing that removes trust records, and only when asked:
+  - **What is an orphan.** A signature record `trust/signatures/<tree hex>` whose tree is not in the store, and a provenance record `trust/provenance/<result hex>` whose result is not in the store or names a tree that is not. A record whose tree is present is never removed, whatever its signatures or keys. Policy plays no part: an untrusted signature on a present tree stays.
+  - **Dry run by default.** Without `--apply`, prune lists each orphan (kind, digest, envelope count, bytes) and removes nothing. With `--apply`, it removes them. The default is the dry run because pruning gives up exactly what gc keeps: a pruned signature no longer covers a later re-pull of the same image. The listing names `zbx trust export <tree>` for keeping a record outside the store first.
+  - **Under the store lock**, held from the presence check to the last unlink, as gc holds it, so a pull or build of the same tree is either already in the store (its record is kept) or waits.
+  - **Bounded and crash-safe.** It reads at most `trust_records_max` entries per directory. Each record is one file removed by one `unlink`, so a crash leaves each record either present or gone, and a second run finishes the job. A damaged record of an absent tree is an orphan like any other and is removed; a damaged record of a present tree is kept and reported (`W0902`, "damaged trust record kept; its tree is in the store").
+  - **Refusals** are the store's existing one-line ones (the store lock is busy, the store is missing or of a newer format). Prune adds no `E09xx` code, and one new warning, `W0902`. Output: one line per orphan and a summary line in text, `zbx.trust-prune/1` in JSON (`dry_run`, each orphan, the counts).
+  - **Library:** `store.prune_trust(store, memory, apply, out, failure)`, beside the export and import pair, for Zigcube's nodes.
 - **Export and import.** `zbx trust export <digest>` writes the tree's envelopes as an in-toto bundle (JSON Lines, `.intoto.jsonl`) on stdout, the same bytes as the signature record. Signed provenance travels inside its envelope, so nothing else is needed. `zbx trust import <file>` checks the size, parses each line, and verifies every signature over PAE against its `keyid`. It checks that each statement's first subject is a tree, and then merges the lines into that tree's record under the store lock. A bundle with any bad line or signature is refused whole (`E0909`), writing nothing. Signatures by keys this host does not trust are kept, because trust is decided at run time by policy, not at import. Without push (a spec non-goal until after M8), this is how a signature made on a build machine reaches the host that pulls the same image.
 - **For Zigcube.** `store.export_trust(store, memory, tree, out, failure)` and `store.import_trust(store, memory, text, tree, failure)` sit beside Z4's `export_image` and `import_image` in the library, with the same shape: caller memory, a `Refusal`, one coded diagnostic. Z4's functions do not change, so C2 keeps working. C6 calls the new pair when it fetches a tree from a peer, and the node's own policy check runs at exec (spec, "Trust checked twice").
 
@@ -202,12 +209,13 @@ An input that is absent, because gc took it, is `W0901` (it cannot be checked of
 - `E0910` signing is refused: the digest is not in the store, its tree is not whole or sound, or a bound (`signatures_per_tree_max`, `trust_records_max`) is reached.
 - `E0911` a passphrase is needed and none is available (no `--passphrase-file` and no terminal), the passphrase file is too open or too long, or the passphrase does not open the key. Fix: pass `--passphrase-file`; a forgotten passphrase is a lost key.
 - `W0901` `zbx verify` could not check an input that is not in the store.
+- `W0902` `zbx trust prune` kept a damaged trust record because its tree is in the store (fix: `zbx trust import` again or sign again, as for `E0903`).
 
 DIAGNOSTICS "Exit codes" applies: `run` uses 125 for its refusals, and every other command uses 1 or 2 by blame. Errors from the packaging step (`zig build packages`) are build-tool errors, one `package: ...` line each, like the harness's `VM-F` codes, and are not product codes.
 
 ### CLI and agents
 
-New commands: `key new|list|show`, `sign`, `verify`, `trust export|import`, `policy check`, and the `--provenance` flag of `inspect`. Each has `help`, `zbx schema` (`zbx.key/1`, `zbx.sign/1`, `zbx.verify/1`, `zbx.trust/1`, `zbx.policy/1`, `zbx.provenance/1`), goldens, and the error documents of its refusals (REVIEW.md, "Every new command"). Nothing prompts, with one exception: `key new` and `sign` read a passphrase from the terminal when both stdin and stderr are one and no `--passphrase-file` is given. Without a terminal they refuse. The agent test drives the trust part of the demo with JSON, `zbx policy check` and `zbx explain` only.
+New commands: `key new|list|show`, `sign`, `verify`, `trust export|import|prune`, `policy check`, and the `--provenance` flag of `inspect`. Each has `help`, `zbx schema` (`zbx.key/1`, `zbx.sign/1`, `zbx.verify/1`, `zbx.trust/1`, `zbx.trust-prune/1`, `zbx.policy/1`, `zbx.provenance/1`), goldens, and the error documents of its refusals (REVIEW.md, "Every new command"). Nothing prompts, with one exception: `key new` and `sign` read a passphrase from the terminal when both stdin and stderr are one and no `--passphrase-file` is given. Without a terminal they refuse. The agent test drives the trust part of the demo with JSON, `zbx policy check` and `zbx explain` only.
 
 ## Fixed decisions (packages, from linux-packages.md and the 2026-11-04 decisions)
 
@@ -249,7 +257,7 @@ Zigcube's C6 admission (server) and node check (agent) call the same verdict fun
 
 Two lanes. **Lane T (trust)** is slices 1 to 5, in order. **Lane P (packages)** is slices 6 and 7, in order. The lanes run in parallel from the start, each in its own worktree with its own `ZIG_GLOBAL_CACHE_DIR` (AGENTS.md, Disk). Slice 8 starts when both lanes have merged. Every slice ends with `zig build check` PASS on the reported commit, and with the fuzzers it touched run as well.
 
-Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers added about a slice and a half to lane T: the passphrase makes keys a slice of their own, and DSSE, the JSON writer and the larger SLSA record make up the rest.
+Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers added about a slice and a half to lane T: the passphrase makes keys a slice of their own, and DSSE, the JSON writer and the larger SLSA record make up the rest. The prune (owner follow-up) takes slice 5 from M to L.
 
 | Slice | Lane | What | Size |
 |---|---|---|---|
@@ -257,18 +265,20 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
 | 2 | T | JSON writer, DSSE, statements, the signature record, `zbx sign` | L |
 | 3 | T | Policy and the run gate, the tamper check | L |
 | 4 | T | Provenance as an SLSA v1 statement, `inspect --provenance` | L |
-| 5 | T | `zbx verify`, `trust export` and `import` | M |
+| 5 | T | `zbx verify`, `trust export`, `import` and `prune` | L |
 | 6 | P | The package writer and the repositories | L |
 | 7 | P | The rpm and Debian guests | M |
 | 8 | both | The demo, CI, the agent test, the Pages asset step | M |
 | 9 | T | The Mac (cuttable, not demonstrated) | S |
 
 1. **Keys (T).**
+   - Slice 1 needs no type URI and can start now.
    - Work: `src/trust/key.zig`: the key file (both encryptions, the bounded KDF parameters), its permission check, sealing and opening (argon2id, XChaCha20-Poly1305, the public text as associated data), the key id and the public text. `zbx key new [--no-passphrase] [--passphrase-file]`, `key list` and `key show`; the passphrase file's rules; and the terminal read with echo off, restored on every exit path. Codes `E0901`, `E0902` and `E0911`. The `key` record fuzzer: random and damaged key files never crash parse, never run argon2id with parameters above the bounds, and are accepted only when they re-render to themselves.
    - Tests: a sealed key opens with its passphrase and with nothing else; a flipped byte of the salt, nonce, sealed seed or public text fails to open; a golden key file made from a fixed seed and salt (tests only) opens to the golden public text; `--no-passphrase` writes `"none"` and `key show` says so; no passphrase and no terminal refuses without reading stdin (the simulated host records every read); a passphrase file readable by others is refused.
    - Measure argon2id with the default parameters in the shipped build on this container and in the VM, and record the cost in `docs/demos/m8.md`. If it is over about 1 s, propose lower defaults to the supervisor; do not change them alone.
    - *Mechanical, for Haiku:* the codes' registry boilerplate and error pages once their text is written; the `help`, `zbx schema` (`zbx.key/1`) and `explain` entries; the golden files' copying; `src/trust/` in `ci-changes.sh` (running `m8`).
 2. **Statements and signing (T).**
+   - **Blocked on the owner naming the project domain** for `type_uri_base` (Fixed decisions, "Our type URIs"). The slice may be written against the `<project domain>` placeholder, but it is not reviewed as done, merged or shipped until the constant holds the owner's domain and the goldens are regenerated from it. A golden or test that spells the URI out instead of reading the constant is a review finding.
    - Work: `src/trust/json.zig` (the canonical writer and the bounded reader); base64 and DSSE PAE; the envelope; the in-toto statement, with its subjects, binding and the `sign/v1` predicate; the signature record as an in-toto bundle (parse, render, atomic write under the store lock, `signatures_per_tree_max`, `signature_record_bytes_max`); and `zbx sign` with the uncached tree check. The check reuses `verify.zig`'s id recomputation, moved into a shared function rather than copied. Codes `E0903` and `E0910`. The `trust` record fuzzer: random and damaged envelopes, payloads and records never crash parse, and are accepted only when they re-render to themselves.
    - Tests:
      - PAE matches DSSE's published test vector (`DSSEv1 29 http://example.com/HelloWorld 11 hello world`);
@@ -299,12 +309,16 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
      - a golden record checks against the SLSA v1 provenance JSON schema, captured once with a real validator; say where.
    - Fuzzer: the `provenance` statement fuzzer, with the same property as slice 2's.
    - *Mechanical:* the schema entry and goldens.
-5. **Verify, export and import (T).**
-   - Work: `zbx verify` (the six links, `W0901`, `--strict`, `--require-provenance`, `--key`, `--public`, `E0908`); `zbx trust export|import` and `E0909`; `store.export_trust` and `store.import_trust` with the second-caller library test; and gc's orphan count.
-   - Simulation test: `verify` never touches the network or the registry.
+5. **Verify, export, import and prune (T).**
+   - Work: `zbx verify` (the six links, `W0901`, `--strict`, `--require-provenance`, `--key`, `--public`, `E0908`); `zbx trust export|import` and `E0909`; `store.export_trust` and `store.import_trust` with the second-caller library test; gc's orphan count; and `zbx trust prune [--apply]` with `W0902` and `store.prune_trust` (Records, gc, export and import).
+   - Simulation tests:
+     - `verify` never touches the network or the registry;
+     - over random stores, prune never removes a record whose tree (or, for provenance, whose result and its tree) is present, and without `--apply` removes nothing;
+     - the simulator crashes at every prune `unlink`, and a second run leaves exactly the records whose trees are present.
+   - A test at `trust_records_max` orphans.
    - Peer fuzzer property: an imported bundle with any byte flipped is refused whole or re-verifies.
    - VM check: verify runs offline in the guest with its network link down.
-   - *Mechanical:* the schema entries, goldens and the `explain` entries.
+   - *Mechanical:* the schema entries (`zbx.trust-prune/1` among them), goldens, the `explain` entries and `W0902`'s registry entry and page.
 6. **The package writer and the repositories (P).**
    - Work: the `zigbox_package` module (ar, cpio, deb, rpm, the apt and dnf repository writers, armor, OpenPGP Ed25519 signature packets); `zig build packages`, `-Dsignatures=` and `packages-check`; the two-round signing commands; and `docs/releases/packaging.md`.
    - Unit tests:
@@ -322,7 +336,7 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
 8. **The demo, CI and the agent test.**
    - `zig build demo-m8` (the trust steps below, exactly) and `zig build demo-m8-packages` (the four guests), with every assertion a unit-tested pure function in `checks_m8.zig`.
    - The upgrade test against the latest tag (0.3.1 if it is cut by then, else 0.3.0). Its store, run records and build cache are read; `zbx run` without a policy behaves as before; with a policy, its images are refused with `E0905`, not a crash; and a build reusing its cache entries writes complete provenance.
-   - The agent test (JSON only, passphrase by file); the two CI jobs (the packages job runs only when `ci-changes.sh` selects it); the Pages deploy's copy of the latest release's signed-repository asset; and `docs/demos/m8.md` with the by-hand steps, cuts and failure modes. The failure modes to cover: a lost key or forgotten passphrase, a key file too open, no passphrase without a terminal, a policy that refuses everything, a tampered object and how to recover, a provenance record replaced after signing, a missing input in verify, the disk full during a signature write, orphan records with no prune yet, and a package upgrade with a container running.
+   - The agent test (JSON only, passphrase by file); the two CI jobs (the packages job runs only when `ci-changes.sh` selects it); the Pages deploy's copy of the latest release's signed-repository asset; and `docs/demos/m8.md` with the by-hand steps, cuts and failure modes. The failure modes to cover: a lost key or forgotten passphrase, a key file too open, no passphrase without a terminal, a policy that refuses everything, a tampered object and how to recover, a provenance record replaced after signing, a missing input in verify, the disk full during a signature write, orphan records and what pruning them gives up (a pruned signature no longer covers a re-pull), and a package upgrade with a container running.
    - *Mechanical:* the upgrade part copied from `upgrade_m7.zig`, with the tag in `old_release.zon`; the CI jobs copied from `demo-m7`'s; the README and site status lines after green runs.
 9. **The Mac (owner: yes; cuttable, not demonstrated).** For the Mac session: add `key`, `sign`, `verify`, `trust` and `policy` to `linux_commands` in `src/macos_main.zig`, with keys and the user's policy on the shared Mac home under a fixed path (the forwarding protocol drops `XDG_*`). The terminal passphrase read is not forwarded: on the Mac, `--passphrase-file` (a path under the shared home) or a `--no-passphrase` key. `build` and `inspect` are not forwarded yet (M7's slice 5 was cut), so provenance on the Mac waits for that.
 
@@ -345,6 +359,7 @@ ACCEPT also checks:
 - A malformed policy is refused with `E0904` and its line and column.
 - A step whose base is unsigned is refused under `require_signature`, naming the step.
 - `zbx trust export` and `zbx trust import` into a second user's store make the image run there.
+- **Prune.** After the re-pull check, `alpine:3.20`'s root is removed and gc run again. `zbx trust prune --output json` lists `alpine`'s signature record as an orphan, with `dry_run: true`, and the record is still there. `zbx trust prune --apply` removes it and keeps the signed result's records, `zbx store gc` then reports no orphans, and after a re-pull `zbx run alpine:3.20 true` exits 125 with `E0905`: the pruned signature is gone.
 - `zbx sign` with stdin from `/dev/null` and no `--passphrase-file` exits 1 with `E0911` at once, and a wrong passphrase file gives `E0911` too. Neither writes a record.
 - The exported bundle is one envelope per line, and its `payloadType` is `application/vnd.in-toto+json`.
 
@@ -368,7 +383,6 @@ ACCEPT also checks:
 - An SBOM, and signing `zbx` release binaries with M8's own keys ("Trust in zbx itself").
 - Zigcube's packages (C3), the Homebrew formula, maintainer scripts, editing `/etc/subuid`, publishing from CI, and any distribution beyond the four.
 - Demonstrating M8 on the Mac.
-- A prune command for orphan trust records (owner: deferred to Zigcube's C5).
 - Changing a key's passphrase, a passphrase from an environment variable, and an agent that caches unlocked keys.
 - Other in-toto predicates (SBOM, VSA, test results), and reading envelopes signed by anything but our Ed25519 keys (cosign or sigstore bundles, ECDSA, RSA). Import refuses them with `E0909`.
 
@@ -395,11 +409,11 @@ The owner answered this brief's eight questions on 2026-11-04. The answers and w
 3. `exec` and `build` are gated, and `pull` is not.
 4. The Mac forwards the trust commands and is not demonstrated (slice 9).
 5. Verify-on-run is `cached`.
-6. Records are never collected, and prune is deferred to Zigcube's C5.
+6. gc never collects trust records; `zbx trust prune` removes orphans when asked, in M8 (follow-up, superseding "defer prune to C5").
 7. CI signs with a checked-in test key.
 8. The signed repositories reach Pages as a release asset.
 
-The brief above is written to these answers. It also makes the smaller choices they left open: the `zbxTree` and `zbxResult` digest names, the `keyid` as public text, our `sign/v1` and `build/v1` type URIs under the project site, and allowing an unencrypted key only with `--no-passphrase`. The decision file says why for each.
+The brief above is written to these answers. It also made the smaller choices they left open, and the owner answered six follow-ups on them the same day (decision file, "Follow-ups"): our `sign/v1` and `build/v1` type URIs go under a proper project domain, not `zigbox.github.io`, and the owner has yet to name it (blocker for slice 2); the `zbxTree` digest key, signed provenance surviving a rebuild, the `keyid` as the full public text and argon2id's defaults (64 MiB, 3 passes, measured in slice 1) are accepted; and the prune is built in M8. The `zbxResult` name and allowing an unencrypted key only with `--no-passphrase` stand as written.
 
 ## Spec notes (flagged, not changed)
 
