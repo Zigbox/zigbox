@@ -78,7 +78,8 @@ classify() {
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;
     src/state/* | src/*state*.zig) want_from m6; return ;;
     src/exec_commands.zig | src/logs_commands.zig | src/runtime/exec* | src/runtime/logfile.zig) want_from m6b; return ;;
-    src/doctor*.zig | src/image_diagnose.zig) want_one m0; return ;;
+    # Not src/doctor.zig: `doctor.subid_answer` chooses the id map of every container.
+    src/doctor_fixtures.zig | src/image_diagnose.zig) want_one m0; return ;;
   esac
   want_all
 }
