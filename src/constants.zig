@@ -767,6 +767,12 @@ pub const image_settings_words_max: u32 = 48;
 /// oldest goes.
 pub const image_tags_max: u32 = 8;
 pub const images_max: u32 = 4096;
+/// Subtrees waiting on the stack of the walk that checks an image from a peer is complete
+/// (`store/image_peer.zig`); a tree with more directories pending than this is refused. It is
+/// the stack gc walks with (1 MiB of 32-byte ids), so a tree that a pull or gc accepts is not
+/// refused here: one directory holds `store_dir_entries_max` entries, and the walk pushes all
+/// the directories of a tree it has popped, so the stack needs more than twice that.
+pub const image_import_stack_max: u32 = 32768;
 /// `zbx.lock` (`lock_file.zig`): the entries it holds, the bytes of their references together,
 /// and the largest file read or written.
 pub const lock_entries_max: u32 = 256;
@@ -868,6 +874,8 @@ pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings
 
 comptime {
     assert(build_result_bytes_max < store_tree_bytes_max);
+    assert(image_import_stack_max <= store_arena_bytes_max / 2 / 32); // A stack of 32-byte ids.
+    assert(image_import_stack_max >= 2 * store_dir_entries_max);
     assert(build_result_label_bytes_max <= build_pool_bytes);
     assert(build_merge_common_max <= store_dir_entries_max);
     assert(build_cache_entry_bytes_max < store_tree_bytes_max);

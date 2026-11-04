@@ -17,11 +17,20 @@
 //!      takes every entry; a refusal stores nothing, an acceptance stores a tree that loads.
 //!      No input reaches an assertion. A tree one byte too long is `TooLarge`, and an accepted
 //!      tree is canonical and walks as its entries say, with the entry limit as the bound.
+//!   5. `image_peer.import_record` of an image record (valid, then cut, extended, flipped or
+//!      random) for a whole tree is accepted exactly when the text parses and names that tree;
+//!      what parses renders and parses again to the same text; a refusal writes nothing under
+//!      images/ or roots/, and an acceptance leaves a record that loads with that tree. No input
+//!      reaches an assertion.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const host_sim = @import("host_sim.zig");
+const image_peer = @import("store/image_peer.zig");
+const reference_mod = @import("registry/reference.zig");
+const images = @import("store/images.zig");
+const Sha256 = @import("registry/digest.zig").Sha256;
 const chunk_read = @import("store/chunk_read.zig");
 const chunks = @import("store/chunks.zig");
 const Digest = @import("store/digest.zig").Digest;
@@ -61,6 +70,7 @@ pub fn fuzz_peer(seed: u64) void {
     store.chunk_bytes = if (random.boolean()) 8 else 16;
     fuzz_read(random);
     fuzz_put(random);
+    fuzz_image(random);
     assert(sim.open_count() == 0);
 }
 
@@ -346,5 +356,115 @@ fn fuzz_put(random: std.Random) void {
     } else |_| {
         assert(!decodes);
         assert(!(trees.has(&store, digest) catch unreachable)); // A refusal stores nothing.
+    }
+}
+
+var peer_memory: image_peer.Memory = undefined;
+var image_text: [constants.image_record_bytes_max]u8 = undefined;
+var image_offered: [constants.image_record_bytes_max + 64]u8 = undefined;
+var image_again: [constants.image_record_bytes_max]u8 = undefined;
+
+/// Files under images/ and roots/ now: what an import may write.
+fn image_files() u32 {
+    var count: u32 = 0;
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        if (std.mem.indexOf(u8, path, "/images/") != null) count += 1;
+        if (std.mem.indexOf(u8, path, "/roots/") != null) count += 1;
+    }
+    return count;
+}
+
+fn random_image(random: std.Random, whole: Digest) []const u8 {
+    var image: images.Image = undefined;
+    image.tag_count = 0;
+    if (random.boolean()) image.add_tag("alpine:3.20");
+    if (random.boolean()) image.add_tag("example.org/app:1");
+    image.manifest = Sha256.of(&.{random.uintLessThan(u8, 3)});
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = Sha256.of("config");
+    image.tree = whole;
+    image.time = random.uintLessThan(u64, 1 << 20);
+    image.layer_count = random.uintLessThan(u32, 3);
+    for (image.layers[0..image.layer_count]) |*layer| layer.* = Sha256.of("layer");
+    image.settings.clear();
+    if (random.boolean()) _ = image.settings.add(.entrypoint, "/bin/hello");
+    if (random.boolean()) _ = image.settings.add(.env, "A=b");
+    if (random.boolean()) _ = image.settings.set(.workdir, "/srv");
+    return images.render(&image, &image_text);
+}
+
+/// True if every tag of `image` reads as a reference, as `image_peer` requires of kept tags.
+fn tags_are_references(image: *const images.Image) bool {
+    for (0..image.tag_count) |index| {
+        var reference: reference_mod.Reference = undefined;
+        reference_mod.parse(image.tag_text(@intCast(index)), &reference) catch return false;
+    }
+    return true;
+}
+
+fn fuzz_image(random: std.Random) void {
+    var writer = tree.Writer.init(&tree_bytes);
+    const empty = writer.finish(); // A directory with no entries: whole with no objects.
+    const whole = Digest.of(empty);
+    var failure: object.Failure = undefined;
+    _ = trees.put_checked(&store, whole, empty, &failure) catch unreachable; // Valid and clean.
+    const good = random_image(random, whole);
+    var length: usize = good.len;
+    @memcpy(image_offered[0..length], good);
+    switch (random.uintLessThan(u8, 5)) {
+        0 => {},
+        1 => length = random.uintAtMost(usize, length),
+        2 => image_offered[random.uintLessThan(usize, length)] ^= @as(u8, 1) << random.int(u3),
+        3 => {
+            const extra = random.intRangeAtMost(usize, 1, 40);
+            random.bytes(image_offered[length..][0..extra]);
+            length += extra;
+        },
+        else => {
+            length = random.uintAtMost(usize, 128);
+            random.bytes(image_offered[0..length]);
+        },
+    }
+    const text = image_offered[0..@min(length, constants.image_record_bytes_max)];
+    const asked = if (random.uintLessThan(u8, 4) == 0) Digest.of("elsewhere") else whole;
+    var parsed: images.Image = undefined;
+    const parse = images.parse(text, &parsed);
+    if (parse == .ok) {
+        const first = images.render(&parsed, &image_text);
+        var again: images.Image = undefined;
+        assert(images.parse(first, &again) == .ok);
+        assert(std.mem.eql(u8, first, images.render(&again, &image_again)));
+    }
+    const before = image_files();
+    const tags: image_peer.TagPolicy = if (random.boolean()) .keep else .drop;
+    // The trusted manifest is usually the one the record names, sometimes another.
+    const elsewhere = random.uintLessThan(u8, 4) == 0;
+    const trusted = if (elsewhere) Sha256.of("elsewhere") else parsed.manifest;
+    const options: image_peer.Options = .{
+        .expected_manifest = trusted,
+        .tags = tags,
+        .entries_max = 16,
+    };
+    var refusal: image_peer.Failure = undefined;
+    if (image_peer.import_record(&store, &peer_memory, text, asked, options, &refusal)) |taken| {
+        assert(parse == .ok);
+        assert(parsed.tree.eql(asked));
+        assert(parsed.manifest.eql(trusted)); // A record for another image is never taken.
+        assert(taken.manifest.eql(trusted));
+        assert(taken.tree.eql(asked));
+        var loaded: images.Image = undefined;
+        var errno: u16 = 0;
+        images.load(&store, parsed.manifest, &loaded, &errno) catch unreachable; // Just saved.
+        assert(loaded.tree.eql(asked));
+    } else |_| {
+        const named = parse == .ok and parsed.tree.eql(asked) and parsed.manifest.eql(trusted);
+        // Only no record, another tree or another image is refused, or, when the tags are kept,
+        // a tag that is no reference: a flipped byte can make one.
+        const bad_tag = tags == .keep and parse == .ok and !tags_are_references(&parsed);
+        if (named) assert(bad_tag); // Only a bad tag refuses a record naming tree and image.
+        assert(image_files() == before); // A refusal writes nothing.
     }
 }

@@ -314,7 +314,7 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     image.time = 0;
     image.settings.clear();
     var version: u32 = 0;
-    var seen: u32 = 0;
+    var seen: u32 = 0; // A bit for each of manifest, platform, config and tree.
     var has_reference = false;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
@@ -337,19 +337,19 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             if (length > 0 and !digest and !image.push_tag(word[0..length])) return .malformed;
         } else if (std.mem.eql(u8, key, "manifest")) {
             image.manifest = quoted_digest(value) orelse return .malformed;
-            seen += 1;
+            seen |= 1;
         } else if (std.mem.eql(u8, key, "platform")) {
             const length = roots.parse_string(value, &image.platform) orelse return .malformed;
             image.platform_len = @intCast(length);
-            seen += 1;
+            seen |= 2;
         } else if (std.mem.eql(u8, key, "config")) {
             image.config = quoted_digest(value) orelse return .malformed;
-            seen += 1;
+            seen |= 4;
         } else if (std.mem.eql(u8, key, "tree")) {
             var word: [constants.store_digest_text_bytes]u8 = undefined;
             const length = roots.parse_string(value, &word) orelse return .malformed;
             image.tree = Digest.parse(word[0..length]) orelse return .malformed;
-            seen += 1;
+            seen |= 8;
         } else if (std.mem.eql(u8, key, "time")) {
             image.time = std.fmt.parseInt(u64, value, 10) catch return .malformed;
             // `render` holds a time under 2^40; a damaged record may not read as more.
@@ -364,7 +364,10 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     }
     if (version == 0) return .malformed;
     if (version > record_version) return .newer;
-    if (seen != 4) return .malformed;
+    // Every field once at least: a repeated key must not stand for a missing one.
+    if (seen != 15) return .malformed;
+    // `render` holds a platform that is not empty; a damaged record may not read as one.
+    if (image.platform_len == 0) return .malformed;
     if (version == 1 and !has_reference) return .malformed;
     return .ok;
 }
@@ -377,7 +380,9 @@ fn record_path(store: *const Store, buffer: *PathBuf, manifest: Sha256) [:0]cons
 }
 
 /// Fills `image.tags` with those of the record kept for `manifest`, or none if there is no record
-/// or it does not read: a pull of the same manifest again keeps what was pulled before. Every
+/// or it does not read: a pull of the same manifest again keeps what was pulled before. Two
+/// writers of one manifest at once (a pull and a pull, or a pull and an import) can each read the
+/// old tags, and the later save wins: a tag is lost until it is next pulled. Every
 /// other field is the caller's to set.
 pub fn carry_tags(store: *const Store, manifest: Sha256, image: *Image) void {
     assert(manifest.bytes.len == constants.oci_digest_bytes);
@@ -624,6 +629,10 @@ test "real version-1 text from M4 reads" {
     try testing.expectEqual(@as(u32, 1), back.layer_count);
     try testing.expectEqualStrings("/bin/sh", back.settings.word(.cmd, 0));
     try testing.expectEqualStrings("/", back.settings.get(.workdir));
+    // The checks `parse` gained with Z4 (every field once, a platform that is not empty) hold
+    // for what M4 wrote: this is the text of a real release, not one this code rendered.
+    try testing.expectEqualStrings("linux/amd64", back.platform_text());
+    try testing.expectEqual(@as(u64, 1761600000), back.time);
     var buffer: [constants.image_record_bytes_max]u8 = undefined;
     const written = render(&back, &buffer);
     try testing.expect(std.mem.indexOf(u8, written, ".version = 2,") != null);
@@ -658,4 +667,26 @@ test "real version-1 text spelled by digest has no tag" {
     defer testing.allocator.free(as_two);
     try testing.expectEqual(ParseResult.ok, parse(as_two, &back));
     try testing.expectEqual(@as(u32, 0), back.tag_count);
+}
+
+test "a record with an empty platform, or a repeated key standing for a missing one, is refused" {
+    // Goal: parse accepts only what render can write. An empty platform would trip `render`'s
+    // assertion; a repeated manifest with no tree used to count as four fields and left the
+    // tree unset. Method: edit the text of a good record.
+    var image = sample();
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    var back: Image = undefined;
+    const empty = try std.mem.replaceOwned(u8, testing.allocator, text, "linux/amd64", "");
+    defer testing.allocator.free(empty);
+    try testing.expectEqual(ParseResult.malformed, parse(empty, &back));
+    const tree_line = std.mem.indexOf(u8, text, "    .tree").?;
+    const tree_end = std.mem.indexOfScalarPos(u8, text, tree_line, '\n').?;
+    const zeros = "0000000000000000000000000000000000000000000000000000000000000000";
+    const manifest_line = "    .manifest = \"sha256:" ++ zeros ++ "\",\n";
+    const twice = try std.mem.concat(testing.allocator, u8, &.{
+        text[0..tree_line], manifest_line, text[tree_end + 1 ..],
+    });
+    defer testing.allocator.free(twice);
+    try testing.expectEqual(ParseResult.malformed, parse(twice, &back));
 }
