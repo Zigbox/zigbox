@@ -10,7 +10,9 @@
 //!      zero; and a flip inside a chunk makes that chunk (and only that one) an error.
 //!      The same holds when the object file is cut or extended: nothing but the original bytes
 //!      of a chunk the list still vouches for. Objects carry random attributes, so a one-chunk
-//!      object's id check gathers them.
+//!      object's id check gathers them. The reader is inside the store's namespace or outside
+//!      it, with the one-id map or a full one; outside, the object is owned by the host ids of
+//!      its container ids.
 //!   3. With short reads and failing reads, a read gives the original bytes or an error.
 //!   4. `put_checked` of bytes (a valid tree, then cut, extended, flipped or random) under their
 //!      own digest or another one is accepted exactly when the digest is right and the decoder
@@ -22,6 +24,8 @@
 //!      what parses renders and parses again to the same text; a refusal writes nothing under
 //!      images/ or roots/, and an acceptance leaves a record that loads with that tree. No input
 //!      reaches an assertion.
+//!   6. Outside the namespace, an owner the map does not reach makes a one-chunk object an
+//!      error (with `out` zero), and an object of several chunks reads as before.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -38,6 +42,7 @@ const fs_sim = @import("store/fs_sim.zig");
 const layout = @import("store/layout.zig");
 const object = @import("store/object.zig");
 const object_mod = object; // `Counter.object` hides `object` inside it.
+const owners = @import("store/owners.zig");
 const support = @import("store/test_support.zig");
 const tree = @import("store/tree.zig");
 const trees = @import("store/trees.zig");
@@ -69,6 +74,7 @@ pub fn fuzz_peer(seed: u64) void {
     store.at(sim.interface(), root_path);
     store.chunk_bytes = if (random.boolean()) 8 else 16;
     fuzz_read(random);
+    store.owners = .inside;
     fuzz_put(random);
     fuzz_image(random);
     assert(sim.open_count() == 0);
@@ -103,17 +109,23 @@ fn restore_attributes(path: []const u8) void {
 fn fuzz_read(random: std.Random) void {
     const length = random.uintAtMost(u32, content_bytes_max);
     for (content[0..length]) |*byte| byte.* = random.intRangeAtMost(u8, 'a', 'e');
+    random_owners(random);
+    // The one-id map has only the container's root, so a store made with it owns nothing else.
+    const single = store.owners == .outside and store.owners.outside.range == null;
     const attrs: object.Attrs = .{
         .mode = random.uintAtMost(u16, 0o7777),
-        .uid = random.uintLessThan(u32, 4),
-        .gid = random.uintLessThan(u32, 4),
+        .uid = if (single) 0 else random_owner_id(random),
+        .gid = if (single) 0 else random_owner_id(random),
         .xattrs = random_attributes(random),
     };
     const id = put_object(content[0..length], attrs);
+    host_owner = .{ host_id(.uid, attrs.uid), host_id(.gid, attrs.gid) };
+    set_host_owner(id, host_owner);
     const count = object.chunk_count(length, store.chunk_bytes);
     for (0..count) |index| expect_chunk(id, @intCast(index), length, true);
     assert(read(id, count) == error.IndexOutOfRange);
     if (length == 0) return;
+    unmapped_owner(random, id, count, length);
     if (random.boolean()) {
         damage_flip(random, id, count, length);
     } else {
@@ -184,8 +196,105 @@ fn damage_resize(
 fn replace_object(path: []const u8, attrs: object.Attrs, bytes: []const u8) void {
     files.remove_path(path);
     files.put_file(path, attrs.mode, bytes);
-    files.set_owner_of(path, attrs.uid, attrs.gid);
+    // The owner is the one `lstat` shows this reader, not the container's in `attrs`.
+    files.set_owner_of(path, host_owner[0], host_owner[1]);
     restore_attributes(path);
+}
+
+/// The owner `lstat` shows for the object being fuzzed: the host's ids of its container ids.
+var host_owner: [2]u32 = undefined;
+
+/// A container id: mostly the few that images use, sometimes the edges of the range.
+fn random_owner_id(random: std.Random) u32 {
+    return switch (random.uintLessThan(u32, 6)) {
+        0 => constants.subid_range_min,
+        1 => constants.subid_range_min - 1,
+        else => random.uintLessThan(u32, 4),
+    };
+}
+
+/// The reader is inside the store's namespace, or outside it with the one-id map or the full
+/// map of a user (or root) with a range.
+fn random_owners(random: std.Random) void {
+    // The user's gid is its own, not its uid (a mutant that maps one through the other fails).
+    const own: u32 = if (random.boolean()) 0 else 1000;
+    const own_gid: u32 = own + random.uintAtMost(u32, 1);
+    store.owners = switch (random.uintLessThan(u32, 3)) {
+        0 => .inside,
+        1 => .{ .outside = .{ .uid = own, .gid = own_gid, .range = null } },
+        else => .{ .outside = .{ .uid = own, .gid = own_gid, .range = .{
+            .uid_start = 100000,
+            .gid_start = if (random.boolean()) 100000 else 300000,
+        } } },
+    };
+}
+
+/// The host id the kernel maps container id `id` to: the oracle of `owners.container_id`,
+/// written forwards, as the id map reads (`0 own 1 1 start range`).
+fn host_id(kind: owners.Kind, id: u32) u32 {
+    switch (store.owners) {
+        .inside => return id,
+        .outside => |map| {
+            const own = if (kind == .uid) map.uid else map.gid;
+            if (id == 0) return own;
+            const range = map.range.?; // The one-id map has only id 0.
+            const start = if (kind == .uid) range.uid_start else range.gid_start;
+            assert(id <= constants.subid_range_min);
+            return start + id - 1;
+        },
+    }
+}
+
+fn set_host_owner(id: Digest, owner: [2]u32) void {
+    const hex = id.hex();
+    var path: [constants.sim_fs_path_bytes_max]u8 = @splat(0);
+    const text = std.fmt.bufPrint(&path, root_path ++ "/objects/{s}/{s}", .{
+        hex[0..2], hex[2..],
+    }) catch unreachable; // Short.
+    files.set_owner_of(text, owner[0], owner[1]);
+}
+
+/// Outside the namespace, an owner the map does not reach (one past the range, or one before
+/// it) makes a one-chunk object refused, never mapped by a guess; an object of several chunks,
+/// whose list does not hold the owner, still reads.
+fn unmapped_owner(random: std.Random, id: Digest, count: u32, length: u32) void {
+    if (store.owners == .inside) return;
+    const map = store.owners.outside;
+    const start = if (map.range) |range| range.uid_start else 100000;
+    const stray: u32 = if (random.boolean()) start + constants.subid_range_min else start - 1;
+    assert(owners.container_id(&map, .uid, stray) == null);
+    const stray_group = if (map.range) |range|
+        range.gid_start + constants.subid_range_min
+    else
+        stray;
+    assert(owners.container_id(&map, .gid, stray_group) == null);
+    const owner: [2]u32 = if (random.boolean())
+        .{ stray, host_owner[1] }
+    else
+        .{ host_owner[0], stray_group };
+    expect_refused(id, count, length, owner);
+    wrong_owner(random, id, count, length);
+    set_host_owner(id, host_owner);
+}
+
+/// With `owner` as the file's owner: a one-chunk object is refused as `Damaged` with `out`
+/// zeroed (never mapped by a guess); an object of several chunks still reads.
+fn expect_refused(id: Digest, count: u32, length: u32, owner: [2]u32) void {
+    set_host_owner(id, owner);
+    for (0..count) |index| {
+        expect_chunk(id, @intCast(index), length, count > 1);
+        if (count == 1) assert(read(id, 0) == error.Damaged);
+    }
+}
+
+/// The neighbour of the right host id, in the range when there is one (a different container
+/// id, or none at the edge): the map must tell it from the right one.
+fn wrong_owner(random: std.Random, id: Digest, count: u32, length: u32) void {
+    const step: u32 = if (random.boolean()) 1 else std.math.maxInt(u32); // +1 or -1, wrapping.
+    var owner = host_owner;
+    if (random.boolean()) owner[0] +%= step else owner[1] +%= step;
+    assert(!std.mem.eql(u32, &owner, &host_owner));
+    expect_refused(id, count, length, owner);
 }
 
 fn put_object(bytes: []const u8, attrs: object.Attrs) Digest {

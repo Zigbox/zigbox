@@ -84,6 +84,7 @@ pub const usage = @import("usage.zig");
 pub const walk = @import("walk.zig");
 pub const materialize = @import("materialize.zig");
 pub const namespace = @import("namespace.zig");
+pub const owners = @import("owners.zig");
 pub const image_peer = @import("image_peer.zig");
 pub const diagnose = @import("diagnose.zig");
 
@@ -98,7 +99,8 @@ pub const chunks = object.chunk_hashes;
 pub const put_chunk = chunk_put.put_chunk;
 
 /// The verified read of one chunk of an object: BLAKE3 is checked before any byte is returned
-/// (the `read_chunk` of Zigcube's contract).
+/// (the `read_chunk` of Zigcube's contract). A caller outside the store's namespace sets
+/// `store.owners` first (`namespace.outside_owners`).
 pub const read_chunk = chunk_read.read_chunk;
 
 /// Whether the store holds an object or a tree (the `has` of Zigcube's contract).
@@ -143,6 +145,7 @@ test {
     _ = usage;
     _ = walk;
     _ = namespace;
+    _ = owners;
     _ = image_peer;
     _ = diagnose;
     _ = @import("names.zig");
