@@ -1,0 +1,33 @@
+// The demo project of M7: a Go hello-world, built in two steps and assembled into one image.
+.{
+    .version = 1,
+    .steps = .{
+        .{
+            .name = "compile",
+            .base = "golang:1.23-alpine",
+            .inputs = .{ "go.mod", "main.go" },
+            .env = .{ "CGO_ENABLED=0", "GOFLAGS=-trimpath -buildvcs=false", "GOPROXY=off" },
+            .run = .{ "go", "build", "-ldflags=-s -w -buildid=", "-o", "/out/hello", "." },
+        },
+        .{
+            .name = "notice",
+            .base = "alpine:3.20",
+            .inputs = .{ "VERSION", "LICENSE" },
+            .run = .{ "sh", "-c", "mkdir -p /out/etc/hello && cp VERSION LICENSE /out/etc/hello/" },
+        },
+    },
+    .image = .{
+        .base = "alpine:3.20",
+        .add = .{
+            .{ .from = "compile", .to = "/usr/local/bin" },
+            .{ .from = "notice", .to = "/" },
+        },
+        .config = .{
+            .entrypoint = .{"/usr/local/bin/hello"},
+            .env = .{"GREETING_STYLE=plain"},
+            .workdir = "/",
+            .user = "0:0",
+            .labels = .{.{ "org.opencontainers.image.source", "https://github.com/Zigbox/zigbox" }},
+        },
+    },
+}

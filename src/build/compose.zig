@@ -35,6 +35,7 @@ const key_mod = @import("key.zig");
 const cache = @import("cache.zig");
 const step_mod = @import("step.zig");
 const input_tree = @import("input_tree.zig");
+const input_job = @import("input_job.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
 const render = @import("../diag/render.zig");
@@ -609,33 +610,17 @@ pub const Context = struct {
     }
 
     fn import_inputs(context: *Context, index: u8) Error!Digest {
-        const loaded = context.loaded;
-        const fs = context.host.filesystem();
-        const project = fs.open_directory(loaded.project.text()) catch |err| {
-            const operation = "opening the project directory";
-            const errno = fs.last_errno();
-            store_diagnose.write_failed(context.diag, context.store, operation, err, errno);
-            return error.Failed;
-        };
-        defer fs.close(project);
-        const import: input_tree.Request = .{
-            .store = context.store,
-            .project = project,
-            .file = &loaded.file,
-            .step = index,
-        };
         const ws = context.ws;
-        return input_tree.import(import, &ws.input, &ws.input_problem, context.diag) catch |err| {
-            if (err == error.Refused) {
-                diagnose.input_problem(
-                    context.diag,
-                    loaded.project.text(),
-                    &loaded.file,
-                    &ws.input_problem,
-                );
-            }
-            return error.Failed;
+        const job: input_job.Request = .{
+            .host = context.host,
+            .facts = context.facts,
+            .store = context.store,
+            .loaded = context.loaded,
+            .step = index,
+            .ws = &ws.input,
+            .problem = &ws.input_problem,
         };
+        return input_job.import(&job, context.diag) catch return error.Failed;
     }
 
     /// Writes the entry under the shared lock, and returns the tree it names.

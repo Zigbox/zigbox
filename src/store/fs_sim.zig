@@ -35,6 +35,7 @@ const Error = fs_mod.Error;
 const Fd = fs_mod.Fd;
 const FileKind = fs_mod.FileKind;
 
+pub const errno_perm: u16 = 1;
 pub const errno_io: u16 = 5;
 pub const errno_intr: u16 = 4;
 pub const errno_acces: u16 = 13;
@@ -49,6 +50,14 @@ pub const errno_inval: u16 = 22;
 pub const errno_nodata: u16 = 61;
 pub const errno_mlink: u16 = 31;
 pub const errno_xdev: u16 = 18;
+
+/// Who may change an owner: the real kernel lets only the root of the caller's user namespace do
+/// it, so a caller in no new namespace (an ordinary user) is refused. The file system model does
+/// not know the processes; the test says whether the current one is in a new user namespace.
+pub const OwnerGate = struct {
+    context: *anyopaque,
+    in_new_user_namespace: *const fn (context: *anyopaque) bool,
+};
 
 pub const Faults = struct {
     /// The call at this write point (zero-based) fails with `fail_errno`, and is not applied.
@@ -71,6 +80,9 @@ pub const Faults = struct {
     /// would follow the link: the model has no links to follow, so it panics instead. The layer
     /// fuzzer sets it.
     forbid_link_above: bool = false,
+    /// A change of owner outside a new user namespace is `EPERM` (not a write point: the
+    /// kernel refuses before it changes anything). Null for the model's default, which allows it.
+    owner_gate: ?OwnerGate = null,
 };
 
 const Node = struct {
@@ -909,6 +921,7 @@ pub const SimFs = struct {
             break :blk made;
         };
         if (sim.nodes[index].kind != .file) return sim.fail(errno_isdir);
+        if (sim.nodes[index].unreadable) return sim.fail(errno_acces);
         for (sim.opens) |other| {
             if (!other.used or other.node != index or other.lock == .none) continue;
             if (exclusive or other.lock == .exclusive) return sim.fail(errno_again);
@@ -967,6 +980,9 @@ pub const SimFs = struct {
 
     fn set_owner(context: *anyopaque, fd: Fd, uid: u32, gid: u32) Error!void {
         const sim = from_context(context);
+        if (sim.faults.owner_gate) |gate| {
+            if (!gate.in_new_user_namespace(gate.context)) return sim.fail(errno_perm);
+        }
         try sim.begin_mutation();
         const node = &sim.nodes[sim.slot_of(fd).node];
         node.uid = uid;
@@ -1273,6 +1289,31 @@ test "a crash tears unsynced bytes and keeps synced ones, and nothing works unti
     try testing.expect(kept >= 8 and kept <= 16);
     try testing.expectEqualStrings("01234567", sim.content_of("/d/f").?[0..8]);
     try testing.expectEqual(@as(u32, 0), sim.open_count());
+}
+
+test "a change of owner outside a new user namespace is refused when the gate says so" {
+    // Goal: the gate makes `set_owner` fail with EPERM only for a caller outside a new user
+    // namespace, and does not count it as a write point. Method: a gate on a flag, both values.
+    const sim = &test_sim;
+    sim.init(3);
+    sim.put_dir("/d", 0o755);
+    const fs = sim.interface();
+    const fd = try fs.create("/d/f", 0o600);
+    var inside = false;
+    const gate = struct {
+        fn call(context: *anyopaque) bool {
+            const flag: *const bool = @ptrCast(@alignCast(context));
+            return flag.*;
+        }
+    };
+    sim.faults.owner_gate = .{ .context = &inside, .in_new_user_namespace = gate.call };
+    const before = sim.mutations;
+    try testing.expectError(error.AccessDenied, fs.set_owner(fd, 0, 0));
+    try testing.expectEqual(@as(u16, errno_perm), fs.last_errno());
+    try testing.expectEqual(before, sim.mutations);
+    inside = true;
+    try fs.set_owner(fd, 0, 0);
+    fs.close(fd);
 }
 
 test "a full disk lets part of a write through, then refuses" {

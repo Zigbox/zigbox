@@ -16,6 +16,10 @@ const file_mod = @import("file.zig");
 const file_tests = @import("file_tests.zig");
 const fs_sim = @import("../store/fs_sim.zig");
 const import = @import("../store/import.zig");
+const input_job = @import("input_job.zig");
+const input_tree = @import("input_tree.zig");
+const inputs_mod = @import("inputs.zig");
+const codes = @import("../diag/codes.zig");
 const key_mod = @import("key.zig");
 const layout = @import("../store/layout.zig");
 const load_mod = @import("load.zig");
@@ -705,6 +709,70 @@ test "a step that dies at any write point, built again, gives the output of a cl
         try testing.expectEqual(@as(u32, 0), totals.damaged);
     }
     try testing.expectEqual(@as(u32, @intCast(points)), crashed_runs);
+}
+
+test "a full disk during a step's output import is E0416, with no cache entry written" {
+    // Goal: the demo document's claim for a full disk: the import of /out fails as ZBX-E0416
+    // (no space), not as a generic write failure, and the step leaves no cache entry. Method:
+    // the sim disk holds a few bytes only, the step's import runs, and the key is looked up.
+    start();
+    support.make_source(&files, 0);
+    files.faults.bytes_max = files.bytes_live + 4;
+    try testing.expect(!step_to_entry_keeping_diag());
+    try testing.expectEqual(@as(?codes.Code, .E0416), diag.code);
+    var failure: cache.Failure = undefined;
+    const found = try cache.lookup(&store, &composed.cache, &composed.key, &failure);
+    try testing.expect(found == .miss);
+    diag.reset();
+}
+
+fn step_to_entry_keeping_diag() bool {
+    var result: import.Result = undefined;
+    const options: import.Options = .{
+        .squash_owner = false,
+        .warn = null,
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = "build:compile",
+    };
+    import.import(&store, &import_workspace, "/src", options, &result, &diag) catch return false;
+    return true;
+}
+
+fn in_new_user_namespace(raw: *anyopaque) bool {
+    const world: *host_sim.HostSim = @ptrCast(@alignCast(raw));
+    return world.world.processes[world.world.current].new_user;
+}
+
+test "a step's inputs are imported inside the new user namespace, where chown to 0:0 is allowed" {
+    // Goal: regression for the first live demo-m7 run, where the parent imported the inputs and
+    // the real kernel refused `fchown(0, 0)` (EPERM) for an ordinary user. Method: the sim file
+    // system refuses a change of owner from a process with no new user namespace; the inputs
+    // of step 0 are imported through `input_job.import`. It fails if the import runs in the
+    // parent (the old code), and passes when the namespace's child does it.
+    start();
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/go.mod", 0o644, "module x\n");
+    files.put_file("/p/main.go", 0o644, "package main\n");
+    set_path(&loaded.project, "/p");
+    files.faults.owner_gate = .{ .context = &sim, .in_new_user_namespace = in_new_user_namespace };
+    try testing.expect(!in_new_user_namespace(&sim)); // The parent has none.
+    var input: input_tree.Workspace = undefined;
+    var problem: inputs_mod.Problem = undefined;
+    const request: input_job.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .store = &store,
+        .loaded = &loaded,
+        .step = 0,
+        .ws = &input,
+        .problem = &problem,
+    };
+    const first = try input_job.import(&request, &diag);
+    try testing.expect(diag.code == null);
+    // Each import is its own child: a second one gives the same tree.
+    try testing.expect(first.eql(try input_job.import(&request, &diag)));
+    try testing.expectEqual(@as(u32, 0), files.open_count());
 }
 
 test "--verbose reaches the step's request: verbose asks to stream, and nothing else does" {

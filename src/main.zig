@@ -266,6 +266,7 @@ test {
     _ = @import("build/assemble_tests.zig");
     _ = @import("build/assemble.zig");
     _ = @import("build/input_tree.zig");
+    _ = @import("build/input_job.zig");
     _ = @import("build/input_tree_tests.zig");
     _ = @import("build/input_tree_bounds_tests.zig");
     _ = @import("build/diagnose.zig");
