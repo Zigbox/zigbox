@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-10-30 (doc rev 86), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -127,7 +127,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** pull a public OCI image and run it, with the store doing the deduplication across images.
 
-**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock` in the project directory (the nearest one up from the working directory, as with `Cargo.lock`); `zbx pull` writes it, and `zbx run <tag>` runs the locked digest. Until containers get their own network namespace (M5), `/sys` is the host's, bound read-only. Deferred: push, private registries.
+**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock` in the project directory (the nearest one up from the working directory, as with `Cargo.lock`); `zbx pull` writes it, and `zbx run <tag>` runs the locked digest. Until containers get their own network namespace (M5), `/sys` is the host's, bound read-only. Deferred: push, private registries (ECR pull is M6c).
 
 **Demo script:**
 
@@ -224,6 +224,28 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] The production-readiness checklist, with an upgrade test against M6 and the agent test.
 
 **Decided:** writable mounts only under the project directory. Ownership: written as the container's root, and refused for a non-root container user. An id-mapped mount needs privilege over the host file system that a rootless zbx does not have, so zbx doctor only reports whether the kernel allows it. Mapping the image's user to the host user for the whole container (a keep-id map) would change how the store's trees are owned, and waits for a milestone of its own if real use asks for it.
+
+### M6c · Private pull: Amazon ECR
+
+**Goal:** a host pulls and runs an image from a private Amazon ECR repository with the AWS credentials it already has, and no secret ever leaves the request it was made for.
+
+**Scope:** authenticated pull from `<account>.dkr.ecr.<region>.amazonaws.com`. zbx signs AWS requests itself (SigV4; no credential helper or `aws` CLI) and takes credentials, in order, from the environment, a web identity token (`AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`), or EC2 instance metadata (IMDSv2 only). Credentials are resolved for each pull and never written to disk. The ECR token goes only to the registry's origin, never to a redirect target or a mirror. The library takes credentials from its caller, so Zigcube's agent pulls the same way. The credential layer is designed for push, which stays after M8. Deferred: AWS profile files and SSO, other private registries, the Mac, push. Brief: `docs/briefs/M6c-ecr.md`.
+
+**Demo script:**
+
+1. With no AWS credentials, `zbx pull <account>.dkr.ecr.<region>.amazonaws.com/zbx-demo:hello` is refused with one line naming the sources tried and the fix.
+2. With a web identity, the same pull succeeds; `zbx run` of it prints `hello`; `zbx.lock` holds the digest.
+3. With static keys in the environment, the same pull succeeds.
+4. Pulling `zbx-denied`, a repository the role may not read, is refused, naming the repository and the missing IAM permission.
+5. The secret key, session token, web identity token and ECR password are absent from every byte zbx wrote: output, JSON, `zbx.lock`, the store, `zbx bundle`, logs.
+
+**Acceptance criteria:**
+
+- [ ] Credentials go only where they are for: AWS keys sign only that region's ECR and STS requests; the ECR password goes only to the registry origin.
+- [ ] No secret on disk, in a diagnostic, an argument list, a record or a bundle; buffers zeroed after use.
+- [ ] Every failure is one coded line (no credentials, refused, clock skew, missing permission, missing repository, unsupported partition).
+- [ ] Public pulls, their output and the lockfile and store formats are unchanged.
+- [ ] CI pulls from a real ECR repository through GitHub OIDC, with no long-lived keys.
 
 ### M7 · Build: hermetic and reproducible
 
@@ -344,7 +366,7 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
-- **Image push and private registries.** Pull-only from public registries until after M8.
+- **Image push and private registries.** Pull-only from public registries until after M8, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push waits for M8.
 - **Dockerfile execution.** Dockerfiles are not run directly (import is stretch S4).
 - **Live migration, checkpoint/restore, GPU passthrough.**
 
@@ -453,6 +475,8 @@ The demo environment is a set of three to five QEMU VMs on one host, created by 
 
 - [ ] Lease timeout is configurable and printed at failover.
 - [ ] A partitioned node stops its workloads when its lease expires, so a replica never runs twice for long. Local mode needs nothing installed beyond zbx and zcube.
+- [ ] An always-on instance runs the cluster simulation 24/7 at `main` and files a GitHub issue, with seed and replay command, for each new failure. C1 ships only after it has run 24 hours on the shipping commit with every issue it filed closed or recorded as a cut (owner, 2026-10-30).
+- [ ] The store survives a hostile network and a failover: through a fault proxy, a history of real Postgres operations checks out (compare-and-set linearizable, no gaps, an unknown commit wholly in or out), a synchronous standby's failover loses no acknowledged commit, and a store that went backwards or forked is refused, never acted on. Supported setup: one primary, synchronous standby only, no replica reads (owner, 2026-10-30).
 
 #### C2 · Swarm: store-aware distribution
 
