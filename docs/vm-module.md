@@ -15,6 +15,7 @@ Source: `src/testing/vm/lib/`, root `zigbox_vm.zig`. Standard library only, no l
 | `image.make_overlay`, `image.ensure_raw_disk` | A qcow2 overlay on the base image for one run (the base is never written), and a sparse raw disk kept between runs (a cache). |
 | `accel.choose`, `accel.kvm_usable` | `auto` means KVM and fails with `error.NoKvm` without it; TCG only when asked for by name. Timeouts scale by `limits.tcg_timeout_factor` under TCG. |
 | `Session.start(init, out, overlay, accel, seed)` | Starts the HTTP server on 127.0.0.1 (the guest reaches it at 10.0.2.2) and QEMU. A `Seed` holds the rendered user data and meta data, the files to serve (`Route`: path and body, borrowed), and extra raw disks. |
+| `Seed.forwards` | TCP forwards from the host into the guest: a list of `Forward{ .host_address = 127.0.0.1, .host_port, .guest_port }`, at most `limits.forwards_max` (8), rendered as `-netdev user,id=net0,hostfwd=tcp:127.0.0.1:H-:G`. Host port 0 is not supported (QEMU's choice cannot be read back with `-monitor none`): name every host port, and make them unique per guest and per run (several guests on one host need different ports). A bad list is one coded line, `vm: VM-F001` to `VM-F004`, and `error.BadForward` before anything starts. No forwards: the QEMU command line is unchanged. |
 | `Session.provision(hostname, reuse)` | Waits for the ready marker and the root prompt, quiets the shell, and waits for cloud-init and systemd to settle. `reuse` boots an overlay that was already provisioned. |
 | `Session.run(command, timeout_s)` | The exec channel: runs a command in the root shell and returns its combined output (cleaned of escape sequences) and exit status. `send`, `wait_for` and `pump` drive the console directly (a Ctrl-C, a long-running command). |
 | `Session.copy_in(.{ .route, .guest_path, .owner, .mode })` | Fetches a served file into the guest, sets owner and mode, and returns the `ls -l` line. |
@@ -96,6 +97,17 @@ pub fn main(init: std.process.Init) !u8 {
     try session.shutdown();
     return 0;
 }
+```
+
+A guest listener is reachable from the host like this (`zig build demo-z7` does it in a VM):
+
+```zig
+try session.start(init, out, overlay, accel, .{
+    .user_data = user_data,
+    .meta_data = meta_data,
+    .forwards = &.{.{ .host_port = 18729, .guest_port = 9000 }},
+});
+// ... start a listener on guest port 9000, then connect to 127.0.0.1:18729 on the host.
 ```
 
 `session` must not move after `start` (its HTTP server borrows from it), and served bodies must outlive it. Everything the console prints is echoed to `out` with a `  vm| ` prefix, so a failure has the whole console above it.
