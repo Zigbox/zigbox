@@ -29,6 +29,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
+const owners_mod = @import("owners.zig");
 
 const Digest = digest_mod.Digest;
 const Fs = fs_mod.Fs;
@@ -73,6 +74,9 @@ pub const Store = struct {
     /// What this process has written, for the message of a write that fails halfway.
     objects_written: u64,
     bytes_written: u64,
+    /// Which ids `lstat` shows this process (`owners.zig`): `inside` (the default) in the store's
+    /// namespace; a reader outside it sets `outside` with `namespace.outside_owners`.
+    owners: owners_mod.Owners,
 
     /// Fills `store` from the environment. False if neither XDG_DATA_HOME nor HOME gives an
     /// absolute directory that fits.
@@ -139,6 +143,7 @@ pub const Store = struct {
         store.lock_errno = 0;
         store.objects_written = 0;
         store.bytes_written = 0;
+        store.owners = .inside;
         assert(store.root[store.root_len] == 0);
     }
 

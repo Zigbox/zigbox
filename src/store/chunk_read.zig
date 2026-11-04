@@ -8,6 +8,9 @@
 //!   - an object of one chunk (or none) has no list, and the chunk's hash is the content hash,
 //!     which the object id commits to together with the mode, owner and attributes. So the
 //!     object id is recomputed from the bytes and the file's own metadata and must be `id`.
+//!     The id commits to the container's ids, so a reader outside the store's namespace (whose
+//!     `lstat` gives host ids) sets `store.owners` and the owner is mapped back first
+//!     (`owners.zig`); an owner the map does not reach is `Damaged`.
 //!
 //! A mismatch is `Damaged` and no byte is returned: every error clears `out`, so a caller that
 //! ignores the error still holds no bytes of an unverified chunk. The call takes no store lock:
@@ -23,6 +26,7 @@ const digest_mod = @import("digest.zig");
 const fs_mod = @import("fs.zig");
 const layout = @import("layout.zig");
 const object = @import("object.zig");
+const owners = @import("owners.zig");
 const xattrs = @import("xattrs.zig");
 
 const Digest = digest_mod.Digest;
@@ -161,10 +165,14 @@ fn id_holds(
         error.TooMany, error.NameTooLong, error.ValueTooLong => return error.Damaged,
         else => |fs_err| return map(fs_err),
     };
+    // Outside the store's namespace `lstat` gives host ids, and the id commits to the
+    // container's: map them back. An owner the map does not reach is no object of this store.
+    const owner = owners.container_ids(&store.owners, stat.uid, stat.gid) orelse return false;
+    if (store.owners == .inside) assert(owner[0] == stat.uid);
     const attrs: object.Attrs = .{
         .mode = stat.mode,
-        .uid = stat.uid,
-        .gid = stat.gid,
+        .uid = owner[0],
+        .gid = owner[1],
         .xattrs = section,
     };
     return object.object_id(content, attrs).eql(id);

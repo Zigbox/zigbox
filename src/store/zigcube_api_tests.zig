@@ -14,6 +14,7 @@ const fs_mod = @import("fs.zig");
 const fs_sim = @import("fs_sim.zig");
 const layout = @import("layout.zig");
 const object = @import("object.zig");
+const owners = @import("owners.zig");
 const support = @import("test_support.zig");
 const tree = @import("tree.zig");
 const trees = @import("trees.zig");
@@ -579,4 +580,102 @@ test "a directory where a tree or an object belongs is not one the store has" {
     if (files.kind_of(shard) == null) files.put_dir(shard, 0o755);
     files.put_dir(path, 0o755);
     try testing.expect(!(try trees.has(&store, digest)));
+}
+
+// ---- read_chunk outside the store's namespace (Z9) ------------------------------------------
+
+/// Gives the object `id` the host owner `uid`:`gid`, as `lstat` shows it outside the namespace.
+fn own_on_host(id: Digest, uid: u32, gid: u32) void {
+    var buffer: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    files.set_owner_of(path_of(&buffer, id, ""), uid, gid);
+}
+
+/// `etc/shadow` of a real image: root's, group 42 (shadow), mode 0640.
+const shadow: object.Attrs = .{ .mode = 0o640, .uid = 0, .gid = 42, .xattrs = &xattrs.empty };
+const ubuntu_range: owners.Range = .{ .uid_start = 100000, .gid_start = 100000 };
+
+fn expect_reads(id: Digest, content: []const u8) !void {
+    @memset(&out, 0xAA);
+    const length = try read(id, 0);
+    try testing.expectEqualSlices(u8, content, out[0..length]);
+}
+
+fn expect_refused(id: Digest) !void {
+    @memset(&out, 0xAA);
+    try testing.expectError(error.Damaged, read(id, 0));
+    try testing.expectEqualSlices(u8, &@as([8]u8, @splat(0)), &out);
+}
+
+test "a one-chunk object owned by a container id reads outside the namespace with the full map" {
+    // Goal: regression for Z9. Zigcube's peer server reads outside the namespace, where `lstat`
+    // gives host ids, and a one-chunk object's id commits to the container's: `etc/shadow`
+    // (0:42) was refused as Damaged. Method: the object as the namespace child stored it, owned
+    // on the host by the user (1000) and the range's id for group 42 (100041). Read with the
+    // namespace's view, as before the fix, it is refused; with the store's map it reads; the
+    // same for root's map (root's own id is 0, as Zigcube's agents run).
+    for ([_]u32{ 1000, 0 }) |own| {
+        start();
+        const id = try put_object("secret", shadow);
+        own_on_host(id, own, 100041);
+        try expect_refused(id);
+        store.owners = .{ .outside = .{ .uid = own, .gid = own, .range = ubuntu_range } };
+        try expect_reads(id, "secret");
+    }
+}
+
+test "the one-id map reads the user's objects back as root's and refuses any other owner" {
+    // Goal: rootless with no subordinate range, where every object is the container root's.
+    // Method: an object of 0:0 owned on the host by the user reads; given to another host id
+    // (the user's id plus one, then a container-looking 42) it is refused and `out` is zero.
+    start();
+    const root_owned: object.Attrs = .{
+        .mode = 0o644,
+        .uid = 0,
+        .gid = 0,
+        .xattrs = &xattrs.empty,
+    };
+    const id = try put_object("short", root_owned);
+    store.owners = .{ .outside = .{ .uid = 1000, .gid = 1000, .range = null } };
+    own_on_host(id, 1000, 1000);
+    try expect_reads(id, "short");
+    own_on_host(id, 1001, 1000);
+    try expect_refused(id);
+    own_on_host(id, 1000, 42);
+    try expect_refused(id);
+    own_on_host(id, 0, 0);
+    try expect_refused(id);
+}
+
+test "with the full map an owner just past the range, or before it, is refused, not guessed" {
+    // Goal: the range's edges, read through `read_chunk`. Method: an object of the range's last
+    // container id (65536) owned by the range's last host id reads; one past it, and one before
+    // the range's first id, are refused; an owner a reader inside would see (42) is refused too.
+    start();
+    const last: object.Attrs = .{
+        .mode = 0o600,
+        .uid = constants.subid_range_min,
+        .gid = 1,
+        .xattrs = &xattrs.empty,
+    };
+    const id = try put_object("edge", last);
+    store.owners = .{ .outside = .{ .uid = 1000, .gid = 1000, .range = ubuntu_range } };
+    own_on_host(id, 165535, 100000);
+    try expect_reads(id, "edge");
+    own_on_host(id, 165536, 100000);
+    try expect_refused(id);
+    own_on_host(id, 165535, 99999);
+    try expect_refused(id);
+    own_on_host(id, constants.subid_range_min, 1);
+    try expect_refused(id);
+}
+
+test "an object of several chunks reads outside the namespace whatever its owner" {
+    // Goal: the map is used only where the owner is checked. Method: a five-chunk object of
+    // 0:42, owned on the host by ids the map does not reach; its chunks are checked against
+    // its list, which does not hold the owner, so every chunk reads.
+    start();
+    const id = try put_object(long, shadow);
+    store.owners = .{ .outside = .{ .uid = 1000, .gid = 1000, .range = null } };
+    own_on_host(id, 7, 7);
+    for (0..5) |index| _ = try read(id, @intCast(index));
 }
