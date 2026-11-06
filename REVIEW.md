@@ -7,6 +7,8 @@ The supervisor reviews every slice against this list, so run it yourself first, 
 - **A JSON schema only grows.** Under the same version (`zbx.store.ls/1`), never remove, rename or retype a member, and never change what it means. Add members beside the old ones. A change that cannot be additive is a new version (`/2`), with the old one still documented.
 - **A record on disk is read by the next release, and by the one after.** Bump its version when the format changes, keep reading every older version, and test that with real text an older release wrote (not text your new code rendered).
 - **Every new command, flag and diagnostic is in `help`, `zbx schema`, the goldens and the error pages** in the same commit. `zig build errors-site-check` catches pages; nothing catches the rest.
+- **An upgrade note covers every component that reads the changed value** (`zbx` and the store it reads, or Zigbox and Zigcube's agent), and says in what order to upgrade.
+- **A merged file in `docs/decisions/` is never edited.** A new decision file supersedes it and names it.
 
 ## Reading what you wrote, and what you did not
 
@@ -24,9 +26,11 @@ The supervisor reviews every slice against this list, so run it yourself first, 
 - **Every bound is a named constant in `constants.zig`**, with a comptime relation to the buffers it sizes, and a test at the bound and one past it.
 - **Every exit path is tested**, not only the clean one: a refusal, a signal, a timeout, SIGKILL of the child, and SIGKILL of `zbx` itself. Anything zbx starts or holds (a scope, a lock, a port, a helper process) is released on each of them.
 - **Every failure is one coded diagnostic** with a cause and a fix (`DIAGNOSTICS.md`). An `errno` alone, an empty reason, or a line that blames the wrong layer is a bug, including in the test harness.
+- **A change to what a check refuses (a range, a bound, a limit) updates that code's explanation** (`explain` text and the generated errors site) in the same change.
 
 ## Tests and gates
 
 - **`zig build check` on the exact commit you report**, with its last line pasted. It runs every fuzzer with a fresh seed; when one fails, its seed is the last `fuzz:` line above, and the replay is `zig build fuzz -- <fuzzer> <seed> 2000`.
 - **A test reachable from no test root never runs.** A new file of tests is imported from a root in `build.zig`'s test list, and you have seen it run (`zig build test --summary all`).
 - **A fixture parsed from text is checked against real output**, captured from a real run, not written from what the code is believed to print.
+- **Every new fuzzer, teeth test or gate runs somewhere**: in `zig build check` or in CI, with a `.github/ci-changes.sh` rule where it is path-gated, and it is listed in AGENTS.md's commands.
