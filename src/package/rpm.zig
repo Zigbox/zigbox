@@ -368,8 +368,8 @@ fn main_header(
     var h = Header.init(memory);
     const nevr = try std.fmt.allocPrint(
         memory,
-        "{s}-{s}.src.rpm",
-        .{ package.name, package.version },
+        "{s}-{s}-{s}.src.rpm",
+        .{ package.name, package.version, package.revision },
     );
     const platform = try std.fmt.allocPrint(
         memory,
@@ -437,22 +437,28 @@ fn signature_header(
     return padded;
 }
 
+/// The lead's name field is 66 bytes with its NUL.
+const lead_name_bytes_max = 65;
+
 fn lead(package: *const model.Package) [lead_bytes]u8 {
     var bytes: [lead_bytes]u8 = @splat(0);
     @memcpy(bytes[0..4], &[4]u8{ 0xed, 0xab, 0xee, 0xdb });
     bytes[4] = 3; // Major.
     bytes[5] = 0; // Minor.
-    // Type 0 is a binary package; archnum 1 is x86 and 12 aarch64 in rpm's table.
+    // Type 0 is a binary package; rpm's `arch_canon` table (rpmrc.in) gives x86_64 1, aarch64 19.
     const archnum: u16 = switch (package.architecture) {
         .x86_64 => 1,
-        .aarch64 => 12,
+        .aarch64 => 19,
     };
     std.mem.writeInt(u16, bytes[8..10], archnum, .big);
-    var name_buffer: [66]u8 = @splat(0);
-    _ = std.fmt.bufPrint(&name_buffer, "{s}-{s}-{s}", .{
+    // The name is a NUL-terminated char[66] that nothing reads back; rpm itself cuts it at 65
+    // bytes (rpmlead.c), and so do we: validate allows 64 bytes each of name, version, revision.
+    var full: [3 * constants.package_name_bytes_max + 2]u8 = undefined;
+    const text = std.fmt.bufPrint(&full, "{s}-{s}-{s}", .{
         package.name, package.version, package.revision,
-    }) catch unreachable; // validate bounds name, version, revision at 64 bytes each; lead has 65.
-    @memcpy(bytes[10..76], &name_buffer);
+    }) catch unreachable; // Three names at their bound and two dashes fit `full`.
+    const length = @min(text.len, lead_name_bytes_max);
+    @memcpy(bytes[10..][0..length], text[0..length]);
     std.mem.writeInt(u16, bytes[76..78], 1, .big); // osnum: Linux.
     std.mem.writeInt(u16, bytes[78..80], 5, .big); // signature type: header-style.
     return bytes;
@@ -547,6 +553,41 @@ test "the sample rpm matches the golden bytes captured from rpm 4.18" {
     defer arena.deinit();
     const bytes = try write(arena.allocator(), &@import("deb.zig").sample, .{});
     try std.testing.expectEqualSlices(u8, @embedFile("testdata/sample.rpm"), bytes);
+}
+
+test "the lead's name is cut at 65 bytes and keeps its NUL, at the bound and one past" {
+    // Goal: a name-version-revision of any length validate allows never overruns the 66-byte lead
+    // name. 65 bytes fit whole; 66 and the 194 of three 64-byte names are cut to 65 bytes.
+    const n30: [30]u8 = @splat('n');
+    const v30: [30]u8 = @splat('1');
+    const r3: [3]u8 = @splat('r');
+    const r4: [4]u8 = @splat('r');
+    var package = @import("deb.zig").sample;
+    package.name = &n30;
+    package.version = &v30;
+    package.revision = &r3; // 30 + 1 + 30 + 1 + 3 = 65.
+    var expected: [65]u8 = undefined;
+    _ = try std.fmt.bufPrint(&expected, "{s}-{s}-{s}", .{ n30, v30, r3 });
+    var bytes = lead(&package);
+    try std.testing.expectEqualSlices(u8, &expected, bytes[10..75]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[75]);
+    package.revision = &r4; // 66 bytes: the last one is dropped.
+    bytes = lead(&package);
+    try std.testing.expectEqualSlices(u8, &expected, bytes[10..75]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[75]);
+    const n64: [64]u8 = @splat('n');
+    const v64: [64]u8 = @splat('1');
+    const r64: [64]u8 = @splat('r');
+    package.name = &n64;
+    package.version = &v64;
+    package.revision = &r64;
+    try model.validate(&package);
+    bytes = lead(&package);
+    try std.testing.expectEqual(@as(u8, 0), bytes[75]);
+    try std.testing.expectEqualSlices(u8, &n64, bytes[10..74]);
+    try std.testing.expectEqual(@as(u8, '-'), bytes[74]);
+    package.architecture = .aarch64;
+    try std.testing.expectEqual(@as(u16, 19), std.mem.readInt(u16, lead(&package)[8..10], .big));
 }
 
 test "two builds are byte-identical" {
