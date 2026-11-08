@@ -795,8 +795,7 @@ pub fn parse(
             .confirm_next, .confirm_inline, .trash => {
                 try take_gc_option(diag, &gc_args, given, args, &index);
             },
-            .oci => try take_oci(diag, &gc_args, given, argument),
-            .dry_run => try take_dry_run(diag, &gc_args, given, argument),
+            .oci, .dry_run => try take_pack_flag(diag, &gc_args, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
             .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
@@ -1151,31 +1150,26 @@ fn take_by_image(
     gc_args.by_image = true;
 }
 
-/// `--oci`, which only `store export` takes.
-fn take_oci(
+/// `--oci`, which only `store export` takes, and `--dry-run`, which only `push` takes.
+fn take_pack_flag(
     diag: *Diag,
     gc_args: *GcArgs,
     operands: []const []const u8,
     argument: []const u8,
 ) ParseError!void {
-    assert(classify(argument) == .oci);
-    const is_export = operands.len >= 2 and command_named(operands[0]) == .store and
-        std.mem.eql(u8, operands[1], "export");
-    if (!is_export) return unknown_option(diag, argument);
-    gc_args.oci = true;
-}
-
-/// `--dry-run`, which only `push` takes.
-fn take_dry_run(
-    diag: *Diag,
-    gc_args: *GcArgs,
-    operands: []const []const u8,
-    argument: []const u8,
-) ParseError!void {
-    assert(classify(argument) == .dry_run);
-    const is_push = operands.len >= 1 and command_named(operands[0]) == .push;
-    if (!is_push) return unknown_option(diag, argument);
-    gc_args.dry_run = true;
+    const flag = classify(argument);
+    assert(argument.len > 2);
+    if (flag == .oci) {
+        const is_export = operands.len >= 2 and command_named(operands[0]) == .store and
+            std.mem.eql(u8, operands[1], "export");
+        if (!is_export) return unknown_option(diag, argument);
+        gc_args.oci = true;
+    } else {
+        assert(flag == .dry_run);
+        const is_push = operands.len >= 1 and command_named(operands[0]) == .push;
+        if (!is_push) return unknown_option(diag, argument);
+        gc_args.dry_run = true;
+    }
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
