@@ -262,12 +262,13 @@ pub const Writer = struct {
         var digits: [20]u8 = undefined; // u64 max has 20 digits.
         var start: usize = digits.len;
         var rest = magnitude;
-        while (true) {
+        for (0..digits.len) |_| { // At most 20 digits: the loop ends at `rest == 0`.
             start -= 1;
             digits[start] = '0' + @as(u8, @intCast(rest % 10));
             rest = @divFloor(rest, 10);
             if (rest == 0) break;
         }
+        assert(rest == 0);
         if (before) |byte| try self.put(&.{byte});
         if (negative) {
             assert(magnitude > 0); // There is no "-0".
@@ -466,7 +467,8 @@ pub const Reader = struct {
     /// write.
     fn string_body(self: *Reader, scratch: []u8) ReadError![]const u8 {
         var length: usize = 0;
-        while (true) {
+        // Each pass consumes one byte, so the string ends (or `peek` fails) within the input.
+        while (self.position <= self.input.len) {
             const byte = try self.peek();
             self.position += 1;
             if (byte == '"') break;

@@ -288,35 +288,50 @@ fn verify_objects(run: *Run) Error!void {
 
 fn check_object(run: *Run, id: Digest, has_list: bool) void {
     assert(run.store.root_len > 1);
-    assert(id.bytes.len == constants.store_digest_bytes);
-    const store = run.store;
-    const fs = store.fs;
-    const ws = run.ws;
     run.totals.objects += 1;
+    var bytes: u64 = 0;
+    const found = check_object_alone(run.store, run.ws, id, has_list, &bytes);
+    run.totals.object_bytes += bytes;
+    if (found) |damage| run.damage(id, .object, damage.kind, damage.errno);
+}
+
+/// What is wrong with one object.
+pub const ObjectDamage = struct { kind: Kind, errno: u16 };
+
+/// Rehashes one file object against its id (bytes, real mode, owner and attributes) and checks
+/// its chunk list against its bytes; null if it is sound. `has_list` says whether a chunk list
+/// is stored beside it. `bytes` gets the object's size once it is known. Shared by the
+/// store-wide `verify` and by anything that must not trust a cache (`zbx sign`).
+pub fn check_object_alone(
+    store: *const Store,
+    ws: *Workspace,
+    id: Digest,
+    has_list: bool,
+    bytes: *u64,
+) ?ObjectDamage {
+    assert(store.root_len > 1);
+    assert(id.bytes.len == constants.store_digest_bytes);
+    const fs = store.fs;
     var path_storage: PathBuf = undefined;
     const path = store.object_path(&path_storage, id);
-    const stat = fs.lstat(path) catch {
-        return run.damage(id, .object, .unreadable, fs.last_errno());
-    };
-    if (stat.kind != .file) return run.damage(id, .object, .not_a_file, 0);
-    run.totals.object_bytes += stat.size;
+    const stat = fs.lstat(path) catch return .{ .kind = .unreadable, .errno = fs.last_errno() };
+    if (stat.kind != .file) return .{ .kind = .not_a_file, .errno = 0 };
+    bytes.* = stat.size;
     const fd = fs.open_read(path) catch {
-        return run.damage(id, .object, .unreadable, fs.last_errno());
+        return .{ .kind = .unreadable, .errno = fs.last_errno() };
     };
     defer fs.close(fd);
     var reader = object.Reader.init(store.chunk_bytes);
     while (true) {
         const count = fs.read(fd, &ws.io) catch {
-            return run.damage(id, .object, .unreadable, fs.last_errno());
+            return .{ .kind = .unreadable, .errno = fs.last_errno() };
         };
         if (count == 0) break;
-        if (!reader.update(ws.io[0..count], &ws.chunks)) {
-            return run.damage(id, .object, .content, 0);
-        }
+        if (!reader.update(ws.io[0..count], &ws.chunks)) return .{ .kind = .content, .errno = 0 };
     }
     const content = reader.finish(&ws.chunks);
-    const blob = gather_xattrs(run, path) orelse {
-        return run.damage(id, .object, .unreadable, fs.last_errno());
+    const blob = ws.xattr.gather(fs, path) catch {
+        return .{ .kind = .unreadable, .errno = fs.last_errno() };
     };
     const attrs: object.Attrs = .{
         .mode = stat.mode,
@@ -324,27 +339,19 @@ fn check_object(run: *Run, id: Digest, has_list: bool) void {
         .gid = stat.gid,
         .xattrs = blob,
     };
-    if (!object.object_id(content, attrs).eql(id)) return run.damage(id, .object, .content, 0);
+    if (!object.object_id(content, attrs).eql(id)) return .{ .kind = .content, .errno = 0 };
     const expects = object.list_is_stored(reader.size, store.chunk_bytes);
-    if (expects != has_list) return run.damage(id, .object, .chunk_list, 0);
-    if (!expects) return;
+    if (expects != has_list) return .{ .kind = .chunk_list, .errno = 0 };
+    if (!expects) return null;
     const listed = object.read_chunk_list(store, id, &ws.list_bytes, &ws.list) catch {
-        return run.damage(id, .object, .chunk_list, fs.last_errno());
+        return .{ .kind = .chunk_list, .errno = fs.last_errno() };
     };
-    if (listed.len != reader.count) return run.damage(id, .object, .chunk_list, 0);
+    if (listed.len != reader.count) return .{ .kind = .chunk_list, .errno = 0 };
     for (listed, ws.chunks[0..reader.count]) |have, want| {
-        if (!have.eql(want)) return run.damage(id, .object, .chunk_list, 0);
+        if (!have.eql(want)) return .{ .kind = .chunk_list, .errno = 0 };
     }
+    return null;
 }
-
-/// The canonical attribute section of a stored object, as the importer would have built it.
-fn gather_xattrs(run: *Run, path: [:0]const u8) ?[]const u8 {
-    assert(path.len > 0);
-    assert(run.ws.xattr.names.len > 0);
-    return run.ws.xattr.gather(run.store.fs, path) catch null;
-}
-
-// ---- Trees and roots -----------------------------------------------------------------------
 
 fn verify_trees(run: *Run) Error!void {
     assert(run.names.len > 0);

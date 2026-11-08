@@ -195,6 +195,8 @@ pub const Code = enum(u8) {
     W0801,
     E0901,
     E0902,
+    E0903,
+    E0910,
     E0911,
     E1001,
     E1002,
@@ -2991,6 +2993,52 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0903,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a signature record in the store is damaged or newer",
+        .explanation =
+        \\Signatures are kept in the store, one file per tree, under trust/signatures:
+        \\each line of it is one signed statement. zbx reads the file whole before it
+        \\adds to it, and checks every line: its signature and its statement. A file
+        \\that fails is not trusted and not changed, because adding to it would
+        \\keep the damage.
+        \\
+        \\The cause says which. A damaged file is not what zbx wrote: a disk or a
+        \\program changed it, or it was put there by hand or by "zbx trust import" of
+        \\something that was not a zbx signature. A newer file was written by a newer
+        \\zbx, with a statement this one does not know.
+        \\
+        \\A signature is a copy of what the signer said, so nothing is lost by
+        \\removing a damaged file: sign the tree again, or import the signatures
+        \\again from where they came. For a newer file, use the newer zbx.
+        ,
+    },
+    .{
+        .code = .E0910,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "signing was refused",
+        .explanation =
+        \\"zbx sign" signs what is in the store, and only a tree that is whole and
+        \\sound: a signature over a tree with a missing or damaged file would
+        \\vouch for something nobody can run. It checks every file object of the
+        \\tree, without trusting the cache, before it signs.
+        \\
+        \\The cause says what was refused: the digest names nothing in the store
+        \\(give a build result, a tree, or "NAME@sha256:..." of an image that was
+        \\pulled or built here), a file of the tree is missing or damaged, or a
+        \\bound was reached. A tree has at most 8 signatures, and the store at most
+        \\4096 signed trees. Signing again with a key that already signed the same
+        \\thing is not a refusal: it changes nothing and says so.
+        \\
+        \\For a missing or damaged tree, pull or build it again, then sign it. For a
+        \\bound, remove a record file of the tree (or of trees you no longer need)
+        \\from trust/signatures in the store; a later release adds a command for
+        \\that. Nothing was written.
+        ,
+    },
+    .{
         .code = .E0911,
         .severity = .@"error",
         .blame = .user,
@@ -3473,7 +3521,7 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0901, .E0902, .E0911 => false,
+        .E0901, .E0902, .E0903, .E0910, .E0911 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

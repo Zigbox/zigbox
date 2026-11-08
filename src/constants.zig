@@ -1404,6 +1404,62 @@ comptime {
     assert(build_step_timeout_ms > 0);
 }
 
+// ---- Packages (M8, slice 6): the `zigbox_package` module and `zig build packages` ----
+
+/// The most files (directories included) one package holds. `zbx` and its licence need three; the
+/// Zigcube omnibus of C3 needs a few more.
+pub const package_files_max: u32 = 64;
+/// A package path is a tar name without a prefix field: at most 99 bytes and a terminator.
+pub const package_path_bytes_max: u32 = 99;
+/// The largest file in a package: a static `zbx` is under 4 MiB (`release_size_limit`).
+pub const package_file_bytes_max: u32 = 64 * 1024 * 1024;
+/// The largest package payload, uncompressed. One rpm header field (ARCHIVESIZE) holds it as a
+/// 32-bit integer, so the bound sits well under 2^31.
+pub const package_payload_bytes_max: u32 = 256 * 1024 * 1024;
+/// The most weak dependencies (`Recommends`) a package names.
+pub const package_recommends_max: u32 = 8;
+/// A package's name, version and architecture strings, a dependency name, and its one-line text.
+pub const package_name_bytes_max: u32 = 64;
+pub const package_summary_bytes_max: u32 = 200;
+/// The long description and the licence text.
+pub const package_description_bytes_max: u32 = 4096;
+/// The most packages one repository holds (two architectures of a few packages).
+pub const repo_packages_max: u32 = 32;
+/// The most files `zig build packages` writes under `zig-out/packages/`.
+pub const repo_files_max: u32 = 256;
+/// A repository metadata file (`Packages`, `primary.xml`): at most this, uncompressed.
+pub const repo_metadata_bytes_max: u32 = 4 * 1024 * 1024;
+/// The deflate window and output buffer sizes the gzip writer needs (std: `flate.max_window_len`).
+pub const package_gzip_window_bytes: u32 = 64 * 1024;
+/// An rpm header: its index entries and data store. A signature header is far smaller.
+pub const rpm_header_entries_max: u32 = 128;
+pub const rpm_header_bytes_max: u32 = 1024 * 1024;
+/// The most OpenPGP signature bytes one detached signature or rpm signature tag holds.
+pub const openpgp_signature_bytes_max: u32 = 1024;
+/// An ASCII-armored block's line width (RFC 4880: at most 76).
+pub const armor_line_bytes: u32 = 64;
+/// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a
+/// commit and the store it was built beside agree.
+pub const package_source_date_epoch: u64 = build_source_date_epoch;
+/// The `Maintainer` of the `zigbox` packages. A supervisor assumption the owner may change
+/// (docs/decisions/2026-11-08-package-bounds.md).
+pub const package_maintainer = "Zigbox project <packages@zigbox.org>";
+/// The release of the fixed test key (the package writer's own signer; vouches for nothing).
+pub const package_test_key_user_id =
+    "Zigbox package test key (vouches for nothing) <test@zigbox.invalid>";
+
+comptime {
+    assert(package_path_bytes_max < 100); // A ustar name field is 100 bytes with its terminator.
+    assert(package_payload_bytes_max <= std.math.maxInt(i32));
+    assert(package_file_bytes_max <= package_payload_bytes_max);
+    assert(package_gzip_window_bytes >= std.compress.flate.max_window_len);
+    assert(armor_line_bytes % 4 == 0); // Base64 lines break on whole groups.
+    assert(armor_line_bytes <= 76);
+    assert(package_files_max <= rpm_header_entries_max);
+    assert(package_recommends_max < rpm_header_entries_max);
+    assert(repo_packages_max * 2 <= repo_files_max);
+}
+
 // ---- Keys (M8 trust) ----
 
 /// A key's name: `[a-z0-9-]`, at most this many bytes.
@@ -1451,6 +1507,35 @@ pub const keys_listed_max: u32 = 64;
 /// A supervisor assumption (docs/decisions/2026-11-08-m8-trust-bounds.md).
 pub const json_depth_max: u32 = 16;
 
+// ---- Statements, envelopes and signature records (M8 trust, slice 2) ----
+// The four numbers below are supervisor assumptions (docs/decisions/2026-11-08-m8-trust-bounds.md).
+
+/// Most subjects in a statement: the tree, and optionally the binding (a result or a manifest).
+pub const statement_subjects_max: u32 = 2;
+/// Most bytes of a statement's payload.
+pub const statement_bytes_max: u32 = 128 * 1024;
+/// Most envelopes (lines) in one tree's signature record. A ninth distinct one is `E0910`.
+pub const signatures_per_tree_max: u32 = 8;
+/// Most signature records (and, from slice 4, provenance records) in the store.
+pub const trust_records_max: u32 = 4096;
+/// The one place our type URIs start (the owner's `2026-11-04-project-domain-zigbox-org.md`).
+/// Once a signature has been made with a URI it is part of the format.
+pub const type_uri_base = "https://zigbox.org";
+pub const sign_predicate_path = "/attestation/sign/v1";
+pub const sign_predicate_type = type_uri_base ++ sign_predicate_path;
+/// A sign statement's `signedAt` is RFC 3339 UTC to the second: `2026-11-08T10:00:00Z`.
+pub const signed_at_text_bytes: u32 = 20;
+/// The latest `signedAt` the form can write: 9999-12-31T23:59:59Z.
+pub const signed_at_seconds_max: u64 = 253402300799;
+/// The base64 of `statement_bytes_max` bytes, with padding.
+pub const payload_base64_bytes_max: u32 = ((statement_bytes_max + 2) / 3) * 4;
+/// Everything in an envelope that is not the payload's base64: the member names, the payload
+/// type, one key id and one signature (checked against the longest rendering in `dsse.zig`).
+pub const envelope_overhead_bytes: u32 = 512;
+pub const envelope_bytes_max: u32 = payload_base64_bytes_max + envelope_overhead_bytes;
+/// A signature record: at most `signatures_per_tree_max` envelopes, each with its newline.
+pub const signature_record_bytes_max: u32 = signatures_per_tree_max * (envelope_bytes_max + 1);
+
 comptime {
     assert(key_kdf_t >= 1);
     assert(key_kdf_t <= key_kdf_t_max);
@@ -1461,6 +1546,16 @@ comptime {
     assert(key_kdf_p_max == 1);
     assert(json_depth_max >= 1);
     assert(json_depth_max <= 64); // The reader's frame stack lives on the stack.
+    assert(statement_subjects_max == 2); // The tree, then at most one binding.
+    assert(statement_bytes_max <= 1024 * 1024);
+    assert(signatures_per_tree_max >= 1);
+    assert(trust_records_max >= signatures_per_tree_max);
+    assert(payload_base64_bytes_max >= statement_bytes_max);
+    assert(payload_base64_bytes_max % 4 == 0);
+    assert(envelope_bytes_max > payload_base64_bytes_max + envelope_overhead_bytes - 1);
+    assert(signature_record_bytes_max >= envelope_bytes_max);
+    assert(signature_record_bytes_max <= 4 * 1024 * 1024);
+    assert(signed_at_text_bytes == "2026-11-08T10:00:00Z".len);
     assert(key_sealed_bytes == 48);
     assert(key_public_text_bytes == 76);
     assert(key_file_bytes_max >= 512); // Room for the longest rendering, checked in key.zig.

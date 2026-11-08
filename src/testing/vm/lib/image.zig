@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const limits = @import("limits.zig");
 const pinned = @import("image.zon");
+const guests = @import("guests.zon");
 const http_server = @import("http_server.zig");
 
 pub const hex_len = 64;
@@ -57,6 +58,25 @@ pub const ubuntu_noble: Pin = .{
     .url = pinned.url,
     .sha256 = pinned.sha256,
     .file_name = pinned.file_name,
+};
+
+/// The other guests, pinned the same way (`guests.zon`): Debian 12 `genericcloud`, the current
+/// Fedora `Cloud Base Generic` and Rocky 9 `GenericCloud`. Their package managers are `apt`
+/// (Debian) and `dnf` (the other two).
+pub const debian_12: Pin = .{
+    .url = guests.debian_12.url,
+    .sha256 = guests.debian_12.sha256,
+    .file_name = guests.debian_12.file_name,
+};
+pub const fedora_45: Pin = .{
+    .url = guests.fedora_45.url,
+    .sha256 = guests.fedora_45.sha256,
+    .file_name = guests.fedora_45.file_name,
+};
+pub const rocky_9: Pin = .{
+    .url = guests.rocky_9.url,
+    .sha256 = guests.rocky_9.sha256,
+    .file_name = guests.rocky_9.file_name,
 };
 
 /// Makes sure `cache_dir/<file_name>` exists and matches the pinned SHA-256; downloads it
@@ -115,16 +135,29 @@ pub fn download(
 
 /// Creates a qcow2 overlay on top of the base image, using qemu-img (part of QEMU, the one
 /// external program the harness is allowed). The overlay lives in `cache_dir` and is deleted
-/// by the caller.
+/// by the caller. It is `limits.overlay_size_text` big.
 pub fn make_overlay(init: std.process.Init, base: []const u8, overlay: []const u8) !void {
+    return make_overlay_sized(init, base, overlay, limits.overlay_size_text);
+}
+
+/// The same with a size of the caller's choice (`12G`): a guest image whose own virtual size is
+/// larger than `limits.overlay_size_text` (Rocky's is 10 GiB) must not be cut short by its
+/// overlay, which would put the end of its partition table beyond the disk.
+pub fn make_overlay_sized(
+    init: std.process.Init,
+    base: []const u8,
+    overlay: []const u8,
+    size_text: []const u8,
+) !void {
     const io = init.io;
     const arena = init.arena.allocator();
+    assert(size_text.len > 0);
     const base_absolute = try Io.Dir.cwd().realPathFileAlloc(io, base, arena);
     Io.Dir.cwd().deleteFile(io, overlay) catch {};
     const argv = [_][]const u8{
-        "qemu-img",               "create",      "-q", "-f",    "qcow2",
-        "-b",                     base_absolute, "-F", "qcow2", overlay,
-        limits.overlay_size_text,
+        "qemu-img", "create",      "-q", "-f",    "qcow2",
+        "-b",       base_absolute, "-F", "qcow2", overlay,
+        size_text,
     };
     var child = try std.process.spawn(io, .{ .argv = &argv });
     const term = try child.wait(io);
@@ -160,6 +193,31 @@ test "the pinned image identifies a dated release and a SHA-256" {
         try std.testing.expect(std.ascii.isHex(byte));
         try std.testing.expect(!std.ascii.isUpper(byte));
     }
+}
+
+test "the Debian, Fedora and Rocky pins are dated https releases with a SHA-256" {
+    // Goal: no guest pin can become a moving target ("latest", "current") or a bad hash.
+    // Method: each pin's URL ends in its file name, names a dated release, and its hash is 64
+    // lowercase hex digits; the four file names (with Ubuntu's) are distinct cache entries.
+    const all = [_]Pin{ ubuntu_noble, debian_12, fedora_45, rocky_9 };
+    for (all, 0..) |pin, index| {
+        try std.testing.expect(std.mem.startsWith(u8, pin.url, "https://"));
+        try std.testing.expect(std.mem.endsWith(u8, pin.url, pin.file_name));
+        try std.testing.expect(std.mem.indexOf(u8, pin.url, "latest") == null);
+        try std.testing.expect(std.mem.indexOf(u8, pin.url, "current") == null);
+        try std.testing.expectEqual(@as(usize, hex_len), pin.sha256.len);
+        for (pin.sha256) |byte| {
+            try std.testing.expect(std.ascii.isHex(byte));
+            try std.testing.expect(!std.ascii.isUpper(byte));
+        }
+        for (all[index + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, pin.file_name, other.file_name));
+            try std.testing.expect(!std.mem.eql(u8, pin.sha256, other.sha256));
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, debian_12.url, "/bookworm/2026") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fedora_45.url, "/releases/45/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rocky_9.url, "-9.8-2026") != null);
 }
 
 test "to_hex renders lowercase hex" {
