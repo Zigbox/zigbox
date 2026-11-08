@@ -67,7 +67,16 @@ fn from_file(host: Host, path: []const u8, out: *Passphrase, problem: *Problem) 
     path_buffer.set(&.{path}) catch return fail(problem, .file_unreadable);
     if (path.len == 0) return fail(problem, .file_unreadable);
     const fs = host.filesystem();
-    const fd = fs.open_read(path_buffer.text()) catch return fail(problem, .file_unreadable);
+    // A link is refused with its own cause: it is what a secrets volume mounts, and "could not
+    // be read" would hide why. The file it points to is read as itself.
+    if (fs.lstat(path_buffer.text())) |linked| {
+        if (linked.kind == .symlink) return fail(problem, .file_is_link);
+    } else |err| {
+        return fail(problem, if (err == error.NotFound) .file_missing else .file_unreadable);
+    }
+    const fd = fs.open_read(path_buffer.text()) catch |err| {
+        return fail(problem, if (err == error.NotFound) .file_missing else .file_unreadable);
+    };
     defer fs.close(fd);
     const stat = fs.fstat(fd) catch return fail(problem, .file_unreadable);
     if (stat.kind != .file) return fail(problem, .file_unreadable);
@@ -116,13 +125,15 @@ fn from_terminal(
     }
 }
 
-/// One line typed with echo off, ended by Enter. Backspace erases, Ctrl-C cancels.
+/// One line typed with echo off, ended by Enter. Backspace erases; Ctrl-C, Ctrl-D, Ctrl-Z and
+/// Ctrl-\ cancel, so that none of them becomes a byte of the passphrase.
 fn read_line(host: Host, prompt: []const u8, out: *Passphrase, problem: *Problem) Error!void {
     assert(prompt.len > 0);
     @memset(&out.bytes, 0);
     out.length = 0;
     host.write_all(.stderr, prompt) catch return fail(problem, .unavailable);
-    defer host.write_all(.stderr, "\n") catch {};
+    // Raw mode has output processing off: a bare newline would not return the cursor.
+    defer host.write_all(.stderr, "\r\n") catch {};
     while (true) {
         var byte: [1]u8 = undefined;
         const count = host.read_some(host.standard_input(), &byte) catch
@@ -133,7 +144,7 @@ fn read_line(host: Host, prompt: []const u8, out: *Passphrase, problem: *Problem
         }
         switch (byte[0]) {
             '\n', '\r' => break,
-            3, 4 => {
+            3, 4, 26, 28 => { // Ctrl-C, Ctrl-D, Ctrl-Z, Ctrl-\: signals are off, so cancel here.
                 out.wipe();
                 return fail(problem, .cancelled);
             },

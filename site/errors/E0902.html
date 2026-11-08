@@ -78,7 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>&quot;zbx key new&quot; never replaces a key: a secret key that is overwritten is gone for good, and so is everything signed with it that nobody else can check. The name is taken by a key (or by half of one) in the keys directory.</p>
 <p>Choose another name:     zbx key new release-2</p>
-<p>To retire the old key, remove its NAME.key and NAME.pub files yourself.</p>
+<p>To retire the old key, remove its NAME.key and NAME.pub files yourself. A NAME.key with no NAME.pub is what a &quot;zbx key new&quot; killed halfway leaves; the cause says so, and removing that file frees the name.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0902</pre>

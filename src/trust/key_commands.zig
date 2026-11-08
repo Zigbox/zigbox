@@ -104,8 +104,9 @@ fn unusable(job: *const Job, extension: []const u8, diag: *Diag) Error {
     const name = job.args.name orelse "";
     var path: fs_path = undefined;
     const text: []const u8 = blk: {
-        if (name.len == 0 or job.failure.problem == .dir_too_open) break :blk job.paths.dir.text();
-        store.file_path(&job.paths, name, extension, false, &path) catch
+        if (name.len == 0 or job.failure.problem == .dir_too_open or
+            job.failure.problem == .dir_not_real) break :blk job.paths.dir.text();
+        store.file_path(&job.paths, name, extension, &path) catch
             break :blk job.paths.dir.text();
         break :blk path.text();
     };
@@ -119,10 +120,7 @@ fn run_new(job: *Job, diag: *Diag) Error!void {
     const name = job.args.name.?;
     const fs = job.host.filesystem();
     store.ensure_dir(fs, &job.paths, &job.failure) catch return unusable(job, ".key", diag);
-    if (store.name_taken(fs, &job.paths, name)) {
-        diagnose.name_exists(diag, name, job.paths.dir.text());
-        return error.Failed;
-    }
+    if (store.name_taken(fs, &job.paths, name)) return taken(job, diag);
     var phrase: passphrase_mod.Passphrase = undefined;
     phrase.length = 0;
     defer phrase.wipe();
@@ -131,14 +129,15 @@ fn run_new(job: *Job, diag: *Diag) Error!void {
     defer std.crypto.secureZero(u8, &seed);
     var salt: [constants.key_salt_bytes]u8 = undefined;
     var nonce: [constants.key_nonce_bytes]u8 = undefined;
-    for ([_][]u8{ &seed, &salt, &nonce }) |bytes| {
+    var unique: store.Unique = undefined;
+    for ([_][]u8{ &seed, &salt, &nonce, &unique }) |bytes| {
         job.host.random_bytes(bytes) catch return random_failed(job, name, diag);
     }
     const public = key.public_of_seed(seed);
     var record: key.Record = .{ .public = public, .body = .{ .none = seed } };
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
     if (!job.args.no_passphrase) try seal(job, &record, &phrase, seed, salt, nonce, diag);
-    store.create(fs, &job.paths, name, &record, &job.failure) catch |err| {
+    store.create(fs, &job.paths, name, &record, &unique, &job.failure) catch |err| {
         assert(err == error.Failed);
         return create_failed(job, diag);
     };
@@ -147,11 +146,16 @@ fn run_new(job: *Job, diag: *Diag) Error!void {
 }
 
 fn create_failed(job: *const Job, diag: *Diag) Error {
-    if (job.failure.problem == .exists) {
-        diagnose.name_exists(diag, job.args.name.?, job.paths.dir.text());
-        return error.Failed;
-    }
+    if (job.failure.problem == .exists) return taken(job, diag);
     return unusable(job, ".key", diag);
+}
+
+/// E0902 for a name that has a file, saying so when the file is a `.key` left without its `.pub`.
+fn taken(job: *const Job, diag: *Diag) Error {
+    const name = job.args.name.?;
+    const orphan = store.orphan_secret(job.host.filesystem(), &job.paths, name);
+    diagnose.name_exists(diag, name, job.paths.dir.text(), orphan);
+    return error.Failed;
 }
 
 fn random_failed(job: *const Job, name: []const u8, diag: *Diag) Error {

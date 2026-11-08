@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the key cannot be used</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>A key is a pair of files in the keys directory ($XDG_CONFIG_HOME/zbx/keys, by default ~/.config/zbx/keys): NAME.key holds the secret and NAME.pub the public key. The cause says what is wrong: the file is not there, cannot be read or written, is not a zbx key file, was written by a newer zbx, or its secret can be read by other users. Like ssh, zbx refuses a secret that group or others can read, and a keys directory that they can.</p>
+<p>A key is a pair of files in the keys directory ($XDG_CONFIG_HOME/zbx/keys, by default ~/.config/zbx/keys): NAME.key holds the secret and NAME.pub the public key. The cause says what is wrong: the file is not there, cannot be read or written, is not a zbx key file, was written by a newer zbx, or its secret can be read by other users. Like ssh, zbx refuses a secret that group or others can read, and a keys directory that they can. It also refuses a keys directory that is a symbolic link (or not a directory): keep the keys in a real directory.</p>
 <p>Make the secret private to you:     chmod 600 ~/.config/zbx/keys/NAME.key     chmod 700 ~/.config/zbx/keys</p>
 <p>&quot;zbx key list&quot; shows the keys there are. A damaged key file cannot be repaired; if you have no copy, make a new key and trust that one instead.</p>
 <h2>Offline</h2>

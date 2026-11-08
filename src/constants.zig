@@ -1414,11 +1414,15 @@ pub const key_kdf_t: u32 = 3;
 pub const key_kdf_m_kib: u32 = 65536;
 pub const key_kdf_p: u32 = 1;
 /// What parse accepts from a key file, so that a hostile file cannot make `sign` allocate or
-/// loop without bound: four times the defaults. `p` is fixed at one (a second lane would need
-/// threads, and zbx's namespace-free parent runs argon2 on its own thread).
-pub const key_kdf_t_max: u32 = 12;
-pub const key_kdf_m_kib_max: u32 = 262144;
+/// loop without bound: `t` at most 6 and memory at most 128 MiB (see
+/// `docs/decisions/2026-11-08-m8-kdf-maxima-tightened.md`). `p` is fixed at one (a second lane
+/// would need threads, and zbx's namespace-free parent runs argon2 on its own thread).
+pub const key_kdf_t_max: u32 = 6;
+pub const key_kdf_m_kib_max: u32 = 131072;
 pub const key_kdf_p_max: u32 = 1;
+/// Random bytes in the name of a key's temporary file, so that two `key new` of one name never
+/// share a temporary (hex in the name: twice this many characters).
+pub const key_temp_random_bytes: u32 = 8;
 pub const key_seed_bytes: u32 = 32;
 pub const key_public_bytes: u32 = 32;
 pub const key_salt_bytes: u32 = 16;

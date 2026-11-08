@@ -212,8 +212,10 @@ test "a name that exists is refused and the old key is untouched; a bad name is 
     try testing.expectEqual(@as(u8, 0), command(&longest));
 }
 
-test "a key file others can read is refused, and show needs only the public file" {
-    // Goal: E0901 for a loose directory or secret. Method: loosen each; show reads the .pub only.
+test "a loose keys directory is refused, and show needs only the public file" {
+    // Goal: E0901 for a loose directory, and that show never opens the secret. Method: loosen the
+    // secret (show still works, it reads the .pub only) and the directory (new is refused).
+    // The refusal of a loose secret itself is tested on read_secret, in key_store_tests.zig.
     start();
     const make = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" };
     try testing.expectEqual(@as(u8, 0), command(&make));
@@ -286,4 +288,68 @@ test "the key options: inline value, missing value, wrong command, both ways, tw
     const inline_value = [_][:0]const u8{ "key", "new", "ci", file };
     try testing.expectEqual(@as(u8, 0), command(&inline_value));
     try testing.expect(has(files.content_of(directory ++ "/ci.key").?, "argon2id"));
+}
+
+test "a passphrase file that is a link or is missing says so, not just that it failed" {
+    // Goal: the causes the review asked to tell apart. Method: a link to a good file, then no
+    // file; each is E0911 with its own words, and no key is made.
+    start();
+    put_pass(0o600, "secret\n");
+    files.put_symlink("/home/alice/link", "/home/alice/pass");
+    const linked = [_][:0]const u8{ "key", "new", "a", "--passphrase-file", "/home/alice/link" };
+    try testing.expectEqual(@as(u8, 1), command(&linked));
+    try testing.expect(has(sim.stderr(), "is a symbolic link; name the file it points to"));
+    const missing = [_][:0]const u8{ "key", "new", "a", "--passphrase-file", "/home/alice/none" };
+    try testing.expectEqual(@as(u8, 1), command(&missing));
+    try testing.expect(has(sim.stderr(), "there is no file /home/alice/none"));
+    try testing.expect(files.kind_of(directory ++ "/a.key") == null);
+}
+
+test "a passphrase typed too long, or ended with Ctrl-Z or Ctrl-\\, is refused in plain words" {
+    // Goal: no empty file name in the message, and no control byte in a passphrase. Method: 1025
+    // typed bytes; then a Ctrl-Z and a Ctrl-\\ after some letters.
+    start();
+    sim.terminal = true;
+    sim.world.input_terminal = true;
+    sim.world.input = long_line(1025) ++ "\n";
+    const make = [_][:0]const u8{ "key", "new", "a" };
+    try testing.expectEqual(@as(u8, 1), command(&make));
+    try testing.expect(has(sim.stderr(), "the passphrase is longer than 1024 bytes"));
+    try testing.expect(!has(sim.stderr(), "line of  "));
+    for ([_][]const u8{ "pw\x1a", "pw\x1c" }) |input| {
+        sim.world.input_handle = null;
+        sim.world.input = input;
+        try testing.expectEqual(@as(u8, 1), command(&make));
+        try testing.expect(has(sim.stderr(), "the passphrase was not entered; nothing was done"));
+        try testing.expect(!sim.world.input_is_raw);
+    }
+    try testing.expect(files.kind_of(directory ++ "/a.key") == null);
+}
+
+test "a keys directory that is a symbolic link is named as one" {
+    // Goal: the cause is not "can be read by other users" (chmod cannot fix a link). Method: a
+    // link to a private directory in place of the keys directory.
+    start();
+    files.put_dir("/home/alice/.config", 0o755);
+    files.put_dir("/home/alice/.config/zbx", 0o700);
+    files.put_dir("/home/alice/private", 0o700);
+    files.put_symlink(directory, "/home/alice/private");
+    const make = [_][:0]const u8{ "key", "new", "a", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 1), command(&make));
+    try testing.expect(has(sim.stderr(), "ZBX-E0901"));
+    try testing.expect(has(sim.stderr(), "symbolic link or not a directory"));
+    try testing.expect(!has(sim.stderr(), "can be read by other users"));
+}
+
+test "a .key left without its .pub is named, and its removal is the fix" {
+    // Goal: the name an interrupted run blocked is not a puzzle. Method: a lone .key; new of
+    // that name is E0902 whose cause says the .pub is missing and whose fix removes the file.
+    start();
+    const first = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&first));
+    files.remove_path(directory ++ "/ci.pub");
+    try testing.expectEqual(@as(u8, 1), command(&first));
+    try testing.expect(has(sim.stderr(), "ZBX-E0902"));
+    try testing.expect(has(sim.stderr(), "ci.key has no ci.pub beside it"));
+    try testing.expect(has(sim.stderr(), "rm " ++ directory ++ "/ci.key"));
 }

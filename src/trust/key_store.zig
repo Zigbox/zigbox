@@ -5,9 +5,10 @@
 //! Nothing here prints or decides. Every call returns a `Problem` for the commands to say in
 //! words, so that this file never holds a diagnostic and never a secret in a message.
 //!
-//! A new key is written to a hidden temporary file (created exclusively, mode 0600), flushed,
-//! and then hard-linked to its final name: `link` fails when the name exists, so an existing
-//! key is never replaced, even by a racing `key new`.
+//! A new key is written to a hidden temporary file (created exclusively, mode 0600, with random
+//! characters in its name), flushed, and then hard-linked to its final name: `link` fails when
+//! the name exists, so an existing key is never replaced, even by a racing `key new`. The
+//! temporary's name is the writer's alone, so no run ever removes or links another's file.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -25,8 +26,10 @@ pub const Problem = enum {
     no_home,
     /// The path is longer than a store path.
     path_too_long,
-    /// The keys directory is readable by group or others, or is not a directory.
+    /// The keys directory is readable by group or others.
     dir_too_open,
+    /// The keys path is a symbolic link or some other thing that is not a real directory.
+    dir_not_real,
     /// A key of that name is already there.
     exists,
     /// No such key.
@@ -85,21 +88,34 @@ pub fn locate(host: Host, paths: *Paths) bool {
     return true;
 }
 
-/// `<dir>/<name><extension>` or, hidden, `<dir>/.<name><extension>.tmp`.
+/// `<dir>/<name><extension>`.
 pub fn file_path(
     paths: *const Paths,
     name: []const u8,
     extension: []const u8,
-    hidden: bool,
     out: *PathBuf,
 ) error{PathTooLong}!void {
     assert(key.name_valid(name));
     assert(extension.len > 0);
+    out.set(&.{ paths.dir.text(), "/", name, extension }) catch return error.PathTooLong;
+}
+
+/// The random bytes that make a temporary file's name one writer's own.
+pub const Unique = [constants.key_temp_random_bytes]u8;
+
+/// `<dir>/.<name><extension>.<hex of unique>.tmp`: hidden, and not any other run's.
+pub fn temp_path(
+    paths: *const Paths,
+    name: []const u8,
+    extension: []const u8,
+    unique: *const Unique,
+    out: *PathBuf,
+) error{PathTooLong}!void {
+    assert(key.name_valid(name));
+    assert(extension.len > 0);
+    const hex = std.fmt.bytesToHex(unique.*, .lower);
     const dir = paths.dir.text();
-    const parts: []const []const u8 = if (hidden)
-        &.{ dir, "/.", name, extension, ".tmp" }
-    else
-        &.{ dir, "/", name, extension };
+    const parts: []const []const u8 = &.{ dir, "/.", name, extension, ".", &hex, ".tmp" };
     out.set(parts) catch return error.PathTooLong;
 }
 
@@ -115,9 +131,7 @@ pub fn ensure_dir(fs: Fs, paths: *const Paths, failure: *Failure) Error!void {
     const dir = paths.dir.text();
     assert(paths.base_len < dir.len);
     if (fs.lstat(dir)) |stat| {
-        if (stat.kind != .dir) return fail(failure, .dir_too_open, 0);
-        if (key.mode_too_open(stat.mode)) return fail(failure, .dir_too_open, 0);
-        return;
+        return check_dir(stat, failure);
     } else |_| {}
     var at: usize = paths.base_len;
     while (at < dir.len) {
@@ -134,6 +148,13 @@ pub fn ensure_dir(fs: Fs, paths: *const Paths, failure: *Failure) Error!void {
     const fd = fs.open_directory(dir) catch |err| return failure_of(fs, failure, err);
     defer fs.close(fd);
     fs.set_mode(fd, 0o700) catch |err| return failure_of(fs, failure, err);
+}
+
+/// The keys directory must be a real directory (not a link: `chmod` would follow it, and the
+/// mode seen would not be the target's) that only its owner can use.
+fn check_dir(stat: fs_mod.Stat, failure: *Failure) Error!void {
+    if (stat.kind != .dir) return fail(failure, .dir_not_real, 0);
+    if (key.mode_too_open(stat.mode)) return fail(failure, .dir_too_open, 0);
 }
 
 fn failure_of(fs: Fs, failure: *Failure, err: host_mod.Error) Error {
@@ -156,9 +177,10 @@ fn write_new(
     assert(bytes.len <= constants.key_file_bytes_max);
     if (mode != 0o644) assert(!key.mode_too_open(mode));
     if (exists(fs, final)) return fail(failure, .exists, 0);
-    fs.unlink(temporary) catch {}; // A leftover of a crashed run; absent is the usual case.
+    // Exclusive create of a name only this run knows. Never unlink a path before this point:
+    // another run may own it.
     const fd = fs.create(temporary, mode) catch |err| return failure_of(fs, failure, err);
-    defer fs.unlink(temporary) catch {}; // The final name is its own link by then.
+    defer fs.unlink(temporary) catch {}; // This run's own file; the final name is its link.
     defer fs.close(fd);
     // The umask may have taken bits off; the mode asked for is what the file gets.
     fs.set_mode(fd, mode) catch |err| return failure_of(fs, failure, err);
@@ -178,6 +200,7 @@ pub fn create(
     paths: *const Paths,
     name: []const u8,
     record: *const key.Record,
+    unique: *const Unique,
     failure: *Failure,
 ) Error!void {
     assert(key.name_valid(name));
@@ -186,7 +209,7 @@ pub fn create(
     var pub_path: PathBuf = undefined;
     var pub_tmp: PathBuf = undefined;
     const all = [4]*PathBuf{ &secret_path, &secret_tmp, &pub_path, &pub_tmp };
-    try name_paths(paths, name, all, failure);
+    try name_paths(paths, name, unique, all, failure);
     if (exists(fs, secret_path.text()) or exists(fs, pub_path.text())) {
         return fail(failure, .exists, 0);
     }
@@ -208,15 +231,16 @@ pub fn create(
 fn name_paths(
     paths: *const Paths,
     name: []const u8,
+    unique: *const Unique,
     out: [4]*PathBuf,
     failure: *Failure,
 ) Error!void {
     assert(key.name_valid(name));
     const failed = .path_too_long;
-    file_path(paths, name, ".key", false, out[0]) catch return fail(failure, failed, 0);
-    file_path(paths, name, ".key", true, out[1]) catch return fail(failure, failed, 0);
-    file_path(paths, name, ".pub", false, out[2]) catch return fail(failure, failed, 0);
-    file_path(paths, name, ".pub", true, out[3]) catch return fail(failure, failed, 0);
+    file_path(paths, name, ".key", out[0]) catch return fail(failure, failed, 0);
+    temp_path(paths, name, ".key", unique, out[1]) catch return fail(failure, failed, 0);
+    file_path(paths, name, ".pub", out[2]) catch return fail(failure, failed, 0);
+    temp_path(paths, name, ".pub", unique, out[3]) catch return fail(failure, failed, 0);
 }
 
 /// The public key and encryption of `name`, from its `.pub` file.
@@ -228,7 +252,7 @@ pub fn read_pub(
 ) Error!key.PubFile {
     assert(key.name_valid(name));
     var path: PathBuf = undefined;
-    file_path(paths, name, ".pub", false, &path) catch return fail(failure, .path_too_long, 0);
+    file_path(paths, name, ".pub", &path) catch return fail(failure, .path_too_long, 0);
     var buffer: [key.pub_file_bytes_max + 1]u8 = undefined;
     const bytes = fs.read_whole(path.text(), &buffer) catch |err| switch (err) {
         error.FileTooLarge => return fail(failure, .malformed, 0),
@@ -248,9 +272,9 @@ pub fn read_secret(
 ) Error!key.Record {
     assert(key.name_valid(name));
     const dir = fs.lstat(paths.dir.text()) catch |err| return failure_of(fs, failure, err);
-    if (dir.kind != .dir or key.mode_too_open(dir.mode)) return fail(failure, .dir_too_open, 0);
+    try check_dir(dir, failure);
     var path: PathBuf = undefined;
-    file_path(paths, name, ".key", false, &path) catch return fail(failure, .path_too_long, 0);
+    file_path(paths, name, ".key", &path) catch return fail(failure, .path_too_long, 0);
     const fd = fs.open_read(path.text()) catch |err| return failure_of(fs, failure, err);
     defer fs.close(fd);
     const stat = fs.fstat(fd) catch |err| return failure_of(fs, failure, err);
@@ -335,8 +359,18 @@ pub fn name_taken(fs: Fs, paths: *const Paths, name: []const u8) bool {
     assert(key.name_valid(name));
     var secret: PathBuf = undefined;
     var public: PathBuf = undefined;
-    const failed = file_path(paths, name, ".key", false, &secret);
-    failed catch return false;
-    file_path(paths, name, ".pub", false, &public) catch return false;
+    file_path(paths, name, ".key", &secret) catch return false;
+    file_path(paths, name, ".pub", &public) catch return false;
     return exists(fs, secret.text()) or exists(fs, public.text());
+}
+
+/// True when `name` has a `.key` and no `.pub`: what a run killed between its two links leaves.
+/// Such a name is taken, yet `show` cannot open it.
+pub fn orphan_secret(fs: Fs, paths: *const Paths, name: []const u8) bool {
+    assert(key.name_valid(name));
+    var secret: PathBuf = undefined;
+    var public: PathBuf = undefined;
+    file_path(paths, name, ".key", &secret) catch return false;
+    file_path(paths, name, ".pub", &public) catch return false;
+    return exists(fs, secret.text()) and !exists(fs, public.text());
 }

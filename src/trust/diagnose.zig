@@ -33,7 +33,14 @@ pub fn unusable(diag: *Diag, name: []const u8, path: []const u8, failure: store.
         .newer => diag.cause("{s} was written by a newer zbx than this one", .{path_echo}),
         .secret_too_open => diag.cause("{s} can be read by other users", .{path_echo}),
         .dir_too_open => diag.cause("{s} can be read by other users", .{path_echo}),
-        .no_home => diag.cause("neither XDG_CONFIG_HOME nor HOME names a directory for keys", .{}),
+        .dir_not_real => diag.cause(
+            "{s} is a symbolic link or not a directory; zbx keeps keys only in a real directory",
+            .{path_echo},
+        ),
+        .no_home => diag.cause(
+            "neither XDG_CONFIG_HOME nor HOME names an existing directory to keep keys in",
+            .{},
+        ),
         .path_too_long => diag.cause("the key's path is longer than zbx handles", .{}),
         .unreadable, .exists => cause_io(diag, path_echo, failure),
     }
@@ -59,6 +66,9 @@ fn fix_unusable(diag: *Diag, name: []const u8, path: []const u8, problem: store.
     switch (problem) {
         .secret_too_open => diag.fix_with("make it private to you:", "chmod 600 {s}", .{path}),
         .dir_too_open => diag.fix_with("make it private to you:", "chmod 700 {s}", .{path}),
+        .dir_not_real => diag.fix(.{
+            .sentence = "replace it with a real directory, moving the keys into it",
+        }),
         .missing => diag.fix(.{
             .sentence = "see the keys there are, or make one:",
             .command = "zbx key list",
@@ -81,7 +91,7 @@ fn fix_unusable(diag: *Diag, name: []const u8, path: []const u8, problem: store.
 }
 
 /// ZBX-E0902: a key of that name exists, and is never overwritten.
-pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8) void {
+pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8, orphan: bool) void {
     assert(diag.code == null);
     var name_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     var dir_storage: [path_echo_bytes]u8 = undefined;
@@ -89,10 +99,18 @@ pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8) void {
     const dir_echo = echo_of(&dir_storage, dir);
     diag.raise(.E0902);
     diag.while_("making the key '{s}'", .{name_echo});
-    diag.cause("a key named '{s}' is already in {s}; zbx never overwrites a key", .{
-        name_echo,
-        dir_echo,
-    });
+    if (orphan) {
+        diag.cause("{s}/{s}.key has no {s}.pub beside it; an interrupted 'zbx key new' left it", .{
+            dir_echo,
+            name_echo,
+            name_echo,
+        });
+    } else {
+        diag.cause("a key named '{s}' is already in {s}; zbx never overwrites a key", .{
+            name_echo,
+            dir_echo,
+        });
+    }
     diag.context("key", "{s}", .{name_echo});
     diag.context("path", "{s}", .{dir_echo});
     diag.fix(.{
@@ -100,6 +118,12 @@ pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8) void {
         .command = "zbx key new <name>",
         .template = true,
     });
+    if (orphan) {
+        diag.fix_with("or, if that key was never used, remove the leftover:", "rm {s}/{s}.key", .{
+            dir_echo,
+            name_echo,
+        });
+    }
     assert(diag.code.? == .E0902);
 }
 
@@ -116,6 +140,10 @@ pub const PassphraseProblem = enum {
     too_long,
     /// The file could not be read.
     file_unreadable,
+    /// The file is not there.
+    file_missing,
+    /// The path is a symbolic link; zbx reads the file itself, not what a link points to.
+    file_is_link,
     /// It does not open the key.
     wrong,
     /// Ctrl-C (or end of input) at the prompt.
@@ -144,15 +172,23 @@ pub fn passphrase(
             .{},
         ),
         .empty => diag.cause("the passphrase is empty; a key needs at least one character", .{}),
-        .mismatch => diag.cause("the two passphrases differ; no key was made", .{}),
+        .mismatch => diag.cause("the two passphrases differ; nothing was done", .{}),
         .file_too_open => diag.cause("{s} can be read by other users", .{path_echo}),
-        .too_long => diag.cause(
+        .too_long => if (path.len == 0) diag.cause(
+            "the passphrase is longer than {d} bytes",
+            .{constants.passphrase_bytes_max},
+        ) else diag.cause(
             "the first line of {s} is longer than {d} bytes",
             .{ path_echo, constants.passphrase_bytes_max },
         ),
         .file_unreadable => diag.cause("{s} could not be read", .{path_echo}),
+        .file_missing => diag.cause("there is no file {s}", .{path_echo}),
+        .file_is_link => diag.cause(
+            "{s} is a symbolic link; name the file it points to instead",
+            .{path_echo},
+        ),
         .wrong => diag.cause("that passphrase does not open the key", .{}),
-        .cancelled => diag.cause("the passphrase was not entered; no key was made", .{}),
+        .cancelled => diag.cause("the passphrase was not entered; nothing was done", .{}),
     }
     diag.context("key", "{s}", .{name_echo});
     if (path.len > 0) diag.context("path", "{s}", .{path_echo});

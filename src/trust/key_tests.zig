@@ -129,11 +129,11 @@ test "parse refuses parameters above the bounds without running argon2id" {
     record.body.passphrase.kdf.m_kib = constants.key_kdf_m_kib_max;
     var buffer: [constants.key_file_bytes_max]u8 = undefined;
     const text = key.render(&record, &buffer);
-    const needle = "262144";
+    const needle = "131072";
     const at = std.mem.indexOf(u8, text, needle).?;
     var copy: [constants.key_file_bytes_max]u8 = undefined;
     @memcpy(copy[0..text.len], text);
-    copy[at + 5] = '5'; // 262145
+    copy[at + 5] = '5'; // 131073
     try testing.expectError(error.Malformed, key.parse(copy[0..text.len]));
 }
 
@@ -177,4 +177,22 @@ test "the pub file round trips and a mode with group or other bits is too open" 
     try testing.expect(!key.mode_too_open(0o700));
     try testing.expect(key.mode_too_open(0o640));
     try testing.expect(key.mode_too_open(0o604));
+}
+
+test "parse accepts the largest cost it allows and refuses t one past it" {
+    // Goal: the tightened maxima (t 6, m 128 MiB) at the bound and one past, through parse.
+    // Method: render a record at the bound, parse it; raise t by one in the text and parse again.
+    var record = try sealed_record("x");
+    record.body.passphrase.kdf.t = constants.key_kdf_t_max;
+    record.body.passphrase.kdf.m_kib = constants.key_kdf_m_kib_max;
+    var buffer: [constants.key_file_bytes_max]u8 = undefined;
+    const text = key.render(&record, &buffer);
+    const parsed = try key.parse(text);
+    try testing.expectEqual(@as(u32, 6), parsed.body.passphrase.kdf.t);
+    try testing.expectEqual(@as(u32, 131072), parsed.body.passphrase.kdf.m_kib);
+    var copy: [constants.key_file_bytes_max]u8 = undefined;
+    @memcpy(copy[0..text.len], text);
+    const at = std.mem.indexOf(u8, text, ".t = 6").? + 5;
+    copy[at] = '7';
+    try testing.expectError(error.Malformed, key.parse(copy[0..text.len]));
 }

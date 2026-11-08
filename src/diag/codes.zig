@@ -2912,7 +2912,9 @@ pub const registry = [_]Entry{
         \\public key. The cause says what is wrong: the file is not there, cannot be
         \\read or written, is not a zbx key file, was written by a newer zbx, or its
         \\secret can be read by other users. Like ssh, zbx refuses a secret that group
-        \\or others can read, and a keys directory that they can.
+        \\or others can read, and a keys directory that they can. It also refuses a
+        \\keys directory that is a symbolic link (or not a directory): keep the
+        \\keys in a real directory.
         \\
         \\Make the secret private to you:
         \\    chmod 600 ~/.config/zbx/keys/NAME.key
@@ -2936,6 +2938,8 @@ pub const registry = [_]Entry{
         \\    zbx key new release-2
         \\
         \\To retire the old key, remove its NAME.key and NAME.pub files yourself.
+        \\A NAME.key with no NAME.pub is what a "zbx key new" killed halfway
+        \\leaves; the cause says so, and removing that file frees the name.
         ,
     },
     .{
@@ -2953,7 +2957,9 @@ pub const registry = [_]Entry{
         \\
         \\The file's first line is the passphrase, without its newline, at most 1024
         \\bytes. A file that group or others can read is refused (chmod 600 it), and
-        \\so is an empty passphrase. A wrong passphrase is refused after the same work
+        \\so is an empty passphrase. A path that is a symbolic link (a secrets
+        \\volume mounts files that way) is refused too: name the file it points to.
+        \\A wrong passphrase is refused after the same work
         \\as a right one, so the refusal tells an attacker nothing about how close the
         \\guess was.
         \\
