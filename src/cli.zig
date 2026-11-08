@@ -64,7 +64,8 @@ const help_text =
     \\  logs <name>     show what a container wrote to its output and error (see below)
     \\  exec <name>     run a command inside a running container (see below)
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
-    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, export, verify,
+    \\                  gc, restore
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  sign <what>     sign a build result, a tree or an image with a key (see below)
@@ -159,6 +160,9 @@ const help_text =
     \\  zbx store du --by-image  what each pulled image costs, and how much it shares
     \\  zbx store rm <digest>    drop a root and its image records (the data stays until gc)
     \\  zbx store diff <a> <b>   list the paths that differ between two trees
+    \\  zbx store export --oci <source> <dir>   write the image of a build result, an image
+    \\                           or a tree as an OCI layout (dir must be new or empty);
+    \\                           --output json prints zbx.export/1
     \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
     \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
     \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
@@ -196,6 +200,10 @@ const help_text =
     \\  --key <name>    the key to sign with; optional when there is exactly one
     \\  the whole tree must be in the store and intact; the signature is added to the tree's
     \\  record, at most 8 per tree; signing again with the same key changes nothing
+    \\
+    \\push:
+    \\  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
+    \\                           manifest digest; sends nothing (the upload is not built yet)
     \\
     \\pull:
     \\  zbx pull [--resolve-only] <reference>
@@ -264,6 +272,7 @@ pub const Command = enum {
     exec,
     ps,
     pull,
+    push,
     run,
     schema,
     sign,
@@ -535,6 +544,10 @@ const Token = union(enum) {
     by_image,
     /// `--trash`: `store gc`'s.
     trash,
+    /// `--oci`: `store export`'s.
+    oci,
+    /// `--dry-run`: `push`'s.
+    dry_run,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -600,6 +613,8 @@ fn classify(argument: []const u8) Token {
         return .{ .confirm_inline = argument["--confirm=".len..] };
     }
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
+    if (std.mem.eql(u8, argument, "--oci")) return .oci;
+    if (std.mem.eql(u8, argument, "--dry-run")) return .dry_run;
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
@@ -650,6 +665,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "exec")) found = .exec;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
+    if (std.mem.eql(u8, name, "push")) found = .push;
     if (std.mem.eql(u8, name, "run")) found = .run;
     if (std.mem.eql(u8, name, "schema")) found = .schema;
     if (std.mem.eql(u8, name, "sign")) found = .sign;
@@ -666,7 +682,8 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull, .lock, .logs, .exec, .inspect, .sign => 1,
+        .explain, .schema, .stop, .commit, .pull, .push, .lock, .logs => 1,
+        .exec, .inspect, .sign => 1,
         .store, .state, .key => 2,
     };
     assert(count <= 2);
@@ -705,7 +722,8 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next, .out_next, .file_next, .passphrase_file_next, .key_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash, .resolve_only, .by_image, .graph => {},
+            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
+            .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
@@ -777,6 +795,7 @@ pub fn parse(
             .confirm_next, .confirm_inline, .trash => {
                 try take_gc_option(diag, &gc_args, given, args, &index);
             },
+            .oci, .dry_run => try take_pack_flag(diag, &gc_args, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
             .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
@@ -1092,13 +1111,25 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
         if (invocation.store.operand) |operand| return unexpected_argument(diag, .store, operand);
         invocation.store.by_image = true;
     }
+    if (invocation.command == .store and invocation.store.action == .@"export" and !gc_args.oci) {
+        return store_usage(diag, .{ .missing = .oci });
+    }
+    if (invocation.command == .push and !gc_args.dry_run) {
+        return missing_argument(diag, .push, .dry_run);
+    }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .exec) try check_exec_args(diag, &invocation.run);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
 /// What `store gc` was given besides its words.
-const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false, by_image: bool = false };
+const GcArgs = struct {
+    confirm: ?[]const u8 = null,
+    trash: bool = false,
+    by_image: bool = false,
+    oci: bool = false,
+    dry_run: bool = false,
+};
 
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
@@ -1117,6 +1148,28 @@ fn take_by_image(
         std.mem.eql(u8, operands[1], "du");
     if (!is_du) return unknown_option(diag, argument);
     gc_args.by_image = true;
+}
+
+/// `--oci`, which only `store export` takes, and `--dry-run`, which only `push` takes.
+fn take_pack_flag(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    const flag = classify(argument);
+    assert(argument.len > 2);
+    if (flag == .oci) {
+        const is_export = operands.len >= 2 and command_named(operands[0]) == .store and
+            std.mem.eql(u8, operands[1], "export");
+        if (!is_export) return unknown_option(diag, argument);
+        gc_args.oci = true;
+    } else {
+        assert(flag == .dry_run);
+        const is_push = operands.len >= 1 and command_named(operands[0]) == .push;
+        if (!is_push) return unknown_option(diag, argument);
+        gc_args.dry_run = true;
+    }
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
@@ -1580,8 +1633,9 @@ fn resolve(
     if (command == .store) return resolve_store(operands, invocation, diag);
     if (command == .state) return resolve_state(operands, invocation, diag);
     if (command == .key) return resolve_key(operands, invocation, diag);
-    defer if (invocation.command == .commit) {
-        invocation.store = .{ .action = .commit, .operand = invocation.operand };
+    defer if (invocation.command == .commit or invocation.command == .push) {
+        const action: store_commands.Action = if (invocation.command == .push) .push else .commit;
+        invocation.store = .{ .action = action, .operand = invocation.operand };
     };
     // `bundle` takes at most one operand (a run's name) and checks the rest itself.
     // `run` takes at most one: the digest of the tree to run (or `--rootfs`, checked below).
@@ -1596,6 +1650,7 @@ fn resolve(
             .inspect => .result,
             .sign => .subject,
             .pull => .reference,
+            .push => .source,
             else => .code,
         };
         return missing_argument(diag, command, what);
@@ -1640,7 +1695,7 @@ fn resolve_store(
     const given: usize = operands.len - 2;
     const wanted: usize = switch (action) {
         .ls, .verify, .gc => 0,
-        .diff => 2,
+        .diff, .@"export" => 2,
         else => 1,
     };
     if (given > wanted) return store_usage(diag, .{ .extra = operands[2 + wanted] });
@@ -1648,6 +1703,7 @@ fn resolve_store(
         const what: StoreMissing = switch (action) {
             .import => .directory,
             .diff => .two_digests,
+            .@"export" => .source_and_directory,
             .restore => .gc_id,
             else => .digest,
         };
@@ -1765,7 +1821,15 @@ fn state_usage(diag: *Diag, sentence: []const u8) ParseError {
     return error.MissingArgument;
 }
 
-const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
+const StoreMissing = enum {
+    action,
+    directory,
+    digest,
+    two_digests,
+    gc_id,
+    source_and_directory,
+    oci,
+};
 
 const StoreUsage = union(enum) {
     missing: StoreMissing,
@@ -1782,13 +1846,19 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             diag.raise(.E0006);
             switch (what) {
                 .action => diag.cause(
-                    "'store' needs a subcommand: import, ls, du, rm, diff, verify, gc or restore",
+                    "'store' needs a subcommand: import, ls, du, rm, diff, export, verify, " ++
+                        "gc or restore",
                     .{},
                 ),
                 .directory => diag.cause("'store import' needs the directory to import", .{}),
                 .digest => diag.cause("'store rm' needs the digest of the root to drop", .{}),
                 .two_digests => diag.cause("'store diff' needs two digests to compare", .{}),
                 .gc_id => diag.cause("'store restore' needs the id of the trash to restore", .{}),
+                .source_and_directory => diag.cause(
+                    "'store export --oci' needs the source to pack and the directory to write",
+                    .{},
+                ),
+                .oci => diag.cause("'store export' needs --oci, the only format it writes", .{}),
             }
             diag.context("cmd", "store", .{});
             diag.fix(
@@ -1800,8 +1870,8 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             const echo = echo_of(&storage, word);
             diag.raise(.E0001);
             diag.cause(
-                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, verify, gc " ++
-                    "and restore",
+                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, export, " ++
+                    "verify, gc and restore",
                 .{echo},
             );
             diag.context("arg", "{s}", .{echo});
@@ -1979,8 +2049,27 @@ const Missing = enum {
     reference,
     action,
     result,
+    source,
+    dry_run,
     subject,
 };
+
+/// What `push` lacks: the source to pack, or `--dry-run`, the only mode this build has.
+fn missing_push(diag: *Diag, missing: Missing) void {
+    assert(diag.code != null);
+    assert(@backingInt(missing) >= @backingInt(Missing.source));
+    assert(@backingInt(missing) <= @backingInt(Missing.dry_run));
+    if (missing == .source) {
+        diag.cause("'push' needs the build result, image or tree to pack", .{});
+    } else {
+        diag.cause("'push' needs --dry-run: this build packs and prints the digests only", .{});
+    }
+    diag.fix(.{
+        .sentence = "pack one and print its digests:",
+        .command = "zbx push --dry-run b3:<64 hex>",
+        .template = true,
+    });
+}
 
 /// What `pull` lacks: its reference.
 fn missing_pull(diag: *Diag, missing: Missing) void {
@@ -2095,6 +2184,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
         .reference => missing_pull(diag, missing),
+        .source, .dry_run => missing_push(diag, missing),
         .action => missing_lock(diag),
         .result => {
             diag.cause("'inspect' needs the digest of a build result", .{});
@@ -2326,7 +2416,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
         .explain, .bundle, .schema, .stop, .run, .commit => true,
-        .pull, .lock, .logs, .exec, .inspect, .sign => true,
+        .push, .pull, .lock, .logs, .exec, .inspect, .sign => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -2381,7 +2471,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .logs => return run_logs(host, invocation, storage, diag),
         .exec => return run_exec(host, invocation, storage, diag),
         .pull => return run_pull(host, invocation, storage, diag),
-        .commit => return run_store(host, invocation, storage, diag),
+        .commit, .push => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
         .state => return run_state(host, invocation, storage, diag),
         .key => return run_key(host, invocation, diag),
@@ -2524,7 +2614,11 @@ fn run_store(
     storage: *Storage,
     diag: *Diag,
 ) RunError!u8 {
-    if (invocation.command != .store) assert(invocation.command == .commit);
+    if (invocation.command != .store) {
+        assert(invocation.command != .run);
+        assert(invocation.command != .store);
+        assert(invocation.store.action != .ls);
+    }
     assert(diag.code == null);
     assert(storage.gc_tables.len >= gc.tables_bytes_min); // The caller gave gc its room.
     storage.store.gc.tables = storage.gc_tables;

@@ -202,6 +202,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
+    "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -232,6 +233,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m6.zig",
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
+    "src/testing/vm/main_m8.zig",
     "src/testing/vm/main_z7.zig",
     "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
@@ -448,6 +450,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .step = "demo-m7",
         .root = "src/testing/vm/main_m7.zig",
         .help = "Run the M7 demo: zbx build, the six steps, two VMs, upgrade from 0.2.0",
+    },
+    .{
+        .step = "demo-m8",
+        .root = "src/testing/vm/main_m8.zig",
+        .help = "Run the M8 export check: one tree exported as two users, byte-identical",
     },
     .{
         .step = "demo-z7",

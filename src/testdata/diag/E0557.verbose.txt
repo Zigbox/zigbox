@@ -1,0 +1,7 @@
+error[ZBX-E0557]: the export directory exists and is not empty
+  while  writing an OCI layout
+  cause  '/out' is not empty, and an export never writes into what is there
+  path   /out
+  fix    name a directory that does not exist, or an empty one
+  more   zbx explain E0557
+  docs   https://zigbox.github.io/zigbox/errors/E0557.html

@@ -18,6 +18,7 @@ const test_util = @import("test_util.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
+const Sha256 = @import("registry/digest.zig").Sha256;
 
 var sim: host_sim.HostSim = undefined;
 var files: fs_sim.SimFs = undefined;
@@ -897,4 +898,124 @@ test "store gc never reads, moves or removes anything under state/" {
     try testing.expectEqualStrings(".{}\n", files.content_of(state ++ "/pgdata/state.zon").?);
     try testing.expectEqualStrings("old", files.content_of(state ++ "/.trash/old@1/data/f").?);
     try testing.expect(files.kind_of(state ++ "/pgdata/lock") != null);
+}
+
+// ---- export (lane U) ------------------------------------------------------------------------
+
+/// The OCI digest an export printed, without its newline.
+/// `zbx store export --oci` with the two words after it: the source and the directory.
+fn export_to(words: *const [2][:0]const u8) !u8 {
+    return command(&.{ "store", "export", "--oci", words[0], words[1] });
+}
+
+fn printed_oci_digest() ![]const u8 {
+    const out = sim.stdout();
+    try testing.expect(out.len == constants.oci_digest_text_bytes + 1);
+    try testing.expect(out[out.len - 1] == '\n');
+    try testing.expect(Sha256.parse(out[0 .. out.len - 1]) != null);
+    return out[0 .. out.len - 1];
+}
+
+test "export of an imported tree prints the manifest digest and writes a whole layout" {
+    // Goal: `store export --oci <tree>` end to end through the command line, which also runs
+    // `source.resolve` on a bare tree digest. Method: import, export twice into two new
+    // directories; both print the same manifest digest, whose blob, the layout marker and the
+    // index exist, and stderr stays empty.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    const tree = try testing.allocator.dupe(u8, try printed_digest());
+    defer testing.allocator.free(tree);
+    var first: [constants.oci_digest_text_bytes]u8 = undefined;
+    for ([_][:0]const u8{ "/export-a", "/export-b" }, 0..) |dir, index| {
+        const args = [_][:0]const u8{ "store", "export", "--oci", "", dir };
+        var buffer: [80]u8 = undefined;
+        var mine = args;
+        mine[3] = term(&buffer, tree);
+        try testing.expectEqual(@as(u8, 0), try command(&mine));
+        const manifest = try printed_oci_digest();
+        if (index == 0) {
+            @memcpy(&first, manifest);
+        } else {
+            try testing.expectEqualStrings(&first, manifest);
+        }
+        try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+        var path: [96]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&path, "{s}/oci-layout", .{dir});
+        try testing.expect(files.kind_of(marker) != null);
+        const index_path = try std.fmt.bufPrint(&path, "{s}/index.json", .{dir});
+        const index_text = files.content_of(index_path).?;
+        try testing.expect(std.mem.indexOf(u8, index_text, &first) != null);
+        const blob = try std.fmt.bufPrint(&path, "{s}/blobs/sha256/{s}", .{ dir, first[7..] });
+        try testing.expect(files.kind_of(blob) != null);
+    }
+}
+
+test "push --dry-run prints the digest an export prints, and refuses without --dry-run" {
+    // Goal: the brief's `zbx push --dry-run`: packs, prints the manifest digest, no network.
+    // Method: import, export (the reference digest), then push --dry-run the same tree.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try export_to(&.{ tree, "/export-a" }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--dry-run") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
+test "export --output json is zbx.export/1, and its keys are the schema's" {
+    // Goal: the machine-readable result issue #60 asked for. Method: parse it and check each
+    // required key's type against the schema text.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(
+        @as(u8, 0),
+        try command(&.{ "--output", "json", "store", "export", "--oci", tree, "/export" }),
+    );
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqualStrings("zbx.export/1", object.get("schema").?.string);
+    try testing.expectEqualStrings("/export", object.get("dir").?.string);
+    try testing.expect(object.get("size").?.integer > 0);
+    const schema = schemas.of("store-export").?;
+    for ([_][]const u8{ "manifest", "config", "layer" }) |key| {
+        try testing.expect(std.mem.indexOf(u8, schema, key) != null);
+        try testing.expect(Sha256.parse(object.get(key).?.string) != null);
+    }
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+}
+
+test "export refuses what cannot be packed or written with one coded line" {
+    // Goal: E0550 for each way a source fails to resolve, and E0557 for a directory that holds
+    // something. Method: an unknown name, a tree digest nothing holds, a manifest digest (not a
+    // tree), then a second export into the first's directory; stdout stays empty each time.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    const nothing = "b3:0000000000000000000000000000000000000000000000000000000000000000";
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ "nope", "/o" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ nothing, "/o" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expectEqual(@as(u8, 0), try export_to(&.{ tree, "/o" }));
+    var manifest_buffer: [80]u8 = undefined;
+    const manifest = term(&manifest_buffer, try printed_oci_digest());
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ manifest, "/p" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", tree, "/o" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0557") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
 }

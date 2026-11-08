@@ -158,6 +158,13 @@ test {
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");
+    _ = @import("layer/tar_write.zig");
+    _ = @import("push/pack.zig");
+    _ = @import("fuzz_pack.zig");
+    _ = @import("push/pack_tests.zig");
+    _ = @import("push/export.zig");
+    _ = @import("push/source.zig");
+    _ = @import("push/diagnose.zig");
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
@@ -172,6 +179,7 @@ test {
     _ = @import("pull_commands.zig");
     _ = @import("pull_tests.zig");
     _ = @import("pull_library_tests.zig");
+    _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");

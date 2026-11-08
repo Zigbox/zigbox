@@ -485,6 +485,19 @@ const store_restore_schema =
     \\"farms":{"type":"integer"},"blobs":{"type":"integer"},"partials":{"type":"integer"}}}
 ;
 
+const store_export_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/store-export/1","version":1,
+    \\"title":"zbx store export --oci --output json",
+    \\"description":"stdout: the OCI layout written and the digests of its blobs",
+    \\"type":"object","required":["schema","dir","manifest","config","layer","size"],
+    \\"properties":{"schema":{"const":"zbx.export/1"},"dir":{"type":"string"},
+    \\"manifest":{"type":"string","description":"sha256 digest of the image manifest"},
+    \\"config":{"type":"string","description":"sha256 digest of the image config"},
+    \\"layer":{"type":"string","description":"sha256 digest of the compressed layer"},
+    \\"size":{"type":"integer","description":"bytes of the manifest, config and layer"}}}
+;
+
 const state_ls_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/state-ls/1","version":1,
@@ -828,6 +841,7 @@ const table = [_]Entry{
     .{ .command = "sign", .text = sign_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
+    .{ .command = "store-export", .text = store_export_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
     .{ .command = "state-rm", .text = state_rm_schema },
     .{ .command = "state-restore", .text = state_restore_schema },
@@ -839,7 +853,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 32);
+    assert(table.len == 33);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -868,7 +882,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 32), table.len);
+    try testing.expectEqual(@as(usize, 33), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

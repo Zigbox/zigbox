@@ -12,7 +12,8 @@ commands:
   logs <name>     show what a container wrote to its output and error (see below)
   exec <name>     run a command inside a running container (see below)
   commit <name>   turn what a stopped container changed into a new tree and print its digest
-  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+  store <cmd>     the content-addressed store: import, ls, du, rm, diff, export, verify,
+                  gc, restore
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   key <cmd>       signing keys: new, list, show (see below)
   sign <what>     sign a build result, a tree or an image with a key (see below)
@@ -107,6 +108,9 @@ store:
   zbx store du --by-image  what each pulled image costs, and how much it shares
   zbx store rm <digest>    drop a root and its image records (the data stays until gc)
   zbx store diff <a> <b>   list the paths that differ between two trees
+  zbx store export --oci <source> <dir>   write the image of a build result, an image
+                           or a tree as an OCI layout (dir must be new or empty);
+                           --output json prints zbx.export/1
   zbx store verify         rehash everything; name each damaged file and the paths it breaks
   zbx store gc             plan a collection of what no root reaches (changes nothing)
   zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
@@ -144,6 +148,10 @@ sign:
   --key <name>    the key to sign with; optional when there is exactly one
   the whole tree must be in the store and intact; the signature is added to the tree's
   record, at most 8 per tree; signing again with the same key changes nothing
+
+push:
+  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
+                           manifest digest; sends nothing (the upload is not built yet)
 
 pull:
   zbx pull [--resolve-only] <reference>

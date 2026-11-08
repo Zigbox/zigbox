@@ -1562,3 +1562,47 @@ comptime {
     assert(passphrase_bytes_max >= 64);
     assert(key_name_bytes_max <= 32);
 }
+
+// ---- Pack and export (lane U, docs/decisions/2026-11-08-push-in-m8.md) --------------------
+
+/// The version of the layer writer: the tar form and the gzip stream a pack produces. The same
+/// tree and config give the same bytes for one version. A change to either is a new version.
+pub const layer_writer_version: u32 = 1;
+
+/// Annotation keys of a packed manifest.
+pub const pack_annotation_tree = "org.zigbox.tree";
+pub const pack_annotation_writer = "org.zigbox.layer-writer";
+
+/// The OCI media types a pack writes.
+pub const oci_manifest_media_type = "application/vnd.oci.image.manifest.v1+json";
+pub const oci_index_media_type = "application/vnd.oci.image.index.v1+json";
+pub const oci_config_media_type = "application/vnd.oci.image.config.v1+json";
+pub const oci_layer_media_type = "application/vnd.oci.image.layer.v1.tar+gzip";
+
+/// The objects a pack tracks (every file's, once: the first name of each), to write later names
+/// of the same object as hard links, and the room for those first paths. Past either, later names
+/// of an object not tracked are written as ordinary files (the bytes are repeated, the result is
+/// the same tree). So a tree of more than `pack_links_max` files, or with more than
+/// `pack_link_paths_bytes` of paths, gets a different layer from the one a larger table would
+/// give: these numbers are part of the layer writer version. The numbers are those of
+/// `zbx state export`.
+pub const pack_links_max: u32 = 16384;
+pub const pack_link_paths_bytes: u32 = 1024 * 1024;
+
+/// The most bytes of the config and of the manifest of a packed image.
+pub const pack_config_bytes_max: u32 = 64 * 1024;
+pub const pack_manifest_bytes_max: u32 = 4096;
+
+/// The bytes the pack's file reads and compressed writes move at a time.
+pub const pack_io_bytes: u32 = 256 * 1024;
+
+/// The mode of the files an export writes (its directories take the process's umask).
+pub const export_file_mode: u16 = 0o644;
+
+comptime {
+    assert(pack_links_max > 0);
+    assert(std.math.isPowerOfTwo(pack_links_max));
+    assert(pack_link_paths_bytes >= path_bytes_max + 1);
+    assert(pack_config_bytes_max >= image_settings_bytes_max);
+    assert(layer_writer_version >= 1);
+}

@@ -79,6 +79,9 @@ pub const Counts = struct {
     partials: u64 = 0,
     /// Leftovers of dead processes in `tmp/`; deleted, not trashed, and not in the hash.
     tmp: u64 = 0,
+    /// Pack records (`pack/`) whose tree is not kept; deleted with the tree, not trashed (a
+    /// record is a cache the next pack rewrites), and not in the hash.
+    packs: u64 = 0,
     /// Bytes of the objects, lists and trees.
     bytes: u64 = 0,
 
@@ -927,6 +930,28 @@ fn clean_tmp(run: *Run, counts: *Counts, remove_them: bool) Error!void {
     }
 }
 
+/// Counts the pack records whose tree gc does not keep. With `remove_them`, deletes them: a
+/// record is a cache of what packing the tree made, so it goes with the tree and needs no trash.
+fn clean_packs(run: *Run, counts: *Counts, remove_them: bool) Error!void {
+    assert(run.names.len > 0);
+    assert(counts.packs == 0);
+    const found = shards.read(run.store, run.names, run.offsets, "pack", null) catch |err| {
+        return run.io("listing the pack records", err);
+    };
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const name = found.name(index);
+        const dash = std.mem.indexOfScalar(u8, name, '-') orelse continue;
+        const tree_id = Digest.from_hex(name[0..dash]) orelse continue;
+        if (run.trees.get(tree_id) != null) continue;
+        counts.packs += 1;
+        if (!remove_them) continue;
+        var storage: PathBuf = undefined;
+        const path = run.store.path(&storage, &.{ "/pack/", name });
+        run.store.fs.unlink(path) catch |err| return run.io("removing a pack record", err);
+    }
+}
+
 fn remove_leftover(run: *Run, name: []const u8) Error!void {
     assert(name.len > 0);
     assert(std.mem.indexOfScalar(u8, name, '/') == null);
@@ -988,6 +1013,8 @@ pub fn plan(
     var leftovers: Counts = .{};
     try clean_tmp(&run, &leftovers, false);
     result.counts.tmp = leftovers.tmp;
+    try clean_packs(&run, &leftovers, false);
+    result.counts.packs = leftovers.packs;
 }
 
 /// What an apply did.
@@ -1056,6 +1083,8 @@ pub fn apply(
     var leftovers: Counts = .{};
     try clean_tmp(&run, &leftovers, true);
     result.counts.tmp = leftovers.tmp;
+    try clean_packs(&run, &leftovers, true);
+    result.counts.packs = leftovers.packs;
 }
 
 fn move_all(run: *Run, result: *Applied, time: u64) Error!void {

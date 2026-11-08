@@ -19,6 +19,7 @@ const errors = @import("diag/errors.zig");
 const render = @import("diag/render.zig");
 const text_util = @import("text.zig");
 const diagnose = @import("store/diagnose.zig");
+const push_diagnose = @import("push/diagnose.zig");
 const digest_mod = @import("store/digest.zig");
 const diff = @import("store/diff.zig");
 const generation = @import("store/generation.zig");
@@ -38,6 +39,9 @@ const usage = @import("store/usage.zig");
 const verify = @import("store/verify.zig");
 const gc = @import("store/gc.zig");
 const image_find = @import("store/image_find.zig");
+const push_run = @import("push/run.zig");
+const export_mod = @import("push/export.zig");
+const pack = @import("push/pack.zig");
 const images = @import("store/images.zig");
 
 const Digest = digest_mod.Digest;
@@ -46,7 +50,7 @@ const Store = layout.Store;
 
 pub const Error = error{Failed};
 
-pub const Action = enum { import, ls, du, rm, diff, commit, verify, gc, restore };
+pub const Action = enum { import, ls, du, rm, diff, @"export", push, commit, verify, gc, restore };
 
 pub const Args = struct {
     action: Action,
@@ -87,6 +91,8 @@ pub const Workspace = struct {
     /// `ls`, `rm` and `du --by-image` look through the image records here.
     image_memory: image_find.Memory,
     image: images.Image,
+    /// `export`: the packer's memory.
+    push: push_run.Workspace,
 };
 
 const Job = struct {
@@ -113,15 +119,15 @@ pub fn run(
 ) Error!u8 {
     assert(diag.code == null);
     switch (args.action) {
-        .import, .rm, .commit, .restore => assert(args.operand != null),
+        .import, .rm, .commit, .restore, .push => assert(args.operand != null),
         .ls, .verify, .gc => assert(args.operand == null),
-        .diff => {
+        .diff, .@"export" => {
             assert(args.operand != null);
             assert(args.second != null);
         },
         .du => {},
     }
-    assert((args.second != null) == (args.action == .diff));
+    assert((args.second != null) == (args.action == .diff or args.action == .@"export"));
     const digests = [2]?[]const u8{ args.operand, args.second };
     if (args.action == .du or args.action == .rm or args.action == .diff) {
         for (digests) |maybe| {
@@ -209,7 +215,9 @@ fn execute(job: *Job, squash_owner: bool, diag: *Diag) Error!void {
         .du => try do_du(job, diag),
         .rm => try do_rm(job, diag),
         .diff => try do_diff(job, diag),
+        .@"export" => try do_export(job, diag),
         .commit => try do_commit(job, squash_owner, diag),
+        .push => try do_push(job, diag),
         .verify => try do_verify(job, diag),
         .gc => try do_gc(job, diag),
         .restore => try do_restore(job, diag),
@@ -1174,6 +1182,57 @@ fn do_diff(job: *Job, diag: *Diag) Error!void {
         "],\"summary\":{{\"added\":{d},\"removed\":{d},\"changed\":{d}}}}}\n",
         .{ summary.added, summary.removed, summary.changed },
     ) catch unreachable; // A short fixed line.
+    try put(job, text, diag);
+}
+
+// ---- export --------------------------------------------------------------------------------
+
+fn do_export(job: *Job, diag: *Diag) Error!void {
+    assert(job.args.action == .@"export");
+    assert(diag.code == null);
+    var store: Store = undefined;
+    const exists = try open_store(job, &store, .existing, diag);
+    const operand = job.args.operand.?;
+    const dir = job.args.second.?;
+    if (!exists) {
+        push_diagnose.cannot_pack(diag, operand, "the store is empty");
+        return error.Failed;
+    }
+    var out: export_mod.Exported = undefined;
+    try push_run.export_operand(&store, &job.workspace.push, operand, dir, &out, diag);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    if (job.output.json) {
+        const text = push_run.export_json(&out, dir, buffer[0 .. buffer.len - 1]) catch {
+            diag.raise(.B0001);
+            diag.cause("the export result did not fit its buffer", .{});
+            return error.Failed;
+        };
+        buffer[text.len] = '\n';
+        return put(job, buffer[0 .. text.len + 1], diag);
+    }
+    // The manifest text is 71 bytes and the buffer is 16 KiB, so the print cannot fail.
+    const line = std.fmt.bufPrint(&buffer, "{s}\n", .{out.manifest.text()}) catch unreachable;
+    try put(job, line, diag);
+}
+
+/// `zbx push --dry-run`: packs the source and prints what an upload would send, which is the
+/// manifest digest, without the network. It writes the same blobs and records as an export.
+fn do_push(job: *Job, diag: *Diag) Error!void {
+    assert(job.args.action == .push);
+    assert(diag.code == null);
+    var store: Store = undefined;
+    const exists = try open_store(job, &store, .existing, diag);
+    const operand = job.args.operand.?;
+    if (!exists) {
+        push_diagnose.cannot_pack(diag, operand, "the store is empty");
+        return error.Failed;
+    }
+    var made: pack.Packed = undefined;
+    try push_run.pack_operand(&store, &job.workspace.push, operand, &made, diag);
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    // One digest of 71 bytes in a 16 KiB buffer: the print cannot fail. `--output json` prints
+    // the same line until `zbx.push/1` (slice 11) gives the upload a result of its own.
+    const text = std.fmt.bufPrint(&buffer, "{s}\n", .{made.manifest.text()}) catch unreachable;
     try put(job, text, diag);
 }
 

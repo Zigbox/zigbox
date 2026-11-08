@@ -1,0 +1,8 @@
+error[ZBX-E0550]: the source cannot be packed into an image
+  while  packing an image
+  cause  'no-such-image' cannot be packed: the store has no build result, image
+         or tree by that name
+  source no-such-image
+  fix    list what the store keeps:   zbx store ls
+  more   zbx explain E0550
+  docs   https://zigbox.github.io/zigbox/errors/E0550.html
