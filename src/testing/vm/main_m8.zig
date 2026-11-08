@@ -17,7 +17,7 @@ const marker = "m8-export: identical";
 const timeout_s: u32 = 300;
 
 /// The whole check, as one script: it prints `marker` as its last line when every step held.
-const script = body ++ "echo '" ++ marker ++ "'\n";
+const script = body ++ "\necho '" ++ marker ++ "'\n";
 
 const body =
     \\set -eu
