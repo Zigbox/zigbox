@@ -176,7 +176,8 @@ fn read_record(
     record_mod.load(&store, work, tree, record, &errno) catch |err| switch (err) {
         error.NotFound => return,
         error.Unreadable => {
-            store_diagnose.cannot_read(diag, &store, "reading the signatures", error.IoFailed, errno);
+            const what = "reading the signatures";
+            store_diagnose.cannot_read(diag, &store, what, error.IoFailed, errno);
             return error.Refused;
         },
         error.Damaged, error.Newer => {

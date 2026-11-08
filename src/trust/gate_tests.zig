@@ -87,7 +87,8 @@ fn write_policy(text: []const u8) void {
 fn write_trusting(name: []const u8) !void {
     var buffer: [512]u8 = undefined;
     const public = try public_text_of(name);
-    const text = try std.fmt.bufPrint(&buffer,
+    const text = try std.fmt.bufPrint(
+        &buffer,
         ".{{ .version = 1, .keys = .{{ .{{ .name = \"{s}\", .public = \"{s}\" }} }}, " ++
             ".require_signature = true }}",
         .{ name, public },

@@ -52,7 +52,10 @@ pub const Policy = struct {
     }
 
     /// The listed key whose public key is `public`, if the policy trusts it.
-    pub fn trusted(policy: *const Policy, public: *const [constants.key_public_bytes]u8) ?*const Key {
+    pub fn trusted(
+        policy: *const Policy,
+        public: *const [constants.key_public_bytes]u8,
+    ) ?*const Key {
         assert(policy.key_count <= constants.policy_keys_max);
         for (policy.keys[0..policy.key_count]) |*listed| {
             if (std.mem.eql(u8, &listed.public, public)) return listed;

@@ -42,12 +42,14 @@ fn trust(seeds: []const u8) void {
 
 fn sign(slot: usize, said: statement.Statement, seed: u8) []const u8 {
     const text = statement.render(&payload_buffer, &said);
-    return dsse.sign(&work, &line_buffers[slot], seed_of(seed), text) catch unreachable;
+    const seed_bytes = seed_of(seed);
+    // A statement is far under the payload bound, and a seed of the OS is no identity key.
+    return dsse.sign(&work, &line_buffers[slot], seed_bytes, text) catch unreachable;
 }
 
 fn record_of(lines: []const []const u8) void {
     one.clear();
-    for (lines) |line| _ = one.add(line) catch unreachable;
+    for (lines) |line| _ = one.add(line) catch unreachable; // At most eight lines.
 }
 
 fn run(subject: verdict.Subject) bool {

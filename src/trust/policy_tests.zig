@@ -78,14 +78,16 @@ test "a key's name and public key are checked, and a key may be listed once" {
     const one = public_line(1);
     const two = public_line(2);
     var buffer: [1024]u8 = undefined;
-    const bad_name = try std.fmt.bufPrint(&buffer,
+    const bad_name = try std.fmt.bufPrint(
+        &buffer,
         ".{{ .version = 1, .keys = .{{ .{{ .name = \"Bad\", .public = \"{s}\" }} }} }}",
         .{one},
     );
     try expect_problem(bad_name, .bad_name, 1, 40);
     const bad_public = ".{ .version = 1, .keys = .{ .{ .name = \"a\", .public = \"nope\" } } }";
     try expect_problem(bad_public, .bad_public, 1, 55);
-    const same_key = try std.fmt.bufPrint(&buffer,
+    const same_key = try std.fmt.bufPrint(
+        &buffer,
         ".{{ .version = 1, .keys = .{{ .{{ .name = \"a\", .public = \"{s}\" }}, " ++
             ".{{ .name = \"b\", .public = \"{s}\" }} }} }}",
         .{ one, one },
@@ -93,7 +95,8 @@ test "a key's name and public key are checked, and a key may be listed once" {
     const problem = policy.parse(same_key, &parsed) orelse return error.TestExpectedProblem;
     try testing.expectEqual(policy.Kind.key_twice, problem.kind);
     try testing.expectEqualStrings("b", problem.detail_text());
-    const same_name = try std.fmt.bufPrint(&buffer,
+    const same_name = try std.fmt.bufPrint(
+        &buffer,
         ".{{ .version = 1, .keys = .{{ .{{ .name = \"a\", .public = \"{s}\" }}, " ++
             ".{{ .name = \"a\", .public = \"{s}\" }} }} }}",
         .{ one, two },
