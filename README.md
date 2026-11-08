@@ -24,7 +24,7 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 | M6 · State | Named, listed state volumes | **Demonstrated**: `demo-m6` passed in an Ubuntu 24.04 VM with KVM ([run 70](https://github.com/Zigbox/zigbox/actions/runs/40807149521)), with `demo-m0` to `demo-m5` green in the same run, an upgrade test reading M5's store, records and lock, and a scripted agent driving M6's steps by JSON (its findings are in the demo document). [Brief](docs/briefs/M6-state.md), [demo](docs/demos/m6.md). Four slices: M5's carried-over notes and `-e` ([run 65](https://github.com/Zigbox/zigbox/actions/runs/40768840601)); state volumes, one writer at a time, `state ls`, `rm` to a trash and `restore` ([run 66](https://github.com/Zigbox/zigbox/actions/runs/40776626150)); `--tmpfs`, `--bind`, `--secret` and `state export` ([run 68](https://github.com/Zigbox/zigbox/actions/runs/40798332928)); the VM demo ([run 70](https://github.com/Zigbox/zigbox/actions/runs/40807149521)). |
 | M6b · Dev loop | Writable mounts inside the project, `zbx logs`, `zbx exec`, `--user`: one service, edited live (more than one service is Zigcube's) | **Brief written** ([M6b-dev-loop.md](docs/briefs/M6b-dev-loop.md)): six slices, pull in the library among them, the sixth (`logs` and `exec` on the Mac) for the session on the owner's Mac. Slice 1 (`--mount` only inside the project, symlinks resolved; written as the container's root, a non-root image refused; `--user`; doctor's id-mapped-mount note) green in CI ([run 87](https://github.com/Zigbox/zigbox/actions/runs/40998123677)); slice 2 (`zbx logs`: every run's output kept, 5 MiB in two rotated files of whole records, `--tail`, `--follow`, `--stream`, JSON; a terminal stays the container's) green in CI ([run 88](https://github.com/Zigbox/zigbox/actions/runs/41022846550)); slice 3 (`zbx exec`: joins the container's namespaces, cgroup, capabilities and seccomp and gains nothing, a pseudo-terminal at a terminal, the exit code passed through; and the fix of an older bug: a non-root container's PID 1 now dies with zbx) merged with slices 1 and 2 (PR #21); slice 4 (pull in the library: the `zigbox` module fetches, verifies and stores an image for any caller, with caller-owned memory, mirrors passed in, and the same diagnostics; `zbx pull` a thin caller with unchanged output) green in CI ([run](https://github.com/Zigbox/zigbox/actions/runs/41065703920)); slice 5 (`demo-m6b`: the spec's five steps, the acceptance checks, the agent test by JSON, the upgrade test against M6; slices 1–3's VM checks moved out of `demo-m6`; an `exec` race fixed by reading PF_EXITING) merged (PR #24), `demo-m6b` green in CI on `main` with `demo-m0` to `demo-m6` ([run 95](https://github.com/Zigbox/zigbox/actions/runs/41104767772)); slice 6 (`logs` and `exec` forwarded on the Mac with the terminal and signals; `demo-mac` runs the five steps from macOS) merged (PR #27), green on the self-hosted Mac runner ([run 24](https://github.com/Zigbox/zigbox/actions/runs/41143740466)) and `demo-m6b` green on `main` ([run 104](https://github.com/Zigbox/zigbox/actions/runs/41143740654)). **Demonstrated** |
 | M7 · Build | Hermetic, reproducible builds from a step DAG | **Demonstrated**: `demo-m7` passed in two clean Ubuntu 24.04 VMs with KVM ([PR #38 run](https://github.com/Zigbox/zigbox/actions/runs/41752087570)), with `demo-m0` to `demo-m6b` green in the same run: the Go hello-world builds with three misses, rebuilds with three hits, ignores a change to a file no step reads, rebuilds only `compile` and `image` after an edit, and builds the same digest (`b3:55077a8f…df62`) in a second clean VM; a step without network fails with E0805 and says how to grant it. Also in the run: an upgrade test from 0.2.0, and an agent driving `zbx build` by JSON. [Brief](docs/briefs/M7-build.md), [demo](docs/demos/m7.md). Four slices merged: the build file and graph; keys and one step (PR #32); the scheduler, the build result, network steps, streaming and the library export (PRs #33, #34, #36, #37); `demo-m7` and two build fixes (PR #38). Slice 5 (the demo on the Mac) is cut (owner, 2026-11-02) |
-| M8 · Trust | Signatures, provenance and a run policy | Not started |
+| M8 · Trust | Signatures, provenance and a run policy | In progress |
 | S1–S5 | Stretch: microVMs, lazy start, egress grants, Dockerfile import, WASM | Not started |
 
 ### M0 in detail
@@ -40,6 +40,28 @@ M0 was built in five slices. Each is reviewed adversarially before it is pushed.
 | 5 · Doctor diagnostics | Each doctor FAIL as a `ZBX-E01xx` diagnostic; golden tests; `demo-m0` asserts codes and exit codes | **Built, reviewed and demonstrated.** `FAIL <check> … [ZBX-E01xx]` on stdout, one diagnostic block per failure on stderr, exit 2; `demo-m0` asserts E0101 for both ways of disabling user namespaces, and E0001 with exit 1 for an unknown command; `site/errors/` pages generated from the registry and checked in CI. Release binaries: x86_64 173 KB, aarch64 156 KB. |
 
 **What works today:** `zbx doctor` checks whether a host can run Zigbox and, for every problem, prints a coded diagnostic with the cause and a runnable fix (`zbx explain <code>` gives the long form, and `site/errors/` has the same pages for the web). `zbx --version`, `zbx help`, `-v` and `--output json` round it out. All of it has run in an Ubuntu 24.04 VM in CI.
+
+### M8 in detail
+
+M8 has three parts: trust (keys, signatures, provenance, policy and verify), packages (the `zigbox` deb and rpm and their repositories) and push (`zbx push` and `zbx store export --oci`). Its brief is [docs/briefs/M8-trust.md](docs/briefs/M8-trust.md). M8 is not demonstrated: `demo-m8` does not exist yet.
+
+| Slice | Contents | Status |
+| --- | --- | --- |
+| 1 · Keys | `zbx key new/list/show`, sealed key files, [PR #65](https://github.com/Zigbox/zigbox/pull/65) | **Built and reviewed.** |
+| 2 (part 1) · JSON writer | Canonical JSON writer and reader, [PR #67](https://github.com/Zigbox/zigbox/pull/67) | **Built and reviewed.** |
+| 2 (part 2) · Sign | `zbx sign` and the signature record, [PR #70](https://github.com/Zigbox/zigbox/pull/70) | **In review.** |
+| 3 · Policy | Policy and the run gate, the tamper check | Not started. |
+| 4 · Provenance | Provenance as an SLSA v1 statement, `inspect --provenance` | Not started. |
+| 5 · Verify | `zbx verify`, `trust export`, `import` and `prune` | Not started. |
+| 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
+| 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
+| 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
+| 9 · Mac | The Mac (cuttable) | Not started. |
+| 10 · Pack | Pack and `zbx store export --oci` | **In progress.** |
+| 11 · Upload | The upload protocol, the test registry, `zbx push` | Not started. |
+| 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR) | Not started. |
+| 13 · ECR | ECR push on M6c (cuttable) | Not started. |
+| 14 · Derived binding | The derived binding | Not started. |
 
 ## Installing
 
