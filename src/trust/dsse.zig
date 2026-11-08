@@ -94,12 +94,16 @@ pub fn pae(buffer: []u8, kind: []const u8, body: []const u8) []const u8 {
 pub fn sign(
     work: *Work,
     out: []u8,
-    seed: [constants.key_seed_bytes]u8,
+    seed_in: [constants.key_seed_bytes]u8,
     payload: []const u8,
 ) SignError![]const u8 {
     assert(out.len >= constants.envelope_bytes_max);
+    // The copies of the secret this frame holds are wiped on every way out.
+    var seed = seed_in;
+    defer std.crypto.secureZero(u8, &seed);
     if (payload.len > constants.statement_bytes_max) return error.PayloadTooLarge;
-    const pair = Ed25519.KeyPair.generateDeterministic(seed) catch return error.KeyUnusable;
+    var pair = Ed25519.KeyPair.generateDeterministic(seed) catch return error.KeyUnusable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&pair));
     const signed_bytes = pae(&work.pae, payload_type, payload);
     const signature = pair.sign(signed_bytes, null) catch return error.KeyUnusable;
     const envelope: Envelope = .{

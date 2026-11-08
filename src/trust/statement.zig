@@ -77,6 +77,22 @@ pub const Statement = struct {
         return make(tree, .{ .manifest = manifest }, name, at);
     }
 
+    /// True when both statements are about the same subjects: the same tree and binding, and for
+    /// a manifest the same subject name. `signed_at` is not compared, so signing again later
+    /// says the same thing (docs/decisions/2026-11-08-sign-idempotence.md).
+    pub fn same_subjects(self: *const Statement, other: *const Statement) bool {
+        if (!std.mem.eql(u8, &self.tree, &other.tree)) return false;
+        const same_binding = switch (self.binding) {
+            .none => other.binding == .none,
+            .result => |digest| other.binding == .result and
+                std.mem.eql(u8, &digest, &other.binding.result),
+            .manifest => |digest| other.binding == .manifest and
+                std.mem.eql(u8, &digest, &other.binding.manifest),
+        };
+        if (!same_binding) return false;
+        return std.mem.eql(u8, self.reference(), other.reference());
+    }
+
     fn make(tree: Digest, binding: Binding, name: []const u8, signed_at: u64) Statement {
         assert(name.len <= constants.reference_bytes_max);
         assert(std.unicode.utf8ValidateSlice(name));

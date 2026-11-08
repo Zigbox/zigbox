@@ -6,8 +6,9 @@
 //! The record is keyed by the tree, so a re-pull of the same image, another manifest or a new
 //! farm all find it. It is only ever replaced whole, by atomic rename, under the store lock
 //! (the caller holds it): a reader and a crash see the old record or the new one. Signing the
-//! same statement with the same key again makes the same line (Ed25519 is deterministic), and
-//! `add` then changes nothing.
+//! same subjects with the same key again is already there (`signed_already`, which ignores
+//! `signedAt`; docs/decisions/2026-11-08-sign-idempotence.md), and the signer then changes
+//! nothing.
 //!
 //! Parse accepts only what the writer writes (REVIEW.md): every line must parse as an envelope,
 //! re-render to its own bytes, verify, and hold a statement of this release's `sign/v1` form
@@ -112,6 +113,24 @@ pub const Record = struct {
         return .added;
     }
 };
+
+/// True when a line of `record` is a signature by `public` over the same subjects as `said`
+/// (`signedAt` aside). The lines were verified when the record was read, so one that does not
+/// parse here is simply not a match.
+pub fn signed_already(
+    work: *Work,
+    record: *const Record,
+    public: [constants.key_public_bytes]u8,
+    said: *const statement.Statement,
+) bool {
+    for (0..record.count) |index| {
+        const envelope = dsse.parse(&work.envelope, record.line(@intCast(index))) catch continue;
+        if (!std.mem.eql(u8, &envelope.public, &public)) continue;
+        const found = statement.parse(envelope.payload) catch continue;
+        if (found.same_subjects(said)) return true;
+    }
+    return false;
+}
 
 comptime {
     assert(constants.signature_record_bytes_max >=

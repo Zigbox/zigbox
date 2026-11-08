@@ -2993,10 +2993,13 @@ pub const registry = [_]Entry{
         \\(give a build result, a tree, or "NAME@sha256:..." of an image that was
         \\pulled or built here), a file of the tree is missing or damaged, or a
         \\bound was reached. A tree has at most 8 signatures, and the store at most
-        \\4096 signed trees; "zbx trust prune" removes records for trees that are
-        \\gone from the store.
+        \\4096 signed trees. Signing again with a key that already signed the same
+        \\thing is not a refusal: it changes nothing and says so.
         \\
-        \\Pull or build the tree again, then sign it. Nothing was written.
+        \\For a missing or damaged tree, pull or build it again, then sign it. For a
+        \\bound, remove a record file of the tree (or of trees you no longer need)
+        \\from trust/signatures in the store; a later release adds a command for
+        \\that. Nothing was written.
         ,
     },
     .{

@@ -306,9 +306,11 @@ pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u
             errors.cause_host_error(diag, "reading the tree", err, errno);
         },
         .too_large => diag.cause("the tree has more entries than zbx checks", .{}),
-        .tree_full => diag.cause("the tree already has {d} signatures, the most it keeps", .{
-            constants.signatures_per_tree_max,
-        }),
+        .tree_full => diag.cause(
+            "the tree already has {d} signatures, none of them by this key over this, " ++
+                "and that is the most it keeps",
+            .{constants.signatures_per_tree_max},
+        ),
         .store_full => diag.cause(
             "the store already holds signatures for {d} trees, the most it keeps",
             .{constants.trust_records_max},
@@ -323,11 +325,12 @@ pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u
             .sentence = "check the store's permissions and free space, then run it again",
         }),
         .tree_full => diag.fix(.{
-            .sentence = "the tree is signed enough; nothing needs to change",
+            .sentence = "to start the tree's record again, remove its file under " ++
+                "trust/signatures in the store (its signatures are lost), then sign again",
         }),
         .store_full => diag.fix(.{
-            .sentence = "remove the records of trees that are gone:",
-            .command = "zbx trust prune",
+            .sentence = "remove the files of trees you no longer need from " ++
+                "trust/signatures in the store; a later release adds a command for it",
         }),
     }
     assert(diag.code.? == .E0910);

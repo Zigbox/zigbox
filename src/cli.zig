@@ -996,12 +996,15 @@ fn take_sign_option(
         },
         else => return unknown_option(diag, argument), // `--no-passphrase` is `key new`'s.
     }
-    switch (classify(argument)) {
-        .passphrase_file_inline, .passphrase_file_next => option = "--passphrase-file",
-        else => {},
-    }
+    const is_key = switch (classify(argument)) {
+        .passphrase_file_inline, .passphrase_file_next => blk: {
+            option = "--passphrase-file";
+            break :blk false;
+        },
+        else => true,
+    };
     if (value.len == 0) return missing_option_value(diag, option);
-    const slot = if (option.len == 5) &sign_args.key else &sign_args.passphrase_file;
+    const slot = if (is_key) &sign_args.key else &sign_args.passphrase_file;
     if (slot.* != null) return sign_option_twice(diag, option);
     slot.* = value;
 }

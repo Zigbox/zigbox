@@ -3,14 +3,15 @@
 //!
 //! The operand names what is signed: the digest of a build result (the signature binds the
 //! result and its tree), a tree's own digest, or `name@sha256:...` of an image in the store (the
-//! signature binds the manifest, under the name as typed, and the image's tree). Nothing is
+//! signature binds the manifest, under its canonical name, and the image's tree). Nothing is
 //! signed that is not whole and sound: every file object of the tree is checked against its name
 //! without a cache (`verify.check_object_alone`), because a signature over a tree with a missing
 //! or damaged file would vouch for something nobody can run.
 //!
 //! The record of the tree (`record.zig`) is read, a line added and the file replaced under the
-//! store lock, so two signers cannot lose each other's line. Signing the same statement with
-//! the same key again changes nothing: Ed25519 is deterministic, and `add` sees the line.
+//! store lock, so two signers cannot lose each other's line. Signing the same subjects with the
+//! same key again changes nothing, whatever the time: `record.signed_already` ignores `signedAt`
+//! (docs/decisions/2026-11-08-sign-idempotence.md).
 //!
 //! No secret reaches a diagnostic, a log or the output: the passphrase, the seed and the key
 //! record are zeroed with `secureZero` before the function ends.
@@ -182,9 +183,15 @@ fn resolve_image(job: *Job, now: u64) Error!Subject {
         },
     };
     const tree = job.ws.image.tree;
+    // Two spellings of one reference are one subject: the name is the canonical repository
+    // without its tag, as the digest alone says which manifest.
+    var name_buffer: reference_mod.Formatted = undefined;
+    const name = std.fmt.bufPrint(&name_buffer, "{s}/{s}@{s}", .{
+        reference.registry(), reference.repository(), &manifest.text(),
+    }) catch unreachable; // The registry, the repository and a digest fit `Formatted`.
     return .{
         .tree = tree,
-        .statement = .for_manifest(tree.bytes, operand, manifest.bytes, now),
+        .statement = .for_manifest(tree.bytes, name, manifest.bytes, now),
     };
 }
 
@@ -228,7 +235,13 @@ const Checker = struct {
             &bytes,
         ) orelse return;
         checker.found = switch (damage.kind) {
-            .unreadable => .{ .why = .unreadable, .errno = damage.errno },
+            // The walk reports a missing tree itself but not a missing file object, which
+            // `check_object_alone` meets as a failed `lstat`.
+            .unreadable => if (damage.errno != 0 and
+                host_mod.error_for_errno(damage.errno) == error.NotFound)
+                .{ .why = .object_missing, .errno = 0 }
+            else
+                .{ .why = .unreadable, .errno = damage.errno },
             else => .{ .why = .object_damaged, .errno = 0 },
         };
     }
@@ -372,6 +385,10 @@ fn sign_under_lock(job: *Job, subject: *const Subject, secret: *const Secret) Er
     try check_tree(job, subject.tree);
     const ws = job.ws;
     const known = try load_record(job, subject.tree);
+    const public = secret.record.public;
+    if (record_mod.signed_already(&ws.record_work, &ws.record, public, &subject.statement)) {
+        return put_result(job, subject, secret, .present);
+    }
     if (known == .absent) try check_room(job);
     const payload = statement.render(&ws.payload, &subject.statement);
     const envelope = dsse.sign(&ws.dsse, &ws.envelope, secret.seed, payload) catch {

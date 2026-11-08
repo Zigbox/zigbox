@@ -680,7 +680,7 @@ const sign_schema =
     \\"subject":{"type":"string","description":"the operand, as given"},
     \\"key":{"type":"string","pattern":"^[a-z0-9-]{1,32}$"},
     \\"id":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"the signing key's id"},
-    \\"added":{"type":"boolean","description":"false: this key had already signed exactly this"},
+    \\"added":{"type":"boolean","description":"false: this key had already signed the same subjects"},
     \\"signatures":{"type":"integer","minimum":1,"description":"lines in the tree's record now"}}}
 ;
 

@@ -8,6 +8,7 @@ const codes = @import("../diag/codes.zig");
 const constants = @import("../constants.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const host_sim = @import("../host_sim.zig");
+const images = @import("../store/images.zig");
 const import = @import("../store/import.zig");
 const layout = @import("../store/layout.zig");
 const fs_sim = @import("../store/fs_sim.zig");
@@ -16,10 +17,12 @@ const result = @import("../build/result.zig");
 const test_util = @import("../test_util.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const dsse = @import("dsse.zig");
+const key_commands = @import("key_commands.zig");
 const record = @import("record.zig");
 const sign_commands = @import("sign_commands.zig");
 const statement = @import("statement.zig");
 const Digest = @import("../store/digest.zig").Digest;
+const Sha256 = @import("../registry/digest.zig").Sha256;
 
 const manifest_hex = "abababababababababababababababababababababababababababababababab";
 const home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = "/home/alice" }};
@@ -68,14 +71,19 @@ fn command(args: []const [:0]const u8) u8 {
 
 /// Signs `operand` with the extra arguments; the code of the diagnostic, if it refused.
 fn sign(operand: []const u8, json: bool, key: ?[]const u8) ?codes.Code {
-    var diag: Diag = undefined;
-    diag.reset();
+    return sign_with(.{ .operand = operand, .key = key }, json);
+}
+
+/// The last diagnostic `sign_with` raised, to check its cause.
+var last_diag: Diag = undefined;
+
+fn sign_with(args: sign_commands.Args, json: bool) ?codes.Code {
+    last_diag.reset();
     sim.stdout_len = 0;
     sim.stderr_len = 0;
-    const args: sign_commands.Args = .{ .operand = operand, .key = key };
     const output: sign_commands.Output = .{ .json = json };
-    const code = sign_commands.run(sim.interface(), &workspace, args, output, &diag) catch
-        return diag.code.?;
+    const run = sign_commands.run(sim.interface(), &workspace, args, output, &last_diag);
+    const code = run catch return last_diag.code.?;
     std.debug.assert(code == 0);
     return null;
 }
@@ -120,9 +128,73 @@ test "signing a tree writes one record line, and signing again changes nothing" 
     try testing.expect(has(sim.stdout(), "signatures: 1\n"));
     const before = (try record_of(tree)).count;
     try testing.expectEqual(@as(u32, 1), before);
+    const first_line = try testing.allocator.dupe(u8, (try record_of(tree)).text());
+    defer testing.allocator.free(first_line);
+    // A day later the statement's `signedAt` differs, but it says the same thing.
+    sim.world.now += 86_400;
     try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, null));
     try testing.expect(has(sim.stdout(), "already signed by this key"));
+    try testing.expect(has(sim.stdout(), "signatures: 1 (already"));
     try testing.expectEqual(@as(u32, 1), (try record_of(tree)).count);
+    try testing.expectEqualStrings(first_line, loaded.text());
+    // Another key is not the same signer, so it adds a line, and its own repeat does not.
+    try testing.expectEqual(@as(u8, 0), command(&.{ "key", "new", "deploy", "--no-passphrase" }));
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "deploy"));
+    sim.world.now += 1;
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "deploy"));
+    try testing.expectEqual(@as(u32, 2), (try record_of(tree)).count);
+    try testing.expect(std.mem.startsWith(u8, loaded.text(), first_line));
+}
+
+test "signing again with the clock moving never fills the record" {
+    // Goal: the failure the review found: a CI job signing on every build locked out the
+    // other signers. Method: sign the same tree ten times, a second apart, then with a second
+    // key, which still has room.
+    try start(true);
+    const text = tree.text();
+    for (0..10) |_| {
+        sim.world.now += 1;
+        try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+    }
+    try testing.expectEqual(@as(u32, 1), (try record_of(tree)).count);
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "deploy"));
+    try testing.expectEqual(@as(u32, 2), (try record_of(tree)).count);
+}
+
+test "two spellings of one image reference are one subject, under the canonical name" {
+    // Goal: REVIEW.md's "two spellings of one reference are one reference". Method: an image
+    // record in the store, signed as three spellings, a day apart; one line, and its subject
+    // name is the canonical, tagless one.
+    try start(false);
+    var image: images.Image = undefined;
+    image.tag_count = 0;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = Sha256.of("config");
+    image.tree = tree;
+    image.time = 1_800_000_000;
+    image.layer_count = 0;
+    image.settings.clear();
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    try images.save(&store, &image, &failure);
+    const hex = std.fmt.bytesToHex(image.manifest.bytes, .lower);
+    const spellings = [_][]const u8{
+        "alpine@sha256:" ++ hex,
+        "docker.io/library/alpine@sha256:" ++ hex,
+        "alpine:3.20@sha256:" ++ hex,
+    };
+    for (spellings) |operand| {
+        sim.world.now += 86_400;
+        try testing.expectEqual(@as(?codes.Code, null), sign(operand, false, null));
+    }
+    const found = try record_of(tree);
+    try testing.expectEqual(@as(u32, 1), found.count);
+    var dsse_work: dsse.Work = undefined;
+    const envelope = try dsse.parse(&dsse_work, found.line(0));
+    const said = try statement.parse(envelope.payload);
+    try testing.expectEqualStrings("docker.io/library/alpine@sha256:" ++ hex, said.reference());
+    try testing.expect(std.meta.activeTag(said.binding) == .manifest);
 }
 
 test "the JSON form is one valid document of the schema, and says what was added" {
@@ -192,28 +264,32 @@ test "an operand that is no digest, or names nothing in the store, is refused" {
     try testing.expect(files.kind_of(records_directory) == null);
 }
 
-test "a missing or damaged object of the tree is refused, and nothing is written" {
-    // Goal: only a whole, intact tree is signed. Method: flip a byte of one object, then
-    // remove another.
-    try start(false);
-    const text = tree.text();
-    var found: ?[]const u8 = null;
+/// The path of some file object of the sample tree that has content.
+fn some_object() []const u8 {
     var index: u32 = 0;
     while (index < files.count) : (index += 1) {
         const path = files.alive_path(index) orelse continue;
         if (!has(path, "/objects/")) continue;
         if (files.kind_of(path).? != .file) continue;
         if (files.content_of(path).?.len == 0) continue;
-        found = path;
-        break;
+        return path;
     }
-    const path = found.?;
+    unreachable; // The sample tree has a file with content.
+}
+
+test "a missing or damaged object of the tree is refused, and nothing is written" {
+    // Goal: only a whole, intact tree is signed, and the cause names what is wrong. Method:
+    // flip a byte of one object, then remove it.
+    try start(false);
+    const text = tree.text();
+    const path = some_object();
     files.flip_byte(path, 0);
     try testing.expectEqual(@as(?codes.Code, .E0910), sign(&text, false, null));
-    const said = sim.stderr();
-    try testing.expect(has(said, "damaged") or has(said, "differ") or said.len == 0);
+    try testing.expect(has(last_diag.last_cause().?, "damaged"));
     files.remove_path(path);
     try testing.expectEqual(@as(?codes.Code, .E0910), sign(&text, false, null));
+    try testing.expect(has(last_diag.last_cause().?, "missing"));
+    try testing.expect(!has(last_diag.last_cause().?, "No such file"));
     try testing.expect(files.kind_of(records_directory) == null);
 }
 
@@ -265,4 +341,51 @@ test "the command line signs, takes --key in both forms, and refuses what is not
     try testing.expectEqual(@as(u8, 1), command(&.{ "key", "list", "--key", "ci" }));
     try testing.expectEqual(@as(u8, 1), command(&.{ "--key", "ci", "key", "list" }));
     try testing.expectEqual(@as(u8, 1), command(&.{ "sign", text, "--no-passphrase" }));
+}
+
+/// Makes the key `sealed`, with the passphrase `phrase` in `/home/alice/pass` (mode 0600).
+fn make_sealed_key(phrase: []const u8) !void {
+    files.put_file("/home/alice/pass", 0o600, phrase);
+    var diag: Diag = undefined;
+    diag.reset();
+    const args: key_commands.Args = .{
+        .action = .new,
+        .name = "sealed",
+        .passphrase_file = "/home/alice/pass",
+    };
+    const cheap: key_commands.Cost = .{ .t = 1, .m_kib = 8, .p = 1 };
+    const made = try key_commands.run(sim.interface(), args, .{ .json = false }, cheap, &diag);
+    try testing.expectEqual(@as(u8, 0), made);
+}
+
+test "a sealed key signs with its passphrase file, and a wrong or missing one writes nothing" {
+    // Goal: the passphrase path of `sign`: right file signs; wrong file, and no file with no
+    // terminal, are E0911 with no record written and no read of standard input. Method: a
+    // sealed key made at the cheap cost, then each way of giving the passphrase.
+    try start(false);
+    try make_sealed_key("correct horse\n");
+    const text = tree.text();
+    sim.world.input = "stolen\nstolen\n";
+    const missing: sign_commands.Args = .{ .operand = &text, .key = "sealed" };
+    try testing.expectEqual(@as(?codes.Code, .E0911), sign_with(missing, false));
+    try testing.expect(has(last_diag.last_cause().?, "no terminal"));
+    try testing.expect(sim.world.input_handle == null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(files.kind_of(records_directory) == null);
+    files.remove_path("/home/alice/pass");
+    files.put_file("/home/alice/pass", 0o600, "wrong horse\n");
+    const wrong: sign_commands.Args = .{
+        .operand = &text,
+        .key = "sealed",
+        .passphrase_file = "/home/alice/pass",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0911), sign_with(wrong, false));
+    try testing.expect(has(last_diag.last_cause().?, "does not open the key"));
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(files.kind_of(records_directory) == null);
+    files.remove_path("/home/alice/pass");
+    files.put_file("/home/alice/pass", 0o600, "correct horse\n");
+    try testing.expectEqual(@as(?codes.Code, null), sign_with(wrong, false));
+    try testing.expect(has(sim.stdout(), "key: sealed  "));
+    try testing.expectEqual(@as(u32, 1), (try record_of(tree)).count);
 }
