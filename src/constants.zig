@@ -1442,7 +1442,8 @@ pub const armor_line_bytes: u32 = 64;
 /// commit and the store it was built beside agree.
 pub const package_source_date_epoch: u64 = build_source_date_epoch;
 /// The release of the fixed test key (the package writer's own signer; vouches for nothing).
-pub const package_test_key_user_id = "Zigbox package test key (vouches for nothing) <test@zigbox.invalid>";
+pub const package_test_key_user_id =
+    "Zigbox package test key (vouches for nothing) <test@zigbox.invalid>";
 
 comptime {
     assert(package_path_bytes_max < 100); // A ustar name field is 100 bytes with its terminator.

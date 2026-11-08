@@ -46,7 +46,8 @@ fn tar_header(entry: TarEntry) Error!std.tar.Writer.Header {
     header.setMtime(constants.package_source_date_epoch) catch return error.WriteFailed;
     @memcpy(header.uname[0..4], "root");
     @memcpy(header.gname[0..4], "root");
-    assert(entry.directory == (entry.bytes.len == 0) or !entry.directory);
+    if (entry.directory) assert(entry.bytes.len == 0);
+    assert(header.uname[0] == 'r');
     return header;
 }
 
@@ -83,7 +84,7 @@ fn cpio_member(writer: *std.Io.Writer, entry: CpioEntry) Error!void {
     const name_size: u32 = @intCast(entry.name.len + 1);
     const nlink: u32 = if (entry.mode & 0o170000 == 0o040000) 2 else 1;
     writer.print("070701{X:0>8}{X:0>8}{X:0>8}{X:0>8}{X:0>8}{X:0>8}{X:0>8}", .{
-        entry.inode, entry.mode, 0, 0, nlink, constants.package_source_date_epoch,
+        entry.inode,     entry.mode, 0, 0, nlink, constants.package_source_date_epoch,
         entry.bytes.len,
     }) catch return error.WriteFailed;
     writer.print("{X:0>8}{X:0>8}{X:0>8}{X:0>8}{X:0>8}{X:0>8}", .{

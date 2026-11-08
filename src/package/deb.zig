@@ -23,7 +23,8 @@ pub fn file_name(memory: Allocator, package: *const model.Package) Error![]u8 {
 pub fn control_text(memory: Allocator, package: *const model.Package) Error![]u8 {
     var out = Output.init(memory);
     const writer = &out.writer;
-    const size_kib = std.math.divCeil(u64, model.content_bytes(package), 1024) catch unreachable; // 1024 is not zero.
+    // 1024 is not zero, so the division cannot fail.
+    const size_kib = std.math.divCeil(u64, model.content_bytes(package), 1024) catch unreachable;
     writer.print("Package: {s}\nVersion: {s}\nArchitecture: {s}\nMaintainer: {s}\n", .{
         package.name, package.version, package.architecture.deb_name(), package.maintainer,
     }) catch return error.WriteFailed;
@@ -69,7 +70,12 @@ fn dotted(memory: Allocator, path: []const u8, directory: bool) Error![]u8 {
 fn data_tar(memory: Allocator, package: *const model.Package) Error![]u8 {
     const entries = try model.layout(memory, package, false);
     const tar_entries = try memory.alloc(archive.TarEntry, entries.len + 1);
-    tar_entries[0] = .{ .name = "./", .mode = model.directory_mode, .bytes = "", .directory = true };
+    tar_entries[0] = .{
+        .name = "./",
+        .mode = model.directory_mode,
+        .bytes = "",
+        .directory = true,
+    };
     for (entries, 1..) |entry, index| {
         const directory = entry.file == null;
         tar_entries[index] = .{

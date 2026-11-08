@@ -222,9 +222,18 @@ fn find_path(entries: []const Entry, path: []const u8) ?Entry {
 
 /// The directories every distribution's base packages own; a package never lists them.
 const system_directories = [_][]const u8{
-    "/usr",       "/usr/bin",          "/usr/sbin",  "/usr/lib",      "/usr/share",
-    "/usr/share/doc", "/usr/share/man", "/usr/share/man/man1", "/usr/share/licenses",
-    "/etc",       "/usr/lib/systemd",  "/usr/lib/systemd/system",
+    "/usr",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/share",
+    "/usr/share/doc",
+    "/usr/share/man",
+    "/usr/share/man/man1",
+    "/usr/share/licenses",
+    "/etc",
+    "/usr/lib/systemd",
+    "/usr/lib/systemd/system",
 };
 
 pub fn is_system_directory(path: []const u8) bool {
@@ -293,8 +302,15 @@ test "layout lists directories first and refuses duplicates" {
         .{ .path = "/usr/bin/zbx", .mode = 0o755, .bytes = "b" },
     };
     const package: Package = .{
-        .name = "zigbox", .version = "1", .architecture = .aarch64, .summary = "s",
-        .description = "d", .license = "l", .homepage = "h", .maintainer = "m", .files = &files,
+        .name = "zigbox",
+        .version = "1",
+        .architecture = .aarch64,
+        .summary = "s",
+        .description = "d",
+        .license = "l",
+        .homepage = "h",
+        .maintainer = "m",
+        .files = &files,
     };
     const all = try layout(arena.allocator(), &package, false);
     try std.testing.expectEqual(@as(usize, 7), all.len);
@@ -308,4 +324,55 @@ test "layout lists directories first and refuses duplicates" {
     var dup = package;
     dup.files = &twice;
     try std.testing.expectError(error.DuplicatePath, layout(arena.allocator(), &dup, false));
+}
+
+/// A file of a repository tree, by its path under the tree's root.
+pub const TreeFile = struct {
+    path: []const u8,
+    bytes: []const u8,
+};
+
+/// A package and the bytes of its built file, as a repository writer takes them.
+pub const Built = struct {
+    package: *const Package,
+    bytes: []const u8,
+};
+
+/// Calendar fields for a UTC time, so metadata dates need no clock.
+pub const Calendar = struct {
+    weekday: u3,
+    day: u5,
+    month: u4,
+    year: u16,
+    seconds_of_day: u17,
+
+    pub fn from_epoch(seconds: u64) Calendar {
+        const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+        const epoch_day = epoch_seconds.getEpochDay();
+        const month_day = epoch_day.calculateYearDay().calculateMonthDay();
+        return .{
+            // 1970-01-01 was a Thursday; index 0 is Sunday.
+            .weekday = @intCast((epoch_day.day + 4) % 7),
+            .day = month_day.day_index + 1,
+            .month = month_day.month.numeric(),
+            .year = epoch_day.calculateYearDay().year,
+            .seconds_of_day = epoch_seconds.getDaySeconds().secs,
+        };
+    }
+};
+
+pub const weekday_names = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+pub const month_names = [12][]const u8{
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+};
+
+test "calendar fields of the build epoch are 1980-01-01, a Tuesday" {
+    // Goal: the Release date line is right without a clock.
+    const calendar = Calendar.from_epoch(constants.package_source_date_epoch);
+    try std.testing.expectEqual(@as(u16, 1980), calendar.year);
+    try std.testing.expectEqual(@as(u4, 1), calendar.month);
+    try std.testing.expectEqual(@as(u5, 1), calendar.day);
+    try std.testing.expectEqualStrings("Tue", weekday_names[calendar.weekday]);
+    const later = Calendar.from_epoch(1_794_149_934); // A Thursday, 2026-11-08 is a Sunday.
+    try std.testing.expect(later.year >= 2026);
 }

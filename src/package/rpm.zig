@@ -87,6 +87,9 @@ pub const sig_tag = struct {
     pub const sha256: u32 = 273;
 };
 
+/// The build host every package names, so that the file does not depend on the machine.
+pub const build_host = "zigbox-build";
+
 const region_signatures: u32 = 62;
 const region_immutable: u32 = 63;
 const header_magic = [8]u8{ 0x8e, 0xad, 0xe8, 0x01, 0, 0, 0, 0 };
@@ -121,8 +124,11 @@ const Header = struct {
         writer.splatByteAll(0, pad) catch return error.WriteFailed;
         if (h.entries.items.len >= constants.rpm_header_entries_max) return error.WriteFailed;
         h.entries.append(h.memory, .{
-            .tag = tag_number, .kind = kind, .count = count,
-            .start = @intCast(writer.end), .length = 0,
+            .tag = tag_number,
+            .kind = kind,
+            .count = count,
+            .start = @intCast(writer.end),
+            .length = 0,
         }) catch return error.OutOfMemory;
     }
 
@@ -195,7 +201,13 @@ const Header = struct {
         writer.writeInt(u32, count, .big) catch return error.WriteFailed;
         writer.writeInt(u32, trailer_offset + 16, .big) catch return error.WriteFailed;
         try index_entry(writer, region, tag_type.binary, trailer_offset, 16);
-        for (entries) |entry| try index_entry(writer, entry.tag, entry.kind, entry.start, entry.count);
+        for (entries) |entry| try index_entry(
+            writer,
+            entry.tag,
+            entry.kind,
+            entry.start,
+            entry.count,
+        );
         writer.writeAll(store.written()) catch return error.WriteFailed;
         // The trailer is an index entry whose offset is minus the bytes of entries it covers.
         const covered: i32 = -@as(i32, @intCast((entries.len + 1) * 16));
@@ -208,7 +220,13 @@ fn entry_less(_: void, left: Entry, right: Entry) bool {
     return left.tag < right.tag;
 }
 
-fn index_entry(writer: *std.Io.Writer, tag_number: u32, kind: u32, offset: u32, count: u32) Error!void {
+fn index_entry(
+    writer: *std.Io.Writer,
+    tag_number: u32,
+    kind: u32,
+    offset: u32,
+    count: u32,
+) Error!void {
     writer.writeInt(u32, tag_number, .big) catch return error.WriteFailed;
     writer.writeInt(u32, kind, .big) catch return error.WriteFailed;
     writer.writeInt(u32, offset, .big) catch return error.WriteFailed;
@@ -259,7 +277,10 @@ fn file_arrays(memory: Allocator, package: *const model.Package) Error!Files {
         f.dir_indexes[index] = try dir_index(memory, &dir_names, dir);
         f.base_names[index] = entry.path[slash + 1 ..];
         const bytes: []const u8 = if (entry.file) |file| file.bytes else "";
-        const mode: u32 = if (entry.file) |file| 0o100000 | file.mode else 0o040000 | model.directory_mode;
+        const mode: u32 = if (entry.file) |file|
+            0o100000 | file.mode
+        else
+            0o040000 | model.directory_mode;
         f.sizes[index] = @intCast(bytes.len);
         f.modes[index] = @intCast(mode);
         f.zeros16[index] = 0;
@@ -268,11 +289,15 @@ fn file_arrays(memory: Allocator, package: *const model.Package) Error!Files {
         f.inodes[index] = @intCast(index + 1);
         f.verify[index] = verify_all;
         f.ones[index] = 1;
-        f.digests[index] = if (entry.file == null) "" else try memory.dupe(u8, &model.digest_hex(bytes));
+        f.digests[index] = if (entry.file == null) "" else try memory.dupe(
+            u8,
+            &model.digest_hex(bytes),
+        );
         f.blanks[index] = "";
         f.roots[index] = "root";
         const name = try std.fmt.allocPrint(memory, ".{s}", .{entry.path});
-        f.cpio[index] = .{ .name = name, .mode = mode, .bytes = bytes, .inode = @intCast(index + 1) };
+        const inode: u32 = @intCast(index + 1);
+        f.cpio[index] = .{ .name = name, .mode = mode, .bytes = bytes, .inode = inode };
     }
     f.dir_names = dir_names.items;
     return f;
@@ -317,7 +342,10 @@ fn dependency_tags(h: *Header, memory: Allocator, package: *const model.Package)
         "rpmlib(CompressedFileNames)", "rpmlib(FileDigests)", "rpmlib(PayloadFilesHavePrefix)",
     };
     try h.strings(tag.require_name, &rpmlib);
-    try h.int32s(tag.require_flags, &[_]u32{ sense_rpmlib_less_equal, sense_rpmlib_less_equal, sense_rpmlib_less_equal });
+    try h.int32s(
+        tag.require_flags,
+        &[_]u32{ sense_rpmlib_less_equal, sense_rpmlib_less_equal, sense_rpmlib_less_equal },
+    );
     try h.strings(tag.require_version, &.{ "3.0.4-1", "4.6.0-1", "4.0-1" });
     const weak = package.recommends_rpm;
     if (weak.len == 0) return;
@@ -338,8 +366,16 @@ fn main_header(
     payload: Payload,
 ) Error![]u8 {
     var h = Header.init(memory);
-    const nevr = try std.fmt.allocPrint(memory, "{s}-{s}.src.rpm", .{ package.name, package.version });
-    const platform = try std.fmt.allocPrint(memory, "{s}-linux", .{package.architecture.rpm_name()});
+    const nevr = try std.fmt.allocPrint(
+        memory,
+        "{s}-{s}.src.rpm",
+        .{ package.name, package.version },
+    );
+    const platform = try std.fmt.allocPrint(
+        memory,
+        "{s}-linux",
+        .{package.architecture.rpm_name()},
+    );
     try h.strings(tag.header_i18n_table, &.{"C"});
     try h.string(tag.name, tag_type.string, package.name);
     try h.string(tag.version, tag_type.string, package.version);
@@ -347,7 +383,7 @@ fn main_header(
     try h.string(tag.summary, tag_type.i18n_string, package.summary);
     try h.string(tag.description, tag_type.i18n_string, package.description);
     try h.int32s(tag.build_time, &.{@intCast(constants.package_source_date_epoch)});
-    try h.string(tag.build_host, tag_type.string, "zigbox-build");
+    try h.string(tag.build_host, tag_type.string, build_host);
     try h.int32s(tag.size, &.{@intCast(model.content_bytes(package))});
     try h.string(tag.license, tag_type.string, package.license);
     try h.string(tag.group, tag_type.i18n_string, "Unspecified");
@@ -415,7 +451,7 @@ fn lead(package: *const model.Package) [lead_bytes]u8 {
     var name_buffer: [66]u8 = @splat(0);
     _ = std.fmt.bufPrint(&name_buffer, "{s}-{s}-{s}", .{
         package.name, package.version, package.revision,
-    }) catch unreachable; // validate bounds name+version+revision at 64 bytes each; the lead keeps 65.
+    }) catch unreachable; // validate bounds name, version, revision at 64 bytes each; lead has 65.
     @memcpy(bytes[10..76], &name_buffer);
     std.mem.writeInt(u16, bytes[76..78], 1, .big); // osnum: Linux.
     std.mem.writeInt(u16, bytes[78..80], 5, .big); // signature type: header-style.
@@ -485,8 +521,19 @@ pub fn write(memory: Allocator, package: *const model.Package, options: Options)
     const cpio = try archive.cpio_write(memory, files.cpio);
     const compressed = try archive.gzip(memory, cpio);
     const digest = try memory.dupe(u8, &model.digest_hex(compressed));
-    const main = try main_header(memory, package, &files, .{ .cpio_bytes = cpio.len, .digest_hex = digest });
-    const signature = try signature_header(memory, main, compressed, cpio.len, options.header_signature);
+    const main = try main_header(
+        memory,
+        package,
+        &files,
+        .{ .cpio_bytes = cpio.len, .digest_hex = digest },
+    );
+    const signature = try signature_header(
+        memory,
+        main,
+        compressed,
+        cpio.len,
+        options.header_signature,
+    );
     const lead_block = lead(package);
     const parts = [_][]const u8{ &lead_block, signature, main, compressed };
     return std.mem.concat(memory, u8, &parts) catch return error.OutOfMemory;
@@ -530,4 +577,10 @@ test "a header signature leaves the main header and its digest unchanged" {
         &model.digest_hex(plain.main_header),
         &model.digest_hex(signed.main_header),
     );
+}
+
+/// The size of the uncompressed payload (the cpio archive), which dnf's metadata records.
+pub fn archive_bytes(memory: Allocator, package: *const model.Package) Error!u64 {
+    const files = try file_arrays(memory, package);
+    return (try archive.cpio_write(memory, files.cpio)).len;
 }

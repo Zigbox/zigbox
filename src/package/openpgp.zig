@@ -41,7 +41,8 @@ pub const SignatureKind = enum(u8) {
 };
 
 pub fn test_key() Ed25519.KeyPair {
-    return Ed25519.KeyPair.generateDeterministic(test_seed) catch unreachable; // Fixed seed: a valid key, checked by the tests.
+    // Fixed seed: a valid key, checked by the tests.
+    return Ed25519.KeyPair.generateDeterministic(test_seed) catch unreachable;
 }
 
 fn put(writer: *std.Io.Writer, bytes: []const u8) Error!void {
@@ -115,7 +116,7 @@ fn put_packet(writer: *std.Io.Writer, tag_number: u8, body: []const u8) Error!vo
 fn signature_prefix(memory: Allocator, kind: SignatureKind, public: [32]u8) Error![]u8 {
     var out = Output.init(memory);
     const writer = &out.writer;
-    try put(writer, &.{ 4, @intFromEnum(kind), algorithm_eddsa, hash_sha256 });
+    try put(writer, &.{ 4, @backingInt(kind), algorithm_eddsa, hash_sha256 });
     const print = fingerprint(public);
     // Creation time (type 2) and issuer fingerprint (type 33), both hashed; a certification
     // also says what the key may do (key flags, type 27: certify and sign).
@@ -222,7 +223,11 @@ pub fn armor(memory: Allocator, label: []const u8, bytes: []const u8) Error![]u8
             return error.WriteFailed;
     }
     const crc = crc24(bytes);
-    const crc_bytes = [3]u8{ @intCast(crc >> 16), @intCast((crc >> 8) & 0xff), @intCast(crc & 0xff) };
+    const crc_bytes = [3]u8{
+        @intCast(crc >> 16),
+        @intCast((crc >> 8) & 0xff),
+        @intCast(crc & 0xff),
+    };
     var crc_line: [4]u8 = undefined;
     writer.print("={s}\n-----END {s}-----\n", .{
         std.base64.standard.Encoder.encode(&crc_line, &crc_bytes), label,

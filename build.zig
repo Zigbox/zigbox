@@ -120,6 +120,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
+    "src/package.zig",
     "src/tidy.zig",
     "src/fuzz.zig",
     "src/size_check.zig",
@@ -147,6 +148,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
+    "src/package.zig",
     "src/fuzz.zig",
 };
 
