@@ -1435,7 +1435,7 @@ pub const package_gzip_window_bytes: u32 = 64 * 1024;
 pub const rpm_header_entries_max: u32 = 128;
 pub const rpm_header_bytes_max: u32 = 1024 * 1024;
 /// The most OpenPGP signature bytes one detached signature or rpm signature tag holds.
-pub const openpgp_signature_bytes_max: u32 = 512;
+pub const openpgp_signature_bytes_max: u32 = 1024;
 /// An ASCII-armored block's line width (RFC 4880: at most 76).
 pub const armor_line_bytes: u32 = 64;
 /// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a

@@ -166,7 +166,9 @@ fn load_signatures(
 /// rpm cannot read from its signature tag.
 fn check_header_signature(log: *Io.Writer, name: []const u8, bytes: []const u8) Refused!void {
     if (bytes.len > constants.openpgp_signature_bytes_max) {
-        return refuse(log, "{s} is larger than a signature can be", .{name});
+        return refuse(log, "{s} is larger than {d} bytes, the most a signature here may be", .{
+            name, constants.openpgp_signature_bytes_max,
+        });
     }
     if (bytes[0] & 0x80 == 0) {
         return refuse(log, "{s} is armored text; sign with gpg --detach-sign, no --armor", .{name});
@@ -365,6 +367,23 @@ test "arguments: a full build line parses, and each missing piece is refused" {
     const unknown = [_][]const u8{ "--out", "o", "--nope", "x" };
     var bad: TestIterator = .{ .words = &unknown };
     try std.testing.expect(parse_arguments(&bad) == null);
+}
+
+test "a header signature is accepted at the bound and refused one byte past it" {
+    // Goal: `openpgp_signature_bytes_max` is exact, and the refusal names the bound.
+    var bytes: [constants.openpgp_signature_bytes_max + 1]u8 = @splat(0x89);
+    var sink: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer sink.deinit();
+    const name = "a.rpm.header.sig";
+    const most = bytes[0..constants.openpgp_signature_bytes_max];
+    try check_header_signature(&sink.writer, name, most);
+    try std.testing.expectError(
+        error.Refused,
+        check_header_signature(&sink.writer, "a.rpm.header.sig", &bytes),
+    );
+    const message = "packages: a.rpm.header.sig is larger than 1024 bytes, " ++
+        "the most a signature here may be\n";
+    try std.testing.expectEqualStrings(message, sink.written());
 }
 
 test {
