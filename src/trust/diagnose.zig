@@ -297,7 +297,7 @@ pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u
             "the store has no build result, tree or image with that digest",
             .{},
         ),
-        .object_missing => diag.cause("a file of the tree is missing from the store", .{}),
+        .object_missing => diag.cause("part of the tree is missing from the store", .{}),
         .object_damaged => diag.cause("a file of the tree in the store is damaged", .{}),
         .unreadable => if (errno == 0) {
             diag.cause("the tree could not be read", .{});
@@ -331,6 +331,26 @@ pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u
         }),
     }
     assert(diag.code.? == .E0910);
+}
+
+/// ZBX-E0006 for `zbx sign` without `--key` when the keys do not say which: none, or several.
+pub fn key_choice(diag: *Diag, count: u32) void {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("choosing the key to sign with", .{});
+    if (count == 0) {
+        diag.cause("there is no key to sign with", .{});
+        diag.fix(.{ .sentence = "make one:", .command = "zbx key new <name>", .template = true });
+    } else {
+        diag.cause("there is more than one key, and --key does not say which to sign with", .{});
+        diag.fix(.{
+            .sentence = "name one of them:",
+            .command = "zbx sign <digest> --key <name>",
+            .template = true,
+        });
+    }
+    diag.context("cmd", "sign", .{});
+    assert(diag.code.? == .E0006);
 }
 
 /// ZBX-E0005 for a key name that cannot name a key.

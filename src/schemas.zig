@@ -666,6 +666,24 @@ const build_graph_schema =
     \\"properties":{"from":{"type":"string"},"to":{"type":"string"}}}}}}
 ;
 
+const sign_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/sign/1","version":1,
+    \\"title":"zbx sign --output json",
+    \\"description":"stdout: the signature just added to a tree's record, or found there.",
+    \\"type":"object",
+    \\"required":["schema","tree","binding","subject","key","id","added","signatures"],
+    \\"properties":{"schema":{"const":"zbx.sign/1"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$","description":"the tree signed"},
+    \\"binding":{"enum":["none","result","manifest"],
+    \\"description":"none: the tree alone; result: and one build result; manifest: and a manifest"},
+    \\"subject":{"type":"string","description":"the operand, as given"},
+    \\"key":{"type":"string","pattern":"^[a-z0-9-]{1,32}$"},
+    \\"id":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"the signing key's id"},
+    \\"added":{"type":"boolean","description":"false: this key had already signed exactly this"},
+    \\"signatures":{"type":"integer","minimum":1,"description":"lines in the tree's record now"}}}
+;
+
 const key_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/key/1","version":1,
@@ -807,6 +825,7 @@ const table = [_]Entry{
     .{ .command = "lock-show", .text = lock_show_schema },
     .{ .command = "build-graph", .text = build_graph_schema },
     .{ .command = "key", .text = key_schema },
+    .{ .command = "sign", .text = sign_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
@@ -820,7 +839,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 31);
+    assert(table.len == 32);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -849,7 +868,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 31), table.len);
+    try testing.expectEqual(@as(usize, 32), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

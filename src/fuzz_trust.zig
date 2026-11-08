@@ -10,6 +10,9 @@
 //!      are accepted only if they re-render to exactly themselves.
 //!   3. Signed: a damaged envelope that still parses verifies only if it is the original; a
 //!      flipped byte of what is signed never passes `verify`.
+//!   5. Record: a record of up to eight signed lines about one tree parses and re-renders to
+//!      itself; a damaged or random record never crashes `record.parse`, and is accepted only if
+//!      what it yields is exactly its bytes; one about another tree is refused.
 //!   4. Bounds: a third subject, a payload one byte past `statement_bytes_max` and an envelope
 //!      one byte past `envelope_bytes_max` are refused, whatever else is right.
 
@@ -18,6 +21,8 @@ const assert = std.debug.assert;
 const constants = @import("constants.zig");
 const dsse = @import("trust/dsse.zig");
 const key = @import("trust/key.zig");
+const digest_mod = @import("store/digest.zig");
+const record = @import("trust/record.zig");
 const statement = @import("trust/statement.zig");
 
 var work: dsse.Work = undefined;
@@ -203,11 +208,77 @@ fn check_bounds(random: std.Random) void {
 
 var payload_over: [constants.statement_bytes_max + 1]u8 = @splat('a');
 
+var record_work: record.Work = undefined;
+var record_in: record.Record = undefined;
+var record_out: record.Record = undefined;
+var record_damaged: [constants.signature_record_bytes_max + 8]u8 = undefined;
+
+/// A record of random lines about a random tree, damaged in the ways a disk or a hand does.
+fn check_record(random: std.Random) void {
+    var tree: digest_mod.Digest = undefined;
+    random.bytes(&tree.bytes);
+    record_in.clear();
+    const lines = 1 + random.uintLessThan(u32, constants.signatures_per_tree_max);
+    while (record_in.count < lines) {
+        var seed: [constants.key_seed_bytes]u8 = undefined;
+        random.bytes(&seed);
+        const at = random.int(u32);
+        const found = statement.Statement.for_tree(tree.bytes, at);
+        const text = statement.render(&render_buffer, &found);
+        const signed = dsse.sign(&work, &envelope_buffer, seed, text) catch unreachable; // Small.
+        _ = record_in.add(signed) catch unreachable; // At most eight lines are made.
+    }
+    record.parse(&record_work, tree, record_in.text(), &record_out) catch |err|
+        std.debug.panic("a written record was refused: {s}", .{@errorName(err)});
+    assert(std.mem.eql(u8, record_in.text(), record_out.text()));
+    var other = tree;
+    other.bytes[0] ^= 1;
+    assert(std.meta.isError(record.parse(&record_work, other, record_in.text(), &record_out)));
+    var round: u32 = 0;
+    while (round < 4) : (round += 1) {
+        const bytes = damage_record(random, record_in.text());
+        record.parse(&record_work, tree, bytes, &record_out) catch continue;
+        // Accepted: nothing but a whole record gets through, and it is the bytes given.
+        assert(std.mem.eql(u8, bytes, record_out.text()));
+        assert(record_out.count >= 1);
+    }
+    const noise = random_bytes(random);
+    record.parse(&record_work, tree, noise, &record_out) catch return;
+    assert(std.mem.eql(u8, noise, record_out.text()));
+}
+
+fn damage_record(random: std.Random, text: []const u8) []const u8 {
+    assert(text.len > 0);
+    @memcpy(record_damaged[0..text.len], text);
+    var length = text.len;
+    switch (random.uintLessThan(u32, 5)) {
+        0 => length = random.uintLessThan(usize, length),
+        1 => record_damaged[random.uintLessThan(usize, length)] ^=
+            @as(u8, 1) << @as(u3, @intCast(random.uintLessThan(u8, 8))),
+        2 => {
+            const at = random.uintLessThan(usize, length);
+            record_damaged[at] = alphabet[random.uintLessThan(usize, alphabet.len)];
+        },
+        3 => {
+            // A line repeated: the writer never makes one.
+            const end = std.mem.indexOfScalar(u8, text, '\n').? + 1;
+            @memcpy(record_damaged[length..][0..end], text[0..end]);
+            length += end;
+        },
+        else => {
+            record_damaged[length] = '\n';
+            length += 1;
+        },
+    }
+    return record_damaged[0..length];
+}
+
 pub fn fuzz_trust(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
     check_round_trip(random);
     check_bounds(random);
+    check_record(random);
 }
 
 test "the fuzzer's properties hold on fixed seeds" {

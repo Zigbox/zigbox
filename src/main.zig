@@ -285,6 +285,8 @@ test {
     _ = @import("trust/passphrase.zig");
     _ = @import("trust/key_commands.zig");
     _ = @import("trust/key_commands_tests.zig");
+    _ = @import("trust/sign_commands.zig");
+    _ = @import("trust/sign_commands_tests.zig");
     _ = @import("trust/key_store_tests.zig");
     _ = @import("fuzz_key.zig");
     _ = @import("trust/json.zig");

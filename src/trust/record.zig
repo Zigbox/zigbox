@@ -171,7 +171,7 @@ fn check_line(work: *Work, tree: Digest, text: []const u8) ParseError!void {
 
 pub const LoadError = error{ NotFound, Unreadable, Damaged, Newer };
 
-fn record_path(store: *const Store, buffer: *PathBuf, tree: Digest) [:0]const u8 {
+pub fn record_path(store: *const Store, buffer: *PathBuf, tree: Digest) [:0]const u8 {
     assert(store.root_len > 1);
     const hex = tree.hex();
     return store.path(buffer, &.{ "/", directory_name, "/", &hex });
