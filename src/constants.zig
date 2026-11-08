@@ -1441,6 +1441,9 @@ pub const armor_line_bytes: u32 = 64;
 /// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a
 /// commit and the store it was built beside agree.
 pub const package_source_date_epoch: u64 = build_source_date_epoch;
+/// The `Maintainer` of the `zigbox` packages. A supervisor assumption the owner may change
+/// (docs/decisions/2026-11-08-package-bounds.md).
+pub const package_maintainer = "Zigbox project <packages@zigbox.org>";
 /// The release of the fixed test key (the package writer's own signer; vouches for nothing).
 pub const package_test_key_user_id =
     "Zigbox package test key (vouches for nothing) <test@zigbox.invalid>";

@@ -15,15 +15,15 @@ Traps found:
 - tidy forbids `assert(a or b)` style compound asserts and lines over 100 columns; `[_]u8{x} ** N` does not parse, use `@splat`.
 - Scratch drivers must live under `src/` (module path rule).
 
-Not done (next implementer starts here):
-1. `src/package_main.zig` driver: `--version --zbx-x86_64 --zbx-aarch64 --license --out [--signatures dir] [--test-key] [--check]`;
-   builds deb+rpm per arch (name `zigbox`, MIT, https://zigbox.org, `/usr/bin/zbx` 0755 + licence at the deb/rpm paths),
-   writes `zig-out/packages/{apt,rpm/<basearch>,to-sign}`, prints the gpg commands. Signature file names chosen:
-   `<rpmfile>.header.sig`, `InRelease`, `Release.gpg`, `repomd.<arch>.xml.asc`.
-2. build.zig: `zigbox_package` module export, `packages` step (`-Dsignatures`, `-Dtest-key`), `packages-check` step.
-3. `docs/releases/packaging.md` runbook (two gpg rounds, `rpmkeys --import`, `rpm -K`, `apt update`), README install commands.
-4. `docs/demos/m8.md` slice 6 entry: createrepo_c time-attr difference, no PAYLOADDIGESTALT, Fedora rpm 6 needs the test key imported, VM check status.
-5. Optional VM check (`vm/m8-slice6`): apt update against a repo signed with the test key. Harness changes go to the supervisor first.
+Part 2 (second implementer): done.
+- `src/package_release.zig` (pure: build the whole tree, `round_of`), `src/package_check.zig` (tree against metadata,
+  via a `Source` with a function pointer so tests use memory), `src/package_main.zig` (I/O, CLI, printed gpg commands).
+- build.zig: `zigbox_package` module, `packages` and `packages-check` steps (`-Dsignatures`, `-Dtest-key`).
+- Docs: `docs/releases/packaging.md`, README install section, `docs/demos/m8.md`, `docs/decisions/2026-11-08-package-bounds.md`.
+- The debug-built tool is slow on a debug `zbx` (17 MB); the build step feeds it release binaries, so it is fast there.
 
-Open for the owner: the maintainer string (placeholder "Zigbox project <packages@zigbox.org>" not yet written anywhere).
-New internal bounds are in `src/constants.zig` ("Packages (M8, slice 6)").
+Not done / for the supervisor:
+- `.github/workflows/vm.yml` knows only m0-m7 and `all`; a `vm/m8-slice6` branch fails at "Which demo". No VM check ran.
+- `.github/ci-changes.sh` does not list `src/package_*.zig` among the paths that need no demo; they would run the full set.
+- The install host layout in the README (zigbox.org/apt, /rpm, keys) is intended, not live.
+- `rpm`, `createrepo_c` and `dnf` are absent from this container, so the rpm side was not re-checked here.
