@@ -1447,6 +1447,9 @@ pub const passphrase_bytes_max: u32 = 1024;
 pub const passphrase_file_bytes_max: u32 = passphrase_bytes_max + 1;
 /// The most keys `key list` shows.
 pub const keys_listed_max: u32 = 64;
+/// Most containers open at once in the canonical JSON writer and reader (`src/trust/json.zig`).
+/// A supervisor assumption (docs/decisions/2026-11-08-m8-trust-bounds.md).
+pub const json_depth_max: u32 = 16;
 
 comptime {
     assert(key_kdf_t >= 1);
@@ -1456,6 +1459,8 @@ comptime {
     assert(key_kdf_p >= 1);
     assert(key_kdf_p <= key_kdf_p_max);
     assert(key_kdf_p_max == 1);
+    assert(json_depth_max >= 1);
+    assert(json_depth_max <= 64); // The reader's frame stack lives on the stack.
     assert(key_sealed_bytes == 48);
     assert(key_public_text_bytes == 76);
     assert(key_file_bytes_max >= 512); // Room for the longest rendering, checked in key.zig.
