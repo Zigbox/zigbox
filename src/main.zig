@@ -158,6 +158,7 @@ test {
     _ = @import("layer/reader.zig");
     _ = @import("layer/tar.zig");
     _ = @import("layer/apply.zig");
+    _ = @import("layer/tar_write.zig");
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
