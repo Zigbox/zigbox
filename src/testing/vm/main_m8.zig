@@ -21,6 +21,7 @@ const script = body ++ "echo '" ++ marker ++ "'\n";
 
 const body =
     \\set -eu
+    \\trap 'cat /tmp/err-* 2>/dev/null' EXIT
     \\useradd -m -s /bin/sh demo2
     \\mkdir -p /srv/m8/tree/sub /srv/m8/tree/empty
     \\printf 'hello\n' > /srv/m8/tree/sub/a.txt
@@ -30,8 +31,8 @@ const body =
     \\chmod -R a+rX /srv/m8
     \\for u in demo demo2; do
     \\  z="runuser -u $u -- env HOME=/home/$u /usr/local/bin/zbx"
-    \\  d=$($z store import /srv/m8/tree 2>/dev/null)
-    \\  m=$($z store export --oci "$d" /tmp/out-$u 2>/dev/null)
+    \\  d=$($z store import /srv/m8/tree 2>/tmp/err-i$u)
+    \\  m=$($z store export --oci "$d" /tmp/out-$u 2>/tmp/err-e$u)
     \\  echo "$u: tree $d manifest $m"
     \\  echo "$m" > /tmp/manifest-$u
     \\done
@@ -93,7 +94,11 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
 }
 
 fn export_check(session: *Session, out: *Io.Writer) !void {
-    const copied = try session.copy_in(.{ .route = "/zbx", .guest_path = "/usr/local/bin/zbx" });
+    const copied = try session.copy_in(.{
+        .route = "/zbx",
+        .guest_path = "/usr/local/bin/zbx",
+        .mode = "755",
+    });
     try H.show(out, "install zbx", copied);
     if (copied.status != 0) return error.InstallFailed;
     try session.put_file(script_path, script);
