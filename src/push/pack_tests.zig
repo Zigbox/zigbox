@@ -12,7 +12,13 @@ const images = @import("../store/images.zig");
 const import = @import("../store/import.zig");
 const layout = @import("../store/layout.zig");
 const support = @import("../store/test_support.zig");
+const apply = @import("../layer/apply.zig");
+const blobs_mod = @import("../registry/blobs.zig");
+const reader_mod = @import("../layer/reader.zig");
+const trees = @import("../store/trees.zig");
+const tree_mod = @import("../store/tree.zig");
 const pack = @import("pack.zig");
+const PathBuf = @import("../store/fs.zig").PathBuf;
 
 const testing = std.testing;
 const HostSim = host_sim.HostSim;
@@ -82,4 +88,75 @@ test "one tree packs to one image, on every pack and at every buffer size" {
         try testing.expectEqualSlices(u8, &first.diff_id.bytes, &other.diff_id.bytes);
         try testing.expectEqual(first.layer_size, other.layer_size);
     }
+}
+
+var applier: apply.Applier = undefined;
+var layer: reader_mod.Layer = undefined;
+
+/// Unpacks the layer of `made` into a fresh `/out` and imports it: the tree digest it gives.
+fn round_trip(made: pack.Packed, squash_owner: bool) !digest_mod.Digest {
+    files.put_dir("/out", 0o755);
+    var path: PathBuf = undefined;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    const layer_path = blobs.final_path(&path, made.layer);
+    applier.start(store.fs, "/out", squash_owner);
+    try layer.start(store.fs, layer_path);
+    defer layer.close();
+    try applier.apply_layer(&layer);
+    const diff = try layer.finish();
+    try testing.expectEqualSlices(u8, &made.layer.bytes, &diff.bytes);
+    var result: import.Result = undefined;
+    diag.reset();
+    const options: import.Options = .{ .squash_owner = squash_owner, .warn = null };
+    try import.import(&store, &imports, "/out", options, &result, &diag);
+    return result.digest;
+}
+
+test "a packed layer applied again gives the tree it was packed from, in both id modes" {
+    // Goal: the round trip. Method: import /src, pack, apply the layer to a new directory and
+    // import that; the digests agree, with owners kept and with owners squashed to 0.
+    for ([_]bool{ false, true }) |squash| {
+        start(3, 0);
+        const imported = try import_source(squash);
+        const made = try pack_tree(imported.digest, constants.pack_io_bytes);
+        const again = try round_trip(made, squash);
+        try testing.expect(imported.digest.eql(again));
+    }
+}
+
+/// The path of the first file object found in `tree` or the directories below it.
+fn first_object_path(tree: digest_mod.Digest, buffer: *PathBuf) !?[:0]const u8 {
+    var bytes: [constants.store_tree_bytes_max]u8 = undefined;
+    var errno: u16 = 0;
+    const loaded = try trees.load(&store, tree, &bytes, &errno);
+    var decoder: tree_mod.Decoder = undefined;
+    try decoder.init(loaded);
+    var entry: tree_mod.Entry = undefined;
+    var below: ?digest_mod.Digest = null;
+    while (try decoder.next(&entry)) {
+        if (entry.kind == .file) return store.object_path(buffer, entry.object);
+        if (entry.kind == .dir and below == null) below = entry.subtree;
+    }
+    if (below) |subtree| return try first_object_path(subtree, buffer);
+    return null;
+}
+
+test "a tree with a file missing or changed is refused, naming what stopped the pack" {
+    // Goal: E0550's cases. Method: remove a file object, then flip a byte of another pack.
+    start(4, 0);
+    const imported = try import_source(false);
+    var path: PathBuf = undefined;
+    const object_path = (try first_object_path(imported.digest, &path)).?;
+    var failure: pack.Failure = undefined;
+    var made: pack.Packed = undefined;
+    const input: pack.Input = .{ .tree = imported.digest, .settings = &settings, .labels = null };
+    packing.piece = constants.pack_io_bytes;
+
+    files.flip_byte(object_path, 0);
+    try testing.expectError(error.Stopped, pack.pack_pieces(&store, &packing, input, &made, &failure));
+    try testing.expectEqual(pack.Stop.object_changed, failure.stop);
+
+    files.remove_path(object_path);
+    try testing.expectError(error.Stopped, pack.pack_pieces(&store, &packing, input, &made, &failure));
+    try testing.expectEqual(pack.Stop.object_missing, failure.stop);
 }
