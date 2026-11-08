@@ -216,12 +216,23 @@ fn check_header_signature(
     if (!std.mem.eql(u8, header, parts.main_header)) {
         return checker.fail("{s} is not the header of {s}", .{ header_path, path });
     }
-    const bound = openpgp.bound_binary(signature, header) orelse return checker.fail(
-        "the header signature in {s} does not sign its header (stale or swapped " ++
-            ".header.sig?); sign round 1 again into an empty signatures directory",
-        .{path},
-    );
-    note_key(checker, path, bound.fingerprint);
+    switch (openpgp.bound_binary(signature, header)) {
+        .stale => checker.fail(
+            "the header signature in {s} does not sign its header (stale or swapped " ++
+                ".header.sig?); sign round 1 again into an empty signatures directory",
+            .{path},
+        ),
+        .several => checker.fail(
+            "the header signature in {s} holds more than one signature; sign with one key",
+            .{path},
+        ),
+        .unsupported => checker.fail(
+            "the header signature in {s} is not a v4 signature with a SHA-2 digest; use a " ++
+                "v4 key (not Ed448) and not SHA-1",
+            .{path},
+        ),
+        .bound => |bound| note_key(checker, path, bound.fingerprint),
+    }
 }
 
 fn note_key(checker: *Checker, path: []const u8, print: ?[20]u8) void {
@@ -285,7 +296,7 @@ fn check_bound(
             .{path},
         ),
         .unsupported => checker.fail(
-            "{s} is a signature version this tool does not read; use a v4 key",
+            "{s} is not a v4 signature with a SHA-2 digest; use a v4 key (not Ed448), not SHA-1",
             .{path},
         ),
         .bound => |bound| note_key(checker, path, bound.fingerprint),
