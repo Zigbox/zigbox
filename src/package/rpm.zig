@@ -502,6 +502,25 @@ pub fn split(bytes: []const u8) ?Parts {
     };
 }
 
+/// The bytes of a binary tag (type 7) in a header, such as the OpenPGP signature (268) in a
+/// signature header; null when the tag is absent or the header is damaged.
+pub fn binary_tag(header: []const u8, wanted: u32) ?[]const u8 {
+    const length = header_length(header) orelse return null;
+    const entries = std.mem.readInt(u32, header[8..12], .big);
+    const data_start = 16 + @as(usize, entries) * 16;
+    const data = header[data_start..length];
+    for (0..entries) |index| {
+        const entry = header[16 + index * 16 ..][0..16];
+        if (std.mem.readInt(u32, entry[0..4], .big) != wanted) continue;
+        if (std.mem.readInt(u32, entry[4..8], .big) != tag_type.binary) return null;
+        const offset: usize = std.mem.readInt(u32, entry[8..12], .big);
+        const count: usize = std.mem.readInt(u32, entry[12..16], .big);
+        if (offset > data.len or count > data.len - offset) return null;
+        return data[offset..][0..count];
+    }
+    return null;
+}
+
 pub const Options = struct {
     /// An OpenPGP signature (binary packet) over `header_bytes`, to place in the signature header.
     header_signature: ?[]const u8 = null,

@@ -30,6 +30,12 @@ gpg --batch --detach-sign -u $KEY -o $SIGNATURES/zigbox-X.Y.Z-1.x86_64.rpm.heade
 
 An armored signature is refused with a one-line message.
 
+Each header signature is tied to the header it signs (its 16 digest bits and its single issuer
+fingerprint), so a swapped or missing `.header.sig` is refused before anything is written, and
+`packages-check` refuses an rpm without one once any signature is placed. RSA (including 4096-bit)
+and Ed25519 keys are read; a signature may be up to 1024 bytes
+(`docs/decisions/2026-11-08-openpgp-signature-bound.md`).
+
 ## Round 2: sign the repository metadata
 
 ```sh
