@@ -47,6 +47,23 @@ pub fn rpm_check_verdict(output: []const u8, status: u8) Verdict {
     return .refused;
 }
 
+/// What one guest showed, for the pass or fail of the check.
+pub const Outcome = struct {
+    metadata: Verdict,
+    package: Verdict,
+    installed: bool,
+    zbx_ran: bool,
+};
+
+/// A guest passes only when it accepted the test key's signature on the repository metadata and
+/// on the package, installed from the signed repository, and `zbx` ran. A refused signature is
+/// a failure, whatever else worked: an unsigned install would hide a signature nobody checked.
+pub fn guest_passed(outcome: Outcome) bool {
+    if (outcome.metadata == .refused) return false;
+    if (outcome.package == .refused) return false;
+    return outcome.installed and outcome.zbx_ran;
+}
+
 /// `zbx version` prints exactly `zbx <version>`.
 pub fn version_ok(output: []const u8, version: []const u8) bool {
     assert(version.len > 0);
@@ -125,4 +142,28 @@ test "zbx version and doctor judgements" {
     try std.testing.expect(!doctor_ran("kernel ok\n", 1));
     try std.testing.expect(!doctor_ran("kernel ok\n", 127));
     try std.testing.expect(!doctor_ran("", 0));
+}
+
+test "a guest passes only with both signatures accepted, the install done and zbx run" {
+    // Goal: a refused signature fails the check even when everything else worked (no unsigned
+    // fallback, supervisor decision on slice 7). Method: flip each field of a passing outcome.
+    const good: Outcome = .{
+        .metadata = .accepted,
+        .package = .accepted,
+        .installed = true,
+        .zbx_ran = true,
+    };
+    try std.testing.expect(guest_passed(good));
+    var bad = good;
+    bad.metadata = .refused;
+    try std.testing.expect(!guest_passed(bad));
+    bad = good;
+    bad.package = .refused;
+    try std.testing.expect(!guest_passed(bad));
+    bad = good;
+    bad.installed = false;
+    try std.testing.expect(!guest_passed(bad));
+    bad = good;
+    bad.zbx_ran = false;
+    try std.testing.expect(!guest_passed(bad));
 }

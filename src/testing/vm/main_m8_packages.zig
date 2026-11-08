@@ -8,8 +8,9 @@
 //! uses no `zbx` of its own, only what the packages contain.
 //!
 //! `zig build demo-m8-packages` (KVM) or with `-Daccel=tcg`; `--only ubuntu|debian|fedora|rocky`
-//! runs one guest. A refused signature is recorded and the install is retried unsigned, so the
-//! rest of the check still says whether the packages install and run.
+//! runs one guest. The guest trusts the test key's public half and every check is signed: a refused
+//! signature FAILS the check (never an unsigned retry, which would hide an unchecked signature),
+//! and is recorded in the summary. A failing guest does not stop the others.
 
 const std = @import("std");
 const Io = std.Io;
@@ -86,13 +87,13 @@ const Args = struct {
     only: []const u8 = "",
 };
 
-/// What one guest showed: the signature verdicts, whether the install had to go unsigned, and
-/// whether `zbx` then ran.
+/// What one guest showed: the signature verdicts, whether the signed install worked, and whether
+/// `zbx` then ran.
 const Report = struct {
     guest: *const Guest,
     metadata: Verdict = .refused,
     package: Verdict = .refused,
-    unsigned_install: bool = false,
+    installed: bool = false,
     version_ok: bool = false,
     doctor_ran: bool = false,
 };
@@ -150,9 +151,8 @@ fn parse_args(init: std.process.Init) !Args {
     return args;
 }
 
-/// Runs every chosen guest and prints the table of verdicts. True when every guest installed and
-/// ran `zbx`; a refused signature is a finding, not a failure, except on Ubuntu, whose archive
-/// key type the M8 brief settled (docs/briefs/M8-trust.md).
+/// Runs every chosen guest and prints the table of verdicts. True when every guest accepted both
+/// signatures, installed from the signed repository and ran `zbx` (`checks.guest_passed`).
 fn run_all(init: std.process.Init, out: *Io.Writer, args: Args) !bool {
     const arena = init.arena.allocator();
     const tar = try pack_tree(init, arena, args.packages);
@@ -173,15 +173,21 @@ fn summarize(out: *Io.Writer, reports: []const Report) !bool {
     var passed = reports.len > 0;
     for (reports) |report| {
         const ran = report.version_ok and report.doctor_ran;
+        const good = checks.guest_passed(.{
+            .metadata = report.metadata,
+            .package = report.package,
+            .installed = report.installed,
+            .zbx_ran = ran,
+        });
         try out.print("{s}:   {s: <7} metadata {s: <8} package {s: <8} {s}  zbx {s}\n", .{
             demo_name,
             report.guest.name,
             @tagName(report.metadata),
             @tagName(report.package),
-            if (report.unsigned_install) "unsigned-install" else "signed-install  ",
+            if (report.installed) "installed    " else "NOT INSTALLED",
             if (ran) "ran" else "DID NOT RUN",
         });
-        if (!ran) passed = false;
+        if (!good) passed = false;
     }
     return passed;
 }
@@ -244,7 +250,7 @@ fn run_guest(
         .apt => try install_apt(&session, out, &report),
         .dnf => try install_dnf(&session, out, &report),
     }
-    try check_installed(&session, out, args.version, &report);
+    if (report.installed) try check_installed(&session, out, args.version, &report);
     try session.shutdown();
     return report;
 }
@@ -306,18 +312,10 @@ fn install_apt(session: *Session, out: *Io.Writer, report: *Report) !void {
     try H.show(out, "apt-get update (the Ed25519 probe)", probe);
     report.metadata = checks.apt_update_verdict(probe.output, probe.status);
     report.package = report.metadata;
-    if (report.metadata == .refused) {
-        report.unsigned_install = true;
-        const trusted = "echo 'deb [trusted=yes] http://127.0.0.1:8081/apt stable main' > " ++
-            apt_source;
-        _ = try session.run(trusted, vm.limits.command_timeout_kvm_s);
-        const retry = try session.run(update, install_timeout_s);
-        try H.show(out, "apt-get update, unsigned", retry);
-    }
     const install = "DEBIAN_FRONTEND=noninteractive apt-get -y -q install zigbox";
     const installed = try session.run(install, install_timeout_s);
     try H.show(out, "apt-get install zigbox", installed);
-    if (installed.status != 0) return error.InstallFailed;
+    report.installed = installed.status == 0;
 }
 
 const dnf_repo = "/etc/yum.repos.d/zigbox-test.repo";
@@ -325,7 +323,6 @@ const dnf_header = "[zigbox-test]\nname=zigbox test\n" ++
     "baseurl=http://127.0.0.1:8081/rpm/$basearch\nenabled=1\n";
 const dnf_signed = dnf_header ++ "gpgcheck=1\nrepo_gpgcheck=1\n" ++
     "gpgkey=file://" ++ repo_dir ++ "/zigbox-test-key.asc\n";
-const dnf_unsigned = dnf_header ++ "gpgcheck=0\nrepo_gpgcheck=0\n";
 
 fn write_repo(session: *Session, text: []const u8) !void {
     var buffer: [512]u8 = undefined;
@@ -354,14 +351,10 @@ fn install_dnf(session: *Session, out: *Io.Writer, report: *Report) !void {
     const rpm = try session.run(rpm_probe, vm.limits.command_timeout_kvm_s);
     try H.show(out, "rpm -K (the package Ed25519 probe)", rpm);
     report.package = checks.rpm_check_verdict(rpm.output, rpm.status);
-    if (report.metadata == .refused or report.package == .refused) {
-        report.unsigned_install = true;
-        try write_repo(session, comptime escaped(dnf_unsigned));
-    }
     const install = "dnf -y -q --disablerepo='*' --enablerepo=zigbox-test install zigbox";
     const installed = try session.run(install, install_timeout_s);
     try H.show(out, "dnf install zigbox", installed);
-    if (installed.status != 0) return error.InstallFailed;
+    report.installed = installed.status == 0;
 }
 
 fn check_installed(session: *Session, out: *Io.Writer, version: []const u8, report: *Report) !void {
