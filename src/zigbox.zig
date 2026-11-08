@@ -126,6 +126,25 @@ pub const Facts = @import("doctor.zig").Facts;
 /// coded `Diag`. `pull.zig` has the rest.
 pub const pull = @import("pull.zig");
 
+/// Push (M8, lane U): the packing a registry upload and an OCI layout share. `push.pack` makes
+/// the one deterministic gzip layer of a tree, its config and manifest (the caller's
+/// `push.Workspace`, about 8 MiB: static storage or the heap) and leaves them in the store's blob
+/// cache; `push.export_layout` writes them as an OCI image layout. The same tree and settings
+/// give the same digests, in any store and at any buffer size. Nothing here reads the
+/// environment, touches the network or prints; a refusal is a `Stopped` error whose `Failure`
+/// says which step and why (`push/diagnose.zig` turns one into a coded `Diag`). The upload
+/// itself is slice 11 and is not here yet.
+pub const push = struct {
+    pub const pack = @import("push/pack.zig");
+    pub const export_mod = @import("push/export.zig");
+    pub const source = @import("push/source.zig");
+    pub const Workspace = pack.Workspace;
+    pub const Input = pack.Input;
+    pub const Packed = pack.Packed;
+    pub const Exported = export_mod.Exported;
+    pub const export_layout = export_mod.export_layout;
+};
+
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
@@ -164,6 +183,8 @@ test "the module's surface is what the contract names" {
     _ = exec_wait;
     _ = pull.pull;
     _ = pull.Workspace;
+    _ = push.pack.pack;
+    _ = push.export_layout;
     _ = exec_signal;
     _ = ExecHandle;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);

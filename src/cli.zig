@@ -1957,7 +1957,8 @@ const Missing = enum {
 /// What `push` lacks: the source to pack, or `--dry-run`, the only mode this build has.
 fn missing_push(diag: *Diag, missing: Missing) void {
     assert(diag.code != null);
-    assert(missing == .source or missing == .dry_run);
+    assert(@backingInt(missing) >= @backingInt(Missing.source));
+    assert(@backingInt(missing) <= @backingInt(Missing.dry_run));
     if (missing == .source) {
         diag.cause("'push' needs the build result, image or tree to pack", .{});
     } else {
@@ -2500,7 +2501,9 @@ fn run_store(
     diag: *Diag,
 ) RunError!u8 {
     if (invocation.command != .store) {
-        assert(invocation.command == .commit or invocation.command == .push);
+        assert(invocation.command != .run);
+        assert(invocation.command != .store);
+        assert(invocation.store.action != .ls);
     }
     assert(diag.code == null);
     assert(storage.gc_tables.len >= gc.tables_bytes_min); // The caller gave gc its room.

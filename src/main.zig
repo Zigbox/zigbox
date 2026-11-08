@@ -179,6 +179,7 @@ test {
     _ = @import("pull_commands.zig");
     _ = @import("pull_tests.zig");
     _ = @import("pull_library_tests.zig");
+    _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");

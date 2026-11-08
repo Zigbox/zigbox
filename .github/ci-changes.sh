@@ -75,7 +75,7 @@ classify() {
     # The source areas only some demos exercise. Anything else under src/ is the runtime every
     # demo runs on.
     src/build/* | src/build_commands.zig) want_one m7; return ;;
-    src/trust/*) want_one m8; return ;;
+    src/trust/* | src/push/*) want_one m8; return ;;
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;
     src/state/* | src/*state*.zig) want_from m6; return ;;
     src/exec_commands.zig | src/logs_commands.zig | src/runtime/exec* | src/runtime/logfile.zig) want_from m6b; return ;;
