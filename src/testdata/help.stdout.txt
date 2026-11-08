@@ -14,6 +14,7 @@ commands:
   commit <name>   turn what a stopped container changed into a new tree and print its digest
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
+  key <cmd>       signing keys: new, list, show (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -122,6 +123,17 @@ state:
                            writes the volume
   volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
   touches them, and nothing but state rm removes one
+
+key:
+  zbx key new <name>       make an Ed25519 signing key, its secret sealed under a passphrase
+                           (argon2id); asked twice on a terminal, or the first line of
+                           --passphrase-file <file>, which only you can read
+  zbx key new <name> --no-passphrase   keep the secret in the clear, mode 0600
+  zbx key list             each key: name, encryption, id and public key
+  zbx key show <name>      one key: name, id, public key and encryption
+  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys
+  (~/.config/zbx/keys), mode 0700; a key is never overwritten; a forgotten passphrase is a
+  lost key; list and show never ask for a passphrase and never print a secret
 
 pull:
   zbx pull [--resolve-only] <reference>

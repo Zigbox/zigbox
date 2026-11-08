@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8
 #
 # Environment: EVENT (github.event_name), HEAD_REF (the PR's head branch), LABELS (the PR's
 # labels, space separated). See docs/decisions/2026-11-04-ci-affected-demos.md.
@@ -11,7 +11,7 @@
 # The rules err toward running. A path no rule below names runs every demo.
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7)
+demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8)
 declare -A want=()
 
 index_of() {
@@ -56,9 +56,9 @@ classify() {
     # and the site, and tests of the code (they never reach the zbx binary a demo runs).
     docs/demos/m*.md)
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
-      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7) want_one "$suffix" ;; esac
+      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8) want_one "$suffix" ;; esac
       return ;;
-    src/mac/* | src/package.zig | src/package/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | packaging/* | \
+    src/mac/* | src/package.zig | src/package_*.zig | src/package/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | packaging/* | \
       src/testing/vm/*top20* | src/testing/vm/*z7* | LICENSE | docs/* | site/* | *.md) return ;;
     src/*_tests.zig | src/*/*_tests.zig | src/fuzz*.zig | src/tidy.zig | src/errors_site.zig | \
       src/size_check.zig | src/testdata/* | src/*/fixtures/*) return ;;
@@ -75,6 +75,7 @@ classify() {
     # The source areas only some demos exercise. Anything else under src/ is the runtime every
     # demo runs on.
     src/build/* | src/build_commands.zig) want_one m7; return ;;
+    src/trust/*) want_one m8; return ;;
     src/registry/* | src/pull*.zig | src/lock_*.zig) want_from m4; return ;;
     src/state/* | src/*state*.zig) want_from m6; return ;;
     src/exec_commands.zig | src/logs_commands.zig | src/runtime/exec* | src/runtime/logfile.zig) want_from m6b; return ;;

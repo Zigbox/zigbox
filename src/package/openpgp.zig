@@ -258,8 +258,17 @@ pub fn clearsign(memory: Allocator, pair: Ed25519.KeyPair, text: []const u8) Err
     return shown.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-/// The fields of a signature packet this module wrote, for verification in tests.
-const Parsed = struct { prefix: []const u8, r: [32]u8, s: [32]u8 };
+/// The fields of a v4 signature packet that tell what it signed.
+const Parsed = struct {
+    /// The hashed part, from the version through the hashed subpackets.
+    prefix: []const u8,
+    hashed_subpackets: []const u8,
+    hash_algorithm: u8,
+    /// The first 16 bits of the digest, which the packet records.
+    left: [2]u8,
+    r: [32]u8,
+    s: [32]u8,
+};
 
 fn read_mpi32(bytes: []const u8, at: *usize) ?[32]u8 {
     if (at.* + 2 > bytes.len) return null;
@@ -273,20 +282,185 @@ fn read_mpi32(bytes: []const u8, at: *usize) ?[32]u8 {
     return value;
 }
 
-fn parse(packet: []const u8) ?Parsed {
-    if (packet.len < 2 or packet[0] != (0xc0 | packet_signature)) return null;
-    var at: usize = 2;
-    if (packet[1] >= 192) at = 3;
-    if (at + 6 > packet.len) return null;
-    const hashed_length = std.mem.readInt(u16, packet[at + 4 ..][0..2], .big);
-    const prefix_end = at + 6 + hashed_length;
-    if (prefix_end + 2 > packet.len) return null;
-    const unhashed_length = std.mem.readInt(u16, packet[prefix_end..][0..2], .big);
-    var cursor = prefix_end + 2 + unhashed_length + 2; // Skip the 16 bits of the digest.
-    const r = read_mpi32(packet, &cursor) orelse return null;
-    const s = read_mpi32(packet, &cursor) orelse return null;
-    return .{ .prefix = packet[at..prefix_end], .r = r, .s = s };
+/// The body of a signature packet in either header format: gpg writes the old one (`0x89`), this
+/// module the new one (`0xc2`).
+fn packet_body(packet: []const u8) ?[]const u8 {
+    if (packet.len < 2 or packet[0] & 0x80 == 0) return null;
+    var at: usize = 1;
+    var length: usize = 0;
+    if (packet[0] & 0x40 != 0) {
+        if (packet[0] & 0x3f != packet_signature) return null;
+        if (packet[1] < 192) {
+            length = packet[1];
+            at = 2;
+        } else if (packet[1] < 224 and packet.len >= 3) {
+            length = (@as(usize, packet[1] - 192) << 8) + packet[2] + 192;
+            at = 3;
+        } else return null; // Five-octet and partial lengths: never a signature of ours or gpg's.
+    } else {
+        if ((packet[0] >> 2) & 0x0f != packet_signature) return null;
+        const width: usize = switch (packet[0] & 3) {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            else => return null,
+        };
+        if (packet.len < 1 + width) return null;
+        for (packet[1..][0..width]) |byte| length = (length << 8) | byte;
+        at = 1 + width;
+    }
+    if (at + length != packet.len) return null;
+    return packet[at..];
 }
+
+fn parse(packet: []const u8) ?Parsed {
+    const body = packet_body(packet) orelse return null;
+    if (body.len < 6 or body[0] != 4) return null;
+    const hashed_length = std.mem.readInt(u16, body[4..6], .big);
+    const prefix_end = 6 + @as(usize, hashed_length);
+    if (prefix_end + 2 > body.len) return null;
+    const unhashed_length = std.mem.readInt(u16, body[prefix_end..][0..2], .big);
+    var cursor = prefix_end + 2 + @as(usize, unhashed_length);
+    if (cursor + 2 > body.len) return null;
+    const left = body[cursor..][0..2].*;
+    cursor += 2;
+    const r = read_mpi32(body, &cursor) orelse return null;
+    const s = read_mpi32(body, &cursor) orelse return null;
+    return .{
+        .prefix = body[0..prefix_end],
+        .hashed_subpackets = body[6..prefix_end],
+        .hash_algorithm = body[3],
+        .left = left,
+        .r = r,
+        .s = s,
+    };
+}
+
+/// The issuer fingerprint (subpacket 33) in the hashed part of a signature, when it has one.
+pub fn issuer_fingerprint(packet: []const u8) ?[20]u8 {
+    const parsed = parse(packet) orelse return null;
+    var rest = parsed.hashed_subpackets;
+    while (rest.len > 0) {
+        if (rest[0] >= 192) return null; // Longer subpackets: none that we need.
+        const length: usize = rest[0];
+        if (length == 0 or 1 + length > rest.len) return null;
+        const body = rest[1..][0..length];
+        if (body[0] & 0x7f == 33 and body.len == 22 and body[1] == 4) return body[2..22].*;
+        rest = rest[1 + length ..];
+    }
+    return null;
+}
+
+fn left_of(comptime Hash: type, material: []const []const u8, prefix: []const u8) [2]u8 {
+    var hash = Hash.init(.{});
+    for (material) |part| hash.update(part);
+    hash.update(prefix);
+    hash.update(&.{ 0x04, 0xff });
+    var length: [4]u8 = undefined;
+    std.mem.writeInt(u32, &length, @intCast(prefix.len), .big);
+    hash.update(&length);
+    return hash.finalResult()[0..2].*;
+}
+
+/// Whether the packet's recorded 16 digest bits are those of `material`: a swapped or stale
+/// signature fails this, short of one chance in 65536. It is not a signature check (that needs
+/// the public key, which the owner's `gpg --verify` has); it ties a signature file to its bytes.
+fn digest_matches(packet: []const u8, material: []const []const u8) bool {
+    const parsed = parse(packet) orelse return false;
+    const left = switch (parsed.hash_algorithm) {
+        8 => left_of(Sha256, material, parsed.prefix),
+        9 => left_of(std.crypto.hash.sha2.Sha384, material, parsed.prefix),
+        10 => left_of(std.crypto.hash.sha2.Sha512, material, parsed.prefix),
+        11 => left_of(std.crypto.hash.sha2.Sha224, material, parsed.prefix),
+        else => return false,
+    };
+    return std.mem.eql(u8, &left, &parsed.left);
+}
+
+/// The binary packets of the first armored block of `text` (`-----BEGIN ...` to `-----END`).
+fn dearmor(memory: Allocator, text: []const u8) Error!?[]u8 {
+    const begin = std.mem.indexOf(u8, text, "-----BEGIN PGP SIGNATURE-----") orelse return null;
+    var lines = std.mem.splitScalar(u8, text[begin..], '\n');
+    _ = lines.next();
+    var base64: std.ArrayList(u8) = .empty;
+    var in_headers = true;
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \t\r");
+        if (in_headers) {
+            if (line.len == 0) in_headers = false;
+            continue;
+        }
+        if (line.len == 0 or line[0] == '=' or line[0] == '-') break;
+        try base64.appendSlice(memory, line);
+    }
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(base64.items) catch return null;
+    const out = try memory.alloc(u8, size);
+    decoder.decode(out, base64.items) catch return null;
+    return out;
+}
+
+/// `text` as a text-mode signature hashes it: lines end CRLF, trailing blanks stripped, and the
+/// last line ending is not part of it.
+fn canonical_text(memory: Allocator, text: []const u8) Error![]u8 {
+    var out = Output.init(memory);
+    var body = text;
+    if (std.mem.endsWith(u8, body, "\n")) body = body[0 .. body.len - 1];
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try put(&out.writer, "\r\n");
+        first = false;
+        try put(&out.writer, std.mem.trimEnd(u8, line, " \t\r"));
+    }
+    return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+pub const Form = enum {
+    /// `gpg --clearsign`: the text and its signature in one file.
+    clearsigned,
+    /// `gpg -abs`: an armored signature over a file.
+    armored_detached,
+};
+
+/// Whether `file` is a signature (in `form`) over exactly `signed`; the answer is the signature's
+/// issuer fingerprint when it names one. `null` means it is not a signature over those bytes.
+pub fn bound_to(
+    memory: Allocator,
+    form: Form,
+    file: []const u8,
+    signed: []const u8,
+) Error!?Bound {
+    var packet: []u8 = undefined;
+    var canonical: []const u8 = signed;
+    switch (form) {
+        .armored_detached => packet = (try dearmor(memory, file)) orelse return null,
+        .clearsigned => {
+            const header = "-----BEGIN PGP SIGNED MESSAGE-----";
+            if (!std.mem.startsWith(u8, file, header)) return null;
+            const blank = std.mem.indexOf(u8, file, "\n\n") orelse return null;
+            const end = std.mem.indexOf(u8, file, "\n-----BEGIN PGP SIGNATURE-----") orelse
+                return null;
+            if (end < blank + 2) return null;
+            var shown = Output.init(memory);
+            var lines = std.mem.splitScalar(u8, file[blank + 2 .. end], '\n');
+            while (lines.next()) |line| {
+                const plain = if (std.mem.startsWith(u8, line, "- ")) line[2..] else line;
+                try put(&shown.writer, plain);
+                try put(&shown.writer, "\n");
+            }
+            const shown_canonical = try canonical_text(memory, shown.written());
+            const signed_canonical = try canonical_text(memory, signed);
+            if (!std.mem.eql(u8, shown_canonical, signed_canonical)) return null;
+            canonical = signed_canonical;
+            packet = (try dearmor(memory, file[end..])) orelse return null;
+        },
+    }
+    if (!digest_matches(packet, &.{canonical})) return null;
+    return .{ .fingerprint = issuer_fingerprint(packet) };
+}
+
+pub const Bound = struct { fingerprint: ?[20]u8 };
 
 /// Whether `packet` is a valid signature by `public` over `data` (binary kind) or over the
 /// canonical text (`text` kind); checks with `std.crypto.sign.Ed25519`.

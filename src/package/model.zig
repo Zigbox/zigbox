@@ -80,7 +80,8 @@ pub const Error = error{
 /// One line saying what a package problem is, for the build tool to print after `package: `.
 pub fn describe(err: Error) []const u8 {
     return switch (err) {
-        error.BadName => "a name, version or revision has an unusable byte or length",
+        error.BadName => "a name, version or revision has an unusable byte or length " ++
+            "(a version has no - or _)",
         error.BadText => "a summary, description, licence, homepage or maintainer is empty, " ++
             "too long or has a control byte",
         error.BadPath => "a file path is not an absolute path of plain parts that fits a tar name",
@@ -108,6 +109,15 @@ fn check_name(name: []const u8) Error!void {
     if (name.len > constants.package_name_bytes_max) return error.BadName;
     for (name) |byte| {
         if (!name_byte_ok(byte)) return error.BadName;
+    }
+}
+
+/// A version or revision: a name without `-` (rpm splits NEVRA there, and dpkg starts the
+/// revision) or `_`, which dpkg refuses.
+fn check_version(version: []const u8) Error!void {
+    try check_name(version);
+    for (version) |byte| {
+        if (byte == '-' or byte == '_') return error.BadName;
     }
 }
 
@@ -141,8 +151,9 @@ pub fn check_path(path: []const u8) Error!void {
 /// Refuses a package the writers could not describe faithfully. Pure: no allocation.
 pub fn validate(package: *const Package) Error!void {
     try check_name(package.name);
-    try check_name(package.version);
-    try check_name(package.revision);
+    try check_version(package.version);
+    if (!std.ascii.isDigit(package.version[0])) return error.BadName; // dpkg wants a digit first.
+    try check_version(package.revision);
     try check_text(package.summary, false, constants.package_summary_bytes_max);
     try check_text(package.description, true, constants.package_description_bytes_max);
     try check_text(package.license, false, constants.package_name_bytes_max);
@@ -276,6 +287,17 @@ test "validate refuses what the writers cannot describe" {
     var bad = good;
     bad.name = "Zig box";
     try std.testing.expectError(error.BadName, validate(&bad));
+    for ([_][]const u8{ "0.4.0-rc.1", "0.4_0", "v0.4.0" }) |version| {
+        bad = good;
+        bad.version = version; // `-`, `_` and a leading letter break rpm or dpkg.
+        try std.testing.expectError(error.BadName, validate(&bad));
+    }
+    bad = good;
+    bad.revision = "1-2";
+    try std.testing.expectError(error.BadName, validate(&bad));
+    bad = good;
+    bad.version = "0.4.0~rc.1";
+    try validate(&bad);
     bad = good;
     bad.summary = "a\nb";
     try std.testing.expectError(error.BadText, validate(&bad));

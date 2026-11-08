@@ -7,7 +7,7 @@ Group       : Unspecified
 Size        : 34
 License     : MIT
 Signature   : (none)
-Source RPM  : sample-1.2.3.src.rpm
+Source RPM  : sample-1.2.3-1.src.rpm
 Build Date  : Tue Jan  1 00:00:00 1980
 Build Host  : zigbox-build
 URL         : https://example.invalid/sample

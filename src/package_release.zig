@@ -214,7 +214,7 @@ fn add_signatures(
 }
 
 /// How far along the two rounds of signing a build is, for the commands the tool prints next.
-pub const Round = enum { headers, trees, done };
+pub const Round = enum { trees, done };
 
 pub fn round_of(files: []const model.TreeFile) Round {
     if (find(files, apt_in_release_path) == null) return .trees;

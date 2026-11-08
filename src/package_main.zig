@@ -200,6 +200,11 @@ fn run_build(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.Wr
         },
         else => return refuse(log, "{s}", .{model.describe(@errorCast(err))}),
     };
+    // A placed signature that signs other bytes (stale, or swapped) stops the run before it writes.
+    check_tree.check_placed_signatures(files, memory, log) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return refuse(log, "a signature does not match the tree; nothing was written", .{}),
+    };
     const dir = Io.Dir.cwd();
     // One run, one set of files: nothing of an earlier run stays beside this one's.
     for ([_][]const u8{ "apt", "rpm", "to-sign" }) |sub| {

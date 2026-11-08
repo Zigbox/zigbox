@@ -18,12 +18,16 @@ pub const Member = struct { name: []const u8, bytes: []const u8 };
 /// The global header and members of a Debian-style `ar` archive: 16-byte names, decimal fields,
 /// mode 100644, owner 0:0, the fixed time, and a newline after an odd-sized member.
 pub fn ar_write(memory: Allocator, members: []const Member) Error![]u8 {
+    // The member is the payload plus tar headers and compression overhead: not bounded by
+    // `validate`, so it is refused here, before anything is allocated.
+    for (members) |member| {
+        if (member.bytes.len > constants.package_payload_bytes_max) return error.PayloadTooLarge;
+    }
     var out = Output.init(memory);
     const writer = &out.writer;
     writer.writeAll("!<arch>\n") catch return error.WriteFailed;
     for (members) |member| {
         assert(member.name.len <= 16);
-        assert(member.bytes.len <= constants.package_payload_bytes_max);
         writer.print("{s: <16}{d: <12}{d: <6}{d: <6}{o: <8}{d: <10}`\n", .{
             member.name, constants.package_source_date_epoch, 0, 0, 0o100644, member.bytes.len,
         }) catch return error.WriteFailed;
@@ -116,6 +120,18 @@ pub fn gzip(memory: Allocator, bytes: []const u8) Error![]u8 {
     compress.writer.writeAll(bytes) catch return error.WriteFailed;
     compress.finish() catch return error.WriteFailed;
     return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+test "an ar member over the payload bound is refused, not asserted" {
+    // Goal: tar headers and compression can push a valid payload's data.tar.gz past the bound;
+    // that is an error the caller prints, not a panic. The bytes are never touched.
+    const size = constants.package_payload_bytes_max + 1;
+    const huge = try std.heap.page_allocator.alloc(u8, size);
+    defer std.heap.page_allocator.free(huge);
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        ar_write(std.testing.allocator, &.{.{ .name = "data.tar.gz", .bytes = huge }}),
+    );
 }
 
 test "ar matches the format ar itself reads" {

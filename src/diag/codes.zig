@@ -191,6 +191,9 @@ pub const Code = enum(u8) {
     E0806,
     E0807,
     W0801,
+    E0901,
+    E0902,
+    E0911,
     E1001,
     E1002,
     E1003,
@@ -2899,6 +2902,71 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0901,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the key cannot be used",
+        .explanation =
+        \\A key is a pair of files in the keys directory ($XDG_CONFIG_HOME/zbx/keys,
+        \\by default ~/.config/zbx/keys): NAME.key holds the secret and NAME.pub the
+        \\public key. The cause says what is wrong: the file is not there, cannot be
+        \\read or written, is not a zbx key file, was written by a newer zbx, or its
+        \\secret can be read by other users. Like ssh, zbx refuses a secret that group
+        \\or others can read, and a keys directory that they can. It also refuses a
+        \\keys directory that is a symbolic link (or not a directory): keep the
+        \\keys in a real directory.
+        \\
+        \\Make the secret private to you:
+        \\    chmod 600 ~/.config/zbx/keys/NAME.key
+        \\    chmod 700 ~/.config/zbx/keys
+        \\
+        \\"zbx key list" shows the keys there are. A damaged key file cannot be
+        \\repaired; if you have no copy, make a new key and trust that one instead.
+        ,
+    },
+    .{
+        .code = .E0902,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a key with that name already exists",
+        .explanation =
+        \\"zbx key new" never replaces a key: a secret key that is overwritten is
+        \\gone for good, and so is everything signed with it that nobody else can
+        \\check. The name is taken by a key (or by half of one) in the keys directory.
+        \\
+        \\Choose another name:
+        \\    zbx key new release-2
+        \\
+        \\To retire the old key, remove its NAME.key and NAME.pub files yourself.
+        \\A NAME.key with no NAME.pub is what a "zbx key new" killed halfway
+        \\leaves; the cause says so, and removing that file frees the name.
+        ,
+    },
+    .{
+        .code = .E0911,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the key's passphrase is missing, unusable or wrong",
+        .explanation =
+        \\A key is sealed with a passphrase (argon2id and XChaCha20-Poly1305), unless
+        \\it was made with --no-passphrase. zbx asks for the passphrase on the
+        \\terminal when both standard input and standard error are one. Anywhere else
+        \\(CI, a script, an agent) there is no one to ask, and zbx does not read
+        \\standard input for it: give the passphrase in a file only you can read.
+        \\    zbx key new release --passphrase-file ~/.config/zbx/release.pass
+        \\
+        \\The file's first line is the passphrase, without its newline, at most 1024
+        \\bytes. A file that group or others can read is refused (chmod 600 it), and
+        \\so is an empty passphrase. A path that is a symbolic link (a secrets
+        \\volume mounts files that way) is refused too: name the file it points to.
+        \\A wrong passphrase is refused after the same work
+        \\as a right one, so the refusal tells an attacker nothing about how close the
+        \\guess was.
+        \\
+        \\A forgotten passphrase is a lost key. There is no recovery: make a new key.
+        ,
+    },
+    .{
         .code = .E1001,
         .severity = .@"error",
         .blame = .environment,
@@ -3357,6 +3425,7 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
+        .E0901, .E0902, .E0911 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

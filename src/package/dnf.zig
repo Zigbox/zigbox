@@ -87,7 +87,8 @@ fn package_xml(
     pkgid: []const u8,
 ) Error!void {
     const package = built.package;
-    const parts = rpm.split(built.bytes) orelse return error.OutOfMemory;
+    const parts = rpm.split(built.bytes) orelse
+        unreachable; // `built.bytes` is an rpm this module just wrote.
     const entries = try model.layout(memory, package, true);
     const epoch = constants.package_source_date_epoch;
     const rpm_arch = package.architecture.rpm_name();
@@ -123,8 +124,8 @@ fn package_xml(
     try print(writer, "    <rpm:buildhost>{s}</rpm:buildhost>\n", .{rpm.build_host});
     try print(
         writer,
-        "    <rpm:sourcerpm>{s}-{s}.src.rpm</rpm:sourcerpm>\n",
-        .{ package.name, package.version },
+        "    <rpm:sourcerpm>{s}-{s}-{s}.src.rpm</rpm:sourcerpm>\n",
+        .{ package.name, package.version, package.revision },
     );
     try print(
         writer,

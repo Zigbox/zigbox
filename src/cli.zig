@@ -30,6 +30,7 @@ const bundle = @import("bundle.zig");
 const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
+const key_commands = @import("trust/key_commands.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
@@ -64,6 +65,7 @@ const help_text =
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
     \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
+    \\  key <cmd>       signing keys: new, list, show (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -173,6 +175,17 @@ const help_text =
     \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); store gc never
     \\  touches them, and nothing but state rm removes one
     \\
+    \\key:
+    \\  zbx key new <name>       make an Ed25519 signing key, its secret sealed under a passphrase
+    \\                           (argon2id); asked twice on a terminal, or the first line of
+    \\                           --passphrase-file <file>, which only you can read
+    \\  zbx key new <name> --no-passphrase   keep the secret in the clear, mode 0600
+    \\  zbx key list             each key: name, encryption, id and public key
+    \\  zbx key show <name>      one key: name, id, public key and encryption
+    \\  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys
+    \\  (~/.config/zbx/keys), mode 0700; a key is never overwritten; a forgotten passphrase is a
+    \\  lost key; list and show never ask for a passphrase and never print a secret
+    \\
     \\pull:
     \\  zbx pull [--resolve-only] <reference>
     \\  <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
@@ -234,6 +247,7 @@ pub const Command = enum {
     explain,
     help,
     inspect,
+    key,
     lock,
     logs,
     exec,
@@ -415,6 +429,9 @@ pub const StateArgs = struct {
     out: ?[]const u8 = null,
 };
 
+/// What `key` was given: the subcommand, the key's name, and `new`'s two options.
+pub const KeyArgs = key_commands.Args;
+
 /// What `pull` was given besides its reference.
 pub const PullArgs = struct {
     resolve_only: bool = false,
@@ -443,6 +460,8 @@ pub const Invocation = struct {
     state: StateArgs,
     /// Set only when `command` is `build`.
     build: BuildArgs,
+    /// Set only when `command` is `key`.
+    key: KeyArgs,
 };
 
 pub const ParseError = error{
@@ -509,6 +528,10 @@ const Token = union(enum) {
     /// `--graph`, and `-f` whose value is the next argument: `build`'s.
     graph,
     file_next,
+    /// `--no-passphrase`, and `--passphrase-file` with its value next or after an `=`: `key new`'s.
+    no_passphrase,
+    passphrase_file_next,
+    passphrase_file_inline: []const u8,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -562,6 +585,11 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--graph")) return .graph;
     if (std.mem.eql(u8, argument, "-f")) return .file_next;
+    if (std.mem.eql(u8, argument, "--no-passphrase")) return .no_passphrase;
+    if (std.mem.eql(u8, argument, "--passphrase-file")) return .passphrase_file_next;
+    if (std.mem.startsWith(u8, argument, "--passphrase-file=")) {
+        return .{ .passphrase_file_inline = argument["--passphrase-file=".len..] };
+    }
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -592,6 +620,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "explain")) found = .explain;
     if (std.mem.eql(u8, name, "help")) found = .help;
     if (std.mem.eql(u8, name, "inspect")) found = .inspect;
+    if (std.mem.eql(u8, name, "key")) found = .key;
     if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "logs")) found = .logs;
     if (std.mem.eql(u8, name, "exec")) found = .exec;
@@ -613,7 +642,7 @@ fn operands_count(command: Command) u32 {
     const count: u32 = switch (command) {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .lock, .logs, .exec, .inspect => 1,
-        .store, .state => 2,
+        .store, .state, .key => 2,
     };
     assert(count <= 2);
     return count;
@@ -648,10 +677,11 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next, .out_next, .file_next => {
+            .confirm_next, .out_next, .file_next, .passphrase_file_next => {
                 if (index + 1 < args.len) index += 1;
             },
             .confirm_inline, .trash, .resolve_only, .by_image, .graph => {},
+            .no_passphrase, .passphrase_file_inline => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
             .operand => {
@@ -697,13 +727,12 @@ pub fn parse(
     var bundle_args: BundleArgs = .{};
     var pull_args: PullArgs = .{};
     var build_args: BuildArgs = .{};
+    var key_args: KeyArgs = .{ .action = .list, .name = null };
     var gc_args: GcArgs = .{};
     var export_file: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
-        const is_run = count > 0 and command_named(operands[0]) == .run;
-        const is_bundle = count > 0 and command_named(operands[0]) == .bundle;
         switch (classify(argument)) {
             .verbose => {},
             .output_inline, .output_next => try take_output(diag, args, &index),
@@ -717,24 +746,21 @@ pub fn parse(
                 run_args.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only => {
-                if (!is_run) return unknown_option(diag, argument);
-                run_args.detach = run_args.detach or classify(argument) == .detach;
-                run_args.read_only = run_args.read_only or classify(argument) == .read_only;
-            },
+            .detach, .read_only => try take_run_flag(diag, &run_args, operands[0..count], argument),
             .confirm_next, .confirm_inline, .trash => {
                 try take_gc_option(diag, &gc_args, operands[0..count], args, &index);
             },
             .last, .no_redact => {
-                if (!is_bundle) return unknown_option(diag, argument);
-                bundle_args.last = bundle_args.last or classify(argument) == .last;
-                bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
+                try take_bundle_flag(diag, &bundle_args, operands[0..count], argument);
             },
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
             .out_next => try take_out_option(diag, &export_file, operands[0..count], args, &index),
             .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
             .graph, .file_next => {
                 try take_build_option(diag, &build_args, operands[0..count], args, &index);
+            },
+            .no_passphrase, .passphrase_file_next, .passphrase_file_inline => {
+                try take_key_option(diag, &key_args, operands[0..count], args, &index);
             },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -749,10 +775,41 @@ pub fn parse(
     invocation.bundle = bundle_args;
     invocation.pull = pull_args;
     invocation.build = build_args;
+    invocation.key = key_args;
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
     invocation.state.out = export_file;
     if (export_file != null) assert(invocation.state.action == .@"export"); // `-o` is its own.
+}
+
+/// `--detach` and `--read-only`, which only `run` takes.
+fn take_run_flag(
+    diag: *Diag,
+    run_args: *RunArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(operands.len <= constants.args_count_max);
+    assert(classify(argument) != .operand);
+    const is_run = operands.len > 0 and command_named(operands[0]) == .run;
+    if (!is_run) return unknown_option(diag, argument);
+    run_args.detach = run_args.detach or classify(argument) == .detach;
+    run_args.read_only = run_args.read_only or classify(argument) == .read_only;
+}
+
+/// `--last` and `--no-redact`, which only `bundle` takes.
+fn take_bundle_flag(
+    diag: *Diag,
+    bundle_args: *BundleArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(operands.len <= constants.args_count_max);
+    assert(classify(argument) != .operand);
+    const is_bundle = operands.len > 0 and command_named(operands[0]) == .bundle;
+    if (!is_bundle) return unknown_option(diag, argument);
+    bundle_args.last = bundle_args.last or classify(argument) == .last;
+    bundle_args.no_redact = bundle_args.no_redact or classify(argument) == .no_redact;
 }
 
 /// `run` and `exec` take a command after `--`.
@@ -807,6 +864,67 @@ fn take_out_option(
     if (index.* + 1 == args.len) return missing_option_value(diag, "-o");
     index.* += 1;
     export_file.* = args[index.*];
+}
+
+/// `--no-passphrase` and `--passphrase-file FILE`, which only `key new` takes (checked once the
+/// subcommand is known, in `resolve_key`).
+fn take_key_option(
+    diag: *Diag,
+    key_args: *KeyArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    if (operands.len == 0) return unknown_option(diag, argument);
+    if (command_named(operands[0]) != .key) return unknown_option(diag, argument);
+    switch (classify(argument)) {
+        .no_passphrase => {
+            if (key_args.no_passphrase) return key_option_twice(diag, "--no-passphrase");
+            key_args.no_passphrase = true;
+        },
+        .passphrase_file_inline => |value| {
+            if (key_args.passphrase_file != null) {
+                return key_option_twice(diag, "--passphrase-file");
+            }
+            if (value.len == 0) return missing_option_value(diag, "--passphrase-file");
+            key_args.passphrase_file = value;
+        },
+        .passphrase_file_next => {
+            if (key_args.passphrase_file != null) {
+                return key_option_twice(diag, "--passphrase-file");
+            }
+            if (index.* + 1 == args.len) return missing_option_value(diag, "--passphrase-file");
+            index.* += 1;
+            if (args[index.*].len == 0) return missing_option_value(diag, "--passphrase-file");
+            key_args.passphrase_file = args[index.*];
+        },
+        else => unreachable, // Only these three tokens come here.
+    }
+}
+
+const both_options = "--no-passphrase --passphrase-file";
+
+/// A `key` option a second time, or both ways of giving the passphrase.
+fn key_option_twice(diag: *Diag, option: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(option.len >= 2);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    if (std.mem.eql(u8, option, both_options)) {
+        diag.cause("--no-passphrase and --passphrase-file cannot be combined", .{});
+    } else {
+        diag.cause("{s} given twice; a key has one passphrase", .{option});
+    }
+    diag.context("cmd", "{s}", .{"key"});
+    diag.context("arg", "{s}", .{option});
+    diag.fix(.{
+        .sentence = "give it once:",
+        .command = "zbx key new release --passphrase-file ./pass",
+    });
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
 }
 
 /// `--graph` and `-f FILE`, which only `build` takes.
@@ -1365,6 +1483,7 @@ fn resolve(
     const command = command_named(operands[0]) orelse return unknown_command(diag, operands[0]);
     if (command == .store) return resolve_store(operands, invocation, diag);
     if (command == .state) return resolve_state(operands, invocation, diag);
+    if (command == .key) return resolve_key(operands, invocation, diag);
     defer if (invocation.command == .commit) {
         invocation.store = .{ .action = .commit, .operand = invocation.operand };
     };
@@ -1482,6 +1601,60 @@ fn resolve_state(
     invocation.operand = null;
     invocation.state = .{ .action = action, .operand = if (given == 1) operands[2] else null };
     assert((invocation.state.operand != null) == (action != .ls));
+}
+
+/// `key` takes a subcommand, and for `new` and `show` a name. `--no-passphrase` and
+/// `--passphrase-file` belong to `new`, and exclude each other.
+fn resolve_key(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .key);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    if (operands.len == 1) return key_usage(diag, "'key' needs a subcommand: new, list or show");
+    const action = std.meta.stringToEnum(key_commands.Action, operands[1]) orelse {
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a key subcommand; they are new, list and show", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    };
+    const wanted: usize = if (action == .list) 0 else 1;
+    const given: usize = operands.len - 2;
+    if (given > wanted) return unexpected_argument(diag, .key, operands[2 + wanted]);
+    if (given < wanted) {
+        return key_usage(diag, if (action == .new)
+            "'key new' needs a name for the key"
+        else
+            "'key show' needs the name of the key to show");
+    }
+    const flags = invocation.key;
+    if (action != .new) {
+        if (flags.no_passphrase) return unknown_option(diag, "--no-passphrase");
+        if (flags.passphrase_file != null) return unknown_option(diag, "--passphrase-file");
+    }
+    if (flags.no_passphrase and flags.passphrase_file != null) {
+        return key_option_twice(diag, both_options);
+    }
+    invocation.command = .key;
+    invocation.operand = null;
+    invocation.key.action = action;
+    invocation.key.name = if (given == 1) operands[2] else null;
+    assert((invocation.key.name != null) == (action != .list));
+}
+
+fn key_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "key", .{});
+    diag.fix(.{ .sentence = "see the keys there are:", .command = "zbx key list" });
+    return error.MissingArgument;
 }
 
 fn state_usage(diag: *Diag, sentence: []const u8) ParseError {
@@ -1633,6 +1806,15 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
     }
     diag.context("cmd", "{s}", .{name});
     diag.context("arg", "{s}", .{echo});
+    unexpected_fix(diag, command);
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
+}
+
+/// The fix line of E0003 for each command.
+fn unexpected_fix(diag: *Diag, command: Command) void {
+    assert(diag.code.? == .E0003);
+    const name = @tagName(command);
     if (command == .run) {
         diag.fix(.{
             .sentence = "put the command after '--', and give each option once:",
@@ -1676,11 +1858,11 @@ fn unexpected_argument(diag: *Diag, command: Command, argument: []const u8) Pars
         });
     } else if (command == .lock) {
         diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
+    } else if (command == .key) {
+        diag.fix(.{ .sentence = "name one key at a time:", .command = "zbx key show release" });
     } else {
         diag.fix_with("pass one code:", "zbx {s} E0001", .{name});
     }
-    assert(diag.code.? == .E0003);
-    return error.UnexpectedArgument;
 }
 
 const Missing = enum {
@@ -2084,6 +2266,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .commit => return run_store(host, invocation, storage, diag),
         .store => return run_store(host, invocation, storage, diag),
         .state => return run_state(host, invocation, storage, diag),
+        .key => return run_key(host, invocation, diag),
     }
     return constants.exit_ok;
 }
@@ -2273,6 +2456,15 @@ fn run_state(
         .out = invocation.state.out,
     };
     return state_commands.run(host, args, output, &storage.handle.facts, &storage.state, diag) catch
+        return error.CommandFailed;
+}
+
+/// `zbx key ...`: the keys directory, and for `new` a passphrase.
+fn run_key(host: Host, invocation: *const Invocation, diag: *Diag) RunError!u8 {
+    assert(invocation.command == .key);
+    assert(diag.code == null);
+    const output: key_commands.Output = .{ .json = invocation.options.output == .json };
+    return key_commands.run(host, invocation.key, output, .{}, diag) catch
         return error.CommandFailed;
 }
 
@@ -3373,6 +3565,7 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
         .{ .topic = "build", .text = @embedFile("testdata/schema_build.stdout.txt") },
         .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
+        .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };
