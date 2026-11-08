@@ -120,6 +120,8 @@ fn run_new(job: *Job, diag: *Diag) Error!void {
     const name = job.args.name.?;
     const fs = job.host.filesystem();
     store.ensure_dir(fs, &job.paths, &job.failure) catch return unusable(job, ".key", diag);
+    const now = job.host.time_now();
+    _ = store.sweep_temporaries(fs, &job.paths, now);
     if (store.name_taken(fs, &job.paths, name)) return taken(job, diag);
     var phrase: passphrase_mod.Passphrase = undefined;
     phrase.length = 0;
@@ -150,11 +152,21 @@ fn create_failed(job: *const Job, diag: *Diag) Error {
     return unusable(job, ".key", diag);
 }
 
-/// E0902 for a name that has a file, saying so when the file is a `.key` left without its `.pub`.
+/// E0902 for a name that has a file, saying so when it is half a key and whether a live run
+/// can still be finishing it.
 fn taken(job: *const Job, diag: *Diag) Error {
     const name = job.args.name.?;
-    const orphan = store.orphan_secret(job.host.filesystem(), &job.paths, name);
-    diagnose.name_exists(diag, name, job.paths.dir.text(), orphan);
+    const fs = job.host.filesystem();
+    const state = store.name_state(fs, &job.paths, name, job.host.time_now());
+    const how: diagnose.Taken = switch (state) {
+        // Both files, or (the other run just finished, or a file just went) a state that
+        // is whole by now: say plainly the name is taken.
+        .whole, .free => .whole,
+        .secret_only_recent => .secret_recent,
+        .secret_only_stale => .secret_stale,
+        .public_only => .public_only,
+    };
+    diagnose.name_exists(diag, name, job.paths.dir.text(), how);
     return error.Failed;
 }
 
