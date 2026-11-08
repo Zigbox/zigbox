@@ -58,7 +58,7 @@ classify() {
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
       case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8) want_one "$suffix" ;; esac
       return ;;
-    src/mac/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | packaging/* | \
+    src/mac/* | src/package.zig | src/package_*.zig | src/package/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | packaging/* | \
       src/testing/vm/*top20* | src/testing/vm/*z7* | LICENSE | docs/* | site/* | *.md) return ;;
     src/*_tests.zig | src/*/*_tests.zig | src/fuzz*.zig | src/tidy.zig | src/errors_site.zig | \
       src/size_check.zig | src/testdata/* | src/*/fixtures/*) return ;;

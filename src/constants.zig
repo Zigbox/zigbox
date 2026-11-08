@@ -1404,6 +1404,62 @@ comptime {
     assert(build_step_timeout_ms > 0);
 }
 
+// ---- Packages (M8, slice 6): the `zigbox_package` module and `zig build packages` ----
+
+/// The most files (directories included) one package holds. `zbx` and its licence need three; the
+/// Zigcube omnibus of C3 needs a few more.
+pub const package_files_max: u32 = 64;
+/// A package path is a tar name without a prefix field: at most 99 bytes and a terminator.
+pub const package_path_bytes_max: u32 = 99;
+/// The largest file in a package: a static `zbx` is under 4 MiB (`release_size_limit`).
+pub const package_file_bytes_max: u32 = 64 * 1024 * 1024;
+/// The largest package payload, uncompressed. One rpm header field (ARCHIVESIZE) holds it as a
+/// 32-bit integer, so the bound sits well under 2^31.
+pub const package_payload_bytes_max: u32 = 256 * 1024 * 1024;
+/// The most weak dependencies (`Recommends`) a package names.
+pub const package_recommends_max: u32 = 8;
+/// A package's name, version and architecture strings, a dependency name, and its one-line text.
+pub const package_name_bytes_max: u32 = 64;
+pub const package_summary_bytes_max: u32 = 200;
+/// The long description and the licence text.
+pub const package_description_bytes_max: u32 = 4096;
+/// The most packages one repository holds (two architectures of a few packages).
+pub const repo_packages_max: u32 = 32;
+/// The most files `zig build packages` writes under `zig-out/packages/`.
+pub const repo_files_max: u32 = 256;
+/// A repository metadata file (`Packages`, `primary.xml`): at most this, uncompressed.
+pub const repo_metadata_bytes_max: u32 = 4 * 1024 * 1024;
+/// The deflate window and output buffer sizes the gzip writer needs (std: `flate.max_window_len`).
+pub const package_gzip_window_bytes: u32 = 64 * 1024;
+/// An rpm header: its index entries and data store. A signature header is far smaller.
+pub const rpm_header_entries_max: u32 = 128;
+pub const rpm_header_bytes_max: u32 = 1024 * 1024;
+/// The most OpenPGP signature bytes one detached signature or rpm signature tag holds.
+pub const openpgp_signature_bytes_max: u32 = 1024;
+/// An ASCII-armored block's line width (RFC 4880: at most 76).
+pub const armor_line_bytes: u32 = 64;
+/// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a
+/// commit and the store it was built beside agree.
+pub const package_source_date_epoch: u64 = build_source_date_epoch;
+/// The `Maintainer` of the `zigbox` packages. A supervisor assumption the owner may change
+/// (docs/decisions/2026-11-08-package-bounds.md).
+pub const package_maintainer = "Zigbox project <packages@zigbox.org>";
+/// The release of the fixed test key (the package writer's own signer; vouches for nothing).
+pub const package_test_key_user_id =
+    "Zigbox package test key (vouches for nothing) <test@zigbox.invalid>";
+
+comptime {
+    assert(package_path_bytes_max < 100); // A ustar name field is 100 bytes with its terminator.
+    assert(package_payload_bytes_max <= std.math.maxInt(i32));
+    assert(package_file_bytes_max <= package_payload_bytes_max);
+    assert(package_gzip_window_bytes >= std.compress.flate.max_window_len);
+    assert(armor_line_bytes % 4 == 0); // Base64 lines break on whole groups.
+    assert(armor_line_bytes <= 76);
+    assert(package_files_max <= rpm_header_entries_max);
+    assert(package_recommends_max < rpm_header_entries_max);
+    assert(repo_packages_max * 2 <= repo_files_max);
+}
+
 // ---- Keys (M8 trust) ----
 
 /// A key's name: `[a-z0-9-]`, at most this many bytes.
