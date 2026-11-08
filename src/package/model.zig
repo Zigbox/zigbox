@@ -80,7 +80,8 @@ pub const Error = error{
 /// One line saying what a package problem is, for the build tool to print after `package: `.
 pub fn describe(err: Error) []const u8 {
     return switch (err) {
-        error.BadName => "a name, version or revision has an unusable byte or length (a version has no - or _)",
+        error.BadName => "a name, version or revision has an unusable byte or length " ++
+            "(a version has no - or _)",
         error.BadText => "a summary, description, licence, homepage or maintainer is empty, " ++
             "too long or has a control byte",
         error.BadPath => "a file path is not an absolute path of plain parts that fits a tar name",

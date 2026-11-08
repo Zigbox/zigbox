@@ -41,7 +41,8 @@ const Checker = struct {
 
     fn fail(self: *Checker, comptime format: []const u8, arguments: anytype) void {
         self.failures += 1;
-        self.log.print("{s}: " ++ format ++ "\n", .{self.name} ++ arguments) catch {}; // Nowhere else.
+        // Nowhere else to report a failed log write.
+        self.log.print("{s}: " ++ format ++ "\n", .{self.name} ++ arguments) catch {};
     }
 
     fn read(self: *Checker, path: []const u8) ?[]const u8 {
@@ -378,10 +379,15 @@ fn signatures_of(memory: Allocator, files: []const model.TreeFile) !release.Sign
             const arch = architecture.rpm_name();
             if (!std.mem.startsWith(u8, file.path, "to-sign/")) continue;
             if (std.mem.indexOf(u8, file.path, arch) == null) continue;
-            signatures.header[index] = try openpgp.sign_detached(memory, openpgp.test_key(), file.bytes);
+            signatures.header[index] =
+                try openpgp.sign_detached(memory, openpgp.test_key(), file.bytes);
         }
-        if (std.mem.eql(u8, file.path, release.apt_in_release_path)) signatures.in_release = file.bytes;
-        if (std.mem.eql(u8, file.path, release.apt_release_gpg_path)) signatures.release_gpg = file.bytes;
+        if (std.mem.eql(u8, file.path, release.apt_in_release_path)) {
+            signatures.in_release = file.bytes;
+        }
+        if (std.mem.eql(u8, file.path, release.apt_release_gpg_path)) {
+            signatures.release_gpg = file.bytes;
+        }
         for (0..release.architectures.len) |index| {
             var buffer: [64]u8 = undefined;
             const name = std.fmt.bufPrint(&buffer, "rpm/{s}/repodata/repomd.xml.asc", .{
@@ -421,7 +427,8 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
         "rpm/x86_64/repodata/repomd.xml (stale or swapped?)";
     try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
     tree = .{ .files = crossed };
-    try std.testing.expectError(error.CheckFailed, check(tree.source(), memory, &sink.writer, strict));
+    const refused = check(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectError(error.CheckFailed, refused);
 
     const other: release.Inputs = .{ .version = "1.2.4", .zbx = test_inputs.zbx, .license = "x\n" };
     const stale = try release.build(memory, &other, .{ .signatures = good });
