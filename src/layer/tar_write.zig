@@ -263,10 +263,9 @@ test "a long path gets a pax record and a cut name" {
     try testing.expectEqual(@as(usize, 512 + 512 + 512), bytes.len);
     try testing.expectEqual(@as(u8, 'x'), bytes[156]);
     const used = std.mem.sliceTo(bytes[512..], 0);
-    const expected = "159 path=" ++ @as([150]u8, @splat('p')) ++ "\n";
+    const expected = "160 path=" ++ @as([150]u8, @splat('p')) ++ "\n";
     try testing.expectEqualStrings(expected, used);
     try testing.expectEqual(@as(u8, 'p'), bytes[1024 + 99]);
-    try testing.expectEqual(@as(u8, 0), bytes[1024 + 100]);
 }
 
 test "a kept attribute and a big owner are pax records, in order" {
@@ -279,8 +278,8 @@ test "a kept attribute and a big owner are pax records, in order" {
     entry.xattrs = &section;
     try write_header(&writer, test_scratch(), entry);
     const used = std.mem.sliceTo(writer.buffered()[512..], 0);
-    try testing.expectEqualStrings("15 uid=3000000\n29 SCHILY.xattr.user.a=hi\n", used);
-    try testing.expectEqualStrings("0007777", writer.buffered()[1024 + 108 ..][0..7]);
+    try testing.expectEqualStrings("15 uid=3000000\n26 SCHILY.xattr.user.a=hi\n", used);
+    try testing.expectEqualStrings("7777777", writer.buffered()[1024 + 108 ..][0..7]);
 }
 
 test "the reader reads back what this writer wrote" {

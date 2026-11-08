@@ -1,0 +1,5 @@
+error[ZBX-E0557]: the export directory exists and is not empty
+  cause  '/out' is not empty, and an export never writes into what is there
+  fix    name a directory that does not exist, or an empty one
+  more   zbx explain E0557 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0557.html

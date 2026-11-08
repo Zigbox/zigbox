@@ -63,7 +63,7 @@ const help_text =
     \\  logs <name>     show what a container wrote to its output and error (see below)
     \\  exec <name>     run a command inside a running container (see below)
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
-    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
+    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, export, verify, gc, restore
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
@@ -157,6 +157,9 @@ const help_text =
     \\  zbx store du --by-image  what each pulled image costs, and how much it shares
     \\  zbx store rm <digest>    drop a root and its image records (the data stays until gc)
     \\  zbx store diff <a> <b>   list the paths that differ between two trees
+    \\  zbx store export --oci <source> <dir>   write the image of a build result, an image
+    \\                           or a tree as an OCI layout (dir must be new or empty);
+    \\                           --output json prints zbx.export/1
     \\  zbx store verify         rehash everything; name each damaged file and the paths it breaks
     \\  zbx store gc             plan a collection of what no root reaches (changes nothing)
     \\  zbx store gc --confirm <hash>   do that plan: move it to the trash, kept for 7 days
@@ -518,6 +521,8 @@ const Token = union(enum) {
     by_image,
     /// `--trash`: `store gc`'s.
     trash,
+    /// `--oci`: `store export`'s.
+    oci,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -580,6 +585,7 @@ fn classify(argument: []const u8) Token {
         return .{ .confirm_inline = argument["--confirm=".len..] };
     }
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
+    if (std.mem.eql(u8, argument, "--oci")) return .oci;
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
@@ -680,7 +686,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next, .out_next, .file_next, .passphrase_file_next => {
                 if (index + 1 < args.len) index += 1;
             },
-            .confirm_inline, .trash, .resolve_only, .by_image, .graph => {},
+            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
             .no_passphrase, .passphrase_file_inline => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
@@ -756,6 +762,7 @@ pub fn parse(
             .resolve_only => try take_pull_option(diag, &pull_args, operands[0..count], argument),
             .out_next => try take_out_option(diag, &export_file, operands[0..count], args, &index),
             .by_image => try take_by_image(diag, &gc_args, operands[0..count], argument),
+            .oci => try take_oci(diag, &gc_args, operands[0..count], argument),
             .graph, .file_next => {
                 try take_build_option(diag, &build_args, operands[0..count], args, &index);
             },
@@ -996,13 +1003,21 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
         if (invocation.store.operand) |operand| return unexpected_argument(diag, .store, operand);
         invocation.store.by_image = true;
     }
+    if (invocation.command == .store and invocation.store.action == .@"export" and !gc_args.oci) {
+        return store_usage(diag, .{ .missing = .oci });
+    }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .exec) try check_exec_args(diag, &invocation.run);
     if (invocation.command == .bundle) try check_bundle_args(diag, invocation);
 }
 
 /// What `store gc` was given besides its words.
-const GcArgs = struct { confirm: ?[]const u8 = null, trash: bool = false, by_image: bool = false };
+const GcArgs = struct {
+    confirm: ?[]const u8 = null,
+    trash: bool = false,
+    by_image: bool = false,
+    oci: bool = false,
+};
 
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
@@ -1021,6 +1036,20 @@ fn take_by_image(
         std.mem.eql(u8, operands[1], "du");
     if (!is_du) return unknown_option(diag, argument);
     gc_args.by_image = true;
+}
+
+/// `--oci`, which only `store export` takes.
+fn take_oci(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(classify(argument) == .oci);
+    const is_export = operands.len >= 2 and command_named(operands[0]) == .store and
+        std.mem.eql(u8, operands[1], "export");
+    if (!is_export) return unknown_option(diag, argument);
+    gc_args.oci = true;
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
@@ -1542,7 +1571,7 @@ fn resolve_store(
     const given: usize = operands.len - 2;
     const wanted: usize = switch (action) {
         .ls, .verify, .gc => 0,
-        .diff => 2,
+        .diff, .@"export" => 2,
         else => 1,
     };
     if (given > wanted) return store_usage(diag, .{ .extra = operands[2 + wanted] });
@@ -1550,6 +1579,7 @@ fn resolve_store(
         const what: StoreMissing = switch (action) {
             .import => .directory,
             .diff => .two_digests,
+            .@"export" => .source_and_directory,
             .restore => .gc_id,
             else => .digest,
         };
@@ -1667,7 +1697,15 @@ fn state_usage(diag: *Diag, sentence: []const u8) ParseError {
     return error.MissingArgument;
 }
 
-const StoreMissing = enum { action, directory, digest, two_digests, gc_id };
+const StoreMissing = enum {
+    action,
+    directory,
+    digest,
+    two_digests,
+    gc_id,
+    source_and_directory,
+    oci,
+};
 
 const StoreUsage = union(enum) {
     missing: StoreMissing,
@@ -1684,13 +1722,19 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             diag.raise(.E0006);
             switch (what) {
                 .action => diag.cause(
-                    "'store' needs a subcommand: import, ls, du, rm, diff, verify, gc or restore",
+                    "'store' needs a subcommand: import, ls, du, rm, diff, export, verify, gc or " ++
+                        "restore",
                     .{},
                 ),
                 .directory => diag.cause("'store import' needs the directory to import", .{}),
                 .digest => diag.cause("'store rm' needs the digest of the root to drop", .{}),
                 .two_digests => diag.cause("'store diff' needs two digests to compare", .{}),
                 .gc_id => diag.cause("'store restore' needs the id of the trash to restore", .{}),
+                .source_and_directory => diag.cause(
+                    "'store export --oci' needs the source to pack and the directory to write",
+                    .{},
+                ),
+                .oci => diag.cause("'store export' needs --oci, the only format it writes", .{}),
             }
             diag.context("cmd", "store", .{});
             diag.fix(
@@ -1702,8 +1746,8 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             const echo = echo_of(&storage, word);
             diag.raise(.E0001);
             diag.cause(
-                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, verify, gc " ++
-                    "and restore",
+                "'{s}' is not a store subcommand; they are import, ls, du, rm, diff, export, " ++
+                    "verify, gc and restore",
                 .{echo},
             );
             diag.context("arg", "{s}", .{echo});

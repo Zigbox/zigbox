@@ -308,6 +308,13 @@ fn prepare_overlay_dirs(sim: *HostSim) void {
     sim.world.add_node(golden_state ++ "/web-1/merged/bin/sh", .file);
 }
 
+/// The sample tree, and an output directory that already holds a file.
+fn prepare_export_not_empty(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    golden_files.put_dir("/out", 0o755);
+    golden_files.put_file("/out/old", 0o644, "x");
+}
+
 fn prepare_link_limit(sim: *HostSim) void {
     prepare_store_with_tree(sim);
     golden_files.faults.link_max = 2; // The object and one name: the second shell is one too many.
@@ -1941,6 +1948,18 @@ const image_cases = [_]Case{
         .exit = 2,
     },
     .{ .code = .E0526, .args = &.{ "lock", "show" }, .prepare = prepare_image_world, .exit = 1 },
+    .{
+        .code = .E0550,
+        .args = &.{ "store", "export", "--oci", "no-such-image", "/out" },
+        .prepare = prepare_store_with_tree,
+        .exit = 1,
+    },
+    .{
+        .code = .E0557,
+        .args = &.{ "store", "export", "--oci", "b3:4ccf5b88ec09f8b7d574449458659c371dc26d367844f42028f2160e4e2fa087", "/out" },
+        .prepare = prepare_export_not_empty,
+        .exit = 1,
+    },
     .{
         .code = .W0503,
         .args = &run_open,
