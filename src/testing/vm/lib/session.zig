@@ -43,6 +43,10 @@ pub const Seed = struct {
     /// A bad list is refused with a coded line on `out` before anything starts. None: the
     /// guest's network is exactly what it always was.
     forwards: []const Forward = &.{},
+    /// The SMBIOS datasource id. cloud-init before 23 (Debian 12's 22.4) drops a URL seed given as
+    /// `ds=nocloud` (dsmode local, fetched in the network stage), so those guests use
+    /// "nocloud-net".
+    seed_id: []const u8 = "nocloud",
 };
 
 pub const Session = struct {
@@ -106,6 +110,7 @@ pub const Session = struct {
         const argv = try qemu_argv(arena, overlay, accel, session.server.port, .{
             .disks = seed.disks,
             .forwards = seed.forwards,
+            .seed_id = seed.seed_id,
         });
         try out.print("vm: starting qemu ({s}), seed at http://10.0.2.2:{d}/\n", .{
             @tagName(accel), session.server.port,
@@ -368,6 +373,7 @@ test "clean_output drops carriage returns and escape sequences, keeps text" {
 pub const Extras = struct {
     disks: []const []const u8 = &.{},
     forwards: []const Forward = &.{},
+    seed_id: []const u8 = "nocloud",
 };
 
 pub fn qemu_argv(
@@ -380,10 +386,11 @@ pub fn qemu_argv(
     const disks = extras.disks;
     assert(overlay.len > 0);
     assert(disks.len <= limits.disks_max);
+    assert(extras.seed_id.len > 0);
     const netdev = try forward_mod.netdev_argument(arena, extras.forwards);
     const drive = try std.fmt.allocPrint(arena, "if=virtio,format=qcow2,file={s}", .{overlay});
-    const seed = "type=1,serial=ds=nocloud;s=http://10.0.2.2:{d}/";
-    const smbios = try std.fmt.allocPrint(arena, seed, .{port});
+    const seed = "type=1,serial=ds={s};s=http://10.0.2.2:{d}/";
+    const smbios = try std.fmt.allocPrint(arena, seed, .{ extras.seed_id, port });
     const memory = try std.fmt.allocPrint(arena, "{d}", .{limits.guest_memory_mib});
     const cpus = try std.fmt.allocPrint(arena, "{d}", .{limits.guest_cpus});
     const accelerator: []const u8 = if (accel == .kvm) "kvm" else "tcg,thread=multi";
@@ -433,6 +440,17 @@ test "qemu arguments select the accelerator and point cloud-init at the host" {
     try std.testing.expectEqual(kvm.len + 4, two.len);
     try std.testing.expectEqualStrings("if=virtio,format=raw,file=a.img", two[kvm.len + 1]);
     try std.testing.expectEqualStrings("if=virtio,format=raw,file=b.img", two[kvm.len + 3]);
+}
+
+test "qemu arguments name the datasource id the guest's cloud-init needs" {
+    // Goal: an old cloud-init gets `ds=nocloud-net`, and the default stays `ds=nocloud`.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const net = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{ .seed_id = "nocloud-net" });
+    try std.testing.expect(contains(net, "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:4242/"));
+    const plain = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{});
+    try std.testing.expect(!contains(plain, "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:4242/"));
 }
 
 fn contains(argv: []const []const u8, wanted: []const u8) bool {

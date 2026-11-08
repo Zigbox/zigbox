@@ -42,6 +42,8 @@ const Guest = struct {
     console_prompt: bool,
     /// Ubuntu 24.04 restricts unprivileged user namespaces; the others do not.
     userns_sysctl: bool,
+    /// Debian 12's cloud-init 22.4 needs `nocloud-net` (see `Seed.seed_id`).
+    seed_id: []const u8 = "nocloud",
 };
 
 const guests = [guests_max]Guest{
@@ -60,6 +62,7 @@ const guests = [guests_max]Guest{
         .hostname = "zigbox-debian",
         .console_prompt = false,
         .userns_sysctl = false,
+        .seed_id = "nocloud-net",
     },
     .{
         .name = "fedora",
@@ -251,6 +254,7 @@ fn run_guest(
         .user_data = try vm.cloud_init.render_user_data(&config, &user_data),
         .meta_data = try vm.cloud_init.render_meta_data(&config, &meta_data),
         .files = &.{.{ .path = tar_route, .body = tar }},
+        .seed_id = guest.seed_id,
     });
     defer session.deinit();
     try session.provision(guest.hostname, false);
