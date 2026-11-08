@@ -1,0 +1,5 @@
+error[ZBX-E0901]: the key cannot be used
+  cause  there is no key file at /home/alice/.config/zbx/keys/ci.pub
+  fix    see the keys there are, or make one:   zbx key list
+  more   zbx explain E0901 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0901.html

@@ -1,0 +1,6 @@
+error[ZBX-E0902]: a key with that name already exists
+  cause  a key named 'ci' is already in /home/alice/.config/zbx/keys; zbx never
+         overwrites a key
+  fix    choose another name:   zbx key new <name>
+  more   zbx explain E0902 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0902.html

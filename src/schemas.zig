@@ -666,6 +666,24 @@ const build_graph_schema =
     \\"properties":{"from":{"type":"string"},"to":{"type":"string"}}}}}}
 ;
 
+const key_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/key/1","version":1,
+    \\"title":"zbx key new|list|show --output json",
+    \\"description":"stdout: the keys made or described. Never a secret or a passphrase.",
+    \\"type":"object","required":["schema","action","keys","truncated"],
+    \\"properties":{"schema":{"const":"zbx.key/1"},
+    \\"action":{"enum":["new","list","show"]},
+    \\"keys":{"type":"array","description":"by name; new and show have exactly one",
+    \\"items":{"type":"object","required":["name","id","public","encryption"],
+    \\"properties":{"name":{"type":"string","pattern":"^[a-z0-9-]{1,32}$"},
+    \\"id":{"type":"string","pattern":"^[0-9a-f]{64}$",
+    \\"description":"BLAKE3 of the public key under the zbx-key domain; always whole"},
+    \\"public":{"type":"string","pattern":"^zbx-ed25519:[0-9a-f]{64}$"},
+    \\"encryption":{"enum":["passphrase","none"]}}}},
+    \\"truncated":{"type":"boolean","description":"list: more keys than are shown"}}}
+;
+
 const vm_status_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/vm-status/1","version":1,
@@ -788,6 +806,7 @@ const table = [_]Entry{
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
     .{ .command = "build-graph", .text = build_graph_schema },
+    .{ .command = "key", .text = key_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
@@ -801,7 +820,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 30);
+    assert(table.len == 31);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -830,7 +849,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 30), table.len);
+    try testing.expectEqual(@as(usize, 31), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

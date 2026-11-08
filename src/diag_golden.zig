@@ -603,7 +603,7 @@ fn publish_args(comptime forward: [:0]const u8) [9][:0]const u8 {
 
 /// One case per code that the command line can trigger. B0001 is a panic and has its own test.
 const cases = base_cases ++ bundle_cases ++ registry_cases ++ image_cases ++ state_cases ++
-    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases;
+    mount_cases ++ writable_cases ++ logs_cases ++ exec_cases ++ build_cases ++ key_cases;
 
 const build_project = "/home/alice/hello";
 
@@ -677,6 +677,36 @@ const build_cases = [_]Case{
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
     .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
+};
+
+const key_directory = "/home/alice/.config/zbx/keys";
+
+/// A user with a home and no keys.
+fn prepare_keys_none(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    golden_files.init(1);
+    sim.store_fs = &golden_files;
+    golden_files.put_dir("/home", 0o755);
+    golden_files.put_dir("/home/alice", 0o755);
+}
+
+/// A user whose keys directory holds a key named `ci` (its public half is all `key new` looks at).
+fn prepare_keys_one(sim: *HostSim) void {
+    prepare_keys_none(sim);
+    golden_files.put_dir("/home/alice/.config", 0o755);
+    golden_files.put_dir("/home/alice/.config/zbx", 0o700);
+    golden_files.put_dir(key_directory, 0o700);
+    golden_files.put_file(key_directory ++ "/ci.pub", 0o644, "x");
+    golden_files.put_file(key_directory ++ "/ci.key", 0o600, "x");
+}
+
+const key_show_args = [_][:0]const u8{ "key", "show", "ci" };
+const key_new_args = [_][:0]const u8{ "key", "new", "ci" };
+
+const key_cases = [_]Case{
+    .{ .code = .E0901, .args = &key_show_args, .prepare = prepare_keys_none, .exit = 1 },
+    .{ .code = .E0902, .args = &key_new_args, .prepare = prepare_keys_one, .exit = 1 },
+    .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
 };
 
 const exec_plan = @import("runtime/exec_plan.zig");
