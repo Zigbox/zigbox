@@ -450,7 +450,8 @@ test "qemu arguments name the datasource id the guest's cloud-init needs" {
     const net = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{ .seed_id = "nocloud-net" });
     try std.testing.expect(contains(net, "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:4242/"));
     const plain = try qemu_argv(arena, "o.qcow2", .kvm, 4242, .{});
-    try std.testing.expect(!contains(plain, "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:4242/"));
+    const wanted = "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:4242/";
+    try std.testing.expect(!contains(plain, wanted));
 }
 
 fn contains(argv: []const []const u8, wanted: []const u8) bool {
