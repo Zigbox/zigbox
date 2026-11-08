@@ -1,4 +1,5 @@
-//! The key diagnostics, `ZBX-E0901`, `E0902` and `E0911`: one function per failure, each with
+//! The key diagnostics, `ZBX-E0901`, `E0902` and `E0911`, and the signing ones, `E0903` and
+//! `E0910`: one function per failure, each with
 //! its cause and a fix (DIAGNOSTICS.md). Nothing here decides, and nothing here is given a
 //! secret: a passphrase and a key's bytes never reach a message, only names and paths.
 
@@ -239,6 +240,97 @@ fn fix_passphrase(diag: *Diag, path: []const u8, problem: PassphraseProblem) voi
         }),
     }
     assert(diag.fixes.count > 0);
+}
+
+/// What is wrong with a signature record, for E0903.
+pub const RecordProblem = enum { damaged, newer };
+
+/// ZBX-E0903: the signature record of a tree cannot be used. `path` is the record's file.
+pub fn record_unusable(diag: *Diag, path: []const u8, problem: RecordProblem) void {
+    assert(diag.code == null);
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const path_echo = echo_of(&path_storage, path);
+    diag.raise(.E0903);
+    diag.while_("reading the signatures of a tree", .{});
+    switch (problem) {
+        .damaged => diag.cause("{s} is damaged: a line of it is not a signed statement", .{
+            path_echo,
+        }),
+        .newer => diag.cause("{s} was written by a newer zbx than this one", .{path_echo}),
+    }
+    diag.context("path", "{s}", .{path_echo});
+    switch (problem) {
+        .damaged => diag.fix_with("remove it, then sign again:", "rm {s}", .{path_echo}),
+        .newer => diag.fix(.{ .sentence = "use the zbx that wrote it, or a newer one" }),
+    }
+    assert(diag.code.? == .E0903);
+}
+
+/// Why `zbx sign` refused, for E0910.
+pub const Refusal = enum {
+    /// The digest names no result, tree or image in the store.
+    not_in_store,
+    /// A file object of the tree is not in the store.
+    object_missing,
+    /// A file object of the tree is not what its name says.
+    object_damaged,
+    /// A tree or an object could not be read (the errno says why).
+    unreadable,
+    /// The tree has more entries than zbx walks.
+    too_large,
+    /// The tree already has `signatures_per_tree_max` signatures.
+    tree_full,
+    /// The store already has `trust_records_max` signed trees.
+    store_full,
+};
+
+/// ZBX-E0910: signing was refused, and nothing was written. `operand` is what was named.
+pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u16) void {
+    assert(diag.code == null);
+    assert(errno < 4096);
+    var operand_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const operand_echo = echo_of(&operand_storage, operand);
+    diag.raise(.E0910);
+    diag.while_("signing '{s}'", .{operand_echo});
+    switch (refusal) {
+        .not_in_store => diag.cause(
+            "the store has no build result, tree or image with that digest",
+            .{},
+        ),
+        .object_missing => diag.cause("a file of the tree is missing from the store", .{}),
+        .object_damaged => diag.cause("a file of the tree in the store is damaged", .{}),
+        .unreadable => if (errno == 0) {
+            diag.cause("the tree could not be read", .{});
+        } else {
+            const err = host_mod.error_for_errno(errno);
+            errors.cause_host_error(diag, "reading the tree", err, errno);
+        },
+        .too_large => diag.cause("the tree has more entries than zbx checks", .{}),
+        .tree_full => diag.cause("the tree already has {d} signatures, the most it keeps", .{
+            constants.signatures_per_tree_max,
+        }),
+        .store_full => diag.cause(
+            "the store already holds signatures for {d} trees, the most it keeps",
+            .{constants.trust_records_max},
+        ),
+    }
+    diag.context("arg", "{s}", .{operand_echo});
+    switch (refusal) {
+        .not_in_store, .object_missing, .object_damaged, .too_large => diag.fix(.{
+            .sentence = "pull or build it again, then sign it",
+        }),
+        .unreadable => diag.fix(.{
+            .sentence = "check the store's permissions and free space, then run it again",
+        }),
+        .tree_full => diag.fix(.{
+            .sentence = "the tree is signed enough; nothing needs to change",
+        }),
+        .store_full => diag.fix(.{
+            .sentence = "remove the records of trees that are gone:",
+            .command = "zbx trust prune",
+        }),
+    }
+    assert(diag.code.? == .E0910);
 }
 
 /// ZBX-E0005 for a key name that cannot name a key.

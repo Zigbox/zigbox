@@ -11,10 +11,11 @@
 //!
 //! Parse accepts only what the writer writes (REVIEW.md): every line must parse as an envelope,
 //! re-render to its own bytes, verify, and hold a statement of this release's `sign/v1` form
-//! about the very tree the record is keyed by, and no line may occur twice. A record whose statement has
-//! another predicate type is `Newer` (a release that knows more wrote it); any other defect is
-//! `Malformed`. Each line's signature is checked against the key it names, so damage is never
-//! taken for a newer record; whether that key is trusted is the gate's question, not this one's.
+//! about the very tree the record is keyed by, and no line may occur twice. A record whose
+//! statement has another predicate type is `Newer` (a release that knows more wrote it); any
+//! other defect is `Malformed`. Each line's signature is checked against the key it names, so
+//! damage is never taken for a newer record; whether that key is trusted is the gate's
+//! question, not this one's.
 
 const std = @import("std");
 const assert = std.debug.assert;

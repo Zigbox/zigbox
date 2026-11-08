@@ -133,7 +133,8 @@ test "every defect of a record is Malformed, and another predicate is Newer" {
     var copy: [constants.signature_record_bytes_max]u8 = undefined;
     @memcpy(copy[0..good.len], good);
     // No final newline, an empty record, a blank line.
-    try testing.expectError(error.Malformed, record.parse(&work, tree, good[0 .. good.len - 1], &two));
+    const no_newline = good[0 .. good.len - 1];
+    try testing.expectError(error.Malformed, record.parse(&work, tree, no_newline, &two));
     try testing.expectError(error.Malformed, record.parse(&work, tree, "", &two));
     try testing.expectError(error.Malformed, record.parse(&work, tree, "\n", &two));
     // A record of another tree.

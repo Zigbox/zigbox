@@ -1,0 +1,7 @@
+error[ZBX-E0910]: signing was refused
+  while  signing '0123456789abcdef'
+  cause  a file of the tree is missing from the store
+  arg    0123456789abcdef
+  fix    pull or build it again, then sign it
+  more   zbx explain E0910
+  docs   https://zigbox.github.io/zigbox/errors/E0910.html

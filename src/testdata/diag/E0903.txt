@@ -1,0 +1,6 @@
+error[ZBX-E0903]: a signature record in the store is damaged or newer
+  cause  /home/alice/.local/share/zbx/trust/signatures/0123456789abcdef is
+         damaged: a line of it is not a signed statement
+  fix    remove it, then sign again:   rm /home/alice/.local/share/zbx/trust/signatures/0123456789abcdef
+  more   zbx explain E0903 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0903.html
