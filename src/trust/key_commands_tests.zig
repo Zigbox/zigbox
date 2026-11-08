@@ -394,3 +394,37 @@ test "key new removes old temporaries of its own pattern and nothing else" {
     try testing.expect(files.kind_of(notes) != null);
     try testing.expect(files.kind_of(directory ++ "/ci2.key") != null);
 }
+
+test "key new sweeps at most key_sweep_max temporaries per run" {
+    // Goal: the sweep bound, at the bound and one past it. Method: one more old temporary than
+    // the bound; the first key new removes exactly the bound, the second removes the rest.
+    start();
+    const make = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" }; // Makes the directory.
+    try testing.expectEqual(@as(u8, 0), command(&make));
+    const total = constants.key_sweep_max + 1;
+    var paths: [total][64]u8 = undefined;
+    for (&paths, 0..) |*buffer, index| {
+        @memset(buffer, 0);
+        const path = std.fmt.bufPrint(buffer, directory ++ "/.dead.key.{x:0>16}.tmp", .{index}) catch
+            return error.TestUnexpectedResult;
+        files.put_file(path, 0o600, "seed");
+        files.set_mtime_of(path, 100);
+    }
+    sim.world.now = 100 + constants.key_leftover_age_seconds;
+    const first = [_][:0]const u8{ "key", "new", "one", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&first));
+    try testing.expectEqual(@as(u32, 1), remaining(&paths));
+    const second = [_][:0]const u8{ "key", "new", "two", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&second));
+    try testing.expectEqual(@as(u32, 0), remaining(&paths));
+}
+
+/// How many of `paths` (NUL-terminated text in each buffer) are still there.
+fn remaining(paths: []const [64]u8) u32 {
+    var count: u32 = 0;
+    for (paths) |buffer| {
+        const length = std.mem.indexOfScalar(u8, &buffer, 0) orelse return 0;
+        if (files.kind_of(buffer[0..length]) != null) count += 1;
+    }
+    return count;
+}

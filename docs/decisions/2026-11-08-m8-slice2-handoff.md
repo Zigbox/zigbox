@@ -29,3 +29,28 @@ ceiling after the leftovers and reconnaissance.
   `src/fuzz.zig` + new `src/fuzz_trust.zig`, `docs/demos/m8.md`.
 - Ed25519 in std 0.17: `KeyPair.generateDeterministic`, `sign(msg, noise)`,
   `Signature.verify(sig, msg, public_key)`.
+
+## Update after part 1 (json.zig, committed)
+- Done: `src/trust/json.zig` (Writer, Reader), `json_tests.zig` (golden, refusals, bounds),
+  `src/fuzz_json.zig` (`zig build fuzz -- json`), `json_depth_max` in constants, and
+  `2026-11-08-m8-trust-bounds.md` (supervisor assumptions). The leftovers got a missing test:
+  `key_sweep_max` at the bound and one past; E0902's explanation now covers the recent and
+  `.pub`-only causes.
+- API for part 2 and lane U: `Writer.init(buffer)`; `begin_object/array`, `end_object/array`,
+  `key`, `string`, `unsigned`, `integer`, `boolean`, and `member_string/unsigned/boolean/
+  object/array` (a key and its value); `finish()` returns the bytes. Members are written in the
+  caller's order. Errors: `Overflow`, `TooDeep`, `InvalidUtf8`; misuse (value without key,
+  second root) is an assertion.
+- Reader is a pull parser: `Reader.init(bytes)`, `next(scratch)` gives a `Token` (`key` and
+  `string` slices live in `scratch` until the next call). It accepts only the writer's form, so
+  accepted text re-renders to itself. It does NOT check duplicate keys or member order: the
+  schema layer must read members in the writer's order (compare each `key` token to the
+  expected name) and refuse anything else, then call `next` once more and require `.end`.
+- Decisions: no `null` and no floats; negative numbers are `.negative` (never zero), others
+  `.unsigned`. The brief says "std's scanner"; std's needs an allocator, so the reader is hand
+  written.
+- Trap: a string token longer than `scratch` is `TooLong`: size scratch from the field's bound.
+- Next (part 2): base64, DSSE PAE, envelope, statement (add `statement_subjects_max`,
+  `statement_bytes_max`, `signatures_per_tree_max`, `trust_records_max`, `type_uri_base` to
+  constants when used), the record, `zbx sign`, E0903/E0910 (new codes: ask the supervisor
+  only if their text alters a bound), and the trust fuzzer.
