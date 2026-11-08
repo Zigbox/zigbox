@@ -90,8 +90,21 @@ fn fix_unusable(diag: *Diag, name: []const u8, path: []const u8, problem: store.
     assert(diag.fixes.count > 0);
 }
 
-/// ZBX-E0902: a key of that name exists, and is never overwritten.
-pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8, orphan: bool) void {
+/// What the name's files are, for E0902.
+pub const Taken = enum {
+    /// Both files.
+    whole,
+    /// A `.key` alone, written a moment ago: another run may be finishing it.
+    secret_recent,
+    /// A `.key` alone for long enough that no run is finishing it.
+    secret_stale,
+    /// A `.pub` alone.
+    public_only,
+};
+
+/// ZBX-E0902: a key of that name exists, and is never overwritten. The `rm` advice is given
+/// only for a leftover no live run can own: a `.key` alone that is old, or a `.pub` alone.
+pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8, taken: Taken) void {
     assert(diag.code == null);
     var name_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     var dir_storage: [path_echo_bytes]u8 = undefined;
@@ -99,17 +112,24 @@ pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8, orphan: bool)
     const dir_echo = echo_of(&dir_storage, dir);
     diag.raise(.E0902);
     diag.while_("making the key '{s}'", .{name_echo});
-    if (orphan) {
-        diag.cause("{s}/{s}.key has no {s}.pub beside it; an interrupted 'zbx key new' left it", .{
-            dir_echo,
-            name_echo,
-            name_echo,
-        });
-    } else {
-        diag.cause("a key named '{s}' is already in {s}; zbx never overwrites a key", .{
+    switch (taken) {
+        .whole => diag.cause("a key named '{s}' is already in {s}; zbx never overwrites a key", .{
             name_echo,
             dir_echo,
-        });
+        }),
+        .secret_recent => diag.cause(
+            "{s}/{s}.key has no {s}.pub beside it yet; another 'zbx key new {s}' is probably " ++
+                "still writing it",
+            .{ dir_echo, name_echo, name_echo, name_echo },
+        ),
+        .secret_stale => diag.cause(
+            "{s}/{s}.key has no {s}.pub beside it; an interrupted 'zbx key new' left it",
+            .{ dir_echo, name_echo, name_echo },
+        ),
+        .public_only => diag.cause(
+            "{s}/{s}.pub has no {s}.key beside it; the secret half of that key is gone",
+            .{ dir_echo, name_echo, name_echo },
+        ),
     }
     diag.context("key", "{s}", .{name_echo});
     diag.context("path", "{s}", .{dir_echo});
@@ -118,11 +138,21 @@ pub fn name_exists(diag: *Diag, name: []const u8, dir: []const u8, orphan: bool)
         .command = "zbx key new <name>",
         .template = true,
     });
-    if (orphan) {
-        diag.fix_with("or, if that key was never used, remove the leftover:", "rm {s}/{s}.key", .{
-            dir_echo,
-            name_echo,
-        });
+    switch (taken) {
+        .whole => {},
+        .secret_recent => diag.fix(.{
+            .sentence = "or wait a few minutes and run it again: the leftover is named then",
+        }),
+        .secret_stale => diag.fix_with(
+            "or, if that key was never used, remove the leftover:",
+            "rm {s}/{s}.key",
+            .{ dir_echo, name_echo },
+        ),
+        .public_only => diag.fix_with(
+            "or, if you removed the secret on purpose, remove the public half:",
+            "rm {s}/{s}.pub",
+            .{ dir_echo, name_echo },
+        ),
     }
     assert(diag.code.? == .E0902);
 }

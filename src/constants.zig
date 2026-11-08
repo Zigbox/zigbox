@@ -1423,6 +1423,11 @@ pub const key_kdf_p_max: u32 = 1;
 /// Random bytes in the name of a key's temporary file, so that two `key new` of one name never
 /// share a temporary (hex in the name: twice this many characters).
 pub const key_temp_random_bytes: u32 = 8;
+/// How long a key file or temporary must have sat before `key new` calls it a leftover of a
+/// killed run (and removes it, or says it can be removed) instead of a live run's work.
+pub const key_leftover_age_seconds: u32 = 600;
+/// Most leftover temporaries one `key new` removes.
+pub const key_sweep_max: u32 = 32;
 pub const key_seed_bytes: u32 = 32;
 pub const key_public_bytes: u32 = 32;
 pub const key_salt_bytes: u32 = 16;
