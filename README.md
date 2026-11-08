@@ -49,15 +49,15 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | --- | --- | --- |
 | 1 · Keys | `zbx key new/list/show`, sealed key files, [PR #65](https://github.com/Zigbox/zigbox/pull/65) | **Built and reviewed.** |
 | 2 (part 1) · JSON writer | Canonical JSON writer and reader, [PR #67](https://github.com/Zigbox/zigbox/pull/67) | **Built and reviewed.** |
-| 2 (part 2) · Sign | `zbx sign` and the signature record, [PR #70](https://github.com/Zigbox/zigbox/pull/70) | **In review.** |
-| 3 · Policy | Policy and the run gate, the tamper check | Not started. |
+| 2 (part 2) · Sign | `zbx sign` and the signature record, [PR #70](https://github.com/Zigbox/zigbox/pull/70) | **Built and reviewed.** |
+| 3 · Policy | Policy and the run gate, the tamper check | **In progress.** |
 | 4 · Provenance | Provenance as an SLSA v1 statement, `inspect --provenance` | Not started. |
 | 5 · Verify | `zbx verify`, `trust export`, `import` and `prune` | Not started. |
 | 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
 | 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
 | 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
 | 9 · Mac | The Mac (cuttable) | Not started. |
-| 10 · Pack | Pack and `zbx store export --oci` | **In progress.** |
+| 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
 | 11 · Upload | The upload protocol, the test registry, `zbx push` | Not started. |
 | 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR) | Not started. |
 | 13 · ECR | ECR push on M6c (cuttable) | Not started. |
