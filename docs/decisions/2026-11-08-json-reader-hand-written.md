@@ -1,0 +1,10 @@
+# M8: the canonical JSON reader is hand-written, not std's JSON scanner
+*Decided 2026-11-08, by the supervisor. This departs from the M8 brief (`docs/briefs/M8-trust.md`, "The canonical JSON writer"), which says reading uses std's JSON scanner.*
+
+- **Decision.** The canonical JSON reader in `src/trust/json.zig` is hand-written. It is a pull parser over bytes already in memory, with a fixed container stack and caller-supplied buffers for decoded strings. It does not use `std.json`.
+- **Why not std's scanner.** The pinned std's `std.json.Scanner` needs an allocator. `initStreaming(allocator)` and `initCompleteInput(allocator, input)` both pass it to a `BitStack` that tracks `[]` and `{}` nesting. Trust parsing must not allocate on untrusted input, and the statement and envelope bounds are fixed sizes (`statement_bytes_max`, `envelope_bytes_max`, `json_depth_max`). A fixed array can hold the stack instead.
+- **Why not a looser reader.** The reader must accept only the canonical form the writer emits: no whitespace, members in schema order, no floats, `null` or exponents, and the escapes the writer produces. std's scanner accepts a much wider grammar, and a reader built on it would need a second pass to refuse everything else. The brief's rule is that the reader accepts a payload or envelope only when the writer re-renders it byte for byte (REVIEW.md, "Parse accepts only what render can write"). A reader that takes only the writer's form makes that check direct.
+- **What this costs.** The reader is our code, so it carries its own tests and fuzzer (`src/fuzz_json.zig`), and its grammar must be kept in step with the writer's header comment in `src/trust/json.zig`.
+- **Scope.** This decision covers the canonical JSON reader only. The brief's other rules are unchanged, including that statements are checked with the writer's re-render and that payload and envelope sizes are bounded.
+
+Links: `docs/briefs/M8-trust.md`, `src/trust/json.zig`, `src/fuzz_json.zig`, `docs/decisions/2026-11-08-m8-trust-bounds.md`.
