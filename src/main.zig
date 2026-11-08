@@ -145,6 +145,7 @@ test {
     _ = @import("sim_bus.zig");
     _ = @import("fuzz_dbus.zig");
     _ = @import("fuzz_layer.zig");
+    _ = @import("fuzz_pack.zig");
 }
 
 test {
