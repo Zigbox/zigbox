@@ -127,7 +127,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** pull a public OCI image and run it, with the store doing the deduplication across images.
 
-**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock` in the project directory (the nearest one up from the working directory, as with `Cargo.lock`); `zbx pull` writes it, and `zbx run <tag>` runs the locked digest. Until containers get their own network namespace (M5), `/sys` is the host's, bound read-only. Deferred: push, private registries (ECR pull is M6c).
+**Scope:** registry client for anonymous pulls (Docker Hub token dance, GHCR); manifest index platform selection; gzip and zstd layer decode; tar extraction with whiteout handling, applied into the M3 store as one flattened tree; image config (entrypoint, env, working dir, user) honoured at run. Tags resolve to digests, recorded in a lockfile `zbx.lock` in the project directory (the nearest one up from the working directory, as with `Cargo.lock`); `zbx pull` writes it, and `zbx run <tag>` runs the locked digest. Until containers get their own network namespace (M5), `/sys` is the host's, bound read-only. Deferred: push (M8), private registries (ECR pull is M6c).
 
 **Demo script:**
 
@@ -229,7 +229,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** a host pulls and runs an image from a private Amazon ECR repository with the AWS credentials it already has, and no secret ever leaves the request it was made for.
 
-**Scope:** authenticated pull from `<account>.dkr.ecr.<region>.amazonaws.com`. zbx signs AWS requests itself (SigV4; no credential helper or `aws` CLI) and takes credentials, in order, from the environment, a web identity token (`AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`), or EC2 instance metadata (IMDSv2 only). Credentials are resolved for each pull and never written to disk. The ECR token goes only to the registry's origin, never to a redirect target or a mirror. The library takes credentials from its caller, so Zigcube's agent pulls the same way. The credential layer is designed for push, which stays after M8. Deferred: AWS profile files and SSO, other private registries, the Mac, push. Brief: `docs/briefs/M6c-ecr.md`.
+**Scope:** authenticated pull from `<account>.dkr.ecr.<region>.amazonaws.com`. zbx signs AWS requests itself (SigV4; no credential helper or `aws` CLI) and takes credentials, in order, from the environment, a web identity token (`AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`), or EC2 instance metadata (IMDSv2 only). Credentials are resolved for each pull and never written to disk. The ECR token goes only to the registry's origin, never to a redirect target or a mirror. The library takes credentials from its caller, so Zigcube's agent pulls the same way. The credential layer is designed for push, which M8 builds on it. Deferred: AWS profile files and SSO, other private registries, the Mac, ECR push (M8). Brief: `docs/briefs/M6c-ecr.md`.
 
 **Demo script:**
 
@@ -272,7 +272,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** a host can refuse to run anything it cannot trace back to a trusted key and a recorded build.
 
-**Scope:** ed25519 keys (`zbx key new`); `zbx sign <digest>`; a provenance record emitted by M7 builds (input digests, build file hash, builder version) stored beside the tree; a run policy file (`trusted keys`, `require signature`, `require provenance`). Deferred: Sigstore integration, transparency logs.
+**Scope:** ed25519 keys (`zbx key new`); `zbx sign <digest>`; a provenance record emitted by M7 builds (input digests, build file hash, builder version) stored beside the tree; a run policy file (`trusted keys`, `require signature`, `require provenance`). Push (owner, 2026-11-08): `zbx push` of a built or pulled image to an OCI registry (Docker Hub, GHCR, ECR), as one deterministic gzip layer, with write credentials that are never printed or written, and `zbx store export --oci` to an OCI image layout. Deferred: Sigstore integration, transparency logs, signatures stored in registries, multi-platform indexes.
 
 **Demo script:**
 
@@ -366,7 +366,7 @@ These are out of scope for M0 to M8. Raise a change to this doc before building 
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
-- **Image push and private registries.** Pull-only from public registries until after M8, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push waits for M8.
+- **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
 - **Dockerfile execution.** Dockerfiles are not run directly (import is stretch S4).
 - **Live migration, checkpoint/restore, GPU passthrough.**
 
