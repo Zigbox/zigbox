@@ -354,6 +354,95 @@ pub fn list(fs: Fs, paths: *const Paths, listing: *Listing, failure: *Failure) E
     listing.sort();
 }
 
+/// What is in the keys directory under one name.
+pub const NameState = enum {
+    free,
+    /// Both files.
+    whole,
+    /// A `.key` without its `.pub`, written a moment ago: a `key new` may still be between its
+    /// two links, and its owner is about to finish. Not to be removed.
+    secret_only_recent,
+    /// A `.key` without its `.pub`, long enough that no live run is waiting to write it: what a
+    /// run killed between its two links leaves.
+    secret_only_stale,
+    /// A `.pub` without its `.key`: the secret half is gone. No run of ours makes this.
+    public_only,
+};
+
+/// The state of `name`. `now` is the host's clock in seconds: a secret alone is "recent" for
+/// `key_leftover_age_seconds` after it was written.
+pub fn name_state(fs: Fs, paths: *const Paths, name: []const u8, now: u64) NameState {
+    assert(key.name_valid(name));
+    var secret: PathBuf = undefined;
+    var public: PathBuf = undefined;
+    file_path(paths, name, ".key", &secret) catch return .free;
+    file_path(paths, name, ".pub", &public) catch return .free;
+    const secret_stat = fs.lstat(secret.text()) catch null;
+    const has_public = exists(fs, public.text());
+    if (secret_stat == null) return if (has_public) .public_only else .free;
+    if (has_public) return .whole;
+    return if (leftover_old(secret_stat.?.mtime, now)) .secret_only_stale else .secret_only_recent;
+}
+
+/// True when a file last written at `mtime` is old enough that no live writer can still own it.
+fn leftover_old(mtime: u64, now: u64) bool {
+    // A clock that went back leaves the file "recent": the safe answer.
+    if (now < mtime) return false;
+    return now - mtime >= constants.key_leftover_age_seconds;
+}
+
+/// True when `entry` is a temporary of the name pattern `temp_path` writes:
+/// `.<name>.key.<hex>.tmp` or `.<name>.pub.<hex>.tmp`. Nothing else is ever swept.
+fn temporary_name(entry: []const u8) bool {
+    const hex_bytes = 2 * constants.key_temp_random_bytes;
+    const tail = ".tmp";
+    if (entry.len < 2 or entry[0] != '.') return false;
+    if (!std.mem.endsWith(u8, entry, tail)) return false;
+    const body = entry[1 .. entry.len - tail.len];
+    if (body.len < hex_bytes + 1 + 4) return false;
+    const hex = body[body.len - hex_bytes ..];
+    if (body[body.len - hex_bytes - 1] != '.') return false;
+    for (hex) |byte| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    }
+    const stem = body[0 .. body.len - hex_bytes - 1];
+    const extension = stem[stem.len - 4 ..];
+    if (!std.mem.eql(u8, extension, ".key") and !std.mem.eql(u8, extension, ".pub")) return false;
+    return key.name_valid(stem[0 .. stem.len - 4]);
+}
+
+const Sweep = struct {
+    fs: Fs,
+    dir: []const u8,
+    now: u64,
+    removed: u32,
+
+    fn visit(context: *anyopaque, entry: []const u8) void {
+        const sweep: *Sweep = @ptrCast(@alignCast(context));
+        if (sweep.removed == constants.key_sweep_max) return;
+        if (!temporary_name(entry)) return;
+        var path: PathBuf = undefined;
+        path.set(&.{ sweep.dir, "/", entry }) catch return;
+        const stat = sweep.fs.lstat(path.text()) catch return;
+        if (stat.kind != .file) return;
+        if (!leftover_old(stat.mtime, sweep.now)) return;
+        sweep.fs.unlink(path.text()) catch return;
+        sweep.removed += 1;
+    }
+};
+
+/// Removes the temporaries a killed `key new` left (the plaintext seed of a `--no-passphrase`
+/// key among them): files of exactly the name `temp_path` writes, regular, and not written in
+/// the last `key_leftover_age_seconds`, so a live writer's file is never taken. A live writer
+/// whose file went anyway would fail its `link` with an error and leave no half key. At most
+/// `key_sweep_max` per call. Returns how many.
+pub fn sweep_temporaries(fs: Fs, paths: *const Paths, now: u64) u32 {
+    var sweep: Sweep = .{ .fs = fs, .dir = paths.dir.text(), .now = now, .removed = 0 };
+    fs.read_dir(paths.dir.text(), .{ .context = &sweep, .call = Sweep.visit }) catch {};
+    assert(sweep.removed <= constants.key_sweep_max);
+    return sweep.removed;
+}
+
 /// True when either file of `name` is there.
 pub fn name_taken(fs: Fs, paths: *const Paths, name: []const u8) bool {
     assert(key.name_valid(name));
@@ -362,15 +451,4 @@ pub fn name_taken(fs: Fs, paths: *const Paths, name: []const u8) bool {
     file_path(paths, name, ".key", &secret) catch return false;
     file_path(paths, name, ".pub", &public) catch return false;
     return exists(fs, secret.text()) or exists(fs, public.text());
-}
-
-/// True when `name` has a `.key` and no `.pub`: what a run killed between its two links leaves.
-/// Such a name is taken, yet `show` cannot open it.
-pub fn orphan_secret(fs: Fs, paths: *const Paths, name: []const u8) bool {
-    assert(key.name_valid(name));
-    var secret: PathBuf = undefined;
-    var public: PathBuf = undefined;
-    file_path(paths, name, ".key", &secret) catch return false;
-    file_path(paths, name, ".pub", &public) catch return false;
-    return exists(fs, secret.text()) and !exists(fs, public.text());
 }

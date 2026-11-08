@@ -287,4 +287,7 @@ test {
     _ = @import("trust/key_commands_tests.zig");
     _ = @import("trust/key_store_tests.zig");
     _ = @import("fuzz_key.zig");
+    _ = @import("trust/json.zig");
+    _ = @import("trust/json_tests.zig");
+    _ = @import("fuzz_json.zig");
 }

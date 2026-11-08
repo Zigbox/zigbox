@@ -2932,14 +2932,26 @@ pub const registry = [_]Entry{
         .explanation =
         \\"zbx key new" never replaces a key: a secret key that is overwritten is
         \\gone for good, and so is everything signed with it that nobody else can
-        \\check. The name is taken by a key (or by half of one) in the keys directory.
+        \\check. The name is taken by a key (or by part of one) in the keys directory.
         \\
         \\Choose another name:
         \\    zbx key new release-2
         \\
-        \\To retire the old key, remove its NAME.key and NAME.pub files yourself.
-        \\A NAME.key with no NAME.pub is what a "zbx key new" killed halfway
-        \\leaves; the cause says so, and removing that file frees the name.
+        \\What to do depends on which file is there:
+        \\
+        \\A NAME.key alone, written in the last 10 minutes: another "zbx key new NAME"
+        \\may still be writing it. Wait a few minutes and run it again. Do not remove
+        \\the file: it may be a live key's secret.
+        \\
+        \\A NAME.key alone, older than that: an interrupted "zbx key new" left it. If
+        \\that key was never used, remove the leftover yourself:
+        \\    rm ~/.config/zbx/keys/NAME.key
+        \\
+        \\A NAME.pub alone: the secret half is gone. If you removed the secret on
+        \\purpose, remove the public half too:
+        \\    rm ~/.config/zbx/keys/NAME.pub
+        \\
+        \\To retire a whole key, remove its NAME.key and NAME.pub files yourself.
         ,
     },
     .{

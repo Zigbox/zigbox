@@ -76,9 +76,13 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a key with that name already exists</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>&quot;zbx key new&quot; never replaces a key: a secret key that is overwritten is gone for good, and so is everything signed with it that nobody else can check. The name is taken by a key (or by half of one) in the keys directory.</p>
+<p>&quot;zbx key new&quot; never replaces a key: a secret key that is overwritten is gone for good, and so is everything signed with it that nobody else can check. The name is taken by a key (or by part of one) in the keys directory.</p>
 <p>Choose another name:     zbx key new release-2</p>
-<p>To retire the old key, remove its NAME.key and NAME.pub files yourself. A NAME.key with no NAME.pub is what a &quot;zbx key new&quot; killed halfway leaves; the cause says so, and removing that file frees the name.</p>
+<p>What to do depends on which file is there:</p>
+<p>A NAME.key alone, written in the last 10 minutes: another &quot;zbx key new NAME&quot; may still be writing it. Wait a few minutes and run it again. Do not remove the file: it may be a live key's secret.</p>
+<p>A NAME.key alone, older than that: an interrupted &quot;zbx key new&quot; left it. If that key was never used, remove the leftover yourself:     rm ~/.config/zbx/keys/NAME.key</p>
+<p>A NAME.pub alone: the secret half is gone. If you removed the secret on purpose, remove the public half too:     rm ~/.config/zbx/keys/NAME.pub</p>
+<p>To retire a whole key, remove its NAME.key and NAME.pub files yourself.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0902</pre>

@@ -8,6 +8,7 @@ const codes = @import("../diag/codes.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const host_sim = @import("../host_sim.zig");
 const key = @import("key.zig");
+const constants = @import("../constants.zig");
 const key_commands = @import("key_commands.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const fs_sim = @import("../store/fs_sim.zig");
@@ -341,15 +342,90 @@ test "a keys directory that is a symbolic link is named as one" {
     try testing.expect(!has(sim.stderr(), "can be read by other users"));
 }
 
-test "a .key left without its .pub is named, and its removal is the fix" {
-    // Goal: the name an interrupted run blocked is not a puzzle. Method: a lone .key; new of
-    // that name is E0902 whose cause says the .pub is missing and whose fix removes the file.
+test "a .key without its .pub: recent is kept, old is a leftover, a .pub alone has its own cause" {
+    // Goal: the loser of a live `key new` race is not told to delete the winner's secret.
+    // Method: the .key is aged by the host's clock; within the window no rm is offered, past it
+    // the leftover is named with its removal, and a lone .pub says the secret is gone.
     start();
     const first = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" };
     try testing.expectEqual(@as(u8, 0), command(&first));
     files.remove_path(directory ++ "/ci.pub");
+    files.set_mtime_of(directory ++ "/ci.key", 1000);
+    sim.world.now = 1000 + constants.key_leftover_age_seconds - 1;
     try testing.expectEqual(@as(u8, 1), command(&first));
     try testing.expect(has(sim.stderr(), "ZBX-E0902"));
-    try testing.expect(has(sim.stderr(), "ci.key has no ci.pub beside it"));
+    try testing.expect(has(sim.stderr(), "ci.key has no ci.pub"));
+    try testing.expect(!has(sim.stderr(), "rm "));
+    sim.world.now = 1000 + constants.key_leftover_age_seconds;
+    try testing.expectEqual(@as(u8, 1), command(&first));
+    try testing.expect(has(sim.stderr(), "interrupted 'zbx key new' left it"));
     try testing.expect(has(sim.stderr(), "rm " ++ directory ++ "/ci.key"));
+    files.remove_path(directory ++ "/ci.key");
+    files.put_file(directory ++ "/ci.pub", 0o644, "x");
+    try testing.expectEqual(@as(u8, 1), command(&first));
+    try testing.expect(has(sim.stderr(), "is gone"));
+    try testing.expect(has(sim.stderr(), "rm " ++ directory ++ "/ci.pub"));
+}
+
+test "key new removes old temporaries of its own pattern and nothing else" {
+    // Goal: a killed run's temporary (a plaintext seed with --no-passphrase) does not stay for
+    // good, and a live run's, other files and other names are never swept. Method: old and
+    // recent temporaries, a look-alike, a directory; one key new; check each.
+    start();
+    const mk = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&mk));
+    const old_key = directory ++ "/.dead.key.0123456789abcdef.tmp";
+    const old_pub = directory ++ "/.dead.pub.0123456789abcdef.tmp";
+    const recent = directory ++ "/.live.key.fedcba9876543210.tmp";
+    const lookalike = directory ++ "/.dead.key.0123456789abcdeg.tmp";
+    const notes = directory ++ "/.notes.tmp";
+    for ([_][]const u8{ old_key, old_pub, recent, lookalike, notes }) |path| {
+        files.put_file(path, 0o600, "seed");
+        files.set_mtime_of(path, 100);
+    }
+    sim.world.now = 100 + constants.key_leftover_age_seconds;
+    files.set_mtime_of(recent, sim.world.now - 1);
+    const other = [_][:0]const u8{ "key", "new", "ci2", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&other));
+    try testing.expect(files.kind_of(old_key) == null);
+    try testing.expect(files.kind_of(old_pub) == null);
+    try testing.expect(files.kind_of(recent) != null);
+    try testing.expect(files.kind_of(lookalike) != null);
+    try testing.expect(files.kind_of(notes) != null);
+    try testing.expect(files.kind_of(directory ++ "/ci2.key") != null);
+}
+
+test "key new sweeps at most key_sweep_max temporaries per run" {
+    // Goal: the sweep bound, at the bound and one past it. Method: one more old temporary than
+    // the bound; the first key new removes exactly the bound, the second removes the rest.
+    start();
+    const make = [_][:0]const u8{ "key", "new", "ci", "--no-passphrase" }; // Makes the directory.
+    try testing.expectEqual(@as(u8, 0), command(&make));
+    const total = constants.key_sweep_max + 1;
+    var paths: [total][64]u8 = undefined;
+    for (&paths, 0..) |*buffer, index| {
+        @memset(buffer, 0);
+        const pattern = directory ++ "/.dead.key.{x:0>16}.tmp";
+        const path = std.fmt.bufPrint(buffer, pattern, .{index}) catch
+            return error.TestUnexpectedResult;
+        files.put_file(path, 0o600, "seed");
+        files.set_mtime_of(path, 100);
+    }
+    sim.world.now = 100 + constants.key_leftover_age_seconds;
+    const first = [_][:0]const u8{ "key", "new", "one", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&first));
+    try testing.expectEqual(@as(u32, 1), remaining(&paths));
+    const second = [_][:0]const u8{ "key", "new", "two", "--no-passphrase" };
+    try testing.expectEqual(@as(u8, 0), command(&second));
+    try testing.expectEqual(@as(u32, 0), remaining(&paths));
+}
+
+/// How many of `paths` (NUL-terminated text in each buffer) are still there.
+fn remaining(paths: []const [64]u8) u32 {
+    var count: u32 = 0;
+    for (paths) |buffer| {
+        const length = std.mem.indexOfScalar(u8, &buffer, 0) orelse return 0;
+        if (files.kind_of(buffer[0..length]) != null) count += 1;
+    }
+    return count;
 }
