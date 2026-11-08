@@ -16,6 +16,8 @@ const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
+const policy_mod = @import("trust/policy.zig");
+const verdict_mod = @import("trust/verdict.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -715,6 +717,8 @@ const key_cases = [_]Case{
     .{ .code = .E0901, .args = &key_show_args, .prepare = prepare_keys_none, .exit = 1 },
     .{ .code = .E0902, .args = &key_new_args, .prepare = prepare_keys_one, .exit = 1 },
     .{ .code = .E0903, .args = &.{}, .direct = record_damaged, .exit = 1 },
+    .{ .code = .E0904, .args = &.{}, .direct = policy_unreadable, .exit = 1 },
+    .{ .code = .E0905, .args = &.{}, .direct = run_unsigned, .exit = 1 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
 };
@@ -728,6 +732,38 @@ fn record_damaged(diag: *Diag) void {
         "/home/alice/.local/share/zbx/trust/signatures/0123456789abcdef",
         .damaged,
     );
+}
+
+const golden_policy_path = "/home/alice/.config/zbx/policy.zon";
+
+/// E0904 and E0905 come from the gate in front of a run, which takes a store with a record to
+/// set up: the golden is the diagnostic as `trust/diagnose.zig` builds it, and the gate tests
+/// run the gate into each.
+fn policy_unreadable(diag: *Diag) void {
+    var fault: trust_diagnose.PolicyFault = .{ .problem = .{
+        .kind = .unknown_field,
+        .line = 3,
+        .column = 5,
+        .detail = undefined,
+        .detail_length = 5,
+    } };
+    @memcpy(fault.problem.detail[0..5], "extra");
+    trust_diagnose.policy_unusable(diag, golden_policy_path, fault);
+}
+
+fn run_unsigned(diag: *Diag) void {
+    var policy: policy_mod.Policy = undefined;
+    policy.clear();
+    policy.require_signature = true;
+    var report: verdict_mod.Report = undefined;
+    report.clear();
+    trust_diagnose.unsigned(diag, &.{
+        .digest = "b3:0123456789abcdef",
+        .policy_path = golden_policy_path,
+        .report = &report,
+        .policy = &policy,
+        .no_tree = false,
+    });
 }
 
 fn sign_refused_missing(diag: *Diag) void {

@@ -74,7 +74,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0903</h1>
 <p class="summary">a signature record in the store is damaged or newer</p>
-<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
+<dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>Signatures are kept in the store, one file per tree, under trust/signatures: each line of it is one signed statement. zbx reads the file whole before it adds to it, and checks every line: its signature and its statement. A file that fails is not trusted and not changed, because adding to it would keep the damage.</p>
 <p>The cause says which. A damaged file is not what zbx wrote: a disk or a program changed it, or it was put there by hand or by &quot;zbx trust import&quot; of something that was not a zbx signature. A newer file was written by a newer zbx, with a statement this one does not know.</p>

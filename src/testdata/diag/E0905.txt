@@ -1,0 +1,7 @@
+error[ZBX-E0905]: no trusted signature covers what was to run
+  cause  /home/alice/.config/zbx/policy.zon requires a signature
+         (require_signature), and nothing has signed b3:0123456789abcdef
+  fix    sign it with a key the policy lists:   zbx sign b3:0123456789abcdef
+         or add the signer's key to the policy file
+  more   zbx explain E0905 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0905.html

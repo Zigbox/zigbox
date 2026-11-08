@@ -196,6 +196,8 @@ pub const Code = enum(u8) {
     E0901,
     E0902,
     E0903,
+    E0904,
+    E0905,
     E0910,
     E0911,
     E1001,
@@ -3015,6 +3017,58 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0904,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a policy file cannot be read or is not a policy",
+        .explanation =
+        \\A policy file says which keys you trust and what a run must have. zbx reads
+        \\/etc/zbx/policy.zon and ~/.config/zbx/policy.zon (or $XDG_CONFIG_HOME/zbx/
+        \\policy.zon) before every run, exec and build step, and every file that
+        \\exists must be a policy: a file that is not is refused and nothing runs,
+        \\because a policy that cannot be read must not be taken for "no rules".
+        \\
+        \\A policy is a restricted ZON file:
+        \\    .{
+        \\        .version = 1,
+        \\        .keys = .{ .{ .name = "release", .public = "zbx-ed25519:..." } },
+        \\        .require_signature = true,
+        \\        .verify = "cached",
+        \\    }
+        \\Only .version is required. Fields come in any order, once each. There are
+        \\at most 16 keys, none listed twice, and the file is at most 16 KiB.
+        \\.require_provenance is not supported by this zbx yet and is refused.
+        \\
+        \\The cause gives the line and column and what was expected there. Correct
+        \\the file, or remove it. "zbx policy check" reads the policy files and
+        \\runs nothing.
+        ,
+    },
+    .{
+        .code = .E0905,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no trusted signature covers what was to run",
+        .explanation =
+        \\A policy file asked for require_signature, and the tree this run would
+        \\start from has no signature that satisfies it. Nothing was started: no
+        \\container, no run record.
+        \\
+        \\A signature counts when, in this order: its signature verifies, its key is
+        \\one the policy lists, it is a statement about this tree, and what it is
+        \\bound to fits the run. A signature of the tree alone counts for any run of
+        \\it; one of a build result counts only for a run of that result, and one of
+        \\an image only for a run of that image. The cause names each signature
+        \\present and the first reason it does not count.
+        \\
+        \\Sign it with a key the policy lists ("zbx sign <digest>"), or add the key
+        \\that signed it to the policy file the cause names. "zbx policy check
+        \\<digest>" shows the same verdict without running anything. A directory
+        \\given as --rootfs has no tree and cannot be signed, so a policy that
+        \\requires a signature refuses it.
+        ,
+    },
+    .{
         .code = .E0910,
         .severity = .@"error",
         .blame = .user,
@@ -3521,7 +3575,7 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0901, .E0902, .E0903, .E0910, .E0911 => false,
+        .E0901, .E0902, .E0910, .E0911 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

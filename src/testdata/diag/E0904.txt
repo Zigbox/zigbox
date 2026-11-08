@@ -1,0 +1,6 @@
+error[ZBX-E0904]: a policy file cannot be read or is not a policy
+  cause  /home/alice/.config/zbx/policy.zon line 3, column 5: 'extra': no such
+         field in a policy file
+  fix    correct the file where it says; "zbx explain E0904" shows its form
+  more   zbx explain E0904 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0904.html

@@ -309,6 +309,7 @@ test {
     _ = @import("trust/policy_tests.zig");
     _ = @import("trust/verdict.zig");
     _ = @import("trust/verdict_tests.zig");
+    _ = @import("trust/gate.zig");
     _ = @import("trust/record_tests.zig");
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");
