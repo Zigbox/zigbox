@@ -41,6 +41,33 @@ M0 was built in five slices. Each is reviewed adversarially before it is pushed.
 
 **What works today:** `zbx doctor` checks whether a host can run Zigbox and, for every problem, prints a coded diagnostic with the cause and a runnable fix (`zbx explain <code>` gives the long form, and `site/errors/` has the same pages for the web). `zbx --version`, `zbx help`, `-v` and `--output json` round it out. All of it has run in an Ubuntu 24.04 VM in CI.
 
+## Installing
+
+Packages are built by `zig build packages` (runbook: [docs/releases/packaging.md](docs/releases/packaging.md)). Once a release is published at the project's package host, the commands are, for apt:
+
+```sh
+curl -fsSL https://zigbox.org/apt/zigbox.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/zigbox.gpg] https://zigbox.org/apt stable main" | sudo tee /etc/apt/sources.list.d/zigbox.list
+sudo apt update && sudo apt install zigbox
+```
+
+and for dnf, with `/etc/yum.repos.d/zigbox.repo` (`$basearch` is `x86_64` or `aarch64`):
+
+```ini
+[zigbox]
+name=Zigbox
+baseurl=https://zigbox.org/rpm/$basearch
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://zigbox.org/zigbox.asc
+```
+
+```sh
+sudo dnf install zigbox
+```
+
+The package holds the static `zbx` binary and recommends `uidmap` (or `shadow-utils`) and `passt`. It does not touch `/etc/subuid` or `/etc/subgid`. The host layout above is the intended one, not yet live.
+
 ## Building
 
 Requires Zig 0.17.0 exactly ([download](https://ziglang.org/download/)). There are no other dependencies.
@@ -51,6 +78,8 @@ zig build test                     # unit, snapshot and simulation tests
 zig build tidy                     # formatting and mechanical style rules
 zig build fuzz -- <fuzzer> [seed]  # one seeded fuzzer; prints its seed so failures replay
 zig build release                  # static ReleaseSafe binaries for x86_64 and aarch64, size-checked
+zig build packages                 # deb, rpm and the apt/dnf trees under zig-out/packages (-Dtest-key, -Dsignatures)
+zig build packages-check           # every placed file agrees with the metadata that names it
 ```
 
 Linux only, by design. Running containers will need unprivileged user namespaces, cgroup v2 with user delegation and the `uidmap` package; `zbx doctor` checks all of this.
