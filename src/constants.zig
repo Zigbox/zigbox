@@ -1480,13 +1480,17 @@ pub const pack_annotation_writer = "org.zigbox.layer-writer";
 
 /// The OCI media types a pack writes.
 pub const oci_manifest_media_type = "application/vnd.oci.image.manifest.v1+json";
+pub const oci_index_media_type = "application/vnd.oci.image.index.v1+json";
 pub const oci_config_media_type = "application/vnd.oci.image.config.v1+json";
 pub const oci_layer_media_type = "application/vnd.oci.image.layer.v1.tar+gzip";
 
-/// Files with several names (one object) a pack tracks, to write the later names as hard links,
-/// and the room for their paths. Past either, later names are written as ordinary files (the
-/// bytes are repeated, the result is the same tree). New bounds, part of the layer writer
-/// version; the numbers are those of `zbx state export`.
+/// The objects a pack tracks (every file's, once: the first name of each), to write later names
+/// of the same object as hard links, and the room for those first paths. Past either, later names
+/// of an object not tracked are written as ordinary files (the bytes are repeated, the result is
+/// the same tree). So a tree of more than `pack_links_max` files, or with more than
+/// `pack_link_paths_bytes` of paths, gets a different layer from the one a larger table would
+/// give: these numbers are part of the layer writer version. The numbers are those of
+/// `zbx state export`.
 pub const pack_links_max: u32 = 16384;
 pub const pack_link_paths_bytes: u32 = 1024 * 1024;
 

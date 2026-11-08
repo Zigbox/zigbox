@@ -91,7 +91,10 @@ test "one tree packs to one image, on every pack and at every buffer size" {
     const second_import = try import_source(false);
     try testing.expect(first_import.digest.eql(second_import.digest));
     for ([_]u32{ 1024, 4099, 65536 }) |piece| {
+        // Without the record the pack walks and compresses again: a cached one proves nothing.
+        pack.forget(&store, second_import.digest);
         const other = try pack_tree(second_import.digest, piece);
+        try testing.expect(!other.cached);
         try testing.expectEqualSlices(u8, &first.manifest.bytes, &other.manifest.bytes);
         try testing.expectEqualSlices(u8, &first.config.bytes, &other.config.bytes);
         try testing.expectEqualSlices(u8, &first.layer.bytes, &other.layer.bytes);
@@ -229,6 +232,55 @@ test "an export writes the layout, and refuses a directory that holds something"
     try testing.expectEqual(export_mod.Stop.not_directory, failure.stop);
     files.put_dir("/empty", 0o755);
     try export_mod.export_layout(&store, &made, "/empty", &buffer, &out, &failure);
+}
+
+test "a failed export leaves nothing under the name, and a damaged blob is dropped" {
+    // Goal: the export is all or nothing, and never copies bytes that are not their digest.
+    // Method: export below a missing parent (a write failure naming ENOENT), then overwrite the
+    // layer blob with other bytes of its length, which must be refused as damaged with nothing
+    // left at the target; the next pack rebuilds the blob and the export then succeeds.
+    start(6, 0);
+    const imported = try import_source(false);
+    const made = try pack_tree(imported.digest, constants.pack_io_bytes);
+    var failure: export_mod.Failure = undefined;
+    var out: export_mod.Exported = undefined;
+    var buffer: [4096]u8 = undefined;
+    try testing.expectError(
+        error.Stopped,
+        export_mod.export_layout(&store, &made, "/missing/x", &buffer, &out, &failure),
+    );
+    try testing.expectEqual(export_mod.Stop.write, failure.stop);
+    try testing.expectEqual(error.NotFound, failure.err);
+    try testing.expectEqual(@as(u16, 2), failure.errno);
+
+    var path: PathBuf = undefined;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    const damaged_path = blobs.final_path(&path, made.layer);
+    try store.fs.unlink(damaged_path); // `create` is exclusive: replace the blob by name.
+    const fd = try store.fs.create(damaged_path, 0o644);
+    var junk: [256]u8 = undefined;
+    @memset(&junk, 0x5A);
+    var left: u64 = made.layer_size;
+    while (left > 0) {
+        const piece: usize = @intCast(@min(left, junk.len));
+        try store.fs.write_all(fd, junk[0..piece]);
+        left -= piece;
+    }
+    store.fs.close(fd);
+    try testing.expect(blobs.has(made.layer, made.layer_size)); // The size check is fooled.
+    try testing.expectError(
+        error.Stopped,
+        export_mod.export_layout(&store, &made, "/export", &buffer, &out, &failure),
+    );
+    try testing.expectEqual(export_mod.Stop.damaged, failure.stop);
+    try testing.expect(failure.digest.eql(made.layer));
+    try testing.expectError(error.NotFound, store.fs.lstat("/export"));
+    try testing.expect(!blobs.has(made.layer, made.layer_size));
+
+    const again = try pack_tree(imported.digest, constants.pack_io_bytes);
+    try testing.expect(!again.cached);
+    try testing.expect(again.layer.eql(made.layer));
+    try export_mod.export_layout(&store, &again, "/export", &buffer, &out, &failure);
 }
 
 /// A fixed root with every kind of entry: directories, files, a symlink, two files that are one

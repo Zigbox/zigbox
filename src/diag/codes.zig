@@ -1502,7 +1502,9 @@ pub const registry = [_]Entry{
         \\The kernel refused a write to the store directory (permissions, a
         \\read-only file system, an I/O error). Nothing partial is left under a
         \\digest: a failed write leaves at most a temporary file in the store's
-        \\tmp directory, which "zbx store gc" removes.
+        \\tmp directory, which "zbx store gc" removes. The same code covers a
+        \\failed write of an export directory: it is written beside its name and
+        \\renamed into place, so nothing partial is left under the name.
         \\
         \\The cause names the path and the kernel's reason. The store is in
         \\$XDG_DATA_HOME/zbx/store, or ~/.local/share/zbx/store.
@@ -2338,11 +2340,13 @@ pub const registry = [_]Entry{
         \\zbx packs a build result, an image or a tree of the store into one image
         \\layer, and the source named is not one it can pack: there is no such digest
         \\or reference in the store, or the tree it names is not whole (a directory
-        \\or a file of it is missing from the store or has changed).
+        \\or a file of it is missing from the store or has changed), or a blob
+        \\that was packed earlier is damaged: its bytes are no longer its digest.
         \\
         \\The cause says which. Nothing was written to the destination. For a tree
         \\that is not whole, run `zbx store verify` to see what the store lost, and
-        \\build or import the source again.
+        \\build or import the source again. A damaged blob is dropped, so the same
+        \\command packs it afresh.
         ,
     },
     .{

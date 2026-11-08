@@ -71,9 +71,13 @@ pub fn export_operand(
     out: *export_mod.Exported,
     diag: *Diag,
 ) Error!void {
+    var failure: export_mod.Failure = undefined;
+    export_mod.check_target(store.fs, dir, &failure) catch {
+        diagnose.export_stopped(diag, dir, &failure);
+        return error.Failed;
+    };
     var made: pack.Packed = undefined;
     try pack_operand(store, ws, operand, &made, diag);
-    var failure: export_mod.Failure = undefined;
     export_mod.export_layout(store, &made, dir, &ws.pack.io, out, &failure) catch {
         diagnose.export_stopped(diag, dir, &failure);
         return error.Failed;

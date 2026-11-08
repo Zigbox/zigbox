@@ -76,8 +76,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the source cannot be packed into an image</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx packs a build result, an image or a tree of the store into one image layer, and the source named is not one it can pack: there is no such digest or reference in the store, or the tree it names is not whole (a directory or a file of it is missing from the store or has changed).</p>
-<p>The cause says which. Nothing was written to the destination. For a tree that is not whole, run `zbx store verify` to see what the store lost, and build or import the source again.</p>
+<p>zbx packs a build result, an image or a tree of the store into one image layer, and the source named is not one it can pack: there is no such digest or reference in the store, or the tree it names is not whole (a directory or a file of it is missing from the store or has changed), or a blob that was packed earlier is damaged: its bytes are no longer its digest.</p>
+<p>The cause says which. Nothing was written to the destination. For a tree that is not whole, run `zbx store verify` to see what the store lost, and build or import the source again. A damaged blob is dropped, so the same command packs it afresh.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0550</pre>

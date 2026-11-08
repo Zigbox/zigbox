@@ -4,7 +4,10 @@
 //! so the manifest digest is the one `pack` made on any host (same layer-writer version).
 //!
 //! The directory must not exist, or be an empty directory: export never mixes into what is
-//! there (ZBX-E0557).
+//! there (ZBX-E0557). The layout is written to a sibling directory first, synced, and renamed
+//! onto the name, so a failed or killed export leaves nothing under it, and a retry works. Every
+//! blob is hashed as it is copied: a cached blob that no longer matches its digest is dropped
+//! (ZBX-E0550) rather than exported under a name it does not match.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -28,11 +31,17 @@ pub const Stop = enum {
     not_directory,
     /// A path is too long, or the directory cannot be read or written.
     write,
+    /// A cached blob's bytes do not hash to its digest; it was dropped.
+    damaged,
 };
 
 pub const Failure = struct {
     stop: Stop,
     errno: u16,
+    /// What the file system said, for the cause (`write`).
+    err: fs_mod.Error = error.IoFailed,
+    /// The blob that failed its hash (`damaged`).
+    digest: Sha256 = .{ .bytes = @splat(0) },
 };
 
 pub const Error = error{Stopped};
@@ -62,22 +71,39 @@ fn stopped(failure: *Failure, stop: Stop, errno: u16) Error {
     return error.Stopped;
 }
 
-/// Checks `dir` is absent or empty, and makes it.
-fn prepare(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
+/// A failed call of the file system: its error, and the errno the kernel gave (a missing path
+/// sets none, so ENOENT is filled in).
+fn io_stopped(fs: Fs, failure: *Failure, err: fs_mod.Error) Error {
+    var errno = fs.last_errno();
+    if (errno == 0 and err == error.NotFound) errno = errno_noent;
+    failure.* = .{ .stop = .write, .errno = errno, .err = err };
+    return error.Stopped;
+}
+
+const errno_noent: u16 = 2;
+
+/// Checks `dir` is absent or an empty directory; writes nothing. A command calls it before the
+/// pack too, so a refusal does not wait for minutes of compression.
+pub fn check_target(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
     assert(dir.len > 0);
     var path: PathBuf = undefined;
     path.set(&.{dir}) catch return stopped(failure, .write, 0);
     if (fs.lstat(path.text())) |found| {
         if (found.kind != .dir) return stopped(failure, .not_directory, 0);
         var counter: Counter = .{};
-        fs.read_dir(path.text(), .{ .context = &counter, .call = Counter.call }) catch {
-            return stopped(failure, .write, fs.last_errno());
+        fs.read_dir(path.text(), .{ .context = &counter, .call = Counter.call }) catch |err| {
+            return io_stopped(fs, failure, err);
         };
         if (counter.count > 0) return stopped(failure, .not_empty, 0);
     } else |err| {
-        if (err != error.NotFound) return stopped(failure, .write, fs.last_errno());
+        if (err != error.NotFound) return io_stopped(fs, failure, err);
     }
-    fs.make_directory(path.text(), true) catch return stopped(failure, .write, fs.last_errno());
+}
+
+/// The sibling the layout is built in: `<dir>.zbx-tmp-` and 8 digits of the manifest's.
+fn work_path(dir: []const u8, made: *const pack.Packed, path: *PathBuf) Error!void {
+    const hex = made.manifest.hex();
+    path.set(&.{ dir, ".zbx-tmp-", hex[0..8] }) catch return error.Stopped;
 }
 
 fn make_directories(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
@@ -85,23 +111,59 @@ fn make_directories(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
     for (parts) |part| {
         var path: PathBuf = undefined;
         path.set(&.{ dir, part }) catch return stopped(failure, .write, 0);
-        fs.make_directory(path.text(), true) catch return stopped(failure, .write, fs.last_errno());
+        fs.make_directory(path.text(), true) catch |err| return io_stopped(fs, failure, err);
+    }
+}
+
+/// Removes what an export makes in `work` (a failed run's, or a stale one), ignoring what is
+/// not there: the layout is fixed, so the names are known.
+fn discard(fs: Fs, work: []const u8, made: *const pack.Packed) void {
+    var path: PathBuf = undefined;
+    const files = [_][]const u8{ "/index.json", "/oci-layout" };
+    for (files) |name| {
+        path.set(&.{ work, name }) catch return;
+        fs.unlink(path.text()) catch {}; // Best effort: a missing file is the usual case.
+    }
+    for ([_]Sha256{ made.layer, made.config, made.manifest }) |digest| {
+        blob_target(work, digest, &path) catch return;
+        fs.unlink(path.text()) catch {}; // Best effort, as above.
+    }
+    for ([_][]const u8{ "/blobs/sha256", "/blobs", "" }) |name| {
+        path.set(&.{ work, name }) catch return;
+        fs.remove_directory(path.text()) catch {}; // Best effort; a directory with strangers stays.
     }
 }
 
 fn put_text(fs: Fs, path: [:0]const u8, text: []const u8, failure: *Failure) Error!void {
     assert(text.len > 0);
-    const fd = fs.create(path, constants.export_file_mode) catch {
-        return stopped(failure, .write, fs.last_errno());
+    const fd = fs.create(path, constants.export_file_mode) catch |err| {
+        return io_stopped(fs, failure, err);
     };
     defer fs.close(fd);
-    fs.write_all(fd, text) catch return stopped(failure, .write, fs.last_errno());
-    fs.fsync(fd) catch return stopped(failure, .write, fs.last_errno());
+    fs.write_all(fd, text) catch |err| return io_stopped(fs, failure, err);
+    fs.fsync(fd) catch |err| return io_stopped(fs, failure, err);
 }
 
-/// Copies the store's blob `digest` to `to`, through `buffer`.
+/// A cached blob whose bytes are not its digest: drop it and the pack record that names it, so
+/// the next run makes it again.
+fn blob_damaged(
+    store: *const Store,
+    made: *const pack.Packed,
+    digest: Sha256,
+    failure: *Failure,
+) Error {
+    var from: PathBuf = undefined;
+    const blobs: blobs_mod.Blobs = .{ .fs = store.fs, .root = store.root_text() };
+    store.fs.unlink(blobs.final_path(&from, digest)) catch {}; // Best effort; a gc finds it too.
+    pack.forget(store, made.tree);
+    failure.* = .{ .stop = .damaged, .errno = 0, .digest = digest };
+    return error.Stopped;
+}
+
+/// Copies the store's blob `digest` to `to`, through `buffer`, hashing what it copies.
 fn copy_blob(
     store: *const Store,
+    made: *const pack.Packed,
     digest: Sha256,
     to: [:0]const u8,
     buffer: []u8,
@@ -111,22 +173,25 @@ fn copy_blob(
     const fs = store.fs;
     const blobs: blobs_mod.Blobs = .{ .fs = fs, .root = store.root_text() };
     var from: PathBuf = undefined;
-    const source = fs.open_read(blobs.final_path(&from, digest)) catch {
-        return stopped(failure, .write, fs.last_errno());
+    const source = fs.open_read(blobs.final_path(&from, digest)) catch |err| {
+        return io_stopped(fs, failure, err);
     };
     defer fs.close(source);
-    const target = fs.create(to, constants.export_file_mode) catch {
-        return stopped(failure, .write, fs.last_errno());
+    const target = fs.create(to, constants.export_file_mode) catch |err| {
+        return io_stopped(fs, failure, err);
     };
     defer fs.close(target);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     while (true) {
-        const count = fs.read(source, buffer) catch
-            return stopped(failure, .write, fs.last_errno());
+        const count = fs.read(source, buffer) catch |err| return io_stopped(fs, failure, err);
         if (count == 0) break;
-        fs.write_all(target, buffer[0..count]) catch
-            return stopped(failure, .write, fs.last_errno());
+        hasher.update(buffer[0..count]);
+        fs.write_all(target, buffer[0..count]) catch |err| return io_stopped(fs, failure, err);
     }
-    fs.fsync(target) catch return stopped(failure, .write, fs.last_errno());
+    var found: Sha256 = undefined;
+    hasher.final(&found.bytes);
+    if (!found.eql(digest)) return blob_damaged(store, made, digest, failure);
+    fs.fsync(target) catch |err| return io_stopped(fs, failure, err);
 }
 
 fn blob_target(dir: []const u8, digest: Sha256, path: *PathBuf) Error!void {
@@ -145,10 +210,61 @@ pub fn render_index(made: *const pack.Packed, out: []u8) json.WriteError![]const
     try writer.member_unsigned("size", made.manifest_size);
     try writer.end_object();
     try writer.end_array();
+    try writer.member_string("mediaType", constants.oci_index_media_type);
     try writer.member_unsigned("schemaVersion", 2);
     try writer.end_object();
     return writer.finish();
 }
+
+/// Writes the three blobs, `index.json` and `oci-layout` into `work`, and syncs its directories.
+fn build(
+    store: *const Store,
+    made: *const pack.Packed,
+    work: []const u8,
+    buffer: []u8,
+    failure: *Failure,
+) Error!void {
+    const fs = store.fs;
+    try make_directories(fs, work, failure);
+    for ([_]Sha256{ made.layer, made.config, made.manifest }) |digest| {
+        var target: PathBuf = undefined;
+        blob_target(work, digest, &target) catch return stopped(failure, .write, 0);
+        try copy_blob(store, made, digest, target.text(), buffer, failure);
+    }
+    var index: [constants.pack_manifest_bytes_max]u8 = undefined;
+    const index_text = render_index(made, &index) catch unreachable; // Sized for one manifest.
+    var path: PathBuf = undefined;
+    path.set(&.{ work, "/index.json" }) catch return stopped(failure, .write, 0);
+    try put_text(fs, path.text(), index_text, failure);
+    path.set(&.{ work, "/oci-layout" }) catch return stopped(failure, .write, 0);
+    try put_text(fs, path.text(), layout_text, failure);
+    for ([_][]const u8{ "/blobs/sha256", "/blobs", "" }) |name| {
+        path.set(&.{ work, name }) catch return stopped(failure, .write, 0);
+        fs.sync_directory(path.text()) catch |err| return io_stopped(fs, failure, err);
+    }
+}
+
+/// Moves the finished `work` onto `dir` (absent, or an empty directory, which is removed first:
+/// if something arrived there meanwhile, that is E0557) and syncs the parent.
+fn install(fs: Fs, work: [:0]const u8, dir: []const u8, failure: *Failure) Error!void {
+    var path: PathBuf = undefined;
+    path.set(&.{dir}) catch return stopped(failure, .write, 0);
+    if (fs.lstat(path.text())) |_| {
+        fs.remove_directory(path.text()) catch |err| {
+            if (fs.last_errno() == errno_notempty) return stopped(failure, .not_empty, 0);
+            return io_stopped(fs, failure, err);
+        };
+    } else |err| {
+        if (err != error.NotFound) return io_stopped(fs, failure, err);
+    }
+    fs.rename(work, path.text()) catch |err| return io_stopped(fs, failure, err);
+    const slash = std.mem.lastIndexOfScalar(u8, dir, '/');
+    const parent = if (slash) |at| (if (at == 0) "/" else dir[0..at]) else ".";
+    path.set(&.{parent}) catch return stopped(failure, .write, 0);
+    fs.sync_directory(path.text()) catch |err| return io_stopped(fs, failure, err);
+}
+
+const errno_notempty: u16 = 39;
 
 /// Writes the layout of `made` to `dir`. `buffer` is the copy's piece.
 pub fn export_layout(
@@ -162,21 +278,18 @@ pub fn export_layout(
     assert(dir.len > 0);
     assert(buffer.len >= 1024);
     const fs = store.fs;
-    try prepare(fs, dir, failure);
-    try make_directories(fs, dir, failure);
-    const digests = [_]Sha256{ made.layer, made.config, made.manifest };
-    for (digests) |digest| {
-        var target: PathBuf = undefined;
-        blob_target(dir, digest, &target) catch return stopped(failure, .write, 0);
-        try copy_blob(store, digest, target.text(), buffer, failure);
-    }
-    var index: [constants.pack_manifest_bytes_max]u8 = undefined;
-    const index_text = render_index(made, &index) catch unreachable; // Sized for one manifest.
-    var path: PathBuf = undefined;
-    path.set(&.{ dir, "/index.json" }) catch return stopped(failure, .write, 0);
-    try put_text(fs, path.text(), index_text, failure);
-    path.set(&.{ dir, "/oci-layout" }) catch return stopped(failure, .write, 0);
-    try put_text(fs, path.text(), layout_text, failure);
+    try check_target(fs, dir, failure);
+    var work: PathBuf = undefined;
+    work_path(dir, made, &work) catch return stopped(failure, .write, 0);
+    discard(fs, work.text(), made); // A killed run's leftovers.
+    build(store, made, work.text(), buffer, failure) catch |err| {
+        discard(fs, work.text(), made);
+        return err;
+    };
+    install(fs, work.text(), dir, failure) catch |err| {
+        discard(fs, work.text(), made);
+        return err;
+    };
     out.* = .{
         .manifest = made.manifest,
         .config = made.config,

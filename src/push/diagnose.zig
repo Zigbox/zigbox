@@ -32,11 +32,12 @@ pub fn cannot_pack(diag: *Diag, operand: []const u8, why: []const u8) void {
 /// ZBX-E0550 for a pack that stopped: the reason is the packer's sentence.
 pub fn pack_stopped(diag: *Diag, operand: []const u8, failure: *const pack.Failure) void {
     assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
     if (failure.stop == .write) {
         diag.raise(.E0417);
         diag.while_("packing an image", .{});
         errors.cause_host_error(diag, failure.stop.sentence(), error.IoFailed, failure.errno);
-        diag.context("source", "{s}", .{operand});
+        diag.context("source", "{s}", .{echo_of(&storage, operand)});
         diag.fix(.{ .sentence = "check that you can write to the store directory, and the disk" });
         return;
     }
@@ -52,9 +53,24 @@ pub fn export_stopped(diag: *Diag, dir: []const u8, failure: *const export_mod.F
     if (failure.stop == .write) {
         diag.raise(.E0417);
         diag.while_("writing the export directory", .{});
-        errors.cause_host_error(diag, "writing the layout", error.IoFailed, failure.errno);
+        var operation: [constants.arg_echo_bytes_max + 48]u8 = undefined;
+        const what = std.fmt.bufPrint(&operation, "writing the export directory '{s}'", .{
+            echo,
+        }) catch unreachable; // Sized for the echo and the words.
+        errors.cause_host_error(diag, what, failure.err, failure.errno);
         diag.context("path", "{s}", .{echo});
-        diag.fix(.{ .sentence = "check that you can write to the directory, and the disk" });
+        diag.fix(.{ .sentence = "check that the directory's parent exists, that you can write" ++
+            " there, and the disk" });
+        return;
+    }
+    if (failure.stop == .damaged) {
+        diag.raise(.E0550);
+        diag.while_("writing an OCI layout", .{});
+        diag.cause("stored blob {s} is damaged (not its digest) and was dropped", .{
+            failure.digest.text(),
+        });
+        diag.context("path", "{s}", .{echo});
+        diag.fix(.{ .sentence = "run the same command again, which makes the blob again" });
         return;
     }
     diag.raise(.E0557);

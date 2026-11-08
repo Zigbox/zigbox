@@ -1,6 +1,8 @@
 //! What a pack is made from: a build result (a tree and the config the build resolved), a
-//! reference of a pulled or pushed image, or a tree digest (a tree with an image record keeps its
-//! image's settings; a bare tree has none).
+//! reference of a pulled or pushed image, or a tree digest. A bare tree digest names content only,
+//! so it has no settings: several image records can share one tree with different settings, and
+//! which one a bare name meant would depend on the host. Name the image or the build result to
+//! keep its settings.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -51,9 +53,7 @@ pub fn resolve(store: *const Store, ws: *Workspace, operand: []const u8, out: *S
             return;
         } else |err| if (err != error.NotFound) return error.Unusable;
         out.tree = digest;
-        var by: image_find.ByTree = .{ .tree = digest };
-        image_find.scan(store, &ws.memory, &ws.image, &by) catch return error.Unusable;
-        if (by.count > 0) try take_settings(store, ws, by.manifest, out);
+        assert(out.settings.used == 0); // Cleared above: a bare tree has no settings.
         return;
     }
     var by: image_find.ByReference = .{ .text = operand };

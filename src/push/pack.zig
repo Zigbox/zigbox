@@ -267,7 +267,8 @@ fn hash_slot(object: Digest) u32 {
 }
 
 /// The first path of the object, or null; remembers `path` when the object is new and there is
-/// room.
+/// room. Every file's object is added, not only those with several names, so a big image fills
+/// the table: past it, later names are written as ordinary files.
 fn link_find_or_add(ws: *Workspace, object: Digest, path: []const u8) ?[]const u8 {
     assert(path.len > 0);
     assert(ws.links_count <= constants.pack_links_max);
@@ -666,6 +667,13 @@ fn recall(store: *const Store, tree: Digest) ?Remembered {
     return found;
 }
 
+/// Drops the pack record of `tree`, so the next pack walks and compresses again (tests and the
+/// fuzzer use it to compare two real packs; a missing record is no error).
+pub fn forget(store: *const Store, tree: Digest) void {
+    var path: PathBuf = undefined;
+    store.fs.unlink(record_path(store, &path, tree)) catch |err| assert(err == error.NotFound);
+}
+
 fn remember(store: *Store, made: *const Packed, failure: *Failure) Error!void {
     var directory: PathBuf = undefined;
     store.fs.make_directory(store.directory_path(&directory, "pack"), true) catch {
@@ -762,4 +770,51 @@ pub fn record_image(
     image.layers[0] = made.layer;
     image.settings = input.settings.*;
     try images.save(store, &image, failure);
+}
+
+var bound_workspace: Workspace = undefined;
+
+fn reset_links(ws: *Workspace) void {
+    ws.links_count = 0;
+    ws.link_used = 0;
+    @memset(&ws.links, .{ .object = undefined, .at = 0, .len = 0, .used = false });
+}
+
+test "the link table stops taking objects at its bound, and later names stay full copies" {
+    // Goal: the bound and one past it, which fix the layer's form for a big image. Method: fill
+    // the table with distinct objects; the next new object is not remembered, so its later
+    // names are not links (null again), while an object kept before still links.
+    const ws = &bound_workspace;
+    reset_links(ws);
+    var name: [16]u8 = undefined;
+    for (0..constants.pack_links_max) |index| {
+        const path = std.fmt.bufPrint(&name, "p{d}", .{index}) catch unreachable; // Short.
+        try std.testing.expect(link_find_or_add(ws, Digest.of(path), path) == null);
+    }
+    try std.testing.expectEqual(constants.pack_links_max, ws.links_count);
+    const extra = Digest.of("one past the bound");
+    try std.testing.expect(link_find_or_add(ws, extra, "extra") == null);
+    try std.testing.expect(link_find_or_add(ws, extra, "extra-again") == null);
+    try std.testing.expectEqual(constants.pack_links_max, ws.links_count);
+    const kept = link_find_or_add(ws, Digest.of("p7"), "later").?;
+    try std.testing.expectEqualStrings("p7", kept);
+}
+
+test "the link table stops taking objects when its path room is full" {
+    // Goal: the byte bound and one past it. Method: remember long paths until the room is
+    // used; the next object that does not fit is not remembered, an earlier one still links.
+    const ws = &bound_workspace;
+    reset_links(ws);
+    var path: [constants.path_bytes_max]u8 = undefined;
+    @memset(&path, 'x');
+    var index: u32 = 0;
+    while (ws.link_used + path.len <= constants.pack_link_paths_bytes) : (index += 1) {
+        var key: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&key, "k{d}", .{index}) catch unreachable; // Short.
+        try std.testing.expect(link_find_or_add(ws, Digest.of(text), &path) == null);
+    }
+    const before = ws.links_count;
+    try std.testing.expect(link_find_or_add(ws, Digest.of("late"), &path) == null);
+    try std.testing.expectEqual(before, ws.links_count);
+    try std.testing.expect(link_find_or_add(ws, Digest.of("k0"), "n") != null);
 }
