@@ -289,5 +289,10 @@ test {
     _ = @import("fuzz_key.zig");
     _ = @import("trust/json.zig");
     _ = @import("trust/json_tests.zig");
+    _ = @import("trust/dsse.zig");
+    _ = @import("trust/dsse_tests.zig");
+    _ = @import("trust/statement.zig");
+    _ = @import("trust/statement_tests.zig");
     _ = @import("fuzz_json.zig");
+    _ = @import("fuzz_trust.zig");
 }

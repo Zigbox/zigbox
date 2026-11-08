@@ -1451,6 +1451,35 @@ pub const keys_listed_max: u32 = 64;
 /// A supervisor assumption (docs/decisions/2026-11-08-m8-trust-bounds.md).
 pub const json_depth_max: u32 = 16;
 
+// ---- Statements, envelopes and signature records (M8 trust, slice 2) ----
+// The four numbers below are supervisor assumptions (docs/decisions/2026-11-08-m8-trust-bounds.md).
+
+/// Most subjects in a statement: the tree, and optionally the binding (a result or a manifest).
+pub const statement_subjects_max: u32 = 2;
+/// Most bytes of a statement's payload.
+pub const statement_bytes_max: u32 = 128 * 1024;
+/// Most envelopes (lines) in one tree's signature record. A ninth distinct one is `E0910`.
+pub const signatures_per_tree_max: u32 = 8;
+/// Most signature records (and, from slice 4, provenance records) in the store.
+pub const trust_records_max: u32 = 4096;
+/// The one place our type URIs start (the owner's `2026-11-04-project-domain-zigbox-org.md`).
+/// Once a signature has been made with a URI it is part of the format.
+pub const type_uri_base = "https://zigbox.org";
+pub const sign_predicate_path = "/attestation/sign/v1";
+pub const sign_predicate_type = type_uri_base ++ sign_predicate_path;
+/// A sign statement's `signedAt` is RFC 3339 UTC to the second: `2026-11-08T10:00:00Z`.
+pub const signed_at_text_bytes: u32 = 20;
+/// The latest `signedAt` the form can write: 9999-12-31T23:59:59Z.
+pub const signed_at_seconds_max: u64 = 253402300799;
+/// The base64 of `statement_bytes_max` bytes, with padding.
+pub const payload_base64_bytes_max: u32 = ((statement_bytes_max + 2) / 3) * 4;
+/// Everything in an envelope that is not the payload's base64: the member names, the payload
+/// type, one key id and one signature (checked against the longest rendering in `dsse.zig`).
+pub const envelope_overhead_bytes: u32 = 512;
+pub const envelope_bytes_max: u32 = payload_base64_bytes_max + envelope_overhead_bytes;
+/// A signature record: at most `signatures_per_tree_max` envelopes, each with its newline.
+pub const signature_record_bytes_max: u32 = signatures_per_tree_max * (envelope_bytes_max + 1);
+
 comptime {
     assert(key_kdf_t >= 1);
     assert(key_kdf_t <= key_kdf_t_max);
@@ -1461,6 +1490,16 @@ comptime {
     assert(key_kdf_p_max == 1);
     assert(json_depth_max >= 1);
     assert(json_depth_max <= 64); // The reader's frame stack lives on the stack.
+    assert(statement_subjects_max == 2); // The tree, then at most one binding.
+    assert(statement_bytes_max <= 1024 * 1024);
+    assert(signatures_per_tree_max >= 1);
+    assert(trust_records_max >= signatures_per_tree_max);
+    assert(payload_base64_bytes_max >= statement_bytes_max);
+    assert(payload_base64_bytes_max % 4 == 0);
+    assert(envelope_bytes_max > payload_base64_bytes_max + envelope_overhead_bytes - 1);
+    assert(signature_record_bytes_max >= envelope_bytes_max);
+    assert(signature_record_bytes_max <= 4 * 1024 * 1024);
+    assert(signed_at_text_bytes == "2026-11-08T10:00:00Z".len);
     assert(key_sealed_bytes == 48);
     assert(key_public_text_bytes == 76);
     assert(key_file_bytes_max >= 512); // Room for the longest rendering, checked in key.zig.
