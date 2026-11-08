@@ -278,4 +278,6 @@ test {
     _ = @import("build/compose_tests.zig");
     _ = @import("build_commands.zig");
     _ = @import("build_tests.zig");
+    _ = @import("trust/key.zig");
+    _ = @import("trust/key_tests.zig");
 }
