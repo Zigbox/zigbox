@@ -80,15 +80,14 @@ const OpenFile = struct {
     offset: u32,
 };
 
-/// The file system of a host that was given none: a machine that is down, on which every call
-/// fails with EIO. One for all hosts, since it never holds anything.
+/// The file system of a host that was given none: an empty machine, on which nothing exists
+/// (so a run finds no policy file). One for all hosts, since it never holds anything.
 var down_files: fs_sim.SimFs = undefined;
 var down_ready: bool = false;
 
 fn down_fs() store_fs.Fs {
     if (!down_ready) {
         down_files.init(0);
-        down_files.crashed = true;
         down_ready = true;
     }
     return down_files.interface();

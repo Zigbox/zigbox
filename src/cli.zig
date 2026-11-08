@@ -32,6 +32,8 @@ const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
+const trust_gate = @import("trust/gate.zig");
+const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
@@ -2339,6 +2341,8 @@ pub const Storage = struct {
     logs: logs_commands.Workspace,
     /// `zbx sign`: the tree check, the record and the envelope.
     sign: sign_commands.Workspace,
+    /// The policy gate before a run: the policy files read.
+    gate: trust_gate.Memory,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings.
@@ -2798,6 +2802,7 @@ fn run_container(
         .workdir = "",
         .user = null,
     };
+    var from_result = false;
     if (invocation.operand) |operand| {
         if (operand.len > 0 and !is_tree_operand(operand)) {
             try prepare_image(host, invocation, storage, operand, &prepared, diag);
@@ -2806,7 +2811,8 @@ fn run_container(
             const ws = &storage.run_image;
             const command = given.command;
             const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
-            if (!(found catch return error.StartFailed) and command.len == 0) {
+            from_result = found catch return error.StartFailed;
+            if (!from_result and command.len == 0) {
                 // A tree that is not a build result has no command of its own.
                 const raised = missing_argument(diag, .run, .command);
                 assert(raised == error.MissingArgument);
@@ -2814,6 +2820,8 @@ fn run_container(
             }
         }
     }
+    const subject = gate_subject_of(invocation, &prepared, from_result);
+    try check_policy(host, storage, subject, diag);
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
     const environment = reached catch return error.StartFailed;
     const container: runtime_spec.Spec = .{
@@ -2836,6 +2844,47 @@ fn run_container(
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+}
+
+/// What a policy judges about a run: the tree it starts from and what that tree is bound to
+/// (the image's manifest, the build result named, or nothing for a bare tree).
+fn gate_subject_of(
+    invocation: *const Invocation,
+    prepared: *const run_image.Prepared,
+    from_result: bool,
+) trust_gate.Subject {
+    const operand = invocation.operand orelse "";
+    if (operand.len == 0) return .{ .tree = null, .binding = .none, .text = "" };
+    const tree = digest_prefix.Digest.parse(prepared.tree) orelse
+        return .{ .tree = null, .binding = .none, .text = "" };
+    var binding: trust_statement.Binding = .none;
+    if (prepared.manifest) |manifest| binding = .{ .manifest = manifest.bytes };
+    if (from_result) {
+        const result = digest_prefix.Digest.parse(operand) orelse return .{
+            .tree = null,
+            .binding = .none,
+            .text = "",
+        };
+        binding = .{ .result = result.bytes };
+    }
+    return .{ .tree = tree, .binding = binding, .text = operand };
+}
+
+/// The gate in front of a run: every policy file that exists must be met before anything
+/// starts. A refusal has set `diag` and started nothing.
+fn check_policy(
+    host: Host,
+    storage: *Storage,
+    subject: trust_gate.Subject,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    trust_gate.load(host, &storage.gate, diag) catch return error.StartFailed;
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
+        return error.StartFailed;
+    };
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
