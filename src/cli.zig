@@ -4582,6 +4582,29 @@ test "run --timeout stops the container when its time is up and says so" {
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
 }
 
+var policy_files: @import("store/fs_sim.zig").SimFs = undefined;
+
+test "run: a policy that requires a signature refuses a directory before anything starts" {
+    // Goal: the gate is in front of the start. Method: a policy file with require_signature,
+    // then a run of a directory (which has no tree to sign): E0905 with the run's code 125,
+    // nothing on stdout, and no scope made for the container.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    policy_files.init(1);
+    sim.store_fs = &policy_files;
+    policy_files.put_dir("/home", 0o755);
+    policy_files.put_dir("/home/alice", 0o755);
+    policy_files.put_dir("/home/alice/.config", 0o755);
+    policy_files.put_dir("/home/alice/.config/zbx", 0o700);
+    const policy = ".{ .version = 1, .require_signature = true }";
+    policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, policy);
+    const args = [_][]const u8{ "run", "--rootfs", sim_run.rootfs_path, "--", "/bin/true" };
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0905") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(sim.world.bus.scope_started == null);
+}
+
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
 const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
