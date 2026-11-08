@@ -1208,6 +1208,7 @@ fn do_export(job: *Job, diag: *Diag) Error!void {
         buffer[text.len] = '\n';
         return put(job, buffer[0 .. text.len + 1], diag);
     }
+    // The manifest text is 71 bytes and the buffer is 16 KiB, so the print cannot fail.
     const line = std.fmt.bufPrint(&buffer, "{s}\n", .{out.manifest.text()}) catch unreachable;
     try put(job, line, diag);
 }

@@ -100,7 +100,13 @@ fn put_text(fs: Fs, path: [:0]const u8, text: []const u8, failure: *Failure) Err
 }
 
 /// Copies the store's blob `digest` to `to`, through `buffer`.
-fn copy_blob(store: *const Store, digest: Sha256, to: [:0]const u8, buffer: []u8, failure: *Failure) Error!void {
+fn copy_blob(
+    store: *const Store,
+    digest: Sha256,
+    to: [:0]const u8,
+    buffer: []u8,
+    failure: *Failure,
+) Error!void {
     assert(buffer.len > 0);
     const fs = store.fs;
     const blobs: blobs_mod.Blobs = .{ .fs = fs, .root = store.root_text() };
@@ -114,9 +120,11 @@ fn copy_blob(store: *const Store, digest: Sha256, to: [:0]const u8, buffer: []u8
     };
     defer fs.close(target);
     while (true) {
-        const count = fs.read(source, buffer) catch return stopped(failure, .write, fs.last_errno());
+        const count = fs.read(source, buffer) catch
+            return stopped(failure, .write, fs.last_errno());
         if (count == 0) break;
-        fs.write_all(target, buffer[0..count]) catch return stopped(failure, .write, fs.last_errno());
+        fs.write_all(target, buffer[0..count]) catch
+            return stopped(failure, .write, fs.last_errno());
     }
     fs.fsync(target) catch return stopped(failure, .write, fs.last_errno());
 }

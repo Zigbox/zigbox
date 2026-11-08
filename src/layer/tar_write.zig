@@ -151,7 +151,7 @@ pub fn write_header(writer: *Io.Writer, scratch: *Scratch, entry: Entry) Error!v
     assert(entry.path.len > 0);
     assert((entry.kind == .directory) == (entry.path[entry.path.len - 1] == '/'));
     assert((entry.kind == .symlink or entry.kind == .hard_link) == (entry.link.len > 0));
-    assert(entry.kind == .file or entry.size == 0);
+    if (entry.kind != .file) assert(entry.size == 0);
     const used = pax_records(scratch, entry);
     if (used > 0) {
         var pax: Header = .init(.regular);

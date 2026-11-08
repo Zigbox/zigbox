@@ -51,7 +51,14 @@ fn start(seed: u64, order: u32) void {
 fn import_source(squash_owner: bool) !import.Result {
     var result: import.Result = undefined;
     diag.reset();
-    try import.import(&store, &imports, "/src", .{ .squash_owner = squash_owner, .warn = null }, &result, &diag);
+    try import.import(
+        &store,
+        &imports,
+        "/src",
+        .{ .squash_owner = squash_owner, .warn = null },
+        &result,
+        &diag,
+    );
     return result;
 }
 
@@ -154,11 +161,17 @@ test "a tree with a file missing or changed is refused, naming what stopped the 
     packing.piece = constants.pack_io_bytes;
 
     files.flip_byte(object_path, 0);
-    try testing.expectError(error.Stopped, pack.pack_pieces(&store, &packing, input, &made, &failure));
+    try testing.expectError(
+        error.Stopped,
+        pack.pack_pieces(&store, &packing, input, &made, &failure),
+    );
     try testing.expectEqual(pack.Stop.object_changed, failure.stop);
 
     files.remove_path(object_path);
-    try testing.expectError(error.Stopped, pack.pack_pieces(&store, &packing, input, &made, &failure));
+    try testing.expectError(
+        error.Stopped,
+        pack.pack_pieces(&store, &packing, input, &made, &failure),
+    );
     try testing.expectEqual(pack.Stop.object_missing, failure.stop);
 }
 
@@ -178,23 +191,39 @@ test "an export writes the layout, and refuses a directory that holds something"
     @memset(&buffer, 0xAA);
     try export_mod.export_layout(&store, &made, "/export", &buffer, &out, &failure);
     try testing.expectEqualSlices(u8, &made.manifest.bytes, &out.manifest.bytes);
-    try testing.expectEqual(made.layer_size + made.config_size + made.manifest_size, out.total_size);
+    try testing.expectEqual(
+        made.layer_size + made.config_size + made.manifest_size,
+        out.total_size,
+    );
 
     var path: PathBuf = undefined;
     var text: [constants.pack_manifest_bytes_max]u8 = undefined;
     try path.set(&.{ "/export/blobs/sha256/", &made.manifest.hex() });
     const manifest = try read_back(path.text(), &text);
-    try testing.expectEqualSlices(u8, &made.manifest.bytes, &@import("../registry/digest.zig").Sha256.of(manifest).bytes);
+    try testing.expectEqualSlices(
+        u8,
+        &made.manifest.bytes,
+        &@import("../registry/digest.zig").Sha256.of(manifest).bytes,
+    );
     try path.set(&.{"/export/oci-layout"});
-    try testing.expectEqualStrings("{\"imageLayoutVersion\":\"1.0.0\"}", try read_back(path.text(), &text));
+    try testing.expectEqualStrings(
+        "{\"imageLayoutVersion\":\"1.0.0\"}",
+        try read_back(path.text(), &text),
+    );
     try path.set(&.{"/export/index.json"});
     const index = try read_back(path.text(), &text);
     try testing.expect(std.mem.indexOf(u8, index, &made.manifest.text()) != null);
 
-    try testing.expectError(error.Stopped, export_mod.export_layout(&store, &made, "/export", &buffer, &out, &failure));
+    try testing.expectError(
+        error.Stopped,
+        export_mod.export_layout(&store, &made, "/export", &buffer, &out, &failure),
+    );
     try testing.expectEqual(export_mod.Stop.not_empty, failure.stop);
     files.put_file("/plain", 0o644, "x");
-    try testing.expectError(error.Stopped, export_mod.export_layout(&store, &made, "/plain", &buffer, &out, &failure));
+    try testing.expectError(
+        error.Stopped,
+        export_mod.export_layout(&store, &made, "/plain", &buffer, &out, &failure),
+    );
     try testing.expectEqual(export_mod.Stop.not_directory, failure.stop);
     files.put_dir("/empty", 0o755);
     try export_mod.export_layout(&store, &made, "/empty", &buffer, &out, &failure);

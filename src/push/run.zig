@@ -53,7 +53,11 @@ pub fn pack_operand(
     // The image record lets `zbx run` and `zbx sign` find the manifest on this host.
     var fail: @import("../store/fs.zig").Failure = undefined;
     pack.record_image(store, out, input, "", &fail) catch {
-        diagnose.pack_stopped(diag, operand, &.{ .stop = .write, .errno = fail.errno, .digest = out.tree });
+        diagnose.pack_stopped(diag, operand, &.{
+            .stop = .write,
+            .errno = fail.errno,
+            .digest = out.tree,
+        });
         return error.Failed;
     };
 }
@@ -77,7 +81,11 @@ pub fn export_operand(
 }
 
 /// The result line of `--output json`: `zbx.export/1`.
-pub fn export_json(out: *const export_mod.Exported, dir: []const u8, buffer: []u8) json.WriteError![]const u8 {
+pub fn export_json(
+    out: *const export_mod.Exported,
+    dir: []const u8,
+    buffer: []u8,
+) json.WriteError![]const u8 {
     var writer = json.Writer.init(buffer);
     try writer.begin_object();
     try writer.member_string("config", &out.config.text());

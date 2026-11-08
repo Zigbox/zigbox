@@ -1501,7 +1501,8 @@ pub const pack_io_bytes: u32 = 256 * 1024;
 pub const export_file_mode: u16 = 0o644;
 
 comptime {
-    assert(pack_links_max > 0 and std.math.isPowerOfTwo(pack_links_max));
+    assert(pack_links_max > 0);
+    assert(std.math.isPowerOfTwo(pack_links_max));
     assert(pack_link_paths_bytes >= path_bytes_max + 1);
     assert(pack_config_bytes_max >= image_settings_bytes_max);
     assert(layer_writer_version >= 1);

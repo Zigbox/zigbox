@@ -305,7 +305,8 @@ fn write_body(walk: *Walk, entry: *const tree_mod.Entry) Error!void {
     var hasher = digest_mod.Hasher.init();
     var total: u64 = 0;
     while (true) {
-        const count = fs.read(fd, walk.ws.io[0..walk.ws.piece]) catch return walk.stop(.unreadable, entry.object);
+        const count = fs.read(fd, walk.ws.io[0..walk.ws.piece]) catch
+            return walk.stop(.unreadable, entry.object);
         if (count == 0) break;
         total += count;
         if (total > entry.size) return walk.stop(.object_changed, entry.object);
@@ -422,7 +423,13 @@ fn blob_path(store: *const Store, buffer: *PathBuf, digest: Sha256) [:0]const u8
 }
 
 /// The layer: tar, gzip, file; returns with the layer in the blob cache.
-fn write_layer(store: *Store, ws: *Workspace, tree: Digest, out: *Packed, failure: *Failure) Error!void {
+fn write_layer(
+    store: *Store,
+    ws: *Workspace,
+    tree: Digest,
+    out: *Packed,
+    failure: *Failure,
+) Error!void {
     const fs = store.fs;
     const blobs: blobs_mod.Blobs = .{ .fs = fs, .root = store.root_text() };
     var blob_fail: blobs_mod.Failure = undefined;
@@ -435,7 +442,13 @@ fn write_layer(store: *Store, ws: *Workspace, tree: Digest, out: *Packed, failur
     };
     ws.file_sink.init(ws.out[0..ws.piece], null, fs, fd);
     ws.gzip = flate.Compress.init(&ws.file_sink.writer, &ws.window, .gzip, .default) catch {
-        return abandon(fs, fd, temporary_path, .{ .stop = .write, .errno = 0, .digest = tree }, failure);
+        return abandon(
+            fs,
+            fd,
+            temporary_path,
+            .{ .stop = .write, .errno = 0, .digest = tree },
+            failure,
+        );
     };
     ws.tar_tee.init(ws.tar_buffer[0..@min(ws.piece, ws.tar_buffer.len)], &ws.gzip.writer, fs, fd);
     ws.walk = .{
@@ -496,7 +509,14 @@ fn put_blob(store: *Store, bytes: []const u8, failure: *Failure, tree: Digest) E
     var directory: PathBuf = undefined;
     const final_path = blobs.final_path(&final, digest);
     directory.set(&.{ blobs.root, "/blobs/sha256" }) catch unreachable; // Short.
-    store.fs.write_atomic(store.tmp_path(&temporary), final_path, directory.text(), bytes, 0o644, &fail) catch {
+    store.fs.write_atomic(
+        store.tmp_path(&temporary),
+        final_path,
+        directory.text(),
+        bytes,
+        0o644,
+        &fail,
+    ) catch {
         return stopped_write(failure, tree, fail.errno);
     };
     return digest;
@@ -509,7 +529,12 @@ fn stopped_write(failure: *Failure, tree: Digest, errno: u16) Error {
 
 // ---- The config and the manifest ------------------------------------------------------------
 
-fn write_words(writer: *json.Writer, name: []const u8, settings: *const images.Settings, list: images.Settings.List) json.WriteError!void {
+fn write_words(
+    writer: *json.Writer,
+    name: []const u8,
+    settings: *const images.Settings,
+    list: images.Settings.List,
+) json.WriteError!void {
     if (settings.count(list) == 0) return;
     try writer.member_array(name);
     var index: u32 = 0;
@@ -538,7 +563,10 @@ pub fn render_config(input: Input, diff_id: Sha256, out: []u8) json.WriteError![
         try writer.end_object();
     };
     if (settings.get(.user).len > 0) try writer.member_string("User", settings.get(.user));
-    if (settings.get(.workdir).len > 0) try writer.member_string("WorkingDir", settings.get(.workdir));
+    if (settings.get(.workdir).len > 0) try writer.member_string(
+        "WorkingDir",
+        settings.get(.workdir),
+    );
     try writer.end_object();
     try writer.member_string("os", "linux");
     try writer.member_object("rootfs");
@@ -551,7 +579,13 @@ pub fn render_config(input: Input, diff_id: Sha256, out: []u8) json.WriteError![
     return writer.finish();
 }
 
-fn descriptor(writer: *json.Writer, name: []const u8, media: []const u8, digest: Sha256, size: u64) json.WriteError!void {
+fn descriptor(
+    writer: *json.Writer,
+    name: []const u8,
+    media: []const u8,
+    digest: Sha256,
+    size: u64,
+) json.WriteError!void {
     if (name.len > 0) try writer.member_object(name) else try writer.begin_object();
     try writer.member_string("digest", &digest.text());
     try writer.member_string("mediaType", media);
@@ -567,7 +601,13 @@ pub fn render_manifest(made: *const Packed, out: []u8) json.WriteError![]const u
     try writer.member_string(constants.pack_annotation_writer, version_text());
     try writer.member_string(constants.pack_annotation_tree, &made.tree.text());
     try writer.end_object();
-    try descriptor(&writer, "config", constants.oci_config_media_type, made.config, made.config_size);
+    try descriptor(
+        &writer,
+        "config",
+        constants.oci_config_media_type,
+        made.config,
+        made.config_size,
+    );
     try writer.member_array("layers");
     try descriptor(&writer, "", constants.oci_layer_media_type, made.layer, made.layer_size);
     try writer.end_array();
@@ -586,7 +626,10 @@ fn version_text() []const u8 {
 fn record_path(store: *const Store, buffer: *PathBuf, tree: Digest) [:0]const u8 {
     const hex = tree.hex();
     var name: [constants.store_digest_hex_bytes + 16]u8 = undefined;
-    const text = std.fmt.bufPrint(&name, "/pack/{s}-{d}", .{ &hex, constants.layer_writer_version }) catch unreachable; // Sized.
+    const text = std.fmt.bufPrint(&name, "/pack/{s}-{d}", .{
+        &hex,
+        constants.layer_writer_version,
+    }) catch unreachable; // Sized.
     return store.path(buffer, &.{text});
 }
 
@@ -633,7 +676,14 @@ fn remember(store: *Store, made: *const Packed, failure: *Failure) Error!void {
     var temporary: PathBuf = undefined;
     var final: PathBuf = undefined;
     var fail: fs_mod.Failure = undefined;
-    store.fs.write_atomic(store.tmp_path(&temporary), record_path(store, &final, made.tree), directory.text(), text, 0o644, &fail) catch {
+    store.fs.write_atomic(
+        store.tmp_path(&temporary),
+        record_path(store, &final, made.tree),
+        directory.text(),
+        text,
+        0o644,
+        &fail,
+    ) catch {
         return stopped_write(failure, made.tree, fail.errno);
     };
 }
@@ -641,16 +691,29 @@ fn remember(store: *Store, made: *const Packed, failure: *Failure) Error!void {
 // ---- Pack -----------------------------------------------------------------------------------
 
 /// Packs `input` into the blob cache and the pack record, and says what it made.
-pub fn pack(store: *Store, ws: *Workspace, input: Input, out: *Packed, failure: *Failure) Error!void {
+pub fn pack(
+    store: *Store,
+    ws: *Workspace,
+    input: Input,
+    out: *Packed,
+    failure: *Failure,
+) Error!void {
     ws.piece = constants.pack_io_bytes;
     return pack_pieces(store, ws, input, out, failure);
 }
 
 /// `pack` with the pieces `ws.piece` bytes long (at least 1024): the output must not depend
 /// on it, which the tests check.
-pub fn pack_pieces(store: *Store, ws: *Workspace, input: Input, out: *Packed, failure: *Failure) Error!void {
+pub fn pack_pieces(
+    store: *Store,
+    ws: *Workspace,
+    input: Input,
+    out: *Packed,
+    failure: *Failure,
+) Error!void {
     assert(store.root_len > 1);
-    assert(ws.piece >= 1024 and ws.piece <= constants.pack_io_bytes);
+    assert(ws.piece >= 1024);
+    assert(ws.piece <= constants.pack_io_bytes);
     out.tree = input.tree;
     ws.links_count = 0;
     ws.link_used = 0;
@@ -678,7 +741,13 @@ pub fn pack_pieces(store: *Store, ws: *Workspace, input: Input, out: *Packed, fa
 
 /// Writes the image record of a packed manifest. `tag` is the destination of a push (empty for
 /// none).
-pub fn record_image(store: *Store, made: *const Packed, input: Input, tag: []const u8, failure: *fs_mod.Failure) fs_mod.Error!void {
+pub fn record_image(
+    store: *Store,
+    made: *const Packed,
+    input: Input,
+    tag: []const u8,
+    failure: *fs_mod.Failure,
+) fs_mod.Error!void {
     assert(tag.len <= constants.reference_bytes_max);
     var image: images.Image = undefined;
     images.carry_tags(store, made.manifest, &image);

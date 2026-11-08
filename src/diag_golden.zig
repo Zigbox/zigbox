@@ -1956,7 +1956,13 @@ const image_cases = [_]Case{
     },
     .{
         .code = .E0557,
-        .args = &.{ "store", "export", "--oci", "b3:4ccf5b88ec09f8b7d574449458659c371dc26d367844f42028f2160e4e2fa087", "/out" },
+        .args = &.{
+            "store",
+            "export",
+            "--oci",
+            "b3:4ccf5b88ec09f8b7d574449458659c371dc26d367844f42028f2160e4e2fa087",
+            "/out",
+        },
         .prepare = prepare_export_not_empty,
         .exit = 1,
     },

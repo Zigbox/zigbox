@@ -63,7 +63,8 @@ const help_text =
     \\  logs <name>     show what a container wrote to its output and error (see below)
     \\  exec <name>     run a command inside a running container (see below)
     \\  commit <name>   turn what a stopped container changed into a new tree and print its digest
-    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, export, verify, gc, restore
+    \\  store <cmd>     the content-addressed store: import, ls, du, rm, diff, export, verify,
+    \\                  gc, restore
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
@@ -1722,8 +1723,8 @@ fn store_usage(diag: *Diag, problem: StoreUsage) ParseError {
             diag.raise(.E0006);
             switch (what) {
                 .action => diag.cause(
-                    "'store' needs a subcommand: import, ls, du, rm, diff, export, verify, gc or " ++
-                        "restore",
+                    "'store' needs a subcommand: import, ls, du, rm, diff, export, verify, " ++
+                        "gc or restore",
                     .{},
                 ),
                 .directory => diag.cause("'store import' needs the directory to import", .{}),

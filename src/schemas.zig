@@ -834,7 +834,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 31);
+    assert(table.len == 32);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -863,7 +863,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 31), table.len);
+    try testing.expectEqual(@as(usize, 32), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {
