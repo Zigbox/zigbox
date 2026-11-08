@@ -1,6 +1,6 @@
 # VM runs on demand, for work in progress. A push to a branch named vm/<demo>-<anything> runs that
 # one demo in the KVM VM, where it takes minutes instead of the quarter hour TCG takes in a build
-# container without KVM. <demo> is m0 to m6, m6b, m7, z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
+# container without KVM. <demo> is m0 to m6, m6b, m7, m8 (slice 7: the packages on four guests, demo-m8-packages), z7 (the zigbox_vm hostfwd check), or all. Nothing else runs: no build matrix, no fuzzers
 # (ci.yml does those on the PR). The run deletes its own scratch branch when it ends, pass or fail,
 # because a cloud session's git proxy cannot delete branches; the run and its logs stay readable.
 # A newer push to the same branch cancels the run it supersedes. See AGENTS.md, "Git".
@@ -34,8 +34,9 @@ jobs:
           demo="${name%%-*}"
           case "$demo" in
             m0|m1|m2|m3|m4|m5|m6|m6b|m7|z7) steps="demo-$demo" ;;
+            m8) steps="demo-m8-packages" ;;
             all) steps="demo-m0 demo-m1 demo-m2 demo-m3 demo-m4 demo-m5 demo-m6 demo-m6b demo-m7 demo-z7" ;;
-            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
+            *) echo "vm: branch $GITHUB_REF_NAME names no demo (vm/m0..m6-<x>, vm/m6b-<x>, vm/m7-<x>, vm/m8-packages-<x>, vm/z7-<x> or vm/all-<x>)"; exit 1 ;;
           esac
           echo "steps=$steps" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-zig
@@ -54,6 +55,16 @@ jobs:
         with:
           path: .zig-cache/zbx-vm
           key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      # The Debian, Fedora and Rocky images of demo-m8-packages (pinned in lib/guests.zon),
+      # kept out of .zig-cache/zbx-vm so the vm-image entry that ci.yml's demos restore stays small.
+      - name: Cache the other guest images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .zig-cache/zbx-vm-guests/debian-*.qcow2
+            .zig-cache/zbx-vm-guests/Fedora-*.qcow2
+            .zig-cache/zbx-vm-guests/Rocky-*.qcow2
+          key: vm-guests-${{ hashFiles('src/testing/vm/lib/guests.zon') }}
       - name: Cache the Alpine rootfs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
