@@ -9,8 +9,9 @@ const assert = std.debug.assert;
 
 pub const Family = enum { apt, dnf };
 
-/// What a guest's tool made of the test key's Ed25519 signature.
-pub const Verdict = enum { accepted, refused };
+/// What a guest's tool made of the test key's Ed25519 signature. `not_run` means the probe never
+/// ran (the guest stopped first): no evidence either way, and it fails the guest like `refused`.
+pub const Verdict = enum { accepted, refused, not_run };
 
 /// `apt-get update` against the test repository: accepted when it exits 0, fetched the
 /// repository's `InRelease` and printed no `W:` or `E:` line (apt's own warnings and errors,
@@ -29,10 +30,19 @@ pub fn apt_update_verdict(output: []const u8, status: u8) Verdict {
 }
 
 /// `dnf makecache` with `repo_gpgcheck=1`: accepted when it exits 0 and says it built the
-/// cache. A signature dnf cannot check ends it with `Error: ...` and a non-zero status.
+/// cache, with no `warning:` line (a weak-key or signature notice). A signature dnf cannot check
+/// ends it with `Error: ...` and a non-zero status.
 pub fn dnf_makecache_verdict(output: []const u8, status: u8) Verdict {
     if (status != 0) return .refused;
-    if (std.mem.indexOf(u8, output, "Metadata cache created") != null) return .accepted;
+    var created = false;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const text = std.mem.trimStart(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, text, "warning:")) return .refused;
+        if (std.mem.startsWith(u8, text, "Warning:")) return .refused;
+        if (std.mem.indexOf(u8, text, "Metadata cache created") != null) created = true;
+    }
+    if (created) return .accepted;
     return .refused;
 }
 
@@ -59,8 +69,8 @@ pub const Outcome = struct {
 /// on the package, installed from the signed repository, and `zbx` ran. A refused signature is
 /// a failure, whatever else worked: an unsigned install would hide a signature nobody checked.
 pub fn guest_passed(outcome: Outcome) bool {
-    if (outcome.metadata == .refused) return false;
-    if (outcome.package == .refused) return false;
+    if (outcome.metadata != .accepted) return false;
+    if (outcome.package != .accepted) return false;
     return outcome.installed and outcome.zbx_ran;
 }
 
@@ -114,6 +124,10 @@ test "dnf makecache: the cache line with status 0 is accepted, an Error line is 
     try std.testing.expectEqual(Verdict.refused, dnf_makecache_verdict(bad, 1));
     try std.testing.expectEqual(Verdict.refused, dnf_makecache_verdict(bad, 0));
     try std.testing.expectEqual(Verdict.refused, dnf_makecache_verdict("", 0));
+    const warned = "warning: Signature uses a weak digest\n" ++ good;
+    try std.testing.expectEqual(Verdict.refused, dnf_makecache_verdict(warned, 0));
+    const warned_late = good ++ "Warning: key is weak\n";
+    try std.testing.expectEqual(Verdict.refused, dnf_makecache_verdict(warned_late, 0));
 }
 
 test "rpm -K: only digests and signatures OK is accepted" {
@@ -161,6 +175,12 @@ test "a guest passes only with both signatures accepted, the install done and zb
     try std.testing.expect(!guest_passed(bad));
     bad = good;
     bad.package = .refused;
+    try std.testing.expect(!guest_passed(bad));
+    bad = good;
+    bad.metadata = .not_run;
+    try std.testing.expect(!guest_passed(bad));
+    bad = good;
+    bad.package = .not_run;
     try std.testing.expect(!guest_passed(bad));
     bad = good;
     bad.installed = false;

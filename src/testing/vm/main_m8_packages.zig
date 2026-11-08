@@ -44,6 +44,9 @@ const Guest = struct {
     userns_sysctl: bool,
     /// Debian 12's cloud-init 22.4 needs `nocloud-net` (see `Seed.seed_id`).
     seed_id: []const u8 = "nocloud",
+    /// The image lives in `Args.guest_dir`, not the Ubuntu cache directory: the other demos'
+    /// caches restore `cache_dir` whole and must not grow by these guests.
+    own_cache: bool = true,
 };
 
 const guests = [guests_max]Guest{
@@ -54,6 +57,7 @@ const guests = [guests_max]Guest{
         .hostname = "zigbox-ubuntu",
         .console_prompt = false,
         .userns_sysctl = true,
+        .own_cache = false,
     },
     .{
         .name = "debian",
@@ -85,6 +89,8 @@ const guests = [guests_max]Guest{
 const Args = struct {
     accel: []const u8 = "auto",
     cache_dir: []const u8 = ".zig-cache/zbx-vm",
+    /// Debian, Fedora and Rocky images and every overlay (vm.yml caches it on its own key).
+    guest_dir: []const u8 = ".zig-cache/zbx-vm-guests",
     packages: []const u8 = "",
     version: []const u8 = "",
     only: []const u8 = "",
@@ -94,8 +100,8 @@ const Args = struct {
 /// `zbx` then ran.
 const Report = struct {
     guest: *const Guest,
-    metadata: Verdict = .refused,
-    package: Verdict = .refused,
+    metadata: Verdict = .not_run,
+    package: Verdict = .not_run,
     installed: bool = false,
     version_ok: bool = false,
     doctor_ran: bool = false,
@@ -141,6 +147,8 @@ fn parse_args(init: std.process.Init) !Args {
             args.accel = value;
         } else if (std.mem.eql(u8, name, "--cache-dir")) {
             args.cache_dir = value;
+        } else if (std.mem.eql(u8, name, "--guest-dir")) {
+            args.guest_dir = value;
         } else if (std.mem.eql(u8, name, "--packages")) {
             args.packages = value;
         } else if (std.mem.eql(u8, name, "--version")) {
@@ -161,13 +169,15 @@ fn parse_args(init: std.process.Init) !Args {
 fn run_all(init: std.process.Init, out: *Io.Writer, args: Args) !bool {
     const arena = init.arena.allocator();
     const tar = try pack_tree(init, arena, args.packages);
+    const accel = try vm.accel.choose(args.accel, vm.accel.kvm_usable(init.io));
     var reports: [guests_max]Report = undefined;
     var count: usize = 0;
     for (&guests) |*guest| {
         if (args.only.len > 0 and !std.mem.eql(u8, args.only, guest.name)) continue;
-        reports[count] = run_guest(init, out, args, guest, tar) catch |err| stopped: {
+        reports[count] = .{ .guest = guest };
+        run_guest(init, out, args, accel, guest, tar, &reports[count]) catch |err| {
             try out.print("{s}: {s}: stopped: {s}\n", .{ demo_name, guest.name, @errorName(err) });
-            break :stopped .{ .guest = guest, .stopped = err };
+            reports[count].stopped = err;
         };
         count += 1;
     }
@@ -181,7 +191,7 @@ fn summarize(out: *Io.Writer, reports: []const Report) !bool {
     var passed = reports.len > 0;
     for (reports) |report| {
         const ran = report.version_ok and report.doctor_ran;
-        const good = checks.guest_passed(.{
+        const good = report.stopped == null and checks.guest_passed(.{
             .metadata = report.metadata,
             .package = report.package,
             .installed = report.installed,
@@ -205,7 +215,15 @@ fn summarize(out: *Io.Writer, reports: []const Report) !bool {
     return passed;
 }
 
-/// The whole package tree (everything but `to-sign/`) as one tar, served to each guest.
+/// Entries for another architecture: every guest here is x86_64, and the 8 MiB body limit
+/// (`vm.limits.http_body_bytes_max`) must leave room for slice 8's second build.
+fn other_arch(path: []const u8) bool {
+    return std.mem.indexOf(u8, path, "arm64") != null or
+        std.mem.indexOf(u8, path, "aarch64") != null;
+}
+
+/// The package tree the guests install from (everything but `to-sign/` and the other
+/// architecture) as one tar, served to each guest.
 fn pack_tree(init: std.process.Init, arena: std.mem.Allocator, root: []const u8) ![]const u8 {
     var dir = try Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true });
     defer dir.close(init.io);
@@ -216,6 +234,7 @@ fn pack_tree(init: std.process.Init, arena: std.mem.Allocator, root: []const u8)
     while (try walker.next(init.io)) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.startsWith(u8, entry.path, "to-sign")) continue;
+        if (other_arch(entry.path)) continue;
         entries += 1;
         if (entries > tar_entries_max) return error.TooManyFiles;
         const limit: Io.Limit = .limited(vm.limits.http_body_bytes_max);
@@ -233,16 +252,21 @@ fn run_guest(
     init: std.process.Init,
     out: *Io.Writer,
     args: Args,
+    accel: vm.accel.Accel,
     guest: *const Guest,
     tar: []const u8,
-) !Report {
+    report: *Report,
+) !void {
+    std.debug.assert(report.guest == guest);
+    std.debug.assert(report.stopped == null);
     const arena = init.arena.allocator();
     const family = @tagName(guest.family);
     try out.print("\n{s}: ===== {s} ({s}) =====\n", .{ demo_name, guest.name, family });
-    const accel = try vm.accel.choose(args.accel, vm.accel.kvm_usable(init.io));
-    const base = try image.ensure_pin(init, args.cache_dir, out, guest.pin);
+    const pin_dir = if (guest.own_cache) args.guest_dir else args.cache_dir;
+    const base = try image.ensure_pin(init, pin_dir, out, guest.pin);
+    try Io.Dir.cwd().createDirPath(init.io, args.guest_dir);
     const format = "{s}/overlay-m8-{s}.qcow2";
-    const overlay = try std.fmt.allocPrint(arena, format, .{ args.cache_dir, guest.name });
+    const overlay = try std.fmt.allocPrint(arena, format, .{ args.guest_dir, guest.name });
     try image.make_overlay_sized(init, base, overlay, overlay_size);
     defer Io.Dir.cwd().deleteFile(init.io, overlay) catch {};
 
@@ -258,15 +282,14 @@ fn run_guest(
     });
     defer session.deinit();
     try session.provision(guest.hostname, false);
-    var report: Report = .{ .guest = guest };
     try serve_repository(&session, out);
     switch (guest.family) {
-        .apt => try install_apt(&session, out, &report),
-        .dnf => try install_dnf(&session, out, &report),
+        .apt => try install_apt(&session, out, report),
+        .dnf => try install_dnf(&session, out, report),
     }
-    if (report.installed) try check_installed(&session, out, args.version, &report);
+    if (report.installed) try check_installed(&session, out, args.version, report);
+    // The verdicts are in `report` already: a failed shutdown is recorded, not thrown away.
     try session.shutdown();
-    return report;
 }
 
 fn config_of(guest: *const Guest) vm.Config {
