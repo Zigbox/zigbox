@@ -950,6 +950,27 @@ test "export of an imported tree prints the manifest digest and writes a whole l
     }
 }
 
+test "push --dry-run prints the digest an export prints, and refuses without --dry-run" {
+    // Goal: the brief's `zbx push --dry-run`: packs, prints the manifest digest, no network.
+    // Method: import, export (the reference digest), then push --dry-run the same tree.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try export_to(&.{ tree, "/export-a" }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--dry-run") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
 test "export --output json is zbx.export/1, and its keys are the schema's" {
     // Goal: the machine-readable result issue #60 asked for. Method: parse it and check each
     // required key's type against the schema text.

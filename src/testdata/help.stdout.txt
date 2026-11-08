@@ -139,6 +139,10 @@ key:
   (~/.config/zbx/keys), mode 0700; a key is never overwritten; a forgotten passphrase is a
   lost key; list and show never ask for a passphrase and never print a secret
 
+push:
+  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
+                           manifest digest; sends nothing (the upload is not built yet)
+
 pull:
   zbx pull [--resolve-only] <reference>
   <reference>     [registry/][namespace/]name[:tag][@sha256:<hex>], for example alpine:3.20
