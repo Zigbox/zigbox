@@ -59,9 +59,29 @@ fn damage(random: std.Random, original: []const u8) []const u8 {
     return damaged[0..length];
 }
 
-fn read_binary(bytes: []const u8) ?[20]u8 {
-    const bound = openpgp.bound_binary(bytes, text) orelse return null;
-    return bound.fingerprint orelse @as([20]u8, @splat(0));
+/// A v4 algorithm 27 (native Ed25519) signature over `text`, with `size` bytes of raw signature
+/// data (64 is the only valid size); the digest bits are right, so only the material can fail.
+fn native_packet(random: std.Random, size: usize) []const u8 {
+    const prefix = [_]u8{ 4, 0, 27, 8, 0, 0 };
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(text);
+    hash.update(&prefix);
+    hash.update(&.{ 0x04, 0xff, 0, 0, 0, prefix.len });
+    const digest = hash.finalResult();
+    native[0] = 0xc2;
+    native[1] = @intCast(prefix.len + 2 + 2 + size);
+    @memcpy(native[2..8], &prefix);
+    native[8] = 0;
+    native[9] = 0;
+    @memcpy(native[10..12], digest[0..2]);
+    random.bytes(native[12..][0..size]);
+    return native[0 .. 12 + size];
+}
+
+var native: [128]u8 = undefined;
+
+fn read_binary(bytes: []const u8) openpgp.Binding {
+    return openpgp.bound_binary(bytes, text);
 }
 
 fn same(left: openpgp.Binding, right: openpgp.Binding) bool {
@@ -82,25 +102,34 @@ pub fn fuzz_openpgp(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
     // Property 3: every undamaged fixture binds.
-    for (binary_fixtures) |fixture| assert(read_binary(fixture) != null);
+    for (binary_fixtures) |fixture| assert(read_binary(fixture) == .bound);
+    assert(read_binary(native_packet(random, 64)) == .bound);
+    assert(read_binary(native_packet(random, 63)) == .stale);
+    assert(read_binary(native_packet(random, 65)) == .stale);
     for (text_fixtures) |fixture| {
         const binding = read_text(fixture[1], fixture[0]);
         const readable = binding == .bound or binding == .several;
         assert(readable);
     }
     // Properties 1 and 2 on damaged binary packets.
-    const packet = binary_fixtures[random.uintLessThan(usize, binary_fixtures.len)];
-    const broken = damage(random, packet);
+    // One iteration in four starts from an algorithm 27 packet, whose material is raw bytes of
+    // 63 to 65 bytes: only 64 binds.
+    const packet = if (random.uintLessThan(u8, 4) == 0)
+        native_packet(random, 63 + random.uintLessThan(usize, 3))
+    else
+        binary_fixtures[random.uintLessThan(usize, binary_fixtures.len)];
+    const broken = if (random.boolean()) damage(random, packet) else packet;
     const once = read_binary(broken);
-    assert(std.meta.eql(once, read_binary(broken)));
+    assert(same(once, read_binary(broken)));
     const print = openpgp.issuer_fingerprint(broken);
     assert(std.meta.eql(print, openpgp.issuer_fingerprint(broken)));
-    // Property 4: armored afresh, the armored path agrees on whether it binds.
+    // Property 4: armored afresh, the armored path gives the same answer as the binary one,
+    // whatever it is (a stale one only when both are stale, by the `same` of the tags).
     var arena: std.heap.FixedBufferAllocator = .init(&armor_scratch);
     if (broken.len > 0) {
         const armored = openpgp.armor(arena.allocator(), "PGP SIGNATURE", broken) catch return;
         const through = read_text(.armored_detached, armored);
-        assert((through == .bound) == (once != null));
+        assert(same(through, once));
     }
     // Properties 1 and 2 on damaged armored and clearsigned text.
     const entry = text_fixtures[random.uintLessThan(usize, text_fixtures.len)];

@@ -279,7 +279,8 @@ const algorithm_ecdsa: u8 = 19;
 const algorithm_ed25519_native: u8 = 27;
 
 /// One multiprecision integer at `at`: a two-octet bit count, then the value's bytes. Null when
-/// the count is zero or the value runs past `bytes`; on success `at` is past the value.
+/// the count is zero, the value runs past `bytes` or starts with a zero byte (not minimal, RFC
+/// 4880 3.2); on success `at` is past the value.
 fn read_mpi(bytes: []const u8, at: *usize) ?[]const u8 {
     if (at.* + 2 > bytes.len) return null;
     const bits = std.mem.readInt(u16, bytes[at.*..][0..2], .big);
@@ -287,6 +288,7 @@ fn read_mpi(bytes: []const u8, at: *usize) ?[]const u8 {
     const length = (@as(usize, bits) + 7) / 8;
     const start = at.* + 2;
     if (length > bytes.len - start) return null;
+    if (bytes[start] == 0) return null;
     at.* = start + length;
     return bytes[start..][0..length];
 }
@@ -525,20 +527,26 @@ pub fn bound_to(
             packet = (try dearmor(memory, file[end..])) orelse return .stale;
         },
     }
-    const split = packet_split(packet) orelse return .stale;
-    if (split.total < packet.len) return .several;
-    if (split.body.len == 0 or split.body[0] != 4) return .unsupported;
-    const bound = bound_binary(packet, canonical) orelse return .stale;
-    return .{ .bound = bound };
+    return bound_binary(packet, canonical);
 }
 
 pub const Bound = struct { fingerprint: ?[20]u8 };
 
 /// Whether `packet` (one binary signature packet, an rpm header signature) signs exactly
-/// `data`; the answer is its issuer fingerprint when it names one.
-pub fn bound_binary(packet: []const u8, data: []const u8) ?Bound {
-    if (!digest_matches(packet, &.{data})) return null;
-    return .{ .fingerprint = issuer_fingerprint(packet) };
+/// `data`. `.bound` carries its issuer fingerprint when it names one; `.several` is more than
+/// one signature packet; `.unsupported` is a version other than 4 or a digest other than SHA-2;
+/// anything else that is not a signature over `data` is `.stale`.
+pub fn bound_binary(packet: []const u8, data: []const u8) Binding {
+    const split = packet_split(packet) orelse return .stale;
+    if (split.total < packet.len) {
+        // Bytes after the packet are a second signature only when they parse as one.
+        return if (packet_split(packet[split.total..]) != null) .several else .stale;
+    }
+    if (split.body.len == 0 or split.body[0] != 4) return .unsupported;
+    const parsed = parse(packet) orelse return .stale;
+    if (parsed.hash_algorithm < 8 or parsed.hash_algorithm > 11) return .unsupported;
+    if (!digest_matches(packet, &.{data})) return .stale;
+    return .{ .bound = .{ .fingerprint = issuer_fingerprint(packet) } };
 }
 
 /// Whether `packet` is a valid signature by `public` over `data` (binary kind) or over the
@@ -621,8 +629,8 @@ test "real gpg signatures (RSA 4096 and Ed25519) bind to their text, in every fo
     };
     inline for (keys) |key| {
         const binary = @embedFile("testdata/gpg/" ++ key[0] ++ ".bin.sig");
-        try expect_bound(.{ .bound = bound_binary(binary, fixture_text).? }, key[1]);
-        try std.testing.expect(bound_binary(binary, "other text\n") == null);
+        try expect_bound(bound_binary(binary, fixture_text), key[1]);
+        try std.testing.expect(bound_binary(binary, "other text\n") == .stale);
         const armored = @embedFile("testdata/gpg/" ++ key[0] ++ ".asc");
         try expect_bound(try bound_to(memory, .armored_detached, armored, fixture_text), key[1]);
         const clear = @embedFile("testdata/gpg/" ++ key[0] ++ ".clear");
@@ -635,7 +643,7 @@ test "real gpg signatures (RSA 4096 and Ed25519) bind to their text, in every fo
     try std.testing.expect(rsa.len > 512 and rsa.len <= constants.openpgp_signature_bytes_max);
     // A signature over the digest of different text is not bound: swap the two keys' files.
     const swapped = bound_binary(@embedFile("testdata/gpg/rsa4096.bin.sig"), "swapped\n");
-    try std.testing.expect(swapped == null);
+    try std.testing.expect(swapped == .stale);
 }
 
 test "a clearsign by two keys and a v5 packet are named, not called stale" {
@@ -693,4 +701,83 @@ test "a subpacket of 192 bytes or more does not hide the issuer fingerprint" {
         try packet.appendSlice(memory, body.items);
         try std.testing.expectEqualSlices(u8, &print, &issuer_fingerprint(packet.items).?);
     }
+}
+
+/// A v4 signature packet (new-format header) with no subpackets and `material` after the 16
+/// digest bits, which are those of `text` when `left` is null.
+fn tiny_packet(
+    memory: Allocator,
+    algorithm: u8,
+    hash: u8,
+    left: ?[2]u8,
+    material: []const u8,
+) ![]u8 {
+    const prefix = [_]u8{ 4, 0, algorithm, hash, 0, 0 };
+    const digest = left orelse left_of(Sha256, &.{fixture_text}, &prefix);
+    const length: u8 = @intCast(prefix.len + 2 + 2 + material.len);
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(memory, &.{ 0xc2, length });
+    try out.appendSlice(memory, &prefix);
+    try out.appendSlice(memory, &.{ 0, 0 });
+    try out.appendSlice(memory, &digest);
+    try out.appendSlice(memory, material);
+    return out.items;
+}
+
+test "read_mpi refuses a zero count, an overrun and a leading zero byte" {
+    // Goal: every branch of read_mpi, including the position it leaves behind.
+    var at: usize = 0;
+    try std.testing.expect(read_mpi(&.{ 0, 8, 0xff }, &at).?.len == 1);
+    try std.testing.expect(at == 3);
+    at = 0;
+    try std.testing.expect(read_mpi(&.{0}, &at) == null); // No room for the count.
+    try std.testing.expect(read_mpi(&.{ 0, 0 }, &at) == null); // Zero bits.
+    try std.testing.expect(read_mpi(&.{ 0, 16, 0xff }, &at) == null); // Overrun.
+    try std.testing.expect(read_mpi(&.{ 0, 9, 0x00, 0xff }, &at) == null); // Leading zero.
+    try std.testing.expect(at == 0);
+}
+
+test "material_valid is exact for each algorithm" {
+    // Goal: counts of MPIs per algorithm, trailing bytes, and 64 raw bytes for algorithm 27.
+    const one = [_]u8{ 0, 8, 0xff };
+    const two = one ++ one;
+    try std.testing.expect(material_valid(algorithm_rsa, &one));
+    try std.testing.expect(!material_valid(algorithm_rsa, &two)); // Trailing bytes.
+    try std.testing.expect(!material_valid(algorithm_rsa, &.{ 0, 0 })); // bits = 0.
+    try std.testing.expect(!material_valid(algorithm_rsa, &.{ 0, 16, 0xff })); // Overrun.
+    try std.testing.expect(!material_valid(algorithm_rsa, &.{})); // Nothing at all.
+    for ([_]u8{ algorithm_dsa, algorithm_ecdsa, algorithm_eddsa }) |algorithm| {
+        try std.testing.expect(material_valid(algorithm, &two));
+        try std.testing.expect(!material_valid(algorithm, &one)); // One MPI short.
+        try std.testing.expect(!material_valid(algorithm, &(two ++ [_]u8{0}))); // Trailing.
+    }
+    const raw: [65]u8 = @splat(1);
+    try std.testing.expect(!material_valid(algorithm_ed25519_native, raw[0..63]));
+    try std.testing.expect(material_valid(algorithm_ed25519_native, raw[0..64]));
+    try std.testing.expect(!material_valid(algorithm_ed25519_native, raw[0..65]));
+    try std.testing.expect(!material_valid(99, &one)); // An algorithm we do not read.
+}
+
+test "bound_binary names each refusal and binds an algorithm 27 signature" {
+    // Goal: the header path gets the same one-case-one-answer as the detached path.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const raw: [64]u8 = @splat(1);
+    const good = try tiny_packet(memory, algorithm_ed25519_native, hash_sha256, null, &raw);
+    try std.testing.expect(bound_binary(good, fixture_text) == .bound);
+    try std.testing.expect(bound_binary(good, "other\n") == .stale);
+    // Two signatures in a row are several; bytes that are no packet are only stale.
+    const twice = try std.mem.concat(memory, u8, &.{ good, good });
+    try std.testing.expect(bound_binary(twice, fixture_text) == .several);
+    const trailing = try std.mem.concat(memory, u8, &.{ good, "xyz" });
+    try std.testing.expect(bound_binary(trailing, fixture_text) == .stale);
+    // Version 5, SHA-1 and an unreadable algorithm are named, not stale.
+    const v5 = try memory.dupe(u8, good);
+    v5[2] = 5;
+    try std.testing.expect(bound_binary(v5, fixture_text) == .unsupported);
+    const sha1 = try tiny_packet(memory, algorithm_ed25519_native, 2, null, &raw);
+    try std.testing.expect(bound_binary(sha1, fixture_text) == .unsupported);
+    const short = try tiny_packet(memory, algorithm_ed25519_native, hash_sha256, null, raw[0..63]);
+    try std.testing.expect(bound_binary(short, fixture_text) == .stale);
 }
