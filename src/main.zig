@@ -280,4 +280,10 @@ test {
     _ = @import("build_tests.zig");
     _ = @import("trust/key.zig");
     _ = @import("trust/key_tests.zig");
+    _ = @import("trust/key_store.zig");
+    _ = @import("trust/diagnose.zig");
+    _ = @import("trust/passphrase.zig");
+    _ = @import("trust/key_commands.zig");
+    _ = @import("trust/key_commands_tests.zig");
+    _ = @import("fuzz_key.zig");
 }

@@ -14,7 +14,14 @@ const cheap: key.Kdf = .{ .t = 1, .m_kib = 8, .p = 1, .salt = fixed_salt };
 
 fn sealed_record(passphrase: []const u8) !key.Record {
     const public = key.public_of_seed(fixed_seed);
-    const sealed = try key.seal(testing.allocator, passphrase, fixed_seed, public, cheap, fixed_nonce);
+    const sealed = try key.seal(
+        testing.allocator,
+        passphrase,
+        fixed_seed,
+        public,
+        cheap,
+        fixed_nonce,
+    );
     return .{ .public = public, .body = .{ .passphrase = sealed } };
 }
 
@@ -84,7 +91,9 @@ test "parse refuses a file that render would not write" {
     @memcpy(upper[0..text.len], text);
     const at = std.mem.indexOf(u8, text, "nonce").? + 12;
     upper[at] = std.ascii.toUpper(upper[at]);
-    if (upper[at] != text[at]) try testing.expectError(error.Malformed, key.parse(upper[0..text.len]));
+    if (upper[at] != text[at]) {
+        try testing.expectError(error.Malformed, key.parse(upper[0..text.len]));
+    }
 }
 
 test "a newer version is reported as newer" {
@@ -154,9 +163,16 @@ test "the id is the full BLAKE3 hash over the context and the public key" {
 
 test "the pub file round trips and a mode with group or other bits is too open" {
     const public = key.public_of_seed(fixed_seed);
-    const bytes = key.render_pub(public);
-    try testing.expectEqualSlices(u8, &public, &key.parse_pub(&bytes).?);
-    try testing.expect(key.parse_pub(bytes[0 .. bytes.len - 1]) == null);
+    var buffer: [key.pub_file_bytes_max]u8 = undefined;
+    for ([_]key.Encryption{ .passphrase, .none }) |encryption| {
+        const bytes = key.render_pub(.{ .public = public, .encryption = encryption }, &buffer);
+        const parsed = key.parse_pub(bytes).?;
+        try testing.expectEqualSlices(u8, &public, &parsed.public);
+        try testing.expectEqual(encryption, parsed.encryption);
+        try testing.expect(key.parse_pub(bytes[0 .. bytes.len - 1]) == null);
+        try testing.expect(key.parse_pub(bytes[0 .. key.pub_file_bytes_max - 12]) == null);
+    }
+    try testing.expect(key.parse_pub(&@as([key.pub_file_bytes_max]u8, @splat('x'))) == null);
     try testing.expect(!key.mode_too_open(0o600));
     try testing.expect(!key.mode_too_open(0o700));
     try testing.expect(key.mode_too_open(0o640));

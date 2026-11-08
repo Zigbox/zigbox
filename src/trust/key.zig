@@ -81,8 +81,8 @@ pub const OpenError = error{
 
 pub const PublicText = [constants.key_public_text_bytes]u8;
 pub const IdText = [constants.key_id_text_bytes]u8;
-/// The `.pub` file: the public text and a newline.
-pub const pub_file_bytes: u32 = constants.key_public_text_bytes + 1;
+/// The longest `.pub` file: the public text, a newline, `passphrase` and a newline.
+pub const pub_file_bytes_max: u32 = constants.key_public_text_bytes + 1 + 10 + 1;
 
 comptime {
     // The longest rendering (a sealed key with every number at its widest) fits the bound.
@@ -138,21 +138,47 @@ pub fn key_id(public: [constants.key_public_bytes]u8) IdText {
     return text;
 }
 
-/// The `.pub` file's bytes.
-pub fn render_pub(public: [constants.key_public_bytes]u8) [pub_file_bytes]u8 {
-    var bytes: [pub_file_bytes]u8 = undefined;
-    bytes[0..constants.key_public_text_bytes].* = public_text(public);
-    bytes[constants.key_public_text_bytes] = '\n';
-    assert(bytes[bytes.len - 1] == '\n');
-    return bytes;
+/// What a `.pub` file says: the public key, and how the secret is kept. The second line lets
+/// `list` and `show` answer without opening the secret file.
+pub const PubFile = struct {
+    public: [constants.key_public_bytes]u8,
+    encryption: Encryption,
+};
+
+pub fn encryption_word(encryption: Encryption) []const u8 {
+    return switch (encryption) {
+        .passphrase => "passphrase",
+        .none => "none",
+    };
 }
 
-/// The public key of a `.pub` file, only when it is exactly what `render_pub` writes.
-pub fn parse_pub(bytes: []const u8) ?[constants.key_public_bytes]u8 {
+/// The `.pub` file's bytes: `<public text>\n<word>\n`, in `buffer`.
+pub fn render_pub(file: PubFile, buffer: *[pub_file_bytes_max]u8) []const u8 {
+    const word = encryption_word(file.encryption);
+    buffer[0..constants.key_public_text_bytes].* = public_text(file.public);
+    buffer[constants.key_public_text_bytes] = '\n';
+    const at = constants.key_public_text_bytes + 1;
+    @memcpy(buffer[at..][0..word.len], word);
+    buffer[at + word.len] = '\n';
+    const length = at + word.len + 1;
+    assert(length <= pub_file_bytes_max);
+    return buffer[0..length];
+}
+
+/// A `.pub` file, only when it is exactly what `render_pub` writes.
+pub fn parse_pub(bytes: []const u8) ?PubFile {
     assert(bytes.len <= constants.key_file_bytes_max + 1);
-    if (bytes.len != pub_file_bytes) return null;
-    if (bytes[bytes.len - 1] != '\n') return null;
-    return parse_public_text(bytes[0 .. bytes.len - 1]);
+    const first = constants.key_public_text_bytes;
+    if (bytes.len <= first + 1) return null;
+    if (bytes[first] != '\n' or bytes[bytes.len - 1] != '\n') return null;
+    const public = parse_public_text(bytes[0..first]) orelse return null;
+    const word = bytes[first + 1 .. bytes.len - 1];
+    for ([_]Encryption{ .passphrase, .none }) |encryption| {
+        if (std.mem.eql(u8, word, encryption_word(encryption))) {
+            return .{ .public = public, .encryption = encryption };
+        }
+    }
+    return null;
 }
 
 /// The public key a seed makes.
@@ -182,7 +208,7 @@ fn hex_array(comptime count: usize, text: []const u8) ?[count]u8 {
 
 /// The key file's text. `out` is `key_file_bytes_max` long; the text is a prefix of it.
 pub fn render(record: *const Record, out: *[constants.key_file_bytes_max]u8) []const u8 {
-    assert(record.body != .passphrase or kdf_valid(record.body.passphrase.kdf));
+    if (record.body == .passphrase) assert(kdf_valid(record.body.passphrase.kdf));
     var writer = std.Io.Writer.fixed(out);
     const public = public_text(record.public);
     writer.print(".{{\n    .version = {d},\n    .algorithm = \"ed25519\",\n", .{version}) catch
@@ -222,13 +248,13 @@ fn render_sealed(writer: *std.Io.Writer, sealed: *const Sealed) void {
 /// Reads the text front to back against the layout; nothing is skipped or guessed.
 const Scanner = struct {
     text: []const u8,
-    at: usize,
+    at: u32,
 
     fn literal(scanner: *Scanner, expected: []const u8) bool {
         assert(scanner.at <= scanner.text.len);
         const rest = scanner.text[scanner.at..];
         if (!std.mem.startsWith(u8, rest, expected)) return false;
-        scanner.at += expected.len;
+        scanner.at += @intCast(expected.len);
         return true;
     }
 
@@ -336,7 +362,8 @@ fn derive(
     var derived: [32]u8 = undefined;
     const params: argon2.Params = .{ .t = kdf.t, .m = kdf.m_kib, .p = @intCast(kdf.p) };
     // One lane (`key_kdf_p_max`), so the `Io` is never used: no threads are started.
-    argon2.kdf(allocator, &derived, passphrase, &kdf.salt, params, .argon2id, std.Io.failing) catch |err| {
+    const io = std.Io.failing;
+    argon2.kdf(allocator, &derived, passphrase, &kdf.salt, params, .argon2id, io) catch |err| {
         switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // The parameters were checked above; the output is 32 bytes; one lane never waits.
@@ -382,7 +409,7 @@ pub fn open(
     record: *const Record,
     passphrase: ?[]const u8,
 ) OpenError![constants.key_seed_bytes]u8 {
-    assert(record.body != .passphrase or kdf_valid(record.body.passphrase.kdf));
+    if (record.body == .passphrase) assert(kdf_valid(record.body.passphrase.kdf));
     var seed: [constants.key_seed_bytes]u8 = undefined;
     switch (record.body) {
         .none => |secret| seed = secret,

@@ -1,0 +1,8 @@
+error[ZBX-E0901]: the key cannot be used
+  while  using the key 'ci'
+  cause  there is no key file at /home/alice/.config/zbx/keys/ci.pub
+  key    ci
+  path   /home/alice/.config/zbx/keys/ci.pub
+  fix    see the keys there are, or make one:   zbx key list
+  more   zbx explain E0901
+  docs   https://zigbox.github.io/zigbox/errors/E0901.html

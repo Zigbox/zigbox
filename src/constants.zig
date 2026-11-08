@@ -1440,9 +1440,12 @@ pub const passphrase_file_bytes_max: u32 = passphrase_bytes_max + 1;
 pub const keys_listed_max: u32 = 64;
 
 comptime {
-    assert(key_kdf_t >= 1 and key_kdf_t <= key_kdf_t_max);
-    assert(key_kdf_m_kib >= 8 * key_kdf_p and key_kdf_m_kib <= key_kdf_m_kib_max);
-    assert(key_kdf_p >= 1 and key_kdf_p <= key_kdf_p_max);
+    assert(key_kdf_t >= 1);
+    assert(key_kdf_t <= key_kdf_t_max);
+    assert(key_kdf_m_kib >= 8 * key_kdf_p);
+    assert(key_kdf_m_kib <= key_kdf_m_kib_max);
+    assert(key_kdf_p >= 1);
+    assert(key_kdf_p <= key_kdf_p_max);
     assert(key_kdf_p_max == 1);
     assert(key_sealed_bytes == 48);
     assert(key_public_text_bytes == 76);
