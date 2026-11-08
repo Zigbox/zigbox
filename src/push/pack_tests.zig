@@ -242,8 +242,10 @@ fn make_golden_source() void {
     files.put_symlink("/src/etc/localtime", "../usr/zone");
     files.put_file("/src/bin/tool", 0o755, "#!tool\n");
     files.put_xattr("/src/bin/tool", "user.note", "kept");
-    const long_name: *const [110]u8 = "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll";
-    files.put_file("/src/" ++ long_name, 0o600, "long\n");
+    var long_path: [128]u8 = undefined;
+    @memcpy(long_path[0..5], "/src/");
+    @memset(long_path[5..115], 'l');
+    files.put_file(long_path[0..115], 0o600, "long\n");
 }
 
 /// The entries of the layer's tar, one line each: type byte, name, link name.
@@ -258,8 +260,17 @@ fn listing(made: pack.Packed, out: []u8) ![]const u8 {
     holder.tar.init(layer.tar_reader(), 1 << 20);
     var writer: std.Io.Writer = .fixed(out);
     while (try holder.tar.next()) |item| {
-        try writer.print("{s} {s} {s} {o}", .{ @tagName(item.kind), item.name, item.link, item.mode });
-        for (item.xattrs) |attribute| try writer.print(" {s}={s}", .{ attribute.name, attribute.value });
+        const mode = item.mode;
+        if (item.name.len > 60) {
+            const kind = @tagName(item.kind);
+            try writer.print("{s} long({d}) {s} {o}", .{ kind, item.name.len, item.link, mode });
+        } else {
+            const kind = @tagName(item.kind);
+            try writer.print("{s} {s} {s} {o}", .{ kind, item.name, item.link, mode });
+        }
+        for (item.xattrs) |attribute| {
+            try writer.print(" {s}={s}", .{ attribute.name, attribute.value });
+        }
         try writer.writeAll("\n");
     }
     return writer.buffered();
@@ -302,7 +313,7 @@ const golden_listing =
     \\file etc/hostname  644
     \\hardlink etc/hostname.copy etc/hostname 644
     \\symlink etc/localtime ../usr/zone 777
-    \\file llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll  600
+    \\file long(110)  600
     \\
 ;
 const golden_layer = "sha256:819a2bfa252009bd10c789437fd136d5d5cef6e59baa1ed609cb360e3e673499";

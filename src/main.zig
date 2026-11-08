@@ -145,7 +145,6 @@ test {
     _ = @import("sim_bus.zig");
     _ = @import("fuzz_dbus.zig");
     _ = @import("fuzz_layer.zig");
-    _ = @import("fuzz_pack.zig");
 }
 
 test {
@@ -161,6 +160,7 @@ test {
     _ = @import("layer/apply.zig");
     _ = @import("layer/tar_write.zig");
     _ = @import("push/pack.zig");
+    _ = @import("fuzz_pack.zig");
     _ = @import("push/pack_tests.zig");
     _ = @import("push/export.zig");
     _ = @import("push/source.zig");

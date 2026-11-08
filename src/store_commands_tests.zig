@@ -903,6 +903,11 @@ test "store gc never reads, moves or removes anything under state/" {
 // ---- export (lane U) ------------------------------------------------------------------------
 
 /// The OCI digest an export printed, without its newline.
+/// `zbx store export --oci` with the two words after it: the source and the directory.
+fn export_to(words: *const [2][:0]const u8) !u8 {
+    return command(&.{ "store", "export", "--oci", words[0], words[1] });
+}
+
 fn printed_oci_digest() ![]const u8 {
     const out = sim.stdout();
     try testing.expect(out.len == constants.oci_digest_text_bytes + 1);
@@ -928,7 +933,11 @@ test "export of an imported tree prints the manifest digest and writes a whole l
         mine[3] = term(&buffer, tree);
         try testing.expectEqual(@as(u8, 0), try command(&mine));
         const manifest = try printed_oci_digest();
-        if (index == 0) @memcpy(&first, manifest) else try testing.expectEqualStrings(&first, manifest);
+        if (index == 0) {
+            @memcpy(&first, manifest);
+        } else {
+            try testing.expectEqualStrings(&first, manifest);
+        }
         try testing.expectEqual(@as(usize, 0), sim.stderr().len);
         var path: [96]u8 = undefined;
         const marker = try std.fmt.bufPrint(&path, "{s}/oci-layout", .{dir});
@@ -975,15 +984,15 @@ test "export refuses what cannot be packed or written with one coded line" {
     var buffer: [80]u8 = undefined;
     const tree = term(&buffer, try printed_digest());
     const nothing = "b3:0000000000000000000000000000000000000000000000000000000000000000";
-    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", "nope", "/o" }));
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ "nope", "/o" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
-    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", nothing, "/o" }));
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ nothing, "/o" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
-    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "export", "--oci", tree, "/o" }));
+    try testing.expectEqual(@as(u8, 0), try export_to(&.{ tree, "/o" }));
     var manifest_buffer: [80]u8 = undefined;
     const manifest = term(&manifest_buffer, try printed_oci_digest());
-    try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", manifest, "/p" }));
+    try testing.expectEqual(@as(u8, 1), try export_to(&.{ manifest, "/p" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", tree, "/o" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0557") != null);
