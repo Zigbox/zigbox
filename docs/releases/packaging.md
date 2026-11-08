@@ -18,6 +18,9 @@ This writes unsigned rpms and `zig-out/packages/to-sign/<rpm>.header`, and print
 architecture. Sign each header with a binary (not armored) detached signature, and name it
 `<rpm file>.header.sig` in a directory of your choice:
 
+Start every release with an empty `$SIGNATURES` directory: `gpg --batch -o` will not overwrite,
+so a directory kept from the last release leaves its files in place, and the tool refuses them.
+
 ```sh
 mkdir -p $SIGNATURES
 gpg --batch --detach-sign -u $KEY -o $SIGNATURES/zigbox-X.Y.Z-1.x86_64.rpm.header.sig \
@@ -54,24 +57,42 @@ zig build packages-check -Dsignatures=$SIGNATURES
 
 `packages-check` reads the tree back and fails, with one line per problem, if any placed file
 disagrees with the metadata that names it (`Release` against `Packages`, `Packages` against the
-debs, `repomd.xml` against `primary.xml`, `primary.xml` against the rpms) or a signature file is
-missing. It does not verify the signatures themselves; do that in the next section.
+debs, `repomd.xml` against `primary.xml`, `primary.xml` against the rpms), a signature file is
+missing, or a signature file does not sign the file beside it (`InRelease` and `Release.gpg`
+against `Release`, each `repomd.<arch>.xml.asc` against its `repomd.xml`; also refused when the
+four are not all by one key). The signing run makes the same check before it writes anything, so a
+swapped or stale file is refused at the point it is placed. The check compares the 16 digest bits
+a signature records, so it catches a swapped or stale file, not a forged one; it does not verify
+the signatures with the public key. Do that in the next section.
 
 Each run deletes `apt/`, `rpm/` and `to-sign/` under the output directory first, so the files
 of an earlier run never stay beside this one's.
 
 ## Verify before publishing
 
+Check all six signed files, on both architectures, with the release public key
+(`release-key.asc` is its armored export):
+
 ```sh
-gpg --verify zig-out/packages/apt/dists/stable/Release.gpg zig-out/packages/apt/dists/stable/Release
-gpg --verify zig-out/packages/apt/dists/stable/InRelease
+T=zig-out/packages
+gpg --verify $T/apt/dists/stable/Release.gpg $T/apt/dists/stable/Release
+gpg --verify $T/apt/dists/stable/InRelease
+gpg --verify $T/rpm/x86_64/repodata/repomd.xml.asc $T/rpm/x86_64/repodata/repomd.xml
+gpg --verify $T/rpm/aarch64/repodata/repomd.xml.asc $T/rpm/aarch64/repodata/repomd.xml
 rpmkeys --import release-key.asc      # on a scratch host or --root
-rpm -Kv zig-out/packages/rpm/x86_64/zigbox-X.Y.Z-1.x86_64.rpm
+rpm -Kv $T/rpm/x86_64/zigbox-X.Y.Z-1.x86_64.rpm
+rpm -Kv $T/rpm/aarch64/zigbox-X.Y.Z-1.aarch64.rpm
 ```
 
-`rpm -Kv` must show the header signature as OK. Then publish `apt/` and `rpm/` at the site, and
-check a client with `apt update` and `dnf makecache`. Publish the release public key (armored)
-beside them, and as `.gpg` for apt's `signed-by=`.
+Each `gpg --verify` must say `Good signature` from the release key, and each `rpm -Kv` must show
+the header signature as OK. Then publish exactly `apt/` and `rpm/` from the last `packages` run, and
+nothing else: not `to-sign/`, and not the test key files. Publish the release public key (armored)
+beside them, and as `.gpg` for apt's `signed-by=`. Check a client with `apt update` and
+`dnf makecache`.
+
+The `Release` file has a fixed `Date` and no `Valid-Until`, and `repomd.xml` a fixed `revision`
+(reproducibility): a client cannot tell an old signed `InRelease` from a new one, so there is no
+replay or freeze protection.
 
 ## CI and the test key
 

@@ -1,7 +1,8 @@
 //! `zig build packages-check`: every placed file of the output tree agrees with the metadata that
 //! names it (apt `Release` and `Packages`, dnf `repomd.xml` and `primary.xml`), and, once the
-//! tree is signed, every signature file is there. With the test key the signatures are checked
-//! by recomputing them (Ed25519 is deterministic and the signature time is fixed).
+//! tree is signed, every signature file is there and signs the bytes beside it. With the test key
+//! the signatures are checked by recomputing them (Ed25519 is deterministic and the signature
+//! time is fixed).
 //! The files come from a `Source`, so a test can use memory and the tool can use the disk.
 
 const std = @import("std");
@@ -33,12 +34,14 @@ const Checker = struct {
     source: Source,
     memory: Allocator,
     log: *std.Io.Writer,
+    /// The tool's name on each line: `packages-check`, or `packages` when the builder checks.
+    name: []const u8 = "packages-check",
     failures: u32 = 0,
     files_checked: u32 = 0,
 
     fn fail(self: *Checker, comptime format: []const u8, arguments: anytype) void {
         self.failures += 1;
-        self.log.print("packages-check: " ++ format ++ "\n", arguments) catch {}; // Nowhere else.
+        self.log.print("{s}: " ++ format ++ "\n", .{self.name} ++ arguments) catch {}; // Nowhere else.
     }
 
     fn read(self: *Checker, path: []const u8) ?[]const u8 {
@@ -184,14 +187,73 @@ fn check_rpm(checker: *Checker, path: []const u8, bytes: []const u8) void {
     if (parts.payload.len == 0) checker.fail("{s} has no payload", .{path});
 }
 
-/// A signed release has all five signature files.
-fn check_signature_files(checker: *Checker) Error!void {
-    const names = [_][]const u8{ release.apt_in_release_path, release.apt_release_gpg_path };
-    for (names) |path| _ = checker.read(path);
+/// A signed release has all four round-2 signature files, each a signature over the bytes it
+/// sits beside (`openpgp.bound_to`), all by one key. With `required` false a missing file is
+/// skipped: the builder checks the files the owner has placed so far.
+fn check_signature_files(checker: *Checker, required: bool) Error!void {
+    var first: ?[20]u8 = null;
+    const release_bytes = checker.source.read_fn(checker.source.context, release.apt_release_path);
+    const apt_files = [_]struct { []const u8, openpgp.Form }{
+        .{ release.apt_in_release_path, .clearsigned },
+        .{ release.apt_release_gpg_path, .armored_detached },
+    };
+    for (apt_files) |entry| {
+        const signed = release.apt_release_path;
+        try check_bound(checker, entry[0], signed, release_bytes, entry[1], required, &first);
+    }
     for (0..release.architectures.len) |index| {
         const repomd = try release.repomd_path(checker.memory, index);
-        _ = checker.read(try checker.join(repomd, ".asc"));
+        const bytes = checker.source.read_fn(checker.source.context, repomd);
+        const path = try checker.join(repomd, ".asc");
+        try check_bound(checker, path, repomd, bytes, .armored_detached, required, &first);
     }
+}
+
+fn check_bound(
+    checker: *Checker,
+    path: []const u8,
+    signed_path: []const u8,
+    signed: ?[]const u8,
+    form: openpgp.Form,
+    required: bool,
+    first: *?[20]u8,
+) Error!void {
+    const file = checker.source.read_fn(checker.source.context, path) orelse {
+        if (required) checker.fail("{s} is missing", .{path});
+        return;
+    };
+    const bytes = signed orelse return; // The signed file's own absence is reported elsewhere.
+    const bound = (try openpgp.bound_to(checker.memory, form, file, bytes)) orelse {
+        checker.fail(
+            "{s} is not a signature of {s} (stale or swapped?); sign again into an empty " ++
+                "signatures directory",
+            .{ path, signed_path },
+        );
+        return;
+    };
+    const print = bound.fingerprint orelse return;
+    if (first.* == null) first.* = print;
+    if (!std.mem.eql(u8, &first.*.?, &print)) {
+        checker.fail("{s} was signed by a different key than the other signature files", .{path});
+    }
+}
+
+/// The signature files the owner placed, checked while the builder still holds the tree in
+/// memory: nothing is written when one of them signs other bytes.
+pub fn check_placed_signatures(
+    files: []const model.TreeFile,
+    memory: Allocator,
+    log: *std.Io.Writer,
+) Error!void {
+    var tree: TreeSource = .{ .files = files };
+    var checker: Checker = .{
+        .source = tree.source(),
+        .memory = memory,
+        .log = log,
+        .name = "packages",
+    };
+    try check_signature_files(&checker, false);
+    if (checker.failures > 0) return error.CheckFailed;
 }
 
 fn expect_signature(checker: *Checker, path: []const u8, expected: []const u8) void {
@@ -229,25 +291,25 @@ pub fn check(
     var checker: Checker = .{ .source = source, .memory = memory, .log = log };
     try check_apt(&checker);
     for (0..release.architectures.len) |index| try check_dnf(&checker, index);
-    if (options.signatures_required) try check_signature_files(&checker);
+    if (options.signatures_required) try check_signature_files(&checker, true);
     if (options.test_key) try check_test_signatures(&checker);
     if (checker.files_checked == 0) assert(checker.failures > 0);
     if (checker.failures > 0) return error.CheckFailed;
 }
 
-/// A tree in memory, for the tests.
-const MemorySource = struct {
+/// A tree in memory: the builder checks it before writing, and the tests use it.
+pub const TreeSource = struct {
     files: []const model.TreeFile,
 
     fn read(context: *anyopaque, path: []const u8) ?[]const u8 {
-        const self: *MemorySource = @ptrCast(@alignCast(context));
+        const self: *TreeSource = @ptrCast(@alignCast(context));
         for (self.files) |file| {
             if (std.mem.eql(u8, file.path, path)) return file.bytes;
         }
         return null;
     }
 
-    fn source(self: *MemorySource) Source {
+    pub fn source(self: *TreeSource) Source {
         return .{ .context = self, .read_fn = read };
     }
 };
@@ -265,7 +327,7 @@ test "a built tree passes, and flipping one byte of a placed rpm fails" {
     const memory = arena.allocator();
     const files = try release.build(memory, &test_inputs, .{ .test_key = true });
     var sink: std.Io.Writer.Allocating = .init(memory);
-    var source: MemorySource = .{ .files = files };
+    var source: TreeSource = .{ .files = files };
     const strict: Options = .{ .signatures_required = true, .test_key = true };
     try check(source.source(), memory, &sink.writer, strict);
     try std.testing.expectEqual(@as(usize, 0), sink.written().len);
@@ -295,7 +357,7 @@ test "an unsigned tree passes unless signatures are required" {
     const memory = arena.allocator();
     const files = try release.build(memory, &test_inputs, .{});
     var sink: std.Io.Writer.Allocating = .init(memory);
-    var source: MemorySource = .{ .files = files };
+    var source: TreeSource = .{ .files = files };
     const loose: Options = .{ .signatures_required = false, .test_key = false };
     try check(source.source(), memory, &sink.writer, loose);
     const strict: Options = .{ .signatures_required = true, .test_key = false };
@@ -305,4 +367,66 @@ test "an unsigned tree passes unless signatures are required" {
     );
     const message = "apt/dists/stable/InRelease is missing";
     try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
+}
+
+/// The signatures a test-key build made, as the owner's `Signatures` input: the repository trees
+/// embed the header signatures, so the round-2 signatures only match a build that has them too.
+fn signatures_of(memory: Allocator, files: []const model.TreeFile) !release.Signatures {
+    var signatures: release.Signatures = .{};
+    for (files) |file| {
+        for (release.architectures, 0..) |architecture, index| {
+            const arch = architecture.rpm_name();
+            if (!std.mem.startsWith(u8, file.path, "to-sign/")) continue;
+            if (std.mem.indexOf(u8, file.path, arch) == null) continue;
+            signatures.header[index] = try openpgp.sign_detached(memory, openpgp.test_key(), file.bytes);
+        }
+        if (std.mem.eql(u8, file.path, release.apt_in_release_path)) signatures.in_release = file.bytes;
+        if (std.mem.eql(u8, file.path, release.apt_release_gpg_path)) signatures.release_gpg = file.bytes;
+        for (0..release.architectures.len) |index| {
+            var buffer: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&buffer, "rpm/{s}/repodata/repomd.xml.asc", .{
+                release.architectures[index].rpm_name(),
+            }) catch unreachable; // A fixed short name.
+            if (std.mem.eql(u8, file.path, name)) signatures.repomd_asc[index] = file.bytes;
+        }
+    }
+    return signatures;
+}
+
+test "a swapped or stale round-2 signature is refused, a matching one is placed" {
+    // Goal: the owner's signature files are tied to the bytes they sign. Signatures made over
+    // another release, or the two repomd signatures swapped, are refused with one line each.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const signed = try release.build(memory, &test_inputs, .{ .test_key = true });
+    var sink: std.Io.Writer.Allocating = .init(memory);
+
+    const good = try signatures_of(memory, signed);
+    const placed = try release.build(memory, &test_inputs, .{ .signatures = good });
+    try check_placed_signatures(placed, memory, &sink.writer);
+    var tree: TreeSource = .{ .files = placed };
+    const strict: Options = .{ .signatures_required = true, .test_key = false };
+    try check(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectEqual(@as(usize, 0), sink.written().len);
+
+    var swapped = good;
+    swapped.repomd_asc = .{ good.repomd_asc[1], good.repomd_asc[0] };
+    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped });
+    try std.testing.expectError(
+        error.CheckFailed,
+        check_placed_signatures(crossed, memory, &sink.writer),
+    );
+    const message = "rpm/x86_64/repodata/repomd.xml.asc is not a signature of " ++
+        "rpm/x86_64/repodata/repomd.xml (stale or swapped?)";
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
+    tree = .{ .files = crossed };
+    try std.testing.expectError(error.CheckFailed, check(tree.source(), memory, &sink.writer, strict));
+
+    const other: release.Inputs = .{ .version = "1.2.4", .zbx = test_inputs.zbx, .license = "x\n" };
+    const stale = try release.build(memory, &other, .{ .signatures = good });
+    try std.testing.expectError(
+        error.CheckFailed,
+        check_placed_signatures(stale, memory, &sink.writer),
+    );
 }
