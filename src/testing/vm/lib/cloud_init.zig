@@ -49,6 +49,11 @@ pub const Config = struct {
     /// Controllers delegated to user managers through a drop-in for user@.service
     /// (`cpu cpuset io memory pids`). Empty writes no drop-in: the guest's stock delegation.
     delegate_controllers: []const u8 = "",
+    /// Write /etc/profile.d/zigbox-console.sh, which gives the root shell the prompt
+    /// `root@<host>:~#` that `Session.provision` waits for, and no `PROMPT_COMMAND`. Ubuntu and
+    /// Debian already prompt that way; Fedora and Rocky prompt `[root@host ~]#` and set a
+    /// terminal title on every prompt. Off by default: Ubuntu's seed stays as it was.
+    console_prompt: bool = false,
 };
 
 pub const Error = error{ ConfigTextUnsafe, ConfigTooLarge, UserDataTooLong };
@@ -103,6 +108,7 @@ fn write_user_data(writer: *Io.Writer, config: *const Config) Io.Writer.Error!vo
         }
     }
     try writer.writeAll(autologin_dropin);
+    if (config.console_prompt) try writer.writeAll(console_prompt_file);
     if (config.delegate_controllers.len > 0) {
         try writer.writeAll("  - path: /etc/systemd/system/user@.service.d/delegate.conf\n" ++
             "    content: |\n      [Service]\n");
@@ -118,6 +124,17 @@ const autologin_dropin =
     \\      [Service]
     \\      ExecStart=
     \\      ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+    \\
+;
+
+/// The root shell's prompt, for guests whose own differs (`Config.console_prompt`). A login shell
+/// reads /etc/profile.d before ~/.bashrc, and Fedora's /etc/bashrc replaces a prompt only if it is
+/// bash's default, so this one stays.
+const console_prompt_file =
+    \\  - path: /etc/profile.d/zigbox-console.sh
+    \\    content: |
+    \\      PS1='\u@\h:\w\$ '
+    \\      PROMPT_COMMAND=:
     \\
 ;
 
@@ -212,6 +229,20 @@ test "a minimal config renders a seed with no packages, sysctls, subids or linge
     const meta_text = try render_meta_data(&test_config, &meta);
     const meta_expected = "instance-id: iid-vm-test\nlocal-hostname: vm-test\n";
     try std.testing.expectEqualStrings(meta_expected, meta_text);
+}
+
+test "the console prompt file is written only when asked for" {
+    // Goal: Ubuntu's seed does not change; a Fedora or Rocky seed carries the prompt that
+    // `Session.provision` waits for. Method: render both and look for the file and its prompt.
+    var buffer: [limits.user_data_bytes_max]u8 = undefined;
+    const plain = try render_user_data(&test_config, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "zigbox-console.sh") == null);
+    var config = test_config;
+    config.console_prompt = true;
+    const text = try render_user_data(&config, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, text, "      PS1='\\u@\\h:\\w\\$ '\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "      PROMPT_COMMAND=:\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--autologin root") != null);
 }
 
 test "texts that could change the seed's structure are refused" {

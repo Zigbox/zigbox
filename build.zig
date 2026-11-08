@@ -98,14 +98,7 @@ fn add_packages_steps(b: *std.Build, options: *std.Build.Step.Options) void {
     const signatures = b.option([]const u8, "signatures", signatures_help);
     const test_key_help = "Sign the packages with the fixed test key";
     const test_key = b.option(bool, "test-key", test_key_help) orelse false;
-    const tool = b.addExecutable(.{
-        .name = "package_main",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/package_main.zig"),
-            .target = b.graph.host,
-            .optimize = .Debug,
-        }),
-    });
+    const tool = package_tool(b);
     const out = "zig-out/packages";
     var steps: [2]*std.Build.Step.Run = undefined;
     for (&steps, [_]bool{ false, true }) |*slot, checking| {
@@ -127,6 +120,40 @@ fn add_packages_steps(b: *std.Build, options: *std.Build.Step.Options) void {
     b.step("packages", packages_help).dependOn(&steps[0].step);
     const check_help = "Place the signatures, then check every file of the package trees";
     b.step("packages-check", check_help).dependOn(&steps[1].step);
+}
+
+fn package_tool(b: *std.Build) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = "package_main",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/package_main.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+}
+
+/// The packages of `demo-m8-packages`: the same writer as `zig build packages -Dtest-key`, into
+/// a directory of its own so the demo never reads a tree signed with anything else. The demo's
+/// run depends on the returned step and is handed the directory.
+const m8_packages_dir = ".zig-cache/m8-packages";
+
+fn add_m8_packages(
+    b: *std.Build,
+    options: *std.Build.Step.Options,
+    demo: *std.Build.Step.Run,
+) void {
+    const run = b.addRunArtifact(package_tool(b));
+    run.setCwd(b.path("."));
+    run.addArgs(&.{ "--version", @import("build.zig.zon").version });
+    add_release_binaries(b, options, run);
+    run.addArg("--license");
+    run.addFileArg(b.path("LICENSE"));
+    run.addArgs(&.{ "--out", m8_packages_dir, "--test-key" });
+    run.has_side_effects = true;
+    demo.step.dependOn(&run.step);
+    demo.addArgs(&.{ "--packages", m8_packages_dir });
+    demo.addArgs(&.{ "--version", @import("build.zig.zon").version });
 }
 
 /// The VM test harness as a module named `zigbox_vm`: boot an Ubuntu 24.04 guest under QEMU,
@@ -176,6 +203,7 @@ const roots = [_][]const u8{
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_z7.zig",
+    "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -205,6 +233,7 @@ const linux_only = [_][]const u8{
     "src/testing/vm/main_m6b.zig",
     "src/testing/vm/main_m7.zig",
     "src/testing/vm/main_z7.zig",
+    "src/testing/vm/main_m8_packages.zig",
     "src/testing/vm/main_top20.zig",
     "src/main.zig",
     "src/zigbox.zig",
@@ -426,6 +455,11 @@ const demos = [_]struct { step: []const u8, root: []const u8, help: []const u8 }
         .help = "Run the Z7 check: a host port forwarded into the guest (docs/vm-module.md)",
     },
     .{
+        .step = "demo-m8-packages",
+        .root = "src/testing/vm/main_m8_packages.zig",
+        .help = "Install the test-key packages on Ubuntu, Debian, Fedora and Rocky (M8 slice 7)",
+    },
+    .{
         .step = "top20",
         .root = "src/testing/vm/main_top20.zig",
         .help = "Pull and run the top 20 Docker Hub images in the VM (docs/demos/m4.md)",
@@ -464,6 +498,7 @@ fn add_demo_step(
     const harness_target = harness_target_of(b);
     for (demos) |demo| {
         const is_top20 = std.mem.eql(u8, demo.step, "top20");
+        const is_packages = std.mem.eql(u8, demo.step, "demo-m8-packages");
         const vm = b.addExecutable(.{
             .name = "vm",
             .root_module = b.createModule(.{
@@ -496,7 +531,11 @@ fn add_demo_step(
         }
         if (keep) run.addArg("--keep-overlay");
         if (reuse) run.addArg("--reuse-overlay");
-        add_release_binaries(b, options, run);
+        if (is_packages) {
+            add_m8_packages(b, options, run);
+        } else {
+            add_release_binaries(b, options, run);
+        }
         const step = b.step(demo.step, demo.help);
         step.dependOn(&run.step);
     }

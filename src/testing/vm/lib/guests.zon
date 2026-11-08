@@ -1,0 +1,27 @@
+.{
+    // The other guests of the VM module, each pinned by URL and SHA-256 like Ubuntu's
+    // (`image.zon`): a dated release, never a moving "latest" link. Change URL and hash together,
+    // deliberately. Each hash was copied from the distribution's published checksum file, except
+    // Debian's, which publishes only SHA-512 (`SHA512SUMS`): the image was downloaded, its
+    // SHA-512 compared with the published sum, and the SHA-256 below computed from that file.
+    .debian_12 = .{
+        // https://cloud.debian.org/images/cloud/bookworm/20261026-2643/SHA512SUMS lists
+        // 0464b5d4ae3aa4f658468d88da83af7857b71548b30d46dcb6282770955a747f
+        // b95a983476db90d25afd0653af607224c7ebd05122ab71faa106fd712aaad652 for this file.
+        .url = "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
+        .sha256 = "24036a8b79cbb11d809752c60f2f885b1a3b02b1d663faa0b648eb87bd7a256e",
+        .file_name = "debian-12-genericcloud-amd64-20261026-2643.qcow2",
+    },
+    .fedora_45 = .{
+        // Fedora-Cloud-45-1.4-x86_64-CHECKSUM, beside the image.
+        .url = "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2",
+        .sha256 = "50bdc5e70f6a24f540932d15411c1c6ae9fcfa40fb990d876d83c5cc823b2ad0",
+        .file_name = "Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2",
+    },
+    .rocky_9 = .{
+        // Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2.CHECKSUM, beside the image.
+        .url = "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2",
+        .sha256 = "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8",
+        .file_name = "Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2",
+    },
+}
