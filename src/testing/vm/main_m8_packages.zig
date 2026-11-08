@@ -1,7 +1,7 @@
 //! The packages check of M8 slice 7, run in four real guests: Ubuntu 24.04 and Debian 12 (apt),
 //! Fedora and Rocky 9 (dnf). For each guest it serves the package trees that
 //! `zig build packages -Dtest-key` wrote, installs `zigbox` from them with the guest's own
-//! package manager, and runs `zbx version` and `zbx doctor`. On the way it probes whether the
+//! package manager, and runs `zbx --version` and `zbx doctor`. On the way it probes whether the
 //! guest accepts the test key's Ed25519 signature on the repository metadata and on an rpm
 //! (`apt-get update`, `dnf makecache`, `rpm -K`); the verdicts are the key-type evidence of
 //! docs/decisions/2026-11-08-archive-key-type.md. It is not the milestone demo (slice 8): it
@@ -96,6 +96,8 @@ const Report = struct {
     installed: bool = false,
     version_ok: bool = false,
     doctor_ran: bool = false,
+    /// The harness error that stopped this guest before its checks finished, if any.
+    stopped: ?anyerror = null,
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -160,7 +162,10 @@ fn run_all(init: std.process.Init, out: *Io.Writer, args: Args) !bool {
     var count: usize = 0;
     for (&guests) |*guest| {
         if (args.only.len > 0 and !std.mem.eql(u8, args.only, guest.name)) continue;
-        reports[count] = try run_guest(init, out, args, guest, tar);
+        reports[count] = run_guest(init, out, args, guest, tar) catch |err| stopped: {
+            try out.print("{s}: {s}: stopped: {s}\n", .{ demo_name, guest.name, @errorName(err) });
+            break :stopped .{ .guest = guest, .stopped = err };
+        };
         count += 1;
     }
     return try summarize(out, reports[0..count]);
@@ -187,6 +192,11 @@ fn summarize(out: *Io.Writer, reports: []const Report) !bool {
             if (report.installed) "installed    " else "NOT INSTALLED",
             if (ran) "ran" else "DID NOT RUN",
         });
+        if (report.stopped) |err| {
+            try out.print("{s}:   {s: <7} stopped early: {s}\n", .{
+                demo_name, report.guest.name, @errorName(err),
+            });
+        }
         if (!good) passed = false;
     }
     return passed;
@@ -360,8 +370,8 @@ fn install_dnf(session: *Session, out: *Io.Writer, report: *Report) !void {
 }
 
 fn check_installed(session: *Session, out: *Io.Writer, version: []const u8, report: *Report) !void {
-    const shown = try session.run("/usr/bin/zbx version", vm.limits.command_timeout_kvm_s);
-    try H.show(out, "zbx version", shown);
+    const shown = try session.run("/usr/bin/zbx --version", vm.limits.command_timeout_kvm_s);
+    try H.show(out, "zbx --version", shown);
     report.version_ok = checks.version_ok(shown.output, version) and shown.status == 0;
     const command = H.as_demo ++ "/usr/bin/zbx doctor";
     const doctor = try session.run(command, vm.limits.command_timeout_kvm_s);

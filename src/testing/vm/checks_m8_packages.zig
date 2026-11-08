@@ -64,10 +64,11 @@ pub fn guest_passed(outcome: Outcome) bool {
     return outcome.installed and outcome.zbx_ran;
 }
 
-/// `zbx version` prints exactly `zbx <version>`.
+/// `zbx --version` prints `zbx <version>` on its first line, then a build line.
 pub fn version_ok(output: []const u8, version: []const u8) bool {
     assert(version.len > 0);
-    const line = std.mem.trim(u8, output, " \r\n");
+    const end = std.mem.indexOfScalar(u8, output, '\n') orelse output.len;
+    const line = std.mem.trim(u8, output[0..end], " \r\n");
     if (line.len != 4 + version.len) return false;
     return std.mem.startsWith(u8, line, "zbx ") and std.mem.endsWith(u8, line, version);
 }
@@ -133,6 +134,7 @@ test "zbx version and doctor judgements" {
     // Goal: the version is matched whole, not as a prefix; doctor's two statuses are the only
     // ones that mean it ran.
     try std.testing.expect(version_ok("zbx 0.3.1\n", "0.3.1"));
+    try std.testing.expect(version_ok("zbx 0.3.1\nbuild: safe x86_64-linux\n", "0.3.1"));
     try std.testing.expect(!version_ok("zbx 0.3.10\n", "0.3.1"));
     try std.testing.expect(!version_ok("zbx 0.3.1 extra\n", "0.3.1"));
     try std.testing.expect(!version_ok("", "0.3.1"));
