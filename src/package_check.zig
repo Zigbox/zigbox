@@ -38,6 +38,10 @@ const Checker = struct {
     name: []const u8 = "packages-check",
     failures: u32 = 0,
     files_checked: u32 = 0,
+    /// The issuer fingerprint of the first signature seen: every signature must be by this key.
+    first_key: ?[20]u8 = null,
+    /// Every rpm must carry a header signature (a signed release is being checked).
+    headers_required: bool = false,
 
     fn fail(self: *Checker, comptime format: []const u8, arguments: anytype) void {
         self.failures += 1;
@@ -186,13 +190,60 @@ fn check_rpm(checker: *Checker, path: []const u8, bytes: []const u8) void {
     const parts = rpm.split(bytes) orelse return checker.fail("{s} is not an rpm", .{path});
     if (!std.mem.endsWith(u8, path, ".rpm")) checker.fail("{s} is not named .rpm", .{path});
     if (parts.payload.len == 0) checker.fail("{s} has no payload", .{path});
+    check_header_signature(checker, path, parts) catch |err| switch (err) {
+        error.OutOfMemory => checker.fail("out of memory", .{}),
+    };
+}
+
+/// An rpm's header signature (RPMSIGTAG_OPENPGP, 268) signs this rpm's main header, which
+/// `to-sign/<rpm>.header` holds, and is by the same key as every other signature. A missing tag
+/// is refused only when a signed release is expected; a tag that signs other bytes always is.
+fn check_header_signature(
+    checker: *Checker,
+    path: []const u8,
+    parts: rpm.Parts,
+) error{OutOfMemory}!void {
+    const signature = rpm.binary_tag(parts.signature_header, rpm.sig_tag.rsa) orelse {
+        if (checker.headers_required) {
+            checker.fail("{s} has no header signature (sign round 1 is missing)", .{path});
+        }
+        return;
+    };
+    const name = std.fs.path.basename(path);
+    const header_path = try std.fmt.allocPrint(checker.memory, "to-sign/{s}.header", .{name});
+    const header = checker.source.read_fn(checker.source.context, header_path) orelse
+        return checker.fail("{s} is missing", .{header_path});
+    if (!std.mem.eql(u8, header, parts.main_header)) {
+        return checker.fail("{s} is not the header of {s}", .{ header_path, path });
+    }
+    const bound = openpgp.bound_binary(signature, header) orelse return checker.fail(
+        "the header signature in {s} does not sign its header (stale or swapped " ++
+            ".header.sig?); sign round 1 again into an empty signatures directory",
+        .{path},
+    );
+    note_key(checker, path, bound.fingerprint);
+}
+
+fn note_key(checker: *Checker, path: []const u8, print: ?[20]u8) void {
+    const found = print orelse {
+        if (checker.headers_required) {
+            checker.fail("{s} has a signature that names no issuer fingerprint", .{path});
+        }
+        return;
+    };
+    const first = checker.first_key orelse {
+        checker.first_key = found;
+        return;
+    };
+    if (!std.mem.eql(u8, &first, &found)) {
+        checker.fail("{s} was signed by a different key than the other signatures", .{path});
+    }
 }
 
 /// A signed release has all four round-2 signature files, each a signature over the bytes it
 /// sits beside (`openpgp.bound_to`), all by one key. With `required` false a missing file is
 /// skipped: the builder checks the files the owner has placed so far.
 fn check_signature_files(checker: *Checker, required: bool) Error!void {
-    var first: ?[20]u8 = null;
     const release_bytes = checker.source.read_fn(checker.source.context, release.apt_release_path);
     const apt_files = [_]struct { []const u8, openpgp.Form }{
         .{ release.apt_in_release_path, .clearsigned },
@@ -200,13 +251,13 @@ fn check_signature_files(checker: *Checker, required: bool) Error!void {
     };
     for (apt_files) |entry| {
         const signed = release.apt_release_path;
-        try check_bound(checker, entry[0], signed, release_bytes, entry[1], required, &first);
+        try check_bound(checker, entry[0], signed, release_bytes, entry[1], required);
     }
     for (0..release.architectures.len) |index| {
         const repomd = try release.repomd_path(checker.memory, index);
         const bytes = checker.source.read_fn(checker.source.context, repomd);
         const path = try checker.join(repomd, ".asc");
-        try check_bound(checker, path, repomd, bytes, .armored_detached, required, &first);
+        try check_bound(checker, path, repomd, bytes, .armored_detached, required);
     }
 }
 
@@ -217,25 +268,27 @@ fn check_bound(
     signed: ?[]const u8,
     form: openpgp.Form,
     required: bool,
-    first: *?[20]u8,
 ) Error!void {
     const file = checker.source.read_fn(checker.source.context, path) orelse {
         if (required) checker.fail("{s} is missing", .{path});
         return;
     };
     const bytes = signed orelse return; // The signed file's own absence is reported elsewhere.
-    const bound = (try openpgp.bound_to(checker.memory, form, file, bytes)) orelse {
-        checker.fail(
+    switch (try openpgp.bound_to(checker.memory, form, file, bytes)) {
+        .stale => checker.fail(
             "{s} is not a signature of {s} (stale or swapped?); sign again into an empty " ++
                 "signatures directory",
             .{ path, signed_path },
-        );
-        return;
-    };
-    const print = bound.fingerprint orelse return;
-    if (first.* == null) first.* = print;
-    if (!std.mem.eql(u8, &first.*.?, &print)) {
-        checker.fail("{s} was signed by a different key than the other signature files", .{path});
+        ),
+        .several => checker.fail(
+            "{s} holds more than one signature; sign with one key (one -u)",
+            .{path},
+        ),
+        .unsupported => checker.fail(
+            "{s} is a signature version this tool does not read; use a v4 key",
+            .{path},
+        ),
+        .bound => |bound| note_key(checker, path, bound.fingerprint),
     }
 }
 
@@ -253,8 +306,35 @@ pub fn check_placed_signatures(
         .log = log,
         .name = "packages",
     };
+    try check_placed_headers(&checker, files);
     try check_signature_files(&checker, false);
     if (checker.failures > 0) return error.CheckFailed;
+}
+
+fn is_rpm_path(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "rpm/") and std.mem.endsWith(u8, path, ".rpm");
+}
+
+/// The rpms of the tree being built: a signature on one binds to its header, and once any
+/// signature is placed (a header signature, or a round-2 file) every rpm must have one.
+fn check_placed_headers(checker: *Checker, files: []const model.TreeFile) Error!void {
+    var any = false;
+    for (files) |file| {
+        if (!is_rpm_path(file.path)) continue;
+        const parts = rpm.split(file.bytes) orelse continue;
+        if (rpm.binary_tag(parts.signature_header, rpm.sig_tag.rsa) != null) any = true;
+    }
+    for (files) |file| {
+        const name = std.fs.path.basename(file.path);
+        if (std.mem.eql(u8, name, "InRelease") or std.mem.eql(u8, name, "Release.gpg") or
+            std.mem.endsWith(u8, name, ".xml.asc")) any = true;
+    }
+    checker.headers_required = any;
+    for (files) |file| {
+        if (!is_rpm_path(file.path)) continue;
+        const parts = rpm.split(file.bytes) orelse continue;
+        check_header_signature(checker, file.path, parts) catch return error.OutOfMemory;
+    }
 }
 
 fn expect_signature(checker: *Checker, path: []const u8, expected: []const u8) void {
@@ -289,7 +369,12 @@ pub fn check(
     log: *std.Io.Writer,
     options: Options,
 ) Error!void {
-    var checker: Checker = .{ .source = source, .memory = memory, .log = log };
+    var checker: Checker = .{
+        .source = source,
+        .memory = memory,
+        .log = log,
+        .headers_required = options.signatures_required,
+    };
     try check_apt(&checker);
     for (0..release.architectures.len) |index| try check_dnf(&checker, index);
     if (options.signatures_required) try check_signature_files(&checker, true);
@@ -436,4 +521,59 @@ test "a swapped or stale round-2 signature is refused, a matching one is placed"
         error.CheckFailed,
         check_placed_signatures(stale, memory, &sink.writer),
     );
+}
+
+test "swapped, missing or half-placed rpm header signatures are refused" {
+    // Goal: round 1 is bound like round 2. Header signatures swapped between the rpms, or none
+    // beside signed round-2 files, give a refusal before anything is written, and the same tree
+    // fails `check`. This test failed before the fix: both were reported as signed.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const signed = try release.build(memory, &test_inputs, .{ .test_key = true });
+    var sink: std.Io.Writer.Allocating = .init(memory);
+    const good = try signatures_of(memory, signed);
+    const strict: Options = .{ .signatures_required = true, .test_key = false };
+
+    var swapped = good;
+    swapped.header = .{ good.header[1], good.header[0] };
+    const crossed = try release.build(memory, &test_inputs, .{ .signatures = swapped });
+    try std.testing.expectError(
+        error.CheckFailed,
+        check_placed_signatures(crossed, memory, &sink.writer),
+    );
+    const message = "does not sign its header (stale or swapped .header.sig?)";
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), message) != null);
+    var tree: TreeSource = .{ .files = crossed };
+    const refused = check(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectError(error.CheckFailed, refused);
+
+    sink.clearRetainingCapacity();
+    var none = good;
+    none.header = .{ null, null };
+    const unsigned = try release.build(memory, &test_inputs, .{ .signatures = none });
+    try std.testing.expectError(
+        error.CheckFailed,
+        check_placed_signatures(unsigned, memory, &sink.writer),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, sink.written(), "has no header signature") != null);
+    tree = .{ .files = unsigned };
+    const refused_again = check(tree.source(), memory, &sink.writer, strict);
+    try std.testing.expectError(error.CheckFailed, refused_again);
+
+    sink.clearRetainingCapacity();
+    var half: release.Signatures = .{};
+    half.header[0] = good.header[0];
+    const partial = try release.build(memory, &test_inputs, .{ .signatures = half });
+    try std.testing.expectError(
+        error.CheckFailed,
+        check_placed_signatures(partial, memory, &sink.writer),
+    );
+    // Round 1 alone, every header signed and no round-2 file yet, is the normal first state.
+    sink.clearRetainingCapacity();
+    var round_one: release.Signatures = .{};
+    round_one.header = good.header;
+    const first = try release.build(memory, &test_inputs, .{ .signatures = round_one });
+    try check_placed_signatures(first, memory, &sink.writer);
+    try std.testing.expectEqual(@as(usize, 0), sink.written().len);
 }

@@ -176,12 +176,12 @@ test "two real processes making one key: one wins, and its halves match" {
     var real: host_real.HostReal = .{};
     const subject = real.interface();
     const fs = subject.filesystem();
-    var root_storage: [64]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_storage, "/tmp/zbx-key-race-{d}", .{linux.getpid()});
-    var base: fs_mod.PathBuf = undefined;
-    try base.set(&.{root});
-    try fs.make_directory(base.text(), true);
-    defer fs.remove_directory(base.text()) catch {};
+    // A directory this test owns (removed with it), not a fixed path under /tmp.
+    var scratch = testing.tmpDir(.{});
+    defer scratch.cleanup();
+    var root_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try scratch.dir.realPath(testing.io, &root_storage);
+    const root = root_storage[0..root_len];
     var paths: store.Paths = undefined;
     try paths.dir.set(&.{ root, "/keys" });
     paths.base_len = @intCast(root.len);
@@ -189,7 +189,6 @@ test "two real processes making one key: one wins, and its halves match" {
     const dir_fd = try fs.open_directory(paths.dir.text());
     try fs.set_mode(dir_fd, 0o700);
     fs.close(dir_fd);
-    defer fs.remove_directory(paths.dir.text()) catch {};
     for (0..rounds) |_| try race_round(subject, &paths);
 }
 

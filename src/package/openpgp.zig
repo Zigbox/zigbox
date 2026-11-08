@@ -263,28 +263,67 @@ const Parsed = struct {
     /// The hashed part, from the version through the hashed subpackets.
     prefix: []const u8,
     hashed_subpackets: []const u8,
+    public_algorithm: u8,
     hash_algorithm: u8,
     /// The first 16 bits of the digest, which the packet records.
     left: [2]u8,
-    r: [32]u8,
-    s: [32]u8,
+    /// The algorithm-specific signature data, checked to be well formed for its algorithm.
+    material: []const u8,
 };
 
-fn read_mpi32(bytes: []const u8, at: *usize) ?[32]u8 {
+/// The OpenPGP public-key algorithm numbers (RFC 4880 9.1, RFC 9580 9.1) a signature may use.
+const algorithm_rsa: u8 = 1;
+const algorithm_rsa_sign_only: u8 = 3;
+const algorithm_dsa: u8 = 17;
+const algorithm_ecdsa: u8 = 19;
+const algorithm_ed25519_native: u8 = 27;
+
+/// One multiprecision integer at `at`: a two-octet bit count, then the value's bytes. Null when
+/// the count is zero or the value runs past `bytes`; on success `at` is past the value.
+fn read_mpi(bytes: []const u8, at: *usize) ?[]const u8 {
     if (at.* + 2 > bytes.len) return null;
     const bits = std.mem.readInt(u16, bytes[at.*..][0..2], .big);
+    if (bits == 0) return null;
     const length = (@as(usize, bits) + 7) / 8;
-    at.* += 2;
-    if (length > 32 or at.* + length > bytes.len) return null;
-    var value: [32]u8 = @splat(0);
-    @memcpy(value[32 - length ..], bytes[at.*..][0..length]);
-    at.* += length;
-    return value;
+    const start = at.* + 2;
+    if (length > bytes.len - start) return null;
+    at.* = start + length;
+    return bytes[start..][0..length];
+}
+
+/// How many MPIs the signature data of `algorithm` holds: RSA one, DSA, ECDSA and legacy EdDSA
+/// two. Null for an algorithm we do not read; Ed25519 (27) is raw bytes, not an MPI.
+fn mpi_count(algorithm: u8) ?usize {
+    return switch (algorithm) {
+        algorithm_rsa, algorithm_rsa_sign_only => 1,
+        algorithm_dsa, algorithm_ecdsa, algorithm_eddsa => 2,
+        else => null,
+    };
+}
+
+/// Whether `material` is exactly the signature data its algorithm defines.
+fn material_valid(algorithm: u8, material: []const u8) bool {
+    if (algorithm == algorithm_ed25519_native) return material.len == 64;
+    const count = mpi_count(algorithm) orelse return false;
+    var at: usize = 0;
+    for (0..count) |_| {
+        _ = read_mpi(material, &at) orelse return false;
+    }
+    return at == material.len;
 }
 
 /// The body of a signature packet in either header format: gpg writes the old one (`0x89`), this
 /// module the new one (`0xc2`).
 fn packet_body(packet: []const u8) ?[]const u8 {
+    const split = packet_split(packet) orelse return null;
+    if (split.total != packet.len) return null;
+    return split.body;
+}
+
+const Split = struct { body: []const u8, total: usize };
+
+/// The first signature packet of `packet`: its body and its whole length with the header.
+fn packet_split(packet: []const u8) ?Split {
     if (packet.len < 2 or packet[0] & 0x80 == 0) return null;
     var at: usize = 1;
     var length: usize = 0;
@@ -309,8 +348,8 @@ fn packet_body(packet: []const u8) ?[]const u8 {
         for (packet[1..][0..width]) |byte| length = (length << 8) | byte;
         at = 1 + width;
     }
-    if (at + length != packet.len) return null;
-    return packet[at..];
+    if (length > packet.len - at) return null;
+    return .{ .body = packet[at..][0..length], .total = at + length };
 }
 
 fn parse(packet: []const u8) ?Parsed {
@@ -324,16 +363,35 @@ fn parse(packet: []const u8) ?Parsed {
     if (cursor + 2 > body.len) return null;
     const left = body[cursor..][0..2].*;
     cursor += 2;
-    const r = read_mpi32(body, &cursor) orelse return null;
-    const s = read_mpi32(body, &cursor) orelse return null;
+    const material = body[cursor..];
+    if (!material_valid(body[2], material)) return null;
     return .{
         .prefix = body[0..prefix_end],
         .hashed_subpackets = body[6..prefix_end],
+        .public_algorithm = body[2],
         .hash_algorithm = body[3],
         .left = left,
-        .r = r,
-        .s = s,
+        .material = material,
     };
+}
+
+/// One subpacket length at the front of `rest` (RFC 4880 5.2.3.1): one octet below 192, two
+/// octets below 255, else five. Null when it runs past `rest`.
+fn subpacket_length(rest: []const u8, at: *usize) ?usize {
+    if (rest.len == 0) return null;
+    const first = rest[0];
+    if (first < 192) {
+        at.* = 1;
+        return first;
+    }
+    if (first < 255) {
+        if (rest.len < 2) return null;
+        at.* = 2;
+        return ((@as(usize, first) - 192) << 8) + rest[1] + 192;
+    }
+    if (rest.len < 5) return null;
+    at.* = 5;
+    return std.mem.readInt(u32, rest[1..5], .big);
 }
 
 /// The issuer fingerprint (subpacket 33) in the hashed part of a signature, when it has one.
@@ -341,12 +399,12 @@ pub fn issuer_fingerprint(packet: []const u8) ?[20]u8 {
     const parsed = parse(packet) orelse return null;
     var rest = parsed.hashed_subpackets;
     while (rest.len > 0) {
-        if (rest[0] >= 192) return null; // Longer subpackets: none that we need.
-        const length: usize = rest[0];
-        if (length == 0 or 1 + length > rest.len) return null;
-        const body = rest[1..][0..length];
+        var header: usize = 0;
+        const length = subpacket_length(rest, &header) orelse return null;
+        if (length == 0 or length > rest.len - header) return null;
+        const body = rest[header..][0..length];
         if (body[0] & 0x7f == 33 and body.len == 22 and body[1] == 4) return body[2..22].*;
-        rest = rest[1 + length ..];
+        rest = rest[header + length ..];
     }
     return null;
 }
@@ -416,6 +474,17 @@ fn canonical_text(memory: Allocator, text: []const u8) Error![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
+/// What a signature file says about the bytes it sits beside.
+pub const Binding = union(enum) {
+    /// Not a signature over those bytes (stale, swapped or damaged).
+    stale,
+    /// More than one signature packet (a rotation signed with two keys): one key is expected.
+    several,
+    /// A signature packet version this module does not read (RFC 9580 v5 and v6).
+    unsupported,
+    bound: Bound,
+};
+
 pub const Form = enum {
     /// `gpg --clearsign`: the text and its signature in one file.
     clearsigned,
@@ -424,24 +493,24 @@ pub const Form = enum {
 };
 
 /// Whether `file` is a signature (in `form`) over exactly `signed`; the answer is the signature's
-/// issuer fingerprint when it names one. `null` means it is not a signature over those bytes.
+/// issuer fingerprint when it names one.
 pub fn bound_to(
     memory: Allocator,
     form: Form,
     file: []const u8,
     signed: []const u8,
-) Error!?Bound {
+) Error!Binding {
     var packet: []u8 = undefined;
     var canonical: []const u8 = signed;
     switch (form) {
-        .armored_detached => packet = (try dearmor(memory, file)) orelse return null,
+        .armored_detached => packet = (try dearmor(memory, file)) orelse return .stale,
         .clearsigned => {
             const header = "-----BEGIN PGP SIGNED MESSAGE-----";
-            if (!std.mem.startsWith(u8, file, header)) return null;
-            const blank = std.mem.indexOf(u8, file, "\n\n") orelse return null;
+            if (!std.mem.startsWith(u8, file, header)) return .stale;
+            const blank = std.mem.indexOf(u8, file, "\n\n") orelse return .stale;
             const end = std.mem.indexOf(u8, file, "\n-----BEGIN PGP SIGNATURE-----") orelse
-                return null;
-            if (end < blank + 2) return null;
+                return .stale;
+            if (end < blank + 2) return .stale;
             var shown = Output.init(memory);
             var lines = std.mem.splitScalar(u8, file[blank + 2 .. end], '\n');
             while (lines.next()) |line| {
@@ -451,24 +520,42 @@ pub fn bound_to(
             }
             const shown_canonical = try canonical_text(memory, shown.written());
             const signed_canonical = try canonical_text(memory, signed);
-            if (!std.mem.eql(u8, shown_canonical, signed_canonical)) return null;
+            if (!std.mem.eql(u8, shown_canonical, signed_canonical)) return .stale;
             canonical = signed_canonical;
-            packet = (try dearmor(memory, file[end..])) orelse return null;
+            packet = (try dearmor(memory, file[end..])) orelse return .stale;
         },
     }
-    if (!digest_matches(packet, &.{canonical})) return null;
-    return .{ .fingerprint = issuer_fingerprint(packet) };
+    const split = packet_split(packet) orelse return .stale;
+    if (split.total < packet.len) return .several;
+    if (split.body.len == 0 or split.body[0] != 4) return .unsupported;
+    const bound = bound_binary(packet, canonical) orelse return .stale;
+    return .{ .bound = bound };
 }
 
 pub const Bound = struct { fingerprint: ?[20]u8 };
+
+/// Whether `packet` (one binary signature packet, an rpm header signature) signs exactly
+/// `data`; the answer is its issuer fingerprint when it names one.
+pub fn bound_binary(packet: []const u8, data: []const u8) ?Bound {
+    if (!digest_matches(packet, &.{data})) return null;
+    return .{ .fingerprint = issuer_fingerprint(packet) };
+}
 
 /// Whether `packet` is a valid signature by `public` over `data` (binary kind) or over the
 /// canonical text (`text` kind); checks with `std.crypto.sign.Ed25519`.
 pub fn verify(packet: []const u8, material: []const []const u8, public: [32]u8) bool {
     const parsed = parse(packet) orelse return false;
+    if (parsed.public_algorithm != algorithm_eddsa) return false;
+    var at: usize = 0;
+    const r = read_mpi(parsed.material, &at) orelse return false;
+    const s = read_mpi(parsed.material, &at) orelse return false;
+    if (r.len > 32 or s.len > 32) return false;
+    var both: [64]u8 = @splat(0);
+    @memcpy(both[32 - r.len .. 32], r);
+    @memcpy(both[64 - s.len ..], s);
     const digest = signature_digest(material, parsed.prefix);
     const key = Ed25519.PublicKey.fromBytes(public) catch return false;
-    const signature = Ed25519.Signature.fromBytes(parsed.r ++ parsed.s);
+    const signature = Ed25519.Signature.fromBytes(both);
     signature.verify(&digest, key) catch return false;
     return true;
 }
@@ -505,4 +592,105 @@ test "armor ends in the CRC-24 of RFC 4880 and wraps at the line width" {
     try std.testing.expectEqual(@as(usize, 8), lines.next().?.len); // 100 bytes: 48 + 48 + 4.
     try std.testing.expect(lines.next().?[0] == '=');
     try std.testing.expectEqualStrings("-----END PGP SIGNATURE-----", lines.next().?);
+}
+
+const fixture_text = @embedFile("testdata/gpg/text.txt");
+const fixture_rsa_fingerprint = [20]u8{
+    0x3c, 0x71, 0x78, 0x72, 0x88, 0xe4, 0x52, 0xc4, 0xc5, 0x21,
+    0x5c, 0x22, 0x58, 0xeb, 0x3a, 0xdc, 0x53, 0x6d, 0x1a, 0xb1,
+};
+const fixture_ed25519_fingerprint = [20]u8{
+    0xa8, 0xc6, 0x24, 0x8d, 0x62, 0xb4, 0x25, 0x75, 0x22, 0x07,
+    0x27, 0x93, 0x6b, 0x6c, 0xee, 0xf8, 0xee, 0x3b, 0xd7, 0x28,
+};
+
+fn expect_bound(binding: Binding, print: [20]u8) !void {
+    try std.testing.expect(binding == .bound);
+    try std.testing.expectEqualSlices(u8, &print, &binding.bound.fingerprint.?);
+}
+
+test "real gpg signatures (RSA 4096 and Ed25519) bind to their text, in every form" {
+    // Goal: checked against real output. The fixtures are `gpg 2.4.4` output for a fixed text,
+    // one RSA 4096 key and one Ed25519 key (SHA-512): binary, armored detached and clearsigned.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const keys = .{
+        .{ "rsa4096", fixture_rsa_fingerprint },
+        .{ "ed25519", fixture_ed25519_fingerprint },
+    };
+    inline for (keys) |key| {
+        const binary = @embedFile("testdata/gpg/" ++ key[0] ++ ".bin.sig");
+        try expect_bound(.{ .bound = bound_binary(binary, fixture_text).? }, key[1]);
+        try std.testing.expect(bound_binary(binary, "other text\n") == null);
+        const armored = @embedFile("testdata/gpg/" ++ key[0] ++ ".asc");
+        try expect_bound(try bound_to(memory, .armored_detached, armored, fixture_text), key[1]);
+        const clear = @embedFile("testdata/gpg/" ++ key[0] ++ ".clear");
+        try expect_bound(try bound_to(memory, .clearsigned, clear, fixture_text), key[1]);
+        const stale = try bound_to(memory, .clearsigned, clear, "other text\n");
+        try std.testing.expect(stale == .stale);
+    }
+    // The RSA 4096 signature is the case the bound was raised for: more than 512, within 1024.
+    const rsa = @embedFile("testdata/gpg/rsa4096.bin.sig");
+    try std.testing.expect(rsa.len > 512 and rsa.len <= constants.openpgp_signature_bytes_max);
+    // A signature over the digest of different text is not bound: swap the two keys' files.
+    const swapped = bound_binary(@embedFile("testdata/gpg/rsa4096.bin.sig"), "swapped\n");
+    try std.testing.expect(swapped == null);
+}
+
+test "a clearsign by two keys and a v5 packet are named, not called stale" {
+    // Goal: two refusals that are not "stale or swapped": a rotation signature, a packet version.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const both = @embedFile("testdata/gpg/both.clear");
+    try std.testing.expect(try bound_to(memory, .clearsigned, both, fixture_text) == .several);
+    const rsa = @embedFile("testdata/gpg/rsa4096.asc");
+    var packet = (try dearmor(memory, rsa)).?;
+    const body_at = packet_split(packet).?.total - packet_split(packet).?.body.len;
+    packet[body_at] = 5;
+    const armored = try armor(memory, "PGP SIGNATURE", packet);
+    const binding = try bound_to(memory, .armored_detached, armored, fixture_text);
+    try std.testing.expect(binding == .unsupported);
+}
+
+test "a subpacket of 192 bytes or more does not hide the issuer fingerprint" {
+    // Goal: two-octet and five-octet subpacket lengths are skipped, not given up on. A long
+    // notation sits before the issuer fingerprint; the real gpg one (notation fixture) is by key
+    // Ed25519, and a hand-built hashed area covers the five-octet form.
+    const notation = @embedFile("testdata/gpg/ed25519-notation.bin.sig");
+    try std.testing.expectEqualSlices(
+        u8,
+        &fixture_ed25519_fingerprint,
+        &issuer_fingerprint(notation).?,
+    );
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const print: [20]u8 = @splat(0x77);
+    const forms = [_][]const u8{ // The long subpacket's length octets: two-octet, five-octet.
+        &.{ 192 + 1, 4 }, // 1 * 256 + 4 + 192 = 452 bytes.
+        &.{ 255, 0, 0, 1, 200 }, // 456 bytes.
+    };
+    for (forms) |length_octets| {
+        var area: std.ArrayList(u8) = .empty;
+        try area.appendSlice(memory, length_octets);
+        const long_length: usize = if (length_octets.len == 2) 452 else 456;
+        try area.appendNTimes(memory, 20, long_length); // Subpacket type 20, then padding.
+        try area.appendSlice(memory, &.{ 22, 33, 4 });
+        try area.appendSlice(memory, &print);
+        var body: std.ArrayList(u8) = .empty;
+        try body.appendSlice(memory, &.{ 4, 0, algorithm_rsa, 10 });
+        const area_length: u16 = @intCast(area.items.len);
+        const area_high: u8 = @intCast(area_length >> 8);
+        try body.appendSlice(memory, &.{ area_high, @intCast(area_length & 0xff) });
+        try body.appendSlice(memory, area.items);
+        try body.appendSlice(memory, &.{ 0, 0, 0x12, 0x34, 0, 8, 0xff }); // One 8-bit MPI.
+        var packet: std.ArrayList(u8) = .empty;
+        const adjusted = body.items.len - 192; // A two-octet packet length.
+        const high: u8 = @intCast(192 + (adjusted >> 8));
+        try packet.appendSlice(memory, &.{ 0xc2, high, @intCast(adjusted & 0xff) });
+        try packet.appendSlice(memory, body.items);
+        try std.testing.expectEqualSlices(u8, &print, &issuer_fingerprint(packet.items).?);
+    }
 }
