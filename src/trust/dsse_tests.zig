@@ -43,7 +43,7 @@ const reference_signature =
 
 /// The envelope `reference_*` make, in our canonical form (the key id is ours: the full public
 /// text).
-const reference_envelope =
+pub const reference_envelope =
     "{\"payloadType\":\"application/vnd.in-toto+json\",\"payload\":\"" ++
     reference_payload_base64 ++ "\",\"signatures\":[{\"keyid\":\"zbx-ed25519:" ++
     reference_public ++ "\",\"sig\":\"" ++ reference_signature ++ "\"}]}";

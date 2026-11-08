@@ -9,11 +9,12 @@
 //! same statement with the same key again makes the same line (Ed25519 is deterministic), and
 //! `add` then changes nothing.
 //!
-//! Parse accepts only what the writer writes (REVIEW.md): every line must parse as an envelope
-//! and re-render to its own bytes, hold a statement of this release's `sign/v1` form about the
-//! very tree the record is keyed by, and no line may occur twice. A record whose statement has
+//! Parse accepts only what the writer writes (REVIEW.md): every line must parse as an envelope,
+//! re-render to its own bytes, verify, and hold a statement of this release's `sign/v1` form
+//! about the very tree the record is keyed by, and no line may occur twice. A record whose statement has
 //! another predicate type is `Newer` (a release that knows more wrote it); any other defect is
-//! `Malformed`. Signatures are not checked here: that is `dsse.verify`'s job, at the gate.
+//! `Malformed`. Each line's signature is checked against the key it names, so damage is never
+//! taken for a newer record; whether that key is trusted is the gate's question, not this one's.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -155,6 +156,9 @@ fn check_line(work: *Work, tree: Digest, text: []const u8) ParseError!void {
     const envelope = dsse.parse(&work.envelope, text) catch return error.Malformed;
     const again = dsse.render(&work.envelope, &work.line, &envelope);
     if (!std.mem.eql(u8, again, text)) return error.Malformed;
+    // A flipped byte of a signature or a payload is damage whatever the predicate says, so
+    // `Newer` is never a guess about a line that does not verify.
+    dsse.verify(&work.envelope, &envelope) catch return error.Malformed;
     const found = statement.parse(envelope.payload) catch |err| switch (err) {
         error.UnknownPredicate => return error.Newer,
         error.Malformed => return error.Malformed,
