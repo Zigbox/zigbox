@@ -1,15 +1,16 @@
-# Brief: M8 · Trust and Linux packages
+# Brief: M8 · Trust, Linux packages and push
 
 Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md` (codes `09xx` are reserved for trust and policy; none is registered yet).
 - The M8 section of `docs/SPEC.md` (the snapshot of live doc rev 91, since PR #55), and C6 in Part II, which reuses M8's checks on every node.
 - `docs/briefs/linux-packages.md` and the decisions `2026-11-04-linux-packages.md`, `-linux-packages-in-m8.md`, `-package-split.md`, `-package-signing-hosting.md` and `-release-0.3.1.md`. They are settled. This brief folds them in and does not reopen them.
-- `docs/decisions/2026-11-04-m8-owner-answers.md`: the owner's answers to this brief's questions (passphrase-encrypted keys, in-toto and DSSE now), and its "Follow-ups" section (our own type URIs under a proper project domain, not yet named, and the trust-record prune built in M8). This brief is written to them.
+- `docs/decisions/2026-11-04-m8-owner-answers.md`: the owner's answers to this brief's questions (passphrase-encrypted keys, in-toto and DSSE now), and its "Follow-ups" section (our own type URIs under a proper project domain, since named `zigbox.org` in `docs/decisions/2026-11-04-project-domain-zigbox-org.md`, and the trust-record prune built in M8). This brief is written to them.
 - For slices 1, 2 and 4: the [DSSE protocol](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md), in-toto's [Statement](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md), [DigestSet](https://github.com/in-toto/attestation/blob/main/spec/v1/digest_set.md), [envelope](https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md) and [bundle](https://github.com/in-toto/attestation/blob/main/spec/v1/bundle.md) pages, and [SLSA provenance v1](https://slsa.dev/spec/v1.0/provenance). Read them from the source; do not write them from memory.
 - `docs/demos/m3.md` (what a tree digest holds), `docs/demos/m7.md` (the build record, the result digest, the cut `build` root and why the image cache entry keeps the tree), `docs/decisions/2026-11-04-z4-image-record-peer.md` (image records to and from a peer), and Z9's `2026-11-04-z9-chunk-read-outside.md` on its branch (reading objects outside the store's namespace).
+- For lane U: the [OCI image spec](https://github.com/opencontainers/image-spec) (manifest, config, layer, image layout) and the [distribution spec](https://github.com/opencontainers/distribution-spec/blob/main/spec.md) (push, mount), Docker's [token auth](https://distribution.github.io/distribution/spec/auth/token/), `src/registry/` and `src/layer/apply.zig`, and the M6c brief (on branch `claude/gracious-heisenberg-thdbyp` until it merges).
 - `src/build/key.zig` and `src/build/cache.zig` (each cache entry keeps the key's preimage "so M8 can write provenance without rebuilding"), `src/build/result.zig`, `src/store/tree.zig`, `src/store/object.zig`, `src/store/verify.zig`, `src/store/walk.zig`, `src/store/images.zig`, `src/store/image_peer.zig`, `src/store/gc.zig`, `src/store/layout.zig`, `src/run_image.zig`, and `run_container` in `src/cli.zig`.
 
-`demo-m0` to `demo-m7`, the top-20 check and the Mac demos must keep passing. M8 has two independent parts: **trust** (keys, signatures, provenance, policy and verify) and **packages** (the `zigbox` deb and rpm and their repositories). They share almost no code and run as two lanes of slices (see Slices).
+`demo-m0` to `demo-m7`, the top-20 check and the Mac demos must keep passing. M8 has three independent parts: **trust** (keys, signatures, provenance, policy and verify), **packages** (the `zigbox` deb and rpm and their repositories) and, since 2026-11-08, **push** (`zbx push` and `zbx store export --oci`; decision `2026-11-08-push-in-m8.md`, issue #60). They share little code and run as three lanes of slices (see Slices).
 
 ## Goal and demo (from the spec, live doc rev 91, plus packages)
 
@@ -68,8 +69,8 @@ Owner, 2026-11-04: in-toto Statement v1 in a DSSE envelope, signed with Ed25519,
   (Shown with whitespace; the payload has none.)
   - **Subjects.** The first subject is always the tree, `{"name":"tree","digest":{"zbxTree":"<64 hex>"}}`. in-toto's DigestSet allows algorithms outside its list, provided their encoding is documented. A tree digest is BLAKE3 over zbx's tree encoding (`docs/demos/m3.md`), not over a file, so the key is `zbxTree` (after the spec's `gitTree`), not `blake3`. `docs/demos/m8.md` documents it: 64 lowercase hex digits, no `b3:` prefix. Plain BLAKE3 over a file's bytes, as provenance uses, takes the key `blake3`.
   - **The binding** is an optional second subject: `{"name":"result","digest":{"zbxResult":"<hex>"}}` for an M7 result, which commits to the tree and its config; or `{"name":"<reference>","digest":{"sha256":"<hex>"}}` for an image manifest, which commits to the OCI config. The second form is the standard `sha256` key that OCI tools match. There are at most `statement_subjects_max` (2) subjects, the tree first, and anything else is refused at parse.
-  - **Predicate.** When the subject has a provenance record, the statement **is** that record (`predicateType` `https://slsa.dev/provenance/v1`; see Provenance). Otherwise `predicateType` is our own sign type, `https://<project domain>/attestation/sign/v1`, and the predicate is `{"signedAt":"<RFC 3339 UTC, seconds>"}`, a claim.
-  - **Our type URIs** (owner: "a proper domain", not `zigbox.github.io`). The sign predicate type and the provenance `buildType` (below) are named constants in `constants.zig`, built from one `type_uri_base` (`"https://<project domain>"`) plus a fixed path (`/attestation/sign/v1`, `/build/v1`). **`<project domain>` is a placeholder: the owner has not named the domain yet, and no slice may ship a signature until they do** (blocker for slice 2). Code, goldens, the demo and the tests read the constant and never spell the URI out, so naming the domain changes one line and the regenerated goldens. Once a signature has been made with a URI it is part of the format: changing it later is a format change.
+  - **Predicate.** When the subject has a provenance record, the statement **is** that record (`predicateType` `https://slsa.dev/provenance/v1`; see Provenance). Otherwise `predicateType` is our own sign type, `https://zigbox.org/attestation/sign/v1`, and the predicate is `{"signedAt":"<RFC 3339 UTC, seconds>"}`, a claim.
+  - **Our type URIs** (owner: "a proper domain", not `zigbox.github.io`). The sign predicate type and the provenance `buildType` (below) are named constants in `constants.zig`, built from one `type_uri_base` (`"https://zigbox.org"`, the project domain: `docs/decisions/2026-11-04-project-domain-zigbox-org.md`) plus a fixed path (`/attestation/sign/v1`, `/build/v1`). Code, goldens, the demo and the tests read the constant and never spell the URI out, so the domain lives in one line. Once a signature has been made with a URI it is part of the format: changing it later is a format change.
 - **The envelope** is DSSE: `{"payloadType":"application/vnd.in-toto+json","payload":"<base64>","signatures":[{"keyid":"zbx-ed25519:<64 hex>","sig":"<base64>"}]}`. It holds one signature; a second key makes a second envelope. `keyid` is DSSE's unauthenticated hint. We set it to the full public text, so anyone holding the envelope can check the signature without a key directory. Trust comes only from policy. Base64 is `std.base64.standard`, with padding, and nothing else is accepted.
 - **The signed bytes** are DSSE's PAE: `"DSSEv1" SP LEN(type) SP type SP LEN(body) SP body`, with `type` the payload type and `body` the payload bytes as stored. Ed25519 (`std.crypto.sign.Ed25519`) signs exactly these. Verification decodes the payload, verifies the signature over PAE of those bytes, and only then parses them. Nothing is re-serialized before the check.
 - **The canonical JSON writer** (`src/trust/json.zig`) is ours, bounded and small. Members come in the order the schema gives, with no whitespace. Strings are UTF-8 checked at write and escape exactly `"`, `\` and bytes below 0x20 (as `\n`, `\t` and `\u00xx` in lowercase hex). There are integers only, no floats, and nesting is at most `json_depth_max`. DSSE needs no canonical form, since it signs bytes. We keep one so the same statement is the same bytes on every host, and so the reader accepts a payload or envelope only when our writer re-renders it byte for byte (REVIEW.md, "Parse accepts only what render can write"). It is not RFC 8785: members are in schema order, not sorted. Reading uses std's JSON scanner under fixed buffers, as `src/registry/` reads manifests. Payloads are at most `statement_bytes_max`, and envelopes at most `envelope_bytes_max` (the base64 of that plus a fixed overhead, computed in `constants.zig` with a `comptime` assert).
@@ -81,7 +82,7 @@ Owner, 2026-11-04: in-toto Statement v1 in a DSSE envelope, signed with Ed25519,
 ### Provenance
 
 - **What and when.** Every successful `zbx build` writes a provenance record for its result, whether the build was all hits or not. Everything in it comes from what the build already holds: each step's cache entry (the key preimage, which includes the base tree and its env, the input tree digest, each needed step's output digest, argv, env and network) and the build record. M7's step logs are not in it.
-- **Form.** The record is an in-toto Statement v1 with `predicateType` `https://slsa.dev/provenance/v1`, written by the canonical JSON writer. Its subjects are the tree and the result (`zbxTree`, then `zbxResult`), so signing it binds the result. Its predicate is SLSA v1 provenance: `buildDefinition` (`buildType` `https://<project domain>/build/v1` (the constant above), `externalParameters`, `internalParameters`, `resolvedDependencies`) and `runDetails` (`builder.id`, `builder.version`, `metadata`, `byproducts`). Digest sets use `zbxTree` for trees, `sha256` for manifests and `blake3` for file bytes. Which field goes where is fixed in `docs/demos/m8.md` with a golden record. The content is:
+- **Form.** The record is an in-toto Statement v1 with `predicateType` `https://slsa.dev/provenance/v1`, written by the canonical JSON writer. Its subjects are the tree and the result (`zbxTree`, then `zbxResult`), so signing it binds the result. Its predicate is SLSA v1 provenance: `buildDefinition` (`buildType` `https://zigbox.org/build/v1` (the constant above), `externalParameters`, `internalParameters`, `resolvedDependencies`) and `runDetails` (`builder.id`, `builder.version`, `metadata`, `byproducts`). Digest sets use `zbxTree` for trees, `sha256` for manifests and `blake3` for file bytes. Which field goes where is fixed in `docs/demos/m8.md` with a golden record. The content is:
   - **subject:** the tree digest and the result digest.
   - **builder:** `zbx` version, release commit and platform, plus the BLAKE3 of the running `zbx` binary (read from `/proc/self/exe`).
   - **build file:** its project-relative path and the BLAKE3 of its bytes.
@@ -192,7 +193,7 @@ An input that is absent, because gc took it, is `W0901` (it cannot be checked of
   - **Bounded and crash-safe.** It reads at most `trust_records_max` entries per directory. Each record is one file removed by one `unlink`, so a crash leaves each record either present or gone, and a second run finishes the job. A damaged record of an absent tree is an orphan like any other and is removed; a damaged record of a present tree is kept and reported (`W0902`, "damaged trust record kept; its tree is in the store").
   - **Refusals** are the store's existing one-line ones (the store lock is busy, the store is missing or of a newer format). Prune adds no `E09xx` code, and one new warning, `W0902`. Output: one line per orphan and a summary line in text, `zbx.trust-prune/1` in JSON (`dry_run`, each orphan, the counts).
   - **Library:** `store.prune_trust(store, memory, apply, out, failure)`, beside the export and import pair, for Zigcube's nodes.
-- **Export and import.** `zbx trust export <digest>` writes the tree's envelopes as an in-toto bundle (JSON Lines, `.intoto.jsonl`) on stdout, the same bytes as the signature record. Signed provenance travels inside its envelope, so nothing else is needed. `zbx trust import <file>` checks the size, parses each line, and verifies every signature over PAE against its `keyid`. It checks that each statement's first subject is a tree, and then merges the lines into that tree's record under the store lock. A bundle with any bad line or signature is refused whole (`E0909`), writing nothing. Signatures by keys this host does not trust are kept, because trust is decided at run time by policy, not at import. Without push (a spec non-goal until after M8), this is how a signature made on a build machine reaches the host that pulls the same image.
+- **Export and import.** `zbx trust export <digest>` writes the tree's envelopes as an in-toto bundle (JSON Lines, `.intoto.jsonl`) on stdout, the same bytes as the signature record. Signed provenance travels inside its envelope, so nothing else is needed. `zbx trust import <file>` checks the size, parses each line, and verifies every signature over PAE against its `keyid`. It checks that each statement's first subject is a tree, and then merges the lines into that tree's record under the store lock. A bundle with any bad line or signature is refused whole (`E0909`), writing nothing. Signatures by keys this host does not trust are kept, because trust is decided at run time by policy, not at import. This is how a signature made on a build machine reaches the host that pulls the same image, whether the image was pushed by `zbx push` (lane U) or by another tool. Signatures are not stored in registries (Non-goals).
 - **For Zigcube.** `store.export_trust(store, memory, tree, out, failure)` and `store.import_trust(store, memory, text, tree, failure)` sit beside Z4's `export_image` and `import_image` in the library, with the same shape: caller memory, a `Refusal`, one coded diagnostic. Z4's functions do not change, so C2 keeps working. C6 calls the new pair when it fetches a tree from a peer, and the node's own policy check runs at exec (spec, "Trust checked twice").
 
 ### Diagnostics (`09xx`, each with cause, fix, goldens and an error page)
@@ -251,11 +252,11 @@ New commands: `key new|list|show`, `sign`, `verify`, `trust export|import|prune`
 - the signature record (an in-toto bundle) and the provenance statement;
 - the tamper check over a store.
 
-Zigcube's C6 admission (server) and node check (agent) call the same verdict function. A test drives the verdict and `import_trust` from a caller other than the CLI, as M7's `build_library_tests.zig` does. `zigbox_package` is a separate module.
+Zigcube's C6 admission (server) and node check (agent) call the same verdict function. A test drives the verdict and `import_trust` from a caller other than the CLI, as M7's `build_library_tests.zig` does. `zigbox_package` is a separate module. `zigbox.push` (lane U) exports `pack`, `export_layout` and `push`; Zigcube's builders call it.
 
 ## Slices (commit and stop for review after each; do not push to the working branch)
 
-Two lanes. **Lane T (trust)** is slices 1 to 5, in order. **Lane P (packages)** is slices 6 and 7, in order. The lanes run in parallel from the start, each in its own worktree with its own `ZIG_GLOBAL_CACHE_DIR` (AGENTS.md, Disk). Slice 8 starts when both lanes have merged. Every slice ends with `zig build check` PASS on the reported commit, and with the fuzzers it touched run as well.
+Three lanes. **Lane T (trust)** is slices 1 to 5, in order. **Lane P (packages)** is slices 6 and 7, in order. **Lane U (push and export)** is slices 10 to 14 (owner, 2026-11-08; "Lane U" below). It starts when slice 2's JSON writer has merged; slice 13 waits for M6c, and slice 14 for slice 3. The lanes run in parallel, each in its own worktree with its own `ZIG_GLOBAL_CACHE_DIR` (AGENTS.md, Disk). Slice 8 starts when lanes T and P and slices 10 to 12 have merged; 13 and 14 join it if merged by then, or are cut. Every slice ends with `zig build check` PASS on the reported commit, and with the fuzzers it touched run as well.
 
 Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers added about a slice and a half to lane T: the passphrase makes keys a slice of their own, and DSSE, the JSON writer and the larger SLSA record make up the rest. The prune (owner follow-up) takes slice 5 from M to L.
 
@@ -270,6 +271,11 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
 | 7 | P | The rpm and Debian guests | M |
 | 8 | both | The demo, CI, the agent test, the Pages asset step | M |
 | 9 | T | The Mac (cuttable, not demonstrated) | S |
+| 10 | U | Pack and `zbx store export --oci` | L |
+| 11 | U | The upload protocol, the test registry, `zbx push` | L |
+| 12 | U | Credentials and write-scoped tokens (Docker Hub, GHCR) | M |
+| 13 | U | ECR push on M6c (cuttable) | S/M |
+| 14 | U | The derived binding (owner: build it, 2026-11-08) | M |
 
 1. **Keys (T).**
    - Slice 1 needs no type URI and can start now.
@@ -278,8 +284,9 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
    - Measure argon2id with the default parameters in the shipped build on this container and in the VM, and record the cost in `docs/demos/m8.md`. If it is over about 1 s, propose lower defaults to the supervisor; do not change them alone.
    - *Mechanical, for Haiku:* the codes' registry boilerplate and error pages once their text is written; the `help`, `zbx schema` (`zbx.key/1`) and `explain` entries; the golden files' copying; `src/trust/` in `ci-changes.sh` (running `m8`).
 2. **Statements and signing (T).**
-   - **Blocked on the owner naming the project domain** for `type_uri_base` (Fixed decisions, "Our type URIs"). The slice may be written against the `<project domain>` placeholder, but it is not reviewed as done, merged or shipped until the constant holds the owner's domain and the goldens are regenerated from it. A golden or test that spells the URI out instead of reading the constant is a review finding.
-   - Work: `src/trust/json.zig` (the canonical writer and the bounded reader); base64 and DSSE PAE; the envelope; the in-toto statement, with its subjects, binding and the `sign/v1` predicate; the signature record as an in-toto bundle (parse, render, atomic write under the store lock, `signatures_per_tree_max`, `signature_record_bytes_max`); and `zbx sign` with the uncached tree check. The check reuses `verify.zig`'s id recomputation, moved into a shared function rather than copied. Codes `E0903` and `E0910`. The `trust` record fuzzer: random and damaged envelopes, payloads and records never crash parse, and are accepted only when they re-render to themselves.
+   - **The project domain is `zigbox.org`** (`docs/decisions/2026-11-04-project-domain-zigbox-org.md`): the slice writes `type_uri_base = "https://zigbox.org"`. A golden or test that spells the URI out instead of reading the constant is a review finding.
+   - **First part, mergeable alone:** `src/trust/json.zig` (the canonical writer and the bounded reader) uses no type URI, so it is reviewed and merged first. Lane U's config and manifest writers depend on it (2026-11-08).
+   - Work: `src/trust/json.zig` (above); base64 and DSSE PAE; the envelope; the in-toto statement, with its subjects, binding and the `sign/v1` predicate; the signature record as an in-toto bundle (parse, render, atomic write under the store lock, `signatures_per_tree_max`, `signature_record_bytes_max`); and `zbx sign` with the uncached tree check. The check reuses `verify.zig`'s id recomputation, moved into a shared function rather than copied. Codes `E0903` and `E0910`. The `trust` record fuzzer: random and damaged envelopes, payloads and records never crash parse, and are accepted only when they re-render to themselves.
    - Tests:
      - PAE matches DSSE's published test vector (`DSSEv1 29 http://example.com/HelloWorld 11 hello world`);
      - an Ed25519 envelope made by us is checked against a reference implementation's output for the same key and payload. Capture it once with the DSSE reference or `in-toto`'s Python library, in this container or in the guest, and say which; REVIEW.md's "checked against real output" applies;
@@ -334,22 +341,155 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
    - The packages demo part runs on all four guests.
    - *Mechanical:* the image entries (URL and checksum copied from the distributions' published checksum files).
 8. **The demo, CI and the agent test.**
-   - `zig build demo-m8` (the trust steps below, exactly) and `zig build demo-m8-packages` (the four guests), with every assertion a unit-tested pure function in `checks_m8.zig`.
+   - `zig build demo-m8` (the trust steps below, exactly, with the PUSH part from lane U) and `zig build demo-m8-packages` (the four guests), with every assertion a unit-tested pure function in `checks_m8.zig`.
    - The upgrade test against the latest tag (0.3.1 if it is cut by then, else 0.3.0). Its store, run records and build cache are read; `zbx run` without a policy behaves as before; with a policy, its images are refused with `E0905`, not a crash; and a build reusing its cache entries writes complete provenance.
    - The agent test (JSON only, passphrase by file); the two CI jobs (the packages job runs only when `ci-changes.sh` selects it); the Pages deploy's copy of the latest release's signed-repository asset; and `docs/demos/m8.md` with the by-hand steps, cuts and failure modes. The failure modes to cover: a lost key or forgotten passphrase, a key file too open, no passphrase without a terminal, a policy that refuses everything, a tampered object and how to recover, a provenance record replaced after signing, a missing input in verify, the disk full during a signature write, orphan records and what pruning them gives up (a pruned signature no longer covers a re-pull), and a package upgrade with a container running.
    - *Mechanical:* the upgrade part copied from `upgrade_m7.zig`, with the tag in `old_release.zon`; the CI jobs copied from `demo-m7`'s; the README and site status lines after green runs.
 9. **The Mac (owner: yes; cuttable, not demonstrated).** For the Mac session: add `key`, `sign`, `verify`, `trust` and `policy` to `linux_commands` in `src/macos_main.zig`, with keys and the user's policy on the shared Mac home under a fixed path (the forwarding protocol drops `XDG_*`). The terminal passphrase read is not forwarded: on the Mac, `--passphrase-file` (a path under the shared home) or a `--no-passphrase` key. `build` and `inspect` are not forwarded yet (M7's slice 5 was cut), so provenance on the Mac waits for that.
 
+### Lane U: push and export (owner, 2026-11-08)
+
+The owner's words: "Unless there's a reason not to put push in 8, in it goes." The reasons, blockers and costs are in `docs/decisions/2026-11-08-push-in-m8.md`. Issue #60 (Botpike) asked for `zbx store export --oci`, so export comes first (slice 10) and push builds on it.
+
+**Fixed decisions (push).**
+- **One image, one layer.** The packer turns a tree and its config into an OCI image manifest (`application/vnd.oci.image.manifest.v1+json`). The image has one gzip layer of the whole tree, an OCI config, and no index. The source is a result digest (its tree and `Config`), a tree with an image record (its tree and `Settings`), or an image reference. The platform is the host's. Labels are written only from a result.
+- **The layer tar** has its own writer, `src/layer/tar_write.zig`, because `std.tar.Writer` writes neither owners nor pax records. It is the inverse of `apply.zig`:
+  - entries in byte order of path, each directory before its contents;
+  - ustar headers, with a pax record only for a long path or link name and for each kept xattr (`SCHILY.xattr.`);
+  - owners from the tree, empty user and group names, mode bits as stored;
+  - mtime `store_mtime_seconds` for every entry;
+  - each further path of a hard-linked object as a link entry to the first;
+  - two zero blocks, and no padding past them.
+
+  Nothing on the host leaks in: no host name, user name, time or umask.
+- **Compression.** std's gzip (`std.compress.flate`), one stream, no intermediate flush, a fixed window and buffer, and the header std writes (no name, mtime 0). Measured here: about 48 MB/s at level 6 and 90 MB/s at level 1. The output does not depend on how the input is chunked. zstd layers are out (Non-goals).
+- **Config and manifest** are written by the canonical JSON writer (slice 2's first part, below), with members in a fixed order. The config holds `architecture`, `os`, `config` (`Entrypoint`, `Cmd`, `Env`, `WorkingDir`, `User`, `Labels`, each only when set), and `rootfs` (`layers`, with one `diff_id`: the sha256 of the uncompressed tar). There is no `created` and no `history`. The manifest carries two annotations: the tree digest and the layer-writer version. Their keys are `org.zigbox.tree` and `org.zigbox.layer-writer`, named constants next to the type URIs.
+- **Digest stability** holds per `layer_writer_version` (a constant, starting at 1). The same tree, config and platform give the same layer, config and manifest bytes on every host, and so repeat pushes are no-ops. Golden digests for a fixed tree guard against unnoticed change. A deliberate change, or a Zig upgrade that changes std's gzip output, bumps the version and is noted in the release. **Round trip:** `zbx pull` of a pushed manifest gives back the same tree digest when both stores are in the same id mode (owners kept, or squashed to 0 by `squash_owner`). `docs/demos/m8.md` states both promises, as issue #60 asked.
+- **The pack record.** `pack/<tree hex>-<writer version>` in the store holds the layer's digest, diff_id and size, so a second push or export of the same tree does not compress again. The layer, config and manifest bytes go into the blob cache (`blobs/sha256`). gc removes a pack record with its tree. The pushed or exported manifest gets an image record (manifest digest, tree and settings), so that `zbx run`, `zbx sign <ref>@sha256:<manifest>` and `trust export` find it on the host that made it.
+- **Export.** `zbx store export --oci <source> DIR` writes an OCI image layout (`oci-layout`, `index.json` naming the one manifest, `blobs/sha256/`). `DIR` must not exist, or must be an empty directory. `--output json` prints `zbx.export/1`: the manifest, config and layer digests and the total size. This is issue #60's form.
+- **The upload protocol** (distribution spec v1.1), per blob, config then layer:
+  1. `HEAD /v2/<name>/blobs/<digest>`: a 200 means the blob exists and is skipped.
+  2. Otherwise `POST /v2/<name>/blobs/uploads/?mount=<digest>&from=<repo>` when another repository on the same registry is known to hold it. A known holder is a tag of this image record on the same registry. A 201 means mounted. A 202 means the registry declined, and the upload goes on in the session it opened.
+  3. Otherwise `POST` opens a session, and the blob goes up in `PATCH` chunks of `push_chunk_bytes`. Each `Location` is followed, relative or absolute, and each `Range` is checked against the bytes sent.
+  4. `PUT <location>?digest=<digest>` closes the session.
+
+  Then `PUT /v2/<name>/manifests/<tag>`. Its returned `Docker-Content-Digest` must equal ours. The manifest goes up only after every blob it names is confirmed. Retries and timeouts reuse pull's bounds. `src/registry/net.zig` gains the methods, request bodies streamed from a file, and the `Location`, `Range` and `Content-Range` headers. It stays one module.
+- **Destinations.** The destination is a reference with a tag (`ghcr.io/o/r:v1`). Pushing by digest only is refused (owner, 2026-11-08). `ZBX_REGISTRY_MIRRORS` is never used for push. Loopback hosts use plain HTTP, as pull does (`reference.zig`).
+- **Credentials.** A push takes at most one credential:
+  - `--username <name>` with `--password-file <path>` (the file `0600` and the user's, as for key passphrases) or `--password-stdin`;
+  - or, for ECR, M6c's credential sources (slice 13).
+
+  There is no environment variable for the password (as for key passphrases) and no `config.json` or credential helper (Non-goals). The secret sits in one fixed buffer of `push_credential_bytes_max` and is zeroed after the push (`std.crypto.secureZero`). It never appears in a diagnostic, a log, JSON output, the store or a file. A registry that answers `Basic` gets it only at its own origin, over TLS or loopback. A registry that answers `Bearer` gets it only at the token realm, which must use https and satisfy the realm rule (below). The token asks for `repository:<name>:pull,push`, and also `repository:<from>:pull` for a mount. The bearer token goes only to the registry's origin, never to an upload `Location` or a redirect on another origin, which gets no `Authorization` header. M6c asked for scope and action in the types: `Scope` is `{ repository, actions: { pull, push } }`, and a pull-only token is never offered for a push.
+- **The realm rule (owner, 2026-11-08).** A realm whose host is the registry's host, or a known pair (`registry-1.docker.io` with `auth.docker.io`), is allowed, and so is loopback in tests. Any other realm host is refused with `E0554` before the password is sent. A registry cannot send a user's password to a third host by naming it in a challenge.
+- **Tags and `zbx.lock`.** A push adds the destination reference as a tag on the pushed image's record, as pull does. It never writes `zbx.lock`, which records what a project *uses*. A consumer's `zbx pull` of the pushed reference locks it as usual (owner, 2026-11-08). The lock format is unchanged.
+- **Signatures reach the pulling host** by `zbx trust export` and `trust import`, as now. No registry storage (Non-goals). Three cases on the pulling host:
+  - A tree-only signature counts for the pulled image in the same id mode.
+  - A manifest-bound signature (`zbx sign <ref>@sha256:<m>` on the builder after the push) counts for runs of that manifest.
+  - A result-bound signature, and so signed provenance, counts only with slice 14.
+- **Library.** `zigbox.push` exports `pack` (store and source to `Packed`: the three digests, diff_id and sizes), `export_layout`, and `push` (store, network, `Packed`, destination, `Credentials`) returning a per-blob report. `Credentials` is a tagged union, `none`, `basic` or `ecr`, of caller-owned slices that the library never copies past the call. Zigcube's builders call it with credentials they hold. A second-caller test drives `pack` and `push` against the test registry, as `build_library_tests.zig` does.
+- **Diagnostics (`05xx`; owner approved the codes, 2026-11-08; each slice registers the codes it first uses).** `E0527`–`E0549` stay free for M6c, and push takes `0550`–`0559`:
+
+  | Code | Refusal |
+  |---|---|
+  | `E0550` | The source cannot be packed: no such digest, or its tree is not whole. |
+  | `E0551` | The destination is not pushable: no tag, digest only, or not a reference. |
+  | `E0552` | The registry wants credentials and none were given. |
+  | `E0553` | The registry or realm refused the credentials, or granted no `push` scope. Names the registry and the scope, never the secret. |
+  | `E0554` | The token realm's host is not allowed by the realm rule. |
+  | `E0555` | The registry refused a blob upload (status, or a digest or range mismatch). |
+  | `E0556` | The registry refused the manifest (its error code; ECR: the repository does not exist). |
+  | `E0557` | The export directory exists and is not empty. |
+  | `E0558` | The password file is unsafe (open to others, or over the bound). |
+  | `W0550` | The destination tag names a manifest with the same tree but another layer-writer version: the digest changed. |
+  | `W0551` | A pulled image's tree differs from its tree annotation: different id modes (slice 14). |
+
+- **Bounds and defaults (owner, 2026-11-08):**
+  - gzip level 6, the std default;
+  - `push_chunk_bytes`: 8 MiB;
+  - `push_credential_bytes_max`: 4 KiB for the username and the password together;
+  - the realm rule as above;
+  - a tag is required;
+  - push never writes `zbx.lock`.
+
+**Slices (lane U).** Lane U runs in its own worktree once slice 2's JSON writer has merged (below). Slices 10, 11 and 12 go in order. Slice 13 waits for M6c to merge. Slice 14 waits for slice 3's verdict function.
+
+10. **Pack and export (U).**
+   - Work: `tar_write.zig`; the gzip stream; the config and manifest writers; the pack record; image records for packed manifests; `zbx store export --oci` with `zbx.export/1`; `zbx push --dry-run` (packs and prints the digests without the network); `layer_writer_version`; and codes `E0550` and `E0557`.
+   - Tests:
+     - golden bytes and digests for a fixed tree covering every entry kind (directory, file, symlink, hard link, a long path, a kept xattr);
+     - two packs give identical bytes, and so do packs through different buffer sizes;
+     - `apply.zig` of the packed layer gives back the same tree digest, in both id modes;
+     - the golden layer's `tar -tvv` listing, and the layout read by a real OCI tool, captured once in the guest or this container. Say which (REVIEW.md, "checked against real output").
+   - Fuzzer: `pack`. A random tree packs and re-applies to the same digest, and the tar writer never writes past its header bounds.
+   - VM check: export in the guest as two users, with identical digests. Push to `vm/m8-export`.
+   - *Mechanical:* `zbx.export/1` in `zbx schema`, the goldens, `src/push/` in `ci-changes.sh`, and the help entry.
+   - Size: L.
+11. **The upload protocol (U).**
+   - Work: `net.zig`'s HEAD, POST, PATCH and PUT, with streamed bodies and the new headers; the upload sequence and mount; the manifest PUT and its digest check; `zbx push` without credentials (loopback, or a registry that allows anonymous push); `zbx.push/1` (per blob: `exists`, `mounted` or `uploaded`, then the manifest digest); and codes `E0551`, `E0555` and `E0556`.
+   - The test registry: `src/testing/vm/push_fixture.zig` accepts uploads into fixed arrays. Faults are named by repository, as `registry_fixture.zig`'s are:
+     - relative and absolute `Location`;
+     - a 202 without `Range`, and a short `Range`;
+     - a refused chunk (416);
+     - a digest mismatch at close;
+     - a declined mount;
+     - `MANIFEST_INVALID`, `MANIFEST_BLOB_UNKNOWN`, and 429;
+     - an upload `Location` on another origin. The simulator's network and `registry_server.zig` both serve it.
+   - Simulation tests:
+     - over random faults, a push either ends with the manifest and every blob it names present, or fails with a code;
+     - the manifest is never PUT before its blobs are confirmed;
+     - a repeat push sends no blob bytes.
+   - Fuzzer: the `registry` fuzzer gains upload answers (`Location`, `Range`, error bodies).
+   - Library test: the second-caller test of `zigbox.push`.
+   - VM check: in the guest, `zbx run -d --publish 5000:5000 registry:2` (pulled through the mirror; a real registry, not ours). Then push the M7 result to `localhost:5000`, push again (all `exists`), and pull as a second user: the tree digest is unchanged. Push to `vm/m8-push`.
+   - *Mechanical:* `zbx.push/1` in `zbx schema`, the goldens, and the error pages once their text is written.
+   - Size: L.
+12. **Credentials and write-scoped tokens (U).**
+   - Work: the credential flags and the password file's rules; the `Basic` challenge; the Bearer exchange with `Basic` at the realm and the push scope; the realm rule; the origin-only rule for tokens; zeroing; and codes `E0552`, `E0553`, `E0554` and `E0558`. Docker Hub (`registry-1.docker.io` via `auth.docker.io`) and GHCR (`ghcr.io/token`) are the targets.
+   - Tests:
+     - the simulated host records every byte written to stdout, stderr, files and logs, and every request with its host and headers. Over random runs with a marker password, the marker appears only in requests to the allowed host;
+     - a realm on another host is refused before any credential is sent;
+     - a token granted `pull` only gives `E0553` naming `push`;
+     - redirects and upload `Location`s on another origin carry no `Authorization`.
+   - Captured answers: Docker Hub's and GHCR's 401 challenges and token responses, recorded once by hand without secrets, as fixtures.
+   - VM check (owner allowed it, 2026-11-08): the `vm.yml` job gets `packages: write` and pushes to `ghcr.io/zigbox/zigbox-demo:<run id>` with `GITHUB_TOKEN` via `--password-stdin`. Push to `vm/m8-push-ghcr`. Docker Hub is checked by hand (no CI account), with the steps in `docs/demos/m8.md`.
+   - Review: for secrets, as slice 1 is.
+   - *Mechanical:* error pages and the help text.
+   - Size: M.
+13. **ECR push (U; after M6c merges; cuttable).**
+   - Work: M6c's credential sources and `GetAuthorizationToken` with `Scope.actions.push`; the ECR token used as `Basic` at the registry origin; and `E0556`'s ECR cause (the repository must exist, since ECR does not create it).
+   - Tests: recorded ECR answers, with no AWS account in CI. A by-hand run against a real repository is recorded in `docs/demos/m8.md`, or the cut is.
+   - *Mechanical:* fixtures copied from M6c's.
+   - Size: S/M.
+14. **The derived binding (U; owner: build it, 2026-11-08).**
+   - Work: pull keeps `Labels`, so the image record goes to version 3 (version 2 still reads). For a run of a pulled manifest, the verdict derives the `zbxResult` from the tree and the recorded settings and labels, as M7 computes it. A result-bound statement, including signed provenance, counts when the derived result matches. Pull checks the tree annotation and warns `W0551` on a mismatch.
+   - Tests:
+     - the derived result of a pushed-then-pulled result equals the original, for random configs;
+     - any changed config field changes it;
+     - a version 2 record reads, and derives no result.
+   - Without this slice, `require_provenance` does not hold for pushed images. The brief says so in `docs/demos/m8.md`.
+   - *Mechanical:* the record version's goldens.
+   - Size: M.
+
+The lane is about four M7 slices: 10 (L), 11 (L), 12 (M), 13 (S/M), 14 (M), plus the PUSH part of slice 8. Slice 12 is reviewed hardest in the lane (credentials), and slice 10 next (the digests are a promise).
+
 Slices 2 and 3 are the riskiest (the statement is the contract; the gate is the promise) and are reviewed hardest. Slice 1 is small but is reviewed for the secret's handling: no secret or passphrase in a diagnostic, a log or a JSON output, and no secret left in a buffer after use (`std.crypto.secureZero`). Slice 6's rpm writer is the riskiest of lane P: rpm's header format is poorly documented, so test against `rpm` itself early.
 
 ## The demo: `zig build demo-m8`
 
-This is the Ubuntu 24.04 guest, the ordinary user, and M7's checked-in project (`src/testing/vm/m7_project/`) copied to `~/hello`. Images come through `mirror.gcr.io` with the blob cache. Parts in order: UPGRADE, SPEC, ACCEPT, AGENT. Assertions on codes, digests and verdicts are exact.
+This is the Ubuntu 24.04 guest, the ordinary user, and M7's checked-in project (`src/testing/vm/m7_project/`) copied to `~/hello`. Images come through `mirror.gcr.io` with the blob cache. Parts in order: UPGRADE, SPEC, PUSH, ACCEPT, AGENT. Assertions on codes, digests and verdicts are exact.
 
 1. **Build and sign.** `zbx key new demo --passphrase-file ~/pass` (a `0600` file the harness writes) prints the key id and its encryption, `passphrase`. `cd ~/hello && zbx build` gives the golden result digest from `m7_expected.zon`. `zbx sign <digest> --passphrase-file ~/pass` exits 0. `zbx inspect --provenance <digest> --output json` matches its schema and is an in-toto statement with `predicateType` `https://slsa.dev/provenance/v1`, names the two bases by their locked manifest digests, the steps `compile` and `notice` with their input and output trees, the build file's hash, the `zbx` version and `signed: true` covering this record. The text form's base, step and builder lines match the golden apart from times.
 2. **Policy.** Write `~/.config/zbx/policy.zon` with `demo`'s public key and `.require_signature = true`. `zbx run <digest>` prints `hello from zigbox`. `zbx pull alpine:3.20 && zbx run alpine:3.20 true` exits 125, and stderr starts `error[ZBX-E0905]:` and names `~/.config/zbx/policy.zon` and `require_signature`. `zbx ps -a` lists no new container, and no run record or scope was created (before and after listings compared).
 3. **Tamper.** The harness finds the object of `/usr/local/bin/hello` through the store's own JSON listing, not by computing the path. It appends one byte as the user (`chmod u+w`, then `printf x >>`). `zbx run <digest>` exits 125 with `error[ZBX-E0907]` naming `/usr/local/bin/hello`, and `zbx store verify` names the same object. The byte is then truncated away: `zbx run` works again (the ctime changed, so it re-hashed).
 4. **Verify, offline.** The guest's network link is taken down (privileged setup in the VM). `zbx verify <digest> --output json` exits 0, and every link from the signature to each base, each step's input and output tree and the build file reports `ok`. The link comes back up.
+
+**PUSH** (lane U). Settled by slice 11:
+- `zbx run -d --publish 5000:5000 registry:2` runs a real registry in the guest, pulled through the mirror.
+- `zbx store export --oci <digest> ~/out --output json` prints the golden manifest digest (a new field in `m7_expected.zon`).
+- `zbx push <digest> localhost:5000/hello:demo` prints the same digest. A second push reports every blob `exists`.
+- `zbx sign localhost:5000/hello:demo@sha256:<m> --passphrase-file ~/pass`, then `trust export` and, as a second user, `trust import`, `zbx pull localhost:5000/hello:demo` (the tree digest is the built tree's) and `zbx run` under `require_signature` prints `hello from zigbox`.
+- With slice 14: `require_provenance` passes there too.
+- The same push to GHCR on CI with `GITHUB_TOKEN` (owner allowed it, 2026-11-08).
 
 ACCEPT also checks:
 - `zbx store rm` of `alpine:3.20`'s root, then `zbx store gc` and a re-pull. A signature made on the pulled `alpine` before the removal still makes `zbx run alpine:3.20 true` pass (survives re-pull).
@@ -376,7 +516,8 @@ ACCEPT also checks:
 ## Non-goals
 
 - Sigstore, keyless signing, OIDC identities and transparency logs (deferred by the spec).
-- Signatures in registries (cosign or OCI referrers), push and OCI export: pull-only until after M8.
+- Signatures in registries (cosign, OCI referrers or the `subject` field). Signatures travel by `trust export` and `trust import`.
+- For push (lane U): multi-platform indexes; zstd layers; keeping a pulled image's original layers; deleting tags or manifests; OCI tar export and OCI import; `docker login`, `config.json` and credential helpers; a password from an environment variable; and pull from private registries with push credentials (decision `2026-11-08-push-in-m8.md`).
 - Hardware keys, ssh-agent and PKCS#11; key rotation, expiry and revocation lists. Revocation is removing a key from the policy file.
 - Thresholds (k-of-n signers) and policy scoped by image name or registry. Allowed source repositories are C6's.
 - The agent-operability rules (deny `--net host`, deny mounting `$HOME`) in the policy file. The schema leaves room for them (spec note).
@@ -401,6 +542,8 @@ Record any cut in `docs/demos/m8.md`.
 
 Not cuttable (owner, 2026-11-04): passphrase encryption of keys, and in-toto statements in DSSE envelopes.
 
+Not cuttable (owner, 2026-11-08): slice 14, the derived binding.
+
 ## Owner decisions
 
 The owner answered this brief's eight questions on 2026-11-04. The answers and what each changed are in `docs/decisions/2026-11-04-m8-owner-answers.md`. In short:
@@ -416,6 +559,9 @@ The owner answered this brief's eight questions on 2026-11-04. The answers and w
 The brief above is written to these answers. It also made the smaller choices they left open, and the owner answered six follow-ups on them the same day (decision file, "Follow-ups"): our `sign/v1` and `build/v1` type URIs go under a proper project domain, not `zigbox.github.io`, and the owner has yet to name it (blocker for slice 2); the `zbxTree` digest key, signed provenance surviving a rebuild, the `keyid` as the full public text and argon2id's defaults (64 MiB, 3 passes, measured in slice 1) are accepted; and the prune is built in M8. The `zbxResult` name and allowing an unencrypted key only with `--no-passphrase` stand as written.
 
 ## Spec notes (flagged, not changed)
+
+- **Push and export are in M8** (owner, 2026-11-08). SPEC.md's snapshot says so (this branch). The live doc should gain the same, since it wins over the snapshot (AGENTS.md).
+- **M6c's brief gives its codes as `04xx`**, which is the store's range. Registry codes are `05xx`, and lane U leaves `E0527`–`E0549` to M6c.
 
 - **Packaging is not in the spec.** The spec (rev 91) does not mention deb, rpm, apt or dnf. The 2026-11-04 decisions put packages in M8 and say the live doc should gain them before this brief. It has not. The supervisor should add the scope, the demo step and the acceptance line above to M8 in the live doc.
 - **"Signatures are over tree digests"** leaves the run config (entrypoint, user, env) unsigned. The brief keeps the tree as the subject and lets a statement bind the result or manifest (Fixed decisions, "Why the binding"). The spec could say "over tree digests, optionally bound to the image's config".
