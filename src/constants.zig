@@ -1497,8 +1497,8 @@ pub const pack_manifest_bytes_max: u32 = 4096;
 /// The bytes the pack's file reads and compressed writes move at a time.
 pub const pack_io_bytes: u32 = 256 * 1024;
 
-/// An export directory is created with this mode.
-pub const export_directory_mode: u16 = 0o755;
+/// The mode of the files an export writes (its directories take the process's umask).
+pub const export_file_mode: u16 = 0o644;
 
 comptime {
     assert(pack_links_max > 0 and std.math.isPowerOfTwo(pack_links_max));

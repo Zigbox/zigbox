@@ -161,6 +161,7 @@ test {
     _ = @import("layer/tar_write.zig");
     _ = @import("push/pack.zig");
     _ = @import("push/pack_tests.zig");
+_ = @import("push/export.zig");
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");

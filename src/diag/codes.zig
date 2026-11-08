@@ -154,6 +154,8 @@ pub const Code = enum(u8) {
     E0524,
     E0525,
     E0526,
+    E0550,
+    E0557,
     W0501,
     W0502,
     W0503,
@@ -2325,6 +2327,36 @@ pub const registry = [_]Entry{
         \\directory or any directory above it. There is none. A lock is made by the
         \\first pull (or the first run of a tag) in the project directory, so pull
         \\an image to make one, from the directory the project lives in.
+        ,
+    },
+    .{
+        .code = .E0550,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the source cannot be packed into an image",
+        .explanation =
+        \\zbx packs a build result, an image or a tree of the store into one image
+        \\layer, and the source named is not one it can pack: there is no such digest
+        \\or reference in the store, or the tree it names is not whole (a directory
+        \\or a file of it is missing from the store or has changed).
+        \\
+        \\The cause says which. Nothing was written to the destination. For a tree
+        \\that is not whole, run `zbx store verify` to see what the store lost, and
+        \\build or import the source again.
+        ,
+    },
+    .{
+        .code = .E0557,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the export directory exists and is not empty",
+        .explanation =
+        \\`zbx store export --oci` writes an OCI image layout, and it never writes
+        \\into a directory that already holds something, so a second export cannot
+        \\mix with an earlier one or with unrelated files. The directory named
+        \\exists and is not empty, or it is not a directory.
+        \\
+        \\Name a directory that does not exist (zbx makes it), or an empty one.
         ,
     },
     .{
