@@ -287,8 +287,10 @@ fn serve_repository(session: *Session, out: *Io.Writer) !void {
     const unpacked = try session.run(unpack, vm.limits.command_timeout_kvm_s);
     try H.show(out, "unpack them", unpacked);
     if (unpacked.status != 0) return error.UnpackFailed;
-    const start = "cd " ++ repo_dir ++ " && setsid nohup python3 -m http.server 8081 " ++
-        "--bind 127.0.0.1 >/tmp/repo-server.log 2>&1 </dev/null & sleep 2; " ++
+    // The whole group is redirected: a background job that still holds the `$( )` pipe keeps
+    // `Session.run` waiting for its end.
+    const start = "(cd " ++ repo_dir ++ " && exec setsid python3 -m http.server 8081 " ++
+        "--bind 127.0.0.1) >/tmp/repo-server.log 2>&1 </dev/null & sleep 2; " ++
         "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/zigbox-test-key.asc";
     const served = try session.run(start, vm.limits.command_timeout_kvm_s);
     try H.show(out, "serve them on 127.0.0.1:8081", served);
