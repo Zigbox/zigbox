@@ -1403,3 +1403,57 @@ comptime {
     assert(build_step_pids <= limit_pids_max);
     assert(build_step_timeout_ms > 0);
 }
+
+// ---- Keys (M8 trust) ----
+
+/// A key's name: `[a-z0-9-]`, at most this many bytes.
+pub const key_name_bytes_max: u32 = 32;
+/// argon2id's defaults for a new key (cost measured in `docs/demos/m8.md`): passes, memory in
+/// KiB, and lanes. One lane, so argon2 runs on one thread.
+pub const key_kdf_t: u32 = 3;
+pub const key_kdf_m_kib: u32 = 65536;
+pub const key_kdf_p: u32 = 1;
+/// What parse accepts from a key file, so that a hostile file cannot make `sign` allocate or
+/// loop without bound: `t` at most 6 and memory at most 128 MiB (see
+/// `docs/decisions/2026-11-08-m8-kdf-maxima-tightened.md`). `p` is fixed at one (a second lane
+/// would need threads, and zbx's namespace-free parent runs argon2 on its own thread).
+pub const key_kdf_t_max: u32 = 6;
+pub const key_kdf_m_kib_max: u32 = 131072;
+pub const key_kdf_p_max: u32 = 1;
+/// Random bytes in the name of a key's temporary file, so that two `key new` of one name never
+/// share a temporary (hex in the name: twice this many characters).
+pub const key_temp_random_bytes: u32 = 8;
+pub const key_seed_bytes: u32 = 32;
+pub const key_public_bytes: u32 = 32;
+pub const key_salt_bytes: u32 = 16;
+pub const key_nonce_bytes: u32 = 24;
+pub const key_tag_bytes: u32 = 16;
+pub const key_sealed_bytes: u32 = key_seed_bytes + key_tag_bytes;
+/// `zbx-ed25519:` and 64 hex digits.
+pub const key_public_text_bytes: u32 = 12 + 2 * key_public_bytes;
+/// A key's id: BLAKE3, 32 bytes, 64 hex digits.
+pub const key_id_text_bytes: u32 = 64;
+/// The key file and the `.pub` file are small records; this bounds what is read of either.
+pub const key_file_bytes_max: u32 = 1024;
+/// The first line of a passphrase file, or what a terminal read gives, without the newline.
+pub const passphrase_bytes_max: u32 = 1024;
+/// A passphrase file is read to this many bytes: the line, its newline, and some room for a
+/// file that goes on (which is read no further).
+pub const passphrase_file_bytes_max: u32 = passphrase_bytes_max + 1;
+/// The most keys `key list` shows.
+pub const keys_listed_max: u32 = 64;
+
+comptime {
+    assert(key_kdf_t >= 1);
+    assert(key_kdf_t <= key_kdf_t_max);
+    assert(key_kdf_m_kib >= 8 * key_kdf_p);
+    assert(key_kdf_m_kib <= key_kdf_m_kib_max);
+    assert(key_kdf_p >= 1);
+    assert(key_kdf_p <= key_kdf_p_max);
+    assert(key_kdf_p_max == 1);
+    assert(key_sealed_bytes == 48);
+    assert(key_public_text_bytes == 76);
+    assert(key_file_bytes_max >= 512); // Room for the longest rendering, checked in key.zig.
+    assert(passphrase_bytes_max >= 64);
+    assert(key_name_bytes_max <= 32);
+}
