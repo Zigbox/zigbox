@@ -293,6 +293,7 @@ test {
     _ = @import("trust/dsse_tests.zig");
     _ = @import("trust/statement.zig");
     _ = @import("trust/statement_tests.zig");
+    _ = @import("trust/record.zig");
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");
 }
