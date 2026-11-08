@@ -405,7 +405,8 @@ test "key new sweeps at most key_sweep_max temporaries per run" {
     var paths: [total][64]u8 = undefined;
     for (&paths, 0..) |*buffer, index| {
         @memset(buffer, 0);
-        const path = std.fmt.bufPrint(buffer, directory ++ "/.dead.key.{x:0>16}.tmp", .{index}) catch
+        const pattern = directory ++ "/.dead.key.{x:0>16}.tmp";
+        const path = std.fmt.bufPrint(buffer, pattern, .{index}) catch
             return error.TestUnexpectedResult;
         files.put_file(path, 0o600, "seed");
         files.set_mtime_of(path, 100);
