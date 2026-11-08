@@ -1,0 +1,5 @@
+error[ZBX-E0910]: signing was refused
+  cause  part of the tree is missing from the store
+  fix    pull or build it again, then sign it
+  more   zbx explain E0910 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0910.html

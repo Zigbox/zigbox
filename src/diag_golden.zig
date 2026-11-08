@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
+const trust_diagnose = @import("trust/diagnose.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -706,8 +707,25 @@ const key_new_args = [_][:0]const u8{ "key", "new", "ci" };
 const key_cases = [_]Case{
     .{ .code = .E0901, .args = &key_show_args, .prepare = prepare_keys_none, .exit = 1 },
     .{ .code = .E0902, .args = &key_new_args, .prepare = prepare_keys_one, .exit = 1 },
+    .{ .code = .E0903, .args = &.{}, .direct = record_damaged, .exit = 1 },
+    .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
 };
+
+/// E0903 and E0910 come from `zbx sign`, whose records and trees take a signed store to set up:
+/// the golden is the diagnostic as `trust/diagnose.zig` builds it, and the sign tests run the
+/// command into each.
+fn record_damaged(diag: *Diag) void {
+    trust_diagnose.record_unusable(
+        diag,
+        "/home/alice/.local/share/zbx/trust/signatures/0123456789abcdef",
+        .damaged,
+    );
+}
+
+fn sign_refused_missing(diag: *Diag) void {
+    trust_diagnose.sign_refused(diag, "0123456789abcdef", .object_missing, 0);
+}
 
 const exec_plan = @import("runtime/exec_plan.zig");
 

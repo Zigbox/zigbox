@@ -40,6 +40,7 @@ const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const key_fuzz = @import("fuzz_key.zig");
 const openpgp_fuzz = @import("fuzz_openpgp.zig");
 const json_fuzz = @import("fuzz_json.zig");
+const trust_fuzz = @import("fuzz_trust.zig");
 const codes = @import("diag/codes.zig");
 const render = @import("diag/render.zig");
 const test_util = @import("test_util.zig");
@@ -87,6 +88,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "key", .run_iteration = key_fuzz.fuzz_key },
     .{ .name = "openpgp", .run_iteration = openpgp_fuzz.fuzz_openpgp },
     .{ .name = "json", .run_iteration = json_fuzz.fuzz_json },
+    .{ .name = "trust", .run_iteration = trust_fuzz.fuzz_trust },
     .{ .name = "build_cache", .run_iteration = build_cache_fuzz.fuzz_build_cache },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },

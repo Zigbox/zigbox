@@ -15,6 +15,7 @@ commands:
   store <cmd>     the content-addressed store: import, ls, du, rm, diff, verify, gc, restore
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   key <cmd>       signing keys: new, list, show (see below)
+  sign <what>     sign a build result, a tree or an image with a key (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -134,6 +135,15 @@ key:
   names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys
   (~/.config/zbx/keys), mode 0700; a key is never overwritten; a forgotten passphrase is a
   lost key; list and show never ask for a passphrase and never print a secret
+
+sign:
+  zbx sign <what> [--key <name>] [--passphrase-file <file>]
+  <what>          a build result or a tree (b3:<64 hex>), or an image
+                  (name@sha256:<manifest digest>); a result or an image is named in
+                  the signature, so it counts only for a run of that one
+  --key <name>    the key to sign with; optional when there is exactly one
+  the whole tree must be in the store and intact; the signature is added to the tree's
+  record, at most 8 per tree; signing again with the same key changes nothing
 
 pull:
   zbx pull [--resolve-only] <reference>

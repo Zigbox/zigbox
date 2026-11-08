@@ -268,6 +268,19 @@ fn check_depth(random: std.Random) void {
     assert(tokens <= writer.length);
 }
 
+/// The reader refuses nesting one past `json_depth_max` (raw text, not the writer's).
+fn check_reader_depth() void {
+    const levels = constants.json_depth_max + 1;
+    const opening: [levels]u8 = @splat('[');
+    var reader = json.Reader.init(&opening);
+    var opened: u32 = 0;
+    while (reader.next(&scratch)) |token| {
+        assert(token == .array_begin);
+        opened += 1;
+    } else |err| assert(err == error.TooDeep);
+    assert(opened == constants.json_depth_max);
+}
+
 /// A buffer shorter than the value refuses with Overflow and writes nothing past itself.
 fn check_overflow(random: std.Random, text: []const u8) void {
     if (text.len < 2) return;
@@ -313,6 +326,7 @@ pub fn fuzz_json(seed: u64) void {
         _ = check_canonical(random_bytes(random), size);
     }
     check_depth(random);
+    check_reader_depth();
 }
 
 test "the fuzzer's round trip holds on a fixed seed" {
