@@ -570,8 +570,8 @@ test "build_image: a hit writes the same record but for its times, and a cache w
 test "build_image: a store full of provenance records skips the new one, and keeps replacing" {
     // Goal: the bound `trust_records_max` on provenance records, at the bound and one past it.
     // Method: build (one record), lower the bound to three and fill the directory to it: a
-    // rebuild still replaces its record and says nothing. Delete the record and add one more other record:
-    // the store is full, the rebuild succeeds, writes no record and prints the bound.
+    // rebuild still replaces its record and says nothing. Delete the record and add one more
+    // other record: the store is full, the rebuild succeeds, writes no record and prints the bound.
     image_started("/etc");
     try context.build_image();
     const first = sim.stdout();
