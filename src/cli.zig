@@ -2951,6 +2951,7 @@ fn run_container(
 
 /// The binding as the run record keeps it (the runtime does not know the trust module).
 fn binding_of(binding: trust_statement.Binding) runtime_spec.Binding {
+    assert(@intFromEnum(binding) <= 2);
     return switch (binding) {
         .none => .none,
         .result => |bytes| .{ .result = bytes },

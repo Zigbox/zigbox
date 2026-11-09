@@ -13,6 +13,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Diag = @import("../diag/diag.zig").Diag;
 const host_mod = @import("../host.zig");
+const constants = @import("../constants.zig");
 const records = @import("../runtime/records.zig");
 const statement = @import("statement.zig");
 const digest_mod = @import("../store/digest.zig");
@@ -28,6 +29,8 @@ pub const Error = error{Refused};
 pub fn subject_of(parsed: *const records.Parsed) gate.Subject {
     const text = parsed.tree_slice();
     const tree = digest_mod.Digest.parse(text);
+    if (tree != null) assert(text.len > 0);
+    assert(parsed.version <= constants.record_version);
     return .{
         .tree = tree,
         .binding = binding_of(parsed.binding),
@@ -38,6 +41,7 @@ pub fn subject_of(parsed: *const records.Parsed) gate.Subject {
 /// A record with no binding says nothing, which no statement of a result or an image matches.
 fn binding_of(found: ?records.Binding) statement.Binding {
     const binding = found orelse return .none;
+    assert(@intFromEnum(binding) <= 2);
     return switch (binding) {
         .none => .none,
         .result => |bytes| .{ .result = bytes },

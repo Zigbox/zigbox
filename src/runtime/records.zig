@@ -254,6 +254,8 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
 }
 
 fn write_binding(writer: *std.Io.Writer, binding: Binding) void {
+    assert(writer.end <= writer.buffer.len);
+    assert(writer.buffer.len > 0);
     switch (binding) {
         .none => write_bytes(writer, "    .binding = \"none\",\n"),
         .result => |bytes| write_format(writer, "    .binding = \"result:{s}\",\n", .{
@@ -927,6 +929,7 @@ fn parse_binding(value: []const u8, out: *Parsed) bool {
     var text: [80]u8 = undefined;
     const length = parse_string(value, &text) orelse return false;
     const word = text[0..length];
+    assert(word.len <= text.len);
     if (std.mem.eql(u8, word, "none")) {
         out.binding = .none;
         return true;
