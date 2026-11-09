@@ -30,6 +30,7 @@ const lock = @import("../store/lock.zig");
 const store_diagnose = @import("../store/diagnose.zig");
 const digest_mod = @import("../store/digest.zig");
 const load_mod = @import("load.zig");
+const provenance_job = @import("provenance_job.zig");
 const file_mod = @import("file.zig");
 const key_mod = @import("key.zig");
 const cache = @import("cache.zig");
@@ -92,6 +93,10 @@ pub const Workspace = struct {
     record_bytes: [constants.build_result_bytes_max]u8,
     adds: [constants.build_image_adds_max]assemble.Add,
     image_adds: [constants.build_image_adds_max]key_mod.ImageAdd,
+    /// By step index: the input tree each step was keyed with, and its key, for the provenance.
+    step_inputs: [constants.build_steps_max]Digest,
+    step_keys: [constants.build_steps_max]Digest,
+    provenance: provenance_job.Workspace,
 };
 
 /// The timings slot of the image step.
@@ -162,6 +167,7 @@ pub fn run_steps(
         .hits = 0,
         .misses = 0,
         .gate_loaded = false,
+        .records_max = constants.trust_records_max,
     };
     for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
@@ -298,6 +304,8 @@ pub const Context = struct {
     misses: u32,
     /// The policy files have been read (once per build).
     gate_loaded: bool,
+    /// `trust_records_max`; a test lowers it.
+    records_max: u32,
 
     pub fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
@@ -365,6 +373,7 @@ pub const Context = struct {
         spec.network = step.network;
         try context.resolve_base(file.text(step.base), &spec);
         spec.input_tree = try context.import_inputs(index);
+        ws.step_inputs[index] = spec.input_tree;
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
         key_mod.compute(&spec, &ws.key) catch {
@@ -744,6 +753,11 @@ pub const Context = struct {
         var warning: Diag = undefined;
         warning.reset();
         diagnose.network_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);
+        context.write_warning(&warning);
+    }
+
+    /// `warning` on stderr in the build's output mode; a stderr that cannot be written loses it.
+    fn write_warning(context: *Context, warning: *const Diag) void {
         const mode: render.Mode = if (context.json)
             .json
         else if (context.verbose)
@@ -752,7 +766,7 @@ pub const Context = struct {
             .text;
         const color = mode != .json and context.host.color_enabled(.stderr);
         var buffer: [constants.output_bytes_max]u8 = undefined;
-        const text = render.render(&warning, mode, color, &buffer);
+        const text = render.render(warning, mode, color, &buffer);
         context.host.write_all(.stderr, text) catch return;
     }
 
@@ -862,8 +876,40 @@ pub const Context = struct {
             store_diagnose.write_failed(context.diag, store, saved.step, err, saved.errno);
             return error.Failed;
         };
+        try context.write_provenance(tree, digest);
         try context.report(image_slot, hit, tree);
         try context.footer(digest);
+    }
+
+    /// The provenance record of the result just saved (the store lock is held).
+    fn write_provenance(context: *Context, tree: Digest, result: Digest) Error!void {
+        const ws = context.ws;
+        const count = context.loaded.file.steps_count;
+        for (ws.timings[0..count], 0..) |timing, index| ws.step_keys[index] = timing.key;
+        const asked: provenance_job.Request = .{
+            .host = context.host,
+            .store = context.store,
+            .loaded = context.loaded,
+            .locking = &ws.locking,
+            .keys = ws.step_keys[0..count],
+            .inputs = ws.step_inputs[0..count],
+            .outputs = ws.outputs[0..count],
+            .image_key = ws.key.digest,
+            .tree = tree,
+            .result = result,
+            .started = context.started_s,
+            .records_max = context.records_max,
+        };
+        const outcome = provenance_job.write(&asked, &ws.provenance, context.diag) catch {
+            return error.Failed;
+        };
+        if (outcome == .written) return;
+        // The result is built and usable; only its provenance record is missing, so a run under
+        // `require_provenance` will be refused until room is made.
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.provenance_store_full(&warning);
+        context.write_warning(&warning);
     }
 
     /// The adds as the assembly and the key take them: each source is its step's output.

@@ -147,7 +147,7 @@ test "parse refuses every statement render does not write" {
         testing.allocator,
         golden_tree,
         constants.sign_predicate_type,
-        "https://slsa.dev/provenance/v1",
+        "https://example.org/other/v1",
     );
     defer testing.allocator.free(other_type);
     try testing.expectError(error.UnknownPredicate, statement.parse(other_type));

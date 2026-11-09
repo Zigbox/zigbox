@@ -11,8 +11,8 @@
 //! Only `.version` is required. Fields come in any order, each at most once; a string has no
 //! escapes. M7's lexer finds the tokens, and this parser reads the schema from them and refuses
 //! the first defect with its line and column. A file holds at most `policy_keys_max` keys and
-//! `policy_bytes_max` bytes. `.require_provenance = true` is refused until the provenance
-//! predicate exists (slice 4): a rule that cannot be met must not be taken for one that is.
+//! `policy_bytes_max` bytes. `.require_provenance = true` asks for a signed SLSA provenance
+//! statement for the tree being run (verdict.zig).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -82,7 +82,6 @@ pub const Kind = enum {
     key_twice,
     too_many_keys,
     bad_verify,
-    provenance_not_yet,
     too_large,
 };
 
@@ -237,12 +236,7 @@ fn read_member(parser: *Parser, out: *Policy, seen: *Seen, field: Field) error{R
         .keys => try read_keys(parser, out),
         .require_signature => out.require_signature = try parser.boolean(),
         .require_provenance => {
-            const at = parser.token;
             out.require_provenance = try parser.boolean();
-            if (out.require_provenance) {
-                parser.token = at;
-                return parser.fail(.provenance_not_yet, "");
-            }
         },
         .verify => try read_verify(parser, out),
     }

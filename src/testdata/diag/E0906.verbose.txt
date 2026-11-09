@@ -1,0 +1,12 @@
+error[ZBX-E0906]: no trusted signed provenance covers what was to run
+  while  checking
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+         against the policy /home/alice/.config/zbx/policy.zon
+  cause  /home/alice/.config/zbx/policy.zon requires signed provenance, but no
+         listed key signed the provenance of
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  policy /home/alice/.config/zbx/policy.zon
+  fix    sign the result with a key the policy lists:   zbx sign 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  more   zbx explain E0906
+  docs   https://zigbox.github.io/zigbox/errors/E0906.html

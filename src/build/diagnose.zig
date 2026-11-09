@@ -940,6 +940,21 @@ fn signal_name(number: u8) []const u8 {
     return name;
 }
 
+/// `W0901`: the provenance store holds `trust_records_max` records, so the result just built has
+/// none. The build succeeded; a policy with `require_provenance` refuses this result.
+pub fn provenance_store_full(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.W0901);
+    diag.while_("recording the provenance of the result", .{});
+    diag.cause(
+        "the store holds {d} provenance records, the most it keeps (trust_records_max), so " ++
+            "this result has none and require_provenance refuses it",
+        .{constants.trust_records_max},
+    );
+    diag.fix(.{ .sentence = "remove records of results you no longer need, then build again" });
+    assert(diag.code.? == .W0901);
+}
+
 /// The start of W0801's last cause; the names follow it, so they have the field less this.
 pub const network_label = "steps that use the network: ";
 
@@ -1011,6 +1026,20 @@ pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind:
     diag.context("path", "/out{s}", .{path});
     diag.fix(.{ .sentence = "have the step remove it, or make it somewhere other than /out" });
     assert(diag.code.? == .E0806);
+}
+
+/// ZBX-E0005: `inspect --provenance` of a build result that has no provenance record: it was
+/// built before provenance was written, or the store lost the record.
+pub fn provenance_absent(diag: *Diag, operand: []const u8) void {
+    assert(diag.code == null);
+    var storage: Echo = undefined;
+    const echo = text_util.sanitise(&storage, operand);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("the store has no provenance record for build result '{s}'", .{echo});
+    diag.fix(.{ .sentence = "build the project again to write one:", .command = "zbx build" });
+    diag.context("cmd", "inspect --provenance", .{});
+    diag.context("arg", "{s}", .{echo});
 }
 
 /// ZBX-E0005: the operand of `inspect` is no build result: not a full digest, or no record of

@@ -685,7 +685,7 @@ pub const state_export_time_max: u64 = 0o77777777777;
 // file written, and open files.
 pub const sim_fs_nodes_max: u32 = 640;
 pub const sim_fs_path_bytes_max: u32 = 192;
-pub const sim_fs_pool_bytes_max: u32 = 2 * 1024 * 1024;
+pub const sim_fs_pool_bytes_max: u32 = 3 * 1024 * 1024;
 pub const sim_fs_handles_max: u32 = 8;
 
 // Registry and pull (M4, docs/briefs/M4-pull.md). Every byte a registry sends is bounded: it is
@@ -859,6 +859,11 @@ pub const build_result_label_bytes_max: u32 = build_pool_bytes;
 /// escaped to six, and the fixed text around them.
 pub const inspect_output_bytes_max: u32 =
     (image_settings_bytes_max + build_result_label_bytes_max) * 6 + 4096;
+/// The room `zbx inspect --provenance` renders a record in, as text or as `zbx.provenance/1`:
+/// each says again what the payload says, once, with names written as the payload writes them,
+/// and adds a label to each member, so twice the payload's bound holds either
+/// (`provenance_view.zig` checks the worst record against it).
+pub const inspect_provenance_bytes_max: u32 = 2 * statement_bytes_max;
 /// Directories two trees of an assembly may have in common at one level (`build/assemble.zig`);
 /// past this a merge is refused rather than grow without bound.
 pub const build_merge_common_max: u32 = 256;
@@ -1522,8 +1527,11 @@ pub const json_depth_max: u32 = 16;
 
 /// Most subjects in a statement: the tree, and optionally the binding (a result or a manifest).
 pub const statement_subjects_max: u32 = 2;
-/// Most bytes of a statement's payload.
-pub const statement_bytes_max: u32 = 128 * 1024;
+/// Most bytes of a statement's payload: the longest provenance record (`provenance_bytes_max`,
+/// from `provenance_steps_max` steps) rounded up to 64 KiB. Slice 2 had 128 KiB, a number made
+/// before provenance existed (docs/decisions/2026-11-09-m8-statement-bytes-from-provenance.md).
+pub const statement_bytes_max: u32 =
+    (provenance_bytes_max + 64 * 1024 - 1) / (64 * 1024) * (64 * 1024);
 /// Most envelopes (lines) in one tree's signature record. A ninth distinct one is `E0910`.
 pub const signatures_per_tree_max: u32 = 8;
 /// Most signature records (and, from slice 4, provenance records) in the store.
@@ -1541,6 +1549,27 @@ pub const trust_verified_file_bytes_max: u32 =
 pub const type_uri_base = "https://zigbox.org";
 pub const sign_predicate_path = "/attestation/sign/v1";
 pub const sign_predicate_type = type_uri_base ++ sign_predicate_path;
+/// The provenance predicate is SLSA's, so its type is not ours; its `buildType` is.
+pub const provenance_predicate_type = "https://slsa.dev/provenance/v1";
+pub const provenance_build_type = type_uri_base ++ "/build/v1";
+pub const provenance_builder_id = type_uri_base ++ "/zbx";
+/// Most steps a provenance record lists: every step of a build file.
+pub const provenance_steps_max: u32 = build_steps_max;
+/// Most distinct bases a record lists: one per step and the image's.
+pub const provenance_bases_max: u32 = provenance_steps_max + 1;
+/// The release a record names as its builder (`build_options.version`), at most this long.
+pub const provenance_version_bytes_max: u32 = 64;
+/// One step's JSON at its longest: fixed text and a key, a base index and four digests (about
+/// 160 bytes), plus its name and its needs' names at six bytes a byte (`\u00xx`), and each
+/// need's digest and separators.
+pub const provenance_step_bytes_max: u32 = 160 + 3 * 64 +
+    6 * build_step_name_bytes_max * (1 + build_step_needs_max) + build_step_needs_max * 72;
+/// One base's JSON: its reference (a lock reference has nothing to escape) and two digests.
+pub const provenance_base_bytes_max: u32 = 300 + reference_bytes_max;
+/// The longest provenance record: its steps, its bases, the build file's path at six bytes a
+/// byte, and the fixed text and image record around them.
+pub const provenance_bytes_max: u32 = 2048 + provenance_steps_max * provenance_step_bytes_max +
+    provenance_bases_max * provenance_base_bytes_max + 6 * path_bytes_max;
 /// A sign statement's `signedAt` is RFC 3339 UTC to the second: `2026-11-08T10:00:00Z`.
 pub const signed_at_text_bytes: u32 = 20;
 /// The latest `signedAt` the form can write: 9999-12-31T23:59:59Z.
@@ -1566,6 +1595,11 @@ comptime {
     assert(json_depth_max <= 64); // The reader's frame stack lives on the stack.
     assert(statement_subjects_max == 2); // The tree, then at most one binding.
     assert(statement_bytes_max <= 1024 * 1024);
+    assert(statement_bytes_max >= provenance_bytes_max); // Rounded up, never down.
+    assert(statement_bytes_max < provenance_bytes_max + 64 * 1024);
+    assert(provenance_steps_max == build_steps_max);
+    assert(provenance_bases_max >= provenance_steps_max + 1);
+    assert(provenance_bases_max <= lock_entries_max);
     assert(signatures_per_tree_max >= 1);
     assert(trust_records_max >= signatures_per_tree_max);
     assert(payload_base64_bytes_max >= statement_bytes_max);

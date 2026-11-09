@@ -11,7 +11,8 @@
 //! second is optional: a result (`zbxResult`) or an image manifest (`<reference>` with a
 //! `sha256` digest). At most `statement_subjects_max` subjects. The only predicate this slice
 //! knows is our sign predicate; a statement of another predicate type is refused as unknown
-//! (the provenance predicate arrives with slice 4, and the type URI comes from `constants`).
+//! (the provenance predicate, `provenance.zig`, is read here by its subjects alone; the type
+//! URIs come from `constants`).
 //!
 //! The reader checks the grammar only, so this layer compares each member name with the one the
 //! writer writes next, refuses any other, and requires `.end` after the root. Parse accepts only
@@ -48,7 +49,17 @@ pub const Binding = union(enum) {
     manifest: Digest,
 };
 
+/// Which predicate a statement carries.
+pub const Kind = enum {
+    /// Our `sign/v1`: a person vouches for the subjects.
+    sign,
+    /// SLSA provenance (`provenance.zig`). `parse` reads only its subjects; the predicate is
+    /// `provenance.parse`'s to check.
+    provenance,
+};
+
 pub const Statement = struct {
+    kind: Kind = .sign,
     tree: Digest,
     binding: Binding,
     /// A manifest binding's subject name (the image reference); empty for the other bindings.
@@ -81,6 +92,7 @@ pub const Statement = struct {
     /// a manifest the same subject name. `signed_at` is not compared, so signing again later
     /// says the same thing (docs/decisions/2026-11-08-sign-idempotence.md).
     pub fn same_subjects(self: *const Statement, other: *const Statement) bool {
+        if (self.kind != other.kind) return false;
         if (!std.mem.eql(u8, &self.tree, &other.tree)) return false;
         const same_binding = switch (self.binding) {
             .none => other.binding == .none,
@@ -185,6 +197,12 @@ pub fn parse(payload: []const u8) ParseError!Statement {
     var statement = try parse_subjects(&reader, &scratch);
     try expect_key(&reader, &scratch, "predicateType");
     const kind = try read_string(&reader, &scratch);
+    if (std.mem.eql(u8, kind, constants.provenance_predicate_type)) {
+        // A provenance statement is always about a tree and the result built into it.
+        if (statement.binding != .result) return error.Malformed;
+        statement.kind = .provenance;
+        return statement;
+    }
     if (!std.mem.eql(u8, kind, constants.sign_predicate_type)) return error.UnknownPredicate;
     try expect_key(&reader, &scratch, "predicate");
     try dsse_expect(&reader, &scratch, .object_begin);
@@ -264,7 +282,7 @@ fn parse_binding(reader: *json.Reader, scratch: []u8, out: *Statement) ParseErro
     try dsse_expect(reader, scratch, .object_end);
 }
 
-fn read_digest(reader: *json.Reader, scratch: []u8) ParseError!Digest {
+pub fn read_digest(reader: *json.Reader, scratch: []u8) ParseError!Digest {
     const text = try read_string(reader, scratch);
     if (text.len != 64) return error.Malformed;
     var digest: Digest = undefined;

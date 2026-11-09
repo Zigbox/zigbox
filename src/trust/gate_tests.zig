@@ -18,6 +18,10 @@ const gate = @import("gate.zig");
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
 const record = @import("record.zig");
+const provenance = @import("provenance.zig");
+const provenance_store = @import("provenance_store.zig");
+const fs_mod = @import("../store/fs.zig");
+const result_mod = @import("../build/result.zig");
 const sign_commands = @import("sign_commands.zig");
 
 const home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = "/home/alice" }};
@@ -154,6 +158,30 @@ test "a directory has no tree to sign, so a signature rule refuses it" {
     try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(subject));
 }
 
+test "require_provenance: a directory is E0905 no-tree; an underived image has its cause" {
+    // Goal: E0906 never prints an empty digest or blames a signed provenance that does not
+    // exist. Method: gate a directory (no tree) under a policy with only require_provenance:
+    // E0905, whose cause names the rule and the directory. Gate a manifest binding and a bare
+    // tree: E0906, the image's cause (its record keeps no labels) and the tree's (not a result).
+    try start();
+    try write_requiring_provenance("ci");
+    const directory: gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(directory));
+    const cause = last_diag.last_cause().?;
+    const asks = "signed provenance (require_provenance)";
+    try testing.expect(std.mem.indexOf(u8, cause, asks) != null);
+    try testing.expect(std.mem.indexOf(u8, cause, "a directory has no tree to sign") != null);
+    const pulled: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .manifest = @splat(7) },
+        .text = "docker.io/library/alpine@sha256:abc",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(pulled));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "labels") != null);
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(tree_subject()));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "not a build result") != null);
+}
+
 test "a damaged record is E0903, not an unsigned tree" {
     // Goal: damage is never taken for absence. Method: sign, then flip a byte of the record.
     try start();
@@ -250,4 +278,165 @@ test "a system policy that cannot be used refuses, whatever the user's file says
     try testing.expect(std.mem.indexOf(u8, refusal_text(&out), "mode 0666") != null);
     write_system(".{ .version = 1 }", 0o664, 0);
     try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+}
+
+fn write_requiring_provenance(name: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    const public = try public_text_of(name);
+    const text = try std.fmt.bufPrint(
+        &buffer,
+        ".{{ .version = 1, .keys = .{{ .{{ .name = \"{s}\", .public = \"{s}\" }} }}, " ++
+            ".require_provenance = true }}",
+        .{ name, public },
+    );
+    write_policy(text);
+}
+
+var result_buffer: [constants.build_result_bytes_max]u8 = undefined;
+var provenance_record: provenance.Record = undefined;
+var provenance_bytes: [constants.statement_bytes_max]u8 = undefined;
+
+fn save_provenance(result: Digest) !void {
+    const filled: provenance.Digest = @splat(0x5a);
+    const made = &provenance_record;
+    made.clear();
+    made.tree = tree.bytes;
+    made.result = result.bytes;
+    made.set_build_file("zbx.build.zon");
+    made.build_file_digest = filled;
+    made.lock = filled;
+    const base = made.add_base("alpine:3.20", filled, filled);
+    const step = made.add_step("compile");
+    step.base = base;
+    step.key = filled;
+    step.input = filled;
+    step.output = filled;
+    made.image_key = filled;
+    made.image_base = base;
+    made.set_version("0.4.0", "linux/amd64");
+    made.zbx = filled;
+    var failure: fs_mod.Failure = undefined;
+    const bytes = provenance.render(&provenance_bytes, made);
+    try provenance_store.save(&store, result, bytes, &failure);
+}
+
+test "require_provenance: no record, an unsigned record, a stranger's signature and the right one" {
+    // Goal: E0906's causes and its satisfaction. Method: a result of the tree, run as the
+    // subject. Nothing stored: refused (missing). A record stored but unsigned: refused. A
+    // record signed by a key the policy does not list: refused. Signed by the listed key: runs.
+    // A signature of the tree alone (not provenance) never satisfies the rule.
+    try start();
+    try write_requiring_provenance("ci");
+    var saved: result_mod.Record = undefined;
+    saved.config.clear();
+    saved.tree = tree;
+    var failure: result_mod.Failure = undefined;
+    const result = try result_mod.save(&store, &saved, &result_buffer, &failure);
+    const text = result.text();
+    var zeroed: [constants.store_digest_text_bytes:0]u8 = undefined;
+    @memcpy(zeroed[0..text.len], &text);
+    zeroed[text.len] = 0;
+    const subject: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .result = result.bytes },
+        .text = &text,
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try sign_as("ci"); // The tree alone: a signature, but not provenance.
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try save_provenance(result);
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "other" }));
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "ci" }));
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(subject));
+    // The same signature does not cover another result of the tree.
+    const other: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .result = @splat(9) },
+        .text = "b3:other",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(other));
+}
+
+/// A result of the sample tree whose provenance record is stored, and the subject of a run of
+/// an image whose record derives that result (a pulled or pushed one).
+fn derived_subject() !gate.Subject {
+    var saved: result_mod.Record = undefined;
+    saved.config.clear();
+    saved.tree = tree;
+    var failure: result_mod.Failure = undefined;
+    const built = try result_mod.save(&store, &saved, &result_buffer, &failure);
+    try save_provenance(built);
+    return .{
+        .tree = tree,
+        .binding = .{ .manifest = @splat(7) },
+        .derived = built.bytes,
+        .text = "docker.io/library/app@sha256:abc",
+    };
+}
+
+fn text_of_derived(subject: gate.Subject) [constants.store_digest_text_bytes:0]u8 {
+    var out: [constants.store_digest_text_bytes:0]u8 = undefined;
+    const text = (Digest{ .bytes = subject.derived.? }).text();
+    @memcpy(out[0..text.len], &text);
+    out[text.len] = 0;
+    return out;
+}
+
+test "require_provenance: an image that derives a result is judged as that result" {
+    // Goal: E0906's cause for a pulled or pushed image is the result's own (slice 14). Method:
+    // an image subject deriving a result with a stored record: unsigned, then signed by a key the
+    // policy does not list, then signed by the listed one (runs). A subject deriving another
+    // result than the signed one: the signed provenance is not of it.
+    try start();
+    try write_requiring_provenance("ci");
+    const subject = try derived_subject();
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    const cause = last_diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, "no listed key signed") != null);
+    const zeroed = text_of_derived(subject);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "other" }));
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "ci" }));
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(subject));
+    var other = subject;
+    other.derived = @splat(9);
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(other));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "is not of") != null);
+}
+
+test "require_provenance: an image deriving a result with no record has none stored" {
+    // Goal: the `missing` cause holds for a derived result as for a built one. Method: derive a
+    // result nothing recorded.
+    try start();
+    try write_requiring_provenance("ci");
+    const subject: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .manifest = @splat(7) },
+        .derived = @splat(9),
+        .text = "docker.io/library/app@sha256:abc",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "has none stored") != null);
+}
+
+test "require_provenance: an image whose record cannot derive says so; a build base does not" {
+    // Goal: only a manifest-bound run that could derive, and cannot, is `not_derived`; a build
+    // step's base never derives (slice 14's cut) and stays "not a build result", as a bare tree.
+    try start();
+    try write_requiring_provenance("ci");
+    const image: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .manifest = @splat(7) },
+        .text = "docker.io/library/app@sha256:abc",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(image));
+    const cause = last_diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, "does not keep its labels") != null);
+    try testing.expect(std.mem.indexOf(u8, cause, "not a build result") == null);
+    var base = image;
+    base.step = "compile";
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(base));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "not a build result") != null);
 }

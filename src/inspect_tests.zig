@@ -50,13 +50,13 @@ test "inspect prints the tree and the config, as text and as one JSON line" {
     // Goal: both forms. Method: save a record, inspect it, parse the JSON.
     const digest = try saved();
     const text = digest.text();
-    try run(sim.interface(), &ws, &text, false, &diag);
+    try run(sim.interface(), &ws, &text, false, false, &diag);
     const out = sim.stdout();
     try testing.expect(std.mem.indexOf(u8, out, &record.tree.text()) != null);
     try testing.expect(std.mem.indexOf(u8, out, "entrypoint /usr/bin/hello\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "va?lue") != null); // Control bytes are cut.
     _ = try saved();
-    try run(sim.interface(), &ws, &text, true, &diag);
+    try run(sim.interface(), &ws, &text, false, true, &diag);
     const line = sim.stdout();
     try testing.expect(try test_util.json_is_valid(line));
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
@@ -75,11 +75,11 @@ test "inspect prints the tree and the config, as text and as one JSON line" {
 test "inspect refuses what is no digest and what is not in the store" {
     // Goal: E0005 for both. Method: a name, then a well-formed digest with no record.
     _ = try saved();
-    try testing.expectError(error.Failed, run(sim.interface(), &ws, "alpine", false, &diag));
+    try testing.expectError(error.Failed, run(sim.interface(), &ws, "alpine", false, false, &diag));
     try testing.expectEqual(.E0005, diag.code.?);
     diag.reset();
     const absent = Digest.of("nothing").text();
-    try testing.expectError(error.Failed, run(sim.interface(), &ws, &absent, false, &diag));
+    try testing.expectError(error.Failed, run(sim.interface(), &ws, &absent, false, false, &diag));
     try testing.expectEqual(.E0005, diag.code.?);
     try testing.expect(std.mem.indexOf(u8, diag.last_cause().?, "no build result") != null);
 }

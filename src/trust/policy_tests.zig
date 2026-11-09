@@ -66,11 +66,15 @@ test "every defect is refused with its line and column" {
     try expect_problem(".{ .version = 1,\n .verify = \"never\" }", .bad_verify, 2, 12);
     try expect_problem(".{ .version = 1,\n .verify = \"a\\n\" }", .bad_string, 2, 12);
     try expect_problem(".{ .version = 1, .require_signature = 1 }", .syntax, 1, 39);
-    try expect_problem(".{ .version = 1, .require_provenance = true }", .provenance_not_yet, 1, 40);
     try testing.expectEqual(
         @as(?policy.Problem, null),
         policy.parse(".{ .version = 1, .require_provenance = false }", &parsed),
     );
+    try testing.expectEqual(
+        @as(?policy.Problem, null),
+        policy.parse(".{ .version = 1, .require_provenance = true }", &parsed),
+    );
+    try testing.expect(parsed.require_provenance);
 }
 
 test "a key's name and public key are checked, and a key may be listed once" {

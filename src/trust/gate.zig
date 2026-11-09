@@ -24,6 +24,7 @@ const open = @import("../store/open.zig");
 const store_diagnose = @import("../store/diagnose.zig");
 const diagnose = @import("diagnose.zig");
 const policy_mod = @import("policy.zig");
+const provenance_store = @import("provenance_store.zig");
 const record_mod = @import("record.zig");
 const statement = @import("statement.zig");
 const verdict = @import("verdict.zig");
@@ -198,7 +199,18 @@ pub fn judge_all(
         };
         const met = subject.tree != null and
             verdict.judge(&work.envelope, &loaded.policy, record, have, &report);
-        if (met) continue;
+        if (met and verdict.provenance_met(&loaded.policy, &report)) continue;
+        // `met` implies a tree. A directory has no tree to sign, so whatever the policy asks,
+        // it falls through to E0905's no-tree form; E0906 is for a subject that has a tree.
+        if (met) {
+            diagnose.provenance_missing(diag, &.{
+                .digest = subject.text,
+                .policy_path = loaded.path.text(),
+                .cause = provenance_cause(host, subject, &report),
+                .step = subject.step,
+            });
+            return error.Refused;
+        }
         diagnose.unsigned(diag, &.{
             .digest = subject.text,
             .policy_path = loaded.path.text(),
@@ -209,6 +221,37 @@ pub fn judge_all(
         });
         return error.Refused;
     }
+}
+
+/// Which of E0906's causes `report` and the store show for `subject`, which has a tree: a result,
+/// or the result a manifest's image record derives, is judged as a result.
+fn provenance_cause(
+    host: Host,
+    subject: Subject,
+    report: *const verdict.Report,
+) diagnose.ProvenanceCause {
+    assert(subject.tree != null);
+    const result = switch (subject.binding) {
+        .result => |digest| digest,
+        // A pulled or pushed image is judged by the result its record derives (slice 14); a
+        // record that cannot derive one is its own cause. A build step's base never derives
+        // (slice 14's cut), and a bare tree has no result: neither is a build result.
+        .manifest => if (subject.derived) |derived|
+            derived
+        else if (subject.step.len == 0)
+            return .not_derived
+        else
+            return .not_a_result,
+        .none => return .not_a_result,
+    };
+    if (report.provenance_with(.other_binding)) return .other_binding;
+    // A line whose signature fails never reaches `Report.provenance`, so only a key the policy
+    // does not list can make a verifying provenance line count for nothing.
+    if (report.provenance_with(.untrusted_key)) return .unsigned;
+    var store: Store = undefined;
+    if (!store.locate(host)) return .missing;
+    if (layout.read_format(&store) != .ok) return .missing;
+    return if (provenance_store.exists(&store, .{ .bytes = result })) .unsigned else .missing;
 }
 
 /// The record of `tree` into `record`, empty when there is none (or no store yet).

@@ -1,0 +1,8 @@
+warning[ZBX-W0901]: the provenance store is full, so this result has no provenance record
+  while  recording the provenance of the result
+  cause  the store holds 4096 provenance records, the most it keeps
+         (trust_records_max), so this result has none and require_provenance
+         refuses it
+  fix    remove records of results you no longer need, then build again
+  more   zbx explain W0901
+  docs   https://zigbox.github.io/zigbox/errors/W0901.html

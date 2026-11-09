@@ -255,7 +255,9 @@ const help_text =
     \\  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
     \\  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
-    \\  prints its tree and config (--output json: see zbx schema inspect)
+    \\  prints its tree and config (--output json: see zbx schema inspect); zbx inspect
+    \\  --provenance <result digest> prints the build's provenance record (--output json: see
+    \\  zbx schema inspect-provenance)
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
@@ -509,6 +511,8 @@ pub const Invocation = struct {
     run: RunArgs,
     /// Set only when `command` is `bundle`.
     bundle: BundleArgs,
+    /// `inspect --provenance`: the provenance record of the result, not the result.
+    provenance: bool,
     /// Set only when `command` is `store`.
     store: StoreArgs,
     /// Set only when `command` is `pull`.
@@ -606,6 +610,8 @@ const Token = union(enum) {
     /// `--key`, with its value next or after an `=`: `sign`'s.
     key_next,
     key_inline: []const u8,
+    /// `--provenance`: `inspect`'s.
+    provenance,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -690,6 +696,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.startsWith(u8, argument, "--key=")) {
         return .{ .key_inline = argument["--key=".len..] };
     }
+    if (std.mem.eql(u8, argument, "--provenance")) return .provenance;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -792,7 +799,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .password_refused => {},
             .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
             .dry_run => {},
-            .no_passphrase, .passphrase_file_inline, .key_inline => {},
+            .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
             .operand => {
@@ -842,6 +849,7 @@ pub fn parse(
     var sign_args: SignArgs = .{ .operand = "" };
     var gc_args: GcArgs = .{};
     var export_file: ?[]const u8 = null;
+    invocation.provenance = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -861,6 +869,7 @@ pub fn parse(
             },
             .detach, .read_only => try take_run_flag(diag, &run_args, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
+            .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
             .graph, .file_next => try take_build_option(diag, &build_args, given, args, &index),
@@ -905,6 +914,20 @@ fn take_run_flag(
     if (!is_run) return unknown_option(diag, argument);
     run_args.detach = run_args.detach or classify(argument) == .detach;
     run_args.read_only = run_args.read_only or classify(argument) == .read_only;
+}
+
+/// `--provenance`, which only `inspect` takes.
+fn take_provenance(
+    diag: *Diag,
+    flag: *bool,
+    operands: []const []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(operands.len <= constants.args_count_max);
+    assert(classify(argument) == .provenance);
+    const is_inspect = operands.len > 0 and command_named(operands[0]) == .inspect;
+    if (!is_inspect) return unknown_option(diag, argument);
+    flag.* = true;
 }
 
 /// `--last` and `--no-redact`, which only `bundle` takes.
@@ -2714,6 +2737,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             host,
             &storage.inspect,
             invocation.operand.?,
+            invocation.provenance,
             invocation.options.output == .json,
             diag,
         ) catch |err| return inspect_error(err),
@@ -4255,6 +4279,10 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "lock-show", .text = @embedFile("testdata/schema_lock_show.stdout.txt") },
         .{ .topic = "build", .text = @embedFile("testdata/schema_build.stdout.txt") },
         .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
+        .{
+            .topic = "inspect-provenance",
+            .text = @embedFile("testdata/schema_inspect-provenance.stdout.txt"),
+        },
         .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
         .{ .topic = "sign", .text = @embedFile("testdata/schema_sign.stdout.txt") },
         .{ .topic = "policy", .text = @embedFile("testdata/schema_policy.stdout.txt") },

@@ -42,6 +42,7 @@ const dsse = @import("dsse.zig");
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
 const passphrase_mod = @import("passphrase.zig");
+const provenance_store = @import("provenance_store.zig");
 const record_mod = @import("record.zig");
 const statement = @import("statement.zig");
 
@@ -74,6 +75,7 @@ pub const Workspace = struct {
     stack: [constants.image_import_stack_max]Digest,
     record: record_mod.Record,
     record_work: record_mod.Work,
+    provenance_work: provenance_store.Work,
     dsse: dsse.Work,
     envelope: [constants.envelope_bytes_max]u8,
     payload: [statement.render_bytes_max]u8,
@@ -431,18 +433,58 @@ fn sign_under_lock(job: *Job, subject: *const Subject, secret: *const Secret) Er
     const ws = job.ws;
     const known = try load_record(job, subject.tree);
     const public = secret.record.public;
-    if (record_mod.signed_already(&ws.record_work, &ws.record, public, &subject.statement)) {
+    // A result with a provenance record signs that record, byte for byte; any other subject,
+    // and a result built before provenance existed, signs the `sign/v1` statement.
+    const stored = try load_provenance(job, subject);
+    // A rebuild of an unchanged project rewrites the record with new times, so the same key's
+    // earlier provenance line for this tree and result counts as signed: it still vouches for
+    // the result, and signing every build must not fill the tree's lines (sign-idempotence).
+    var said = subject.statement;
+    if (stored != null) said.kind = .provenance;
+    if (record_mod.signed_already(&ws.record_work, &ws.record, public, &said)) {
         return put_result(job, subject, secret, .present);
     }
     if (known == .absent) try check_room(job);
-    const payload = statement.render(&ws.payload, &subject.statement);
+    const payload = stored orelse statement.render(&ws.payload, &subject.statement);
     const envelope = dsse.sign(&ws.dsse, &ws.envelope, secret.seed, payload) catch {
         diagnose.unusable(job.diag, secret.name_slice(), "", .{ .problem = .malformed });
         return error.Failed;
     };
+    // The same record signed again by the same key is the same line (Ed25519 is deterministic),
+    // which `add` knows as present; a later build's record is another payload, another line.
     const added = ws.record.add(envelope) catch return refused(job, .tree_full, 0);
     if (added == .added) try save_record(job, subject.tree);
     try put_result(job, subject, secret, added);
+}
+
+/// The stored provenance record of the result `subject` binds, or null when it binds no result
+/// or none was written. A record that does not read, or is about another tree, is E0903.
+fn load_provenance(job: *Job, subject: *const Subject) Error!?[]const u8 {
+    const wanted = switch (subject.statement.binding) {
+        .result => |digest| Digest{ .bytes = digest },
+        else => return null,
+    };
+    const work = &job.ws.provenance_work;
+    var errno: u16 = 0;
+    const bytes = provenance_store.load(&job.store, work, wanted, &errno) catch |err| {
+        if (err == error.NotFound) return null;
+        var path: PathBuf = undefined;
+        const text = provenance_store.record_path(&job.store, &path, wanted);
+        if (err == error.Damaged) {
+            diagnose.record_unusable(job.diag, text, .damaged);
+        } else {
+            const what = "reading the provenance record";
+            store_diagnose.cannot_read(job.diag, &job.store, what, error.IoFailed, errno);
+        }
+        return error.Failed;
+    };
+    if (!std.mem.eql(u8, &work.parsed.tree, &subject.tree.bytes)) {
+        var path: PathBuf = undefined;
+        const text = provenance_store.record_path(&job.store, &path, wanted);
+        diagnose.record_unusable(job.diag, text, .damaged);
+        return error.Failed;
+    }
+    return bytes;
 }
 
 const Known = enum { absent, present };
