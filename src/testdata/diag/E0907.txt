@@ -1,5 +1,5 @@
 error[ZBX-E0907]: a file of the image in the store was changed
   cause  /usr/bin/tool (object 0123456789ab) has bytes that are not the image's
-  fix    remove the damaged tree and pull or build it again; this shows what is damaged:   zbx store verify
+  fix    remove the damaged tree and pull or build it again; this shows the damage:   zbx store verify
   more   zbx explain E0907 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0907.html

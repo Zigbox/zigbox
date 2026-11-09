@@ -82,6 +82,9 @@ pub const Counts = struct {
     /// Pack records (`pack/`) whose tree is not kept; deleted with the tree, not trashed (a
     /// record is a cache the next pack rewrites), and not in the hash.
     packs: u64 = 0,
+    /// Tamper-check records (`trust/verified/`) whose tree is not kept: deleted with the tree, not
+    /// trashed (a cache the next checked run rewrites), and not in the hash.
+    verified: u64 = 0,
     /// Bytes of the objects, lists and trees.
     bytes: u64 = 0,
 
@@ -952,6 +955,28 @@ fn clean_packs(run: *Run, counts: *Counts, remove_them: bool) Error!void {
     }
 }
 
+/// Counts the tamper-check records (`trust/verified/<tree hex>`) whose tree gc does not keep.
+/// With `remove_them`, deletes them: like a pack record, one is a cache and goes with its tree.
+fn clean_verified(run: *Run, counts: *Counts, remove_them: bool) Error!void {
+    assert(run.names.len > 0);
+    assert(counts.verified == 0);
+    const directory = "trust/verified";
+    const found = shards.read(run.store, run.names, run.offsets, directory, null) catch |err| {
+        return run.io("listing the tamper-check records", err);
+    };
+    var index: u32 = 0;
+    while (index < found.count()) : (index += 1) {
+        const name = found.name(index);
+        const tree_id = Digest.from_hex(name) orelse continue;
+        if (run.trees.get(tree_id) != null) continue;
+        counts.verified += 1;
+        if (!remove_them) continue;
+        var storage: PathBuf = undefined;
+        const path = run.store.path(&storage, &.{ "/", directory, "/", name });
+        run.store.fs.unlink(path) catch |err| return run.io("removing a tamper-check record", err);
+    }
+}
+
 fn remove_leftover(run: *Run, name: []const u8) Error!void {
     assert(name.len > 0);
     assert(std.mem.indexOfScalar(u8, name, '/') == null);
@@ -1015,6 +1040,8 @@ pub fn plan(
     result.counts.tmp = leftovers.tmp;
     try clean_packs(&run, &leftovers, false);
     result.counts.packs = leftovers.packs;
+    try clean_verified(&run, &leftovers, false);
+    result.counts.verified = leftovers.verified;
 }
 
 /// What an apply did.
@@ -1085,6 +1112,8 @@ pub fn apply(
     result.counts.tmp = leftovers.tmp;
     try clean_packs(&run, &leftovers, true);
     result.counts.packs = leftovers.packs;
+    try clean_verified(&run, &leftovers, true);
+    result.counts.verified = leftovers.verified;
 }
 
 fn move_all(run: *Run, result: *Applied, time: u64) Error!void {

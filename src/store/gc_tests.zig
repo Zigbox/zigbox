@@ -544,6 +544,34 @@ test "a pack record goes with its tree, and one of a kept tree stays" {
     try testing.expectEqual(@as(u64, 0), again.counts.packs);
 }
 
+test "a tamper-check record goes with its tree, and one of a kept tree stays" {
+    // Goal: the brief's rule: gc removes `trust/verified/<tree>` with its tree; the record is a
+    // cache, so it is deleted, not trashed, and it is not part of the plan's hash.
+    const trees_ = try prepare_gc();
+    var one: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    var two: [constants.sim_fs_path_bytes_max]u8 = undefined;
+    const format = root_path ++ "/trust/verified/{s}";
+    const kept_hex = trees_[0].hex();
+    const dead_hex = trees_[1].hex();
+    const kept = std.fmt.bufPrint(&one, format, .{kept_hex}) catch unreachable; // Short.
+    const dead = std.fmt.bufPrint(&two, format, .{dead_hex}) catch unreachable; // Short.
+    files.put_dir(root_path ++ "/trust", 0o755);
+    files.put_dir(root_path ++ "/trust/verified", 0o755);
+    files.put_file(kept, 0o644, "record");
+    files.put_file(dead, 0o644, "record");
+    files.put_file(root_path ++ "/trust/verified/stray", 0o644, "left alone");
+    const planned = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 1), planned.counts.verified);
+    try testing.expect(files.kind_of(dead) != null); // A plan removes nothing.
+    const applied = try do_apply(planned.hash);
+    try testing.expectEqual(@as(u64, 1), applied.counts.verified);
+    try testing.expect(files.kind_of(dead) == null);
+    try testing.expect(files.kind_of(kept) != null);
+    try testing.expect(files.kind_of(root_path ++ "/trust/verified/stray") != null);
+    const again = try make_plan(&.{});
+    try testing.expectEqual(@as(u64, 0), again.counts.verified);
+}
+
 test "restore refuses a conflict, a missing trash and a trash with things gone" {
     _ = try prepare_gc();
     const planned = try make_plan(&.{});
