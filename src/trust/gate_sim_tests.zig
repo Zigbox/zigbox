@@ -24,7 +24,10 @@ fn case_of(choice: u32) Case {
         3 => .{ .text = "not a policy", .refuses = true },
         4 => .{ .text = ".{ .version = 1, .extra = true }", .refuses = true },
         5 => .{ .text = ".{ .version = 2 }", .refuses = true },
-        6 => .{ .text = ".{ .version = 1, .keys = .{}, .require_signature = true }", .refuses = true },
+        6 => .{
+            .text = ".{ .version = 1, .keys = .{}, .require_signature = true }",
+            .refuses = true,
+        },
         else => .{ .text = "", .refuses = true },
     };
 }

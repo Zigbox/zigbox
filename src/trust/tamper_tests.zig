@@ -43,7 +43,11 @@ fn start() !void {
 
 fn check_tree(always: bool) !void {
     last_diag.reset();
-    const lent: tamper.Lent = .{ .scratch = &scratch, .tree_buffer = &tree_buffer, .stack = &stack };
+    const lent: tamper.Lent = .{
+        .scratch = &scratch,
+        .tree_buffer = &tree_buffer,
+        .stack = &stack,
+    };
     try tamper.check(&store, &workspace, lent, tree, always, &last_diag);
 }
 
@@ -65,7 +69,7 @@ fn record_path() []const u8 {
     const hex = tree.hex();
     const path = std.fmt.bufPrint(&buffer, "{s}/{s}/{s}", .{
         support.user_store, tamper.directory_name, &hex,
-    }) catch unreachable;
+    }) catch unreachable; // 256 bytes hold the store path and a 64-digit hex.
     return keep(path);
 }
 

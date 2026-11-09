@@ -3078,6 +3078,7 @@ fn tamper_call(
     const storage: *Storage = @ptrCast(@alignCast(context));
     assert(storage.tamper_on);
     assert(tree.bytes.len == constants.store_digest_bytes);
+    assert(storage.gate.count > 0);
     const sign = &storage.sign;
     const lent: trust_tamper.Lent = .{
         .scratch = &sign.verify.scratch,

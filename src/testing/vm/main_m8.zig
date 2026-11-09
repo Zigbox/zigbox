@@ -63,16 +63,18 @@ const body =
 const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
 
 const sign_body =
-    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=/home/demo/d XDG_CONFIG_HOME=/home/demo/c
+    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=$HOME/d XDG_CONFIG_HOME=$HOME/c
     \\Z=/usr/local/bin/zbx
     \\f() { echo "FAIL: $*"; exit 1; }
-    \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME
+    \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME $XDG_CONFIG_HOME/zbx
     \\echo 'correct horse' > ~/pw; chmod 600 ~/pw
     \\$Z key new demo --passphrase-file ~/pw || f key
     \\T=$($Z --output json pull alpine:3.20 | sed -n 's/.*"tree":"\(b3:[0-9a-f]*\)".*/\1/p')
     \\P=$($Z --output json key show demo | sed -n 's/.*"public":"\([^"]*\)".*/\1/p')
     \\[ -n "$T" ] && [ -n "$P" ] || f "tree or key"
-    \\echo ".{ .version = 1, .keys = .{ .{ .name = \"demo\", .public = \"$P\" } }, .require_signature = true }" > $XDG_CONFIG_HOME/zbx/policy.zon
+    \\Q=$XDG_CONFIG_HOME/zbx/policy.zon
+    \\echo ".{ .version = 1, .keys = .{ .{ .name = \"demo\", .public = \"$P\" } }," > $Q
+    \\echo ".require_signature = true }" >> $Q
     \\$Z run $T -- true 2> /tmp/e1; [ $? = 125 ] || f "unsigned ran"
     \\grep -m1 'E0905' /tmp/e1 || f "no E0905"
     \\$Z sign $T --passphrase-file ~/pw || f sign
