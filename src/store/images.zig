@@ -129,6 +129,8 @@ pub const Labels = struct {
             .value_len = @intCast(text.len),
         };
         labels.total += 1;
+        assert(labels.used <= labels.bytes.len);
+        assert(labels.total <= labels.places.len);
     }
 };
 
