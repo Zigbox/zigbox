@@ -3040,9 +3040,14 @@ pub const registry = [_]Entry{
         \\at most 16 keys, none listed twice, and the file is at most 16 KiB.
         \\.require_provenance is not supported by this zbx yet and is refused.
         \\
+        \\The system file, /etc/zbx/policy.zon, must be owned by root and not
+        \\writable by group or others: a file anyone else could rewrite is no rule,
+        \\so it is refused too. As root, "chown root:root /etc/zbx/policy.zon" and
+        \\"chmod 644 /etc/zbx/policy.zon" put it right.
+        \\
         \\The cause gives the line and column and what was expected there. Correct
-        \\the file, or remove it. "zbx policy check" reads the policy files and
-        \\runs nothing.
+        \\the file, or remove it (the system file: ask the administrator). "zbx
+        \\policy check" reads the policy files and runs nothing.
         ,
     },
     .{

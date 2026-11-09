@@ -436,6 +436,8 @@ pub fn bad_name(diag: *Diag, name: []const u8) void {
 pub const PolicyFault = union(enum) {
     /// The file could not be read; the errno says why (0 when not known).
     unreadable: u16,
+    /// The system file is not root's, or others can write it.
+    not_root: struct { uid: u32, mode: u16 },
     /// The file was read and its text is not a policy.
     problem: policy_mod.Problem,
 };
@@ -460,7 +462,7 @@ fn problem_expected(kind: policy_mod.Kind) []const u8 {
 }
 
 /// ZBX-E0904: a policy file cannot be used. `path` is the file.
-pub fn policy_unusable(diag: *Diag, path: []const u8, fault: PolicyFault) void {
+pub fn policy_unusable(diag: *Diag, path: []const u8, system: bool, fault: PolicyFault) void {
     assert(diag.code == null);
     var path_storage: [path_echo_bytes]u8 = undefined;
     const path_echo = echo_of(&path_storage, path);
@@ -473,6 +475,11 @@ pub fn policy_unusable(diag: *Diag, path: []const u8, fault: PolicyFault) void {
             const err = host_mod.error_for_errno(errno);
             errors.cause_host_error(diag, "reading the policy file", err, errno);
         },
+        .not_root => |owner| diag.cause(
+            "{s} is owned by uid {d} with mode {o:0>4}; a system policy must be owned by root " ++
+                "and writable by no one else, or anyone who can write it can switch it off",
+            .{ path_echo, owner.uid, owner.mode },
+        ),
         .problem => |problem| {
             var detail_storage: [constants.arg_echo_bytes_max]u8 = undefined;
             const detail = echo_of(&detail_storage, problem.detail_text());
@@ -498,7 +505,16 @@ pub fn policy_unusable(diag: *Diag, path: []const u8, fault: PolicyFault) void {
     }
     diag.context("path", "{s}", .{path_echo});
     switch (fault) {
-        .unreadable => diag.fix(.{ .sentence = "make the file readable by you, or remove it" }),
+        .unreadable => if (system) {
+            diag.fix(.{ .sentence = "ask the administrator to make it readable, or to remove it" });
+        } else {
+            diag.fix(.{ .sentence = "make the file readable by you, or remove it" });
+        },
+        .not_root => diag.fix(.{
+            .sentence = "as root, make it root's and not writable by others:",
+            .command = "chown root:root /etc/zbx/policy.zon && chmod 644 /etc/zbx/policy.zon",
+            .needs_root = true,
+        }),
         .problem => diag.fix(.{
             .sentence = "correct the file where it says; \"zbx explain E0904\" shows its form",
         }),
@@ -541,10 +557,10 @@ pub const Unsigned = struct {
 pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
     assert(diag.code == null);
     assert(what.report.count <= constants.signatures_per_tree_max);
-    // A digest the user is told to sign is whole: `b3:` and 64 digits are longer than an echo.
-    var digest_storage: [digest_echo_bytes]u8 = undefined;
+    // The digest is a command to copy: it must not be cut short as an argument echo is.
+    var digest_storage: [constants.reference_bytes_max]u8 = undefined;
     var path_storage: [path_echo_bytes]u8 = undefined;
-    const digest = text_util.sanitise(&digest_storage, what.digest);
+    const digest = echo_of(&digest_storage, what.digest);
     const path = echo_of(&path_storage, what.policy_path);
     diag.raise(.E0905);
     if (what.step.len > 0) {
@@ -553,6 +569,8 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
         diag.while_("checking the base of step '{s}', {s}, against the policy {s}", .{
             step, digest, path,
         });
+    } else if (what.no_tree) {
+        diag.while_("checking the directory run against the policy {s}", .{path});
     } else {
         diag.while_("checking {s} against the policy {s}", .{ digest, path });
     }

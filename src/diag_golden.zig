@@ -749,7 +749,7 @@ fn policy_unreadable(diag: *Diag) void {
         .detail_length = 5,
     } };
     @memcpy(fault.problem.detail[0..5], "extra");
-    trust_diagnose.policy_unusable(diag, golden_policy_path, fault);
+    trust_diagnose.policy_unusable(diag, golden_policy_path, false, fault);
 }
 
 fn run_tampered(diag: *Diag) void {
@@ -763,7 +763,8 @@ fn run_unsigned(diag: *Diag) void {
     var report: verdict_mod.Report = undefined;
     report.clear();
     trust_diagnose.unsigned(diag, &.{
-        .digest = "b3:0123456789abcdef",
+        .digest = "registry-1.docker.io/library/alpine@sha256:" ++
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         .policy_path = golden_policy_path,
         .report = &report,
         .policy = &policy,

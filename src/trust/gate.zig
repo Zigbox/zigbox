@@ -85,33 +85,77 @@ pub fn load(host: Host, memory: *Memory, diag: *Diag) Error!void {
     memory.count = 0;
     var system: PathBuf = undefined;
     system.set(&.{constants.policy_system_path}) catch unreachable; // A short constant.
-    try load_one(host, memory, &system, diag);
+    try load_one(host, memory, &system, true, diag);
     var user: PathBuf = undefined;
-    if (user_path(host, &user)) try load_one(host, memory, &user, diag);
+    if (user_path(host, &user)) try load_one(host, memory, &user, false, diag);
     assert(memory.count <= constants.policy_files_max);
 }
 
-fn load_one(host: Host, memory: *Memory, path: *const PathBuf, diag: *Diag) Error!void {
+/// The system policy binds users who cannot write it: owned by root, and not writable by group
+/// or others. A file that anyone but root could rewrite is no rule.
+fn system_file_fault(fs: fs_mod.Fs, fd: fs_mod.Fd) ?diagnose.PolicyFault {
+    const stat = fs.fstat(fd) catch return .{ .unreadable = fs.last_errno() };
+    if (stat.uid != 0 or stat.mode & 0o022 != 0) {
+        return .{ .not_root = .{ .uid = stat.uid, .mode = stat.mode } };
+    }
+    return null;
+}
+
+const ReadError = fs_mod.Error || error{Untrusted};
+
+/// The file's bytes. `Untrusted` (the system file's owner or mode) sets `untrusted`.
+fn read_file(
+    fs: fs_mod.Fs,
+    path: *const PathBuf,
+    system: bool,
+    buffer: []u8,
+    untrusted: *diagnose.PolicyFault,
+) ReadError![]u8 {
+    const fd = fs.open_read(path.text()) catch |err| return err;
+    defer fs.close(fd);
+    if (system) {
+        if (system_file_fault(fs, fd)) |fault| {
+            untrusted.* = fault;
+            return error.Untrusted;
+        }
+    }
+    const length = try fs.read_full(fd, buffer);
+    if (length == buffer.len) {
+        var extra: [1]u8 = undefined; // One more byte tells exactly-full from too long.
+        if (try fs.read(fd, &extra) != 0) return error.FileTooLarge;
+    }
+    return buffer[0..length];
+}
+
+fn load_one(
+    host: Host,
+    memory: *Memory,
+    path: *const PathBuf,
+    system: bool,
+    diag: *Diag,
+) Error!void {
     assert(memory.count < constants.policy_files_max);
     const fs = host.filesystem();
-    const bytes = fs.read_whole(path.text(), &memory.text) catch |err| {
+    var untrusted: diagnose.PolicyFault = undefined;
+    const bytes = read_file(fs, path, system, &memory.text, &untrusted) catch |err| {
         if (err == error.NotFound) return;
-        const fault: diagnose.PolicyFault = if (err == error.FileTooLarge)
-            .{ .problem = .{
+        const fault: diagnose.PolicyFault = switch (err) {
+            error.Untrusted => untrusted,
+            error.FileTooLarge => .{ .problem = .{
                 .kind = .too_large,
                 .line = 0,
                 .column = 0,
                 .detail = undefined,
                 .detail_length = 0,
-            } }
-        else
-            .{ .unreadable = fs.last_errno() };
-        diagnose.policy_unusable(diag, path.text(), fault);
+            } },
+            else => .{ .unreadable = fs.last_errno() },
+        };
+        diagnose.policy_unusable(diag, path.text(), system, fault);
         return error.Refused;
     };
     const slot = &memory.files[memory.count];
     if (policy_mod.parse(bytes, &slot.policy)) |problem| {
-        diagnose.policy_unusable(diag, path.text(), .{ .problem = problem });
+        diagnose.policy_unusable(diag, path.text(), system, .{ .problem = problem });
         return error.Refused;
     }
     slot.path = path.*;
