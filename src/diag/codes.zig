@@ -3562,7 +3562,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u8));
-    @setEvalBranchQuota(400_000);
+    @setEvalBranchQuota(600_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));
