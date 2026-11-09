@@ -6,11 +6,14 @@
 //! link it (`201`); a declined mount (`202`) is an upload session, as is a plain `POST`. The bytes
 //! go in pieces of `chunk_bytes` (`PATCH`, each answer's `Location` followed, its `Range` checked)
 //! and the last piece closes the session (`PUT <location>?digest=`). The manifest is put only
-//! when both blobs are confirmed, and the `Docker-Content-Digest` it answers with must be ours.
+//! when both blobs are confirmed, and the `Docker-Content-Digest` it answers with must be ours;
+//! an answer with no such header is confirmed by a `HEAD` of the tag, which must say the same.
 //!
-//! Nothing here retries or sleeps: a refusal is a code on the `Diag`, and running the command
-//! again skips what the registry already holds. A `Location` is followed only to the registry's
-//! own origin. The bytes are read from the store's blob cache as they are sent.
+//! Nothing here retries or sleeps (a `429` fails at once, as in pull): a refusal is a code on the
+//! `Diag`, and running the command again skips what the registry already holds. An upload's
+//! `Location` may name another origin (an upload host behind the registry): it is followed, and a
+//! request there carries no `Authorization` (`bearer_for`). The bytes are read from the store's
+//! blob cache as they are sent.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -46,17 +49,18 @@ pub const Sent = struct {
     outcome: Outcome,
 };
 
-/// What a push did: the layer, then the config, then the manifest the registry holds now.
+/// What a push did: the config, then the layer (the order they are pushed in, and the order of
+/// `zbx.push/1`'s `blobs`), then the manifest the registry holds now.
 pub const Report = struct {
-    layer: Sent,
     config: Sent,
+    layer: Sent,
     manifest: Sha256,
     manifest_size: u32,
     /// Blob bytes sent in request bodies; zero when the registry had every blob.
     bytes_sent: u64,
 
     pub fn blobs(report: *const Report) [constants.push_blobs]Sent {
-        return .{ report.layer, report.config };
+        return .{ report.config, report.layer };
     }
 };
 
@@ -93,11 +97,28 @@ pub const Workspace = struct {
     error_len: u32,
     manifest: [constants.pack_manifest_bytes_max]u8,
     target: [constants.registry_url_bytes_max]u8,
-    location_host: [256]u8,
+    location_host: [host_bytes]u8,
     location_target: [constants.registry_url_bytes_max]u8,
-    close_target: [constants.registry_url_bytes_max + 96]u8,
-    range_text: [48]u8,
+    close_target: [constants.registry_url_bytes_max + digest_param_bytes]u8,
+    range_text: [range_bytes]u8,
 };
+
+/// What `client.follow` takes for a host name.
+const host_bytes = 256;
+/// Two numbers of at most 20 digits and the dash between them ("0-18446744073709551615").
+const range_bytes = 48;
+/// `?digest=` or `&digest=`, and a digest of 71 bytes.
+const digest_param_bytes = 96;
+/// "it holds bytes up to N, zbx sent up to N": 36 bytes of words and two numbers.
+const detail_bytes = 96;
+const number_bytes_max = "18446744073709551615".len;
+
+comptime {
+    assert(2 * number_bytes_max + 1 <= range_bytes);
+    assert("&digest=".len + "sha256:".len + 64 <= digest_param_bytes);
+    assert(36 + 2 * number_bytes_max <= detail_bytes);
+    assert(host_bytes == 256);
+}
 
 const octet_stream = "application/octet-stream";
 
@@ -108,7 +129,41 @@ const Push = struct {
     destination: Destination,
     options: Options,
     bytes_sent: u64,
+    /// The credential for the destination's origin; empty until credentials exist (slice 12).
+    bearer: []const u8,
 };
+
+/// An upload session: where it is, which may be another origin than the registry's.
+const Session = struct {
+    origin: Origin,
+    target: []const u8,
+};
+
+/// The credential a request to `origin` carries: the destination's, to the destination's origin
+/// only. A `Location` on another origin is followed with none, so a token never leaves for a host
+/// the registry named.
+fn bearer_for(state: *const Push, origin: Origin) []const u8 {
+    assert(origin.host.len > 0);
+    if (!origin.same(state.destination.origin)) return "";
+    return state.bearer;
+}
+
+/// The number of requests a blob of `size` bytes takes in pieces of `chunk` bytes.
+pub fn pieces_of(size: u64, chunk: u64) u64 {
+    assert(chunk > 0);
+    return (size + chunk - 1) / chunk;
+}
+
+/// A blob that would take more pieces than `push_chunks_max` is refused before any request.
+fn check_pieces(state: *const Push, digest: Sha256, size: u64, diag: *Diag) Error!void {
+    const pieces = pieces_of(size, state.options.chunk_bytes);
+    if (pieces <= constants.push_chunks_max) return;
+    push_diagnose.too_many_pieces(diag, state.destination.origin.host, digest, .{
+        .pieces = pieces,
+        .chunk = state.options.chunk_bytes,
+    });
+    return error.Failed;
+}
 
 /// Pushes the packed image `made` to `destination`; the failure is in `diag`.
 pub fn push(
@@ -131,16 +186,20 @@ pub fn push(
         .destination = destination,
         .options = options,
         .bytes_sent = 0,
+        .bearer = "",
+    };
+    try check_pieces(&state, made.config, made.config_size, diag);
+    try check_pieces(&state, made.layer, made.layer_size, diag);
+    // The config, then the layer: the order of the report.
+    const config: Sent = .{
+        .digest = made.config,
+        .size = made.config_size,
+        .outcome = try push_blob(&state, made.config, made.config_size, diag),
     };
     const layer: Sent = .{
         .digest = made.layer,
         .size = made.layer_size,
         .outcome = try push_blob(&state, made.layer, made.layer_size, diag),
-    };
-    const config: Sent = .{
-        .digest = made.config,
-        .size = made.config_size,
-        .outcome = try push_blob(&state, made.config, made.config_size, diag),
     };
     // Both blobs are confirmed: the manifest names nothing the registry lacks.
     try push_manifest(&state, made, diag);
@@ -206,39 +265,51 @@ const Piece = struct {
     }
 };
 
-/// One request to the registry's origin (or the location's, which is the same origin). The
-/// answer is in `ws.head` and `ws.error_body`; a network failure is on `diag`.
-fn exchange(
-    state: *Push,
+/// One request.
+const Call = struct {
     method: net.Method,
+    /// The registry's origin, or the one an upload's `Location` named.
+    origin: Origin,
     target: []const u8,
-    body: ?net.Body,
-    content_type: []const u8,
-    content_range: []const u8,
-    diag: *Diag,
-) Error!void {
-    assert(target.len > 0);
-    assert(target[0] == '/');
-    const origin = state.destination.origin;
+    body: ?net.Body = null,
+    content_type: []const u8 = "",
+    content_range: []const u8 = "",
+    accept: []const u8 = "",
+};
+
+/// The call to the registry's own origin.
+fn registry_call(state: *const Push, method: net.Method, target: []const u8) Call {
+    return .{ .method = method, .origin = state.destination.origin, .target = target };
+}
+
+/// Makes `call`. The answer is in `ws.head` and `ws.error_body`; a network failure is on `diag`. A
+/// refusal (status 400 or more) whose body is over the bound is still an answer: its status is
+/// kept and its body dropped.
+fn exchange(state: *Push, call: Call, diag: *Diag) Error!void {
+    assert(call.target.len > 0);
+    assert(call.target[0] == '/');
+    const origin = call.origin;
     const ws = state.ws;
     ws.head.reset();
+    ws.error_len = 0;
     var sink: net.BufferSink = .{ .buffer = &ws.error_body };
     const request: net.Request = .{
         .scheme = origin.scheme,
         .host = origin.host,
         .port = origin.port,
-        .target = target,
-        .accept = "",
-        .bearer = "",
+        .target = call.target,
+        .accept = call.accept,
+        .bearer = bearer_for(state, origin),
         .body_bytes_max = constants.push_error_body_bytes,
         .idle_timeout_ms = constants.net_idle_timeout_ms,
         .total_timeout_ms = constants.net_request_timeout_ms,
-        .method = method,
-        .body = if (method.has_body() and body == null) empty_body else body,
-        .content_type = content_type,
-        .content_range = content_range,
+        .method = call.method,
+        .body = if (call.method.has_body() and call.body == null) empty_body else call.body,
+        .content_type = call.content_type,
+        .content_range = call.content_range,
     };
     state.wire.call(&request, &ws.head, sink.sink()) catch |err| {
+        if (err == error.TooLarge and ws.head.status >= 400) return;
         const where: diagnose.Target = .{
             .host = origin.host,
             .port = origin.port,
@@ -304,13 +375,13 @@ fn push_blob(state: *Push, digest: Sha256, size: u64, diag: *Diag) Error!Outcome
     assert(state.destination.tag.len > 0);
     const name = digest.text();
     const target = blob_target(state, "/blobs/", &name);
-    try exchange(state, .head, target, null, "", "", diag);
+    try exchange(state, registry_call(state, .head, target), diag);
     switch (state.ws.head.status) {
         200 => return .exists,
         404 => {},
         else => return refuse_blob(state, diag, digest, "checking for the blob", ""),
     }
-    var session: []const u8 = undefined;
+    var session: Session = undefined;
     if (state.options.mount_from.len > 0) {
         session = (try mount(state, digest, diag)) orelse return .mounted;
     } else {
@@ -320,9 +391,9 @@ fn push_blob(state: *Push, digest: Sha256, size: u64, diag: *Diag) Error!Outcome
     return .uploaded;
 }
 
-/// Asks for a mount. Null when the registry linked the blob (`201`); the session's target when
-/// it declined (`202`) and opened an upload session instead.
-fn mount(state: *Push, digest: Sha256, diag: *Diag) Error!?[]const u8 {
+/// Asks for a mount. Null when the registry linked the blob (`201`); the session when it declined
+/// (`202`) and opened an upload session instead.
+fn mount(state: *Push, digest: Sha256, diag: *Diag) Error!?Session {
     const name = digest.text();
     const from = state.options.mount_from;
     const format = "/v2/{s}/blobs/uploads/?mount={s}&from={s}";
@@ -331,7 +402,7 @@ fn mount(state: *Push, digest: Sha256, diag: *Diag) Error!?[]const u8 {
         &name,
         from,
     }) catch unreachable; // Two repositories and a digest fit a target.
-    try exchange(state, .post, target, null, "", "", diag);
+    try exchange(state, registry_call(state, .post, target), diag);
     switch (state.ws.head.status) {
         201 => return null,
         202 => return try session_location(state, digest, "opening the upload", diag),
@@ -339,23 +410,23 @@ fn mount(state: *Push, digest: Sha256, diag: *Diag) Error!?[]const u8 {
     }
 }
 
-fn open_session(state: *Push, digest: Sha256, diag: *Diag) Error![]const u8 {
+fn open_session(state: *Push, digest: Sha256, diag: *Diag) Error!Session {
     const target = blob_target(state, "/blobs/uploads/", "");
-    try exchange(state, .post, target, null, "", "", diag);
+    try exchange(state, registry_call(state, .post, target), diag);
     if (state.ws.head.status != 202) {
         return refuse_blob(state, diag, digest, "opening the upload", "");
     }
     return session_location(state, digest, "opening the upload", diag);
 }
 
-/// The session's target, copied from the answer's `Location` into `location_target`. Only the
-/// registry's own origin is followed.
+/// The session an answer's `Location` names, copied into `location_host` and `location_target`.
+/// It may be on another origin (the brief: each `Location` is followed, relative or absolute).
 fn session_location(
     state: *Push,
     digest: Sha256,
     step: []const u8,
     diag: *Diag,
-) Error![]const u8 {
+) Error!Session {
     const ws = state.ws;
     const location = ws.head.location.slice() orelse {
         return refuse_blob(state, diag, digest, step, "the answer has no usable Location");
@@ -366,11 +437,8 @@ fn session_location(
         &ws.location_host,
         &ws.location_target,
     ) orelse return refuse_blob(state, diag, digest, step, "the Location is not one zbx follows");
-    if (!next.origin.same(state.destination.origin)) {
-        return refuse_blob(state, diag, digest, step, "the Location names another host");
-    }
     assert(next.target.len > 0);
-    return next.target;
+    return .{ .origin = next.origin, .target = next.target };
 }
 
 /// Sends the bytes of the blob: whole pieces by `PATCH`, the last piece with the closing `PUT`.
@@ -378,11 +446,11 @@ fn send_blob(
     state: *Push,
     digest: Sha256,
     size: u64,
-    first_session: []const u8,
+    first_session: Session,
     diag: *Diag,
 ) Error!void {
     const chunk: u64 = state.options.chunk_bytes;
-    assert(size / chunk < constants.push_chunks_max);
+    assert(pieces_of(size, chunk) <= constants.push_chunks_max); // `check_pieces` refused more.
     var path: PathBuf = undefined;
     const blobs: blobs_mod.Blobs = .{ .fs = state.store.fs, .root = state.store.root_text() };
     const fs = state.store.fs;
@@ -409,27 +477,33 @@ fn send_blob(
 fn send_piece(
     state: *Push,
     digest: Sha256,
-    session: []const u8,
+    session: Session,
     piece: *Piece,
     diag: *Diag,
-) Error![]const u8 {
+) Error!Session {
     const first = piece.at;
     const last = piece.end - 1;
     const range = std.fmt.bufPrint(&state.ws.range_text, "{d}-{d}", .{ first, last }) catch {
         unreachable; // Two numbers of at most 20 digits.
     };
-    try exchange(state, .patch, session, piece.body(), octet_stream, range, diag);
+    try exchange(state, .{
+        .method = .patch,
+        .origin = session.origin,
+        .target = session.target,
+        .body = piece.body(),
+        .content_type = octet_stream,
+        .content_range = range,
+    }, diag);
     if (state.ws.head.status != 202) {
         return refuse_blob(state, diag, digest, "sending a piece of the blob", "");
     }
     if (state.ws.head.range.slice()) |held| try check_range(state, digest, held, last, diag);
-    state.bytes_sent += piece.end - piece.at;
     return session_location(state, digest, "sending a piece of the blob", diag);
 }
 
-/// The registry says which bytes it holds ("0-N", or "bytes=0-N"); a registry that says fewer
-/// than were sent has lost some, and the upload stops there. One that says nothing is trusted:
-/// the closing `PUT` checks the whole blob against its digest.
+/// The registry says which bytes it holds ("0-N", or "bytes=0-N"); one that does not start at 0,
+/// or says fewer than were sent, has lost some, and the upload stops there. One that says nothing
+/// is trusted: the closing `PUT` checks the whole blob against its digest.
 fn check_range(
     state: *Push,
     digest: Sha256,
@@ -443,11 +517,14 @@ fn check_range(
     const dash = std.mem.indexOfScalar(u8, text, '-') orelse {
         return refuse_blob(state, diag, digest, "sending a piece of the blob", "the Range is odd");
     };
+    if (!std.mem.eql(u8, text[0..dash], "0")) {
+        return refuse_blob(state, diag, digest, "sending a piece of the blob", "the Range is odd");
+    }
     const end = std.fmt.parseInt(u64, text[dash + 1 ..], 10) catch {
         return refuse_blob(state, diag, digest, "sending a piece of the blob", "the Range is odd");
     };
     if (end == last) return;
-    var detail: [96]u8 = undefined;
+    var detail: [detail_bytes]u8 = undefined;
     const said = std.fmt.bufPrint(&detail, "it holds bytes up to {d}, zbx sent up to {d}", .{
         end,
         last,
@@ -459,26 +536,33 @@ fn check_range(
 fn close_session(
     state: *Push,
     digest: Sha256,
-    session: []const u8,
+    session: Session,
     piece: *Piece,
     diag: *Diag,
 ) Error!void {
     assert(piece.end > piece.at);
     const name = digest.text();
-    const joiner: u8 = if (std.mem.indexOfScalar(u8, session, '?') != null) '&' else '?';
+    const joiner: u8 = if (std.mem.indexOfScalar(u8, session.target, '?') != null) '&' else '?';
     const target = std.fmt.bufPrint(&state.ws.close_target, "{s}{c}digest={s}", .{
-        session,
+        session.target,
         joiner,
         &name,
-    }) catch unreachable; // The session fits `registry_url_bytes_max`; the rest is 80 bytes.
-    var range_storage: [48]u8 = undefined;
+    }) catch unreachable; // The session fits `registry_url_bytes_max`; the digest the rest.
+    var range_storage: [range_bytes]u8 = undefined;
     var range: []const u8 = "";
     if (piece.at > 0) {
         range = std.fmt.bufPrint(&range_storage, "{d}-{d}", .{ piece.at, piece.end - 1 }) catch {
             unreachable; // Two numbers of at most 20 digits.
         };
     }
-    try exchange(state, .put, target, piece.body(), octet_stream, range, diag);
+    try exchange(state, .{
+        .method = .put,
+        .origin = session.origin,
+        .target = target,
+        .body = piece.body(),
+        .content_type = octet_stream,
+        .content_range = range,
+    }, diag);
     if (state.ws.head.status != 201) {
         return refuse_blob(state, diag, digest, "closing the upload", "");
     }
@@ -507,12 +591,36 @@ fn push_manifest(state: *Push, made: *const pack.Packed, diag: *Diag) Error!void
         .end = bytes.len,
     };
     const target = blob_target(state, "/manifests/", state.destination.tag);
-    try exchange(state, .put, target, piece.body(), constants.oci_manifest_media_type, "", diag);
+    var call = registry_call(state, .put, target);
+    call.body = piece.body();
+    call.content_type = constants.oci_manifest_media_type;
+    try exchange(state, call, diag);
     const status = ws.head.status;
     if (status != 201 and status != 200) return refuse_manifest(state, diag, "");
-    const said = ws.head.content_digest.slice() orelse return;
     const text = made.manifest.text();
+    const said = ws.head.content_digest.slice() orelse {
+        return confirm_manifest(state, target, &text, diag);
+    };
     if (std.mem.eql(u8, said, &text)) return;
+    return refuse_manifest(state, diag, "the registry stored it under another digest");
+}
+
+/// The registry took the manifest and named no digest for it (the header is optional on this
+/// answer): a `HEAD` of the tag says which digest it holds now, which must be ours. A registry
+/// that cannot say is refused, since the digest `zbx push` prints would be a guess.
+fn confirm_manifest(state: *Push, target: []const u8, ours: []const u8, diag: *Diag) Error!void {
+    var call = registry_call(state, .head, target);
+    call.accept = constants.oci_manifest_media_type;
+    try exchange(state, call, diag);
+    if (state.ws.head.status != 200) {
+        return refuse_manifest(state, diag, "it did not say which digest it stored the manifest" ++
+            " under, and has no manifest under the tag");
+    }
+    const said = state.ws.head.content_digest.slice() orelse {
+        return refuse_manifest(state, diag, "it did not say which digest it stored the manifest" ++
+            " under");
+    };
+    if (std.mem.eql(u8, said, ours)) return;
     return refuse_manifest(state, diag, "the registry stored it under another digest");
 }
 

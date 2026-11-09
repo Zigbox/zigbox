@@ -139,6 +139,33 @@ pub fn blob_refused(diag: *Diag, host: []const u8, digest: Sha256, refusal: Refu
     assert(diag.code.? == .E0555);
 }
 
+/// What a blob that would take too many pieces is sent in.
+pub const Pieces = struct {
+    pieces: u64,
+    chunk: u32,
+};
+
+/// ZBX-E0555: a blob would take more requests than one upload may; nothing was sent.
+pub fn too_many_pieces(diag: *Diag, host: []const u8, digest: Sha256, sent: Pieces) void {
+    assert(diag.code == null);
+    assert(sent.pieces > constants.push_chunks_max);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const name = digest.text();
+    diag.raise(.E0555);
+    diag.while_("pushing an image", .{});
+    diag.cause("blob {s} would go to {s} in {d} pieces of {d} bytes; zbx sends at most {d}", .{
+        name[0 .. "sha256:".len + 12],
+        echo_of(&storage, host),
+        sent.pieces,
+        sent.chunk,
+        constants.push_chunks_max,
+    });
+    diag.context("blob", "{s}", .{&name});
+    diag.context("chunk", "{d}", .{sent.chunk});
+    diag.fix(.{ .sentence = "push with a larger piece size" });
+    assert(diag.code.? == .E0555);
+}
+
 /// ZBX-E0556: the registry refused the manifest, or answered with another digest.
 pub fn manifest_refused(diag: *Diag, host: []const u8, tag: []const u8, refusal: Refusal) void {
     assert(diag.code == null);

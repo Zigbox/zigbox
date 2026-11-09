@@ -40,6 +40,10 @@ pub const Fault = enum {
     throttle,
     /// Every Location is on another origin.
     farlocation,
+    /// The manifest is taken with no `Docker-Content-Digest`; a `HEAD` of the tag tells it.
+    nodigest,
+    /// As `nodigest`, and the `HEAD` names another digest.
+    nodigestwrong,
 };
 
 pub const Query = struct {
@@ -195,6 +199,9 @@ pub const PushFixture = struct {
         const manifests = "/manifests/";
         if (std.mem.startsWith(u8, rest, manifests) and query.method == .put) {
             return fixture.manifest_put(query, parsed, rest[manifests.len..], out);
+        }
+        if (std.mem.startsWith(u8, rest, manifests) and query.method == .head) {
+            return fixture.manifest_head(parsed, rest[manifests.len..], out);
         }
         return fixture.refuse(out, 404, "UNSUPPORTED");
     }
@@ -386,7 +393,19 @@ pub const PushFixture = struct {
         fixture.manifest_puts += 1;
         fixture.digest_text = stored.digest;
         if (parsed.fault == .wrongdigest) @memset(fixture.digest_text["sha256:".len..], '0');
-        out.* = .{ .status = 201, .content_digest = &fixture.digest_text };
+        const silent = parsed.fault == .nodigest or parsed.fault == .nodigestwrong;
+        out.* = .{ .status = 201, .content_digest = if (silent) "" else &fixture.digest_text };
+    }
+
+    /// `HEAD <manifest>`: the digest the registry holds under the tag.
+    fn manifest_head(fixture: *PushFixture, parsed: Parsed, tag: []const u8, out: *Answer) void {
+        const stored = fixture.manifest_slot(parsed.repo, tag) orelse {
+            return fixture.refuse(out, 404, "MANIFEST_UNKNOWN");
+        };
+        if (!stored.used) return fixture.refuse(out, 404, "MANIFEST_UNKNOWN");
+        fixture.digest_text = stored.digest;
+        if (parsed.fault == .nodigestwrong) @memset(fixture.digest_text["sha256:".len..], '0');
+        out.* = .{ .status = 200, .content_digest = &fixture.digest_text };
     }
 
     fn manifest_slot(fixture: *PushFixture, repo: []const u8, tag: []const u8) ?*Manifest {

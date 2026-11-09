@@ -1611,7 +1611,7 @@ pub const push_chunks_max: u32 = 1 << 20;
 /// The most bytes of a registry's error answer that are read (the JSON `errors` array).
 pub const push_error_body_bytes: u32 = 4096;
 
-/// The blobs of one packed image: its config and its layer, in that order.
+/// The blobs of one packed image: its config and its layer, in the order they are pushed.
 pub const push_blobs: u32 = 2;
 
 comptime {

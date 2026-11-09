@@ -1,5 +1,5 @@
 error[ZBX-E0555]: the registry refused a blob upload
-  cause  registry.test refused closing the upload for blob sha256:a479776e583f:
+  cause  registry.test refused closing the upload for blob sha256:5ea5c582993b:
          it answered 400
   fix    run the same command again; what the registry already holds is not sent twice
   more   zbx explain E0555 · rerun with --verbose for the full cause chain
