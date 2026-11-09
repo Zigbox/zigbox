@@ -22,6 +22,8 @@ const panic = @import("diag/panic.zig");
 const render = @import("diag/render.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const image_mod = @import("runtime/image.zig");
+const reference_mod = @import("registry/reference.zig");
+const layout = @import("store/layout.zig");
 const runtime = @import("runtime/run.zig");
 const run_env = @import("run_env.zig");
 const runtime_spec = @import("runtime/spec.zig");
@@ -32,6 +34,8 @@ const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
+const trust_gate = @import("trust/gate.zig");
+const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
@@ -2339,6 +2343,8 @@ pub const Storage = struct {
     logs: logs_commands.Workspace,
     /// `zbx sign`: the tree check, the record and the envelope.
     sign: sign_commands.Workspace,
+    /// The policy gate before a run: the policy files read.
+    gate: trust_gate.Memory,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings.
@@ -2798,6 +2804,7 @@ fn run_container(
         .workdir = "",
         .user = null,
     };
+    var from_result = false;
     if (invocation.operand) |operand| {
         if (operand.len > 0 and !is_tree_operand(operand)) {
             try prepare_image(host, invocation, storage, operand, &prepared, diag);
@@ -2806,7 +2813,8 @@ fn run_container(
             const ws = &storage.run_image;
             const command = given.command;
             const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
-            if (!(found catch return error.StartFailed) and command.len == 0) {
+            from_result = found catch return error.StartFailed;
+            if (!from_result and command.len == 0) {
                 // A tree that is not a build result has no command of its own.
                 const raised = missing_argument(diag, .run, .command);
                 assert(raised == error.MissingArgument);
@@ -2814,6 +2822,11 @@ fn run_container(
             }
         }
     }
+    var digest_text: [constants.store_digest_text_bytes]u8 = undefined;
+    try resolve_tree_prefix(host, storage, &prepared, &digest_text, diag);
+    var name_buffer: reference_mod.Formatted = undefined;
+    const subject = gate_subject_of(invocation, &prepared, from_result, &name_buffer);
+    try check_policy(host, storage, subject, diag);
     const reached = run_env.resolve(host, given.env_slice(), prepared.env, &storage.run_env, diag);
     const environment = reached catch return error.StartFailed;
     const container: runtime_spec.Spec = .{
@@ -2836,6 +2849,85 @@ fn run_container(
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+}
+
+/// A tree given by a prefix (or bare hex) is resolved to its full digest before the gate, so the
+/// gate judges, and the start runs, the one tree. An unknown or ambiguous prefix is the store's
+/// own refusal. Anything else is left as it is.
+fn resolve_tree_prefix(
+    host: Host,
+    storage: *Storage,
+    prepared: *run_image.Prepared,
+    text: *[constants.store_digest_text_bytes]u8,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    const operand = prepared.tree;
+    if (operand.len == 0 or !is_tree_operand(operand)) return;
+    if (digest_prefix.Digest.parse(operand) != null) return;
+    var store: layout.Store = undefined;
+    if (!store.locate(host)) return; // The start says what is missing.
+    const full = image_mod.resolve(&store, &storage.image, operand, diag) catch {
+        return error.StartFailed;
+    };
+    text.* = full.text();
+    prepared.tree = text;
+}
+
+/// What a policy judges about a run: the tree it starts from and what that tree is bound to
+/// (the image's manifest, the build result named, or nothing for a bare tree). The text is
+/// what `zbx sign` accepts for the same subject: the image's name at its manifest digest, or
+/// the result's or the tree's digest.
+fn gate_subject_of(
+    invocation: *const Invocation,
+    prepared: *const run_image.Prepared,
+    from_result: bool,
+    name_buffer: *reference_mod.Formatted,
+) trust_gate.Subject {
+    const none: trust_gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
+    const operand = invocation.operand orelse "";
+    if (operand.len == 0) return none;
+    const tree = digest_prefix.Digest.parse(prepared.tree) orelse return none;
+    if (from_result) {
+        const result = digest_prefix.Digest.parse(operand) orelse return none;
+        return .{ .tree = tree, .binding = .{ .result = result.bytes }, .text = operand };
+    }
+    const manifest = prepared.manifest orelse {
+        return .{ .tree = tree, .binding = .none, .text = prepared.tree };
+    };
+    var reference: reference_mod.Reference = undefined;
+    reference_mod.parse(operand, &reference) catch return .{
+        .tree = tree,
+        .binding = .{ .manifest = manifest.bytes },
+        .text = prepared.tree,
+    };
+    const text = std.fmt.bufPrint(name_buffer, "{s}/{s}@{s}", .{
+        reference.registry(), reference.repository(), &manifest.text(),
+    }) catch unreachable; // The registry, the repository and a digest fit `Formatted`.
+    // A fix `zbx sign <text>` that does not fit a command line is no fix: name the tree.
+    const fits = text.len + "zbx sign ".len <= constants.diag_command_bytes_max;
+    return .{
+        .tree = tree,
+        .binding = .{ .manifest = manifest.bytes },
+        .text = if (fits) text else prepared.tree,
+    };
+}
+
+/// The gate in front of a run: every policy file that exists must be met before anything
+/// starts. A refusal has set `diag` and started nothing.
+fn check_policy(
+    host: Host,
+    storage: *Storage,
+    subject: trust_gate.Subject,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    trust_gate.load(host, &storage.gate, diag) catch return error.StartFailed;
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
+        return error.StartFailed;
+    };
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
@@ -4533,6 +4625,29 @@ test "run --timeout stops the container when its time is up and says so" {
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "\"timed_out\":true") != null);
 }
 
+var policy_files: @import("store/fs_sim.zig").SimFs = undefined;
+
+test "run: a policy that requires a signature refuses a directory before anything starts" {
+    // Goal: the gate is in front of the start. Method: a policy file with require_signature,
+    // then a run of a directory (which has no tree to sign): E0905 with the run's code 125,
+    // nothing on stdout, and no scope made for the container.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    policy_files.init(1);
+    sim.store_fs = &policy_files;
+    policy_files.put_dir("/home", 0o755);
+    policy_files.put_dir("/home/alice", 0o755);
+    policy_files.put_dir("/home/alice/.config", 0o755);
+    policy_files.put_dir("/home/alice/.config/zbx", 0o700);
+    const policy = ".{ .version = 1, .require_signature = true }";
+    policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, policy);
+    const args = [_][]const u8{ "run", "--rootfs", sim_run.rootfs_path, "--", "/bin/true" };
+    try testing.expectEqual(@as(u8, 125), command_line(&sim, &args));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0905") != null);
+    try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+    try testing.expect(sim.world.bus.scope_started == null);
+}
+
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
 const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
@@ -4920,4 +5035,51 @@ test "exec on the command line: the command's code, 125 to 127 for zbx's, and ex
     try testing.expect(!exit.get("container_ended").?.bool);
     test_storage.handle.session.release_keeper();
     test_storage.handle.session.release_output();
+}
+
+test "the gate's subject: tree and binding by what was run, and a text `zbx sign` accepts" {
+    // Goal: the gate judges what the run starts, bound as it was named. Method: build the
+    // subject for a directory, a bare tree, a build result and an image (manifest bound).
+    const tree_text = digest_prefix.Digest.of("a tree").text();
+    var prepared: run_image.Prepared = .{
+        .tree = &tree_text,
+        .command = &.{},
+        .env = &.{},
+        .workdir = "",
+        .user = null,
+    };
+    var invocation: Invocation = undefined;
+    var names: reference_mod.Formatted = undefined;
+    invocation.operand = null;
+    const directory = gate_subject_of(&invocation, &prepared, false, &names);
+    try testing.expect(directory.tree == null);
+    invocation.operand = &tree_text;
+    const bare = gate_subject_of(&invocation, &prepared, false, &names);
+    try testing.expect(bare.tree.?.eql(digest_prefix.Digest.of("a tree")));
+    try testing.expect(bare.binding == .none);
+    try testing.expectEqualStrings(&tree_text, bare.text);
+    const built = digest_prefix.Digest.of("a result").text();
+    invocation.operand = &built;
+    const from_result = gate_subject_of(&invocation, &prepared, true, &names);
+    try testing.expect(from_result.binding == .result);
+    const result_bytes = digest_prefix.Digest.of("a result").bytes;
+    try testing.expectEqualSlices(u8, &result_bytes, &from_result.binding.result);
+    try testing.expectEqualStrings(&built, from_result.text);
+    const manifest = Sha256.of("a manifest");
+    prepared.manifest = manifest;
+    invocation.operand = "alpine:3.20";
+    const image = gate_subject_of(&invocation, &prepared, false, &names);
+    try testing.expect(image.binding == .manifest);
+    try testing.expectEqualSlices(u8, &manifest.bytes, &image.binding.manifest);
+    try testing.expect(image.tree.?.eql(digest_prefix.Digest.of("a tree")));
+    // The text is the tag-free reference at the manifest digest, which `zbx sign` takes.
+    try testing.expect(std.mem.endsWith(u8, image.text, &manifest.text()));
+    try testing.expect(std.mem.indexOfScalar(u8, image.text, ':') == std.mem.lastIndexOfScalar(
+        u8,
+        image.text,
+        ':',
+    ));
+    var parsed: reference_mod.Reference = undefined;
+    try reference_mod.parse(image.text, &parsed);
+    try testing.expect(parsed.digest.?.eql(manifest));
 }

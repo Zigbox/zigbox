@@ -195,7 +195,7 @@ pub fn prepare(
 }
 
 /// The digest `image` names, or the store's diagnostic.
-fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
+pub fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
     assert(diag.code == null);
     const prefix = digest_mod.Prefix.parse(image) orelse {
         return resolve_name(store, workspace, image, diag);

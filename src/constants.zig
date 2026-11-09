@@ -1563,6 +1563,27 @@ comptime {
     assert(key_name_bytes_max <= 32);
 }
 
+// ---- Policy (M8 slice 3) ----
+
+/// Keys one policy file may trust (docs/briefs/M8-trust.md, "The policy file").
+pub const policy_keys_max: u32 = 16;
+/// A policy file's size. Sixteen keys take about 2 KiB, so the rest is room for comments.
+pub const policy_bytes_max: u32 = 16 * 1024;
+/// The policy files: the system one, and the user one under the user's config directory.
+pub const policy_system_path = "/etc/zbx/policy.zon";
+pub const policy_user_suffix = "/zbx/policy.zon";
+/// The policy files a run is checked against: the system file and the user file.
+pub const policy_files_max: u32 = 2;
+
+comptime {
+    assert(policy_keys_max >= 1);
+    assert(policy_keys_max * (key_name_bytes_max + key_public_text_bytes + 64) <
+        policy_bytes_max);
+    assert(policy_bytes_max <= build_render_bytes_max); // M7's lexer takes the text whole.
+    assert(policy_files_max == 2);
+    assert(policy_system_path.len < store_path_bytes_max);
+}
+
 // ---- Pack and export (lane U, docs/decisions/2026-11-08-push-in-m8.md) --------------------
 
 /// The version of the layer writer: the tar form and the gzip stream a pack produces. The same

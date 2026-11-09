@@ -80,20 +80,6 @@ const OpenFile = struct {
     offset: u32,
 };
 
-/// The file system of a host that was given none: a machine that is down, on which every call
-/// fails with EIO. One for all hosts, since it never holds anything.
-var down_files: fs_sim.SimFs = undefined;
-var down_ready: bool = false;
-
-fn down_fs() store_fs.Fs {
-    if (!down_ready) {
-        down_files.init(0);
-        down_files.crashed = true;
-        down_ready = true;
-    }
-    return down_files.interface();
-}
-
 /// The log disk of a host that was given none: it takes the writes and keeps nothing, so a run
 /// that is not a test of logs neither fails nor warns. A test of logs gives the host a real
 /// `SimFs` as `log_fs`.
@@ -292,6 +278,10 @@ pub const HostSim = struct {
     /// The store's file system (store/fs_sim.zig), which is large and kept by the test that
     /// uses it; null for a host with none.
     store_fs: ?*fs_sim.SimFs,
+    /// What a host with no `store_fs` sees: an empty machine of its own, so nothing one test
+    /// writes through the host is seen by another. Initialised on first use.
+    down_files: fs_sim.SimFs,
+    down_ready: bool,
     /// The disk the container logs are kept on; null for one that keeps nothing (`sink_fs`).
     log_fs: ?*fs_sim.SimFs,
     /// The network (registry/net_sim.zig), kept by the test that uses it; null for a host with
@@ -329,6 +319,7 @@ pub const HostSim = struct {
         sim.step_fault_fired = false;
         sim.reaped_next = null;
         sim.store_fs = null;
+        sim.down_ready = false;
         sim.log_fs = null;
         sim.wire = null;
         assert(sim.open_count() == 0);
@@ -1205,10 +1196,18 @@ pub const HostSim = struct {
         from_context(context).world.broken_pipe_ignored = ignore;
     }
 
+    fn down_fs(sim: *HostSim) store_fs.Fs {
+        if (!sim.down_ready) {
+            sim.down_files.init(0);
+            sim.down_ready = true;
+        }
+        return sim.down_files.interface();
+    }
+
     fn filesystem(context: *anyopaque) store_fs.Fs {
         const sim = from_context(context);
         if (sim.store_fs) |files| return files.interface();
-        return down_fs();
+        return sim.down_fs();
     }
 
     fn network(context: *anyopaque) registry_net.Net {
