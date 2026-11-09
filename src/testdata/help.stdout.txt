@@ -17,6 +17,8 @@ commands:
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   key <cmd>       signing keys: new, list, show (see below)
   sign <what>     sign a build result, a tree or an image with a key (see below)
+  policy check [what]   what the policy files say, and whether a run of <what> would pass
+                  (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
   build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -148,6 +150,16 @@ sign:
   --key <name>    the key to sign with; optional when there is exactly one
   the whole tree must be in the store and intact; the signature is added to the tree's
   record, at most 8 per tree; signing again with the same key changes nothing
+
+policy:
+  zbx policy check [<what>]
+  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
+                  takes it; omitted: only describe the policy files
+  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
+                  a run must pass each one that exists
+  prints each file, its rules, each signature of the tree and why it counts or not, and
+  whether the run would start; runs nothing. Exits 0 when it would start, 1 when a policy
+  would refuse it (ZBX-E0905); a file that cannot be read is ZBX-E0904
 
 push:
   zbx push --dry-run <source>   pack a build result, an image or a tree and print the

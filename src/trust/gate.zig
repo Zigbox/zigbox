@@ -161,7 +161,7 @@ pub fn judge_all(
 }
 
 /// The record of `tree` into `record`, empty when there is none (or no store yet).
-fn read_record(
+pub fn read_record(
     host: Host,
     work: *record_mod.Work,
     tree: Digest,

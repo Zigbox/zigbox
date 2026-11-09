@@ -311,6 +311,8 @@ test {
     _ = @import("trust/verdict_tests.zig");
     _ = @import("trust/gate.zig");
     _ = @import("trust/gate_tests.zig");
+    _ = @import("trust/policy_commands.zig");
+    _ = @import("trust/policy_commands_tests.zig");
     _ = @import("trust/record_tests.zig");
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");

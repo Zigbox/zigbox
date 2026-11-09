@@ -31,6 +31,7 @@ const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
+const policy_commands = @import("trust/policy_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
 const trust_gate = @import("trust/gate.zig");
 const trust_statement = @import("trust/statement.zig");
@@ -71,6 +72,8 @@ const help_text =
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  sign <what>     sign a build result, a tree or an image with a key (see below)
+    \\  policy check [what]   what the policy files say, and whether a run of <what> would pass
+    \\                  (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -203,6 +206,16 @@ const help_text =
     \\  the whole tree must be in the store and intact; the signature is added to the tree's
     \\  record, at most 8 per tree; signing again with the same key changes nothing
     \\
+    \\policy:
+    \\  zbx policy check [<what>]
+    \\  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
+    \\                  takes it; omitted: only describe the policy files
+    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
+    \\                  a run must pass each one that exists
+    \\  prints each file, its rules, each signature of the tree and why it counts or not, and
+    \\  whether the run would start; runs nothing. Exits 0 when it would start, 1 when a policy
+    \\  would refuse it (ZBX-E0905); a file that cannot be read is ZBX-E0904
+    \\
     \\push:
     \\  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
     \\                           manifest digest; sends nothing (the upload is not built yet)
@@ -272,6 +285,7 @@ pub const Command = enum {
     lock,
     logs,
     exec,
+    policy,
     ps,
     pull,
     push,
@@ -665,6 +679,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "logs")) found = .logs;
     if (std.mem.eql(u8, name, "exec")) found = .exec;
+    if (std.mem.eql(u8, name, "policy")) found = .policy;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "push")) found = .push;
@@ -686,7 +701,7 @@ fn operands_count(command: Command) u32 {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .push, .lock, .logs => 1,
         .exec, .inspect, .sign => 1,
-        .store, .state, .key => 2,
+        .store, .state, .key, .policy => 2,
     };
     assert(count <= 2);
     return count;
@@ -1635,6 +1650,7 @@ fn resolve(
     if (command == .store) return resolve_store(operands, invocation, diag);
     if (command == .state) return resolve_state(operands, invocation, diag);
     if (command == .key) return resolve_key(operands, invocation, diag);
+    if (command == .policy) return resolve_policy(operands, invocation, diag);
     defer if (invocation.command == .commit or invocation.command == .push) {
         const action: store_commands.Action = if (invocation.command == .push) .push else .commit;
         invocation.store = .{ .action = action, .operand = invocation.operand };
@@ -1801,6 +1817,40 @@ fn resolve_key(
     invocation.key.action = action;
     invocation.key.name = if (given == 1) operands[2] else null;
     assert((invocation.key.name != null) == (action != .list));
+}
+
+/// `policy check [OPERAND]`: the one subcommand, and what a run would be of (optional).
+fn resolve_policy(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .policy);
+    if (operands.len == 1) return policy_usage(diag, "'policy' needs a subcommand: check");
+    if (!std.mem.eql(u8, operands[1], "check")) {
+        var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a policy subcommand; the only one is check", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    }
+    if (operands.len > 3) return unexpected_argument(diag, .policy, operands[3]);
+    invocation.command = .policy;
+    invocation.operand = if (operands.len == 3) operands[2] else null;
+}
+
+fn policy_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "policy", .{});
+    diag.fix(.{ .sentence = "see what the policy files say:", .command = "zbx policy check" });
+    return error.MissingArgument;
 }
 
 fn key_usage(diag: *Diag, sentence: []const u8) ParseError {
@@ -2030,6 +2080,11 @@ fn unexpected_fix(diag: *Diag, command: Command) void {
         diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
     } else if (command == .key) {
         diag.fix(.{ .sentence = "name one key at a time:", .command = "zbx key show release" });
+    } else if (command == .policy) {
+        diag.fix(.{
+            .sentence = "check one run at a time:",
+            .command = "zbx policy check alpine:3.20",
+        });
     } else if (command == .sign) {
         diag.fix(.{
             .sentence = "sign one thing at a time:",
@@ -2420,7 +2475,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
         .explain, .bundle, .schema, .stop, .run, .commit => true,
-        .push, .pull, .lock, .logs, .exec, .inspect, .sign => true,
+        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -2480,6 +2535,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .state => return run_state(host, invocation, storage, diag),
         .key => return run_key(host, invocation, diag),
         .sign => return run_sign(host, invocation, storage, diag),
+        .policy => return run_policy(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -2682,6 +2738,46 @@ fn run_sign(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     assert(invocation.sign.operand.len > 0);
     const output: sign_commands.Output = .{ .json = invocation.options.output == .json };
     return sign_commands.run(host, &storage.sign, invocation.sign, output, diag) catch
+        return error.CommandFailed;
+}
+
+/// `zbx policy check [OPERAND]`: the policy files, and the verdict on what `run` would run.
+fn run_policy(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .policy);
+    assert(diag.code == null);
+    var prepared: run_image.Prepared = .{
+        .tree = invocation.operand orelse "",
+        .command = &.{},
+        .env = &.{},
+        .workdir = "",
+        .user = null,
+    };
+    var from_result = false;
+    if (invocation.operand) |operand| {
+        if (!is_tree_operand(operand)) {
+            prepare_image(host, invocation, storage, operand, &prepared, diag) catch {
+                return error.CommandFailed;
+            };
+        } else {
+            const ws = &storage.run_image;
+            from_result = run_image.prepare_result(host, ws, operand, &.{}, &prepared, diag) catch {
+                return error.CommandFailed;
+            };
+        }
+    }
+    const subject: ?trust_gate.Subject = if (invocation.operand != null)
+        gate_subject_of(invocation, &prepared, from_result)
+    else
+        null;
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    const output: policy_commands.Output = .{ .json = invocation.options.output == .json };
+    return policy_commands.run(host, &storage.gate, record, work, subject, output, diag) catch
         return error.CommandFailed;
 }
 
@@ -3838,6 +3934,7 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
         .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
         .{ .topic = "sign", .text = @embedFile("testdata/schema_sign.stdout.txt") },
+        .{ .topic = "policy", .text = @embedFile("testdata/schema_policy.stdout.txt") },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };

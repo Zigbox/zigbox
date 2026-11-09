@@ -448,7 +448,7 @@ pub fn policy_unusable(diag: *Diag, path: []const u8, fault: PolicyFault) void {
     assert(diag.code.? == .E0904);
 }
 
-fn reason_text(reason: verdict.Reason) []const u8 {
+pub fn reason_text(reason: verdict.Reason) []const u8 {
     return switch (reason) {
         .counts => "it counts",
         .malformed => "it is not a statement this zbx can read",
