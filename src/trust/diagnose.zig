@@ -11,8 +11,18 @@ const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const errors = @import("../diag/errors.zig");
 const store = @import("key_store.zig");
+const key_mod = @import("key.zig");
+const policy_mod = @import("policy.zig");
+const verdict = @import("verdict.zig");
 
 const path_echo_bytes = constants.store_path_bytes_max;
+
+/// A name, `@sha256:` and 64 digits, or `b3:` and 64 digits, with room for the name.
+const digest_echo_bytes = 256;
+
+comptime {
+    assert(digest_echo_bytes >= constants.oci_digest_text_bytes + 128);
+}
 
 fn echo_of(storage: []u8, text: []const u8) []const u8 {
     assert(storage.len >= constants.arg_echo_bytes_max);
@@ -284,6 +294,78 @@ pub const Refusal = enum {
     store_full,
 };
 
+/// What differs in the file the tamper check found.
+const too_large_fix = std.fmt.comptimePrint(
+    "zbx checks at most {d} files, directories and links in an image, and only so many " ++
+        "directories side by side; run a smaller image, or one that is less wide",
+    .{constants.store_walk_entries_max},
+);
+
+const farm_fix = "remove the image's directory under cache/ in the data directory (named by its " ++
+    "digest) and run again; zbx builds it afresh from the checked files";
+
+pub const Tampered = enum { bytes, mode, owner, missing, unreadable, too_large, farm };
+
+/// ZBX-E0907: a file object of the tree to run no longer matches its name. `path` is the file's
+/// path in the image (empty if it was not found), `object` the object's hex id.
+pub fn tampered(
+    diag: *Diag,
+    path: []const u8,
+    object: []const u8,
+    what: Tampered,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(errno < 4096);
+    assert(object.len > 0);
+    var path_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const path_echo = echo_of(&path_storage, if (path.len > 0) path else "(unnamed)");
+    const short = object[0..@min(object.len, 12)];
+    diag.raise(.E0907);
+    diag.while_("checking the files of the image before running it", .{});
+    switch (what) {
+        .bytes => diag.cause(
+            "{s} (object {s}) has bytes that are not the image's",
+            .{ path_echo, short },
+        ),
+        .mode => diag.cause(
+            "{s} (object {s}) has a mode that is not the image's",
+            .{ path_echo, short },
+        ),
+        .owner => diag.cause(
+            "{s} (object {s}) has an owner that is not the image's",
+            .{ path_echo, short },
+        ),
+        .too_large => diag.cause(
+            "the image has more files or nested directories than zbx checks",
+            .{},
+        ),
+        .farm => diag.cause(
+            "{s} in the image's materialized directory is not the image's",
+            .{path_echo},
+        ),
+        .missing => diag.cause("{s} (object {s}) is missing from the store", .{ path_echo, short }),
+        .unreadable => if (errno == 0) {
+            diag.cause("{s} (object {s}) could not be read", .{ path_echo, short });
+        } else {
+            const err = host_mod.error_for_errno(errno);
+            errors.cause_host_error(diag, "reading a file of the image", err, errno);
+        },
+    }
+    diag.context("path", "{s}", .{path_echo});
+    diag.context("object", "{s}", .{short});
+    switch (what) {
+        .too_large => diag.fix(.{ .sentence = too_large_fix }),
+        .farm => diag.fix(.{ .sentence = farm_fix }),
+        else => diag.fix(.{
+            .sentence = "remove the damaged tree and pull or build it again; " ++
+                "this shows the damage:",
+            .command = "zbx store verify",
+        }),
+    }
+    assert(diag.code.? == .E0907);
+}
+
 /// ZBX-E0910: signing was refused, and nothing was written. `operand` is what was named.
 pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u16) void {
     assert(diag.code == null);
@@ -369,4 +451,185 @@ pub fn bad_name(diag: *Diag, name: []const u8) void {
     });
     diag.context("arg", "{s}", .{echo});
     diag.fix(.{ .sentence = "for example:", .command = "zbx key new release" });
+}
+
+/// What is wrong with a policy file, for E0904.
+pub const PolicyFault = union(enum) {
+    /// The file could not be read; the errno says why (0 when not known).
+    unreadable: u16,
+    /// The system file is not root's, or others can write it.
+    not_root: struct { uid: u32, mode: u16 },
+    /// The file was read and its text is not a policy.
+    problem: policy_mod.Problem,
+};
+
+fn problem_expected(kind: policy_mod.Kind) []const u8 {
+    return switch (kind) {
+        .syntax => "this is not part of the form of a policy file",
+        .unknown_field => "no such field in a policy file",
+        .duplicate_field => "this field is given twice",
+        .missing_version => "the file has no .version = 1",
+        .bad_version => "the only version is 1",
+        .newer_version => "the version is newer than this zbx reads",
+        .bad_string => "a string here has no escapes and no control characters",
+        .bad_name => "a key's name is lower-case letters, digits and '-', at most 32",
+        .bad_public => "a public key reads zbx-ed25519: and 64 hex digits",
+        .key_twice => "this key, or its name, is listed twice",
+        .too_many_keys => "more keys than a policy lists",
+        .bad_verify => "verify is \"cached\" or \"always\"",
+        .provenance_not_yet => "require_provenance is not supported by this zbx yet",
+        .too_large => "the file is larger than a policy file may be",
+    };
+}
+
+/// ZBX-E0904: a policy file cannot be used. `path` is the file.
+pub fn policy_unusable(diag: *Diag, path: []const u8, system: bool, fault: PolicyFault) void {
+    assert(diag.code == null);
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const path_echo = echo_of(&path_storage, path);
+    diag.raise(.E0904);
+    diag.while_("reading the policy {s}", .{path_echo});
+    switch (fault) {
+        .unreadable => |errno| if (errno == 0) {
+            diag.cause("{s} could not be read", .{path_echo});
+        } else {
+            const err = host_mod.error_for_errno(errno);
+            errors.cause_host_error(diag, "reading the policy file", err, errno);
+        },
+        .not_root => |owner| diag.cause(
+            "{s} is owned by uid {d} with mode {o:0>4}; a system policy must be owned by root " ++
+                "and writable by no one else, or anyone who can write it can switch it off",
+            .{ path_echo, owner.uid, owner.mode },
+        ),
+        .problem => |problem| {
+            var detail_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+            const detail = echo_of(&detail_storage, problem.detail_text());
+            if (problem.line == 0) {
+                diag.cause("{s}: {s}", .{ path_echo, problem_expected(problem.kind) });
+            } else if (detail.len > 0) {
+                diag.cause("{s} line {d}, column {d}: '{s}': {s}", .{
+                    path_echo,
+                    problem.line,
+                    problem.column,
+                    detail,
+                    problem_expected(problem.kind),
+                });
+            } else {
+                diag.cause("{s} line {d}, column {d}: {s}", .{
+                    path_echo,
+                    problem.line,
+                    problem.column,
+                    problem_expected(problem.kind),
+                });
+            }
+        },
+    }
+    diag.context("path", "{s}", .{path_echo});
+    switch (fault) {
+        .unreadable => if (system) {
+            diag.fix(.{ .sentence = "ask the administrator to make it readable, or to remove it" });
+        } else {
+            diag.fix(.{ .sentence = "make the file readable by you, or remove it" });
+        },
+        .not_root => diag.fix(.{
+            .sentence = "as root, make it root's and not writable by others:",
+            .command = "chown root:root /etc/zbx/policy.zon && chmod 644 /etc/zbx/policy.zon",
+            .needs_root = true,
+        }),
+        .problem => diag.fix(.{
+            .sentence = "correct the file where it says; \"zbx explain E0904\" shows its form",
+        }),
+    }
+    assert(diag.code.? == .E0904);
+}
+
+pub fn reason_text(reason: verdict.Reason) []const u8 {
+    return switch (reason) {
+        .counts => "it counts",
+        .malformed => "it is not a statement this zbx can read",
+        .bad_signature => "its signature does not verify",
+        .untrusted_key => "the policy does not list that key",
+        .other_tree => "it is about another tree",
+        .other_predicate => "it says something this zbx does not know",
+        .other_binding => "it is bound to another result or image than this run's",
+    };
+}
+
+/// How many signatures E0905 names, one cause each; the rest are counted.
+const signatures_named_max: u32 = 4;
+
+/// What E0905 says about the run it refused.
+pub const Unsigned = struct {
+    /// The digest of what was to run, as the user would give it to `zbx sign`.
+    digest: []const u8,
+    /// The policy file whose rule was not met.
+    policy_path: []const u8,
+    /// The record's lines, judged.
+    report: *const verdict.Report,
+    /// The policy, to name the keys it lists.
+    policy: *const policy_mod.Policy,
+    /// The run has no tree to sign (a directory given as `--rootfs`).
+    no_tree: bool,
+    /// The build step whose base was judged; empty for a run.
+    step: []const u8 = "",
+};
+
+/// ZBX-E0905: a run is refused because no trusted signature covers it.
+pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
+    assert(diag.code == null);
+    assert(what.report.count <= constants.signatures_per_tree_max);
+    // The digest is a command to copy: it must not be cut short as an argument echo is.
+    var digest_storage: [constants.reference_bytes_max]u8 = undefined;
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const digest = echo_of(&digest_storage, what.digest);
+    const path = echo_of(&path_storage, what.policy_path);
+    diag.raise(.E0905);
+    if (what.step.len > 0) {
+        var step_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const step = echo_of(&step_storage, what.step);
+        diag.while_("checking the base of step '{s}', {s}, against the policy {s}", .{
+            step, digest, path,
+        });
+    } else if (what.no_tree) {
+        diag.while_("checking the directory run against the policy {s}", .{path});
+    } else {
+        diag.while_("checking {s} against the policy {s}", .{ digest, path });
+    }
+    if (what.no_tree) {
+        diag.cause("{s} requires a signature (require_signature) and a directory has no tree " ++
+            "to sign", .{path});
+    } else if (what.report.count == 0) {
+        diag.cause("{s} requires a signature (require_signature), and nothing has signed {s}", .{
+            path,
+            digest,
+        });
+    } else {
+        diag.cause("{s} requires a signature (require_signature), and none of the {d} on {s} " ++
+            "counts", .{ path, what.report.count, digest });
+    }
+    const shown = @min(what.report.count, signatures_named_max);
+    for (what.report.lines[0..shown]) |line| {
+        const text = key_mod.public_text(line.public);
+        const listed = what.policy.trusted(&line.public);
+        const name: []const u8 = if (listed) |found| found.name_text() else "";
+        // The first 16 hex digits identify a key to a reader; the full text is `zbx key show`'s.
+        const prefix_bytes = key_mod.public_prefix.len + 16;
+        if (name.len > 0) {
+            diag.cause("signed by '{s}': {s}", .{ name, reason_text(line.reason) });
+        } else {
+            diag.cause("signed by {s}: {s}", .{ text[0..prefix_bytes], reason_text(line.reason) });
+        }
+    }
+    if (what.report.count > shown) {
+        diag.cause("{d} more signatures are not listed", .{what.report.count - shown});
+    }
+    diag.context("digest", "{s}", .{digest});
+    diag.context("policy", "{s}", .{path});
+    if (!what.no_tree) {
+        diag.fix_with("sign it with a key the policy lists:", "zbx sign {s}", .{digest});
+        diag.fix(.{ .sentence = "or add the signer's key to the policy file" });
+    } else {
+        diag.fix(.{ .sentence = "run an image, or a build result, that has been signed" });
+    }
+    assert(diag.code.? == .E0905);
 }

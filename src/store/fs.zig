@@ -41,6 +41,11 @@ pub const Stat = struct {
     rdev_minor: u32 = 0,
     /// When the bytes last changed, in seconds since the epoch.
     mtime: u64 = 0,
+    /// When the inode last changed (bytes, mode, owner, attributes or link count), in
+    /// nanoseconds since the epoch. An unprivileged user cannot set it back, so the tamper
+    /// check (`trust/tamper.zig`) trusts a changed value and nothing else. Zero where the file
+    /// system does not say.
+    ctime_ns: u64 = 0,
     /// The space the file takes on the disk, in 512-byte blocks (`st_blocks`); what `state ls`
     /// adds up. Zero where the file system does not say.
     blocks: u64 = 0,

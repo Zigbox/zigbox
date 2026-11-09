@@ -400,7 +400,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 8;
+pub const record_version: u32 = 9;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 64 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
@@ -1518,6 +1518,14 @@ pub const statement_bytes_max: u32 = 128 * 1024;
 pub const signatures_per_tree_max: u32 = 8;
 /// Most signature records (and, from slice 4, provenance records) in the store.
 pub const trust_records_max: u32 = 4096;
+/// Most file objects one tree's `trust/verified` record holds (slice 3's tamper check): 56 bytes
+/// each, so a record is under 4 MiB. A tree with more objects is checked whole on every run and
+/// writes no record.
+pub const trust_verified_entries_max: u32 = 65536;
+/// The bytes of a `trust/verified` record: a 16-byte header and its entries.
+pub const trust_verified_entry_bytes: u32 = 56;
+pub const trust_verified_file_bytes_max: u32 =
+    16 + trust_verified_entries_max * trust_verified_entry_bytes;
 /// The one place our type URIs start (the owner's `2026-11-04-project-domain-zigbox-org.md`).
 /// Once a signature has been made with a URI it is part of the format.
 pub const type_uri_base = "https://zigbox.org";
@@ -1561,6 +1569,27 @@ comptime {
     assert(key_file_bytes_max >= 512); // Room for the longest rendering, checked in key.zig.
     assert(passphrase_bytes_max >= 64);
     assert(key_name_bytes_max <= 32);
+}
+
+// ---- Policy (M8 slice 3) ----
+
+/// Keys one policy file may trust (docs/briefs/M8-trust.md, "The policy file").
+pub const policy_keys_max: u32 = 16;
+/// A policy file's size. Sixteen keys take about 2 KiB, so the rest is room for comments.
+pub const policy_bytes_max: u32 = 16 * 1024;
+/// The policy files: the system one, and the user one under the user's config directory.
+pub const policy_system_path = "/etc/zbx/policy.zon";
+pub const policy_user_suffix = "/zbx/policy.zon";
+/// The policy files a run is checked against: the system file and the user file.
+pub const policy_files_max: u32 = 2;
+
+comptime {
+    assert(policy_keys_max >= 1);
+    assert(policy_keys_max * (key_name_bytes_max + key_public_text_bytes + 64) <
+        policy_bytes_max);
+    assert(policy_bytes_max <= build_render_bytes_max); // M7's lexer takes the text whole.
+    assert(policy_files_max == 2);
+    assert(policy_system_path.len < store_path_bytes_max);
 }
 
 // ---- Pack and export (lane U, docs/decisions/2026-11-08-push-in-m8.md) --------------------

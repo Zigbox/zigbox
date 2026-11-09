@@ -55,6 +55,14 @@ pub const Workspace = struct {
     record: images.Image,
 };
 
+/// A check of the tree before it is materialized, run in the store's child (the tamper check of
+/// `trust/tamper.zig`, which the cli supplies so the runtime does not know of policy). It returns
+/// false with `diag` set to refuse the run.
+pub const Check = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, store: *Store, tree: Digest, diag: *Diag) bool,
+};
+
 /// A path with its own room.
 pub const Path = struct {
     bytes: [constants.containers_path_bytes_max + 1]u8,
@@ -151,6 +159,7 @@ pub fn prepare(
     name: []const u8,
     read_only: bool,
     warn: ?namespace.Warn,
+    check: ?Check,
     prepared: *Prepared,
     diag: *Diag,
 ) Error!void {
@@ -191,11 +200,11 @@ pub fn prepare(
             return error.Failed;
         }
     }
-    try build(host, facts, workspace, prepared, base.text(), existing, warn, diag);
+    try build(host, facts, workspace, prepared, base.text(), existing, warn, check, diag);
 }
 
 /// The digest `image` names, or the store's diagnostic.
-fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
+pub fn resolve(store: *Store, workspace: *Workspace, image: []const u8, diag: *Diag) Error!Digest {
     assert(diag.code == null);
     const prefix = digest_mod.Prefix.parse(image) orelse {
         return resolve_name(store, workspace, image, diag);
@@ -272,6 +281,7 @@ const Job = struct {
     prepared: *const Prepared,
     base: [:0]const u8,
     existing: u32,
+    check: ?Check,
     /// The write end of the pipe the child reports a failure through.
     report: host_mod.Pipe,
 };
@@ -284,6 +294,7 @@ fn build(
     base: [:0]const u8,
     existing: u32,
     warn: ?namespace.Warn,
+    check: ?Check,
     diag: *Diag,
 ) Error!void {
     const pipe = host.pipe() catch |err| {
@@ -300,6 +311,7 @@ fn build(
         .prepared = prepared,
         .base = base,
         .existing = existing,
+        .check = check,
         .report = pipe,
     };
     const work: namespace.Work = .{ .context = &job, .call = work_call };
@@ -357,6 +369,12 @@ fn execute(job: *Job, diag: *Diag) Error!void {
     }
     const present = open.check(&store, .existing, diag) catch return error.Failed;
     assert(present); // The caller found the tree in it.
+    if (job.check) |check| {
+        if (!check.call(check.context, &store, prepared.digest, diag)) {
+            assert(diag.code != null);
+            return error.Failed;
+        }
+    }
     const ws = &job.workspace.materialize;
     _ = materialize.ensure(&store, ws, prepared.digest, diag) catch return error.Failed;
     // The container's directory, new: whatever an earlier run of the name left is removed.
@@ -545,6 +563,7 @@ pub fn remove_container(
         .prepared = &prepared,
         .base = base.text(),
         .existing = existing,
+        .check = null,
         .report = host.pipe() catch return error.Failed,
     };
     defer host.close(job.report.read);

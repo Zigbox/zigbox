@@ -22,6 +22,9 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const build_diagnose = @import("../build/diagnose.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const doctor = @import("../doctor.zig");
+const namespace = @import("../store/namespace.zig");
+const render = @import("../diag/render.zig");
 const errors = @import("../diag/errors.zig");
 const json = @import("../bundle.zig");
 const lock = @import("../store/lock.zig");
@@ -60,6 +63,8 @@ pub const Args = struct {
 
 pub const Output = struct {
     json: bool,
+    mode: render.Mode = .text,
+    color: bool = false,
 };
 
 /// The caller's memory, several MiB: keep it in static storage.
@@ -93,6 +98,46 @@ const Job = struct {
     store: Store,
     diag: *Diag,
 };
+
+/// What the store's child is given.
+const Child = struct {
+    host: Host,
+    ws: *Workspace,
+    args: Args,
+    output: Output,
+};
+
+/// `run`, in the store's user namespace. The objects' ids were hashed with the container's
+/// owners, which `lstat` shows only inside it: outside, every object of a tree pulled by an
+/// ordinary user would look damaged. The child renders its own failure, as `store` does.
+pub fn run_in_namespace(
+    host: Host,
+    facts: *doctor.Facts,
+    ws: *Workspace,
+    args: Args,
+    output: Output,
+    diag: *Diag,
+) Error!u8 {
+    assert(diag.code == null);
+    assert(args.operand.len > 0);
+    var child: Child = .{ .host = host, .ws = ws, .args = args, .output = output };
+    const work: namespace.Work = .{ .context = &child, .call = child_call };
+    return namespace.run(host, facts, work, null, diag) catch return error.Failed;
+}
+
+fn child_call(context: *anyopaque, squash_owner: bool) u8 {
+    assert(@intFromPtr(context) != 0);
+    _ = squash_owner; // Nothing here records an owner.
+    const child: *Child = @ptrCast(@alignCast(context));
+    var diag: Diag = undefined;
+    diag.reset();
+    return run(child.host, child.ws, child.args, child.output, &diag) catch {
+        var buffer: [constants.output_bytes_max]u8 = undefined;
+        const text = render.render(&diag, child.output.mode, child.output.color, &buffer);
+        child.host.write_all(.stderr, text) catch return constants.exit_environment;
+        return diag.exit_code();
+    };
+}
 
 pub fn run(host: Host, ws: *Workspace, args: Args, output: Output, diag: *Diag) Error!u8 {
     assert(diag.code == null);
@@ -229,7 +274,7 @@ const Checker = struct {
         var bytes: u64 = 0;
         const damage = verify.check_object_alone(
             checker.store,
-            checker.ws,
+            &checker.ws.scratch,
             ref.id,
             has_list,
             &bytes,

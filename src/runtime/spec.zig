@@ -166,6 +166,14 @@ pub fn publish_problem(network: Network, list: []const Publish) ?PublishListProb
     return null;
 }
 
+/// What a policy statement about the run's tree may name: nothing (a bare tree), the build
+/// result the run named, or the image manifest it resolved to. The digests are raw bytes.
+pub const Binding = union(enum) {
+    none,
+    result: [32]u8,
+    manifest: [32]u8,
+};
+
 /// A user and group id inside the container.
 pub const User = struct {
     uid: u32,
@@ -219,6 +227,9 @@ pub const Spec = struct {
     project: []const u8 = "",
     /// The user as the caller names it (`--user`, or the image's `User`), for a refusal's message.
     user_text: []const u8 = "",
+    /// What the run's tree is bound to, written to the run record for the policy gate at
+    /// `zbx exec` (the gate at the run itself judged it already).
+    binding: Binding = .none,
     /// The container's hostname (M7: a build step's is `build`), held to the rules of a name.
     /// Null: the container's name, as before.
     hostname: ?[]const u8 = null,

@@ -80,6 +80,7 @@ fn start() void {
         .name_width = 7,
         .hits = 0,
         .misses = 0,
+        .gate_loaded = false,
     };
     composed.timings = @splat(std.mem.zeroes(compose.Timing));
     key_mod.compute(&.{
@@ -795,4 +796,35 @@ test "--verbose reaches the step's request: verbose asks to stream, and nothing 
     try testing.expect(context.request(&spec).stream);
     context.verbose = false;
     try testing.expect(!context.request(&spec).stream);
+}
+
+test "a step whose base no policy trusts is refused before it starts, naming the step" {
+    // Goal: the build gate. Method: with no policy file the base passes; a policy that requires
+    // a signature refuses the unsigned base with E0905 naming the step and the base as
+    // `zbx sign` takes it; a policy that asks nothing passes.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    const config = [_]host_sim.EnvironmentVariable{
+        .{ .name = "XDG_DATA_HOME", .value = "/data" },
+        .{ .name = "XDG_CONFIG_HOME", .value = "/cfg" },
+    };
+    sim.environment_variables = &config;
+    _ = try context.load_base(locked_reference, "compile");
+    var spec: key_mod.Spec = undefined;
+    spec.name = "compile";
+    spec.base_tree = composed.image.tree;
+    try context.check_base(locked_reference, &spec);
+    files.put_dir("/cfg", 0o755);
+    files.put_dir("/cfg/zbx", 0o755);
+    files.put_file("/cfg/zbx/policy.zon", 0o644, ".{ .version = 1 }");
+    context.gate_loaded = false;
+    try context.check_base(locked_reference, &spec);
+    files.remove_path("/cfg/zbx/policy.zon");
+    files.put_file("/cfg/zbx/policy.zon", 0o644, ".{ .version = 1, .require_signature = true }");
+    context.gate_loaded = false;
+    try testing.expectError(error.Failed, context.check_base(locked_reference, &spec));
+    try testing.expectEqual(.E0905, diag.code.?);
+    const text = diag.whiles.slice()[0].slice();
+    try testing.expect(std.mem.indexOf(u8, text, "base of step 'compile'") != null);
+    const sign = "registry.test/fixture/open@sha256:";
+    try testing.expect(std.mem.indexOf(u8, text, sign) != null);
 }
