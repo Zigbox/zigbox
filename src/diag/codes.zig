@@ -3091,13 +3091,15 @@ pub const registry = [_]Entry{
         \\when the signature verifies, its key is one the policy lists, and it is
         \\about this tree and bound to the result that is to run.
         \\
-        \\The cause says which of three things is wrong. Nothing has recorded a build
+        \\The cause says which of four things is wrong. Nothing has recorded a build
         \\of this result (it was built by an older zbx, or not built here): build it
         \\again. A record is stored, or a provenance signature is present, but no
         \\key the policy lists signed it: sign it, or add the signer's key to the
         \\policy. A listed key signed provenance for another result: run that one.
-        \\A policy that requires provenance cannot be met by an image that is not a
-        \\build result, or a directory given as --rootfs.
+        \\What is to run may not be a build result (a pulled image, a base image of a
+        \\build, a bare tree): only a result built by zbx carries provenance, so a
+        \\policy that requires it cannot be met by one. A directory given as
+        \\--rootfs has no tree to sign and is refused as ZBX-E0905.
         ,
     },
     .{

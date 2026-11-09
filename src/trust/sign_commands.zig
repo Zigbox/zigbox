@@ -436,9 +436,12 @@ fn sign_under_lock(job: *Job, subject: *const Subject, secret: *const Secret) Er
     // A result with a provenance record signs that record, byte for byte; any other subject,
     // and a result built before provenance existed, signs the `sign/v1` statement.
     const stored = try load_provenance(job, subject);
-    if (stored == null and
-        record_mod.signed_already(&ws.record_work, &ws.record, public, &subject.statement))
-    {
+    // A rebuild of an unchanged project rewrites the record with new times, so the same key's
+    // earlier provenance line for this tree and result counts as signed: it still vouches for
+    // the result, and signing every build must not fill the tree's lines (sign-idempotence).
+    var said = subject.statement;
+    if (stored != null) said.kind = .provenance;
+    if (record_mod.signed_already(&ws.record_work, &ws.record, public, &said)) {
         return put_result(job, subject, secret, .present);
     }
     if (known == .absent) try check_room(job);

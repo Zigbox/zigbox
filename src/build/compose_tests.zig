@@ -81,6 +81,7 @@ fn start() void {
         .hits = 0,
         .misses = 0,
         .gate_loaded = false,
+        .records_max = constants.trust_records_max,
     };
     composed.timings = @splat(std.mem.zeroes(compose.Timing));
     key_mod.compute(&.{
@@ -564,6 +565,43 @@ test "build_image: a hit writes the same record but for its times, and a cache w
     again.finished = provenance_work.parsed.finished;
     const rebuilt = provenance.render(&left, &again);
     try testing.expectEqualStrings(rebuilt, provenance.render(&right, &provenance_work.parsed));
+}
+
+test "build_image: a store full of provenance records skips the new one, and keeps replacing" {
+    // Goal: the bound `trust_records_max` on provenance records, at the bound and one past it.
+    // Method: build (one record), lower the bound to three and fill the directory to it: a
+    // rebuild still replaces its record and says nothing. Delete the record and add one more other record:
+    // the store is full, the rebuild succeeds, writes no record and prints the bound.
+    image_started("/etc");
+    try context.build_image();
+    const first = sim.stdout();
+    const at = std.mem.indexOf(u8, first, "built b3:").?;
+    const digest = Digest.parse(first[at + 6 ..][0..constants.store_digest_text_bytes]).?;
+    // The simulated disk cannot hold 4096 files, so the bound is lowered to three records.
+    context.records_max = 3;
+    defer context.records_max = constants.trust_records_max;
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    var filler: Digest = .{ .bytes = @splat(0xee) };
+    for (1..context.records_max) |number| {
+        std.mem.writeInt(u32, filler.bytes[0..4], @intCast(number), .little);
+        try provenance_store.save(&store, filler, "x", &failure);
+    }
+    var errno: u16 = 0;
+    try testing.expectEqual(context.records_max, try provenance_store.count(&store, &errno));
+    sim.stdout_len = 0;
+    sim.stderr_len = 0;
+    try context.build_image();
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try store.fs.unlink(provenance_store.record_path(&store, &path, digest));
+    std.mem.writeInt(u32, filler.bytes[0..4], context.records_max, .little);
+    try provenance_store.save(&store, filler, "x", &failure);
+    sim.stdout_len = 0;
+    try context.build_image();
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "built b3:") != null);
+    try testing.expect(!provenance_store.exists(&store, digest));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "trust_records_max") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "require_provenance") != null);
 }
 
 test "build_image: adds that clash are E0807 naming both, reached through compose" {

@@ -47,6 +47,9 @@ pub const Request = struct {
     tree: Digest,
     result: Digest,
     started: u64,
+    /// How many records the store may hold; `trust_records_max`, lower only in a test (the
+    /// simulated disk cannot hold that many files).
+    records_max: u32,
 };
 
 /// The memory the record and its bytes take.
@@ -74,7 +77,8 @@ pub fn write(
             store_diagnose.cannot_read(diag, request.store, "counting provenance", err, errno);
             return error.Failed;
         };
-        if (held >= constants.trust_records_max) return .full;
+        assert(request.records_max <= constants.trust_records_max);
+        if (held >= request.records_max) return .full;
     }
     var failure: fs_mod.Failure = undefined;
     provenance_store.save(request.store, request.result, payload, &failure) catch |err| {
@@ -147,16 +151,20 @@ fn lock_digest(request: *const Request, diag: *Diag) Error!?[constants.store_dig
     return Digest.of(text).bytes;
 }
 
-/// The BLAKE3 of the running executable; zero where it cannot be read.
+/// The BLAKE3 of the running executable; zero where it cannot be read, or where it is longer
+/// than `package_file_bytes_max` (no `zbx` is).
 fn binary_digest(fs: fs_mod.Fs) [constants.store_digest_bytes]u8 {
     var hasher = digest_mod.Hasher.init();
     const fd = fs.open_read("/proc/self/exe") catch return @splat(0);
     defer fs.close(fd);
     var buffer: [64 * 1024]u8 = undefined;
-    while (true) {
+    comptime assert(constants.package_file_bytes_max % buffer.len == 0);
+    var reads_left: u32 = @divExact(constants.package_file_bytes_max, buffer.len) + 1;
+    while (reads_left > 0) : (reads_left -= 1) {
         const got = fs.read(fd, &buffer) catch return @splat(0);
         if (got == 0) break;
+        assert(got <= buffer.len);
         hasher.update(buffer[0..got]);
-    }
+    } else return @splat(0);
     return hasher.final().bytes;
 }

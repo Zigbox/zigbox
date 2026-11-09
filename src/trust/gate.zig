@@ -196,7 +196,9 @@ pub fn judge_all(
         const met = subject.tree != null and
             verdict.judge(&work.envelope, &loaded.policy, record, have, &report);
         if (met and verdict.provenance_met(&loaded.policy, &report)) continue;
-        if (met or (subject.tree == null and !loaded.policy.require_signature)) {
+        // `met` implies a tree. A directory has no tree to sign, so whatever the policy asks,
+        // it falls through to E0905's no-tree form; E0906 is for a subject that has a tree.
+        if (met) {
             diagnose.provenance_missing(diag, &.{
                 .digest = subject.text,
                 .policy_path = loaded.path.text(),
@@ -217,21 +219,21 @@ pub fn judge_all(
     }
 }
 
-/// Which of E0906's three causes `report` and the store show for `subject`.
+/// Which of E0906's causes `report` and the store show for `subject`, which has a tree.
 fn provenance_cause(
     host: Host,
     subject: Subject,
     report: *const verdict.Report,
 ) diagnose.ProvenanceCause {
+    assert(subject.tree != null);
     const result = switch (subject.binding) {
         .result => |digest| digest,
-        else => return .other_binding,
+        else => return .not_a_result,
     };
-    if (subject.tree == null) return .other_binding;
     if (report.provenance_with(.other_binding)) return .other_binding;
-    if (report.provenance_with(.untrusted_key) or report.provenance_with(.bad_signature)) {
-        return .unsigned;
-    }
+    // A line whose signature fails never reaches `Report.provenance`, so only a key the policy
+    // does not list can make a verifying provenance line count for nothing.
+    if (report.provenance_with(.untrusted_key)) return .unsigned;
     var store: Store = undefined;
     if (!store.locate(host)) return .missing;
     if (layout.read_format(&store) != .ok) return .missing;

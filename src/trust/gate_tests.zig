@@ -158,6 +158,30 @@ test "a directory has no tree to sign, so a signature rule refuses it" {
     try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(subject));
 }
 
+test "require_provenance: a directory is E0905 no-tree, a pulled image is no result" {
+    // Goal: E0906 never prints an empty digest or blames a signed provenance that does not
+    // exist. Method: gate a directory (no tree) under a policy with only require_provenance:
+    // E0905, whose cause names the rule and the directory. Gate a manifest binding and a bare
+    // tree: E0906 whose cause says they are not build results.
+    try start();
+    try write_requiring_provenance("ci");
+    const directory: gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(directory));
+    const cause = last_diag.last_cause().?;
+    const asks = "signed provenance (require_provenance)";
+    try testing.expect(std.mem.indexOf(u8, cause, asks) != null);
+    try testing.expect(std.mem.indexOf(u8, cause, "a directory has no tree to sign") != null);
+    const pulled: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .manifest = @splat(7) },
+        .text = "docker.io/library/alpine@sha256:abc",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(pulled));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "not a build result") != null);
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(tree_subject()));
+    try testing.expect(std.mem.indexOf(u8, last_diag.last_cause().?, "not a build result") != null);
+}
+
 test "a damaged record is E0903, not an unsigned tree" {
     // Goal: damage is never taken for absence. Method: sign, then flip a byte of the record.
     try start();

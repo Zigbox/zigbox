@@ -134,7 +134,7 @@ fn run_provenance(
         }
         return error.Failed;
     };
-    try load_signers(store, ws, diag, bytes);
+    try load_signers(store, ws, diag, digest, bytes);
     const view: provenance_view.View = .{
         .result = digest,
         .record_digest = provenance_store.digest_of(bytes),
@@ -153,8 +153,14 @@ fn run_provenance(
 }
 
 /// Fills `work.signers` from the signature record of the result's tree: each line that is a
-/// signed provenance statement, and whether it signed `stored` itself.
-fn load_signers(store: *Store, ws: *Workspace, diag: *Diag, stored: []const u8) Error!void {
+/// signed provenance statement of the result `digest`, and whether it signed `stored` itself.
+fn load_signers(
+    store: *Store,
+    ws: *Workspace,
+    diag: *Diag,
+    digest: Digest,
+    stored: []const u8,
+) Error!void {
     const work = &ws.provenance;
     work.signers_count = 0;
     var errno: u16 = 0;
@@ -180,6 +186,12 @@ fn load_signers(store: *Store, ws: *Workspace, diag: *Diag, stored: []const u8) 
         const envelope = dsse.parse(&work.record_work.envelope, line) catch continue;
         const head = statement.parse(envelope.payload) catch continue;
         if (head.kind != .provenance) continue;
+        // Another result of the same tree has its own provenance; its signers vouch for that
+        // build, not for this one.
+        switch (head.binding) {
+            .result => |signed| if (!std.mem.eql(u8, &signed, &digest.bytes)) continue,
+            else => continue,
+        }
         work.signers[work.signers_count] = .{
             .public = envelope.public,
             .current = std.mem.eql(u8, envelope.payload, stored),

@@ -167,6 +167,7 @@ pub fn run_steps(
         .hits = 0,
         .misses = 0,
         .gate_loaded = false,
+        .records_max = constants.trust_records_max,
     };
     for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
@@ -303,6 +304,8 @@ pub const Context = struct {
     misses: u32,
     /// The policy files have been read (once per build).
     gate_loaded: bool,
+    /// `trust_records_max`; a test lowers it.
+    records_max: u32,
 
     pub fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
@@ -888,12 +891,19 @@ pub const Context = struct {
             .tree = tree,
             .result = result,
             .started = context.started_s,
+            .records_max = context.records_max,
         };
         const outcome = provenance_job.write(&asked, &ws.provenance, context.diag) catch {
             return error.Failed;
         };
         if (outcome == .written) return;
-        const text = "zbx: the store holds its most provenance records; this result has none\n";
+        // The result is built and usable; only its provenance record is missing, so a run under
+        // `require_provenance` will be refused until room is made.
+        const text = std.fmt.comptimePrint(
+            "zbx: the store holds {d} provenance records, the most it keeps " ++
+                "(trust_records_max), so this result has none and require_provenance refuses it\n",
+            .{constants.trust_records_max},
+        );
         context.host.write_all(.stderr, text) catch {};
     }
 

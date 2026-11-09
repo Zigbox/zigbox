@@ -595,8 +595,11 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
         diag.while_("checking {s} against the policy {s}", .{ digest, path });
     }
     if (what.no_tree) {
-        diag.cause("{s} requires a signature (require_signature) and a directory has no tree " ++
-            "to sign", .{path});
+        const asks = if (what.policy.require_signature)
+            "a signature (require_signature)"
+        else
+            "signed provenance (require_provenance)";
+        diag.cause("{s} requires {s} and a directory has no tree to sign", .{ path, asks });
     } else if (what.report.count == 0) {
         diag.cause("{s} requires a signature (require_signature), and nothing has signed {s}", .{
             path,
@@ -640,9 +643,11 @@ pub const ProvenanceCause = enum {
     /// A record of the build is stored, or a provenance line is present, but no trusted key
     /// has signed it.
     unsigned,
-    /// A trusted key signed a provenance statement, for another result than this run's, or
-    /// the run is not of a build result.
+    /// A trusted key signed a provenance statement, but for another result than this run's.
     other_binding,
+    /// The run is not of a build result (a pulled image, a build base, a tree digest), and only
+    /// a build result carries provenance.
+    not_a_result,
 };
 
 /// What E0906 says about the run it refused.
@@ -681,6 +686,8 @@ pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
         .other_binding => diag.cause(need ++ "the signed provenance is not of {s}", .{
             path, digest,
         }),
+        .not_a_result => diag.cause(need ++ "{s} is not a build result, and only a result " ++
+            "built by zbx carries provenance", .{ path, digest }),
     }
     diag.context("digest", "{s}", .{digest});
     diag.context("policy", "{s}", .{path});
@@ -692,6 +699,9 @@ pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
             .{digest},
         ),
         .other_binding => diag.fix(.{ .sentence = "run the result whose provenance was signed" }),
+        .not_a_result => diag.fix(.{
+            .sentence = "run a result built with zbx build and signed, or lift require_provenance",
+        }),
     }
     assert(diag.code.? == .E0906);
 }

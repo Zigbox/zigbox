@@ -448,6 +448,49 @@ test "a result with a provenance record signs the record's bytes, and one withou
     try testing.expectEqual(@as(u32, 2), (try record_of(tree)).count);
 }
 
+test "signing a rebuilt record again by the same key adds no line, so the tree never fills" {
+    // Goal: an all-hit rebuild rewrites the record with new times, and a CI job that signs after
+    // every build must not fill the tree's lines (docs/decisions/2026-11-08-sign-idempotence.md).
+    // Method: sign, rebuild with new times and sign again, more often than a record holds lines;
+    // the count stays one and no sign is refused.
+    try start(false);
+    const digest = try save_result();
+    const text = digest.text();
+    _ = try save_provenance(digest);
+    for (0..constants.signatures_per_tree_max + 4) |_| {
+        try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+        provenance_record.finished += 1;
+        var failure: fs_mod.Failure = undefined;
+        const later = provenance.render(&provenance_bytes, &provenance_record);
+        try provenance_store.save(&store, digest, later, &failure);
+    }
+    try testing.expectEqual(@as(u32, 1), (try record_of(tree)).count);
+}
+
+test "inspect --provenance lists no signer of another result of the same tree" {
+    // Goal: the signer list is about this result only. Method: two results of one tree (they
+    // differ in a label); only the second has its provenance signed. Inspecting the first shows
+    // no signer, inspecting the second shows one.
+    try start(false);
+    const first = try save_result();
+    var saved: result.Record = undefined;
+    saved.config.clear();
+    saved.config.add_label("name", "second").?;
+    saved.tree = tree;
+    var failure: result.Failure = undefined;
+    const second = try result.save(&store, &saved, &save_buffer, &failure);
+    try testing.expect(!std.mem.eql(u8, &first.bytes, &second.bytes));
+    _ = try save_provenance(first);
+    _ = try save_provenance(second);
+    const text = second.text();
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "inspect", "--provenance", zed(first) }));
+    try testing.expect(!has(sim.stdout(), "this record"));
+    try testing.expect(!has(sim.stdout(), "an earlier build"));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "inspect", "--provenance", zed(second) }));
+    try testing.expect(has(sim.stdout(), "this record"));
+}
+
 test "inspect --provenance shows the record and who signed it, in text and JSON" {
     // Goal: the view. Method: a result with no record is E0005; with one, the text has the
     // result and the step, no signer; after signing the signer is "this record"; a later
