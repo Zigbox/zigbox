@@ -2750,9 +2750,20 @@ fn run_state(
 fn run_sign(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(invocation.command == .sign);
     assert(invocation.sign.operand.len > 0);
-    const output: sign_commands.Output = .{ .json = invocation.options.output == .json };
-    return sign_commands.run(host, &storage.sign, invocation.sign, output, diag) catch
-        return error.CommandFailed;
+    const mode = invocation.options.mode();
+    const output: sign_commands.Output = .{
+        .json = invocation.options.output == .json,
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+    };
+    return sign_commands.run_in_namespace(
+        host,
+        &storage.handle.facts,
+        &storage.sign,
+        invocation.sign,
+        output,
+        diag,
+    ) catch return error.CommandFailed;
 }
 
 /// `zbx policy check [OPERAND]`: the policy files, and the verdict on what `run` would run.
