@@ -753,6 +753,11 @@ pub const Context = struct {
         var warning: Diag = undefined;
         warning.reset();
         diagnose.network_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);
+        context.write_warning(&warning);
+    }
+
+    /// `warning` on stderr in the build's output mode; a stderr that cannot be written loses it.
+    fn write_warning(context: *Context, warning: *const Diag) void {
         const mode: render.Mode = if (context.json)
             .json
         else if (context.verbose)
@@ -761,7 +766,7 @@ pub const Context = struct {
             .text;
         const color = mode != .json and context.host.color_enabled(.stderr);
         var buffer: [constants.output_bytes_max]u8 = undefined;
-        const text = render.render(&warning, mode, color, &buffer);
+        const text = render.render(warning, mode, color, &buffer);
         context.host.write_all(.stderr, text) catch return;
     }
 
@@ -901,12 +906,10 @@ pub const Context = struct {
         if (outcome == .written) return;
         // The result is built and usable; only its provenance record is missing, so a run under
         // `require_provenance` will be refused until room is made.
-        const text = std.fmt.comptimePrint(
-            "zbx: the store holds {d} provenance records, the most it keeps " ++
-                "(trust_records_max), so this result has none and require_provenance refuses it\n",
-            .{constants.trust_records_max},
-        );
-        context.host.write_all(.stderr, text) catch {};
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.provenance_store_full(&warning);
+        context.write_warning(&warning);
     }
 
     /// The adds as the assembly and the key take them: each source is its step's output.

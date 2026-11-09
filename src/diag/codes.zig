@@ -211,6 +211,7 @@ pub const Code = enum(u8) {
     E0907,
     E0910,
     E0911,
+    W0901,
     E1001,
     E1002,
     E1003,
@@ -3265,15 +3266,20 @@ pub const registry = [_]Entry{
         \\when the signature verifies, its key is one the policy lists, and it is
         \\about this tree and bound to the result that is to run.
         \\
-        \\The cause says which of four things is wrong. Nothing has recorded a build
+        \\The cause says which of five things is wrong. Nothing has recorded a build
         \\of this result (it was built by an older zbx, or not built here): build it
         \\again. A record is stored, or a provenance signature is present, but no
         \\key the policy lists signed it: sign it, or add the signer's key to the
         \\policy. A listed key signed provenance for another result: run that one.
-        \\What is to run may not be a build result (a pulled image, a base image of a
-        \\build, a bare tree): only a result built by zbx carries provenance, so a
-        \\policy that requires it cannot be met by one. A directory given as
-        \\--rootfs has no tree to sign and is refused as ZBX-E0905.
+        \\A pulled or pushed image is judged by the result its record derives from its
+        \\tree, settings and labels: a signed provenance of that result covers it,
+        \\and the causes above apply to it. If its record does not keep the labels
+        \\(it was pulled by an older zbx, or they did not fit), no result can be
+        \\derived: pull the image again. What is to run may also be no build result
+        \\(a base image of a build, which never derives one, or a bare tree): only a
+        \\result built by zbx carries provenance, so a policy that requires it cannot
+        \\be met by one. A directory given as --rootfs has no tree to sign and is
+        \\refused as ZBX-E0905.
         ,
     },
     .{
@@ -3359,6 +3365,24 @@ pub const registry = [_]Entry{
         \\guess was.
         \\
         \\A forgotten passphrase is a lost key. There is no recovery: make a new key.
+        ,
+    },
+    .{
+        .code = .W0901,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the provenance store is full, so this result has no provenance record",
+        .explanation =
+        \\The build succeeded and the result is usable. The store keeps at most
+        \\trust_records_max provenance records (4096), and it already holds that
+        \\many, so this result's record was not written. A rebuild of a result
+        \\that has a record replaces it as usual; only a result with no record
+        \\yet is affected.
+        \\
+        \\A policy with require_provenance refuses a run of this result (ZBX-E0906:
+        \\no provenance stored) until there is room for its record. Remove the
+        \\records of results you no longer need from trust/provenance in the
+        \\store, then build again: the build is a cache hit and writes the record.
         ,
     },
     .{
@@ -3820,7 +3844,7 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0901, .E0902, .E0910, .E0911 => false,
+        .E0901, .E0902, .E0910, .E0911, .W0901 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

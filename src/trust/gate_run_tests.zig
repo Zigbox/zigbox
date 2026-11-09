@@ -18,6 +18,8 @@ const images = @import("../store/images.zig");
 const Sha256 = @import("../registry/digest.zig").Sha256;
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
+const provenance = @import("provenance.zig");
+const provenance_store = @import("provenance_store.zig");
 
 const policy_path = "/home/alice/.config/zbx/policy.zon";
 
@@ -197,4 +199,67 @@ test "a pulled image passes require_provenance on the signed result it derives" 
     try refused_as_unsigned();
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "pull the image again") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "bound to another result") == null);
+}
+
+test "a pulled image passes require_provenance on the result built, signed with provenance" {
+    // Goal: slice 4 meets slice 14 end to end through `zbx run`. Method: a policy that requires
+    // provenance; the result has a stored record, signed by the listed key; its image, run by
+    // manifest, passes. With no record stored it is refused as E0906, not as "not a result".
+    try start();
+    const public = try policy_public();
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(
+        &buffer,
+        ".{{ .version = 1, .keys = .{{ .{{ .name = \"ci\", .public = \"{s}\" }} }}, " ++
+            ".require_provenance = true }}",
+        .{public},
+    );
+    files.remove_path(policy_path);
+    files.put_file(policy_path, 0o644, text);
+    const operand = try save_pulled(true);
+    run_of_last = run_of(operand);
+    try testing.expectEqual(@as(u8, 125), run_of_last);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0906") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "has none stored") != null);
+    try save_provenance_of_built();
+    const result_text = terminated(built);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &result_text, "--key", "ci" }));
+    _ = run_of(operand);
+    try passes_gate();
+}
+
+fn policy_public() ![constants.key_public_text_bytes]u8 {
+    var key_failure: key_store.Failure = undefined;
+    var paths: key_store.Paths = undefined;
+    try testing.expect(key_store.locate(sim.interface(), &paths));
+    const fs = sim.interface().filesystem();
+    const pub_file = try key_store.read_pub(fs, &paths, "ci", &key_failure);
+    return key.public_text(pub_file.public);
+}
+
+var provenance_record: provenance.Record = undefined;
+var provenance_bytes: [constants.statement_bytes_max]u8 = undefined;
+
+fn save_provenance_of_built() !void {
+    const filled: provenance.Digest = @splat(0x5a);
+    const made = &provenance_record;
+    made.clear();
+    made.tree = tree.bytes;
+    made.result = built.bytes;
+    made.set_build_file("zbx.build.zon");
+    made.build_file_digest = filled;
+    made.lock = filled;
+    const base = made.add_base("alpine:3.20", filled, filled);
+    const step = made.add_step("compile");
+    step.base = base;
+    step.key = filled;
+    step.input = filled;
+    step.output = filled;
+    made.image_key = filled;
+    made.image_base = base;
+    made.set_version("0.4.0", "linux/amd64");
+    made.zbx = filled;
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    const bytes = provenance.render(&provenance_bytes, made);
+    try provenance_store.save(&store, built, bytes, &failure);
 }

@@ -940,6 +940,21 @@ fn signal_name(number: u8) []const u8 {
     return name;
 }
 
+/// `W0901`: the provenance store holds `trust_records_max` records, so the result just built has
+/// none. The build succeeded; a policy with `require_provenance` refuses this result.
+pub fn provenance_store_full(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.W0901);
+    diag.while_("recording the provenance of the result", .{});
+    diag.cause(
+        "the store holds {d} provenance records, the most it keeps (trust_records_max), so " ++
+            "this result has none and require_provenance refuses it",
+        .{constants.trust_records_max},
+    );
+    diag.fix(.{ .sentence = "remove records of results you no longer need, then build again" });
+    assert(diag.code.? == .W0901);
+}
+
 /// The start of W0801's last cause; the names follow it, so they have the field less this.
 pub const network_label = "steps that use the network: ";
 

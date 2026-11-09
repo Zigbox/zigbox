@@ -600,6 +600,7 @@ test "build_image: a store full of provenance records skips the new one, and kee
     try context.build_image();
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "built b3:") != null);
     try testing.expect(!provenance_store.exists(&store, digest));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-W0901") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "trust_records_max") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "require_provenance") != null);
 }

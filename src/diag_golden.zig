@@ -725,6 +725,13 @@ const key_cases = [_]Case{
     .{ .code = .E0907, .args = &.{}, .direct = run_tampered, .exit = 2 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
+    .{
+        .code = .W0901,
+        .args = &.{},
+        .direct = build_provenance_store_full,
+        .warning = true,
+        .exit = 0,
+    },
 };
 
 /// E0903 and E0910 come from `zbx sign`, whose records and trees take a signed store to set up:
@@ -2329,6 +2336,10 @@ fn build_output_refused(diag: *Diag) void {
 fn build_tag_not_recorded(diag: *Diag) void {
     const failure: @import("store/fs.zig").Failure = .{ .err = error.NoSpace, .errno = 28 };
     push_diagnose.tag_not_recorded(diag, "registry.test/app:1.0", failure);
+}
+
+fn build_provenance_store_full(diag: *Diag) void {
+    @import("build/diagnose.zig").provenance_store_full(diag);
 }
 
 fn build_tree_annotation_differs(diag: *Diag) void {

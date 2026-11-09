@@ -638,7 +638,7 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
     assert(diag.code.? == .E0905);
 }
 
-/// Why E0906: the three ways a policy's `require_provenance` is not met.
+/// Why E0906: the ways a policy's `require_provenance` is not met.
 pub const ProvenanceCause = enum {
     /// No provenance statement is signed for the tree, and none is stored.
     missing,
@@ -647,9 +647,12 @@ pub const ProvenanceCause = enum {
     unsigned,
     /// A trusted key signed a provenance statement, but for another result than this run's.
     other_binding,
-    /// The run is not of a build result (a pulled image, a build base, a tree digest), and only
-    /// a build result carries provenance.
+    /// The run is not of a build result or of an image that derives one (a build step's base, a
+    /// tree digest), and only a build result carries provenance.
     not_a_result,
+    /// The run is of an image whose record does not keep the labels its derived result needs
+    /// (slice 14), so whether provenance covers it cannot be checked.
+    not_derived,
 };
 
 /// What E0906 says about the run it refused.
@@ -690,6 +693,8 @@ pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
         }),
         .not_a_result => diag.cause(need ++ "{s} is not a build result, and only a result " ++
             "built by zbx carries provenance", .{ path, digest }),
+        .not_derived => diag.cause(need ++ "{s} is an image whose record does not keep its " ++
+            "labels, so the result it was made from cannot be checked", .{ path, digest }),
     }
     diag.context("digest", "{s}", .{digest});
     diag.context("policy", "{s}", .{path});
@@ -704,6 +709,7 @@ pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
         .not_a_result => diag.fix(.{
             .sentence = "run a result built with zbx build and signed, or lift require_provenance",
         }),
+        .not_derived => diag.fix(.{ .sentence = "pull the image again" }),
     }
     assert(diag.code.? == .E0906);
 }
