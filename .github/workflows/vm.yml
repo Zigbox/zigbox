@@ -104,9 +104,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tree"
           printf 'zbx push to ghcr, run %s\n' "$GITHUB_RUN_ID" > "$RUNNER_TEMP/tree/hello.txt"
           ref="ghcr.io/zigbox/zigbox-demo:$GITHUB_RUN_ID"
-          digest=$(./zig-out/bin/zbx --verbose store import "$RUNNER_TEMP/tree")
+          digest=$(./zig-out/bin/zbx store import "$RUNNER_TEMP/tree")
           printf '%s' "$ZBX_PUSH_TOKEN" |
-            ./zig-out/bin/zbx --verbose push --username "$ZBX_PUSH_USER" --password-stdin \
+            ./zig-out/bin/zbx push --username "$ZBX_PUSH_USER" --password-stdin \
               "$digest" "$ref"
       # Not on cancel: a newer push to the branch superseded this run and still needs the branch.
       - name: Delete the scratch branch
