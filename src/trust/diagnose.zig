@@ -294,6 +294,57 @@ pub const Refusal = enum {
     store_full,
 };
 
+/// What differs in the file the tamper check found.
+pub const Tampered = enum { bytes, mode, owner, missing, unreadable, too_large };
+
+/// ZBX-E0907: a file object of the tree to run no longer matches its name. `path` is the file's
+/// path in the image (empty if it was not found), `object` the object's hex id.
+pub fn tampered(
+    diag: *Diag,
+    path: []const u8,
+    object: []const u8,
+    what: Tampered,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(errno < 4096);
+    assert(object.len > 0);
+    var path_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const path_echo = echo_of(&path_storage, if (path.len > 0) path else "(unnamed)");
+    const short = object[0..@min(object.len, 12)];
+    diag.raise(.E0907);
+    diag.while_("checking the files of the image before running it", .{});
+    switch (what) {
+        .bytes => diag.cause(
+            "{s} (object {s}) has bytes that are not the image's",
+            .{ path_echo, short },
+        ),
+        .mode => diag.cause(
+            "{s} (object {s}) has a mode that is not the image's",
+            .{ path_echo, short },
+        ),
+        .owner => diag.cause(
+            "{s} (object {s}) has an owner that is not the image's",
+            .{ path_echo, short },
+        ),
+        .too_large => diag.cause("the image has more files than zbx checks", .{}),
+        .missing => diag.cause("{s} (object {s}) is missing from the store", .{ path_echo, short }),
+        .unreadable => if (errno == 0) {
+            diag.cause("{s} (object {s}) could not be read", .{ path_echo, short });
+        } else {
+            const err = host_mod.error_for_errno(errno);
+            errors.cause_host_error(diag, "reading a file of the image", err, errno);
+        },
+    }
+    diag.context("path", "{s}", .{path_echo});
+    diag.context("object", "{s}", .{short});
+    diag.fix(.{
+        .sentence = "remove the damaged tree and pull or build it again; this shows the damage:",
+        .command = "zbx store verify",
+    });
+    assert(diag.code.? == .E0907);
+}
+
 /// ZBX-E0910: signing was refused, and nothing was written. `operand` is what was named.
 pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u16) void {
     assert(diag.code == null);

@@ -719,6 +719,7 @@ const key_cases = [_]Case{
     .{ .code = .E0903, .args = &.{}, .direct = record_damaged, .exit = 1 },
     .{ .code = .E0904, .args = &.{}, .direct = policy_unreadable, .exit = 1 },
     .{ .code = .E0905, .args = &.{}, .direct = run_unsigned, .exit = 1 },
+    .{ .code = .E0907, .args = &.{}, .direct = run_tampered, .exit = 2 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
 };
@@ -749,6 +750,10 @@ fn policy_unreadable(diag: *Diag) void {
     } };
     @memcpy(fault.problem.detail[0..5], "extra");
     trust_diagnose.policy_unusable(diag, golden_policy_path, fault);
+}
+
+fn run_tampered(diag: *Diag) void {
+    trust_diagnose.tampered(diag, "/usr/bin/tool", "0123456789abcdef0123", .bytes, 0);
 }
 
 fn run_unsigned(diag: *Diag) void {

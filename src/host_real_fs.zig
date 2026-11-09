@@ -136,6 +136,7 @@ fn stat_at(dir: i32, path: [:0]const u8, flags: u32) host.Error!fs.Stat {
 
 /// The inode change time in nanoseconds, or zero when the kernel did not give it.
 fn ctime_ns_of(buffer: *const linux.Statx) u64 {
+    assert(@intFromPtr(buffer) != 0);
     if (!buffer.mask.CTIME or buffer.ctime.sec <= 0) return 0;
     assert(buffer.ctime.nsec < 1_000_000_000);
     const seconds: u64 = @intCast(buffer.ctime.sec);

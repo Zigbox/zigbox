@@ -35,6 +35,8 @@ const policy_commands = @import("trust/policy_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
 const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
+const trust_tamper = @import("trust/tamper.zig");
+const layout_mod = @import("store/layout.zig");
 const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
@@ -2399,6 +2401,10 @@ pub const Storage = struct {
     sign: sign_commands.Workspace,
     /// The policy gate before a run: the policy files read.
     gate: trust_gate.Memory,
+    /// The tamper check of a run under a policy file (`trust/tamper.zig`).
+    tamper: trust_tamper.Workspace,
+    tamper_on: bool,
+    tamper_always: bool,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings.
@@ -2998,6 +3004,42 @@ fn check_policy(
     trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
         return error.StartFailed;
     };
+    // Any policy file at all asks for the tamper check, whatever it requires (the strictest
+    // `verify` of them wins); with none there is no check.
+    storage.tamper_on = storage.gate.count > 0;
+    storage.tamper_always = false;
+    for (storage.gate.files[0..storage.gate.count]) |*loaded| {
+        if (loaded.policy.verify == .always) storage.tamper_always = true;
+    }
+}
+
+/// The check the store's child makes of the tree before it starts, or none.
+fn tree_check_of(storage: *Storage) ?image_mod.Check {
+    assert(@intFromPtr(storage) != 0);
+    assert(storage.gate.count <= constants.policy_files_max);
+    if (!storage.tamper_on) return null;
+    return .{ .context = storage, .call = tamper_call };
+}
+
+fn tamper_call(
+    context: *anyopaque,
+    store: *layout_mod.Store,
+    tree: digest_prefix.Digest,
+    diag: *Diag,
+) bool {
+    const storage: *Storage = @ptrCast(@alignCast(context));
+    assert(storage.tamper_on);
+    assert(tree.bytes.len == constants.store_digest_bytes);
+    const sign = &storage.sign;
+    const lent: trust_tamper.Lent = .{
+        .scratch = &sign.verify.scratch,
+        .tree_buffer = &sign.tree_buffer,
+        .stack = &sign.stack,
+    };
+    trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
+        return false;
+    };
+    return true;
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
@@ -3019,6 +3061,7 @@ fn run_foreground(
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
         .image_workspace = &storage.image,
+        .tree_check = tree_check_of(storage),
         .mirror = true,
     };
     const handle = &storage.handle;
@@ -3300,6 +3343,7 @@ fn supervise(
         .grace_ms = times.grace_ms,
         .detached = true,
         .image_workspace = &storage.image,
+        .tree_check = tree_check_of(storage),
     };
     var diag: Diag = undefined;
     diag.reset();

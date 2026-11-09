@@ -198,6 +198,7 @@ pub const Code = enum(u8) {
     E0903,
     E0904,
     E0905,
+    E0907,
     E0910,
     E0911,
     E1001,
@@ -3066,6 +3067,32 @@ pub const registry = [_]Entry{
         \\<digest>" shows the same verdict without running anything. A directory
         \\given as --rootfs has no tree and cannot be signed, so a policy that
         \\requires a signature refuses it.
+        ,
+    },
+    .{
+        .code = .E0907,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file of the image in the store was changed",
+        .explanation =
+        \\Before it starts anything, a run under a policy file checks that the
+        \\files of its image are the ones the image names: every file object the
+        \\tree reaches is hashed again, its bytes, mode, owner and attributes, and
+        \\compared with its name. A signature vouches for a tree's digest, so it
+        \\means something only if the files in the store still match it. Nothing
+        \\was started.
+        \\
+        \\The cause names the first file that differs, by its path in the image, and
+        \\says what differs: its bytes, its mode or its owner. The first checked run
+        \\of a tree hashes all of it and records what it saw in trust/verified in
+        \\the store; later runs look at each file's inode, size and change time and
+        \\hash again only a file that changed. The record is a cache, never trusted:
+        \\a damaged one is ignored and rewritten. verify = "always" in the policy
+        \\file hashes every file every run. A run with no policy file does no check.
+        \\
+        \\Run "zbx store verify" to see everything that is damaged, then remove the
+        \\damaged tree and pull or build it again. A file changed between the check
+        \\and the start of the container is not seen.
         ,
     },
     .{
