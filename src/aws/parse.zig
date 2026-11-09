@@ -162,7 +162,8 @@ fn digits(text: []const u8) ?u64 {
 /// Days from 1970-01-01 to a civil date (Howard Hinnant's algorithm), for dates from 1970 on.
 fn days_from_civil(year: u64, month: u64, day: u64) u64 {
     assert(year >= 1970);
-    assert(month >= 1 and month <= 12);
+    assert(month >= 1);
+    assert(month <= 12);
     const shifted_year = if (month <= 2) year - 1 else year;
     const era = shifted_year / 400;
     const year_of_era = shifted_year - era * 400;
@@ -201,7 +202,12 @@ pub fn parse_imds(body: []const u8) Error!Credentials {
     return checked(key_id, secret, token, expiry);
 }
 
-fn checked(key_id: []const u8, secret: []const u8, token: []const u8, expiry: []const u8) Error!Credentials {
+fn checked(
+    key_id: []const u8,
+    secret: []const u8,
+    token: []const u8,
+    expiry: []const u8,
+) Error!Credentials {
     if (!key_id_valid(key_id)) return error.Malformed;
     if (!secret_valid(secret)) return error.Malformed;
     if (!token_valid(token)) return error.Malformed;
