@@ -1266,6 +1266,7 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
 /// The registry holds the image but this host's store could not record the tag (W0552).
 fn warn_tag_not_recorded(job: *const Job, pushed: *const push_run.Pushed) void {
     const failure = pushed.record_failure orelse return;
+    assert(pushed.destination_text().len > 0);
     var warning: Diag = undefined;
     warning.reset();
     push_diagnose.tag_not_recorded(&warning, pushed.destination_text(), failure);

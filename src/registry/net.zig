@@ -65,17 +65,22 @@ pub const Method = enum {
     put,
 
     pub fn text(method: Method) []const u8 {
-        return switch (method) {
+        const name: []const u8 = switch (method) {
             .get => "GET",
             .head => "HEAD",
             .post => "POST",
             .patch => "PATCH",
             .put => "PUT",
         };
+        assert(name.len >= 3);
+        assert(name.len <= 5);
+        return name;
     }
 
     pub fn has_body(method: Method) bool {
-        return method != .get and method != .head;
+        const result = method != .get and method != .head;
+        if (result) assert(method != .head);
+        return result;
     }
 };
 

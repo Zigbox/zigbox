@@ -1226,5 +1226,7 @@ test "an upload goes over TCP: open, a piece with its range, the close, the mani
 fn path_of(location: []const u8) []const u8 {
     const scheme = std.mem.indexOf(u8, location, "://") orelse return location;
     const slash = std.mem.indexOfScalarPos(u8, location, scheme + 3, '/') orelse return location;
+    assert(slash >= scheme + 3);
+    assert(location[slash] == '/');
     return location[slash..];
 }
