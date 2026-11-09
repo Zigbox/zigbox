@@ -110,33 +110,37 @@ test "environment credentials are used as given, with no network call" {
 // used, and never replaced by another identity (web identity or the instance role).
 test "an incomplete or malformed environment pair is terminal" {
     const long_token: [constants.aws_session_token_bytes_max + 1]u8 = @splat('t');
-    const key = credentials_mod.Env.Pair{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" };
+    const Pair = credentials_mod.Env.Pair;
+    const key = Pair{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" };
+    const spaced = Pair{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIA EXAMPLE EXAMPLE" };
+    const short = Pair{ .name = "AWS_ACCESS_KEY_ID", .value = "SHORT" };
+    const dirty = Pair{ .name = "AWS_SECRET_ACCESS_KEY", .value = "wJalrXUtnFEMI/K7MDENG\n" };
+    const big = Pair{ .name = "AWS_SESSION_TOKEN", .value = &long_token };
     const secret = credentials_mod.Env.Pair{
         .name = "AWS_SECRET_ACCESS_KEY",
         .value = aws_sim.issued_secret,
     };
-    const cases = [_]struct { pairs: []const credentials_mod.Env.Pair, state: credentials_mod.State }{
+    const Case = struct { pairs: []const Pair, state: credentials_mod.State };
+    const cases = [_]Case{
         .{ .pairs = &.{key}, .state = .incomplete },
         .{ .pairs = &.{secret}, .state = .incomplete },
         .{
             .pairs = &.{ .{ .name = "AWS_SESSION_TOKEN", .value = aws_sim.issued_token }, key },
             .state = .incomplete,
         },
-        .{ .pairs = &.{ .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIA EXAMPLE EXAMPLE" }, secret }, .state = .malformed },
-        .{ .pairs = &.{ .{ .name = "AWS_ACCESS_KEY_ID", .value = "SHORT" }, secret }, .state = .malformed },
-        .{
-            .pairs = &.{ .{ .name = "AWS_SECRET_ACCESS_KEY", .value = "wJalrXUtnFEMI/K7MDENG\n" }, key },
-            .state = .malformed,
-        },
+        .{ .pairs = &.{ spaced, secret }, .state = .malformed },
+        .{ .pairs = &.{ short, secret }, .state = .malformed },
+        .{ .pairs = &.{ dirty, key }, .state = .malformed },
         // A token over its bound is refused with a reason, not dropped.
-        .{ .pairs = &.{ key, secret, .{ .name = "AWS_SESSION_TOKEN", .value = &long_token } }, .state = .malformed },
+        .{ .pairs = &.{ key, secret, big }, .state = .malformed },
     };
     for (cases) |case| {
         // Web identity is configured and the metadata service is there: neither is reached.
         const fixture = try Fixture.create(2, &.{token_file}, &web_env);
         defer fixture.destroy();
         fixture.aws.imds = .v2;
-        try testing.expectError(error.NoCredentials, fixture.resolve_with(.{ .pairs = case.pairs }));
+        const env: credentials_mod.Env = .{ .pairs = case.pairs };
+        try testing.expectError(error.NoCredentials, fixture.resolve_with(env));
         try testing.expectEqual(case.state, fixture.trace.environment);
         try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.web_identity);
         try testing.expectEqual(@as(u32, 0), fixture.wire.requests);

@@ -129,8 +129,12 @@ pub const Env = struct {
 
     fn value_limit(name: []const u8) u32 {
         if (std.mem.eql(u8, name, "AWS_ACCESS_KEY_ID")) return constants.aws_key_id_bytes_max;
-        if (std.mem.eql(u8, name, "AWS_SECRET_ACCESS_KEY")) return constants.aws_secret_key_bytes_max;
-        if (std.mem.eql(u8, name, "AWS_SESSION_TOKEN")) return constants.aws_session_token_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_SECRET_ACCESS_KEY")) {
+            return constants.aws_secret_key_bytes_max;
+        }
+        if (std.mem.eql(u8, name, "AWS_SESSION_TOKEN")) {
+            return constants.aws_session_token_bytes_max;
+        }
         if (std.mem.eql(u8, name, "AWS_ROLE_ARN")) return constants.aws_role_arn_bytes_max;
         if (std.mem.eql(u8, name, "AWS_WEB_IDENTITY_TOKEN_FILE")) return constants.path_bytes_max;
         if (std.mem.eql(u8, name, "AWS_ROLE_SESSION_NAME")) {
@@ -294,6 +298,23 @@ fn read_token(host: host_mod.Host, path: []const u8, buffer: []u8) ?[]const u8 {
     return token;
 }
 
+fn build_form(
+    workspace: *Workspace,
+    role: []const u8,
+    session_name: []const u8,
+    token: []const u8,
+) ?[]const u8 {
+    var form: sigv4.Writer = .{ .buffer = &workspace.request_body };
+    form.put("Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=");
+    sigv4.put_encoded(&form, role, false, false);
+    form.put("&RoleSessionName=");
+    sigv4.put_encoded(&form, session_name, false, false);
+    form.put("&WebIdentityToken=");
+    sigv4.put_encoded(&form, token, false, false);
+    if (form.overflow) return null;
+    return form.text();
+}
+
 fn web_identity(
     host: host_mod.Host,
     env: Env,
@@ -322,21 +343,14 @@ fn web_identity(
         trace.web_identity = .unreadable;
         return;
     };
-    var form: sigv4.Writer = .{ .buffer = &workspace.request_body };
-    form.put("Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=");
-    sigv4.put_encoded(&form, role.?, false, false);
-    form.put("&RoleSessionName=");
-    sigv4.put_encoded(&form, session_name, false, false);
-    form.put("&WebIdentityToken=");
-    sigv4.put_encoded(&form, token, false, false);
-    if (form.overflow) {
+    const body = build_form(workspace, role.?, session_name, token) orelse {
         trace.web_identity = .malformed;
         return;
-    }
+    };
     var host_buffer: [constants.aws_service_bytes_max + constants.aws_region_bytes_max + 15]u8 =
         undefined;
     const sts_host = ecr.service_host(&host_buffer, sts_service, region);
-    var source: net.SliceSource = .{ .bytes = form.text() };
+    var source: net.SliceSource = .{ .bytes = body };
     var sink: net.BufferSink = .{ .buffer = &workspace.response };
     var head: net.Head = .{};
     const request: net.Request = .{

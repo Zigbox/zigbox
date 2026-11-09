@@ -20,6 +20,23 @@ const Caller = struct {
     credentials: zigbox.AwsCredentials,
     trace: zigbox.AwsTrace,
     received: [1024]u8,
+
+    fn resolve(
+        caller: *Caller,
+        pairs: []const zigbox.AwsEnv.Pair,
+        region: []const u8,
+        now: u64,
+    ) !void {
+        try zigbox.aws_credentials_resolve(
+            caller.host.interface(),
+            .{ .pairs = pairs },
+            region,
+            now,
+            &caller.workspace,
+            &caller.credentials,
+            &caller.trace,
+        );
+    }
 };
 
 test "a second caller resolves from its own environment, region and clock" {
@@ -49,46 +66,25 @@ test "a second caller resolves from its own environment, region and clock" {
         .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIACALLERONEAAAA1" },
         .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
     };
-    try zigbox.aws_credentials_resolve(
-        callers[0].host.interface(),
-        .{ .pairs = &keys },
-        "eu-west-1",
-        callers[0].host.world.now,
-        &callers[0].workspace,
-        &callers[0].credentials,
-        &callers[0].trace,
-    );
-    try testing.expectEqualStrings("AKIACALLERONEAAAA1", callers[0].credentials.key().access_key_id);
+    try callers[0].resolve(&keys, "eu-west-1", callers[0].host.world.now);
+    const first_key = callers[0].credentials.key();
+    try testing.expectEqualStrings("AKIACALLERONEAAAA1", first_key.access_key_id);
     try testing.expectEqual(@as(u32, 0), callers[0].wire.requests);
     const web = [_]zigbox.AwsEnv.Pair{
         .{ .name = "AWS_ROLE_ARN", .value = "arn:aws:iam::123456789012:role/other" },
         .{ .name = "AWS_WEB_IDENTITY_TOKEN_FILE", .value = token_path },
     };
     callers[1].aws.region = "ap-southeast-2";
-    try zigbox.aws_credentials_resolve(
-        callers[1].host.interface(),
-        .{ .pairs = &web },
-        "ap-southeast-2",
-        callers[1].host.world.now,
-        &callers[1].workspace,
-        &callers[1].credentials,
-        &callers[1].trace,
-    );
-    try testing.expectEqual(zigbox.aws_credentials.Source.web_identity, callers[1].credentials.source);
+    try callers[1].resolve(&web, "ap-southeast-2", callers[1].host.world.now);
+    const web_identity = zigbox.aws_credentials.Source.web_identity;
+    try testing.expectEqual(web_identity, callers[1].credentials.source);
     const logged = callers[1].wire.logged(0).?;
     try testing.expectEqualStrings("sts.ap-southeast-2.amazonaws.com", logged.host_text());
     // The first caller's keys are untouched by the second's resolve.
-    try testing.expectEqualStrings("AKIACALLERONEAAAA1", callers[0].credentials.key().access_key_id);
+    const again = callers[0].credentials.key();
+    try testing.expectEqualStrings("AKIACALLERONEAAAA1", again.access_key_id);
     // The clock is the caller's: a clock far in the future finds the answer out of date.
     const far = callers[1].host.world.now + 10 * 3600;
-    try testing.expectError(error.NoCredentials, zigbox.aws_credentials_resolve(
-        callers[1].host.interface(),
-        .{ .pairs = &web },
-        "ap-southeast-2",
-        far,
-        &callers[1].workspace,
-        &callers[1].credentials,
-        &callers[1].trace,
-    ));
+    try testing.expectError(error.NoCredentials, callers[1].resolve(&web, "ap-southeast-2", far));
     try testing.expectEqual(zigbox.aws_credentials.State.expired, callers[1].trace.web_identity);
 }

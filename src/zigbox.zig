@@ -130,9 +130,9 @@ pub const pull = @import("pull.zig");
 /// credentials, trace)` finds the credentials a call in `region` runs with: the environment the
 /// caller passes as an `AwsEnv` view (never the process's own), web identity, then the instance
 /// metadata service (version 2 only). It knows nothing of pulls: ECR pull and push both call it.
-/// The caller owns the `AwsWorkspace` (about 75 KiB) and the `AwsCredentials`, wipes both when done,
-/// and reads the `AwsTrace` to say why nothing was found. Nothing is cached or written. Where the
-/// brief's `diag` is a `Trace` here: the diagnostics are registered with the ECR client.
+/// The caller owns the `AwsWorkspace` (about 75 KiB) and the `AwsCredentials`, wipes both when
+/// done, and reads the `AwsTrace` to say why nothing was found. Nothing is cached or written.
+/// Where the brief's `diag` is a `Trace` here: the diagnostics are registered with the ECR client.
 pub const aws_credentials = @import("aws/credentials.zig");
 pub const aws_credentials_resolve = aws_credentials.resolve;
 pub const AwsEnv = aws_credentials.Env;

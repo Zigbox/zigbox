@@ -164,7 +164,10 @@ test "region validity at its boundaries" {
     try std.testing.expect(!valid_region("us--east-1"));
     try std.testing.expect(!valid_region("-us-east-1"));
     try std.testing.expect(!valid_region("us-east-1-"));
-    for ([_][]const u8{ "us-gov-west-1", "us-gov-east-1", "us-isob-east-1", "eu-isoe-west-1" }) |other| {
+    const others = [_][]const u8{
+        "us-gov-west-1", "us-gov-east-1", "us-isob-east-1", "eu-isoe-west-1",
+    };
+    for (others) |other| {
         try std.testing.expect(!valid_region(other));
     }
     const gov = "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com";
