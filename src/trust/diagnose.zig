@@ -552,6 +552,8 @@ pub fn reason_text(reason: verdict.Reason) []const u8 {
         .other_tree => "it is about another tree",
         .other_predicate => "it says something this zbx does not know",
         .other_binding => "it is bound to another result or image than this run's",
+        .not_derived => "it is bound to a result, and this image's record does not keep its " ++
+            "labels, so the result it was made from cannot be checked; pull the image again",
     };
 }
 

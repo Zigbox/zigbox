@@ -167,6 +167,7 @@ pub const Code = enum(u8) {
     W0502,
     W0503,
     W0504,
+    W0551,
     W0552,
     E0600,
     E0601,
@@ -2561,6 +2562,29 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .W0551,
+        .severity = .warning,
+        .blame = .external,
+        .summary = "the image's tree annotation is not the tree its layers unpack to",
+        .explanation =
+        \\A manifest pushed by zbx carries an `org.zigbox.tree` annotation: the tree
+        \\digest of the image as it was packed. This image's layers unpacked to a
+        \\different tree. The image was pulled and recorded all the same.
+        \\
+        \\The usual cause is benign: the same layers unpack to a different tree on a
+        \\host with another id mapping (a full subuid range on the pusher's host, a
+        \\single id on this one). Compare the id mode "zbx doctor" reports on both
+        \\hosts. If they differ, nothing is wrong. If they match, the annotation is
+        \\wrong, or the layers are not the ones the pusher packed.
+        \\
+        \\Nothing trusts the annotation: a policy judges the tree this pull made, and
+        \\a signature counts only if it names that tree. A signature made for the
+        \\annotated tree therefore does not cover this image. If you expected it to,
+        \\do not rely on it: ask whoever pushed the image, and sign the tree this pull
+        \\made only if you have checked it yourself.
+        ,
+    },
+    .{
         .code = .W0552,
         .severity = .warning,
         .blame = .environment,
@@ -3766,7 +3790,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0552 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0901, .E0902, .E0910, .E0911 => false,
         .E1006, .E1007 => false,

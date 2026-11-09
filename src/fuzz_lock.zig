@@ -154,6 +154,7 @@ fn fill_image(random: std.Random) void {
     image.layer_count = random.uintAtMost(u32, 4);
     for (image.layers[0..image.layer_count]) |*layer| layer.* = random_manifest(random);
     image.settings.clear();
+    image.labels.clear();
     const lists = [_]images.Settings.List{ .entrypoint, .cmd, .env };
     for (lists) |list| {
         for (0..random.uintAtMost(u32, 6)) |_| {
@@ -164,6 +165,29 @@ fn fill_image(random: std.Random) void {
     }
     _ = image.settings.set(.workdir, if (random.boolean()) "" else "/srv/app");
     _ = image.settings.set(.user, if (random.boolean()) "" else "app:staff");
+    fill_labels(random);
+}
+
+/// Labels: none, some in any order (the record keeps them sorted), or unknown.
+fn fill_labels(random: std.Random) void {
+    image.labels.clear();
+    const names = [_][]const u8{ "org.zigbox.tree", "a", "b.c", "quote\"", "z" };
+    const texts = [_][]const u8{ "", "v", "two words", "back\\slash", "\"" };
+    for (0..random.uintAtMost(u32, 5)) |_| {
+        const name = names[random.uintLessThan(usize, names.len)];
+        _ = image.labels.add(name, texts[random.uintLessThan(usize, texts.len)]);
+    }
+    if (random.uintLessThan(u32, 8) == 0) image.labels.forget();
+}
+
+fn same_labels(one: *const images.Labels, other: *const images.Labels) bool {
+    if (one.known != other.known or one.count() != other.count()) return false;
+    for (0..one.count()) |index| {
+        const at: u32 = @intCast(index);
+        if (!std.mem.eql(u8, one.key(at), other.key(at))) return false;
+        if (!std.mem.eql(u8, one.value(at), other.value(at))) return false;
+    }
+    return true;
 }
 
 fn same_tags(one: *const images.Image, other: *const images.Image) bool {
@@ -179,7 +203,7 @@ fn same_tags(one: *const images.Image, other: *const images.Image) bool {
 /// with exactly one tag.
 fn as_version_one(written: []const u8, out: []u8) []const u8 {
     assert(image.tag_count == 1);
-    const version_at = std.mem.indexOf(u8, written, "version = 2").?;
+    const version_at = std.mem.indexOf(u8, written, "version = 3").?;
     const tags_at = std.mem.indexOf(u8, written, ".tags = ").?;
     assert(version_at < tags_at);
     var length: usize = 0;
@@ -217,6 +241,7 @@ fn fuzz_record_text(random: std.Random) void {
     // 1. Written and read back, settings in order.
     assert(images.parse(written, &back) == .ok);
     assert(same_settings(&image.settings, &back.settings));
+    assert(same_labels(&image.labels, &back.labels));
     assert(back.layer_count == image.layer_count);
     assert(back.tree.eql(image.tree));
     assert(same_tags(&image, &back));
@@ -224,10 +249,12 @@ fn fuzz_record_text(random: std.Random) void {
     var rewritten: [constants.image_record_bytes_max]u8 = undefined;
     assert(std.mem.eql(u8, written, images.render(&back, &rewritten)));
     // 5. M4's version 1 reads as the one tag, and is written as version 2.
-    if (image.tag_count == 1) {
+    if (image.tag_count == 1 and image.labels.known and image.labels.count() == 0) {
         const old = as_version_one(written, &record_damaged);
         assert(images.parse(old, &back) == .ok);
         assert(same_tags(&image, &back));
+        assert(!back.labels.known); // An old record has none to derive from.
+        back.labels.clear();
         assert(std.mem.eql(u8, written, images.render(&back, &rewritten)));
     }
     // 3. Damaged text: never a crash; if it reads, it writes and reads again the same.
@@ -238,6 +265,7 @@ fn fuzz_record_text(random: std.Random) void {
         const out = images.render(&copy, &rewritten);
         assert(images.parse(out, &back) == .ok);
         assert(same_settings(&copy.settings, &back.settings));
+        assert(same_labels(&copy.labels, &back.labels));
         assert(same_tags(&copy, &back));
     }
 }

@@ -763,6 +763,11 @@ pub const image_record_bytes_max: u32 = 80 * 1024;
 /// all their strings together, and the words of each list. An image with more is refused.
 pub const image_settings_bytes_max: u32 = 6 * 1024;
 pub const image_settings_words_max: u32 = 48;
+/// The labels an image record keeps, so that the result a pushed image was made from can be
+/// derived again (M8 slice 14): the bytes of all keys and values together, and the labels. An
+/// image with more keeps none, and says so (`.labels_unknown`); it is never refused for them.
+pub const image_labels_bytes_max: u32 = 2 * 1024;
+pub const image_labels_count_max: u32 = 32;
 /// The tags an image record keeps: every reference the image was pulled as. When it is full, the
 /// oldest goes.
 pub const image_tags_max: u32 = 8;
@@ -1350,8 +1355,13 @@ comptime {
     assert(diag_carry_bytes_max <= std.math.maxInt(u16));
     assert(image_tags_max > 0);
     // A record holds the tags escaped, 128 layer lines of 90 bytes and the settings escaped.
+    // And its labels: two lines a label, each key and value escaped four bytes a byte.
     assert(image_tags_max * (reference_bytes_max * 4 + 16) + registry_layers_max * 90 +
-        image_settings_bytes_max * 4 + 2048 <= image_record_bytes_max);
+        image_settings_bytes_max * 4 + image_labels_bytes_max * 4 +
+        image_labels_count_max * 40 + 2048 <= image_record_bytes_max);
+    // A label of a result is a label of an image only while both bounds agree on the count.
+    assert(image_labels_count_max == build_config_labels_max);
+    assert(image_labels_bytes_max <= build_result_label_bytes_max);
 
     assert(fuzz_iterations_default > 0);
     assert(fuzz_iterations_default <= fuzz_iterations_max);

@@ -520,6 +520,7 @@ test "store writes done in the child are in the store the parent reads afterward
     image.time = 1;
     image.layer_count = 0;
     image.settings.clear();
+    image.labels.clear();
     var text: [constants.image_record_bytes_max]u8 = undefined;
     var job: StoreWork = .{
         .store = &store,

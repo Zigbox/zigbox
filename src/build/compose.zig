@@ -406,6 +406,8 @@ pub const Context = struct {
         const entry = ws.locking.lock.entries[ws.locking.lock.find(reference).?];
         var text: [constants.oci_digest_text_bytes + 129]u8 = undefined;
         const shown = base_text(&text, reference, entry.manifest);
+        // A base derives nothing (M8 slice 14 cut): its labels are not in the base's record, so
+        // only a tree-only or manifest-bound statement can count for it.
         const subject: trust_gate.Subject = .{
             .tree = spec.base_tree,
             .binding = .{ .manifest = entry.manifest.bytes },

@@ -131,6 +131,46 @@ test "a statement's binding counts only for a subject it fits" {
     try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
 }
 
+test "a result-bound statement counts for the result derived from a pulled image" {
+    // Goal: slice 14. Method: the subject has no binding of its own, only a derived result.
+    const tree = digest_of(7);
+    const result = digest_of(1);
+    const by_result: statement.Binding = .{ .result = result };
+    try testing.expect(verdict.derived_fits(by_result, result));
+    try testing.expect(!verdict.derived_fits(by_result, digest_of(2)));
+    try testing.expect(!verdict.derived_fits(by_result, null));
+    try testing.expect(!verdict.derived_fits(.none, result));
+    try testing.expect(!verdict.derived_fits(.{ .manifest = result }, result));
+    trust(&.{1});
+    record_of(&.{sign(0, statement.Statement.for_result(tree, result, 5), 1)});
+    try testing.expect(run(.{ .tree = tree, .binding = .none, .derived = result }));
+    try testing.expect(!run(.{ .tree = tree, .binding = .none, .derived = digest_of(2) }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+    try testing.expect(!run(.{ .tree = tree, .binding = .none, .derived = null }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+}
+
+test "a result-bound line for a pulled image with no derived result says why" {
+    // Goal: slice 14 fix. A record that cannot derive (v2, labels past the bound) must not read as
+    // "bound to another result"; a manifest-bound subject says `not_derived`, the rest do not.
+    const tree = digest_of(7);
+    const result = digest_of(1);
+    trust(&.{1});
+    record_of(&.{sign(0, statement.Statement.for_result(tree, result, 5), 1)});
+    const pulled: statement.Binding = .{ .manifest = digest_of(3) };
+    try testing.expect(!run(.{ .tree = tree, .binding = pulled, .derived = null }));
+    try testing.expectEqual(verdict.Reason.not_derived, report.lines[0].reason);
+    try testing.expect(!run(.{ .tree = tree, .binding = pulled, .derived = digest_of(2) }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+    try testing.expect(run(.{ .tree = tree, .binding = pulled, .derived = result }));
+    try testing.expect(!run(.{ .tree = tree, .binding = pulled, .derives = false }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+    // A manifest-bound statement for another manifest is still another binding.
+    record_of(&.{sign(0, statement.Statement.for_manifest(tree, "x", digest_of(4), 5), 1)});
+    try testing.expect(!run(.{ .tree = tree, .binding = pulled, .derived = null }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+}
+
 test "one counting line is enough, and a policy that asks for nothing is met" {
     // Goal: the rule is "at least one", and an empty rule set passes. Method: a record of a bad
     // line and a good one; then a policy with no rule against an empty record.

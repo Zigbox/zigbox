@@ -263,6 +263,24 @@ pub fn warnings_dropped(diag: *Diag, count: u32) void {
     diag.fix(.{ .sentence = "nothing to do; the image is unpacked and recorded" });
 }
 
+/// ZBX-W0551: the manifest's `org.zigbox.tree` annotation names another tree than the layers made.
+pub fn tree_annotation_differs(diag: *Diag, claimed: []const u8, actual: []const u8) void {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, claimed, actual));
+    diag.raise(.W0551);
+    diag.while_("unpacking the image", .{});
+    diag.cause("the manifest claims tree {s}, the layers unpacked to {s}", .{ claimed, actual });
+    diag.context("claim", "{s}", .{claimed});
+    diag.context("tree", "{s}", .{actual});
+    var storage: [echo_bytes_max]u8 = undefined;
+    const command = std.fmt.bufPrint(&storage, "zbx sign {s}", .{actual}) catch "zbx sign";
+    diag.fix(.{
+        .sentence = "compare \"zbx doctor\" on both hosts (another id mapping unpacks to " ++
+            "another tree); sign this tree only once you have checked it:",
+        .command = command,
+    });
+}
+
 /// ZBX-W0503: a run found no lock and made one.
 pub fn lock_created(diag: *Diag, reference: []const u8, path: []const u8) void {
     assert(diag.code == null);

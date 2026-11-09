@@ -769,7 +769,21 @@ pub fn record_image(
     image.layer_count = 1;
     image.layers[0] = made.layer;
     image.settings = input.settings.*;
+    set_labels(&image.labels, input.labels);
     try images.save(store, &image, failure);
+}
+
+/// The labels the config blob carries, as the record keeps them (what a pull of it would read):
+/// none for an image, a result's own otherwise, and unknown when they do not fit.
+fn set_labels(labels: *images.Labels, from: ?*const result_mod.Config) void {
+    labels.clear();
+    const config = from orelse return;
+    assert(config.labels_count <= constants.build_config_labels_max);
+    for (0..config.labels_count) |index| {
+        const at: u32 = @intCast(index);
+        const added = labels.add(config.label_key(at), config.label_value(at));
+        if (added == null) return labels.forget();
+    }
 }
 
 var bound_workspace: Workspace = undefined;

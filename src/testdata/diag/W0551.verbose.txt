@@ -1,0 +1,11 @@
+warning[ZBX-W0551]: the image's tree annotation is not the tree its layers unpack to
+  while  unpacking the image
+  cause  the manifest claims tree
+         b3:1111111111111111111111111111111111111111111111111111111111111111,
+         the layers unpacked to
+         b3:2222222222222222222222222222222222222222222222222222222222222222
+  claim  b3:1111111111111111111111111111111111111111111111111111111111111111
+  tree   b3:2222222222222222222222222222222222222222222222222222222222222222
+  fix    compare "zbx doctor" on both hosts (another id mapping unpacks to another tree); sign this tree only once you have checked it:   zbx sign b3:2222222222222222222222222222222222222222222222222222222222222222
+  more   zbx explain W0551
+  docs   https://zigbox.github.io/zigbox/errors/W0551.html

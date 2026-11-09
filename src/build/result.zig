@@ -56,6 +56,12 @@ pub const Config = struct {
         config.labels_count = 0;
     }
 
+    /// Drops every label.
+    pub fn clear_labels(config: *Config) void {
+        config.label_used = 0;
+        config.labels_count = 0;
+    }
+
     pub fn label_key(config: *const Config, index: u32) []const u8 {
         assert(index < config.labels_count);
         const span = config.labels[index];
@@ -207,9 +213,57 @@ pub fn encode(record: *const Record, buffer: []u8) error{TooLarge}![]const u8 {
     return encode_field(record, buffer, &field);
 }
 
+/// The labels of a build result, as `encode_parts` reads any labels.
+const ConfigLabels = struct {
+    config: *const Config,
+
+    fn count(view: ConfigLabels) u32 {
+        return view.config.labels_count;
+    }
+
+    fn key(view: ConfigLabels, index: u32) []const u8 {
+        return view.config.label_key(index);
+    }
+
+    fn value(view: ConfigLabels, index: u32) []const u8 {
+        return view.config.label_value(index);
+    }
+};
+
+/// The labels of an image record, read the same way.
+const ImageLabels = struct {
+    labels: *const images.Labels,
+
+    fn count(view: ImageLabels) u32 {
+        return view.labels.count();
+    }
+
+    fn key(view: ImageLabels, index: u32) []const u8 {
+        return view.labels.key(index);
+    }
+
+    fn value(view: ImageLabels, index: u32) []const u8 {
+        return view.labels.value(index);
+    }
+};
+
 /// `encode`, and on `TooLarge` the field that did not fit in `field`.
 pub fn encode_field(
     record: *const Record,
+    buffer: []u8,
+    field: *Refusal,
+) error{TooLarge}![]const u8 {
+    const labels: ConfigLabels = .{ .config = &record.config };
+    return encode_parts(record.tree, &record.config.settings, labels, buffer, field);
+}
+
+/// The one writer of a record's bytes: a result's config and an image's derived one both come
+/// through here, so the same tree, settings and labels are the same bytes (and digest) either way.
+/// `labels` has `count`, `key` and `value`, in key order.
+fn encode_parts(
+    tree: Digest,
+    settings: *const Settings,
+    labels: anytype,
     buffer: []u8,
     field: *Refusal,
 ) error{TooLarge}![]const u8 {
@@ -218,8 +272,7 @@ pub fn encode_field(
     errdefer field.* = encoder.field;
     try encoder.bytes(magic);
     try encoder.int(record_version);
-    try encoder.bytes(&record.tree.bytes);
-    const settings = &record.config.settings;
+    try encoder.bytes(&tree.bytes);
     encoder.field = .entrypoint;
     try encoder.list(settings, .entrypoint);
     encoder.field = .cmd;
@@ -231,12 +284,33 @@ pub fn encode_field(
     encoder.field = .user;
     try encoder.string(settings.get(.user));
     encoder.field = .labels;
-    try encoder.int(record.config.labels_count);
-    for (0..record.config.labels_count) |at| {
-        try encoder.string(record.config.label_key(@intCast(at)));
-        try encoder.string(record.config.label_value(@intCast(at)));
+    try encoder.int(labels.count());
+    for (0..labels.count()) |at| {
+        try encoder.string(labels.key(@intCast(at)));
+        try encoder.string(labels.value(@intCast(at)));
     }
     return buffer[0..encoder.len];
+}
+
+/// Room for `derive`: the settings and labels of an image, and the fixed fields and length
+/// prefixes around them.
+pub const derive_bytes_max: u32 = constants.image_settings_bytes_max +
+    constants.image_labels_bytes_max + 4096;
+
+/// The result digest that a run of an image's tree, settings and labels would have, as M7
+/// computes it from a build's tree and resolved config (the same encoder, so it is the digest
+/// of the result a pushed-then-pulled image was made from). Null when the labels are not known
+/// (a record from before version 3, or an image with more labels than a record keeps), which
+/// derives no result: nothing is guessed from what was not recorded.
+pub fn derive(tree: Digest, settings: *const Settings, labels: *const images.Labels) ?Digest {
+    assert(settings.used <= settings.bytes.len);
+    if (!labels.known) return null;
+    var buffer: [derive_bytes_max]u8 = undefined;
+    var field: Refusal = undefined;
+    const parts: ImageLabels = .{ .labels = labels };
+    const bytes = encode_parts(tree, settings, parts, &buffer, &field) catch
+        return null; // Cannot happen within the bounds; failing closed is the safe answer.
+    return result_digest(bytes);
 }
 
 /// The result digest of a record: BLAKE3 over its bytes.
