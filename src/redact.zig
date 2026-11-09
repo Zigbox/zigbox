@@ -259,11 +259,30 @@ fn mask_word(input: []const u8, at: usize, mask: *Mask) void {
     if (std.ascii.eqlIgnoreCase(word, "authorization")) {
         if (authorization_value(input, end)) |span| mask.mark(span.start, span.end, .authorization);
     }
-    if (secret_kind(word)) |kind| {
-        const quoted_name = at > 0 and (input[at - 1] == '"' or input[at - 1] == '\'');
-        if (assigned_value(input, end, word[0] == '-', quoted_name)) |value| {
-            mask.mark(value.start, value.end, kind);
-        }
+    if (secret_kind(word)) |kind| xml_value(input, at, end, kind, mask);
+    if (contains_ci(word, "signature")) mask_assigned(input, at, end, .secret, mask);
+    if (secret_kind(word)) |kind| mask_assigned(input, at, end, kind, mask);
+}
+
+/// `<SecretAccessKey>value</SecretAccessKey>`: an element with a secret name, as the token
+/// service answers, loses its text up to the next tag.
+fn xml_value(input: []const u8, at: usize, end: usize, kind: Kind, mask: *Mask) void {
+    assert(at < end);
+    assert(end <= input.len);
+    if (at == 0) return;
+    if (input[at - 1] != '<') return;
+    if (end >= input.len) return;
+    if (input[end] != '>') return;
+    const close = std.mem.indexOfScalarPos(u8, input, end + 1, '<') orelse input.len;
+    mask.mark(end + 1, close, kind);
+}
+
+fn mask_assigned(input: []const u8, at: usize, end: usize, kind: Kind, mask: *Mask) void {
+    assert(at < end);
+    assert(end <= input.len);
+    const quoted_name = at > 0 and (input[at - 1] == '"' or input[at - 1] == '\'');
+    if (assigned_value(input, end, input[at] == '-', quoted_name)) |value| {
+        mask.mark(value.start, value.end, kind);
     }
 }
 
@@ -472,6 +491,29 @@ test "bearer headers and authorization values" {
     try expect_redacted("got bearer  tok123 ok", "got bearer  [redacted:bearer] ok");
     try expect_redacted("a bearer of news", "a bearer [redacted:bearer] news"); // Prose is a cost.
     try expect_redacted("bearer", "bearer");
+}
+
+test "aws: signed requests, token service answers and metadata documents" {
+    // Goal: every secret an AWS exchange carries goes, and the names around it stay.
+    try expect_redacted(
+        "Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/" ++
+            "aws4_request, SignedHeaders=host;x-amz-date, Signature=5d672d79c15b13162d9279b0855",
+        "Authorization: [redacted:authorization] " ++
+            "SignedHeaders=host;x-amz-date, Signature=[redacted:secret]",
+    );
+    try expect_redacted(
+        "X-Amz-Security-Token: FwoGZXIvYXdzE",
+        "X-Amz-Security-Token: [redacted:token]",
+    );
+    try expect_redacted(
+        "<SecretAccessKey>wJalrXUtnFEMI/K7MDENG</SecretAccessKey><SessionToken>AQoD</SessionToken>",
+        "<SecretAccessKey>[redacted:secret]</SecretAccessKey>" ++
+            "<SessionToken>[redacted:token]</SessionToken>",
+    );
+    try expect_redacted(
+        "{\"SecretAccessKey\":\"abc\",\"Token\":\"def\"}",
+        "{\"SecretAccessKey\":\"[redacted:secret]\",\"Token\":\"[redacted:token]\"}",
+    );
 }
 
 test "private keys, whole and cut off" {

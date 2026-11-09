@@ -1,9 +1,10 @@
 //! The redaction fuzzer: `zig build fuzz -- redact`. Each iteration builds text out of junk and of
 //! secrets planted in the shapes redact.zig claims to cover (assignments, flags, JSON and ZON
-//! pairs, quoted and escaped values, bearer headers, private keys, token shapes, labels, and
-//! values zbx was told to scrub), sometimes escaped once or twice the way a run record escapes a
-//! command. The property: no planted secret is in the output, whatever the size of the output
-//! buffer (a full buffer stops, it never copies the rest). The oracle is the planting itself, so
+//! pairs, AWS signed requests and XML answers, quoted and escaped values, bearer headers,
+//! private keys, token shapes, labels, and values zbx was told to scrub), sometimes escaped
+//! once or twice the way a run record escapes a command. The property: no planted secret is in
+//! the output, whatever the size of the output buffer (a full buffer stops, it never copies the
+//! rest). The oracle is the planting itself, so
 //! it does not share code with the redactor. Damaged and random text only has to be survived:
 //! no crash, the output within its buffer, and the same answer twice.
 
@@ -58,6 +59,9 @@ const junk = [_][]const u8{
     "sk-",
     "eyJ",
 };
+
+const aws_signed_format = "Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/" ++
+    "us-east-1/iam/aws4_request, SignedHeaders=host;x-amz-date, Signature={s}";
 
 const pem_format = "-----BEGIN PRIVATE KEY-----\n{s}\n-----END PRIVATE KEY-----";
 
@@ -116,7 +120,7 @@ fn pick_name(random: std.Random) []const u8 {
 
 fn add_context(random: std.Random, builder: *Builder, planted: *Planted) void {
     var scratch: [256]u8 = undefined;
-    const choice = random.uintLessThan(u8, 12);
+    const choice = random.uintLessThan(u8, 16);
     const name = pick_name(random);
     // A token shape is only recognised from its real length up (a GitHub token is 40).
     const secret = plant(random, planted, choice == 5 or choice == 11, if (choice == 9) 20 else 8);
@@ -136,7 +140,11 @@ fn add_context(random: std.Random, builder: *Builder, planted: *Planted) void {
             planted.literals_count += 1;
             break :blk std.fmt.bufPrint(&scratch, "use {s} here", .{secret});
         },
-        else => std.fmt.bufPrint(&scratch, "{s}=\"{s}\"", .{ name, secret }),
+        11 => std.fmt.bufPrint(&scratch, "{s}=\"{s}\"", .{ name, secret }),
+        12 => std.fmt.bufPrint(&scratch, aws_signed_format, .{secret}),
+        13 => std.fmt.bufPrint(&scratch, "X-Amz-Security-Token: {s}", .{secret}),
+        14 => std.fmt.bufPrint(&scratch, "<SecretAccessKey>{s}</SecretAccessKey>", .{secret}),
+        else => std.fmt.bufPrint(&scratch, "x?X-Amz-Signature={s}&a=b", .{secret}),
     } catch return;
     builder.add(text);
 }
