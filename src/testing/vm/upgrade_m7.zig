@@ -24,6 +24,9 @@ const checks_exec = @import("checks_exec_m6b.zig");
 const checks_up5 = @import("checks_upgrade_m5.zig");
 const checks_up6 = @import("checks_upgrade_m6.zig");
 const checks = @import("checks_upgrade_m6b.zig");
+
+/// The run record version 0.2.0 wrote; this binary reads it as it is and writes its own.
+const run_record_version_0_2_0: u32 = 8;
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
 const limits = @import("limits.zig");
@@ -104,7 +107,7 @@ fn read_store(session: *Session, out: *Io.Writer, pull: m4.PullDoc) !void {
     };
 }
 
-/// The old container's record (version 7) and volume, read by this binary while it runs.
+/// The old container's record (0.2.0's version) and volume, read by this binary while it runs.
 fn read_running(session: *Session, out: *Io.Writer) !void {
     const arena = session.scratch_allocator();
     const ps = try expect_exit(session, out, step, z ++ " --output json ps", 0);
@@ -117,8 +120,8 @@ fn read_running(session: *Session, out: *Io.Writer) !void {
     });
     const record = try session.run(version, limits.command_timeout_kvm_s);
     try H.show(out, version, record);
-    checks_up5.check_record_version(record.output, checks.run_record_version) catch |err| {
-        return fail_step(out, step, "expected the run record to be version 7", err);
+    checks_up5.check_record_version(record.output, run_record_version_0_2_0) catch |err| {
+        return fail_step(out, step, "expected the run record to be 0.2.0's version", err);
     };
     try state.listing(session, out, .{
         .name = volume,
@@ -181,7 +184,7 @@ fn stop_and_reuse(session: *Session, out: *Io.Writer) !void {
         );
     };
     const names = [_][]const u8{ container, "m7new" };
-    const versions = [_]u32{ checks.run_record_version, checks.run_record_version };
+    const versions = [_]u32{ run_record_version_0_2_0, checks.run_record_version };
     for (names, versions) |name, version| {
         const command = try common.format(session, "grep -h version {s}/runs/{s}.zon", .{
             common.state_dir, name,
