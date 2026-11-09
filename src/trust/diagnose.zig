@@ -17,6 +17,13 @@ const verdict = @import("verdict.zig");
 
 const path_echo_bytes = constants.store_path_bytes_max;
 
+/// A name, `@sha256:` and 64 digits, or `b3:` and 64 digits, with room for the name.
+const digest_echo_bytes = 256;
+
+comptime {
+    assert(digest_echo_bytes >= constants.oci_digest_text_bytes + 128);
+}
+
 fn echo_of(storage: []u8, text: []const u8) []const u8 {
     assert(storage.len >= constants.arg_echo_bytes_max);
     return text_util.sanitise(storage, text);
@@ -475,18 +482,29 @@ pub const Unsigned = struct {
     policy: *const policy_mod.Policy,
     /// The run has no tree to sign (a directory given as `--rootfs`).
     no_tree: bool,
+    /// The build step whose base was judged; empty for a run.
+    step: []const u8 = "",
 };
 
 /// ZBX-E0905: a run is refused because no trusted signature covers it.
 pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
     assert(diag.code == null);
     assert(what.report.count <= constants.signatures_per_tree_max);
-    var digest_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    // A digest the user is told to sign is whole: `b3:` and 64 digits are longer than an echo.
+    var digest_storage: [digest_echo_bytes]u8 = undefined;
     var path_storage: [path_echo_bytes]u8 = undefined;
-    const digest = echo_of(&digest_storage, what.digest);
+    const digest = text_util.sanitise(&digest_storage, what.digest);
     const path = echo_of(&path_storage, what.policy_path);
     diag.raise(.E0905);
-    diag.while_("checking {s} against the policy {s}", .{ digest, path });
+    if (what.step.len > 0) {
+        var step_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const step = echo_of(&step_storage, what.step);
+        diag.while_("checking the base of step '{s}', {s}, against the policy {s}", .{
+            step, digest, path,
+        });
+    } else {
+        diag.while_("checking {s} against the policy {s}", .{ digest, path });
+    }
     if (what.no_tree) {
         diag.cause("{s} requires a signature (require_signature) and a directory has no tree " ++
             "to sign", .{path});

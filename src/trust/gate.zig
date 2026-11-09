@@ -42,6 +42,8 @@ pub const Subject = struct {
     binding: statement.Binding,
     /// The digest the user would give `zbx sign`, for the message. Empty for a directory.
     text: []const u8,
+    /// The build step whose base this is, for the message; empty for a run.
+    step: []const u8 = "",
 };
 
 /// One policy file that was found, with where.
@@ -155,6 +157,7 @@ pub fn judge_all(
             .report = &report,
             .policy = &loaded.policy,
             .no_tree = subject.tree == null,
+            .step = subject.step,
         });
         return error.Refused;
     }

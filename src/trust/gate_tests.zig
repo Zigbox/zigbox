@@ -140,6 +140,13 @@ test "a rule is met by a signature of a listed key, and by nothing else" {
     try start();
     try write_trusting("ci");
     try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(tree_subject()));
+    // The command the fix gives names the whole digest (67 bytes), not a cut one.
+    const text = tree.text();
+    var subject = tree_subject();
+    subject.text = &text;
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(subject));
+    const fix = last_diag.fixes.slice()[0].command.slice();
+    try testing.expect(std.mem.endsWith(u8, fix, &text));
     try sign_as("other");
     try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(tree_subject()));
     try sign_as("ci");

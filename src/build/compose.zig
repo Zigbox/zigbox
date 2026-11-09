@@ -46,6 +46,9 @@ const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
 const reference_mod = @import("../registry/reference.zig");
 const manifest = @import("../registry/manifest.zig");
+const digest_sha = @import("../registry/digest.zig");
+const trust_gate = @import("../trust/gate.zig");
+const trust_record = @import("../trust/record.zig");
 
 const Host = host_mod.Host;
 const Digest = digest_mod.Digest;
@@ -55,6 +58,10 @@ pub const Error = error{ Failed, OutputFailed };
 
 /// The caller's memory for a build: large, so static or heap storage.
 pub const Workspace = struct {
+    /// The policy gate before a step starts: the files, and the base's signatures.
+    gate: trust_gate.Memory,
+    signatures: trust_record.Record,
+    record_work: trust_record.Work,
     locking: lock_file.Workspace,
     image: images.Image,
     input: input_tree.Workspace,
@@ -154,6 +161,7 @@ pub fn run_steps(
         .name_width = name_width(&loaded.file),
         .hits = 0,
         .misses = 0,
+        .gate_loaded = false,
     };
     for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
@@ -288,6 +296,8 @@ pub const Context = struct {
     name_width: u8,
     hits: u32,
     misses: u32,
+    /// The policy files have been read (once per build).
+    gate_loaded: bool,
 
     pub fn request(context: *const Context, spec: *const key_mod.Spec) step_mod.Request {
         return .{
@@ -373,8 +383,38 @@ pub const Context = struct {
             },
             .miss => {},
         }
+        try context.check_base(file.text(step.base), &spec);
         try context.fork_worker(index, &spec);
         return .running;
+    }
+
+    /// The policy gate on a step that is about to run (a hit runs nothing and is not checked):
+    /// the base is judged like a run's tree, bound to the manifest the lock names.
+    pub fn check_base(
+        context: *Context,
+        reference: []const u8,
+        spec: *const key_mod.Spec,
+    ) Error!void {
+        assert(spec.name.len > 0);
+        const ws = context.ws;
+        const diag = context.diag;
+        if (!context.gate_loaded) {
+            trust_gate.load(context.host, &ws.gate, diag) catch return error.Failed;
+            context.gate_loaded = true;
+        }
+        if (!trust_gate.any_checks(&ws.gate)) return;
+        const entry = ws.locking.lock.entries[ws.locking.lock.find(reference).?];
+        var text: [constants.oci_digest_text_bytes + 129]u8 = undefined;
+        const shown = base_text(&text, reference, entry.manifest);
+        const subject: trust_gate.Subject = .{
+            .tree = spec.base_tree,
+            .binding = .{ .manifest = entry.manifest.bytes },
+            .text = shown,
+            .step = spec.name,
+        };
+        const host = context.host;
+        trust_gate.judge_all(host, &ws.gate, &ws.signatures, &ws.record_work, subject, diag) catch
+            return error.Failed;
     }
 
     pub fn fork_worker(
@@ -960,4 +1000,18 @@ comptime {
     assert(row_bytes > 2 * constants.store_digest_text_bytes + constants.build_step_name_bytes_max +
         200);
     assert(answer_bytes == 1 + constants.store_digest_bytes);
+}
+
+/// What `zbx sign` takes for a base: the reference's name and the manifest the lock names,
+/// `alpine@sha256:<hex>`. A name too long for `out` is cut (the digest is what is signed).
+fn base_text(out: []u8, reference: []const u8, manifest_digest: digest_sha.Sha256) []const u8 {
+    assert(out.len >= constants.oci_digest_text_bytes + 1);
+    var name = reference;
+    if (std.mem.indexOfScalar(u8, name, '@')) |at| name = name[0..at];
+    const slash = std.mem.lastIndexOfScalar(u8, name, '/') orelse 0;
+    if (std.mem.indexOfScalarPos(u8, name, slash, ':')) |colon| name = name[0..colon];
+    const room = out.len - constants.oci_digest_text_bytes - 1;
+    name = name[0..@min(name.len, room)];
+    const digest = manifest_digest.text();
+    return std.fmt.bufPrint(out, "{s}@{s}", .{ name, &digest }) catch unreachable; // Room made.
 }
