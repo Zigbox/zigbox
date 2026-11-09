@@ -14,6 +14,8 @@ const support = @import("../store/test_support.zig");
 const result = @import("../build/result.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const Digest = @import("../store/digest.zig").Digest;
+const images = @import("../store/images.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
 
@@ -152,4 +154,47 @@ test "an unsigned tree given by a prefix is refused naming the full digest" {
     run_of_last = run_of(&prefix);
     try refused_as_unsigned();
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), &tree_text) != null);
+}
+
+/// Saves the image record of a pulled image of `tree`, with the settings of `record` and
+/// known (or forgotten) labels, and returns the operand that names it by manifest.
+fn save_pulled(known: bool) ![:0]const u8 {
+    var image: images.Image = undefined;
+    image.tag_count = 0;
+    image.manifest = Sha256.of("manifest");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = Sha256.of("config");
+    image.tree = tree;
+    image.time = 1_800_000_000;
+    image.layer_count = 0;
+    image.settings.clear();
+    _ = image.settings.add(.entrypoint, "/bin/sh");
+    image.labels.clear();
+    if (!known) image.labels.forget();
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    try images.save(&store, &image, &failure);
+    const hex = std.fmt.bytesToHex(image.manifest.bytes, .lower);
+    const text = try std.fmt.bufPrint(&pulled_operand, "alpine@sha256:{s}", .{&hex});
+    pulled_operand[text.len] = 0;
+    return pulled_operand[0..text.len :0];
+}
+
+var pulled_operand: [128]u8 = undefined;
+
+test "a pulled image passes require_provenance on the signed result it derives" {
+    // Goal: slice 14 end to end: run_image -> gate subject -> verdict carry `derived`. Method: a
+    // result signed with its binding; the image of that tree, settings and labels is run by its
+    // manifest (passes); the same image with unknown labels is refused as `not_derived`.
+    try start();
+    const result_text = terminated(built);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &result_text, "--key", "ci" }));
+    const operand = try save_pulled(true);
+    _ = run_of(operand);
+    try passes_gate();
+    _ = try save_pulled(false);
+    run_of_last = run_of(operand);
+    try refused_as_unsigned();
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "pull the image again") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "bound to another result") == null);
 }

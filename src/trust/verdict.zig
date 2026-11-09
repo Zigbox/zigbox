@@ -28,6 +28,9 @@ pub const Subject = struct {
     /// for a run of the manifest too: that is what lets signed provenance hold for a pushed
     /// image after it is pulled.
     derived: ?statement.Digest = null,
+    /// False for a build step's base, which never derives (M8 slice 14 cut), so a missing
+    /// derived result there is not the image record's fault.
+    derives: bool = true,
 };
 
 pub const Reason = enum {
@@ -44,6 +47,9 @@ pub const Reason = enum {
     other_predicate,
     /// Bound to another result or manifest than the subject's.
     other_binding,
+    /// Bound to a result, for a pulled image whose record gives no derived result (it predates
+    /// the labels, or they did not fit), so whether it is that result cannot be checked.
+    not_derived,
 };
 
 pub const Examined = struct {
@@ -119,8 +125,21 @@ pub fn examine(
     }
     const fits = binding_fits(found.binding, subject.binding) or
         derived_fits(found.binding, subject.derived);
-    result.reason = if (fits) .counts else .other_binding;
+    result.reason = if (fits)
+        .counts
+    else if (cannot_derive(found.binding, subject))
+        .not_derived
+    else
+        .other_binding;
     return result;
+}
+
+/// Whether the line fails only because the image record gives no result to compare it with.
+fn cannot_derive(said: statement.Binding, subject: Subject) bool {
+    if (subject.derived != null) assert(subject.derives);
+    if (said == .manifest) assert(subject.binding != .none);
+    if (subject.derived != null or !subject.derives) return false;
+    return said == .result and subject.binding == .manifest;
 }
 
 /// Whether a result-bound statement names the result derived from the subject's image.

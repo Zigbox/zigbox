@@ -2489,8 +2489,13 @@ pub const registry = [_]Entry{
         .explanation =
         \\A manifest pushed by zbx carries an `org.zigbox.tree` annotation: the tree
         \\digest of the image as it was packed. This image's layers unpacked to a
-        \\different tree, so the annotation is wrong, or the layers are not the ones
-        \\the pusher packed. The image was pulled and recorded all the same.
+        \\different tree. The image was pulled and recorded all the same.
+        \\
+        \\The usual cause is benign: the same layers unpack to a different tree on a
+        \\host with another id mapping (a full subuid range on the pusher's host, a
+        \\single id on this one). Compare the id mode "zbx doctor" reports on both
+        \\hosts. If they differ, nothing is wrong. If they match, the annotation is
+        \\wrong, or the layers are not the ones the pusher packed.
         \\
         \\Nothing trusts the annotation: a policy judges the tree this pull made, and
         \\a signature counts only if it names that tree. A signature made for the

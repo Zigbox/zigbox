@@ -153,12 +153,90 @@ const DescriptorJson = struct {
     platform: ?PlatformJson = null,
 };
 
+/// The manifest's `annotations` member. The tree claim is only a claim, so nothing in this member
+/// can refuse a manifest: it is read without allocating, and a member that is not an object, a
+/// value that is not a string, a name or value that is escaped or too long, a repeated name or
+/// text that is not a digest leave `tree` null.
 const AnnotationsJson = struct {
-    @"org.zigbox.tree": ?[]const u8 = null,
+    tree: ?[32]u8 = null,
+
+    comptime {
+        assert(std.mem.eql(u8, constants.pack_annotation_tree, "org.zigbox.tree"));
+        assert(constants.pack_annotation_tree.len < 32);
+    }
+
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !AnnotationsJson {
+        _ = allocator;
+        _ = options;
+        assert(constants.pack_annotation_tree.len < 32);
+        var found: AnnotationsJson = .{};
+        if ((try source.peekNextTokenType()) != .object_begin) {
+            try source.skipValue();
+            return found;
+        }
+        _ = try source.next();
+        var seen = false;
+        var repeated = false;
+        while ((try source.peekNextTokenType()) != .object_end) {
+            var name_buffer: [32]u8 = undefined;
+            const name = try read_text(source, &name_buffer);
+            const ours = if (name) |text|
+                std.mem.eql(u8, text, constants.pack_annotation_tree)
+            else
+                false;
+            if (!ours or (try source.peekNextTokenType()) != .string) {
+                try source.skipValue();
+                continue;
+            }
+            if (seen) repeated = true;
+            seen = true;
+            var text_buffer: [128]u8 = undefined;
+            const text = try read_text(source, &text_buffer);
+            if (text) |claim| if (store_digest.Digest.parse(claim)) |claimed| {
+                found.tree = claimed.bytes;
+            };
+        }
+        _ = try source.next();
+        if (repeated) found.tree = null;
+        if (found.tree != null) assert(seen);
+        if (repeated) assert(found.tree == null);
+        return found;
+    }
 };
 
-comptime {
-    assert(std.mem.eql(u8, constants.pack_annotation_tree, "org.zigbox.tree"));
+/// The next JSON string, if it is plain and fits `buffer`; the whole string is consumed either way.
+fn read_text(source: anytype, buffer: []u8) !?[]const u8 {
+    assert(buffer.len > 0);
+    assert(buffer.len <= 128);
+    var used: usize = 0;
+    var fits = true;
+    while (true) {
+        const token = try source.next();
+        const part: []const u8 = switch (token) {
+            .string, .partial_string => |piece| piece,
+            .partial_string_escaped_1,
+            .partial_string_escaped_2,
+            .partial_string_escaped_3,
+            .partial_string_escaped_4,
+            => {
+                fits = false;
+                continue;
+            },
+            else => unreachable, // The scanner has been told a string is next.
+        };
+        if (fits and part.len <= buffer.len - used) {
+            @memcpy(buffer[used..][0..part.len], part);
+            used += part.len;
+        } else {
+            fits = false;
+        }
+        if (token == .string) break;
+    }
+    return if (fits) buffer[0..used] else null;
 }
 
 const DocumentJson = struct {
@@ -419,9 +497,7 @@ pub fn read_manifest(
         return error.UnknownMediaType;
     }
     resolved.tree_note = null;
-    if (document.json.annotations) |notes| if (notes.@"org.zigbox.tree") |text| {
-        if (store_digest.Digest.parse(text)) |claimed| resolved.tree_note = claimed.bytes;
-    };
+    if (document.json.annotations) |notes| resolved.tree_note = notes.tree;
     resolved.config_digest = try descriptor_digest(config, problem);
     resolved.config_size = config.size orelse return error.BadDescriptor;
     if (resolved.config_size == 0) return error.BadDescriptor;
@@ -705,6 +781,30 @@ test "a manifest's tree annotation is read when it is a digest, and ignored othe
     try read_in(head ++ "\"org.zigbox.tree\":\"not a digest\"}}", &resolved, &problem);
     try testing.expect(resolved.tree_note == null);
     try read_in(head ++ good ++ "}}", &resolved, &problem);
+    try testing.expect(resolved.tree_note != null);
+}
+
+test "a malformed tree annotation never refuses the manifest" {
+    // Goal: the claim is only a claim; a non-string, a repeat or an odd member leaves it null.
+    const head = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[],\"annotations\":";
+    const good = "\"org.zigbox.tree\":\"b3:" ++ repeat('a', 64) ++ "\"";
+    const bodies = [_][]const u8{
+        head ++ "{\"org.zigbox.tree\":5}}",
+        head ++ "\"x\"}",
+        head ++ "[1,{\"a\":null}]}",
+        head ++ "null}",
+        head ++ "{" ++ good ++ "," ++ good ++ "}}",
+        head ++ "{\"org.zigbox.tree\":\"a\\nb\"}}",
+        head ++ "{\"org.zigbox.tree\":\"" ++ repeat('x', 4000) ++ "\"}}",
+        head ++ "{\"" ++ repeat('k', 4000) ++ "\":{\"deep\":[1,2]}}}",
+    };
+    var resolved: Resolved = undefined;
+    var problem: Problem = .{};
+    for (bodies) |body| {
+        try read_in(body, &resolved, &problem);
+        try testing.expect(resolved.tree_note == null);
+    }
+    try read_in(head ++ "{\"o\\u0072g\":1," ++ good ++ "}}", &resolved, &problem);
     try testing.expect(resolved.tree_note != null);
 }
 

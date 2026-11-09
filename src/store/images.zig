@@ -364,17 +364,19 @@ fn render_settings(writer: *std.Io.Writer, settings: *const Settings) void {
 
 fn render_labels(writer: *std.Io.Writer, labels: *const Labels) void {
     assert(labels.used <= labels.bytes.len);
+    assert(labels.total <= constants.image_labels_count_max);
     if (!labels.known) {
         // Cannot fail: the buffer holds the fixed lines, with room to spare.
         writer.writeAll("    .labels_unknown = true,\n") catch unreachable; // Sized.
         return;
     }
+    const limit = constants.image_labels_bytes_max; // More than a source: not `put_string`.
     for (0..labels.count()) |index| {
         // Cannot fail: the buffer holds the labels escaped (four bytes a byte at the worst).
         writer.writeAll("    .label_key = ") catch unreachable; // Sized.
-        roots.put_string(writer, labels.key(@intCast(index)));
+        roots.put_string_up_to(writer, labels.key(@intCast(index)), limit);
         writer.writeAll(",\n    .label_value = ") catch unreachable; // Sized.
-        roots.put_string(writer, labels.value(@intCast(index)));
+        roots.put_string_up_to(writer, labels.value(@intCast(index)), limit);
         writer.writeAll(",\n") catch unreachable; // Sized.
     }
 }
@@ -738,6 +740,32 @@ test "the labels round-trip in key order, and a full block is refused" {
     image.labels.forget();
     try testing.expectEqual(ParseResult.ok, parse(render(&image, &buffer), &back));
     try testing.expect(!back.labels.known);
+}
+
+test "labels totalling exactly the byte bound are kept, render escaped and read back" {
+    // Goal: the bound is exact (REVIEW.md: at the bound and one past it), with every byte escaped
+    // so that the record buffer relation is exercised too.
+    var image = sample();
+    var value: [constants.image_labels_bytes_max - 1]u8 = @splat('"');
+    try testing.expect(image.labels.add("k", &value) != null);
+    try testing.expect(image.labels.known);
+    try testing.expectEqual(@as(u32, constants.image_labels_bytes_max), image.labels.used);
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(render(&image, &buffer), &back));
+    try testing.expect(back.labels.known);
+    try testing.expectEqualStrings(&value, back.labels.value(0));
+    // One byte more is refused by `add`, not kept.
+    image.labels.clear();
+    var over: [constants.image_labels_bytes_max]u8 = @splat('"');
+    try testing.expect(image.labels.add("k", &over) == null);
+    // The same total in many labels.
+    var half: [constants.image_labels_bytes_max / 2 - 1]u8 = @splat('"');
+    try testing.expect(image.labels.add("a", &half) != null);
+    try testing.expect(image.labels.add("b", &half) != null);
+    try testing.expectEqual(@as(u32, constants.image_labels_bytes_max), image.labels.used);
+    try testing.expectEqual(ParseResult.ok, parse(render(&image, &buffer), &back));
+    try testing.expectEqual(@as(u32, 2), back.labels.count());
 }
 
 test "a version 2 record reads with its labels unknown, and may not carry any" {

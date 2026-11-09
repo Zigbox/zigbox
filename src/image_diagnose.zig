@@ -269,11 +269,15 @@ pub fn tree_annotation_differs(diag: *Diag, claimed: []const u8, actual: []const
     assert(!std.mem.eql(u8, claimed, actual));
     diag.raise(.W0551);
     diag.while_("unpacking the image", .{});
-    diag.cause("the manifest's tree annotation is not the tree the layers made", .{});
-    diag.context("note", "{s}", .{claimed});
+    diag.cause("the manifest claims tree {s}, the layers unpacked to {s}", .{ claimed, actual });
+    diag.context("claim", "{s}", .{claimed});
     diag.context("tree", "{s}", .{actual});
+    var storage: [echo_bytes_max]u8 = undefined;
+    const command = std.fmt.bufPrint(&storage, "zbx sign {s}", .{actual}) catch "zbx sign";
     diag.fix(.{
-        .sentence = "a signature for the annotated tree does not cover this image",
+        .sentence = "compare \"zbx doctor\" on both hosts (another id mapping unpacks to " ++
+            "another tree); sign this tree only once you have checked it:",
+        .command = command,
     });
 }
 

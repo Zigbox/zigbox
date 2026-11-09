@@ -741,7 +741,7 @@ const policy_schema =
     \\"properties":{"public":{"type":"string"},
     \\"key":{"type":["string","null"],"description":"the policy's name for the key, if listed"},
     \\"reason":{"enum":["counts","malformed","bad_signature","untrusted_key","other_tree",
-    \\"other_predicate","other_binding"]}}}}}}},
+    \\"other_predicate","other_binding","not_derived"]}}}}}}},
     \\"allowed":{"type":"boolean","description":"every file is met; the run would start"}}}
 ;
 

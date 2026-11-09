@@ -77,7 +77,8 @@ pub fn check(
     };
 }
 
-/// The result the image record of a manifest-bound container derives, as the run's gate had it;
+/// The result the image record of a manifest-bound container derives, as the record is now (a
+/// re-pull since the run may have given it labels, which the run's gate lacked);
 /// null when the record cannot be read or gives none, which only narrows what counts.
 fn derived_of(host: Host, binding: statement.Binding, image: *images.Image) ?[32]u8 {
     const manifest = switch (binding) {
@@ -109,4 +110,39 @@ test "a version 8 record has no binding, so only a tree-only statement could cou
     const got = subject_of(&parsed).binding;
     try std.testing.expect(got == .result);
     try std.testing.expectEqual(@as(u8, 0xcd), got.result[0]);
+}
+
+test "exec counts the result a re-pulled image record derives" {
+    // Goal: the exec gate reads the image record as it is now. Method: a v3 record in a temp
+    // store; its derived result is the one `result.derive` gives; a manifest-less binding gives
+    // none.
+    const host_sim = @import("../host_sim.zig");
+    var sim: host_sim.HostSim = undefined;
+    var files: @import("../store/fs_sim.zig").SimFs = undefined;
+    @import("../runtime/sim_run.zig").init(&sim, 9);
+    files.init(9);
+    sim.store_fs = &files;
+    const support = @import("../store/test_support.zig");
+    support.make_user_store(&files, ".{\n    .format = 1,\n}\n");
+    var store: Store = undefined;
+    store.at(sim.interface(), support.user_store);
+    var image: images.Image = undefined;
+    image.tag_count = 0;
+    image.manifest = @import("../registry/digest.zig").Sha256.of("m");
+    image.platform_len = 11;
+    @memcpy(image.platform[0..11], "linux/amd64");
+    image.config = image.manifest;
+    image.tree = digest_mod.Digest.of("tree");
+    image.time = 1;
+    image.layer_count = 0;
+    image.settings.clear();
+    image.labels.clear();
+    var failure: @import("../store/fs.zig").Failure = undefined;
+    try images.save(&store, &image, &failure);
+    const binding: statement.Binding = .{ .manifest = image.manifest.bytes };
+    var loaded: images.Image = undefined;
+    const got = derived_of(sim.interface(), binding, &loaded).?;
+    const want = result.derive(image.tree, &image.settings, &image.labels).?;
+    try std.testing.expectEqualSlices(u8, &want.bytes, &got);
+    try std.testing.expect(derived_of(sim.interface(), .none, &loaded) == null);
 }

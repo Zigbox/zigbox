@@ -76,7 +76,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the image's tree annotation is not the tree its layers unpack to</p>
 <dl class="facts"><div><dt>Kind</dt><dd>warning</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3</dd></div></dl>
 <h2>What it means</h2>
-<p>A manifest pushed by zbx carries an `org.zigbox.tree` annotation: the tree digest of the image as it was packed. This image's layers unpacked to a different tree, so the annotation is wrong, or the layers are not the ones the pusher packed. The image was pulled and recorded all the same.</p>
+<p>A manifest pushed by zbx carries an `org.zigbox.tree` annotation: the tree digest of the image as it was packed. This image's layers unpacked to a different tree. The image was pulled and recorded all the same.</p>
+<p>The usual cause is benign: the same layers unpack to a different tree on a host with another id mapping (a full subuid range on the pusher's host, a single id on this one). Compare the id mode &quot;zbx doctor&quot; reports on both hosts. If they differ, nothing is wrong. If they match, the annotation is wrong, or the layers are not the ones the pusher packed.</p>
 <p>Nothing trusts the annotation: a policy judges the tree this pull made, and a signature counts only if it names that tree. A signature made for the annotated tree therefore does not cover this image. If you expected it to, do not rely on it: ask whoever pushed the image, and sign the tree this pull made only if you have checked it yourself.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

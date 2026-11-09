@@ -194,6 +194,7 @@ pub fn judge_all(
             .tree = if (subject.tree) |tree| tree.bytes else @splat(0),
             .binding = subject.binding,
             .derived = subject.derived,
+            .derives = subject.step.len == 0,
         };
         const met = subject.tree != null and
             verdict.judge(&work.envelope, &loaded.policy, record, have, &report);

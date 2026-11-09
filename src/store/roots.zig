@@ -75,8 +75,14 @@ pub const Root = struct {
 // ---- Writing -------------------------------------------------------------------------------
 
 pub fn put_string(writer: *std.Io.Writer, text: []const u8) void {
+    put_string_up_to(writer, text, constants.store_source_bytes_max);
+}
+
+/// `put_string` for a caller whose text may be longer than a source: the caller's own bound, and
+/// a buffer that holds it escaped four bytes a byte.
+pub fn put_string_up_to(writer: *std.Io.Writer, text: []const u8, limit: u32) void {
     assert(writer.buffer.len >= constants.store_root_record_bytes_max);
-    assert(text.len <= constants.store_source_bytes_max);
+    assert(text.len <= limit);
     writer.writeAll(
         "\"",
     ) catch unreachable; // Cannot fail: `render` proves the buffer is big enough.
