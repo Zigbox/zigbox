@@ -144,9 +144,14 @@ const Meddler = struct {
         return .{ .context = meddler, .answer = answer };
     }
 
-    fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Served) void {
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *net_sim.Served,
+    ) void {
         const meddler: *Meddler = @ptrCast(@alignCast(context));
-        meddler.inner.answer(meddler.inner.context, request, served);
+        meddler.inner.answer(meddler.inner.context, request, received, served);
         if (served.status != 200) return;
         if (served.body.len == 0 or served.body.len > meddler.scratch.len) return;
         if (meddler.random.uintLessThan(u16, 1000) >= meddler.flip_per_mille) return;

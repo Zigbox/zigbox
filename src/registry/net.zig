@@ -3,8 +3,9 @@
 //! TLS, the proxy), the simulator's is `net_sim.zig` (a registry in memory with faults). Code
 //! above this file does not know which it has (docs/STYLE.md, layer 4).
 //!
-//! One call is one HTTP GET and one response: the vtable does not follow redirects, retry, or
-//! authenticate. Those are the client's (`client.zig`), written once, so the simulator exercises
+//! One call is one HTTP request and one response (GET and HEAD to read, POST, PATCH and PUT to
+//! upload; a body is streamed from a `Source`, never held whole): the vtable does not follow
+//! redirects, retry, or authenticate. Those are the client's (`client.zig`), written once, so the simulator exercises
 //! the code that runs in production. What the vtable does own is everything a wire can do wrong:
 //! the connection (DNS, connect, the proxy, TLS), the timeouts, and the bounds. It stops reading
 //! at `body_bytes_max`, refuses a head larger than the bound, and reports a body that ends before
@@ -46,9 +47,49 @@ pub const Error = error{
     BadResponse,
     /// The sink refused bytes (its own failure is the caller's to explain).
     SinkFailed,
+    /// The request body's source failed or ended before its declared length (its own failure
+    /// is the caller's to explain).
+    SourceFailed,
     /// The request asks for what this build cannot do (an IPv6 literal, for example).
     Unsupported,
     IoFailed,
+};
+
+/// What a request does. A GET or HEAD has no body; the others carry one (possibly empty).
+pub const Method = enum {
+    get,
+    head,
+    post,
+    patch,
+    put,
+
+    pub fn text(method: Method) []const u8 {
+        return switch (method) {
+            .get => "GET",
+            .head => "HEAD",
+            .post => "POST",
+            .patch => "PATCH",
+            .put => "PUT",
+        };
+    }
+
+    pub fn has_body(method: Method) bool {
+        return method != .get and method != .head;
+    }
+};
+
+/// Where a request body's bytes come from, as they are sent. `read` fills the front of `buffer`
+/// and returns how many bytes it wrote; it is asked again until the body's length is reached.
+pub const Source = struct {
+    context: *anyopaque,
+    read: *const fn (context: *anyopaque, buffer: []u8) error{SourceFailed}!usize,
+};
+
+/// A request body: exactly `length` bytes from `source`. A source that runs dry early, or has
+/// more, fails the call with `SourceFailed`.
+pub const Body = struct {
+    length: u64,
+    source: Source,
 };
 
 pub const Request = struct {
@@ -71,6 +112,13 @@ pub const Request = struct {
     /// A resumed download: ask for the bytes from this offset on (`Range: bytes=N-`). Zero asks
     /// for the whole body and sends no header.
     range_from: u64 = 0,
+    method: Method = .get,
+    /// The upload's bytes; null for none. Set exactly when `method.has_body()`.
+    body: ?Body = null,
+    /// The Content-Type of the body; empty for none.
+    content_type: []const u8 = "",
+    /// The Content-Range of a chunk ("first-last"); empty for none.
+    content_range: []const u8 = "",
 };
 
 /// A header value kept whole, or marked cut: a value past its bound is never half-used.
@@ -114,6 +162,8 @@ pub const Head = struct {
     location: HeaderValue(constants.registry_url_bytes_max) = .{},
     /// "bytes first-last/total" of a 206 answer.
     content_range: HeaderValue(constants.registry_header_bytes_max) = .{},
+    /// "0-last" of an upload's 202 answer: the bytes the registry holds.
+    range: HeaderValue(constants.registry_header_bytes_max) = .{},
     /// Body bytes handed to the sink.
     body_len: u64 = 0,
 
@@ -131,7 +181,7 @@ pub const Sink = struct {
 };
 
 pub const VTable = struct {
-    get: *const fn (
+    call: *const fn (
         context: *anyopaque,
         request: *const Request,
         head: *Head,
@@ -148,6 +198,14 @@ pub const Net = struct {
     /// One GET. On success `head` is the response and its body went to `sink`; whatever the
     /// status, a body over `body_bytes_max` is `TooLarge`.
     pub fn get(net: Net, request: *const Request, head: *Head, sink: Sink) Error!void {
+        assert(request.method == .get);
+        return net.call(request, head, sink);
+    }
+
+    /// One request of any method, and its one response; see `get`. A HEAD answer has no body.
+    pub fn call(net: Net, request: *const Request, head: *Head, sink: Sink) Error!void {
+        assert(request.method.has_body() == (request.body != null));
+        if (request.body) |body| assert(body.length <= constants.push_chunk_bytes);
         assert(request.host.len > 0);
         assert(request.port != 0);
         assert(request.target.len > 0);
@@ -157,7 +215,8 @@ pub const Net = struct {
         assert(request.idle_timeout_ms > 0);
         assert(request.body_bytes_max > 0);
         head.reset();
-        try net.vtable.get(net.context, request, head, sink);
+        try net.vtable.call(net.context, request, head, sink);
+        if (request.method == .head) assert(head.body_len == 0);
         assert(head.status >= 100);
         assert(head.status <= 599);
         assert(head.body_len <= request.body_bytes_max);

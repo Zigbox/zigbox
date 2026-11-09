@@ -225,13 +225,13 @@ fn sink_lock(_: *anyopaque, _: [:0]const u8, _: bool, _: []const u8) host.Error!
 /// The network of a host that was given none: no route to anywhere, so every request is refused
 /// at the connect. One for all hosts, since it never holds anything.
 fn down_net() registry_net.Net {
-    const vtable: registry_net.VTable = .{ .get = down_get, .last_errno = down_errno };
+    const vtable: registry_net.VTable = .{ .call = down_call, .last_errno = down_errno };
     return .{ .context = &down_net_context, .vtable = &vtable };
 }
 
 var down_net_context: u8 = 0;
 
-fn down_get(
+fn down_call(
     context: *anyopaque,
     request: *const registry_net.Request,
     head: *registry_net.Head,

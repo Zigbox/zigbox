@@ -46,7 +46,7 @@ pub const Origin = struct {
     host: []const u8,
     port: u16,
 
-    fn same(first: Origin, second: Origin) bool {
+    pub fn same(first: Origin, second: Origin) bool {
         assert(first.host.len > 0);
         assert(second.host.len > 0);
         if (first.scheme != second.scheme) return false;
@@ -615,12 +615,12 @@ fn request_following(
     unreachable; // The loop returns on the last hop.
 }
 
-const Next = struct { origin: Origin, target: []const u8 };
+pub const Next = struct { origin: Origin, target: []const u8 };
 
 /// The place a Location points at, copied into the storage (the head it came from is reused by
 /// the next request). Null for one that is not followed: another scheme, a downgrade from https
 /// to http, or a malformed URL.
-fn follow(
+pub fn follow(
     current: Origin,
     location: []const u8,
     host_storage: *[256]u8,

@@ -34,7 +34,13 @@ pub const TestRegistry = struct {
     }
 };
 
-fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Served) void {
+fn answer(
+    context: *anyopaque,
+    request: *const net.Request,
+    received: []const u8,
+    served: *net_sim.Served,
+) void {
+    _ = received; // The pull fixture takes no uploads.
     const registry: *TestRegistry = @ptrCast(@alignCast(context));
     var out: fixture_mod.Answer = .{};
     registry.fixture.answer(.{

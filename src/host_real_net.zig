@@ -40,7 +40,7 @@ pub fn interface(context: *HostReal) net.Net {
     return .{ .context = context, .vtable = &vtable };
 }
 
-const vtable: net.VTable = .{ .get = get, .last_errno = last_errno };
+const vtable: net.VTable = .{ .call = call, .last_errno = last_errno };
 
 fn last_errno(context: *anyopaque) u16 {
     const memory = memory_of(@ptrCast(@alignCast(context)));
@@ -620,7 +620,11 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     assert(request.target[0] == '/');
     assert(request.host.len > 0);
     const default_port: u16 = if (request.scheme == .https) 443 else 80;
-    try writer.print("GET {s} HTTP/1.1\r\nHost: {s}", .{ request.target, request.host });
+    try writer.print("{s} {s} HTTP/1.1\r\nHost: {s}", .{
+        request.method.text(),
+        request.target,
+        request.host,
+    });
     if (request.port != default_port) try writer.print(":{d}", .{request.port});
     try writer.print("\r\nUser-Agent: zbx/{s}\r\n", .{build_options.version});
     try writer.writeAll("Accept-Encoding: identity\r\nConnection: close\r\n");
@@ -629,7 +633,32 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     if (request.bearer.len > 0) {
         try writer.print("Authorization: Bearer {s}\r\n", .{request.bearer});
     }
+    if (request.content_type.len > 0) {
+        try writer.print("Content-Type: {s}\r\n", .{request.content_type});
+    }
+    if (request.content_range.len > 0) {
+        try writer.print("Content-Range: {s}\r\n", .{request.content_range});
+    }
+    // A POST, PATCH or PUT always says how long its body is, even when it is empty.
+    if (request.body) |body| try writer.print("Content-Length: {d}\r\n", .{body.length});
     try writer.writeAll("\r\n");
+}
+
+/// Sends the body from its source, exactly `length` bytes, through `out`.
+fn write_body(out: *Io.Writer, socket: *Socket, body: net.Body) net.Error!void {
+    var chunk: [16 * 1024]u8 = undefined;
+    var remaining = body.length;
+    while (remaining > 0) {
+        const wanted: usize = @intCast(@min(remaining, chunk.len));
+        const count = body.source.read(body.source.context, chunk[0..wanted]) catch {
+            return error.SourceFailed;
+        };
+        if (count == 0) return error.SourceFailed; // It ended before its declared length.
+        assert(count <= wanted);
+        out.writeAll(chunk[0..count]) catch return socket_error(socket);
+        remaining -= count;
+    }
+    assert(remaining == 0);
 }
 
 fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void {
@@ -649,6 +678,8 @@ fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void 
             if (!head.content_digest.present) head.content_digest.set(header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "content-range")) {
             if (!head.content_range.present) head.content_range.set(header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "range")) {
+            if (!head.range.present) head.range.set(header.value);
         }
     }
     if (parsed.content_type) |text| head.content_type.set(text);
@@ -699,6 +730,8 @@ fn read_body(
 ) net.Error!void {
     assert(head.status >= 200);
     assert(head.body_len == 0);
+    // An answer to HEAD carries the length of the body it does not send.
+    if (request.method == .head) return;
     if (head.content_length) |declared| {
         if (declared > request.body_bytes_max) return error.TooLarge;
     }
@@ -722,7 +755,7 @@ fn read_body(
     }
 }
 
-fn get(
+fn call(
     context: *anyopaque,
     request: *const net.Request,
     head: *net.Head,
@@ -769,6 +802,7 @@ fn exchange(
     write_request(&writer, request) catch return error.Unsupported;
 
     out.writeAll(writer.buffered()) catch return socket_error(socket);
+    if (request.body) |body| try write_body(out, socket, body);
     out.flush() catch return socket_error(socket);
     // TLS wrote its records into the socket's own buffer: that one is sent too.
     socket.writer.flush() catch return socket_error(socket);

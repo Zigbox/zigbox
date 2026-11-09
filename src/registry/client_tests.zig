@@ -366,15 +366,20 @@ const MirrorWorld = struct {
         world.mirror_scenario = mirror_scenario;
     }
 
-    fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Served) void {
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *net_sim.Served,
+    ) void {
         const world: *MirrorWorld = @ptrCast(@alignCast(context));
         const inner = world.registry.responder();
         if (!std.mem.eql(u8, request.host, mirror_host)) {
-            return inner.answer(inner.context, request, served);
+            return inner.answer(inner.context, request, received, served);
         }
         const name = "/fixture/open/";
         const at = std.mem.indexOf(u8, request.target, name) orelse
-            return inner.answer(inner.context, request, served);
+            return inner.answer(inner.context, request, received, served);
         const swapped = std.fmt.bufPrint(&world.target, "{s}/fixture/{s}/{s}", .{
             request.target[0..at],
             @tagName(world.mirror_scenario),
@@ -382,7 +387,7 @@ const MirrorWorld = struct {
         }) catch unreachable; // The targets of the tests are short.
         var changed = request.*;
         changed.target = swapped;
-        inner.answer(inner.context, &changed, served);
+        inner.answer(inner.context, &changed, received, served);
     }
 
     fn resolve(world: *MirrorWorld, mirrors: []const u8) client_mod.Error!client_mod.Client {
