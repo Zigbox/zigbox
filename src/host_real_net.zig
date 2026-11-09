@@ -630,8 +630,12 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     try writer.writeAll("Accept-Encoding: identity\r\nConnection: close\r\n");
     if (request.accept.len > 0) try writer.print("Accept: {s}\r\n", .{request.accept});
     if (request.range_from > 0) try writer.print("Range: bytes={d}-\r\n", .{request.range_from});
+    if (request.bearer.len > 0) assert(request.basic.len == 0);
     if (request.bearer.len > 0) {
         try writer.print("Authorization: Bearer {s}\r\n", .{request.bearer});
+    }
+    if (request.basic.len > 0) {
+        try writer.print("Authorization: Basic {s}\r\n", .{request.basic});
     }
     if (request.content_type.len > 0) {
         try writer.print("Content-Type: {s}\r\n", .{request.content_type});

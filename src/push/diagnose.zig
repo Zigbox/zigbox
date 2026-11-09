@@ -233,3 +233,173 @@ pub fn destination_refused(diag: *Diag, operand: []const u8, why: []const u8) vo
         " registry.example/team/app:1.0" });
     assert(diag.code.? == .E0551);
 }
+
+// ---- Credentials (slice 12) ----------------------------------------------------------------
+
+/// ZBX-E0552: the registry wants credentials and none were given. Nothing was sent to a token
+/// service.
+pub fn no_credentials(diag: *Diag, host: []const u8, repository: []const u8) void {
+    assert(diag.code == null);
+    var host_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var repo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&host_storage, host);
+    diag.raise(.E0552);
+    diag.while_("pushing an image", .{});
+    diag.cause("{s} wants credentials to push, and none were given", .{shown});
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{echo_of(&repo_storage, repository)});
+    diag.fix(.{
+        .sentence = "give a user and a password file only you can read:",
+        .command = "zbx push <dest> --username <user> --password-file <file>",
+        .template = true,
+    });
+    assert(diag.code.? == .E0552);
+}
+
+/// What the registry or its token service said to the credentials.
+pub const CredentialsRefusal = enum {
+    /// The registry, or the realm, answered the user and password with 401 or 403.
+    refused,
+    /// The token the realm granted does not allow `push` to the repository (it granted `pull`).
+    no_push_scope,
+    /// The token service answered, and what it sent is no token.
+    token_unusable,
+    /// The registry's challenge is neither Basic nor Bearer, or is not there.
+    no_challenge,
+};
+
+/// ZBX-E0553: the registry or its token service refused the credentials, or granted no push
+/// scope. The username and the password are never named.
+pub fn credentials_refused(
+    diag: *Diag,
+    host: []const u8,
+    repository: []const u8,
+    refusal: CredentialsRefusal,
+) void {
+    assert(diag.code == null);
+    var host_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var repo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&host_storage, host);
+    const repo_shown = echo_of(&repo_storage, repository);
+    diag.raise(.E0553);
+    diag.while_("pushing an image", .{});
+    switch (refusal) {
+        .refused => diag.cause("{s} refused the credentials", .{shown}),
+        .no_push_scope => diag.cause(
+            "{s} would not let these credentials push to '{s}' (no 'push' scope): " ++
+                "they may only pull",
+            .{ shown, repo_shown },
+        ),
+        .token_unusable => diag.cause(
+            "{s}'s token service answered with no token zbx can use",
+            .{shown},
+        ),
+        .no_challenge => diag.cause(
+            "{s} wants credentials, and asks for them in a way zbx does not speak (it speaks" ++
+                " Basic and Bearer)",
+            .{shown},
+        ),
+    }
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{repo_shown});
+    if (refusal == .no_push_scope) diag.context("scope", "push", .{});
+    switch (refusal) {
+        .no_push_scope => diag.fix(.{
+            .sentence = "use credentials that may push to this repository (a token with write" ++
+                " access), or push to a repository you own",
+        }),
+        else => diag.fix(.{
+            .sentence = "check the user and the password file; many registries want an access" ++
+                " token, not an account password",
+        }),
+    }
+    assert(diag.code.? == .E0553);
+}
+
+/// ZBX-E0554: the token service a registry named is on a host that may not be sent the password.
+pub fn realm_refused(diag: *Diag, registry: []const u8, realm_host: []const u8) void {
+    assert(diag.code == null);
+    var registry_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var realm_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&registry_storage, registry);
+    const realm_shown = echo_of(&realm_storage, realm_host);
+    diag.raise(.E0554);
+    diag.while_("pushing an image", .{});
+    diag.cause(
+        "{s} named the token service {s}, which is not {s}, nor a service it is known to use;" ++
+            " the password was not sent",
+        .{ shown, realm_shown, shown },
+    );
+    diag.context("host", "{s}", .{shown});
+    diag.context("realm", "{s}", .{realm_shown});
+    diag.fix(.{
+        .sentence = "push to a registry whose token service is on its own host; zbx sends a" ++
+            " password only there",
+    });
+    assert(diag.code.? == .E0554);
+}
+
+/// What is wrong with the password file or the standard input, for E0558.
+pub const PasswordProblem = enum {
+    /// The file can be read by group or others.
+    file_too_open,
+    /// The first line, with the user name, is longer than `push_credential_bytes_max`.
+    too_long,
+    empty,
+    file_missing,
+    file_unreadable,
+    file_is_link,
+    /// Standard input is a terminal: a password typed there would show.
+    stdin_is_terminal,
+    stdin_unreadable,
+    /// A user name with a colon cannot be sent with Basic authentication.
+    user_has_colon,
+};
+
+/// ZBX-E0558: the password file is unsafe or unusable. `path` is empty for standard input. The
+/// password itself is never an argument.
+pub fn password_unsafe(diag: *Diag, path: []const u8, problem: PasswordProblem) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, path);
+    diag.raise(.E0558);
+    diag.while_("reading the password for a push", .{});
+    switch (problem) {
+        .file_too_open => diag.cause("{s} can be read by other users", .{shown}),
+        .too_long => diag.cause(
+            "the user and the password are over {d} bytes together",
+            .{constants.push_credential_bytes_max},
+        ),
+        .empty => diag.cause("the password is empty; a password needs at least one character", .{}),
+        .file_missing => diag.cause("there is no file {s}", .{shown}),
+        .file_unreadable => diag.cause("{s} could not be read", .{shown}),
+        .file_is_link => diag.cause(
+            "{s} is a symbolic link; name the file it points to instead",
+            .{shown},
+        ),
+        .stdin_is_terminal => diag.cause(
+            "standard input is a terminal, where the password would show as it is typed",
+            .{},
+        ),
+        .stdin_unreadable => diag.cause("standard input could not be read", .{}),
+        .user_has_colon => diag.cause(
+            "the user name has a ':', which Basic login cannot carry",
+            .{},
+        ),
+    }
+    if (path.len > 0) diag.context("path", "{s}", .{shown});
+    switch (problem) {
+        .file_too_open => diag.fix_with("make it private to you:", "chmod 600 {s}", .{shown}),
+        .stdin_is_terminal => diag.fix(.{
+            .sentence = "pipe the password in, or give a file only you can read:",
+            .command = "zbx push <dest> --username <user> --password-file <file>",
+            .template = true,
+        }),
+        else => diag.fix(.{
+            .sentence = "give the password as the first line of a file only you can read:",
+            .command = "zbx push <dest> --username <user> --password-file <file>",
+            .template = true,
+        }),
+    }
+    assert(diag.code.? == .E0558);
+}

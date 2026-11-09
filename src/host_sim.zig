@@ -351,7 +351,10 @@ pub const HostSim = struct {
         const store_open = if (sim.store_fs) |files| files.open_count() else 0;
         var namespaces: u32 = 0;
         for (sim.world.namespace_handles) |entry| namespaces += @intFromBool(entry != null);
-        const pipes = sim.world.open_pipe_ends() - @intFromBool(sim.world.input_handle != null);
+        // Standard input is the world's, not a descriptor to leak; when a forked command made it,
+        // it was that process's and is not among this process's ends.
+        const input_held = sim.world.input_is_held_by_first();
+        const pipes = sim.world.open_pipe_ends() - @intFromBool(input_held);
         return count + pipes + sim.world.bus.open_count() + store_open + namespaces;
     }
 

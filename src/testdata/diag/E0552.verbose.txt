@@ -1,0 +1,8 @@
+error[ZBX-E0552]: the registry wants credentials and none were given
+  while  pushing an image
+  cause  registry.test wants credentials to push, and none were given
+  host   registry.test
+  repo   push/ok
+  fix    give a user and a password file only you can read:   zbx push <dest> --username <user> --password-file <file>
+  more   zbx explain E0552
+  docs   https://zigbox.github.io/zigbox/errors/E0552.html

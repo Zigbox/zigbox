@@ -38,6 +38,7 @@ const layout = @import("store/layout.zig");
 const pack = @import("push/pack.zig");
 const push_registry = @import("registry/push_registry.zig");
 const support = @import("store/test_support.zig");
+const credentials_mod = @import("push/credentials.zig");
 const upload = @import("push/upload.zig");
 const reference_mod = @import("registry/reference.zig");
 const test_registry = @import("registry/test_registry.zig");
@@ -413,6 +414,32 @@ const Spoiler = struct {
     }
 };
 
+/// Pushes to a repository that holds both blobs, with no faults: a mount may come from it.
+fn seed_holder(rig: *Pushing, holder: []const u8) void {
+    assert(holder.len > 0);
+    var report: upload.Report = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    const source: upload.Destination = .{
+        .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
+        .repository = holder,
+        .tag = "v1",
+    };
+    const wire = rig.wire.interface();
+    upload.push(&rig.store, &rig.uploading, wire, source, &rig.made, .{}, &report, &diag) catch
+        @panic("a push with no fault failed");
+}
+
+const secret = "fz-secret-password";
+
+/// Makes the registry ask for credentials, in a mode picked at random.
+fn require_login(rig: *Pushing, random: std.Random) void {
+    const modes = [_]push_registry.Mode{ .basic, .bearer, .pull_only, .far_realm, .expiring };
+    const mode = modes[random.uintLessThan(usize, modes.len)];
+    assert(mode != .open);
+    rig.registry.require(mode, secret);
+}
+
 fn fuzz_upload(random: std.Random, seed: u64) void {
     const rig = pushing_ready();
     rig.wire.init(seed, rig.registry.responder());
@@ -424,18 +451,7 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
     const holder = "push/ok-src";
     var report: upload.Report = undefined;
     var diag: Diag = undefined;
-    if (random.boolean()) {
-        // A repository that holds both blobs, pushed to with no faults: a mount may come from it.
-        diag.reset();
-        const source: upload.Destination = .{
-            .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
-            .repository = holder,
-            .tag = "v1",
-        };
-        const wire = rig.wire.interface();
-        upload.push(&rig.store, &rig.uploading, wire, source, &rig.made, .{}, &report, &diag) catch
-            @panic("a push with no fault failed");
-    }
+    if (random.boolean()) seed_holder(rig, holder);
     var spoiler: Spoiler = .{
         .inner = rig.registry.responder(),
         .random = random,
@@ -450,9 +466,14 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
         .repository = name,
         .tag = "v1",
     };
+    // Half the pushes log in, in a mode the registry picks at random; the secret must not leave.
+    var credentials = credentials_mod.Credentials.of(push_registry.test_user, secret);
+    defer credentials.wipe();
+    if (random.boolean()) require_login(rig, random);
     const options: upload.Options = .{
         .chunk_bytes = random.intRangeAtMost(u32, 16, 4096),
         .mount_from = if (random.boolean()) holder else "",
+        .credentials = if (random.boolean()) &credentials else null,
     };
     diag.reset();
     const store = &rig.store;
@@ -477,6 +498,8 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
     }
     // The registry told the truth unless it was spoiled; then a manifest may name a missing blob.
     if (spoiler.spoiled == 0) assert(rig.registry.fixture.unknown_refusals == 0);
+    assert(rig.registry.leaked == 0); // a credential reached no host but the registry's
+    assert(std.mem.indexOf(u8, std.mem.asBytes(&diag), secret) == null);
 }
 
 pub fn fuzz_registry(seed: u64) void {

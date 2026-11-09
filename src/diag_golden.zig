@@ -1753,6 +1753,28 @@ fn prepare_push_registry(sim: *HostSim) void {
     sim.wire = &golden_wire;
 }
 
+/// A registry that asks for credentials, and a password file `/pw` of the right password (mode
+/// 0600), a world-readable one `/open`.
+fn prepare_push_login(sim: *HostSim, mode: push_registry.Mode) void {
+    prepare_push_registry(sim);
+    golden_push_registry.require(mode, "right");
+    golden_files.put_file("/pw", 0o600, "wrong\n");
+    golden_files.put_file("/open", 0o644, "right\n");
+    golden_files.put_file("/good", 0o600, "right\n");
+}
+
+fn prepare_push_asks(sim: *HostSim) void {
+    prepare_push_login(sim, .bearer);
+}
+
+fn prepare_push_far_realm(sim: *HostSim) void {
+    prepare_push_login(sim, .far_realm);
+}
+
+fn prepare_push_pull_only(sim: *HostSim) void {
+    prepare_push_login(sim, .pull_only);
+}
+
 fn prepare_wire_fault(sim: *HostSim, err: @import("registry/net.zig").Error) void {
     prepare_registry(sim);
     golden_wire.faults.fail_request = 0;
@@ -2057,6 +2079,54 @@ const image_cases = [_]Case{
         .args = &.{ "push", sample_tree, push_registry.PushRegistry.destination(.invalidmanifest) },
         .prepare = prepare_push_registry,
         .exit = 3,
+    },
+    .{
+        .code = .E0552,
+        .args = &.{ "push", sample_tree, push_registry.PushRegistry.destination(.ok) },
+        .prepare = prepare_push_asks,
+        .exit = 1,
+    },
+    .{
+        .code = .E0553,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/good",
+        },
+        .prepare = prepare_push_pull_only,
+        .exit = 1,
+    },
+    .{
+        .code = .E0554,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/pw",
+        },
+        .prepare = prepare_push_far_realm,
+        .exit = 3,
+    },
+    .{
+        .code = .E0558,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/open",
+        },
+        .prepare = prepare_push_asks,
+        .exit = 1,
     },
     .{
         .code = .W0503,

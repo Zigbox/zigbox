@@ -156,9 +156,13 @@ pub const Code = enum(u8) {
     E0526,
     E0550,
     E0551,
+    E0552,
+    E0553,
+    E0554,
     E0555,
     E0556,
     E0557,
+    E0558,
     W0501,
     W0502,
     W0503,
@@ -2375,6 +2379,60 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0552,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the registry wants credentials and none were given",
+        .explanation =
+        \\The registry answered a push with `401`: it wants a user and a password, and
+        \\the command gave none. Nothing was sent to the registry's token service.
+        \\
+        \\Give a user name and a file only you can read whose first line is the
+        \\password (or an access token, which most registries prefer):
+        \\`zbx push <image> <destination> --username <user> --password-file <file>`.
+        \\To read the password from standard input instead, use `--password-stdin`;
+        \\that is the way for a CI job, whose secret is then in no argument and no
+        \\file. zbx reads no environment variable, no `config.json` and no
+        \\credential helper, and an anonymous push is refused by every registry that
+        \\matters.
+        ,
+    },
+    .{
+        .code = .E0553,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the registry or its token service refused the credentials",
+        .explanation =
+        \\The credentials were sent, and the registry, or the token service it named,
+        \\refused them (`401` or `403`), or the token it gave back does not allow a
+        \\push: it grants the scope `pull` only, or no scope at all.
+        \\
+        \\The cause says which. For a refusal, check the user and the password file;
+        \\many registries want an access token and not the account's password. For a
+        \\missing `push`, use a token with write access to the repository, or push to
+        \\a repository you own. The user name and the password are never in the
+        \\message.
+        ,
+    },
+    .{
+        .code = .E0554,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the token service is on a host the password may not be sent to",
+        .explanation =
+        \\A registry answers a request without a token by naming a token service (the
+        \\realm of its `WWW-Authenticate` challenge), and zbx sends the user and the
+        \\password there. It does so only when the realm is on the registry's own
+        \\host, is one of the pairs zbx knows (Docker Hub's registry and
+        \\`auth.docker.io`), or, for a registry on loopback, is on loopback, and only
+        \\over HTTPS (plain HTTP on loopback). This realm is on another host, so a
+        \\password sent there would reach a service the registry merely pointed at.
+        \\
+        \\Nothing was sent. If the registry is yours, serve its token service from
+        \\its own host; if it is not, do not use it with a password.
+        ,
+    },
+    .{
         .code = .E0555,
         .severity = .@"error",
         .blame = .external,
@@ -2385,8 +2443,9 @@ pub const registry = [_]Entry{
         \\or with something the upload protocol does not allow (a Location that cannot
         \\be followed, a Range that says it kept fewer bytes than were sent).
         \\
-        \\The cause names the step and the registry's own code. A `401` or `403` means
-        \\the registry wants credentials this build of zbx does not send. A `429`
+        \\The cause names the step and the registry's own code. A `401` is not
+        \\reported here: it is E0552 (no credentials given) or E0553 (refused), and
+        \\so is a `403` with the code `DENIED` once credentials were sent. A `429`
         \\means wait and try again. Nothing is half-done in a way that matters: a
         \\push again skips every blob the registry holds, and the manifest is only
         \\put once all of its blobs are there.
@@ -2419,6 +2478,25 @@ pub const registry = [_]Entry{
         \\exists and is not empty, or it is not a directory.
         \\
         \\Name a directory that does not exist (zbx makes it), or an empty one.
+        ,
+    },
+    .{
+        .code = .E0558,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the password file or input is unsafe or unusable",
+        .explanation =
+        \\The password for a push is read from the first line of a file, or from
+        \\standard input, and the one given is refused. A file that other users can
+        \\read is refused whole, as a key's passphrase file is, because anyone who
+        \\can read it has the password; so is a symbolic link (name the file it
+        \\points to), a file that is missing, one that cannot be read, an empty line,
+        \\and a user name and password that together are over 4096 bytes. Standard
+        \\input is refused when it is a terminal, where the password would show as it
+        \\is typed.
+        \\
+        \\The cause names the file and the fault. `chmod 600 <file>` makes a file
+        \\private to you. The password is never in the message.
         ,
     },
     .{

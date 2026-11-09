@@ -1,0 +1,7 @@
+error[ZBX-E0558]: the password file or input is unsafe or unusable
+  while  reading the password for a push
+  cause  /open can be read by other users
+  path   /open
+  fix    make it private to you:   chmod 600 /open
+  more   zbx explain E0558
+  docs   https://zigbox.github.io/zigbox/errors/E0558.html

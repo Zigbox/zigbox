@@ -164,7 +164,11 @@ policy:
 push:
   zbx push <source> <registry/repository:tag>
                            pack a build result, an image or a tree and put it in the
-                           registry (no credentials yet); prints the manifest digest
+                           registry; prints the manifest digest. A user name and a password,
+                           read from a file or stdin (never the command line), log in:
+  zbx push --username <name> --password-stdin <source> <reference>
+  zbx push --username <name> --password-file <file> <source> <reference>
+                           the file must be mode 0600 or tighter; one line, at most 4096 bytes
   zbx push --dry-run <source>   pack it and print the manifest digest; sends nothing
 
 pull:
