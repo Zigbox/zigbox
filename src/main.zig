@@ -311,6 +311,7 @@ test {
     _ = @import("trust/verdict_tests.zig");
     _ = @import("trust/gate.zig");
     _ = @import("trust/gate_tests.zig");
+    _ = @import("trust/tamper_tests.zig");
     _ = @import("trust/policy_commands.zig");
     _ = @import("trust/policy_commands_tests.zig");
     _ = @import("trust/exec_gate.zig");
