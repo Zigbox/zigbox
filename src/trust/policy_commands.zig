@@ -85,7 +85,11 @@ fn judge_one(
     const asked = subject orelse return .asks_nothing;
     if (!loaded.policy.checks()) return .asks_nothing;
     const tree = asked.tree orelse return .refused;
-    const have: verdict.Subject = .{ .tree = tree.bytes, .binding = asked.binding };
+    const have: verdict.Subject = .{
+        .tree = tree.bytes,
+        .binding = asked.binding,
+        .derived = asked.derived,
+    };
     const met = verdict.judge(&work.envelope, &loaded.policy, record, have, report);
     return if (met) .met else .refused;
 }

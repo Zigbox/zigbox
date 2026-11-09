@@ -2066,6 +2066,13 @@ const image_cases = [_]Case{
         .exit = 0,
     },
     .{
+        .code = .W0551,
+        .args = &.{},
+        .direct = build_tree_annotation_differs,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
         .code = .W0552,
         .args = &.{},
         .direct = build_tag_not_recorded,
@@ -2243,6 +2250,13 @@ fn build_output_refused(diag: *Diag) void {
 fn build_tag_not_recorded(diag: *Diag) void {
     const failure: @import("store/fs.zig").Failure = .{ .err = error.NoSpace, .errno = 28 };
     push_diagnose.tag_not_recorded(diag, "registry.test/app:1.0", failure);
+}
+
+fn build_tree_annotation_differs(diag: *Diag) void {
+    const repeat = @import("test_util.zig").repeat;
+    const claimed = "b3:" ++ repeat('1', 64);
+    const actual = "b3:" ++ repeat('2', 64);
+    image_diagnose.tree_annotation_differs(diag, claimed, actual);
 }
 
 fn build_warnings_dropped(diag: *Diag) void {

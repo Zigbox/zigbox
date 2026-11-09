@@ -15,6 +15,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const digest_mod = @import("digest.zig");
+const store_digest = @import("../store/digest.zig");
 const text_util = @import("../text.zig");
 
 const Sha256 = digest_mod.Sha256;
@@ -112,6 +113,9 @@ pub const Resolved = struct {
     architecture: Architecture,
     layer_count: u32,
     layers: [constants.registry_layers_max]Layer,
+    /// The tree digest the manifest's `org.zigbox.tree` annotation claims, when it has one that
+    /// reads; a claim only, which a pull checks against the tree it unpacks.
+    tree_note: ?[32]u8,
 };
 
 /// Why a body was not accepted. The code that reports it is chosen by the client.
@@ -149,7 +153,16 @@ const DescriptorJson = struct {
     platform: ?PlatformJson = null,
 };
 
+const AnnotationsJson = struct {
+    @"org.zigbox.tree": ?[]const u8 = null,
+};
+
+comptime {
+    assert(std.mem.eql(u8, constants.pack_annotation_tree, "org.zigbox.tree"));
+}
+
 const DocumentJson = struct {
+    annotations: ?AnnotationsJson = null,
     schemaVersion: ?i64 = null,
     mediaType: ?[]const u8 = null,
     manifests: ?[]const DescriptorJson = null,
@@ -405,6 +418,10 @@ pub fn read_manifest(
         name_media(problem, config_media);
         return error.UnknownMediaType;
     }
+    resolved.tree_note = null;
+    if (document.json.annotations) |notes| if (notes.@"org.zigbox.tree") |text| {
+        if (store_digest.Digest.parse(text)) |claimed| resolved.tree_note = claimed.bytes;
+    };
     resolved.config_digest = try descriptor_digest(config, problem);
     resolved.config_size = config.size orelse return error.BadDescriptor;
     if (resolved.config_size == 0) return error.BadDescriptor;
@@ -675,6 +692,20 @@ test "a manifest gives its config and layers, with their kinds" {
     try testing.expectEqual(LayerKind.tar_gzip, resolved.layers[2].kind);
     try testing.expectEqual(LayerKind.tar, resolved.layers[3].kind);
     try testing.expectEqual(@as(u64, 14), resolved.layers[3].size);
+}
+
+test "a manifest's tree annotation is read when it is a digest, and ignored otherwise" {
+    // Goal: slice 14's W0551 compares the claim with the unpacked tree; the claim must be exact.
+    const head = "{\"schemaVersion\":2," ++ config_member ++ ",\"layers\":[],\"annotations\":{";
+    const good = "\"org.zigbox.tree\":\"b3:" ++ repeat('a', 64) ++ "\"";
+    var resolved: Resolved = undefined;
+    var problem: Problem = .{};
+    try read_in(head ++ "\"other\":\"x\"}}", &resolved, &problem);
+    try testing.expect(resolved.tree_note == null);
+    try read_in(head ++ "\"org.zigbox.tree\":\"not a digest\"}}", &resolved, &problem);
+    try testing.expect(resolved.tree_note == null);
+    try read_in(head ++ good ++ "}}", &resolved, &problem);
+    try testing.expect(resolved.tree_note != null);
 }
 
 test "a manifest with a type, digest or size it cannot use is refused" {

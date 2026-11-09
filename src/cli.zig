@@ -2695,7 +2695,8 @@ fn run_exec(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     };
     const record = &storage.sign.record;
     const work = &storage.sign.record_work;
-    trust_exec.check(host, &storage.gate, record, work, args.name, diag) catch {
+    const image = &storage.run_image.image;
+    trust_exec.check(host, &storage.gate, record, work, image, args.name, diag) catch {
         return error.StartFailed;
     };
     return exec_commands.run_exec(host, &args, &storage.exec, diag) catch error.StartFailed;
@@ -3051,10 +3052,12 @@ fn gate_subject_of(
     const manifest = prepared.manifest orelse {
         return .{ .tree = tree, .binding = .none, .text = prepared.tree };
     };
+    const derived = prepared.derived;
     var reference: reference_mod.Reference = undefined;
     reference_mod.parse(operand, &reference) catch return .{
         .tree = tree,
         .binding = .{ .manifest = manifest.bytes },
+        .derived = derived,
         .text = prepared.tree,
     };
     const text = std.fmt.bufPrint(name_buffer, "{s}/{s}@{s}", .{
@@ -3065,6 +3068,7 @@ fn gate_subject_of(
     return .{
         .tree = tree,
         .binding = .{ .manifest = manifest.bytes },
+        .derived = derived,
         .text = if (fits) text else prepared.tree,
     };
 }

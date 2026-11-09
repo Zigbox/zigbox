@@ -18,6 +18,9 @@ const records = @import("../runtime/records.zig");
 const statement = @import("statement.zig");
 const digest_mod = @import("../store/digest.zig");
 const gate = @import("gate.zig");
+const images = @import("../store/images.zig");
+const result = @import("../build/result.zig");
+const Store = @import("../store/layout.zig").Store;
 const record_mod = @import("record.zig");
 
 const Host = host_mod.Host;
@@ -56,6 +59,7 @@ pub fn check(
     memory: *gate.Memory,
     record: *record_mod.Record,
     work: *record_mod.Work,
+    image: *images.Image,
     name: []const u8,
     diag: *Diag,
 ) Error!void {
@@ -66,9 +70,28 @@ pub fn check(
     if (!records.locate(host, &dir)) return;
     var parsed: records.Parsed = undefined;
     records.load(host, &dir, name, &parsed) catch return;
-    gate.judge_all(host, memory, record, work, subject_of(&parsed), diag) catch {
+    var subject = subject_of(&parsed);
+    subject.derived = derived_of(host, subject.binding, image);
+    gate.judge_all(host, memory, record, work, subject, diag) catch {
         return error.Refused;
     };
+}
+
+/// The result the image record of a manifest-bound container derives, as the run's gate had it;
+/// null when the record cannot be read or gives none, which only narrows what counts.
+fn derived_of(host: Host, binding: statement.Binding, image: *images.Image) ?[32]u8 {
+    const manifest = switch (binding) {
+        .manifest => |bytes| bytes,
+        else => return null,
+    };
+    assert(@intFromPtr(image) != 0);
+    assert(manifest.len == constants.oci_digest_bytes);
+    var store: Store = undefined;
+    if (!store.locate(host)) return null;
+    var errno: u16 = 0;
+    images.load(&store, .{ .bytes = manifest }, image, &errno) catch return null;
+    const found = result.derive(image.tree, &image.settings, &image.labels) orelse return null;
+    return found.bytes;
 }
 
 test "a version 8 record has no binding, so only a tree-only statement could count" {

@@ -20,6 +20,7 @@ const ConfigObject = struct {
     Env: ?[]const []const u8 = null,
     WorkingDir: ?[]const u8 = null,
     User: ?[]const u8 = null,
+    Labels: ?std.json.Value = null,
 };
 
 const Document = struct {
@@ -38,11 +39,19 @@ pub const Problem = error{
     bad_variable,
 };
 
-/// Reads `body` into `settings`. `arena` is scratch for the JSON.
-pub fn parse(arena: []u8, body: []const u8, settings: *Settings) Problem!void {
+/// Reads `body` into `settings` and `labels`. `arena` is scratch for the JSON. Labels that do
+/// not fit `images.Labels`, or are not a JSON object of strings, are left unknown, never refused:
+/// zbx only needs them to derive a result digest, and an image that cannot is still pulled.
+pub fn parse(
+    arena: []u8,
+    body: []const u8,
+    settings: *Settings,
+    labels: *images.Labels,
+) Problem!void {
     assert(arena.len > 0);
     assert(body.len <= constants.registry_manifest_bytes_max);
     settings.clear();
+    labels.clear();
     var fixed = std.heap.FixedBufferAllocator.init(arena);
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     const document = std.json.parseFromSliceLeaky(
@@ -57,6 +66,7 @@ pub fn parse(arena: []u8, body: []const u8, settings: *Settings) Problem!void {
         };
     };
     const config = document.config orelse return;
+    read_labels(labels, config.Labels);
     try add_words(settings, .entrypoint, config.Entrypoint orelse &.{});
     try add_words(settings, .cmd, config.Cmd orelse &.{});
     for (config.Env orelse &.{}) |variable| {
@@ -68,6 +78,25 @@ pub fn parse(arena: []u8, body: []const u8, settings: *Settings) Problem!void {
     settings.set(.user, config.User orelse "") orelse return error.too_big;
 }
 
+/// Copies a JSON `Labels` member in; anything `images.Labels` cannot hold leaves them unknown.
+fn read_labels(labels: *images.Labels, member: ?std.json.Value) void {
+    assert(labels.known);
+    assert(labels.total == 0);
+    const value = member orelse return;
+    const object = switch (value) {
+        .object => |found| found,
+        .null => return,
+        else => return labels.forget(),
+    };
+    for (object.keys(), object.values()) |name, text| {
+        const word = switch (text) {
+            .string => |found| found,
+            else => return labels.forget(),
+        };
+        labels.add(name, word) orelse return labels.forget();
+    }
+}
+
 fn add_words(settings: *Settings, list: Settings.List, words: []const []const u8) Problem!void {
     assert(list != .env);
     assert(words.len < 1 << 20);
@@ -77,8 +106,13 @@ fn add_words(settings: *Settings, list: Settings.List, words: []const []const u8
 const testing = std.testing;
 
 fn parsed(body: []const u8, settings: *Settings) Problem!void {
+    var labels: images.Labels = undefined;
+    return parsed_labels(body, settings, &labels);
+}
+
+fn parsed_labels(body: []const u8, settings: *Settings, labels: *images.Labels) Problem!void {
     var arena: [64 * 1024]u8 = undefined;
-    return parse(&arena, body, settings);
+    return parse(&arena, body, settings, labels);
 }
 
 test "the five members are read, and the rest is ignored" {
@@ -128,9 +162,10 @@ test "no config member is an image with nothing set; bad documents are refused" 
         error.bad_variable,
         parsed("{\"config\":{\"Env\":[\"=x\"]}}", &settings),
     );
+    var labels: images.Labels = undefined;
     var small: [64]u8 = undefined;
     const body = "{\"config\":{\"Cmd\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\"]}}";
-    try testing.expectError(error.too_complex, parse(&small, body, &settings));
+    try testing.expectError(error.too_complex, parse(&small, body, &settings, &labels));
 }
 
 test "more words than the settings hold is refused" {
@@ -145,4 +180,29 @@ test "more words than the settings hold is refused" {
     }
     try writer.writeAll("]}}");
     try testing.expectError(error.too_big, parsed(writer.buffered(), &settings));
+}
+
+test "labels are read in key order, and what does not fit leaves them unknown" {
+    // Goal: a labelled config keeps them; a non-string value, a long block or too many do not
+    // refuse the pull but forget the labels.
+    var settings: Settings = undefined;
+    var labels: images.Labels = undefined;
+    try parsed_labels("{\"config\":{\"Labels\":{\"b\":\"2\",\"a\":\"1\"}}}", &settings, &labels);
+    try testing.expect(labels.known);
+    try testing.expectEqual(@as(u32, 2), labels.count());
+    try testing.expectEqualStrings("a", labels.key(0));
+    try testing.expectEqualStrings("2", labels.value(1));
+    try parsed_labels("{\"config\":{\"Labels\":null}}", &settings, &labels);
+    try testing.expect(labels.known and labels.count() == 0);
+    try parsed_labels("{\"config\":{\"Labels\":{\"a\":1}}}", &settings, &labels);
+    try testing.expect(!labels.known);
+    try parsed_labels("{\"config\":{\"Labels\":[]}}", &settings, &labels);
+    try testing.expect(!labels.known);
+    var text: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    try writer.writeAll("{\"config\":{\"Labels\":{\"k\":\"");
+    try writer.splatByteAll('x', constants.image_labels_bytes_max);
+    try writer.writeAll("\"}}}");
+    try parsed_labels(writer.buffered(), &settings, &labels);
+    try testing.expect(!labels.known);
 }

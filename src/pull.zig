@@ -110,6 +110,8 @@ pub const Workspace = struct {
     reference: reference_mod.Reference,
     /// What the image runs by default, read from its configuration blob.
     settings: images.Settings,
+    /// Its labels, for the result digest a verdict derives.
+    labels: images.Labels,
     /// The machine type the client quotes in its refusals; it must outlive the resolve.
     machine: host_mod.Text,
 };
@@ -337,6 +339,7 @@ fn unpack_in_child(
         .workspace = &workspace.unpack,
         .import_workspace = import_workspace,
         .settings = &workspace.settings,
+        .labels = &workspace.labels,
     };
     const work: namespace.Work = .{ .context = &job, .call = unpack.work_call };
     const warn: namespace.Warn = .{
@@ -546,7 +549,8 @@ fn read_settings(workspace: *Workspace, store: *const Store, diag: *Diag) Error!
         image_diagnose.config_refused(diag, config, "could not be read back from the blob cache");
         return error.Failed;
     };
-    config_mod.parse(&workspace.client.arena, body, &workspace.settings) catch |problem| {
+    const arena = &workspace.client.arena;
+    config_mod.parse(arena, body, &workspace.settings, &workspace.labels) catch |problem| {
         const words = switch (problem) {
             error.malformed => "is not the JSON of an image configuration",
             error.too_complex => "is more complex than zbx reads",

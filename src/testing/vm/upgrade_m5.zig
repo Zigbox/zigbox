@@ -207,7 +207,7 @@ fn tags(session: *Session, out: *Io.Writer, pull: m4.PullDoc) !void {
     checks.check_same_image(pull, by_tag) catch |err| {
         return fail_step(out, step, "expected this pull by tag to find M4's blobs", err);
     };
-    try expect_record_version(session, out, pull, checks.image_record_version_m5);
+    try expect_record_version(session, out, pull, checks.image_record_version_m8);
     try expect_tags(session, out, pull, &.{reference});
     _ = try pull_json(session, out, z, spelled);
     try expect_tags(session, out, pull, &.{reference});

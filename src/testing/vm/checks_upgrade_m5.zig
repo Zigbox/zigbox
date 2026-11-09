@@ -27,9 +27,11 @@ pub const Error = m4.Error || m3.Error || error{
 /// What each record on disk says in its `.version` line. M4 wrote image records as version 1 and
 /// M5 slice 1 writes version 2 (tags). Run records were version 4 in both; M6 slice 1 wrote
 /// version 5 (the network, the forwards and the names of `-e`), slice 2 version 6 (the state
-/// volumes), and this zbx still reads M4's and M5's.
+/// volumes), and this zbx still reads M4's and M5's. M8 slice 14 writes image records as
+/// version 3 (labels), which this zbx writes after a pull; the old releases keep their own.
 pub const image_record_version_m4: u32 = 1;
 pub const image_record_version_m5: u32 = 2;
+pub const image_record_version_m8: u32 = 3;
 pub const run_record_version_old: u32 = 4;
 pub const run_record_version: u32 = 9;
 

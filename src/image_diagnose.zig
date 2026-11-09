@@ -263,6 +263,20 @@ pub fn warnings_dropped(diag: *Diag, count: u32) void {
     diag.fix(.{ .sentence = "nothing to do; the image is unpacked and recorded" });
 }
 
+/// ZBX-W0551: the manifest's `org.zigbox.tree` annotation names another tree than the layers made.
+pub fn tree_annotation_differs(diag: *Diag, claimed: []const u8, actual: []const u8) void {
+    assert(diag.code == null);
+    assert(!std.mem.eql(u8, claimed, actual));
+    diag.raise(.W0551);
+    diag.while_("unpacking the image", .{});
+    diag.cause("the manifest's tree annotation is not the tree the layers made", .{});
+    diag.context("note", "{s}", .{claimed});
+    diag.context("tree", "{s}", .{actual});
+    diag.fix(.{
+        .sentence = "a signature for the annotated tree does not cover this image",
+    });
+}
+
 /// ZBX-W0503: a run found no lock and made one.
 pub fn lock_created(diag: *Diag, reference: []const u8, path: []const u8) void {
     assert(diag.code == null);

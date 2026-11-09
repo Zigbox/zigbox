@@ -6,7 +6,7 @@
 //! The file is the text of a small ZON-like record, written atomically, one field a line:
 //!
 //!   .{
-//!       .version = 2,
+//!       .version = 3,
 //!       .tags = "alpine:3.20",      (none or more, oldest first; a pull by digest adds none)
 //!       .tags = "alpine:3.19",
 //!       .manifest = "sha256:...",
@@ -21,6 +21,12 @@
 //! After `.layers` come the image's settings, a line a word in order: `.entrypoint`, `.cmd`,
 //! `.env` ("NAME=value"), and the single `.workdir` and `.user` (left out when empty). A reader
 //! skips keys it does not know, and a record of a newer version is `Newer`, never guessed at.
+//!
+//! Version 3 (M8) adds the image's labels after the settings, two lines a label in key order
+//! (`.label_key`, then `.label_value`), or `.labels_unknown = true` when there are none to
+//! trust: the image had more than `Labels` holds, or the record was written by a release that
+//! did not keep them (versions 1 and 2). Without the labels the result an image was made from
+//! cannot be derived (`build/result.zig`, `derive`), so an image of unknown labels derives none.
 //!
 //! Version 1 (M4) kept one `.reference = "..."` where version 2 keeps the tags; a version-1
 //! record reads as an image with that one tag, and is written as version 2 the next time.
@@ -40,11 +46,91 @@ const Digest = digest_mod.Digest;
 const PathBuf = fs_mod.PathBuf;
 const Store = layout.Store;
 
-pub const record_version: u32 = 2;
+pub const record_version: u32 = 3;
 pub const directory_name = "images";
 
 /// Where a string is in `Settings.bytes`.
 const Span = struct { at: u16, len: u16 };
+
+/// An image's labels, sorted by key and unique, as a build result keeps them (`build/result.zig`),
+/// so that a result digest can be derived from an image's tree, settings and labels. `known` is
+/// false when the labels are not the image's own: it had more than fits, or the record is from a
+/// release that did not keep them. No labels are held then.
+pub const Labels = struct {
+    const Place = struct { at: u32, key_len: u16, value_len: u16 };
+
+    bytes: [constants.image_labels_bytes_max]u8,
+    used: u32,
+    places: [constants.image_labels_count_max]Place,
+    total: u32,
+    known: bool,
+
+    /// Known and empty.
+    pub fn clear(labels: *Labels) void {
+        assert(labels.places.len == constants.image_labels_count_max);
+        labels.used = 0;
+        labels.total = 0;
+        labels.known = true;
+        assert(labels.count() == 0);
+    }
+
+    /// Not the image's own: no labels held, and nothing derives from them.
+    pub fn forget(labels: *Labels) void {
+        labels.clear();
+        labels.known = false;
+        assert(labels.total == 0);
+        assert(labels.used == 0);
+    }
+
+    pub fn count(labels: *const Labels) u32 {
+        assert(labels.total <= constants.image_labels_count_max);
+        if (!labels.known) assert(labels.total == 0);
+        return labels.total;
+    }
+
+    pub fn key(labels: *const Labels, index: u32) []const u8 {
+        assert(index < labels.total);
+        assert(labels.known);
+        const place = labels.places[index];
+        return labels.bytes[place.at..][0..place.key_len];
+    }
+
+    pub fn value(labels: *const Labels, index: u32) []const u8 {
+        assert(index < labels.total);
+        assert(labels.known);
+        const place = labels.places[index];
+        return labels.bytes[place.at + place.key_len ..][0..place.value_len];
+    }
+
+    /// Adds a label in key order; null if the list or the block is full, or the key is there.
+    pub fn add(labels: *Labels, name: []const u8, text: []const u8) ?void {
+        assert(labels.used <= labels.bytes.len);
+        assert(labels.known);
+        if (labels.total == labels.places.len) return null;
+        if (name.len > labels.bytes.len - labels.used) return null;
+        if (text.len > labels.bytes.len - labels.used - name.len) return null;
+        var position: u32 = 0;
+        while (position < labels.total) : (position += 1) {
+            switch (std.mem.order(u8, labels.key(position), name)) {
+                .lt => continue,
+                .eq => return null,
+                .gt => break,
+            }
+        }
+        var move = labels.total;
+        while (move > position) : (move -= 1) labels.places[move] = labels.places[move - 1];
+        const at = labels.used;
+        @memcpy(labels.bytes[at..][0..name.len], name);
+        @memcpy(labels.bytes[at + name.len ..][0..text.len], text);
+        labels.used += @intCast(name.len + text.len);
+        labels.places[position] = .{
+            .at = at,
+            .key_len = @intCast(name.len),
+            .value_len = @intCast(text.len),
+        };
+        labels.total += 1;
+    }
+};
 
 /// What an image runs by default: the members of its configuration that zbx honours
 /// (`registry/config.zig` reads them from the blob). All the strings are in one block.
@@ -159,6 +245,7 @@ pub const Image = struct {
     layer_count: u32,
     layers: [constants.registry_layers_max]Sha256,
     settings: Settings,
+    labels: Labels,
 
     pub fn tag_text(image: *const Image, index: u32) []const u8 {
         assert(image.tag_count <= constants.image_tags_max);
@@ -250,6 +337,7 @@ pub fn render(image: *const Image, buffer: *[constants.image_record_bytes_max]u8
         writer.print("    .layers = \"{s}\",\n", .{&layer.text()}) catch unreachable; // Same.
     }
     render_settings(&writer, &image.settings);
+    render_labels(&writer, &image.labels);
     writer.writeAll("}\n") catch unreachable; // Same bound.
     assert(writer.end <= buffer.len);
     return writer.buffered();
@@ -271,6 +359,23 @@ fn render_settings(writer: *std.Io.Writer, settings: *const Settings) void {
             roots.put_string(writer, settings.get(which));
             writer.writeAll(",\n") catch unreachable; // Sized.
         }
+    }
+}
+
+fn render_labels(writer: *std.Io.Writer, labels: *const Labels) void {
+    assert(labels.used <= labels.bytes.len);
+    if (!labels.known) {
+        // Cannot fail: the buffer holds the fixed lines, with room to spare.
+        writer.writeAll("    .labels_unknown = true,\n") catch unreachable; // Sized.
+        return;
+    }
+    for (0..labels.count()) |index| {
+        // Cannot fail: the buffer holds the labels escaped (four bytes a byte at the worst).
+        writer.writeAll("    .label_key = ") catch unreachable; // Sized.
+        roots.put_string(writer, labels.key(@intCast(index)));
+        writer.writeAll(",\n    .label_value = ") catch unreachable; // Sized.
+        roots.put_string(writer, labels.value(@intCast(index)));
+        writer.writeAll(",\n") catch unreachable; // Sized.
     }
 }
 
@@ -304,6 +409,47 @@ fn parse_setting(settings: *Settings, key: []const u8, value: []const u8) bool {
     return true;
 }
 
+/// A `.label_key` waiting for its `.label_value`.
+const PendingLabel = struct {
+    bytes: [constants.image_labels_bytes_max]u8,
+    len: u32,
+    waiting: bool,
+};
+
+/// Reads one line of the labels; false if it is one and does not fit, is out of order or is not
+/// a string. A key that is not about labels is not this function's, and is true.
+fn parse_label(labels: *Labels, pending: *PendingLabel, name: []const u8, value: []const u8) bool {
+    assert(value.len <= constants.image_record_bytes_max);
+    assert(labels.used <= labels.bytes.len);
+    var word: [constants.image_labels_bytes_max]u8 = undefined;
+    if (std.mem.eql(u8, name, "labels_unknown")) {
+        // Unknown labels are none held, and not a mixture.
+        if (!std.mem.eql(u8, value, "true")) return false;
+        if (labels.total > 0 or !labels.known or pending.waiting) return false;
+        labels.forget();
+        return true;
+    }
+    if (std.mem.eql(u8, name, "label_key")) {
+        if (pending.waiting or !labels.known) return false;
+        const length = roots.parse_string(value, &pending.bytes) orelse return false;
+        pending.len = @intCast(length);
+        pending.waiting = true;
+        return true;
+    }
+    if (std.mem.eql(u8, name, "label_value")) {
+        if (!pending.waiting) return false;
+        const length = roots.parse_string(value, &word) orelse return false;
+        const given = pending.bytes[0..pending.len];
+        // `render` writes keys in strict order, which is what `add` keeps.
+        if (labels.total > 0) {
+            if (std.mem.order(u8, labels.key(labels.total - 1), given) != .lt) return false;
+        }
+        pending.waiting = false;
+        return labels.add(given, word[0..length]) != null;
+    }
+    return true;
+}
+
 /// Reads a record.
 pub fn parse(text: []const u8, image: *Image) ParseResult {
     assert(@intFromPtr(image) != 0);
@@ -313,6 +459,8 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
     image.layer_count = 0;
     image.time = 0;
     image.settings.clear();
+    image.labels.clear();
+    var pending: PendingLabel = .{ .bytes = undefined, .len = 0, .waiting = false };
     var version: u32 = 0;
     var seen: u32 = 0; // A bit for each of manifest, platform, config and tree.
     var has_reference = false;
@@ -360,10 +508,32 @@ pub fn parse(text: []const u8, image: *Image) ParseResult {
             image.layer_count += 1;
         } else if (!parse_setting(&image.settings, key, value)) {
             return .malformed;
+        } else if (!parse_label(&image.labels, &pending, key, value)) {
+            return .malformed;
         }
     }
+    return finish_parse(image, version, seen, has_reference, &pending);
+}
+
+/// What a record's fields add up to once every line is read: its version, the fields it has and
+/// the labels it may carry.
+fn finish_parse(
+    image: *Image,
+    version: u32,
+    seen: u32,
+    has_reference: bool,
+    pending: *const PendingLabel,
+) ParseResult {
+    assert(@intFromPtr(image) != 0);
+    assert(seen <= 15);
     if (version == 0) return .malformed;
     if (version > record_version) return .newer;
+    if (pending.waiting) return .malformed;
+    if (version < 3) {
+        // Releases before version 3 kept no labels, so the image's are not known.
+        if (image.labels.total > 0 or !image.labels.known) return .malformed;
+        image.labels.forget();
+    }
     // Every field once at least: a repeated key must not stand for a missing one.
     if (seen != 15) return .malformed;
     // `render` holds a platform that is not empty; a damaged record may not read as one.
@@ -461,6 +631,7 @@ fn sample() Image {
     image.layers[0] = Sha256.of("one");
     image.layers[1] = Sha256.of("two");
     image.settings.clear();
+    image.labels.clear();
     return image;
 }
 
@@ -540,6 +711,54 @@ test "the settings at their bounds still render and read back" {
     try testing.expect(image.settings.add(.env, &over) == null);
 }
 
+test "the labels round-trip in key order, and a full block is refused" {
+    // Goal: labels read back as written, sorted; the bound holds; unknown is written and read.
+    var image = sample();
+    try testing.expect(image.labels.add("b.key", "two\"") != null);
+    try testing.expect(image.labels.add("a.key", "one") != null);
+    try testing.expect(image.labels.add("a.key", "again") == null);
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(text, &back));
+    try testing.expect(back.labels.known);
+    try testing.expectEqual(@as(u32, 2), back.labels.count());
+    try testing.expectEqualStrings("a.key", back.labels.key(0));
+    try testing.expectEqualStrings("two\"", back.labels.value(1));
+    var big: [constants.image_labels_bytes_max]u8 = @splat('"');
+    try testing.expect(image.labels.add("c", &big) == null);
+    image.labels.clear();
+    for (0..constants.image_labels_count_max) |index| {
+        var name: [2]u8 = .{ 'a', @intCast('a' + index) };
+        try testing.expect(image.labels.add(&name, "\"\"") != null);
+    }
+    try testing.expect(image.labels.add("zz", "") == null);
+    try testing.expectEqual(ParseResult.ok, parse(render(&image, &buffer), &back));
+    try testing.expectEqual(constants.image_labels_count_max, back.labels.count());
+    image.labels.forget();
+    try testing.expectEqual(ParseResult.ok, parse(render(&image, &buffer), &back));
+    try testing.expect(!back.labels.known);
+}
+
+test "a version 2 record reads with its labels unknown, and may not carry any" {
+    // Goal: an old record has no labels to derive from; text claiming some is damaged.
+    var image = sample();
+    var buffer: [constants.image_record_bytes_max]u8 = undefined;
+    const text = render(&image, &buffer);
+    const two = try std.mem.replaceOwned(u8, testing.allocator, text, "version = 3", "version = 2");
+    defer testing.allocator.free(two);
+    var back: Image = undefined;
+    try testing.expectEqual(ParseResult.ok, parse(two, &back));
+    try testing.expect(!back.labels.known);
+    try testing.expectEqual(@as(u32, 0), back.labels.count());
+    image.labels.forget();
+    const marked = render(&image, &buffer);
+    const old = "version = 2";
+    const bad = try std.mem.replaceOwned(u8, testing.allocator, marked, "version = 3", old);
+    defer testing.allocator.free(bad);
+    try testing.expectEqual(ParseResult.malformed, parse(bad, &back));
+}
+
 test "a damaged or newer record is refused" {
     // Goal: no guessing: a missing field, a bad digest, a newer version, no version.
     var image = sample();
@@ -547,7 +766,7 @@ test "a damaged or newer record is refused" {
     const text = render(&image, &buffer);
     var back: Image = undefined;
     const alloc = testing.allocator;
-    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 2", "version = 3");
+    const newer = try std.mem.replaceOwned(u8, alloc, text, "version = 3", "version = 4");
     defer testing.allocator.free(newer);
     try testing.expectEqual(ParseResult.newer, parse(newer, &back));
     const cut = text[0..std.mem.indexOf(u8, text, "    .tree").?];
@@ -635,7 +854,7 @@ test "real version-1 text from M4 reads" {
     try testing.expectEqual(@as(u64, 1761600000), back.time);
     var buffer: [constants.image_record_bytes_max]u8 = undefined;
     const written = render(&back, &buffer);
-    try testing.expect(std.mem.indexOf(u8, written, ".version = 2,") != null);
+    try testing.expect(std.mem.indexOf(u8, written, ".version = 3,") != null);
     try testing.expect(std.mem.indexOf(u8, written, ".tags = \"alpine:3.20\",") != null);
     try testing.expect(std.mem.indexOf(u8, written, ".reference") == null);
     // The same text without its reference is damaged, as it was in M4.

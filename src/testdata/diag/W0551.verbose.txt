@@ -1,0 +1,8 @@
+warning[ZBX-W0551]: the image's tree annotation is not the tree its layers unpack to
+  while  unpacking the image
+  cause  the manifest's tree annotation is not the tree the layers made
+  note   b3:1111111111111111111111111111111111111111111111111111111111111111
+  tree   b3:2222222222222222222222222222222222222222222222222222222222222222
+  fix    a signature for the annotated tree does not cover this image
+  more   zbx explain W0551
+  docs   https://zigbox.github.io/zigbox/errors/W0551.html
