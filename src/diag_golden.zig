@@ -719,6 +719,7 @@ const key_cases = [_]Case{
     .{ .code = .E0903, .args = &.{}, .direct = record_damaged, .exit = 1 },
     .{ .code = .E0904, .args = &.{}, .direct = policy_unreadable, .exit = 1 },
     .{ .code = .E0905, .args = &.{}, .direct = run_unsigned, .exit = 1 },
+    .{ .code = .E0906, .args = &.{}, .direct = run_no_provenance, .exit = 1 },
     .{ .code = .E0907, .args = &.{}, .direct = run_tampered, .exit = 2 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
@@ -769,6 +770,14 @@ fn run_unsigned(diag: *Diag) void {
         .report = &report,
         .policy = &policy,
         .no_tree = false,
+    });
+}
+
+fn run_no_provenance(diag: *Diag) void {
+    trust_diagnose.provenance_missing(diag, &.{
+        .digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .policy_path = golden_policy_path,
+        .cause = .unsigned,
     });
 }
 

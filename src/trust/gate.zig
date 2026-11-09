@@ -24,6 +24,7 @@ const open = @import("../store/open.zig");
 const store_diagnose = @import("../store/diagnose.zig");
 const diagnose = @import("diagnose.zig");
 const policy_mod = @import("policy.zig");
+const provenance_store = @import("provenance_store.zig");
 const record_mod = @import("record.zig");
 const statement = @import("statement.zig");
 const verdict = @import("verdict.zig");
@@ -194,7 +195,16 @@ pub fn judge_all(
         };
         const met = subject.tree != null and
             verdict.judge(&work.envelope, &loaded.policy, record, have, &report);
-        if (met) continue;
+        if (met and verdict.provenance_met(&loaded.policy, &report)) continue;
+        if (met or (subject.tree == null and !loaded.policy.require_signature)) {
+            diagnose.provenance_missing(diag, &.{
+                .digest = subject.text,
+                .policy_path = loaded.path.text(),
+                .cause = provenance_cause(host, subject, &report),
+                .step = subject.step,
+            });
+            return error.Refused;
+        }
         diagnose.unsigned(diag, &.{
             .digest = subject.text,
             .policy_path = loaded.path.text(),
@@ -205,6 +215,27 @@ pub fn judge_all(
         });
         return error.Refused;
     }
+}
+
+/// Which of E0906's three causes `report` and the store show for `subject`.
+fn provenance_cause(
+    host: Host,
+    subject: Subject,
+    report: *const verdict.Report,
+) diagnose.ProvenanceCause {
+    const result = switch (subject.binding) {
+        .result => |digest| digest,
+        else => return .other_binding,
+    };
+    if (subject.tree == null) return .other_binding;
+    if (report.provenance_with(.other_binding)) return .other_binding;
+    if (report.provenance_with(.untrusted_key) or report.provenance_with(.bad_signature)) {
+        return .unsigned;
+    }
+    var store: Store = undefined;
+    if (!store.locate(host)) return .missing;
+    if (layout.read_format(&store) != .ok) return .missing;
+    return if (provenance_store.exists(&store, .{ .bytes = result })) .unsigned else .missing;
 }
 
 /// The record of `tree` into `record`, empty when there is none (or no store yet).

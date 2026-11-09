@@ -845,6 +845,47 @@ const inspect_schema =
     \\"labels":{"type":"object","additionalProperties":{"type":"string"}}}}}}
 ;
 
+const inspect_provenance_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/inspect-provenance/1","version":1,
+    \\"title":"zbx inspect --provenance --output json",
+    \\"description":"stdout: a build result's provenance record, one line. A refusal is on stderr.",
+    \\"type":"object",
+    \\"required":["schema","result","tree","record","build_file","lock","builder",
+    \\"started","finished","bases","steps","image","signatures"],
+    \\"properties":{"schema":{"const":"zbx.provenance/1"},
+    \\"result":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"record":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"build_file":{"type":"object","required":["name","digest"],
+    \\"properties":{"name":{"type":"string"},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}},
+    \\"lock":{"anyOf":[{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},{"type":"null"}]},
+    \\"builder":{"type":"object","required":["version","platform","zbx"],
+    \\"properties":{"version":{"type":"string"},"platform":{"type":"string"},
+    \\"zbx":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}},
+    \\"started":{"type":"integer"},"finished":{"type":"integer"},
+    \\"bases":{"type":"array","items":{"type":"object",
+    \\"required":["reference","manifest","tree"],
+    \\"properties":{"reference":{"type":"string"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}}}},
+    \\"steps":{"type":"array","items":{"type":"object",
+    \\"required":["name","key","base","input","needs","output","network"],
+    \\"properties":{"name":{"type":"string"},"key":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"base":{"type":"integer"},"input":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"needs":{"type":"object",
+    \\"additionalProperties":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"}},
+    \\"output":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},"network":{"type":"boolean"}}}},
+    \\"image":{"type":"object","required":["key","base"],
+    \\"properties":{"key":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"base":{"anyOf":[{"type":"integer"},{"type":"null"}]}}},
+    \\"signatures":{"type":"array","items":{"type":"object",
+    \\"required":["key","id","signed"],
+    \\"properties":{"key":{"type":"string"},"id":{"type":"string"},
+    \\"signed":{"enum":["this record","an earlier build"]}}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -875,6 +916,7 @@ const table = [_]Entry{
     .{ .command = "policy", .text = policy_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
+    .{ .command = "inspect-provenance", .text = inspect_provenance_schema },
     .{ .command = "store-export", .text = store_export_schema },
     .{ .command = "state-ls", .text = state_ls_schema },
     .{ .command = "state-rm", .text = state_rm_schema },
@@ -887,7 +929,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 34);
+    assert(table.len == 35);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -916,7 +958,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 34), table.len);
+    try testing.expectEqual(@as(usize, 35), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

@@ -14,9 +14,16 @@ const open = @import("store/open.zig");
 const result = @import("build/result.zig");
 const store_diagnose = @import("store/diagnose.zig");
 const text_util = @import("text.zig");
+const dsse = @import("trust/dsse.zig");
+const provenance_store = @import("trust/provenance_store.zig");
+const provenance_view = @import("trust/provenance_view.zig");
+const record_mod = @import("trust/record.zig");
+const statement = @import("trust/statement.zig");
+const trust_diagnose = @import("trust/diagnose.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const Digest = @import("store/digest.zig").Digest;
 const Host = host_mod.Host;
+const PathBuf = @import("store/fs.zig").PathBuf;
 const Store = @import("store/layout.zig").Store;
 
 pub const Error = error{ Failed, OutputFailed };
@@ -25,13 +32,32 @@ pub const Workspace = struct {
     record: result.Record,
     bytes: [constants.build_result_bytes_max + 1]u8,
     out: [constants.inspect_output_bytes_max]u8,
+    provenance: ProvenanceWork,
+};
+
+/// What `--provenance` needs beside the build result: the record, the tree's signatures, the
+/// signers found among them and the larger output.
+pub const ProvenanceWork = struct {
+    store_work: provenance_store.Work,
+    record_work: record_mod.Work,
+    signatures: record_mod.Record,
+    signers: [constants.signatures_per_tree_max]provenance_view.Signer,
+    signers_count: u32,
+    out: [constants.inspect_provenance_bytes_max]u8,
 };
 
 /// One word of the text form is shown cut to this many bytes.
 const shown_bytes_max = 1024;
 
 /// Prints the record named `operand`, a full digest.
-pub fn run(host: Host, ws: *Workspace, operand: []const u8, json: bool, diag: *Diag) Error!void {
+pub fn run(
+    host: Host,
+    ws: *Workspace,
+    operand: []const u8,
+    provenance: bool,
+    json: bool,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
     assert(operand.len <= constants.arg_bytes_max);
     const digest = Digest.parse(operand) orelse {
@@ -64,6 +90,7 @@ pub fn run(host: Host, ws: *Workspace, operand: []const u8, json: bool, diag: *D
             return error.Failed;
         },
     };
+    if (provenance) return run_provenance(host, ws, &store, digest, operand, json, diag);
     var writer = std.Io.Writer.fixed(&ws.out);
     const rendered = if (json)
         render_json(&writer, digest, &ws.record)
@@ -75,6 +102,90 @@ pub fn run(host: Host, ws: *Workspace, operand: []const u8, json: bool, diag: *D
         errors.output_failed(diag, .stdout, err, host.last_errno());
         return error.OutputFailed;
     };
+}
+
+/// `--provenance`: the stored record of the result `digest`, whose build result is in
+/// `ws.record`, and the keys that signed a provenance statement of its tree.
+fn run_provenance(
+    host: Host,
+    ws: *Workspace,
+    store: *Store,
+    digest: Digest,
+    operand: []const u8,
+    json: bool,
+    diag: *Diag,
+) Error!void {
+    assert(diag.code == null);
+    const work = &ws.provenance;
+    var errno: u16 = 0;
+    const bytes = provenance_store.load(store, &work.store_work, digest, &errno) catch |err| {
+        switch (err) {
+            error.NotFound => build_diagnose.provenance_absent(diag, operand),
+            error.Damaged => {
+                var path: PathBuf = undefined;
+                const text = provenance_store.record_path(store, &path, digest);
+                trust_diagnose.record_unusable(diag, text, .damaged);
+            },
+            error.Unreadable => {
+                const failed = error.IoFailed;
+                const step = "reading the provenance record";
+                store_diagnose.cannot_read(diag, store, step, failed, errno);
+            },
+        }
+        return error.Failed;
+    };
+    try load_signers(store, ws, diag, bytes);
+    const view: provenance_view.View = .{
+        .result = digest,
+        .record_digest = provenance_store.digest_of(bytes),
+        .record = &work.store_work.parsed,
+        .signers = work.signers[0..work.signers_count],
+    };
+    var writer = std.Io.Writer.fixed(&work.out);
+    // Cannot fail: `inspect_provenance_bytes_max` holds the largest record, escaped.
+    if (json) provenance_view.render_json(&writer, &view) catch unreachable;
+    // The writer holds `inspect_provenance_bytes_max`, which a worst-case view fits.
+    if (!json) provenance_view.render_text(&writer, &view) catch unreachable;
+    host.write_all(.stdout, writer.buffered()) catch |err| {
+        errors.output_failed(diag, .stdout, err, host.last_errno());
+        return error.OutputFailed;
+    };
+}
+
+/// Fills `work.signers` from the signature record of the result's tree: each line that is a
+/// signed provenance statement, and whether it signed `stored` itself.
+fn load_signers(store: *Store, ws: *Workspace, diag: *Diag, stored: []const u8) Error!void {
+    const work = &ws.provenance;
+    work.signers_count = 0;
+    var errno: u16 = 0;
+    record_mod.load(store, &work.record_work, ws.record.tree, &work.signatures, &errno) catch |e| {
+        switch (e) {
+            error.NotFound => return,
+            error.Damaged, error.Newer => {
+                var path: PathBuf = undefined;
+                const text = record_mod.record_path(store, &path, ws.record.tree);
+                const newer = e == error.Newer;
+                const why: trust_diagnose.RecordProblem = if (newer) .newer else .damaged;
+                trust_diagnose.record_unusable(diag, text, why);
+            },
+            error.Unreadable => {
+                const failed = error.IoFailed;
+                store_diagnose.cannot_read(diag, store, "reading the signatures", failed, errno);
+            },
+        }
+        return error.Failed;
+    };
+    for (0..work.signatures.count) |at| {
+        const line = work.signatures.line(@intCast(at));
+        const envelope = dsse.parse(&work.record_work.envelope, line) catch continue;
+        const head = statement.parse(envelope.payload) catch continue;
+        if (head.kind != .provenance) continue;
+        work.signers[work.signers_count] = .{
+            .public = envelope.public,
+            .current = std.mem.eql(u8, envelope.payload, stored),
+        };
+        work.signers_count += 1;
+    }
 }
 
 fn json_list(writer: *std.Io.Writer, config: *const result.Config, list: anytype) !void {

@@ -374,6 +374,8 @@ test "a failed row changes the error value `finish` returns, not the diagnostic"
 
 const roots = @import("../store/roots.zig");
 const result_mod = @import("result.zig");
+const provenance_store = @import("../trust/provenance_store.zig");
+const provenance = @import("../trust/provenance.zig");
 
 /// A step's output imported as the worker does: rooted `build:compile`, unless a root exists.
 fn imported_as_step(fresh: bool) Digest {
@@ -471,6 +473,11 @@ fn image_started(dest: []const u8) void {
     const parsed = file_mod.parse(out, &loaded.file, &problem);
     testing.expectEqual(file_mod.ParseResult.parsed, parsed) catch unreachable; // A valid file.
     composed.outputs[0] = made_output();
+    composed.locking.lock.clear();
+    const manifest = oci_digest.Sha256{ .bytes = @splat(3) };
+    composed.locking.lock.put("alpine:3.20", manifest, "linux/amd64", Digest.of("t")) catch {
+        unreachable; // One entry fits.
+    };
     // A tree with a file `bin`: under /usr/bin it clashes with the sample tree's directory.
     files.put_dir("/other", 0o755);
     files.put("/other/bin", .file, 0o644, .{ 0, 0 }, "x");
@@ -510,6 +517,53 @@ test "build_image: a miss, then a hit, the footer, and the result record saved" 
     try testing.expect(std.mem.indexOf(u8, second, "hit") != null);
     try testing.expect(std.mem.indexOf(u8, second, &digest.text()) != null);
     try testing.expect(std.mem.indexOf(u8, second, "  (1 hit, 0 misses, ") != null);
+}
+
+var provenance_work: provenance_store.Work = undefined;
+var first_record: provenance.Record = undefined;
+
+/// The stored record of `digest`, copied into `into`.
+fn stored_record(digest: Digest, into: *provenance.Record) !void {
+    var errno: u16 = 0;
+    _ = try provenance_store.load(&store, &provenance_work, digest, &errno);
+    into.* = provenance_work.parsed;
+}
+
+test "build_image: a hit writes the same record but for its times, and a cache with none gets one" {
+    // Goal: a record is a function of the build inputs and its times; an all-hit rebuild of an
+    // unchanged project writes the same record apart from its times; a record from a cache a
+    // release without provenance wrote (no record in the store) is complete. Method: build
+    // (miss), read the record, build again (hit), read it, compare with the times set equal;
+    // delete the record, build once more (a hit), and compare again.
+    image_started("/etc");
+    try context.build_image();
+    const first = sim.stdout();
+    const at = std.mem.indexOf(u8, first, "built b3:").?;
+    const digest = Digest.parse(first[at + 6 ..][0..constants.store_digest_text_bytes]).?;
+    try stored_record(digest, &first_record);
+    try testing.expectEqual(@as(u32, 2), first_record.steps_count);
+    try testing.expectEqual(@as(u32, 1), first_record.bases_count);
+    try testing.expectEqualSlices(u8, &digest.bytes, &first_record.result);
+    try testing.expect(first_record.finished >= first_record.started);
+    sim.stdout_len = 0;
+    try context.build_image();
+    try stored_record(digest, &provenance_work.parsed);
+    var again: provenance.Record = first_record;
+    again.started = provenance_work.parsed.started;
+    again.finished = provenance_work.parsed.finished;
+    var left: [constants.statement_bytes_max]u8 = undefined;
+    var right: [constants.statement_bytes_max]u8 = undefined;
+    const kept = provenance.render(&left, &again);
+    try testing.expectEqualStrings(kept, provenance.render(&right, &provenance_work.parsed));
+    var path: @import("../store/fs.zig").PathBuf = undefined;
+    try store.fs.unlink(provenance_store.record_path(&store, &path, digest));
+    try testing.expect(!provenance_store.exists(&store, digest));
+    try context.build_image();
+    try stored_record(digest, &provenance_work.parsed);
+    again.started = provenance_work.parsed.started;
+    again.finished = provenance_work.parsed.finished;
+    const rebuilt = provenance.render(&left, &again);
+    try testing.expectEqualStrings(rebuilt, provenance.render(&right, &provenance_work.parsed));
 }
 
 test "build_image: adds that clash are E0807 naming both, reached through compose" {

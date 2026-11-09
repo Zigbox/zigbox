@@ -477,7 +477,6 @@ fn problem_expected(kind: policy_mod.Kind) []const u8 {
         .key_twice => "this key, or its name, is listed twice",
         .too_many_keys => "more keys than a policy lists",
         .bad_verify => "verify is \"cached\" or \"always\"",
-        .provenance_not_yet => "require_provenance is not supported by this zbx yet",
         .too_large => "the file is larger than a policy file may be",
     };
 }
@@ -632,4 +631,67 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
         diag.fix(.{ .sentence = "run an image, or a build result, that has been signed" });
     }
     assert(diag.code.? == .E0905);
+}
+
+/// Why E0906: the three ways a policy's `require_provenance` is not met.
+pub const ProvenanceCause = enum {
+    /// No provenance statement is signed for the tree, and none is stored.
+    missing,
+    /// A record of the build is stored, or a provenance line is present, but no trusted key
+    /// has signed it.
+    unsigned,
+    /// A trusted key signed a provenance statement, for another result than this run's, or
+    /// the run is not of a build result.
+    other_binding,
+};
+
+/// What E0906 says about the run it refused.
+pub const ProvenanceRefused = struct {
+    digest: []const u8,
+    policy_path: []const u8,
+    cause: ProvenanceCause,
+    /// The step whose base this is; empty for a run.
+    step: []const u8 = "",
+};
+
+/// ZBX-E0906: a run is refused because no trusted signed provenance covers it.
+pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
+    assert(diag.code == null);
+    assert(what.policy_path.len > 0);
+    var digest_storage: [constants.reference_bytes_max]u8 = undefined;
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const digest = echo_of(&digest_storage, what.digest);
+    const path = echo_of(&path_storage, what.policy_path);
+    diag.raise(.E0906);
+    if (what.step.len > 0) {
+        var step_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const step = echo_of(&step_storage, what.step);
+        diag.while_("checking the base of step '{s}', {s}, against the policy {s}", .{
+            step, digest, path,
+        });
+    } else {
+        diag.while_("checking {s} against the policy {s}", .{ digest, path });
+    }
+    const need = "{s} requires signed provenance, but ";
+    switch (what.cause) {
+        .missing => diag.cause(need ++ "{s} has none stored", .{ path, digest }),
+        .unsigned => diag.cause(need ++ "no listed key signed the provenance of {s}", .{
+            path, digest,
+        }),
+        .other_binding => diag.cause(need ++ "the signed provenance is not of {s}", .{
+            path, digest,
+        }),
+    }
+    diag.context("digest", "{s}", .{digest});
+    diag.context("policy", "{s}", .{path});
+    switch (what.cause) {
+        .missing => diag.fix(.{ .sentence = "build it with this zbx, then sign the result" }),
+        .unsigned => diag.fix_with(
+            "sign the result with a key the policy lists:",
+            "zbx sign {s}",
+            .{digest},
+        ),
+        .other_binding => diag.fix(.{ .sentence = "run the result whose provenance was signed" }),
+    }
+    assert(diag.code.? == .E0906);
 }

@@ -189,7 +189,9 @@ build:
   step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
   at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
   zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
-  prints its tree and config (--output json: see zbx schema inspect)
+  prints its tree and config (--output json: see zbx schema inspect); zbx inspect
+  --provenance <result digest> prints the build's provenance record (--output json: see
+  zbx schema inspect-provenance)
 
 bundle:
   zbx bundle (--last | <name>) [--no-redact]

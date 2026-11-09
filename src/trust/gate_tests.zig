@@ -18,6 +18,10 @@ const gate = @import("gate.zig");
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
 const record = @import("record.zig");
+const provenance = @import("provenance.zig");
+const provenance_store = @import("provenance_store.zig");
+const fs_mod = @import("../store/fs.zig");
+const result_mod = @import("../build/result.zig");
 const sign_commands = @import("sign_commands.zig");
 
 const home = [_]host_sim.EnvironmentVariable{.{ .name = "HOME", .value = "/home/alice" }};
@@ -250,4 +254,83 @@ test "a system policy that cannot be used refuses, whatever the user's file says
     try testing.expect(std.mem.indexOf(u8, refusal_text(&out), "mode 0666") != null);
     write_system(".{ .version = 1 }", 0o664, 0);
     try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+}
+
+fn write_requiring_provenance(name: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    const public = try public_text_of(name);
+    const text = try std.fmt.bufPrint(
+        &buffer,
+        ".{{ .version = 1, .keys = .{{ .{{ .name = \"{s}\", .public = \"{s}\" }} }}, " ++
+            ".require_provenance = true }}",
+        .{ name, public },
+    );
+    write_policy(text);
+}
+
+var result_buffer: [constants.build_result_bytes_max]u8 = undefined;
+var provenance_record: provenance.Record = undefined;
+var provenance_bytes: [constants.statement_bytes_max]u8 = undefined;
+
+fn save_provenance(result: Digest) !void {
+    const filled: provenance.Digest = @splat(0x5a);
+    const made = &provenance_record;
+    made.clear();
+    made.tree = tree.bytes;
+    made.result = result.bytes;
+    made.set_build_file("zbx.build.zon");
+    made.build_file_digest = filled;
+    made.lock = filled;
+    const base = made.add_base("alpine:3.20", filled, filled);
+    const step = made.add_step("compile");
+    step.base = base;
+    step.key = filled;
+    step.input = filled;
+    step.output = filled;
+    made.image_key = filled;
+    made.image_base = base;
+    made.set_version("0.4.0", "linux/amd64");
+    made.zbx = filled;
+    var failure: fs_mod.Failure = undefined;
+    const bytes = provenance.render(&provenance_bytes, made);
+    try provenance_store.save(&store, result, bytes, &failure);
+}
+
+test "require_provenance: no record, an unsigned record, a stranger's signature and the right one" {
+    // Goal: E0906's causes and its satisfaction. Method: a result of the tree, run as the
+    // subject. Nothing stored: refused (missing). A record stored but unsigned: refused. A
+    // record signed by a key the policy does not list: refused. Signed by the listed key: runs.
+    // A signature of the tree alone (not provenance) never satisfies the rule.
+    try start();
+    try write_requiring_provenance("ci");
+    var saved: result_mod.Record = undefined;
+    saved.config.clear();
+    saved.tree = tree;
+    var failure: result_mod.Failure = undefined;
+    const result = try result_mod.save(&store, &saved, &result_buffer, &failure);
+    const text = result.text();
+    var zeroed: [constants.store_digest_text_bytes:0]u8 = undefined;
+    @memcpy(zeroed[0..text.len], &text);
+    zeroed[text.len] = 0;
+    const subject: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .result = result.bytes },
+        .text = &text,
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try sign_as("ci"); // The tree alone: a signature, but not provenance.
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try save_provenance(result);
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "other" }));
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(subject));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "sign", &zeroed, "--key", "ci" }));
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(subject));
+    // The same signature does not cover another result of the tree.
+    const other: gate.Subject = .{
+        .tree = tree,
+        .binding = .{ .result = @splat(9) },
+        .text = "b3:other",
+    };
+    try testing.expectEqual(@as(?codes.Code, .E0906), gate_says(other));
 }

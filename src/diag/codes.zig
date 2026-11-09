@@ -198,6 +198,7 @@ pub const Code = enum(u8) {
     E0903,
     E0904,
     E0905,
+    E0906,
     E0907,
     E0910,
     E0911,
@@ -3038,7 +3039,7 @@ pub const registry = [_]Entry{
         \\    }
         \\Only .version is required. Fields come in any order, once each. There are
         \\at most 16 keys, none listed twice, and the file is at most 16 KiB.
-        \\.require_provenance is not supported by this zbx yet and is refused.
+        \\.require_provenance = true asks for a signed provenance statement (E0906).
         \\
         \\The system file, /etc/zbx/policy.zon, must be owned by root and not
         \\writable by group or others: a file anyone else could rewrite is no rule,
@@ -3072,6 +3073,31 @@ pub const registry = [_]Entry{
         \\<digest>" shows the same verdict without running anything. A directory
         \\given as --rootfs has no tree and cannot be signed, so a policy that
         \\requires a signature refuses it.
+        ,
+    },
+    .{
+        .code = .E0906,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "no trusted signed provenance covers what was to run",
+        .explanation =
+        \\A policy file asked for require_provenance, and the build result this run
+        \\would start from has no signed provenance that satisfies it. Nothing was
+        \\started: no container, no run record.
+        \\
+        \\"zbx build" writes a SLSA provenance record for every result it makes, hit
+        \\or miss. The record is only a claim until a key signs it ("zbx sign
+        \\<result>" signs the stored record, byte for byte). It satisfies the rule
+        \\when the signature verifies, its key is one the policy lists, and it is
+        \\about this tree and bound to the result that is to run.
+        \\
+        \\The cause says which of three things is wrong. Nothing has recorded a build
+        \\of this result (it was built by an older zbx, or not built here): build it
+        \\again. A record is stored, or a provenance signature is present, but no
+        \\key the policy lists signed it: sign it, or add the signer's key to the
+        \\policy. A listed key signed provenance for another result: run that one.
+        \\A policy that requires provenance cannot be met by an image that is not a
+        \\build result, or a directory given as --rootfs.
         ,
     },
     .{
@@ -3492,7 +3518,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u8));
-    @setEvalBranchQuota(400_000);
+    @setEvalBranchQuota(600_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));

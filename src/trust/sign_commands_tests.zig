@@ -17,6 +17,9 @@ const result = @import("../build/result.zig");
 const test_util = @import("../test_util.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const dsse = @import("dsse.zig");
+const fs_mod = @import("../store/fs.zig");
+const provenance = @import("provenance.zig");
+const provenance_store = @import("provenance_store.zig");
 const key_commands = @import("key_commands.zig");
 const record = @import("record.zig");
 const sign_commands = @import("sign_commands.zig");
@@ -388,4 +391,88 @@ test "a sealed key signs with its passphrase file, and a wrong or missing one wr
     try testing.expectEqual(@as(?codes.Code, null), sign_with(wrong, false));
     try testing.expect(has(sim.stdout(), "key: sealed  "));
     try testing.expectEqual(@as(u32, 1), (try record_of(tree)).count);
+}
+
+var provenance_record: provenance.Record = undefined;
+var provenance_bytes: [constants.statement_bytes_max]u8 = undefined;
+
+/// Stores a provenance record for `digest`, a result of `tree`; its bytes.
+fn save_provenance(digest: Digest) ![]const u8 {
+    const filled: provenance.Digest = @splat(0x5a);
+    const made = &provenance_record;
+    made.clear();
+    made.tree = tree.bytes;
+    made.result = digest.bytes;
+    made.set_build_file("zbx.build.zon");
+    made.build_file_digest = filled;
+    made.lock = filled;
+    const base = made.add_base("alpine:3.20", filled, filled);
+    const step = made.add_step("compile");
+    step.base = base;
+    step.key = filled;
+    step.input = filled;
+    step.output = filled;
+    step.network = false;
+    made.image_key = filled;
+    made.image_base = base;
+    made.set_version("0.4.0", "linux/amd64");
+    made.zbx = filled;
+    made.started = 1000;
+    made.finished = 1042;
+    const bytes = provenance.render(&provenance_bytes, made);
+    var failure: fs_mod.Failure = undefined;
+    try provenance_store.save(&store, digest, bytes, &failure);
+    return bytes;
+}
+
+test "a result with a provenance record signs the record's bytes, and one without signs sign/v1" {
+    // Goal: `zbx sign` wraps the stored record exactly, and falls back for a result built
+    // before provenance. Method: sign a result with no record (the statement is not a
+    // provenance one), then store a record and sign again: the second line's payload is the
+    // record's bytes; signing again adds nothing.
+    try start(false);
+    const digest = try save_result();
+    const text = digest.text();
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+    var dsse_work: dsse.Work = undefined;
+    var envelope = try dsse.parse(&dsse_work, (try record_of(tree)).line(0));
+    try testing.expectEqual(statement.Kind.sign, (try statement.parse(envelope.payload)).kind);
+    const bytes = try save_provenance(digest);
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+    try testing.expectEqual(@as(u32, 2), (try record_of(tree)).count);
+    envelope = try dsse.parse(&dsse_work, (try record_of(tree)).line(1));
+    try testing.expectEqualSlices(u8, bytes, envelope.payload);
+    const head = try statement.parse(envelope.payload);
+    try testing.expectEqual(statement.Kind.provenance, head.kind);
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, true, "ci"));
+    try testing.expectEqual(@as(u32, 2), (try record_of(tree)).count);
+}
+
+test "inspect --provenance shows the record and who signed it, in text and JSON" {
+    // Goal: the view. Method: a result with no record is E0005; with one, the text has the
+    // result and the step, no signer; after signing the signer is "this record"; a later
+    // record makes it "an earlier build"; the JSON parses and names its schema.
+    try start(false);
+    const digest = try save_result();
+    const text = digest.text();
+    try testing.expectEqual(@as(u8, 1), command(&.{ "inspect", "--provenance", zed(digest) }));
+    try testing.expect(has(sim.stderr(), "E0005"));
+    _ = try save_provenance(digest);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "inspect", "--provenance", zed(digest) }));
+    try testing.expect(has(sim.stdout(), "step        compile"));
+    try testing.expect(!has(sim.stdout(), "signed"));
+    try testing.expectEqual(@as(?codes.Code, null), sign(&text, false, "ci"));
+    try testing.expectEqual(@as(u8, 0), command(&.{ "inspect", "--provenance", zed(digest) }));
+    try testing.expect(has(sim.stdout(), "this record"));
+    const as_json = command(&.{ "inspect", "--provenance", zed(digest), "--output", "json" });
+    try testing.expectEqual(@as(u8, 0), as_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, sim.stdout(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("zbx.provenance/1", parsed.value.object.get("schema").?.string);
+    provenance_record.finished += 1;
+    var failure: fs_mod.Failure = undefined;
+    const later = provenance.render(&provenance_bytes, &provenance_record);
+    try provenance_store.save(&store, digest, later, &failure);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "inspect", "--provenance", zed(digest) }));
+    try testing.expect(has(sim.stdout(), "an earlier build"));
 }

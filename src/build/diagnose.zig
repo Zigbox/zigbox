@@ -1013,6 +1013,20 @@ pub fn output_refused(diag: *Diag, step: []const u8, relative: []const u8, kind:
     assert(diag.code.? == .E0806);
 }
 
+/// ZBX-E0005: `inspect --provenance` of a build result that has no provenance record: it was
+/// built before provenance was written, or the store lost the record.
+pub fn provenance_absent(diag: *Diag, operand: []const u8) void {
+    assert(diag.code == null);
+    var storage: Echo = undefined;
+    const echo = text_util.sanitise(&storage, operand);
+    diag.raise(.E0005);
+    diag.while_("reading the command line", .{});
+    diag.cause("the store has no provenance record for build result '{s}'", .{echo});
+    diag.fix(.{ .sentence = "build the project again to write one:", .command = "zbx build" });
+    diag.context("cmd", "inspect --provenance", .{});
+    diag.context("arg", "{s}", .{echo});
+}
+
 /// ZBX-E0005: the operand of `inspect` is no build result: not a full digest, or no record of
 /// that name in the store.
 pub fn result_operand(diag: *Diag, operand: []const u8, absent: bool) void {

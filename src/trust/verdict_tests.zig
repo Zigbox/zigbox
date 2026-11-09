@@ -148,3 +148,23 @@ test "one counting line is enough, and a policy that asks for nothing is met" {
     policy.require_signature = false;
     try testing.expect(run(.{ .tree = tree, .binding = .none }));
 }
+
+test "provenance_met: needs a counted provenance line only when the policy asks" {
+    // Goal: the provenance rule is its own. Method: a report with a counted signature that is
+    // not provenance, then one that is; a policy that does not ask is met by both.
+    policy.clear();
+    report.clear();
+    try testing.expect(verdict.provenance_met(&policy, &report));
+    policy.require_provenance = true;
+    try testing.expect(!verdict.provenance_met(&policy, &report));
+    report.count = 1;
+    report.counted = 1;
+    report.lines[0] = .{ .public = @splat(0), .reason = .counts, .provenance = false };
+    try testing.expect(!verdict.provenance_met(&policy, &report));
+    report.provenance_counted = 1;
+    report.lines[0].provenance = true;
+    try testing.expect(verdict.provenance_met(&policy, &report));
+    try testing.expect(!report.provenance_with(.other_binding));
+    report.lines[0].reason = .other_binding;
+    try testing.expect(report.provenance_with(.other_binding));
+}

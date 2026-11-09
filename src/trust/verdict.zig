@@ -8,7 +8,10 @@
 //! subject's tree, and its binding fits the subject. A statement about the tree alone counts for
 //! any run; one bound to a result counts only for a run of that result, and one bound to a
 //! manifest only for a run of that manifest. The first reason a line does not count is the one
-//! reported. `require_signature` is met when at least one line counts.
+//! reported. `require_signature` is met when at least one line counts. `require_provenance` is
+//! met when at least one line that counts is a signed provenance statement (`provenance.zig`):
+//! it is a signature, by a trusted key, over the SLSA record of this tree, bound to the result
+//! that is to run. An unsigned stored record counts for nothing; a store is not asked here.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -42,6 +45,9 @@ pub const Reason = enum {
 pub const Examined = struct {
     public: [constants.key_public_bytes]u8,
     reason: Reason,
+    /// The line's statement is a provenance statement. Known for every line whose signature
+    /// verifies, whatever else is wrong with it.
+    provenance: bool = false,
 };
 
 pub const Report = struct {
@@ -49,10 +55,21 @@ pub const Report = struct {
     lines: [constants.signatures_per_tree_max]Examined,
     /// How many lines counted.
     counted: u32,
+    /// How many of those are provenance statements.
+    provenance_counted: u32,
 
     pub fn clear(report: *Report) void {
         report.count = 0;
         report.counted = 0;
+        report.provenance_counted = 0;
+    }
+
+    /// Whether some provenance line was judged `reason`.
+    pub fn provenance_with(report: *const Report, reason: Reason) bool {
+        for (report.lines[0..report.count]) |line| {
+            if (line.provenance and line.reason == reason) return true;
+        }
+        return false;
     }
 };
 
@@ -74,10 +91,19 @@ pub fn judge(
         report.lines[report.count] = examined;
         report.count += 1;
         if (examined.reason == .counts) report.counted += 1;
+        if (examined.reason == .counts and examined.provenance) report.provenance_counted += 1;
     }
     assert(report.counted <= report.count);
+    assert(report.provenance_counted <= report.counted);
     if (!policy.require_signature) return true;
     return report.counted > 0;
+}
+
+/// Whether the policy's provenance rule is met by what `judge` reported.
+pub fn provenance_met(policy: *const policy_mod.Policy, report: *const Report) bool {
+    assert(report.provenance_counted <= report.counted);
+    if (!policy.require_provenance) return true;
+    return report.provenance_counted > 0;
 }
 
 /// One line against the policy and the subject.
@@ -95,6 +121,9 @@ pub fn examine(
         result.reason = .bad_signature;
         return result;
     };
+    if (statement.parse(envelope.payload)) |head| {
+        result.provenance = head.kind == .provenance;
+    } else |_| {}
     if (policy.trusted(&envelope.public) == null) {
         result.reason = .untrusted_key;
         return result;

@@ -12,7 +12,8 @@
 //!
 //! Parse accepts only what the writer writes (REVIEW.md): every line must parse as an envelope,
 //! re-render to its own bytes, verify, and hold a statement of this release's `sign/v1` form
-//! about the very tree the record is keyed by, and no line may occur twice. A record whose
+//! about the very tree the record is keyed by (a signed provenance statement is read whole as
+//! well), and no line may occur twice. A record whose
 //! statement has another predicate type is `Newer` (a release that knows more wrote it); any
 //! other defect is `Malformed`. Each line's signature is checked against the key it names, so
 //! damage is never taken for a newer record; whether that key is trusted is the gate's
@@ -25,6 +26,7 @@ const host_mod = @import("../host.zig");
 const digest_mod = @import("../store/digest.zig");
 const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
+const provenance = @import("provenance.zig");
 const dsse = @import("dsse.zig");
 const statement = @import("statement.zig");
 
@@ -49,9 +51,12 @@ pub const AddError = error{
 
 pub const Added = enum { added, present };
 
-/// The memory parse needs, about 2.9 MiB: the caller makes one (static or heap) and reuses it.
+/// The memory parse needs, about 6 MiB: the caller makes one (static or heap) and reuses it.
 pub const Work = struct {
     envelope: dsse.Work,
+    /// A signed provenance line is read whole (`provenance.parse`) to be sure of its form.
+    provenance: provenance.Record,
+    again: [constants.statement_bytes_max]u8,
     /// One line, re-rendered, to compare with the line read.
     line: [constants.envelope_bytes_max]u8,
     /// The file as read: one byte more than the bound, so a file that is too long is seen.
@@ -184,6 +189,12 @@ fn check_line(work: *Work, tree: Digest, text: []const u8) ParseError!void {
         error.Malformed => return error.Malformed,
     };
     if (!std.mem.eql(u8, &found.tree, &tree.bytes)) return error.Malformed;
+    if (found.kind == .provenance) {
+        const payload = envelope.payload;
+        provenance.parse(payload, &work.provenance, &work.again) catch return error.Malformed;
+        // The statement's subjects and the predicate's record are the same payload.
+        assert(std.mem.eql(u8, &work.provenance.tree, &tree.bytes));
+    }
 }
 
 // ---- The store ----
@@ -247,11 +258,18 @@ pub fn save(
 
 /// How many signature records the store holds, for `trust_records_max`.
 pub fn count_records(store: *const Store, errno: *u16) host_mod.Error!u32 {
+    return count_in(store, directory_name, errno);
+}
+
+/// How many files the store's directory `name` (relative to the store root) holds; 0 if it is
+/// not there yet.
+pub fn count_in(store: *const Store, name: []const u8, errno: *u16) host_mod.Error!u32 {
+    assert(name.len > 0);
     var counter: Counter = .{ .count = 0 };
     var directory: PathBuf = undefined;
     const fs = store.fs;
     const visitor: fs_mod.Visitor = .{ .context = &counter, .call = Counter.visit };
-    fs.read_dir(store.directory_path(&directory, directory_name), visitor) catch |err| {
+    fs.read_dir(store.directory_path(&directory, name), visitor) catch |err| {
         if (err == error.NotFound) return 0;
         errno.* = fs.last_errno();
         return err;
