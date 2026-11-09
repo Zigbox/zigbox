@@ -20,3 +20,7 @@ Traps found:
   registry; tests and the fuzzer assert it is 0.
 
 Next (slice 13): the push is complete for the registry API; what remains is the M8 demo wiring.
+
+Trap found by the live run: the simulated host accepts a read of standard input with no open file;
+`HostReal.read` did not. Any new use of a host call the simulator and the real host implement
+separately needs a real run, not only the simulation.
