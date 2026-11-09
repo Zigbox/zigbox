@@ -1,0 +1,5 @@
+error[ZBX-E0551]: the destination cannot be pushed to
+  cause  'registry.test/app' cannot be pushed to: it names no tag
+  fix    name a registry, a repository and a tag: registry.example/team/app:1.0
+  more   zbx explain E0551 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0551.html

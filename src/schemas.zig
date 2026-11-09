@@ -621,6 +621,21 @@ const pull_schema =
     \\"created":{"type":"boolean","description":"this pull made the file"}}}}}
 ;
 
+const push_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/push/1","version":1,
+    \\"title":"zbx push <source> <destination> --output json",
+    \\"description":"stdout: what each blob needed and the manifest put under the tag.",
+    \\"type":"object","required":["blobs","destination","manifest","schema"],
+    \\"properties":{"schema":{"const":"zbx.push/1"},
+    \\"destination":{"type":"string","description":"registry/repository:tag, as pushed"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"blobs":{"type":"array","items":{"type":"object","required":["digest","outcome","size"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"outcome":{"enum":["exists","mounted","uploaded"]},
+    \\"size":{"type":"integer"}}}}}}
+;
+
 const explain_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/explain/1","version":1,
@@ -867,6 +882,7 @@ const table = [_]Entry{
     .{ .command = "store-restore", .text = store_restore_schema },
     .{ .command = "pull-resolve", .text = pull_resolve_schema },
     .{ .command = "pull", .text = pull_schema },
+    .{ .command = "push", .text = push_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
     .{ .command = "build-graph", .text = build_graph_schema },
@@ -887,7 +903,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 34);
+    assert(table.len == 35);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -916,7 +932,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 34), table.len);
+    try testing.expectEqual(@as(usize, 35), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

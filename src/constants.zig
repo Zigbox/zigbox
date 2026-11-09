@@ -1628,7 +1628,27 @@ pub const pack_io_bytes: u32 = 256 * 1024;
 /// The mode of the files an export writes (its directories take the process's umask).
 pub const export_file_mode: u16 = 0o644;
 
+// ---- Upload (lane U, slice 11) -------------------------------------------------------------
+
+/// The bytes of one PATCH of a blob upload (owner, 2026-11-08). Also the most a request body
+/// holds: the manifest (`pack_manifest_bytes_max`) is far below it.
+pub const push_chunk_bytes: u32 = 8 * 1024 * 1024;
+
+/// The most chunks of one blob: the loop's bound, 8 TiB at the chunk size above.
+pub const push_chunks_max: u32 = 1 << 20;
+
+/// The most bytes of a registry's error answer that are read (the JSON `errors` array).
+pub const push_error_body_bytes: u32 = 4096;
+
+/// The blobs of one packed image: its config and its layer, in the order they are pushed.
+pub const push_blobs: u32 = 2;
+
 comptime {
+    assert(push_chunk_bytes >= pack_manifest_bytes_max);
+    assert(push_chunk_bytes >= pack_io_bytes);
+    assert(push_chunks_max > 0);
+    assert(push_error_body_bytes < registry_manifest_bytes_max);
+    assert(push_blobs == 2);
     assert(pack_links_max > 0);
     assert(std.math.isPowerOfTwo(pack_links_max));
     assert(pack_link_paths_bytes >= path_bytes_max + 1);

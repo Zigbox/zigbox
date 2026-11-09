@@ -155,11 +155,15 @@ pub const Code = enum(u8) {
     E0525,
     E0526,
     E0550,
+    E0551,
+    E0555,
+    E0556,
     E0557,
     W0501,
     W0502,
     W0503,
     W0504,
+    W0552,
     E0600,
     E0601,
     E0602,
@@ -2355,6 +2359,55 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0551,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the destination cannot be pushed to",
+        .explanation =
+        \\`zbx push <source> <destination>` puts an image under a tag in a registry,
+        \\and the destination named is not one it can use: it has no tag (a push by
+        \\digest alone is refused, because a registry may delete a manifest that no
+        \\tag points at),
+        \\or it names a digest, or it is not a reference at all.
+        \\
+        \\Name a tag: registry.example/team/app:1.0. The digest of what was pushed is
+        \\printed when the push is done, and `app@sha256:...` pulls it back.
+        ,
+    },
+    .{
+        .code = .E0555,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused a blob upload",
+        .explanation =
+        \\The registry did not take a blob of the image: it answered the check, the
+        \\mount request, a piece of the bytes or the closing request with a refusal,
+        \\or with something the upload protocol does not allow (a Location that cannot
+        \\be followed, a Range that says it kept fewer bytes than were sent).
+        \\
+        \\The cause names the step and the registry's own code. A `401` or `403` means
+        \\the registry wants credentials this build of zbx does not send. A `429`
+        \\means wait and try again. Nothing is half-done in a way that matters: a
+        \\push again skips every blob the registry holds, and the manifest is only
+        \\put once all of its blobs are there.
+        ,
+    },
+    .{
+        .code = .E0556,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused the manifest",
+        .explanation =
+        \\All the blobs of the image are in the registry, and the registry refused the
+        \\manifest that names them, or answered with a digest other than the
+        \\manifest's own. The cause gives the registry's code (MANIFEST_INVALID,
+        \\MANIFEST_BLOB_UNKNOWN, a tag that may not be overwritten, and the like).
+        \\
+        \\The tag was not moved. A push again sends no blob bytes when the registry
+        \\holds them all.
+        ,
+    },
+    .{
         .code = .E0557,
         .severity = .@"error",
         .blame = .user,
@@ -2425,6 +2478,23 @@ pub const registry = [_]Entry{
         \\
         \\The message says how many were not shown. Nothing to do unless one of
         \\mattered. The image is the same either way.
+        ,
+    },
+    .{
+        .code = .W0552,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the push succeeded but this host did not record the tag",
+        .explanation =
+        \\The registry holds the image under the tag, and the manifest digest was
+        \\printed. This host's store could not write its record that the image has
+        \\that tag, so a later `zbx run` or `zbx sign` by that name will not find it
+        \\here, until the record is made.
+        \\
+        \\The cause names the destination and why the store could not be written
+        \\(a full or read-only disk, say). Fix that, then push the same image to the
+        \\same destination again: the registry already holds every blob, so nothing
+        \\is sent but the manifest, and the record is written.
         ,
     },
     .{
@@ -3492,7 +3562,7 @@ comptime {
     // build error, and lets `entry` index the table directly.
     assert(registry.len == fields.len);
     assert(fields.len <= std.math.maxInt(u8));
-    @setEvalBranchQuota(400_000);
+    @setEvalBranchQuota(600_000);
     for (registry, fields, 0..) |item, name, index| {
         assert(@backingInt(item.code) == index);
         assert(std.mem.eql(u8, @tagName(item.code), name));
@@ -3616,7 +3686,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0552 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0901, .E0902, .E0910, .E0911 => false,
         .E1006, .E1007 => false,

@@ -43,6 +43,7 @@ const push_run = @import("push/run.zig");
 const export_mod = @import("push/export.zig");
 const pack = @import("push/pack.zig");
 const images = @import("store/images.zig");
+const reference_mod = @import("registry/reference.zig");
 
 const Digest = digest_mod.Digest;
 const Host = host_mod.Host;
@@ -65,6 +66,8 @@ pub const Args = struct {
     trash: bool = false,
     /// `du --by-image`: one line for each image instead of the store's total.
     by_image: bool = false,
+    /// `push --dry-run`: pack and print the digest, send nothing.
+    dry_run: bool = false,
 };
 
 /// How results and diagnostics are written.
@@ -127,7 +130,9 @@ pub fn run(
         },
         .du => {},
     }
-    assert((args.second != null) == (args.action == .diff or args.action == .@"export"));
+    if (args.action != .push) {
+        assert((args.second != null) == (args.action == .diff or args.action == .@"export"));
+    }
     const digests = [2]?[]const u8{ args.operand, args.second };
     if (args.action == .du or args.action == .rm or args.action == .diff) {
         for (digests) |maybe| {
@@ -1215,11 +1220,13 @@ fn do_export(job: *Job, diag: *Diag) Error!void {
     try put(job, line, diag);
 }
 
-/// `zbx push --dry-run`: packs the source and prints what an upload would send, which is the
-/// manifest digest, without the network. It writes the same blobs and records as an export.
+/// `zbx push <source> <destination>`: packs the source and puts it in the registry under the
+/// destination's tag. With `--dry-run` it packs and prints the digest, and sends nothing.
 fn do_push(job: *Job, diag: *Diag) Error!void {
     assert(job.args.action == .push);
     assert(diag.code == null);
+    var destination: reference_mod.Reference = undefined;
+    if (job.args.second) |text| try push_run.parse_destination(text, &destination, diag);
     var store: Store = undefined;
     const exists = try open_store(job, &store, .existing, diag);
     const operand = job.args.operand.?;
@@ -1227,13 +1234,43 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
         push_diagnose.cannot_pack(diag, operand, "the store is empty");
         return error.Failed;
     }
-    var made: pack.Packed = undefined;
-    try push_run.pack_operand(&store, &job.workspace.push, operand, &made, diag);
     var buffer: [constants.output_bytes_max]u8 = undefined;
-    // One digest of 71 bytes in a 16 KiB buffer: the print cannot fail. `--output json` prints
-    // the same line until `zbx.push/1` (slice 11) gives the upload a result of its own.
-    const text = std.fmt.bufPrint(&buffer, "{s}\n", .{made.manifest.text()}) catch unreachable;
-    try put(job, text, diag);
+    if (job.args.dry_run) {
+        var made: pack.Packed = undefined;
+        try push_run.pack_operand(&store, &job.workspace.push, operand, &made, diag);
+        // One digest of 71 bytes in a 16 KiB buffer: the print cannot fail.
+        const text = std.fmt.bufPrint(&buffer, "{s}\n", .{made.manifest.text()}) catch unreachable;
+        return put(job, text, diag);
+    }
+    assert(job.args.second != null);
+    var pushed: push_run.Pushed = undefined;
+    const wire = job.host.network();
+    const workspace = &job.workspace.push;
+    try push_run.push_operand(&store, workspace, wire, operand, &destination, &pushed, diag);
+    if (job.output.json) {
+        const text = push_run.push_json(&pushed, buffer[0 .. buffer.len - 1]) catch {
+            diag.raise(.B0001);
+            diag.cause("the push result did not fit its buffer", .{});
+            return error.Failed;
+        };
+        buffer[text.len] = '\n';
+        try put(job, buffer[0 .. text.len + 1], diag);
+        return warn_tag_not_recorded(job, &pushed);
+    }
+    const line = std.fmt.bufPrint(&buffer, "{s}\n", .{pushed.report.manifest.text()}) catch
+        unreachable;
+    try put(job, line, diag);
+    warn_tag_not_recorded(job, &pushed);
+}
+
+/// The registry holds the image but this host's store could not record the tag (W0552).
+fn warn_tag_not_recorded(job: *const Job, pushed: *const push_run.Pushed) void {
+    const failure = pushed.record_failure orelse return;
+    assert(pushed.destination_text().len > 0);
+    var warning: Diag = undefined;
+    warning.reset();
+    push_diagnose.tag_not_recorded(&warning, pushed.destination_text(), failure);
+    write_diag(job, &warning);
 }
 
 // ---- verify --------------------------------------------------------------------------------

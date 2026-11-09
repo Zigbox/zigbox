@@ -11,12 +11,15 @@
 //!   - `refuse_tunnel`: `CONNECT` is answered 407.
 //! Without `refuse_tunnel`, `CONNECT host:port` is answered `200` and then nothing, which is what
 //! a proxy tunnel to a peer that does not speak TLS looks like.
+//! With `push` set, every request goes to the upload fixture (`push_fixture.zig`) instead: HEAD,
+//! POST, PATCH and PUT, the body read by its `Content-Length`.
 //! The requests it saw are kept (`log`), readable once `stop` has joined the thread.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const linux = std.os.linux;
 const fixture_mod = @import("registry_fixture.zig");
+const push_fixture = @import("push_fixture.zig");
 
 pub const log_entries_max = 32;
 const request_bytes_max = 8192;
@@ -42,6 +45,7 @@ pub const Server = struct {
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
     mode: Mode = .normal,
+    push: ?*push_fixture.PushFixture = null,
     requests: std.atomic.Value(u32) = .init(0),
     log: [log_entries_max]Logged = @splat(.{}),
 
@@ -104,7 +108,8 @@ pub const Server = struct {
 
     fn handle(server: *Server, client: i32) void {
         var request: [request_bytes_max]u8 = undefined;
-        const length = read_head(client, &request, &server.stopping) orelse return;
+        var filled: usize = 0;
+        const length = read_head(client, &request, &filled, &server.stopping) orelse return;
         const text = request[0..length];
         const index = server.requests.fetchAdd(1, .acq_rel);
         const line_end = std.mem.indexOf(u8, text, "\r\n").?;
@@ -132,6 +137,9 @@ pub const Server = struct {
             }
             return;
         }
+        if (server.push) |uploads| {
+            return server.handle_push(client, uploads, text, request[length..filled]);
+        }
         const target = request_target(line) orelse return write_all(client, status_only(400));
         var answer: fixture_mod.Answer = .{};
         var token: []const u8 = "";
@@ -145,6 +153,37 @@ pub const Server = struct {
             .range_from = range_start(header_value(text, "range")),
         };
         server.fixture.answer(query, &answer);
+        server.respond(client, &answer);
+    }
+
+    /// A request for the upload fixture: its body is read by `Content-Length`, bounded by the
+    /// fixture's biggest blob.
+    fn handle_push(
+        server: *Server,
+        client: i32,
+        uploads: *push_fixture.PushFixture,
+        head: []const u8,
+        early: []const u8,
+    ) void {
+        const line = head[0..std.mem.indexOf(u8, head, "\r\n").?];
+        const parsed = request_line(line) orelse return write_all(client, status_only(400));
+        const declared = header_value(head, "content-length") orelse "0";
+        const size = std.fmt.parseInt(usize, declared, 10) catch {
+            return write_all(client, status_only(400));
+        };
+        if (size > push_fixture.blob_bytes_max) return write_all(client, status_only(400));
+        var body: [push_fixture.blob_bytes_max]u8 = undefined;
+        const kept = @min(early.len, size);
+        @memcpy(body[0..kept], early[0..kept]);
+        if (!read_exact(client, body[kept..size], &server.stopping)) return;
+        var answer: fixture_mod.Answer = .{};
+        uploads.answer(.{
+            .method = parsed.method,
+            .target = parsed.target,
+            .content_range = header_value(head, "content-range") orelse "",
+            .body = body[0..size],
+        }, &answer);
+        if (parsed.method == .head) answer.body = "";
         server.respond(client, &answer);
     }
 
@@ -181,6 +220,7 @@ fn write_head(
         .{ .name = "Docker-Content-Digest", .value = answer.content_digest },
         .{ .name = "Location", .value = answer.location },
         .{ .name = "Content-Range", .value = answer.content_range },
+        .{ .name = "Range", .value = answer.range },
     };
     for (optional) |header| {
         if (header.value.len > 0) try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
@@ -230,6 +270,10 @@ fn reason(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
         206 => "Partial Content",
+        201 => "Created",
+        202 => "Accepted",
+        400 => "Bad Request",
+        413 => "Content Too Large",
         416 => "Range Not Satisfiable",
         307 => "Temporary Redirect",
         401 => "Unauthorized",
@@ -252,7 +296,12 @@ fn write_all(client: i32, bytes: []const u8) void {
 
 /// Reads until the blank line that ends a request head; its length, or null on a timeout, a
 /// close or an oversize head.
-fn read_head(client: i32, buffer: []u8, stopping: *const std.atomic.Value(bool)) ?usize {
+fn read_head(
+    client: i32,
+    buffer: []u8,
+    filled: *usize,
+    stopping: *const std.atomic.Value(bool),
+) ?usize {
     var length: usize = 0;
     var waited: u32 = 0;
     while (length < buffer.len) {
@@ -269,7 +318,52 @@ fn read_head(client: i32, buffer: []u8, stopping: *const std.atomic.Value(bool))
         const got = linux.recvfrom(client, room.ptr, room.len, 0, null, null);
         if (linux.errno(got) != .SUCCESS or got == 0) return null;
         length += got;
+        filled.* = length;
         if (std.mem.indexOf(u8, buffer[0..length], "\r\n\r\n")) |end| return end + 4;
+    }
+    return null;
+}
+
+/// Fills `buffer` from the client; false on a timeout, a close or a stop.
+fn read_exact(client: i32, buffer: []u8, stopping: *const std.atomic.Value(bool)) bool {
+    var at: usize = 0;
+    var waited: u32 = 0;
+    while (at < buffer.len) {
+        if (stopping.load(.acquire)) return false;
+        var entries = [1]linux.pollfd{.{ .fd = client, .events = linux.POLL.IN, .revents = 0 }};
+        const ready = linux.poll(&entries, 1, 50);
+        if (linux.errno(ready) != .SUCCESS) return false;
+        if (ready == 0) {
+            waited += 50;
+            if (waited >= read_timeout_ms) return false;
+            continue;
+        }
+        const room = buffer[at..];
+        const got = linux.recvfrom(client, room.ptr, room.len, 0, null, null);
+        if (linux.errno(got) != .SUCCESS or got == 0) return false;
+        at += got;
+    }
+    return true;
+}
+
+const RequestLine = struct { method: push_fixture.Method, target: []const u8 };
+
+/// `<METHOD> <target> HTTP/1.x`, for the five methods an upload uses; null for any other.
+fn request_line(line: []const u8) ?RequestLine {
+    const space = std.mem.indexOfScalar(u8, line, ' ') orelse return null;
+    const methods = [_]struct { name: []const u8, method: push_fixture.Method }{
+        .{ .name = "GET", .method = .get },
+        .{ .name = "HEAD", .method = .head },
+        .{ .name = "POST", .method = .post },
+        .{ .name = "PATCH", .method = .patch },
+        .{ .name = "PUT", .method = .put },
+    };
+    for (methods) |known| {
+        if (!std.mem.eql(u8, line[0..space], known.name)) continue;
+        const rest = line[space + 1 ..];
+        const end = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+        if (!std.mem.startsWith(u8, rest[end..], " HTTP/1.")) return null;
+        return .{ .method = known.method, .target = rest[0..end] };
     }
     return null;
 }
@@ -304,4 +398,15 @@ test "header_value and request_target read a request head" {
     try std.testing.expectEqualStrings("/v2/x/manifests/1", request_target(head[0..31]).?);
     try std.testing.expect(request_target("POST /x HTTP/1.1") == null);
     try std.testing.expect(request_target("GET /x") == null);
+}
+
+test "request_line reads the methods of an upload" {
+    // Goal: the five methods, a target with a query, and the refusals.
+    const patch = request_line("PATCH /v2/a/blobs/uploads/1?x=y HTTP/1.1").?;
+    try std.testing.expectEqual(push_fixture.Method.patch, patch.method);
+    try std.testing.expectEqualStrings("/v2/a/blobs/uploads/1?x=y", patch.target);
+    const head = request_line("HEAD /x HTTP/1.1").?;
+    try std.testing.expectEqual(push_fixture.Method.head, head.method);
+    try std.testing.expect(request_line("DELETE /x HTTP/1.1") == null);
+    try std.testing.expect(request_line("PUT /x") == null);
 }

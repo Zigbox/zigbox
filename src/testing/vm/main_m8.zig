@@ -1,13 +1,23 @@
-//! The M8 slice 10 check (`zbx store export --oci`), run in a real Ubuntu 24.04 VM: one tree is
-//! imported and exported as two different users, and the two layouts must be byte-identical.
-//! Every blob must also hash to its own file name, and the layer must read back with the guest's
-//! own `tar` and `gzip`, which are not ours. This is the slice's check, not the M8 demo, which
-//! needs the registry upload (slice 11). `zig build demo-m8`, or `-Daccel=tcg`.
+//! The M8 slice 10 and 11 checks and the SIGN part (slice 3), run in a real Ubuntu 24.04 VM.
+//!
+//! Slice 10 (`zbx store export --oci`): one tree is imported and exported as two different users,
+//! and the two layouts must be byte-identical. Every blob must also hash to its own file name,
+//! and the layer must read back with the guest's own `tar` and `gzip`, which are not ours.
+//!
+//! Slice 11 (`zbx push`, no credentials): a real registry (the distribution registry, from the
+//! guest's `docker-registry` package, on `localhost:5000`, so not our test registry) takes the
+//! tree as `localhost:5000/m8/tree:1`; the digest `push` prints is the export's manifest digest
+//! and the registry's own `Docker-Content-Digest`; a second push says `exists` for every blob and
+//! sends nothing; a second user pulls it and gets the same tree. The brief names the `registry:2`
+//! image run by `zbx run`; the guest has no container runtime to pull it with before this check
+//! trusts `zbx run`, so the package stands in (docs/demos/m8.md).
 //!
 //! The SIGN part (slice 3): as `demo`, with a store and a config directory of its own, a key
 //! sealed by a passphrase file signs a pulled `alpine`; under `require_signature` the signed
 //! tree runs, an unsigned one is refused (E0905), and a changed object of the signed tree is
 //! refused (E0907) until it is put back.
+//!
+//! This is not the M8 demo, which needs slices 12 to 14. `zig build demo-m8`, or `-Daccel=tcg`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -18,7 +28,9 @@ const Session = session_mod.Session;
 const H = harness;
 
 const script_path = "/root/m8-export.sh";
+const push_path = "/root/m8-push.sh";
 const marker = "m8-export: identical";
+const push_marker = "m8-push: ok";
 const timeout_s: u32 = 300;
 const sign_script_path = "/tmp/m8-sign.sh";
 const sign_marker = "m8-sign: refused, then run again";
@@ -26,6 +38,46 @@ const sign_timeout_s: u32 = 900;
 
 /// The whole check, as one script: it prints `marker` as its last line when every step held.
 const script = body ++ "\necho '" ++ marker ++ "'\n";
+
+/// Slice 11: the real registry, a push, a push again, and a pull by a second user.
+const push_script = push_body ++ "\necho '" ++ push_marker ++ "'\n";
+
+const push_body =
+    \\set -eu
+    \\trap 'cat /tmp/err-* 2>/dev/null' EXIT
+    \\d=$(cat /tmp/tree)
+    \\m=$(cat /tmp/manifest)
+    \\export DEBIAN_FRONTEND=noninteractive
+    \\apt-get update -qq >/tmp/err-apt 2>&1
+    \\apt-get install -y -qq docker-registry >>/tmp/err-apt 2>&1
+    \\{ echo 'version: 0.1'; echo 'storage: {filesystem: {rootdirectory: /var/lib/docker-registry}}'
+    \\  echo 'http: {addr: ":5000"}'; } >/etc/docker/registry/config.yml
+    \\systemctl restart docker-registry >/tmp/err-start 2>&1
+    \\i=0
+    \\until curl -fs http://localhost:5000/v2/ >/dev/null; do
+    \\  i=$((i + 1))
+    \\  [ "$i" -lt 30 ] || { echo 'the registry did not start'
+    \\    systemctl status docker-registry --no-pager | tail -5; exit 1; }
+    \\  sleep 1
+    \\done
+    \\zd() { u=$1; shift; runuser -u "$u" -- env HOME=/home/$u /usr/local/bin/zbx "$@"; }
+    \\ref=localhost:5000/m8/tree:1
+    \\p1=$(zd demo push "$d" $ref 2>/tmp/err-p1)
+    \\[ "$p1" = "$m" ] || { echo "push printed $p1"; exit 1; }
+    \\j=$(zd demo --output json push "$d" $ref 2>/tmp/err-p2)
+    \\n=$(echo "$j" | grep -o '"outcome":"exists"' | wc -l)
+    \\[ "$n" = 2 ] || { echo 'not all exist'; exit 1; }
+    \\c=$(curl -fsI -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+    \\  http://localhost:5000/v2/m8/tree/manifests/1 | tr -d '\r' |
+    \\  sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')
+    \\[ "$c" = "$m" ] || { echo "the registry has $c"; exit 1; }
+    \\mkdir /tmp/p2
+    \\chown demo2 /tmp/p2
+    \\cd /tmp/p2
+    \\zd demo2 --output json pull $ref >/tmp/pull-demo2 2>/tmp/err-pull
+    \\grep -q "\"tree\":\"$d\"" /tmp/pull-demo2 || { echo "pulled another tree"; exit 1; }
+    \\true
+;
 
 const body =
     \\set -eu
@@ -55,6 +107,8 @@ const body =
     \\for f in blobs/sha256/*; do
     \\  if gzip -t "$f" 2>/dev/null; then tar -tvzf "$f"; fi
     \\done
+    \\echo "$d" > /tmp/tree
+    \\echo "$m" > /tmp/manifest
     \\true
 ;
 
@@ -141,11 +195,16 @@ fn export_check(session: *Session, out: *Io.Writer) !void {
     });
     try H.show(out, "install zbx", copied);
     if (copied.status != 0) return error.InstallFailed;
+    try session.put_file(push_path, push_script);
     try session.put_file(script_path, script);
     const result = try session.run("sh " ++ script_path ++ " 2>&1", timeout_s);
     try H.show(out, "export as two users", result);
-    if (result.status != 0) return error.ExportCheckFailed;
-    if (std.mem.indexOf(u8, result.output, marker) == null) return error.ExportCheckFailed;
+    if (result.status != 0) return error.CheckFailed;
+    if (std.mem.indexOf(u8, result.output, marker) == null) return error.CheckFailed;
+    const pushed = try session.run("sh " ++ push_path ++ " 2>&1", timeout_s);
+    try H.show(out, "push to a real registry, push again, pull", pushed);
+    if (pushed.status != 0) return error.CheckFailed;
+    if (std.mem.indexOf(u8, pushed.output, push_marker) == null) return error.CheckFailed;
 }
 
 fn sign_check(session: *Session, out: *Io.Writer) !void {
@@ -162,10 +221,13 @@ test "the sign script ends with its marker and fits a put_file" {
     try std.testing.expect(sign_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
 }
 
-test "the script ends with the marker the check looks for" {
+test "the scripts end with the markers the check looks for" {
     try std.testing.expect(std.mem.endsWith(u8, script, marker ++ "'\n"));
+    try std.testing.expect(std.mem.endsWith(u8, push_script, push_marker ++ "'\n"));
 }
 
-test "the script fits a put_file" {
-    try std.testing.expect(script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
+test "the scripts fit a put_file" {
+    const limit = @import("zigbox_vm").limits.put_file_bytes_max;
+    try std.testing.expect(script.len <= limit);
+    try std.testing.expect(push_script.len <= limit);
 }

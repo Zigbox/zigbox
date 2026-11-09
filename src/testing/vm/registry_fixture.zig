@@ -106,6 +106,8 @@ pub const Answer = struct {
     content_digest: []const u8 = "",
     location: []const u8 = "",
     content_range: []const u8 = "",
+    /// The `Range` of an upload session ("0-N"); empty for none.
+    range: []const u8 = "",
     body: []const u8 = "",
     /// Body bytes that arrive before the connection drops; null for all.
     deliver: ?u64 = null,

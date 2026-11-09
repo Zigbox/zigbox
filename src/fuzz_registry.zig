@@ -12,6 +12,14 @@
 //!      digest of the platform manifest the registry really has, whatever was changed on the
 //!      way, because every manifest is hashed before it is used. It never makes more requests
 //!      than one flow and one repeat, and a failure is always an E05xx diagnostic.
+//!   4. `upload`: a push to the test registry (any of its faults, with or without a mount from a
+//!      repository that holds the blobs, in pieces of a random size) whose answers are made worse
+//!      by the seed: an error status, a `Location` that is relative, absolute, on another origin
+//!      or made of random bytes, a `Range` that is valid, short, not from 0 or malformed, an
+//!      error body of random bytes (up to past its bound), and failed and cut requests. The upload
+//!      property: a push that succeeds leaves the manifest and both blobs in the registry, and
+//!      the manifest was never put before they were there; one that fails is E0555, E0556 or
+//!      another E05xx code, never a crash.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,6 +30,15 @@ const constants = @import("constants.zig");
 const manifest = @import("registry/manifest.zig");
 const net = @import("registry/net.zig");
 const net_sim = @import("registry/net_sim.zig");
+const fs_sim = @import("store/fs_sim.zig");
+const host_sim = @import("host_sim.zig");
+const images = @import("store/images.zig");
+const import_mod = @import("store/import.zig");
+const layout = @import("store/layout.zig");
+const pack = @import("push/pack.zig");
+const push_registry = @import("registry/push_registry.zig");
+const support = @import("store/test_support.zig");
+const upload = @import("push/upload.zig");
 const reference_mod = @import("registry/reference.zig");
 const test_registry = @import("registry/test_registry.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -144,9 +161,14 @@ const Meddler = struct {
         return .{ .context = meddler, .answer = answer };
     }
 
-    fn answer(context: *anyopaque, request: *const net.Request, served: *net_sim.Served) void {
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *net_sim.Served,
+    ) void {
         const meddler: *Meddler = @ptrCast(@alignCast(context));
-        meddler.inner.answer(meddler.inner.context, request, served);
+        meddler.inner.answer(meddler.inner.context, request, received, served);
         if (served.status != 200) return;
         if (served.body.len == 0 or served.body.len > meddler.scratch.len) return;
         if (meddler.random.uintLessThan(u16, 1000) >= meddler.flip_per_mille) return;
@@ -196,12 +218,274 @@ fn fuzz_resolve(random: std.Random, seed: u64) void {
     assert(wire.requests <= 40);
 }
 
+/// A store with one packed image, made once and kept; the registry and the wire are new each time.
+const Pushing = struct {
+    host: host_sim.HostSim,
+    files: fs_sim.SimFs,
+    store: layout.Store,
+    imports: import_mod.Workspace,
+    packing: pack.Workspace,
+    uploading: upload.Workspace,
+    wire: net_sim.SimNet,
+    registry: push_registry.PushRegistry,
+    settings: images.Settings,
+    made: pack.Packed,
+};
+
+var pushing: ?*Pushing = null;
+
+fn pushing_ready() *Pushing {
+    if (pushing) |ready| return ready;
+    const rig = std.heap.page_allocator.create(Pushing) catch @panic("out of memory");
+    rig.host.init(1, &.{});
+    rig.files.init(1);
+    rig.host.store_fs = &rig.files;
+    rig.files.put_dir("/data", 0o755);
+    support.make_store_directories(&rig.files, "/data/store");
+    rig.store.at(rig.host.interface(), "/data/store");
+    support.make_source(&rig.files, 0);
+    rig.settings.clear();
+    var diag: Diag = undefined;
+    diag.reset();
+    var result: import_mod.Result = undefined;
+    const options: import_mod.Options = .{ .squash_owner = false, .warn = null };
+    import_mod.import(&rig.store, &rig.imports, "/src", options, &result, &diag) catch {
+        @panic("the fuzzer's source does not import");
+    };
+    const input: pack.Input = .{ .tree = result.digest, .settings = &rig.settings, .labels = null };
+    var failure: pack.Failure = undefined;
+    rig.packing.piece = 4096;
+    pack.pack(&rig.store, &rig.packing, input, &rig.made, &failure) catch {
+        @panic("the fuzzer's image does not pack");
+    };
+    pushing = rig;
+    return rig;
+}
+
+/// Serves the push registry and makes one answer in a few worse.
+const Spoiler = struct {
+    inner: net_sim.Responder,
+    random: std.Random,
+    spoil_per_mille: u16,
+    /// How many answers were made worse: a registry that lies can leave a blob it never stored.
+    spoiled: u32 = 0,
+    location: [location_bytes]u8 = undefined,
+    /// Where junk is made before it is copied into `location`.
+    scratch: [location_bytes]u8 = undefined,
+    range: [range_bytes]u8 = undefined,
+    body: [constants.push_error_body_bytes + 64]u8 = undefined,
+
+    const location_bytes = 400;
+    const range_bytes = 64;
+
+    fn responder(spoiler: *Spoiler) net_sim.Responder {
+        return .{ .context = spoiler, .answer = answer };
+    }
+
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *net_sim.Served,
+    ) void {
+        const spoiler: *Spoiler = @ptrCast(@alignCast(context));
+        spoiler.inner.answer(spoiler.inner.context, request, received, served);
+        if (spoiler.random.uintLessThan(u16, 1000) >= spoiler.spoil_per_mille) return;
+        spoiler.spoiled += 1;
+        switch (spoiler.random.uintLessThan(u8, 4)) {
+            0 => {
+                const statuses = [_]u16{ 400, 401, 403, 404, 416, 429, 500, 503 };
+                served.status = statuses[spoiler.random.uintLessThan(usize, statuses.len)];
+            },
+            1 => spoiler.spoil_location(served),
+            2 => spoiler.spoil_range(served),
+            else => spoiler.spoil_body(served),
+        }
+    }
+
+    fn text(spoiler: *Spoiler, buffer: []u8, parts: []const []const u8) []const u8 {
+        _ = spoiler;
+        var at: usize = 0;
+        for (parts) |part| {
+            const count = @min(part.len, buffer.len - at);
+            @memcpy(buffer[at..][0..count], part[0..count]);
+            at += count;
+        }
+        return buffer[0..at];
+    }
+
+    /// A `Location` that is valid, odd or hostile.
+    fn spoil_location(spoiler: *Spoiler, served: *net_sim.Served) void {
+        const random = spoiler.random;
+        const buffer = &spoiler.location;
+        const session = "/v2/push/ok/blobs/uploads/1";
+        served.location = switch (random.uintLessThan(u8, 10)) {
+            0 => "",
+            1 => session,
+            2 => "https://registry.test" ++ session,
+            3 => "https://other.test:8443" ++ session ++ "?state=a",
+            4 => "http://registry.test" ++ session, // A downgrade.
+            5 => "//other.test" ++ session, // Protocol-relative.
+            6 => "v2/push/ok/blobs/uploads/1", // No leading slash.
+            7 => spoiler.text(buffer, &.{ "https://", spoiler.junk(&spoiler.scratch), "/x" }),
+            8 => spoiler.text(buffer, &.{ "/", spoiler.junk(&spoiler.scratch) }),
+            else => spoiler.text(buffer, &.{
+                "https://registry.test/",
+                spoiler.junk(&spoiler.scratch),
+            }),
+        };
+    }
+
+    /// Random bytes (any byte, or only URL-ish ones) of a random length in `buffer`.
+    fn junk(spoiler: *Spoiler, buffer: []u8) []const u8 {
+        const random = spoiler.random;
+        const length = random.uintAtMost(usize, buffer.len);
+        const url_like = random.boolean();
+        const alphabet = "abcdef0123456789/:?&=.-_%";
+        for (buffer[0..length]) |*byte| {
+            byte.* = if (url_like)
+                alphabet[random.uintLessThan(usize, alphabet.len)]
+            else
+                random.int(u8);
+        }
+        return buffer[0..length];
+    }
+
+    /// A `Range` that is valid, short, not from 0 or malformed.
+    fn spoil_range(spoiler: *Spoiler, served: *net_sim.Served) void {
+        const random = spoiler.random;
+        const buffer = &spoiler.range;
+        const number = random.int(u64) >> random.uintLessThan(u6, 63);
+        const forms = [_][]const u8{
+            "", //
+            "-", //
+            "0-", //
+            "-0", //
+            "0", //
+            "bytes=", //
+            "bytes=0-x", //
+            "0-x", //
+            "5-100", //
+            "bytes=1-63", //
+            "0--1", //
+            " 0-63", //
+            "0-63 ", //
+            "00-63", //
+            "0-63-64", //
+            "0-18446744073709551615", //
+            "0-18446744073709551616", //
+            "0-99999999999999999999999", //
+        };
+        served.range = switch (random.uintLessThan(u8, 4)) {
+            0 => forms[random.uintLessThan(usize, forms.len)],
+            1 => std.fmt.bufPrint(buffer, "0-{d}", .{number}) catch unreachable, // 2 + 20 digits.
+            2 => std.fmt.bufPrint(buffer, "bytes=0-{d}", .{number}) catch unreachable, // 8 + 20.
+            else => spoiler.junk(buffer),
+        };
+    }
+
+    /// A refusal with an error body of random bytes, a truncated JSON error, or a long one.
+    fn spoil_body(spoiler: *Spoiler, served: *net_sim.Served) void {
+        const random = spoiler.random;
+        const buffer = &spoiler.body;
+        const bound = constants.push_error_body_bytes;
+        const length = switch (random.uintLessThan(u8, 4)) {
+            0 => random.uintAtMost(usize, 64),
+            1 => bound - random.uintAtMost(usize, 1),
+            2 => bound + random.uintAtMost(usize, 1),
+            else => random.uintAtMost(usize, buffer.len),
+        };
+        const json = "{\"errors\":[{\"code\":\"BLOB_UPLOAD_INVALID\",\"message\":\"x\"}]}";
+        const shape = random.uintLessThan(u8, 4);
+        if (shape == 0) {
+            random.bytes(buffer[0..length]);
+        } else {
+            @memset(buffer[0..length], ' ');
+            const kept = @min(length, random.uintAtMost(usize, json.len));
+            @memcpy(buffer[0..kept], json[0..kept]); // Cut anywhere, even inside the key.
+            if (shape == 3 and length > 8) @memcpy(buffer[length - 8 ..][0..8], "\"code\":\"");
+        }
+        const statuses = [_]u16{ 400, 404, 416, 429, 500, 503 };
+        served.status = statuses[random.uintLessThan(usize, statuses.len)];
+        served.content_type = "application/json";
+        served.body = buffer[0..length];
+        served.content_length = null;
+    }
+};
+
+fn fuzz_upload(random: std.Random, seed: u64) void {
+    const rig = pushing_ready();
+    rig.wire.init(seed, rig.registry.responder());
+    rig.registry.init(&rig.wire);
+    const fault = random.enumValue(push_registry.Fault);
+    var repository: [48]u8 = undefined;
+    const name = std.fmt.bufPrint(&repository, "push/{s}", .{@tagName(fault)}) catch
+        unreachable; // 48 bytes hold "push/" and the longest fault name
+    const holder = "push/ok-src";
+    var report: upload.Report = undefined;
+    var diag: Diag = undefined;
+    if (random.boolean()) {
+        // A repository that holds both blobs, pushed to with no faults: a mount may come from it.
+        diag.reset();
+        const source: upload.Destination = .{
+            .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
+            .repository = holder,
+            .tag = "v1",
+        };
+        const wire = rig.wire.interface();
+        upload.push(&rig.store, &rig.uploading, wire, source, &rig.made, .{}, &report, &diag) catch
+            @panic("a push with no fault failed");
+    }
+    var spoiler: Spoiler = .{
+        .inner = rig.registry.responder(),
+        .random = random,
+        .spoil_per_mille = random.uintLessThan(u16, 300),
+    };
+    rig.wire.init(seed, spoiler.responder());
+    rig.wire.received = &rig.registry.drained;
+    rig.wire.faults.fail_per_mille = random.uintLessThan(u16, 100);
+    rig.wire.faults.cut_per_mille = random.uintLessThan(u16, 100);
+    const destination: upload.Destination = .{
+        .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
+        .repository = name,
+        .tag = "v1",
+    };
+    const options: upload.Options = .{
+        .chunk_bytes = random.intRangeAtMost(u32, 16, 4096),
+        .mount_from = if (random.boolean()) holder else "",
+    };
+    diag.reset();
+    const store = &rig.store;
+    const wire = rig.wire.interface();
+    const pushed = upload.push(
+        store,
+        &rig.uploading,
+        wire,
+        destination,
+        &rig.made,
+        options,
+        &report,
+        &diag,
+    );
+    if (pushed) |_| {
+        const held = &rig.registry.fixture;
+        assert(held.has_blob(name, &rig.made.layer.text()));
+        assert(held.has_blob(name, &rig.made.config.text()));
+        assert(held.tag_digest(name, "v1") != null);
+    } else |_| {
+        assert(std.mem.startsWith(u8, @tagName(diag.code.?), "E05"));
+    }
+    // The registry told the truth unless it was spoiled; then a manifest may name a missing blob.
+    if (spoiler.spoiled == 0) assert(rig.registry.fixture.unknown_refusals == 0);
+}
+
 pub fn fuzz_registry(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
-    switch (random.uintLessThan(u8, 3)) {
+    switch (random.uintLessThan(u8, 4)) {
         0 => fuzz_challenge(random),
         1 => fuzz_document(random),
+        2 => fuzz_upload(random, seed),
         else => fuzz_resolve(random, seed),
     }
 }
