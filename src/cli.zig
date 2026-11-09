@@ -3318,9 +3318,9 @@ fn tamper_call(
     assert(storage.gate.count > 0);
     const sign = &storage.sign;
     const lent: trust_tamper.Lent = .{
-        .scratch = &sign.verify.scratch,
-        .tree_buffer = &sign.tree_buffer,
-        .stack = &sign.stack,
+        .scratch = &sign.tree.verify.scratch,
+        .tree_buffer = &sign.tree.tree_buffer,
+        .stack = &sign.tree.stack,
     };
     trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
         return false;
