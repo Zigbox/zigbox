@@ -1,0 +1,6 @@
+error[ZBX-E0909]: a trust bundle was refused
+  cause  the text is not a bundle this zbx reads: a line is not an envelope, its
+         signature does not verify, or its statement is not about one tree
+  fix    export the bundle again with 'zbx trust export <tree>' where it was made
+  more   zbx explain E0909 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0909.html

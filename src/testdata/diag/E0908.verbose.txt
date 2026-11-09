@@ -1,0 +1,8 @@
+error[ZBX-E0908]: zbx verify found a broken link
+  while  verifying 0123456789abcdef, link 3 (the tree)
+  cause  a file of the tree in the store is damaged
+  arg    0123456789abcdef
+  link   3
+  fix    run 'zbx store verify', remove what is damaged, then pull or build again
+  more   zbx explain E0908
+  docs   https://zigbox.github.io/zigbox/errors/E0908.html

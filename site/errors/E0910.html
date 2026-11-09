@@ -78,7 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>&quot;zbx sign&quot; signs what is in the store, and only a tree that is whole and sound: a signature over a tree with a missing or damaged file would vouch for something nobody can run. It checks every file object of the tree, without trusting the cache, before it signs.</p>
 <p>The cause says what was refused: the digest names nothing in the store (give a build result, a tree, or &quot;NAME@sha256:...&quot; of an image that was pulled or built here), a file of the tree is missing or damaged, or a bound was reached. A tree has at most 8 signatures, and the store at most 4096 signed trees. Signing again with a key that already signed the same thing is not a refusal: it changes nothing and says so.</p>
-<p>For a missing or damaged tree, pull or build it again, then sign it. For a bound, remove a record file of the tree (or of trees you no longer need) from trust/signatures in the store; a later release adds a command for that. Nothing was written.</p>
+<p>For a missing or damaged tree, pull or build it again, then sign it. For a bound, run &quot;zbx trust prune&quot; to see the records whose trees are gone and &quot;zbx trust prune --apply&quot; to remove them. Nothing was written.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0910</pre>

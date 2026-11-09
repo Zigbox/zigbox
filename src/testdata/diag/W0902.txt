@@ -1,0 +1,7 @@
+warning[ZBX-W0902]: a damaged trust record was kept; its tree is in the store
+  cause  /home/alice/.local/share/zbx/trust/signatures/0123456789abcdef is
+         damaged, or of a newer zbx, but its tree is in the store, so it was
+         kept
+  fix    import the tree's bundle again or sign it again; upgrade zbx if newer
+  more   zbx explain W0902 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0902.html

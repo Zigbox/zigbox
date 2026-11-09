@@ -1,0 +1,5 @@
+error[ZBX-E0908]: zbx verify found a broken link
+  cause  a file of the tree in the store is damaged
+  fix    run 'zbx store verify', remove what is damaged, then pull or build again
+  more   zbx explain E0908 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0908.html

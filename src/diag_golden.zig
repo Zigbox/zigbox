@@ -19,6 +19,7 @@ const build_diagnose = @import("build/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const policy_mod = @import("trust/policy.zig");
 const verdict_mod = @import("trust/verdict.zig");
+const peer_mod = @import("trust/peer.zig");
 const constants = @import("constants.zig");
 const codes = @import("diag/codes.zig");
 const panic = @import("diag/panic.zig");
@@ -723,6 +724,8 @@ const key_cases = [_]Case{
     .{ .code = .E0905, .args = &.{}, .direct = run_unsigned, .exit = 1 },
     .{ .code = .E0906, .args = &.{}, .direct = run_no_provenance, .exit = 1 },
     .{ .code = .E0907, .args = &.{}, .direct = run_tampered, .exit = 2 },
+    .{ .code = .E0908, .args = &.{}, .direct = verify_broken_tree, .exit = 1 },
+    .{ .code = .E0909, .args = &.{}, .direct = trust_bundle_refused, .exit = 1 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
     .{
@@ -732,7 +735,36 @@ const key_cases = [_]Case{
         .warning = true,
         .exit = 0,
     },
+    .{ .code = .W0902, .args = &.{}, .direct = prune_kept_damaged, .warning = true, .exit = 0 },
+    .{ .code = .W0903, .args = &.{}, .direct = verify_absent_input, .warning = true, .exit = 0 },
 };
+
+/// E0908, E0909, W0902 and W0903 come from `zbx verify` and `zbx trust`, which take a signed
+/// store to set up: the golden is the diagnostic as `trust/diagnose.zig` builds it, and the
+/// command tests run the commands into each.
+fn verify_broken_tree(diag: *Diag) void {
+    trust_diagnose.verify_broken(diag, &.{
+        .operand = "0123456789abcdef",
+        .link = .tree,
+        .cause = .tree_damaged,
+    });
+}
+
+fn trust_bundle_refused(diag: *Diag) void {
+    const failure: peer_mod.Failure = .{ .refusal = .malformed, .size = 0, .err = error.IoFailed, .errno = 0 };
+    trust_diagnose.trust_refused(diag, &failure, "importing the trust bundle bundle.jsonl");
+}
+
+fn prune_kept_damaged(diag: *Diag) void {
+    trust_diagnose.prune_kept_damaged(
+        diag,
+        "/home/alice/.local/share/zbx/trust/signatures/0123456789abcdef",
+    );
+}
+
+fn verify_absent_input(diag: *Diag) void {
+    trust_diagnose.verify_absent_input(diag, "0123456789abcdef", "the base alpine@sha256:0123");
+}
 
 /// E0903 and E0910 come from `zbx sign`, whose records and trees take a signed store to set up:
 /// the golden is the diagnostic as `trust/diagnose.zig` builds it, and the sign tests run the
