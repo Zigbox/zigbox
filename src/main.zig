@@ -324,4 +324,5 @@ test {
     _ = @import("trust/record_tests.zig");
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");
+    _ = @import("fuzz_verified.zig");
 }
