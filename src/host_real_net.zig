@@ -40,7 +40,7 @@ pub fn interface(context: *HostReal) net.Net {
     return .{ .context = context, .vtable = &vtable };
 }
 
-const vtable: net.VTable = .{ .get = get, .last_errno = last_errno };
+const vtable: net.VTable = .{ .call = call, .last_errno = last_errno };
 
 fn last_errno(context: *anyopaque) u16 {
     const memory = memory_of(@ptrCast(@alignCast(context)));
@@ -620,16 +620,49 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     assert(request.target[0] == '/');
     assert(request.host.len > 0);
     const default_port: u16 = if (request.scheme == .https) 443 else 80;
-    try writer.print("GET {s} HTTP/1.1\r\nHost: {s}", .{ request.target, request.host });
+    try writer.print("{s} {s} HTTP/1.1\r\nHost: {s}", .{
+        request.method.text(),
+        request.target,
+        request.host,
+    });
     if (request.port != default_port) try writer.print(":{d}", .{request.port});
     try writer.print("\r\nUser-Agent: zbx/{s}\r\n", .{build_options.version});
     try writer.writeAll("Accept-Encoding: identity\r\nConnection: close\r\n");
     if (request.accept.len > 0) try writer.print("Accept: {s}\r\n", .{request.accept});
     if (request.range_from > 0) try writer.print("Range: bytes={d}-\r\n", .{request.range_from});
+    if (request.bearer.len > 0) assert(request.basic.len == 0);
     if (request.bearer.len > 0) {
         try writer.print("Authorization: Bearer {s}\r\n", .{request.bearer});
     }
+    if (request.basic.len > 0) {
+        try writer.print("Authorization: Basic {s}\r\n", .{request.basic});
+    }
+    if (request.content_type.len > 0) {
+        try writer.print("Content-Type: {s}\r\n", .{request.content_type});
+    }
+    if (request.content_range.len > 0) {
+        try writer.print("Content-Range: {s}\r\n", .{request.content_range});
+    }
+    // A POST, PATCH or PUT always says how long its body is, even when it is empty.
+    if (request.body) |body| try writer.print("Content-Length: {d}\r\n", .{body.length});
     try writer.writeAll("\r\n");
+}
+
+/// Sends the body from its source, exactly `length` bytes, through `out`.
+fn write_body(out: *Io.Writer, socket: *Socket, body: net.Body) net.Error!void {
+    var chunk: [16 * 1024]u8 = undefined;
+    var remaining = body.length;
+    while (remaining > 0) {
+        const wanted: usize = @intCast(@min(remaining, chunk.len));
+        const count = body.source.read(body.source.context, chunk[0..wanted]) catch {
+            return error.SourceFailed;
+        };
+        if (count == 0) return error.SourceFailed; // It ended before its declared length.
+        assert(count <= wanted);
+        out.writeAll(chunk[0..count]) catch return socket_error(socket);
+        remaining -= count;
+    }
+    assert(remaining == 0);
 }
 
 fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void {
@@ -649,6 +682,8 @@ fn fill_head(head: *net.Head, parsed: http.Client.Response.Head) net.Error!void 
             if (!head.content_digest.present) head.content_digest.set(header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "content-range")) {
             if (!head.content_range.present) head.content_range.set(header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "range")) {
+            if (!head.range.present) head.range.set(header.value);
         }
     }
     if (parsed.content_type) |text| head.content_type.set(text);
@@ -699,6 +734,8 @@ fn read_body(
 ) net.Error!void {
     assert(head.status >= 200);
     assert(head.body_len == 0);
+    // An answer to HEAD carries the length of the body it does not send.
+    if (request.method == .head) return;
     if (head.content_length) |declared| {
         if (declared > request.body_bytes_max) return error.TooLarge;
     }
@@ -722,7 +759,25 @@ fn read_body(
     }
 }
 
-fn get(
+fn carries_credential(request: *const net.Request) bool {
+    assert(request.host.len > 0);
+    if (request.bearer.len > 0) assert(request.basic.len == 0);
+    return request.basic.len > 0 or request.bearer.len > 0;
+}
+
+/// Zeroes every buffer a request or its answer passes through. What TLS keeps inside its own
+/// client state (keys, std's cipher state) and what the kernel keeps are not ours to wipe.
+fn wipe_buffers(buffers: *Buffers) void {
+    std.crypto.secureZero(u8, &buffers.socket_read);
+    std.crypto.secureZero(u8, &buffers.socket_write);
+    std.crypto.secureZero(u8, &buffers.tls_read);
+    std.crypto.secureZero(u8, &buffers.tls_write);
+    std.crypto.secureZero(u8, &buffers.request_head);
+    assert(buffers.request_head[0] == 0);
+    assert(buffers.tls_write[0] == 0);
+}
+
+fn call(
     context: *anyopaque,
     request: *const net.Request,
     head: *net.Head,
@@ -735,6 +790,9 @@ fn get(
     assert(!memory.state.busy); // One call at a time on a `Memory`.
     memory.state.busy = true;
     defer memory.state.busy = false;
+    // The head, the plaintext TLS and socket write buffers, and the read buffers (a token
+    // service's answer is in them) held a credential: zero them on every way out.
+    defer if (carries_credential(request)) wipe_buffers(&memory.buffers);
     memory.state.errno_last = 0;
     var socket: Socket = undefined;
     const started = monotonic_ms();
@@ -769,6 +827,7 @@ fn exchange(
     write_request(&writer, request) catch return error.Unsupported;
 
     out.writeAll(writer.buffered()) catch return socket_error(socket);
+    if (request.body) |body| try write_body(out, socket, body);
     out.flush() catch return socket_error(socket);
     // TLS wrote its records into the socket's own buffer: that one is sent too.
     socket.writer.flush() catch return socket_error(socket);
@@ -789,6 +848,7 @@ const client_tests = @import("registry/client_tests.zig");
 const fixture_mod = @import("testing/vm/registry_fixture.zig");
 const manifest = @import("registry/manifest.zig");
 const reference_mod = @import("registry/reference.zig");
+const push_fixture = @import("testing/vm/push_fixture.zig");
 const registry_server = @import("testing/vm/registry_server.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const HostSim = @import("host_sim.zig").HostSim;
@@ -911,6 +971,56 @@ fn probe(loopback: *Loopback, request: *const net.Request, storage: []u8) net.Er
     try interface(&real).get(request, &head, sink.sink());
     _ = loopback;
     return .{ .status = head.status, .content_length = head.content_length };
+}
+
+fn buffers_are_zero(buffers: *const Buffers) bool {
+    const names = [_][]const u8{
+        "socket_read", "socket_write", "tls_read", "tls_write", "request_head",
+    };
+    inline for (names) |name| {
+        for (@field(buffers, name)) |byte| if (byte != 0) return false;
+    }
+    return true;
+}
+
+test "a call that carried a credential leaves no byte in the socket buffers, on every way out" {
+    // Goal: the head (with its Authorization line) and the read and write buffers are zeroed
+    // after a success, a timeout and a refused connection. Method: fill every buffer with a known
+    // byte after the memory is initialised; a call without a credential must leave some of it
+    // (the control), and one with Basic or Bearer must leave none.
+    var loopback: Loopback = undefined;
+    try loopback.start(.normal);
+    var storage: [4096]u8 = undefined;
+    var sink: net.BufferSink = .{ .buffer = &storage };
+    var head: net.Head = .{};
+    var real = test_real();
+    var request = probe_request(loopback.server.port, 1000, 0);
+    @memset(std.mem.asBytes(&test_memory.buffers.request_head), 0xAA);
+    _ = try interface(&real).get(&request, &head, sink.sink());
+    try testing.expect(!buffers_are_zero(&test_memory.buffers)); // The control.
+    request.basic = "dXNlcjpzZWNyZXQtbWFya2Vy";
+    for ([_][]const u8{ "basic", "bearer" }) |kind| {
+        if (std.mem.eql(u8, kind, "bearer")) {
+            request.basic = "";
+            request.bearer = "secret-token-marker";
+        }
+        real = test_real();
+        @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
+        head = .{};
+        sink = .{ .buffer = &storage };
+        _ = try interface(&real).get(&request, &head, sink.sink());
+        try testing.expect(buffers_are_zero(&test_memory.buffers));
+    }
+    loopback.stop();
+    // A peer that takes the head and never answers: the head was written, then the call timed out.
+    try loopback.start(.stall);
+    defer loopback.stop();
+    request = probe_request(loopback.server.port, 200, 0);
+    request.bearer = "secret-token-marker";
+    real = test_real();
+    @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
+    try testing.expectError(error.TimedOut, interface(&real).get(&request, &head, sink.sink()));
+    try testing.expect(buffers_are_zero(&test_memory.buffers));
 }
 
 test "a peer that never answers is a timeout, idle or total, and quickly" {
@@ -1105,4 +1215,93 @@ test "over TCP a blob arrives whole, resumes with Range, and follows a redirect 
         try testing.expectError(error.Failed, fetch_first_layer(&loopback, .badblob, 0, &diag));
         try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0511), diag.code);
     }
+}
+
+const PushWire = struct {
+    server: registry_server.Server,
+    fixture: fixture_mod.Fixture,
+    uploads: push_fixture.PushFixture,
+    body: []const u8 = "",
+    at: u32 = 0,
+
+    fn read(context: *anyopaque, buffer: []u8) net.Read {
+        const wire: *PushWire = @ptrCast(@alignCast(context));
+        const count = @min(buffer.len, wire.body.len - wire.at);
+        @memcpy(buffer[0..count], wire.body[wire.at..][0..count]);
+        wire.at += @intCast(count);
+        return count;
+    }
+
+    /// One call with `body` ("" for none), answered by the upload fixture; the head.
+    fn send(
+        wire: *PushWire,
+        method: net.Method,
+        target: []const u8,
+        body: []const u8,
+        range: []const u8,
+    ) !net.Head {
+        wire.body = body;
+        wire.at = 0;
+        var request = probe_request(wire.server.port, 5000, 10_000);
+        request.target = target;
+        request.method = method;
+        request.content_range = range;
+        if (method.has_body()) {
+            request.body = .{ .length = body.len, .source = .{ .context = wire, .read = read } };
+        }
+        var real = test_real();
+        var storage: [1024]u8 = undefined;
+        var sink: net.BufferSink = .{ .buffer = &storage };
+        var head: net.Head = .{};
+        try interface(&real).call(&request, &head, sink.sink());
+        return head;
+    }
+};
+
+test "an upload goes over TCP: open, a piece with its range, the close, the manifest" {
+    // Goal: the real wire sends HEAD, POST, PATCH and PUT with their bodies and the Content-Range,
+    // and reads Location and Range back, as the simulator's test registry does.
+    var wire: PushWire = undefined;
+    wire.server = .{ .mode = .normal };
+    try wire.server.bind();
+    var base: [48]u8 = undefined;
+    const here = try std.fmt.bufPrint(&base, "http://127.0.0.1:{d}", .{wire.server.port});
+    wire.fixture.init(here, here);
+    wire.uploads.init(here, here);
+    wire.server.push = &wire.uploads;
+    try wire.server.serve(&wire.fixture);
+    defer wire.server.stop();
+    const text = "hello world";
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &hash, .{});
+    const absent = try wire.send(.head, "/v2/push/ok/blobs/sha256:00", "", "");
+    try testing.expectEqual(@as(u16, 404), absent.status);
+    const opened = try wire.send(.post, "/v2/push/ok/blobs/uploads/", "", "");
+    try testing.expectEqual(@as(u16, 202), opened.status);
+    const first = opened.location.slice().?;
+    var next: [256]u8 = undefined;
+    const target = try std.fmt.bufPrint(&next, "{s}", .{path_of(first)});
+    const piece = try wire.send(.patch, target, text[0..6], "0-5");
+    try testing.expectEqual(@as(u16, 202), piece.status);
+    try testing.expectEqualStrings("0-5", piece.range.slice().?);
+    var again: [256]u8 = undefined;
+    const closing = try std.fmt.bufPrint(&again, "{s}?digest=sha256:{x}", .{
+        path_of(piece.location.slice().?),
+        &hash,
+    });
+    const closed = try wire.send(.put, closing, text[6..], "6-10");
+    try testing.expectEqual(@as(u16, 201), closed.status);
+    var digest: [71]u8 = undefined;
+    _ = try std.fmt.bufPrint(&digest, "sha256:{x}", .{&hash});
+    try testing.expect(wire.uploads.has_blob("push/ok", &digest));
+    try testing.expectEqual(@as(u64, 11), wire.uploads.received_bytes);
+}
+
+/// The path of an absolute Location (`http://host:port/path`).
+fn path_of(location: []const u8) []const u8 {
+    const scheme = std.mem.indexOf(u8, location, "://") orelse return location;
+    const slash = std.mem.indexOfScalarPos(u8, location, scheme + 3, '/') orelse return location;
+    assert(slash >= scheme + 3);
+    assert(location[slash] == '/');
+    return location[slash..];
 }

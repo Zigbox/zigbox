@@ -374,3 +374,136 @@ const golden_config_x86_64 =
     "sha256:df64ce2fc2b1e6ed71f1c4f88673b16d968b3130a3a2c51e549ed7739dafa287";
 const golden_manifest_x86_64 =
     "sha256:9fb72b7ef67ab49164f62a0c208083bea73a9c06c40ca8742c6cc5620201d59d";
+
+const config_mod = @import("../registry/config.zig");
+const result_mod = @import("../build/result.zig");
+const Sha256 = @import("../registry/digest.zig").Sha256;
+
+var derive_record: result_mod.Record = undefined;
+var derive_settings: images.Settings = undefined;
+var derive_labels: images.Labels = undefined;
+var derive_json: [constants.registry_manifest_bytes_max]u8 = undefined;
+var derive_arena: [64 * 1024]u8 = undefined;
+
+/// What a pull of the config this record's push writes would derive.
+fn pushed_then_pulled(record: *const result_mod.Record) !?digest_mod.Digest {
+    const input: pack.Input = .{
+        .tree = record.tree,
+        .settings = &record.config.settings,
+        .labels = &record.config,
+    };
+    const body = try pack.render_config(input, Sha256.of("diff"), &derive_json);
+    try config_mod.parse(&derive_arena, body, &derive_settings, &derive_labels);
+    return result_mod.derive(record.tree, &derive_settings, &derive_labels);
+}
+
+fn digest_of_record(record: *const result_mod.Record) !digest_mod.Digest {
+    var bytes: [constants.build_result_bytes_max]u8 = undefined;
+    return result_mod.result_digest(try result_mod.encode(record, &bytes));
+}
+
+const pool = [_][]const u8{
+    "a", "", "sh -c", "quote\"d", "back\\slash", "tab\there", "/usr/bin/x",
+};
+
+fn random_record(random: std.Random, record: *result_mod.Record) void {
+    record.config.clear();
+    var name: [8]u8 = undefined;
+    record.tree = digest_mod.Digest.of(std.mem.asBytes(&random.int(u64)));
+    const cs = &record.config.settings;
+    for (0..random.uintAtMost(u32, 3)) |_| {
+        _ = cs.add(.entrypoint, pool[random.uintLessThan(usize, pool.len)]);
+    }
+    for (0..random.uintAtMost(u32, 3)) |_| {
+        _ = cs.add(.cmd, pool[random.uintLessThan(usize, pool.len)]);
+    }
+    for (0..random.uintAtMost(u32, 3)) |index| {
+        const text = std.fmt.bufPrint(&name, "K{d}", .{index}) catch {
+            unreachable; // Eight bytes hold K and one digit.
+        };
+        var variable: [24]u8 = undefined;
+        const word = pool[random.uintLessThan(usize, pool.len)];
+        const full = std.fmt.bufPrint(&variable, "{s}={s}", .{ text, word }) catch {
+            unreachable; // Twenty-four bytes hold a short name and a short word.
+        };
+        _ = cs.add(.env, full);
+    }
+    _ = cs.set(.workdir, pool[random.uintLessThan(usize, pool.len)]);
+    _ = cs.set(.user, if (random.boolean()) "" else "1000:1000");
+    for (0..random.uintAtMost(u32, 5)) |_| {
+        const key = pool[random.uintLessThan(usize, pool.len)];
+        _ = record.config.add_label(key, pool[random.uintLessThan(usize, pool.len)]);
+    }
+}
+
+test "a pushed-then-pulled image derives the result it was made from, for random configs" {
+    // Goal: the derived result equals the original (slice 14). Method: 300 seeded configs, each
+    // through the push's config writer and the pull's reader.
+    var prng = std.Random.Xoshiro256.init(14);
+    const random = prng.random();
+    for (0..300) |_| {
+        random_record(random, &derive_record);
+        const derived = (try pushed_then_pulled(&derive_record)).?;
+        try testing.expect(derived.eql(try digest_of_record(&derive_record)));
+    }
+}
+
+test "any changed field of the config changes the derived result, and an old record derives none" {
+    // Goal: nothing of the config is left out of the digest. Method: change each field of one
+    // record in turn; each result differs from the original and from every other.
+    derive_record.config.clear();
+    derive_record.tree = digest_mod.Digest.of("tree");
+    const cs = &derive_record.config.settings;
+    _ = cs.add(.entrypoint, "/entry");
+    _ = cs.add(.cmd, "run");
+    _ = cs.add(.env, "A=1");
+    _ = cs.set(.workdir, "/w");
+    _ = cs.set(.user, "5");
+    _ = derive_record.config.add_label("k", "v");
+    const original = (try pushed_then_pulled(&derive_record)).?;
+    var seen: [11]digest_mod.Digest = undefined;
+    var count: usize = 0;
+    seen[count] = original;
+    count += 1;
+    const Change = enum {
+        tree,
+        entrypoint,
+        cmd,
+        env,
+        workdir,
+        user,
+        label_key,
+        label_value,
+        label_added,
+        label_gone,
+    };
+    for (std.enums.values(Change)) |change| {
+        var changed = derive_record;
+        const edit = &changed.config;
+        switch (change) {
+            .tree => changed.tree = digest_mod.Digest.of("other"),
+            .entrypoint => _ = edit.settings.add(.entrypoint, "x"),
+            .cmd => edit.settings.cmd_count = 0,
+            .env => _ = edit.settings.add(.env, "B=2"),
+            .workdir => _ = edit.settings.set(.workdir, "/v"),
+            .user => _ = edit.settings.set(.user, "6"),
+            .label_key => {
+                edit.clear_labels();
+                _ = edit.add_label("j", "v");
+            },
+            .label_value => {
+                edit.clear_labels();
+                _ = edit.add_label("k", "w");
+            },
+            .label_added => _ = edit.add_label("l", "v"),
+            .label_gone => edit.clear_labels(),
+        }
+        const derived = (try pushed_then_pulled(&changed)).?;
+        for (seen[0..count]) |before| try testing.expect(!before.eql(derived));
+        seen[count] = derived;
+        count += 1;
+    }
+    derive_labels.forget();
+    const settings_of = &derive_record.config.settings;
+    try testing.expect(result_mod.derive(derive_record.tree, settings_of, &derive_labels) == null);
+}

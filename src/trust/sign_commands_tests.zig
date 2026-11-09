@@ -179,6 +179,7 @@ test "two spellings of one image reference are one subject, under the canonical 
     image.time = 1_800_000_000;
     image.layer_count = 0;
     image.settings.clear();
+    image.labels.clear();
     var failure: @import("../store/fs.zig").Failure = undefined;
     try images.save(&store, &image, &failure);
     const hex = std.fmt.bytesToHex(image.manifest.bytes, .lower);

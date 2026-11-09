@@ -621,6 +621,21 @@ const pull_schema =
     \\"created":{"type":"boolean","description":"this pull made the file"}}}}}
 ;
 
+const push_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/push/1","version":1,
+    \\"title":"zbx push <source> <destination> --output json",
+    \\"description":"stdout: what each blob needed and the manifest put under the tag.",
+    \\"type":"object","required":["blobs","destination","manifest","schema"],
+    \\"properties":{"schema":{"const":"zbx.push/1"},
+    \\"destination":{"type":"string","description":"registry/repository:tag, as pushed"},
+    \\"manifest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"blobs":{"type":"array","items":{"type":"object","required":["digest","outcome","size"],
+    \\"properties":{"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    \\"outcome":{"enum":["exists","mounted","uploaded"]},
+    \\"size":{"type":"integer"}}}}}}
+;
+
 const explain_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/explain/1","version":1,
@@ -726,7 +741,7 @@ const policy_schema =
     \\"properties":{"public":{"type":"string"},
     \\"key":{"type":["string","null"],"description":"the policy's name for the key, if listed"},
     \\"reason":{"enum":["counts","malformed","bad_signature","untrusted_key","other_tree",
-    \\"other_predicate","other_binding"]}}}}}}},
+    \\"other_predicate","other_binding","not_derived"]}}}}}}},
     \\"allowed":{"type":"boolean","description":"every file is met; the run would start"}}}
 ;
 
@@ -908,6 +923,7 @@ const table = [_]Entry{
     .{ .command = "store-restore", .text = store_restore_schema },
     .{ .command = "pull-resolve", .text = pull_resolve_schema },
     .{ .command = "pull", .text = pull_schema },
+    .{ .command = "push", .text = push_schema },
     .{ .command = "explain", .text = explain_schema },
     .{ .command = "lock-show", .text = lock_show_schema },
     .{ .command = "build-graph", .text = build_graph_schema },

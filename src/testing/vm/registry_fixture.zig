@@ -106,6 +106,8 @@ pub const Answer = struct {
     content_digest: []const u8 = "",
     location: []const u8 = "",
     content_range: []const u8 = "",
+    /// The `Range` of an upload session ("0-N"); empty for none.
+    range: []const u8 = "",
     body: []const u8 = "",
     /// Body bytes that arrive before the connection drops; null for all.
     deliver: ?u64 = null,
@@ -399,21 +401,9 @@ fn build_variant_layers(image: *Image) void {
     build_service(image);
 }
 
-fn build_image(image: *Image, family: Family) void {
-    image.families = family;
-    image.config.set_bytes(
-        \\{"architecture":"amd64","os":"linux","config":{"Entrypoint":["/bin/hello"],
-        \\"Cmd":["world"],"Env":["PATH=/bin:/usr/bin","LANG=C"],"WorkingDir":"/srv/app",
-        \\"User":""}}
-    );
-    build_layer_one(&image.layer_gzip);
-    build_layer_two(&image.layer_zstd);
-    build_variant_layers(image);
-    image.other.set_bytes("a manifest nobody serves");
-    image.nothing.set_bytes("an attestation nobody serves");
-    build_manifest(image, &image.amd64, "amd64", family.layer_gzip);
-    build_manifest(image, &image.arm64, "arm64", family.layer_gzip);
-    build_manifest(image, &image.amd64_layermedia, "amd64", media_unknown);
+/// Every index of the image, over the platform manifests as they are now.
+fn build_default_index(image: *Image) void {
+    const family = image.families;
     const arm64: Entry = .{
         .item = &image.arm64,
         .architecture = "arm64",
@@ -443,6 +433,24 @@ fn build_image(image: *Image, family: Family) void {
     build_index(image, &image.index_media, media_unknown, &.{ arm64, arm, amd64, buildx });
     build_index(image, &image.index_layermedia, family.index, &.{bad_layer});
     build_index(image, &image.index_nomatch, family.index, &.{ arm, ppc64 });
+}
+
+fn build_image(image: *Image, family: Family) void {
+    image.families = family;
+    image.config.set_bytes(
+        \\{"architecture":"amd64","os":"linux","config":{"Entrypoint":["/bin/hello"],
+        \\"Cmd":["world"],"Env":["PATH=/bin:/usr/bin","LANG=C"],"WorkingDir":"/srv/app",
+        \\"User":""}}
+    );
+    build_layer_one(&image.layer_gzip);
+    build_layer_two(&image.layer_zstd);
+    build_variant_layers(image);
+    image.other.set_bytes("a manifest nobody serves");
+    image.nothing.set_bytes("an attestation nobody serves");
+    build_manifest(image, &image.amd64, "amd64", family.layer_gzip);
+    build_manifest(image, &image.arm64, "arm64", family.layer_gzip);
+    build_manifest(image, &image.amd64_layermedia, "amd64", media_unknown);
+    build_default_index(image);
 }
 
 pub const Fixture = struct {
@@ -510,6 +518,19 @@ pub const Fixture = struct {
             .unsafe, .damaged, .special, .badconfig, .service, .ghost => 1,
             else => 2,
         };
+    }
+
+    /// Makes the amd64 manifest of the OCI image claim `claim` as its tree (`org.zigbox.tree`),
+    /// and rebuilds the indexes over it, as a push by zbx leaves it.
+    pub fn claim_tree(fixture: *Fixture, claim: []const u8) void {
+        assert(claim.len <= 71); // A store digest is "b3:" and 64 hex digits.;
+        const used = &fixture.oci;
+        // The annotation slot holds the architecture's text: close its string, add the pair.
+        var text: [128]u8 = undefined;
+        const format = "amd64\",\"org.zigbox.tree\":\"{s}";
+        const said = std.fmt.bufPrint(&text, format, .{claim}) catch unreachable; // 128 bytes.
+        build_manifest(used, &used.amd64, said, used.families.layer_gzip);
+        build_default_index(used);
     }
 
     /// What the registry answers for `query`.

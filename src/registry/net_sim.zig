@@ -25,6 +25,8 @@ pub const Served = struct {
     content_digest: []const u8 = "",
     location: []const u8 = "",
     content_range: []const u8 = "",
+    /// The `Range` of an upload session ("0-N"); empty for none.
+    range: []const u8 = "",
     body: []const u8 = "",
     /// How many body bytes arrive before the connection drops; null means all of them.
     deliver: ?u64 = null,
@@ -32,7 +34,13 @@ pub const Served = struct {
 
 pub const Responder = struct {
     context: *anyopaque,
-    answer: *const fn (context: *anyopaque, request: *const net.Request, served: *Served) void,
+    /// `received` is the upload body the request carried (empty for none), already drained.
+    answer: *const fn (
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *Served,
+    ) void,
 };
 
 pub const Faults = struct {
@@ -60,9 +68,16 @@ pub const Logged = struct {
     /// fixture's token is shorter than this, and `bearer_len` is the real length.
     bearer: [96]u8,
     bearer_len: u32,
+    /// The `Authorization: Basic` value the request carried, likewise (base64 of a short
+    /// `user:password` in tests); `basic_len` is the real length.
+    basic: [128]u8,
+    basic_len: u32,
     status: u16,
     /// The offset a resumed download asked for; zero for none.
     range_from: u64,
+    method: net.Method,
+    /// The bytes of an upload body the request carried.
+    sent: u64,
 
     pub fn target_text(entry: *const Logged) []const u8 {
         return entry.target[0..entry.target_len];
@@ -70,6 +85,10 @@ pub const Logged = struct {
 
     pub fn host_text(entry: *const Logged) []const u8 {
         return entry.host[0..entry.host_len];
+    }
+
+    pub fn basic_text(entry: *const Logged) []const u8 {
+        return entry.basic[0..@min(entry.basic_len, entry.basic.len)];
     }
 
     pub fn bearer_text(entry: *const Logged) []const u8 {
@@ -85,6 +104,8 @@ pub const SimNet = struct {
     requests: u32,
     log: [log_entries_max]Logged,
     errno_value: u16,
+    /// Where an upload's body is drained to; a test that uploads gives it room.
+    received: []u8,
 
     pub fn init(sim: *SimNet, seed: u64, responder: Responder) void {
         sim.responder = responder;
@@ -92,6 +113,7 @@ pub const SimNet = struct {
         sim.faults = .{};
         sim.requests = 0;
         sim.errno_value = 0;
+        sim.received = &.{};
         assert(sim.requests == 0);
     }
 
@@ -107,7 +129,7 @@ pub const SimNet = struct {
         return &sim.log[index];
     }
 
-    const vtable: net.VTable = .{ .get = get, .last_errno = last_errno };
+    const vtable: net.VTable = .{ .call = call, .last_errno = last_errno };
 
     fn from_context(context: *anyopaque) *SimNet {
         const sim: *SimNet = @ptrCast(@alignCast(context));
@@ -139,8 +161,13 @@ pub const SimNet = struct {
         entry.target_len = @intCast(target_len);
         entry.port = request.port;
         entry.bearer_len = @intCast(request.bearer.len);
+        const basic_kept = @min(request.basic.len, entry.basic.len);
+        @memcpy(entry.basic[0..basic_kept], request.basic[0..basic_kept]);
+        entry.basic_len = @intCast(request.basic.len);
         entry.status = 0;
         entry.range_from = request.range_from;
+        entry.method = request.method;
+        entry.sent = if (request.body) |body| body.length else 0;
     }
 
     fn injected(sim: *SimNet, index: u32) ?net.Error {
@@ -151,7 +178,22 @@ pub const SimNet = struct {
         return null;
     }
 
-    fn get(
+    /// Drains an upload's body from its source into `received`.
+    fn drain(sim: *SimNet, request: *const net.Request) net.Error![]const u8 {
+        const body = request.body orelse return &.{};
+        if (body.length > sim.received.len) return error.TooLarge;
+        const length: usize = @intCast(body.length);
+        var at: usize = 0;
+        while (at < length) {
+            const count = try body.source.read(body.source.context, sim.received[at..length]);
+            if (count == 0) return error.SourceFailed;
+            at += count;
+        }
+        assert(at == length);
+        return sim.received[0..length];
+    }
+
+    fn call(
         context: *anyopaque,
         request: *const net.Request,
         head: *net.Head,
@@ -166,13 +208,18 @@ pub const SimNet = struct {
             sim.errno_value = if (err == error.ConnectFailed) 111 else 0;
             return err;
         }
+        const received = try sim.drain(request);
         var served: Served = .{};
-        sim.responder.answer(sim.responder.context, request, &served);
+        sim.responder.answer(sim.responder.context, request, received, &served);
         assert(served.status >= 100);
         assert(served.status <= 599);
         fill_head(head, &served);
         if (index < log_entries_max) sim.log[index].status = served.status;
         const declared = served.content_length orelse served.body.len;
+        if (request.method == .head) {
+            assert(head.body_len == 0);
+            return;
+        }
         if (declared > request.body_bytes_max) return error.TooLarge;
         if (head.www_authenticate.present and head.www_authenticate.truncated) {
             return error.BadResponse;
@@ -211,6 +258,7 @@ fn fill_head(head: *net.Head, served: *const Served) void {
     if (served.content_digest.len > 0) head.content_digest.set(served.content_digest);
     if (served.location.len > 0) head.location.set(served.location);
     if (served.content_range.len > 0) head.content_range.set(served.content_range);
+    if (served.range.len > 0) head.range.set(served.range);
 }
 
 // ---- Tests ---------------------------------------------------------------------------------
@@ -220,9 +268,15 @@ const testing = std.testing;
 const Script = struct {
     served: Served,
 
-    fn answer(context: *anyopaque, request: *const net.Request, served: *Served) void {
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *Served,
+    ) void {
         const script: *Script = @ptrCast(@alignCast(context));
         _ = request;
+        _ = received;
         served.* = script.served;
     }
 

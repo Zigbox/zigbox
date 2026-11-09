@@ -171,7 +171,13 @@ pub fn network_failed(diag: *Diag, err: net.Error, target: Target, errno: u16) v
             diag.cause("{s} closed the connection before the whole answer arrived", .{host});
             diag.fix(.{ .sentence = "run the command again" });
         },
-        error.TooLarge, error.BadResponse, error.SinkFailed, error.IoFailed, error.Unsupported => {
+        error.TooLarge,
+        error.BadResponse,
+        error.SinkFailed,
+        error.IoFailed,
+        error.Unsupported,
+        error.SourceFailed,
+        => {
             unusable_wire(diag, err, host);
         },
         error.ConnectFailed, error.ProxyFailed, error.TimedOut => {
@@ -253,6 +259,7 @@ fn unusable_wire(diag: *Diag, err: net.Error, host: []const u8) void {
         error.BadResponse => diag.cause("{s} did not answer in usable HTTP", .{host}),
 
         error.Unsupported => diag.cause("the request to {s} is too large to send", .{host}),
+        error.SourceFailed => diag.cause("reading the bytes to send to {s} failed", .{host}),
         else => diag.cause("reading the answer of {s} failed", .{host}),
     }
     diag.fix(.{ .sentence = fix_again });

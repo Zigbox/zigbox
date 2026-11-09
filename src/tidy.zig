@@ -406,7 +406,11 @@ const Scanner = struct {
             scanner.paren_depth = 0;
             scanner.pending_bad_name = false;
             scanner.pending_is_test = is_test_header(code);
-            if (function_name(code)) |name| scanner.pending_bad_name = !is_snake_case(name);
+            if (function_name(code)) |name| {
+                // `jsonParse` is the name std.json looks for on a type that parses itself.
+                const hook = std.mem.eql(u8, name, "jsonParse");
+                scanner.pending_bad_name = !is_snake_case(name) and !hook;
+            }
         }
         if (scanner.depth > 0 and scanner.stack[scanner.depth - 1].kind == .container) {
             if (has_usize_field(code)) scanner.report.add(line, .usize_field);
@@ -1296,6 +1300,7 @@ test "function names must be snake_case, except type constructors" {
         \\pub fn BadName() void {}
         \\fn badName() void {}
         \\fn good_name() void {}
+        \\fn jsonParse() void {}
         \\pub fn Generic(comptime T: type) type {
         \\    return T;
         \\}
@@ -1313,7 +1318,7 @@ test "function names must be snake_case, except type constructors" {
     );
     try testing.expect(report.contains(.function_name_not_snake_case, 1));
     try testing.expect(report.contains(.function_name_not_snake_case, 2));
-    try testing.expect(report.contains(.function_name_not_snake_case, 13));
+    try testing.expect(report.contains(.function_name_not_snake_case, 14));
     try testing.expectEqual(@as(u32, 3), report.total());
 }
 

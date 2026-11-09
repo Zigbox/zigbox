@@ -499,6 +499,7 @@ fn random_image(random: std.Random, whole: Digest) []const u8 {
     image.layer_count = random.uintLessThan(u32, 3);
     for (image.layers[0..image.layer_count]) |*layer| layer.* = Sha256.of("layer");
     image.settings.clear();
+    image.labels.clear();
     if (random.boolean()) _ = image.settings.add(.entrypoint, "/bin/hello");
     if (random.boolean()) _ = image.settings.add(.env, "A=b");
     if (random.boolean()) _ = image.settings.set(.workdir, "/srv");

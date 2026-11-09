@@ -72,6 +72,9 @@ pub const Prepared = struct {
     tree: []const u8,
     /// The manifest of the image the name meant; null for a run that is not of an image.
     manifest: ?Sha256 = null,
+    /// The M7 result digest the image's record derives, for a policy: what a statement bound
+    /// to a result must name to count for a run of the manifest. Null when it derives none.
+    derived: ?[32]u8 = null,
     command: []const []const u8,
     env: []const spec.Label,
     workdir: []const u8,
@@ -140,9 +143,19 @@ pub fn prepare_result(
     ws.image.settings = ws.record.config.settings;
     ws.image.tree = ws.record.tree;
     ws.image.config = std.mem.zeroes(Sha256);
+    ws.image.labels.forget();
     try compose(&store, ws, operand, given, null, out, diag);
     out.manifest = null;
+    out.derived = null;
     return true;
+}
+
+/// The result digest an image's record gives: the tree, settings and labels, as M7 encodes them.
+fn derive_of(image: *const images.Image) ?[32]u8 {
+    assert(image.settings.used <= image.settings.bytes.len);
+    assert(image.labels.total <= image.labels.places.len);
+    const found = result.derive(image.tree, &image.settings, &image.labels) orelse return null;
+    return found.bytes;
 }
 
 /// Finds the image `operand` names and prepares what the container is started with.
@@ -300,6 +313,7 @@ fn compose(
     ws.tree = image.tree.text();
     out.tree = &ws.tree;
     out.manifest = image.manifest;
+    out.derived = derive_of(image);
     var count: usize = 0;
     for (0..settings.count(.entrypoint)) |index| {
         if (count == ws.words.len) return too_many_words(image, diag);

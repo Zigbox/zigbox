@@ -211,13 +211,13 @@ fn sink_lock(_: *anyopaque, _: [:0]const u8, _: bool, _: []const u8) host.Error!
 /// The network of a host that was given none: no route to anywhere, so every request is refused
 /// at the connect. One for all hosts, since it never holds anything.
 fn down_net() registry_net.Net {
-    const vtable: registry_net.VTable = .{ .get = down_get, .last_errno = down_errno };
+    const vtable: registry_net.VTable = .{ .call = down_call, .last_errno = down_errno };
     return .{ .context = &down_net_context, .vtable = &vtable };
 }
 
 var down_net_context: u8 = 0;
 
-fn down_get(
+fn down_call(
     context: *anyopaque,
     request: *const registry_net.Request,
     head: *registry_net.Head,
@@ -351,7 +351,10 @@ pub const HostSim = struct {
         const store_open = if (sim.store_fs) |files| files.open_count() else 0;
         var namespaces: u32 = 0;
         for (sim.world.namespace_handles) |entry| namespaces += @intFromBool(entry != null);
-        const pipes = sim.world.open_pipe_ends() - @intFromBool(sim.world.input_handle != null);
+        // Standard input is the world's, not a descriptor to leak; when a forked command made it,
+        // it was that process's and is not among this process's ends.
+        const input_held = sim.world.input_is_held_by_first();
+        const pipes = sim.world.open_pipe_ends() - @intFromBool(input_held);
         return count + pipes + sim.world.bus.open_count() + store_open + namespaces;
     }
 

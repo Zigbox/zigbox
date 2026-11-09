@@ -165,6 +165,10 @@ test {
     _ = @import("push/export.zig");
     _ = @import("push/source.zig");
     _ = @import("push/diagnose.zig");
+    _ = @import("push/upload.zig");
+    _ = @import("push/upload_tests.zig");
+    _ = @import("push/auth_tests.zig");
+    _ = @import("push/credentials_tests.zig");
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
@@ -174,6 +178,8 @@ test {
     _ = @import("registry/client.zig");
     _ = @import("registry/client_tests.zig");
     _ = @import("registry/test_registry.zig");
+    _ = @import("registry/push_registry.zig");
+    _ = @import("testing/vm/push_fixture.zig");
     _ = @import("registry/proxy.zig");
     _ = @import("registry/diagnose.zig");
     _ = @import("pull_commands.zig");
@@ -322,4 +328,5 @@ test {
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");
     _ = @import("fuzz_provenance.zig");
+    _ = @import("fuzz_verified.zig");
 }

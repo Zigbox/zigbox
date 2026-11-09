@@ -50,18 +50,18 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 1 · Keys | `zbx key new/list/show`, sealed key files, [PR #65](https://github.com/Zigbox/zigbox/pull/65) | **Built and reviewed.** |
 | 2 (part 1) · JSON writer | Canonical JSON writer and reader, [PR #67](https://github.com/Zigbox/zigbox/pull/67) | **Built and reviewed.** |
 | 2 (part 2) · Sign | `zbx sign` and the signature record, [PR #70](https://github.com/Zigbox/zigbox/pull/70) | **Built and reviewed.** |
-| 3 · Policy | Policy and the run gate, the tamper check | **In progress.** |
-| 4 · Provenance | Provenance as an SLSA v1 statement, `inspect --provenance` | Not started. |
+| 3 · Policy | Policy and the run gate, `zbx policy check`, the tamper check, [PR #73](https://github.com/Zigbox/zigbox/pull/73) and [PR #74](https://github.com/Zigbox/zigbox/pull/74) | **Built and reviewed.** |
+| 4 · Provenance | Provenance as an SLSA v1 statement, `inspect --provenance` | **In progress.** |
 | 5 · Verify | `zbx verify`, `trust export`, `import` and `prune` | Not started. |
 | 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
 | 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
 | 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
 | 9 · Mac | The Mac (cuttable) | Not started. |
 | 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
-| 11 · Upload | The upload protocol, the test registry, `zbx push` | Not started. |
-| 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR) | Not started. |
+| 11 · Upload | The upload protocol, the test registry, `zbx push`, [PR #75](https://github.com/Zigbox/zigbox/pull/75) | **Built and reviewed.** |
+| 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR), [PR #76](https://github.com/Zigbox/zigbox/pull/76); a push to GHCR passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42660370098) | **Built and reviewed.** |
 | 13 · ECR | ECR push on M6c (cuttable) | Not started. |
-| 14 · Derived binding | The derived binding | Not started. |
+| 14 · Derived binding | The derived binding: image record v3, labels, W0551, [PR #77](https://github.com/Zigbox/zigbox/pull/77) | **Built and reviewed.** |
 
 ## Installing
 

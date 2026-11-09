@@ -12,7 +12,9 @@
 //!      entries in strictly increasing id order.
 //!   3. Never trusted for more than equality: a real record of a real tree, damaged, then an
 //!      object of the tree damaged (its change time moves): the check refuses; and with nothing
-//!      damaged it passes and leaves the one canonical record the next release also reads.
+//!      damaged it passes and leaves the one canonical record the next release also reads. A
+//!      damaged record that holds the flipped file's own id, inode, size and new change time
+//!      vouches for it (the record is believed when all four match), and then the check passes.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -25,6 +27,7 @@ const layout = @import("store/layout.zig");
 const support = @import("store/test_support.zig");
 const verify = @import("store/verify.zig");
 const Digest = @import("store/digest.zig").Digest;
+const fs_mod = @import("store/fs.zig");
 const tamper = @import("trust/tamper.zig");
 
 const header_bytes = tamper.header_bytes;
@@ -242,8 +245,40 @@ fn check_store(random: std.Random, seed: u64) !void {
     // Now a damaged object: refused whatever the record says.
     files.remove_path(path);
     files.put_file(path, 0o644, bad_copy[0..bad.len]);
-    files.flip_byte(passwd_object(), 0);
-    if (run_check(made.digest, &diag)) |_| unreachable else |_| assert(diag.code.? == .E0907);
+    const object = passwd_object();
+    files.flip_byte(object, 0);
+    // The record is a cache of what the file system said: an entry whose id, inode, size and
+    // change time all equal the flipped file's own is believed, as the brief says, so a damaged
+    // record that happens to hold exactly those has vouched for the file. The simulation's
+    // change times are small counters, so one flipped bit of a recorded time can land on the
+    // time the flip gave (a real clock in nanoseconds cannot be hit so); that case is accepted.
+    const vouched = vouches(bad_copy[0..bad.len], object, files.stat_of(object).?);
+    if (run_check(made.digest, &diag)) |_| assert(vouched) else |_| {
+        assert(!vouched);
+        assert(diag.code.? == .E0907);
+    }
+}
+
+/// Whether `record` is one `parse` accepts with an entry of `object`'s id holding `stat`'s
+/// inode, size and change time.
+fn vouches(record: []const u8, object: []const u8, stat: fs_mod.Stat) bool {
+    const count = tamper.parse(record);
+    // The path ends in the id's hex, split after two digits: `objects/ab/cdef...`.
+    const digits = constants.store_digest_hex_bytes;
+    var hex: [digits]u8 = undefined;
+    @memcpy(hex[0..2], object[object.len - digits - 1 ..][0..2]);
+    @memcpy(hex[2..], object[object.len - (digits - 2) ..]);
+    const id = Digest.from_hex(&hex).?;
+    var index: u32 = 0;
+    while (index < count) : (index += 1) {
+        const entry = record[tamper.entry_at(index)..][0..entry_bytes];
+        if (!std.mem.eql(u8, entry[0..32], &id.bytes)) continue;
+        const inode = std.mem.readInt(u64, entry[32..40], .little);
+        const size = std.mem.readInt(u64, entry[40..48], .little);
+        const ctime = std.mem.readInt(u64, entry[48..56], .little);
+        return inode == stat.inode and size == stat.size and ctime == stat.ctime_ns;
+    }
+    return false;
 }
 
 fn random_bytes(random: std.Random) []const u8 {
@@ -260,4 +295,60 @@ pub fn fuzz_verified(seed: u64) void {
     check_bounds();
     // Cannot fail: the simulated store and the tree are fixed, the faults none.
     check_store(random, seed) catch unreachable;
+}
+
+test "a record holding the flipped file's own stat vouches for it; any other does not" {
+    // Goal: regression for `fuzz verified 6392601139263564258`: a damaged record's change time,
+    // one bit away from the one the flip gave, was equal to it, and the check rightly passed.
+    // Method: the record of a real tree with the passwd entry's time set to the time the flip
+    // will give is believed; set one bit away from it, the flip is refused.
+    sim.init(1, &.{});
+    files.init(1);
+    sim.store_fs = &files;
+    support.make_user_store(&files, ".{\n    .format = 1,\n}\n");
+    support.make_source(&files, 0);
+    store.at(sim.interface(), support.user_store);
+    var diag: Diag = undefined;
+    diag.reset();
+    var made: import.Result = undefined;
+    const options: import.Options = .{ .squash_owner = false, .warn = null };
+    try import.import(&store, &import_work, "/src", options, &made, &diag);
+    try run_check(made.digest, &diag);
+    var path_buffer: [256]u8 = undefined;
+    const path = record_path(&path_buffer, made.digest);
+    var record: [header_bytes + 48 * entry_bytes]u8 = undefined;
+    const length = files.content_of(path).?.len;
+    @memcpy(record[0..length], files.content_of(path).?);
+    const object = passwd_object();
+    const before = files.stat_of(object).?;
+    for ([_]u64{ 0, 1 }) |forged_bit| {
+        // Writing the record moves the clock by a fixed step: measure it, to name the time the
+        // flip will give.
+        const clock = files.ctime_clock;
+        files.remove_path(path);
+        files.put_file(path, 0o644, record[0..length]);
+        const step = files.ctime_clock - clock;
+        var at: usize = header_bytes;
+        var found = false;
+        while (at < length) : (at += entry_bytes) {
+            const inode = std.mem.readInt(u64, record[at + 32 ..][0..8], .little);
+            if (inode != before.inode) continue;
+            const next = files.ctime_clock + step + 1;
+            std.mem.writeInt(u64, record[at + 48 ..][0..8], next ^ forged_bit, .little);
+            found = true;
+        }
+        try std.testing.expect(found);
+        files.remove_path(path);
+        files.put_file(path, 0o644, record[0..length]);
+        diag.reset();
+        files.flip_byte(object, 0);
+        const vouched = vouches(record[0..length], object, files.stat_of(object).?);
+        try std.testing.expectEqual(forged_bit == 0, vouched);
+        const result = run_check(made.digest, &diag);
+        if (vouched) try result else {
+            try std.testing.expectError(error.Failed, result);
+            try std.testing.expectEqual(.E0907, diag.code.?);
+        }
+        files.flip_byte(object, 0); // Back to intact bytes; the time has moved on.
+    }
 }

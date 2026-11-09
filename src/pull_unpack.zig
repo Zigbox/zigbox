@@ -19,6 +19,7 @@ const client_mod = @import("registry/client.zig");
 const blobs_mod = @import("registry/blobs.zig");
 const constants = @import("constants.zig");
 const host_mod = @import("host.zig");
+const image_diagnose = @import("image_diagnose.zig");
 const import = @import("store/import.zig");
 const images = @import("store/images.zig");
 const layer_diagnose = @import("layer/diagnose.zig");
@@ -31,6 +32,7 @@ const registry_diagnose = @import("registry/diagnose.zig");
 const report_mod = @import("pull_report.zig");
 const remove = @import("store/remove.zig");
 const store_diagnose = @import("store/diagnose.zig");
+const store_digest = @import("store/digest.zig");
 const fs_mod = @import("store/fs.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
@@ -63,6 +65,7 @@ pub const Job = struct {
     workspace: *Workspace,
     import_workspace: *import.Workspace,
     settings: *const images.Settings,
+    labels: *const images.Labels,
 };
 
 /// The platform text of an image, "linux/amd64": what the record and the lock carry.
@@ -232,6 +235,20 @@ fn report_skipped(job: *const Job, applier: *const apply.Applier) void {
     }
 }
 
+/// Warns when the manifest's tree annotation names another tree than the layers made. The
+/// annotation is a claim and nothing relies on it; the record keeps the tree that was unpacked.
+fn report_annotation(job: *const Job, tree: store_digest.Digest) void {
+    assert(tree.bytes.len == constants.store_digest_bytes);
+    const claimed = job.resolved.tree_note orelse return;
+    assert(claimed.len == tree.bytes.len);
+    if (std.mem.eql(u8, &claimed, &tree.bytes)) return;
+    const said: store_digest.Digest = .{ .bytes = claimed };
+    var warning: Diag = undefined;
+    warning.reset();
+    image_diagnose.tree_annotation_differs(&warning, &said.text(), &tree.text());
+    job.report.warning(&warning);
+}
+
 /// The image's record, then the result in the report.
 fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) Error!void {
     assert(result.directories > 0);
@@ -256,12 +273,14 @@ fn finish(job: *Job, store: *Store, result: *const import.Result, diag: *Diag) E
         image.layers[index] = blob.digest;
     }
     image.settings = job.settings.*;
+    image.labels = job.labels.*;
     var failure: fs_mod.Failure = undefined;
     images.save(store, &image, &failure) catch {
         const step = "writing the image record";
         store_diagnose.write_failed(diag, store, step, failure.err, failure.errno);
         return error.Failed;
     };
+    report_annotation(job, result.digest);
     const counts = job.workspace.applier.counts;
     job.report.result(result.digest, .{
         .files = result.files,

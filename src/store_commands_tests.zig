@@ -15,6 +15,8 @@ const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
 const support = @import("store/test_support.zig");
 const test_util = @import("test_util.zig");
+const net_sim = @import("registry/net_sim.zig");
+const push_registry = @import("registry/push_registry.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
@@ -964,11 +966,243 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expectEqualStrings(&expected, try printed_oci_digest());
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree }));
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--dry-run") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the destination") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
+var push_wire: net_sim.SimNet = undefined;
+var upload_registry: push_registry.PushRegistry = undefined;
+
+test "push puts the image in the registry, prints the digest, and a repeat sends nothing" {
+    // Goal: `zbx push <source> <destination>` end to end in the simulator. Method: import, push
+    // to a tag, push again; the digest is the dry run's, the JSON result lists each blob as
+    // uploaded and then as existing, and a destination without a tag is E0551.
+    start();
+    push_wire.init(1, upload_registry.responder());
+    upload_registry.init(&push_wire);
+    sim.wire = &push_wire;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    const target = push_registry.PushRegistry.destination(.ok);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", tree, target }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const json_push = [_][:0]const u8{ "--output", "json", "push", tree, target };
+    try testing.expectEqual(@as(u8, 0), try command(&json_push));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqualStrings("zbx.push/1", object.get("schema").?.string);
+    try testing.expectEqualStrings(&expected, object.get("manifest").?.string);
+    for (object.get("blobs").?.array.items) |blob| {
+        try testing.expectEqualStrings("exists", blob.object.get("outcome").?.string);
+    }
+    const bare = push_registry.registry_host ++ "/push/ok";
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree, bare }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0551") != null);
+}
+
+test "a push whose tag record fails warns W0552 and still succeeds" {
+    // Goal: the registry holds the image, so a host failure while the store records the tag is
+    // a warning, not a failed push. Method: walk a one-shot failure across every host call of a
+    // push; each run either fails with an error, succeeds quietly, or exits 0 with the digest on
+    // stdout and W0552 on stderr, and the walk must reach the third kind at least once.
+    var writes: u32 = 0;
+    var warned: u32 = 0;
+    var index: u32 = 0;
+    while (index <= writes) : (index += 1) {
+        start();
+        push_wire.init(1, upload_registry.responder());
+        upload_registry.init(&push_wire);
+        sim.wire = &push_wire;
+        try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+        var buffer: [80]u8 = undefined;
+        const tree = term(&buffer, try printed_digest());
+        const target = push_registry.PushRegistry.destination(.ok);
+        const before = files.mutations;
+        if (index > 0) files.faults.fail_mutation = before + index - 1;
+        const code = try command(&.{ "push", tree, target });
+        if (index == 0) writes = files.mutations - before;
+        files.faults.fail_mutation = null;
+        if (code != 0) continue;
+        if (std.mem.indexOf(u8, sim.stderr(), "ZBX-W0552") == null) continue;
+        warned += 1;
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "warning["));
+        try testing.expect(std.mem.startsWith(u8, sim.stdout(), "sha256:"));
+    }
+    try testing.expect(warned > 0);
+}
+
+/// Imports the sample tree and starts the registry; returns the tree's term.
+fn start_push(buffer: *[80]u8) ![:0]const u8 {
+    start();
+    push_wire.init(1, upload_registry.responder());
+    upload_registry.init(&push_wire);
+    sim.wire = &push_wire;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    return term(buffer, try printed_digest());
+}
+
+fn seen(needle: []const u8) bool {
+    if (std.mem.indexOf(u8, sim.stdout(), needle) != null) return true;
+    return std.mem.indexOf(u8, sim.stderr(), needle) != null;
+}
+
+test "push logs in with --username and a password on standard input or in a file" {
+    // Goal: the credential flags end to end. Method: a registry that asks for Basic and one that
+    // asks for a Bearer token; the password arrives on stdin, then from a 0600 file.
+    const secret = "Hunter-22-marker";
+    inline for (.{ push_registry.Mode.basic, push_registry.Mode.bearer }) |mode| {
+        var buffer: [80]u8 = undefined;
+        const tree = try start_push(&buffer);
+        upload_registry.require(mode, secret);
+        const target = push_registry.PushRegistry.destination(.ok);
+        const user = push_registry.test_user;
+        sim.world.input = secret ++ "\n";
+        sim.world.input_handle = null;
+        const by_stdin = &.{ "push", tree, target, "--username", user, "--password-stdin" };
+        try testing.expectEqual(@as(u8, 0), try command(by_stdin));
+        try testing.expect(std.mem.startsWith(u8, sim.stdout(), "sha256:"));
+        try testing.expect(!seen(secret));
+        files.put_file("/pw", 0o600, secret ++ "\n");
+        const by_file = &.{ "push", tree, target, "--username", user, "--password-file=/pw" };
+        try testing.expectEqual(@as(u8, 0), try command(by_file));
+        try testing.expect(!seen(secret));
+    }
+}
+
+test "push without credentials to a registry that asks is E0552, and wrong ones E0553" {
+    // Goal: the two codes at the command line, with the password nowhere in the output.
+    var buffer: [80]u8 = undefined;
+    const tree = try start_push(&buffer);
+    upload_registry.require(.bearer, "the-right-one");
+    const target = push_registry.PushRegistry.destination(.ok);
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree, target }));
+    try testing.expect(seen("ZBX-E0552"));
+    files.put_file("/pw", 0o600, "the-wrong-one\n");
+    const user = push_registry.test_user;
+    const wrong = &.{ "push", tree, target, "--username", user, "--password-file", "/pw" };
+    try testing.expectEqual(@as(u8, 1), try command(wrong));
+    try testing.expect(seen("ZBX-E0553"));
+    try testing.expect(!seen("the-wrong-one"));
+}
+
+test "the password file's rules: mode, link, missing, empty, long, and a terminal on stdin" {
+    // Goal: E0558 for each unsafe or unusable source, before any request is made.
+    var buffer: [80]u8 = undefined;
+    const tree = try start_push(&buffer);
+    upload_registry.require(.basic, "pw");
+    const target = push_registry.PushRegistry.destination(.ok);
+    const user = push_registry.test_user;
+    files.put_file("/open", 0o644, "pw\n");
+    files.put_file("/empty", 0o600, "\n");
+    files.put_symlink("/link", "/open");
+    var long: [push_long]u8 = undefined;
+    @memset(&long, 'x');
+    files.put_file("/long", 0o600, &long);
+    const paths = [_][:0]const u8{ "/open", "/empty", "/link", "/missing", "/long" };
+    for (paths) |path| {
+        errdefer std.debug.print("path {s}\n", .{path});
+        const argv = &.{ "push", tree, target, "--username", user, "--password-file", path };
+        const before = push_wire.requests;
+        try testing.expectEqual(@as(u8, 1), try command(argv));
+        try testing.expect(seen("ZBX-E0558"));
+        try testing.expectEqual(before, push_wire.requests);
+    }
+    sim.terminal = true;
+    sim.world.input_terminal = true;
+    sim.world.input = "pw\n";
+    sim.world.input_handle = null;
+    const typed = &.{ "push", tree, target, "--username", user, "--password-stdin" };
+    try testing.expectEqual(@as(u8, 1), try command(typed));
+    try testing.expect(seen("ZBX-E0558"));
+    try testing.expect(sim.world.input_handle == null); // Never read.
+}
+
+const push_long = constants.push_credential_bytes_max + 100;
+
+test "the credential options: --password is refused without its value, and misuse is E0003" {
+    // Goal: no secret on the command line is accepted, and none is echoed back.
+    var buffer: [80]u8 = undefined;
+    const tree = try start_push(&buffer);
+    const target = push_registry.PushRegistry.destination(.ok);
+    const bad = [_][]const [:0]const u8{
+        &.{ "push", tree, target, "--password", "s3cret-value" },
+        &.{ "push", tree, target, "--password=s3cret-value" },
+        &.{ "push", tree, target, "--username", "u" },
+        &.{ "push", tree, target, "--password-stdin" },
+        &.{ "push", tree, target, "--username", "u", "--password-stdin", "--password-file", "/x" },
+        &.{ "push", tree, target, "--username", "u", "--username", "v", "--password-stdin" },
+        &.{ "pull", target, "--username", "u" },
+    };
+    for (bad) |argv| {
+        try testing.expectEqual(@as(u8, 1), try command(argv));
+        try testing.expect(!seen("s3cret-value"));
+        // `pull` has no credential options at all, so it says "unknown option".
+        const code = if (std.mem.eql(u8, argv[0], "pull")) "ZBX-E0004" else "ZBX-E0003";
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), code) != null);
+    }
+}
+
+test "the marker password is in no output, file or log, and only in requests to the registry" {
+    // Goal: the brief's marker test at the command line. Method: over random runs (registry
+    // mode, fault, failures), the marker and the base64 of user:marker are recorded nowhere the
+    // simulator keeps: stdout, stderr, every file, and every request to another host.
+    const modes = [_]push_registry.Mode{ .basic, .bearer, .expiring, .far_realm, .pull_only };
+    const faults = [_][:0]const u8{
+        push_registry.PushRegistry.destination(.ok),
+        push_registry.PushRegistry.destination(.farlocation),
+        push_registry.PushRegistry.destination(.absolute),
+    };
+    var seed: u64 = 0;
+    while (seed < 60) : (seed += 1) {
+        var prng = std.Random.Xoshiro256.init(seed);
+        const random = prng.random();
+        var buffer: [80]u8 = undefined;
+        const tree = try start_push(&buffer);
+        var secret: [20]u8 = undefined;
+        for (&secret) |*byte| byte.* = "ABCDEFGHJKLMNPQRSTUVWXYZ"[random.uintLessThan(usize, 24)];
+        upload_registry.require(modes[random.uintLessThan(usize, modes.len)], &secret);
+        upload_registry.expire_after = random.intRangeAtMost(u32, 2, 6);
+        push_wire.faults = .{ .fail_per_mille = random.uintLessThan(u16, 30) };
+        sim.world.input = &secret;
+        sim.world.input_handle = null;
+        const target = faults[random.uintLessThan(usize, faults.len)];
+        const user = push_registry.test_user;
+        const argv = &.{ "push", tree, target, "--username", user, "--password-stdin" };
+        _ = try command(argv);
+        var plain: [64]u8 = undefined;
+        const joined = try std.fmt.bufPrint(&plain, "{s}:{s}", .{ user, &secret });
+        var encoded: [96]u8 = undefined;
+        const based = std.base64.standard.Encoder.encode(&encoded, joined);
+        try testing.expect(!seen(&secret));
+        try testing.expect(!seen(based));
+        try testing.expect(!files_hold(&secret));
+        try testing.expect(!files_hold(based));
+        try testing.expectEqual(@as(u32, 0), upload_registry.leaked);
+        var index: u32 = 0;
+        while (push_wire.logged(index)) |entry| : (index += 1) {
+            if (std.mem.eql(u8, entry.host_text(), push_registry.registry_host)) continue;
+            try testing.expectEqual(@as(u32, 0), entry.basic_len + entry.bearer_len);
+        }
+    }
+}
+
+fn files_hold(needle: []const u8) bool {
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const path = files.alive_path(index) orelse continue;
+        const content = files.content_of(path) orelse continue;
+        if (std.mem.indexOf(u8, content, needle) != null) return true;
+    }
+    return false;
 }
 
 test "export --output json is zbx.export/1, and its keys are the schema's" {

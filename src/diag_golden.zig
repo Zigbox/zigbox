@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
+const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const policy_mod = @import("trust/policy.zig");
@@ -37,6 +38,7 @@ const support = @import("store/test_support.zig");
 const Digest = @import("store/digest.zig").Digest;
 const net_sim = @import("registry/net_sim.zig");
 const test_registry = @import("registry/test_registry.zig");
+const push_registry = @import("registry/push_registry.zig");
 
 const testing = std.testing;
 
@@ -1748,6 +1750,40 @@ fn prepare_registry(sim: *HostSim) void {
     sim.wire = &golden_wire;
 }
 
+/// The upload registry and the wire to it, with the sample tree in the store to push.
+var golden_push_registry: push_registry.PushRegistry = undefined;
+
+const sample_tree = "b3:4ccf5b88ec09f8b7d574449458659c371dc26d367844f42028f2160e4e2fa087";
+
+fn prepare_push_registry(sim: *HostSim) void {
+    prepare_store_with_tree(sim);
+    golden_wire.init(1, golden_push_registry.responder());
+    golden_push_registry.init(&golden_wire);
+    sim.wire = &golden_wire;
+}
+
+/// A registry that asks for credentials, and a password file `/pw` of the right password (mode
+/// 0600), a world-readable one `/open`.
+fn prepare_push_login(sim: *HostSim, mode: push_registry.Mode) void {
+    prepare_push_registry(sim);
+    golden_push_registry.require(mode, "right");
+    golden_files.put_file("/pw", 0o600, "wrong\n");
+    golden_files.put_file("/open", 0o644, "right\n");
+    golden_files.put_file("/good", 0o600, "right\n");
+}
+
+fn prepare_push_asks(sim: *HostSim) void {
+    prepare_push_login(sim, .bearer);
+}
+
+fn prepare_push_far_realm(sim: *HostSim) void {
+    prepare_push_login(sim, .far_realm);
+}
+
+fn prepare_push_pull_only(sim: *HostSim) void {
+    prepare_push_login(sim, .pull_only);
+}
+
 fn prepare_wire_fault(sim: *HostSim, err: @import("registry/net.zig").Error) void {
     prepare_registry(sim);
     golden_wire.faults.fail_request = 0;
@@ -2036,9 +2072,89 @@ const image_cases = [_]Case{
         .exit = 1,
     },
     .{
+        .code = .E0551,
+        .args = &.{ "push", sample_tree, push_registry.registry_host ++ "/app" },
+        .prepare = prepare_store_with_tree,
+        .exit = 1,
+    },
+    .{
+        .code = .E0555,
+        .args = &.{ "push", sample_tree, push_registry.PushRegistry.destination(.badclose) },
+        .prepare = prepare_push_registry,
+        .exit = 3,
+    },
+    .{
+        .code = .E0556,
+        .args = &.{ "push", sample_tree, push_registry.PushRegistry.destination(.invalidmanifest) },
+        .prepare = prepare_push_registry,
+        .exit = 3,
+    },
+    .{
+        .code = .E0552,
+        .args = &.{ "push", sample_tree, push_registry.PushRegistry.destination(.ok) },
+        .prepare = prepare_push_asks,
+        .exit = 1,
+    },
+    .{
+        .code = .E0553,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/good",
+        },
+        .prepare = prepare_push_pull_only,
+        .exit = 1,
+    },
+    .{
+        .code = .E0554,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/pw",
+        },
+        .prepare = prepare_push_far_realm,
+        .exit = 3,
+    },
+    .{
+        .code = .E0558,
+        .args = &.{
+            "push",
+            sample_tree,
+            push_registry.PushRegistry.destination(.ok),
+            "--username",
+            push_registry.test_user,
+            "--password-file",
+            "/open",
+        },
+        .prepare = prepare_push_asks,
+        .exit = 1,
+    },
+    .{
         .code = .W0503,
         .args = &run_open,
         .prepare = prepare_image_world,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0551,
+        .args = &.{},
+        .direct = build_tree_annotation_differs,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
+        .code = .W0552,
+        .args = &.{},
+        .direct = build_tag_not_recorded,
         .warning = true,
         .exit = 0,
     },
@@ -2208,6 +2324,18 @@ fn build_network_steps(diag: *Diag) void {
 
 fn build_output_refused(diag: *Diag) void {
     build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
+}
+
+fn build_tag_not_recorded(diag: *Diag) void {
+    const failure: @import("store/fs.zig").Failure = .{ .err = error.NoSpace, .errno = 28 };
+    push_diagnose.tag_not_recorded(diag, "registry.test/app:1.0", failure);
+}
+
+fn build_tree_annotation_differs(diag: *Diag) void {
+    const repeat = @import("test_util.zig").repeat;
+    const claimed = "b3:" ++ repeat('1', 64);
+    const actual = "b3:" ++ repeat('2', 64);
+    image_diagnose.tree_annotation_differs(diag, claimed, actual);
 }
 
 fn build_warnings_dropped(diag: *Diag) void {

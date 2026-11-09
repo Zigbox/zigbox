@@ -41,6 +41,8 @@ pub const Subject = struct {
     /// The tree the container starts from; null for a directory, which has none.
     tree: ?Digest,
     binding: statement.Binding,
+    /// The result derived from a pulled manifest's image record, when it gives one.
+    derived: ?statement.Digest = null,
     /// The digest the user would give `zbx sign`, for the message. Empty for a directory.
     text: []const u8,
     /// The build step whose base this is, for the message; empty for a run.
@@ -192,6 +194,8 @@ pub fn judge_all(
         const have: verdict.Subject = .{
             .tree = if (subject.tree) |tree| tree.bytes else @splat(0),
             .binding = subject.binding,
+            .derived = subject.derived,
+            .derives = subject.step.len == 0,
         };
         const met = subject.tree != null and
             verdict.judge(&work.envelope, &loaded.policy, record, have, &report);
