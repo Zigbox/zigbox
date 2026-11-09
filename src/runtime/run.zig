@@ -261,6 +261,8 @@ pub const Handle = struct {
     resolution: mounts_mod.Resolution,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
+    /// What the tree is bound to, for the record.
+    binding: spec_mod.Binding,
     /// The log of the container's output: open from before the container exists until it has
     /// ended, when `log_active`. `mirror` copies the output to the terminal too.
     log: logfile.Writer,
@@ -347,6 +349,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.user = container.user;
+    handle.binding = container.binding;
     reset_log(handle, options);
     handle.command = container.command;
     handle.labels = container.labels;
@@ -1298,6 +1301,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .state = handle.volumes.mount_slice(),
         .mounts = handle.mounts,
         .user = handle.user,
+        .binding = handle.binding,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

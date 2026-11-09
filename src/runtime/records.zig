@@ -5,7 +5,10 @@
 //!
 //! The format has a version, written first. A reader accepts every version up to
 //! `constants.record_version` and fills what an older one lacks with defaults; a newer one is
-//! skipped, never misread. Version 8 added the user the command ran as (`.user`, `"UID:GID"`;
+//! skipped, never misread. Version 9 added what the run's tree is bound to (`.binding`: `none`,
+//! `result:<64 hex>` or `manifest:<64 hex>`), so that `zbx exec` can judge it by the policy as
+//! the run was judged; an older record has none, which reads as unknown. Version 8 added the
+//! user the command ran as (`.user`, `"UID:GID"`;
 //! an older record has none, which reads as unknown) and a fourth kind of mount, `mount:` (M6b,
 //! `--mount`, writable), whose host path is the resolved one. Version 7 added the other mounts
 //! of the run (`.mounts`, one string of
@@ -117,7 +120,11 @@ pub const View = struct {
     mounts: []const mounts_mod.Mount = &.{},
     /// Version 8: the user the command ran as; null is root (written as 0:0).
     user: ?spec_mod.User = null,
+    /// Version 9: what the tree is bound to, for the policy gate at `zbx exec`.
+    binding: Binding = .none,
 };
+
+pub const Binding = spec_mod.Binding;
 
 // ---- Writing -------------------------------------------------------------------------------
 
@@ -243,6 +250,19 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_mounts(writer, view.state, view.mounts);
     const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
     write_format(writer, "    .user = \"{d}:{d}\",\n", .{ user.uid, user.gid });
+    write_binding(writer, view.binding);
+}
+
+fn write_binding(writer: *std.Io.Writer, binding: Binding) void {
+    switch (binding) {
+        .none => write_bytes(writer, "    .binding = \"none\",\n"),
+        .result => |bytes| write_format(writer, "    .binding = \"result:{s}\",\n", .{
+            &std.fmt.bytesToHex(bytes, .lower),
+        }),
+        .manifest => |bytes| write_format(writer, "    .binding = \"manifest:{s}\",\n", .{
+            &std.fmt.bytesToHex(bytes, .lower),
+        }),
+    }
 }
 
 /// `.mounts = "bind:/srv:/data tmpfs:/scratch:67108864",`: one string, for the same reason.
@@ -380,8 +400,10 @@ comptime {
     // four, and `.user = "4294967295:4294967295",` with its name and newline.
     const mounts = 4 * mounts_text_bytes_max + 32;
     const user = 48;
+    // Version 9: `.binding = "manifest:<64 hex>",` with its newline.
+    const binding = 96;
     const total = strings + command + labels + diagnostic + scope + store + network + state +
-        mounts + user + 512;
+        mounts + user + binding + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -444,6 +466,9 @@ pub const Parsed = struct {
     mounts_count: u8,
     /// Version 8: the user the command ran as; null for an older record, which did not say.
     user: ?spec_mod.User,
+    /// Version 9: null for an older record, which did not say; the gate then trusts only a
+    /// statement of the tree alone (it fails closed).
+    binding: ?Binding,
 
     /// The `index`th other mount the run made; its strings point into this record.
     pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
@@ -648,6 +673,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.mounts_len = 0;
     out.mounts_count = 0;
     out.user = null;
+    out.binding = null;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -804,6 +830,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "state")) return parse_state(value, out);
     if (std.mem.eql(u8, key, "mounts")) return parse_mounts(value, out);
     if (std.mem.eql(u8, key, "user")) return parse_user(value, out);
+    if (std.mem.eql(u8, key, "binding")) return parse_binding(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     if (std.mem.eql(u8, key, "limit_memory")) {
@@ -889,6 +916,37 @@ fn parse_env_names(value: []const u8, out: *Parsed) bool {
         room[name.len] = 0;
         out.env_names_len += @intCast(name.len + 1);
         out.env_names_count += 1;
+    }
+    return true;
+}
+
+/// `"none"`, `"result:<64 hex>"` or `"manifest:<64 hex>"`, as `write_binding` writes it.
+fn parse_binding(value: []const u8, out: *Parsed) bool {
+    assert(value.len > 0);
+    assert(value.len <= constants.record_bytes_max);
+    var text: [80]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    const word = text[0..length];
+    if (std.mem.eql(u8, word, "none")) {
+        out.binding = .none;
+        return true;
+    }
+    const colon = std.mem.indexOfScalar(u8, word, ':') orelse return false;
+    const hex = word[colon + 1 ..];
+    if (hex.len != 64) return false;
+    var bytes: [32]u8 = undefined;
+    const decoded = std.fmt.hexToBytes(&bytes, hex) catch return false;
+    if (decoded.len != 32) return false;
+    // Lowercase only, the one spelling the writer makes.
+    for (hex) |byte| {
+        if (std.ascii.isUpper(byte)) return false;
+    }
+    if (std.mem.eql(u8, word[0..colon], "result")) {
+        out.binding = .{ .result = bytes };
+    } else if (std.mem.eql(u8, word[0..colon], "manifest")) {
+        out.binding = .{ .manifest = bytes };
+    } else {
+        return false;
     }
     return true;
 }
@@ -1390,7 +1448,7 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 8,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 9,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
@@ -1401,6 +1459,45 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         try testing.expectEqual(view.ended, parsed.ended);
         try testing.expectEqual(exit, parsed.exit);
         try testing.expectEqual(@as(?IdsMode, .full), parsed.ids);
+    }
+}
+
+const test_util = @import("../test_util.zig");
+
+test "the binding is written, read back, and absent from a version 8 record" {
+    // Goal: exec's gate can tell which run a container is. Method: each binding round trips; a
+    // record with no binding line reads null; a malformed binding is Malformed.
+    const bytes: [32]u8 = @splat(0xaa);
+    const hex = test_util.repeat('a', 64);
+    const bindings = [_]Binding{ .none, .{ .result = bytes }, .{ .manifest = bytes } };
+    for (bindings) |binding| {
+        var view = sample_view();
+        view.binding = binding;
+        var buffer: [constants.record_bytes_max]u8 = undefined;
+        const text = render(&view, &buffer);
+        var parsed: Parsed = undefined;
+        try parse(text, &parsed);
+        try testing.expectEqual(@as(?Binding, binding), parsed.binding);
+    }
+    var view = sample_view();
+    view.binding = .{ .result = bytes };
+    var buffer: [constants.record_bytes_max]u8 = undefined;
+    const text = render(&view, &buffer);
+    const line = "    .binding = \"result:" ++ hex ++ "\",\n";
+    try testing.expect(std.mem.indexOf(u8, text, line) != null);
+    var parsed: Parsed = undefined;
+    const old = ".{\n    .version = 8,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    try parse(old, &parsed);
+    try testing.expectEqual(@as(?Binding, null), parsed.binding);
+    const head = ".{\n    .version = 9,\n    .name = \"x\",\n    .started = 5,\n";
+    inline for (.{
+        "\"result:ab\"",
+        "\"result:" ++ test_util.repeat('A', 64) ++ "\"",
+        "\"other:" ++ hex ++ "\"",
+        "\"none:" ++ hex ++ "\"",
+    }) |value| {
+        const record = head ++ "    .binding = " ++ value ++ ",\n}\n";
+        try testing.expectError(error.Malformed, parse(record, &parsed));
     }
 }
 
@@ -1432,7 +1529,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 9,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 10,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1537,7 +1634,7 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     }
     const prefix = "/home/alice/.local/state/zbx/runs/";
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(prefix ++ "legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(prefix ++ "damaged.zon", "not a record") == null);
     try testing.expect(sim.world.write_file(prefix ++ "future.zon", future) == null);

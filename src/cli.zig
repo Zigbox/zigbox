@@ -33,6 +33,7 @@ const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
 const policy_commands = @import("trust/policy_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
+const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
 const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
@@ -2664,6 +2665,11 @@ fn run_exec(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .json = invocation.options.output == .json,
         .warn = .{ .context = &reporter, .call = report_warning },
     };
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    trust_exec.check(host, &storage.gate, record, work, args.name, diag) catch {
+        return error.StartFailed;
+    };
     return exec_commands.run_exec(host, &args, &storage.exec, diag) catch error.StartFailed;
 }
 
@@ -2936,10 +2942,20 @@ fn run_container(
         .state = given.state_slice(),
         .mounts = spec_mounts,
         .user_text = prepared.user_text,
+        .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+}
+
+/// The binding as the run record keeps it (the runtime does not know the trust module).
+fn binding_of(binding: trust_statement.Binding) runtime_spec.Binding {
+    return switch (binding) {
+        .none => .none,
+        .result => |bytes| .{ .result = bytes },
+        .manifest => |bytes| .{ .manifest = bytes },
+    };
 }
 
 /// What a policy judges about a run: the tree it starts from and what that tree is bound to

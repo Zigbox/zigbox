@@ -131,7 +131,7 @@ fn prepare_disk_full(sim: *HostSim) void {
 fn prepare_records_unreadable(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.add_node(sim_run.runs_path, .dir);
-    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage") == null);
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     for (0..constants.runs_max - 1) |number| {

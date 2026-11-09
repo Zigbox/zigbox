@@ -749,7 +749,7 @@ test "upgrade: a missing, empty, older, newer or damaged records directory never
     sim_run.init(&sim, 18);
     sim.world.add_node(sim_run.runs_path, .dir);
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     try testing.expect(
