@@ -374,7 +374,8 @@ fn step_upgrade(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     // (issue #80), so no old run may end at once: each command holds on for a second first.
     _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old1 -- " ++ old_hold, 0);
     _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " -d --name old2 -- sleep 600", 0);
-    _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old3 -- " ++ old_hold_exit3, 3);
+    const old3 = old_zbx ++ dir ++ " --name old3 -- " ++ old_hold_exit3;
+    _ = try expect_exit(session, out, step, old3, 3);
     _ = try expect_exit(session, out, step, old_zbx ++ " stop old2", 0);
     const names = [_][]const u8{ "old1", "old2", "old3" };
     for (names) |name| try record_version(session, out, name, 3);
