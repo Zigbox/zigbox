@@ -250,6 +250,8 @@ test "a pull makes the tree the layers flatten to, and records the image" {
     try testing.expectEqualStrings(&image.amd64.digest, json_field(&parsed, "manifest_digest"));
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-W0502") != null);
     try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-W0501") == null);
+    // No annotation, so nothing to differ from.
+    try testing.expect(std.mem.indexOf(u8, world.sim.stderr(), "ZBX-W0551") == null);
     const layers = parsed.value.object.get("layers").?.array.items;
     try testing.expectEqual(@as(usize, 2), layers.len);
     try testing.expectEqualStrings("downloaded", layers[0].object.get("cache").?.string);
@@ -267,6 +269,26 @@ test "a pull makes the tree the layers flatten to, and records the image" {
         if (std.mem.indexOf(u8, path, "/store/tmp/") != null) count += 1;
     }
     try testing.expectEqual(@as(u32, 0), count);
+}
+
+test "a pull whose manifest claims another tree warns W0551, names both, and still succeeds" {
+    // Goal: the annotation is a claim nothing relies on: the pull finishes (exit 0, the unpacked
+    // tree in the result), and the warning names the claimed tree and the one the layers made.
+    var world: World = undefined;
+    pull_world(&world, 61);
+    const claim = "b3:" ++ test_util.repeat('0', 64);
+    world.registry.fixture.claim_tree(claim);
+    const reference = test_registry.TestRegistry.reference(.open);
+    const args = [_][:0]const u8{ "zbx", "--output", "json", "pull", reference };
+    try testing.expectEqual(@as(u8, 0), run_text(&world, &args));
+    const parsed = try parse_json(world.sim.stdout());
+    defer parsed.deinit();
+    const tree = json_field(&parsed, "tree");
+    try testing.expect(!std.mem.eql(u8, tree, claim));
+    const errors = world.sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, errors, "ZBX-W0551") != null);
+    try testing.expect(std.mem.indexOf(u8, errors, claim) != null);
+    try testing.expect(std.mem.indexOf(u8, errors, tree) != null);
 }
 
 test "a second pull asks the registry for the manifests only" {

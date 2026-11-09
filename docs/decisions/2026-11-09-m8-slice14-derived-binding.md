@@ -8,9 +8,12 @@ Date: 2026-11-09. Lane U, implementer note.
   record, so the derived digest equals M7's by construction; `record_version` of the result stays 1.
 - **Label bound 2 KiB / 32** (`image_labels_*`): 8 KiB would overflow the 80 KiB record buffer.
   Past the bound the labels are unknown, never refused: a deviation from the brief, no new refusal.
+  The supervisor accepted the bound (2026-11-09); `docs/demos/m8.md` lists it with the other limits.
 - **Exec** derives from the image record found by manifest binding, as run does; the run record's
   version is unchanged.
 - **W0551** (tree annotation differs): registered like W0552, goldens and site pages included.
+  `pull_tests.zig` pulls a manifest whose annotation claims another tree (fixture `claim_tree`)
+  and checks the warning names both trees and the exit is 0.
 - **VM pins:** `image_record_version_m8 = 3` is what this zbx writes after a pull
   (`upgrade_m5.zig`); the pins for what old releases wrote stay 1 and 2.
 - **Trap:** a build-step base in `compose.zig` records no labels, so it derives nothing.
