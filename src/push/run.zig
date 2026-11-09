@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const diagnose = @import("diagnose.zig");
+const fs_mod = @import("../store/fs.zig");
 const export_mod = @import("export.zig");
 const json = @import("../trust/json.zig");
 const layout = @import("../store/layout.zig");
@@ -113,6 +114,8 @@ pub const Pushed = struct {
     /// The destination as parsed and written: "registry.example/team/app:1.0".
     destination: reference_mod.Formatted,
     destination_len: u16,
+    /// Set when the registry holds the image and this host's store could not record the tag.
+    record_failure: ?fs_mod.Failure,
 
     pub fn destination_text(pushed: *const Pushed) []const u8 {
         assert(pushed.destination_len <= pushed.destination.len);
@@ -191,10 +194,13 @@ pub fn push_operand(
         .settings = &ws.source.settings,
         .labels = ws.source.labels(),
     };
-    var fail: @import("../store/fs.zig").Failure = undefined;
+    var fail: fs_mod.Failure = undefined;
+    out.record_failure = null;
     // The push is done and the registry holds it; a record that cannot be written costs the tag
-    // on this host only, so it is not a failure of the push.
-    pack.record_image(store, &made, input, out.destination_text(), &fail) catch return;
+    // on this host only, so it is not a failure of the push: the caller warns (W0552).
+    pack.record_image(store, &made, input, out.destination_text(), &fail) catch {
+        out.record_failure = fail;
+    };
 }
 
 fn outcome_word(outcome: upload.Outcome) []const u8 {

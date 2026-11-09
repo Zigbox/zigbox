@@ -1,0 +1,6 @@
+warning[ZBX-W0552]: the push succeeded but this host did not record the tag
+  cause  recording 'registry.test/app:1.0' in this host's store failed: no space
+         left on the device (ENOSPC)
+  fix    the registry has the image; fix the store, then push again to record the tag
+  more   zbx explain W0552 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0552.html

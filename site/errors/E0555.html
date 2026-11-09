@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the registry refused a blob upload</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>external</dd></div><div><dt>Exit code</dt><dd>3 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>The registry did not take a blob of the image: it answered the check, the mount request, a piece of the bytes or the closing request with a refusal, or with something the upload protocol does not allow (a Location that names another host, a Range that says it kept fewer bytes than were sent).</p>
+<p>The registry did not take a blob of the image: it answered the check, the mount request, a piece of the bytes or the closing request with a refusal, or with something the upload protocol does not allow (a Location that cannot be followed, a Range that says it kept fewer bytes than were sent).</p>
 <p>The cause names the step and the registry's own code. A `401` or `403` means the registry wants credentials this build of zbx does not send. A `429` means wait and try again. Nothing is half-done in a way that matters: a push again skips every blob the registry holds, and the manifest is only put once all of its blobs are there.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

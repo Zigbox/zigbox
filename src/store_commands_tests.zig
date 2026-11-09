@@ -1009,6 +1009,37 @@ test "push puts the image in the registry, prints the digest, and a repeat sends
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0551") != null);
 }
 
+test "a push whose tag record fails warns W0552 and still succeeds" {
+    // Goal: the registry holds the image, so a host failure while the store records the tag is
+    // a warning, not a failed push. Method: walk a one-shot failure across every host call of a
+    // push; each run either fails with an error, succeeds quietly, or exits 0 with the digest on
+    // stdout and W0552 on stderr, and the walk must reach the third kind at least once.
+    var writes: u32 = 0;
+    var warned: u32 = 0;
+    var index: u32 = 0;
+    while (index <= writes) : (index += 1) {
+        start();
+        push_wire.init(1, upload_registry.responder());
+        upload_registry.init(&push_wire);
+        sim.wire = &push_wire;
+        try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+        var buffer: [80]u8 = undefined;
+        const tree = term(&buffer, try printed_digest());
+        const target = push_registry.PushRegistry.destination(.ok);
+        const before = files.mutations;
+        if (index > 0) files.faults.fail_mutation = before + index - 1;
+        const code = try command(&.{ "push", tree, target });
+        if (index == 0) writes = files.mutations - before;
+        files.faults.fail_mutation = null;
+        if (code != 0) continue;
+        if (std.mem.indexOf(u8, sim.stderr(), "ZBX-W0552") == null) continue;
+        warned += 1;
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "warning["));
+        try testing.expect(std.mem.startsWith(u8, sim.stdout(), "sha256:"));
+    }
+    try testing.expect(warned > 0);
+}
+
 test "export --output json is zbx.export/1, and its keys are the schema's" {
     // Goal: the machine-readable result issue #60 asked for. Method: parse it and check each
     // required key's type against the schema text.

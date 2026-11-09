@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
+const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
 const constants = @import("constants.zig");
@@ -2023,6 +2024,13 @@ const image_cases = [_]Case{
         .exit = 0,
     },
     .{
+        .code = .W0552,
+        .args = &.{},
+        .direct = build_tag_not_recorded,
+        .warning = true,
+        .exit = 0,
+    },
+    .{
         .code = .W0504,
         .args = &.{},
         .direct = build_warnings_dropped,
@@ -2188,6 +2196,11 @@ fn build_network_steps(diag: *Diag) void {
 
 fn build_output_refused(diag: *Diag) void {
     build_diagnose.output_refused(diag, "compile", "/run/control", "FIFO");
+}
+
+fn build_tag_not_recorded(diag: *Diag) void {
+    const failure: @import("store/fs.zig").Failure = .{ .err = error.NoSpace, .errno = 28 };
+    push_diagnose.tag_not_recorded(diag, "registry.test/app:1.0", failure);
 }
 
 fn build_warnings_dropped(diag: *Diag) void {

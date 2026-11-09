@@ -163,6 +163,7 @@ pub const Code = enum(u8) {
     W0502,
     W0503,
     W0504,
+    W0552,
     E0600,
     E0601,
     E0602,
@@ -2378,8 +2379,8 @@ pub const registry = [_]Entry{
         .explanation =
         \\The registry did not take a blob of the image: it answered the check, the
         \\mount request, a piece of the bytes or the closing request with a refusal,
-        \\or with something the upload protocol does not allow (a Location that names
-        \\another host, a Range that says it kept fewer bytes than were sent).
+        \\or with something the upload protocol does not allow (a Location that cannot
+        \\be followed, a Range that says it kept fewer bytes than were sent).
         \\
         \\The cause names the step and the registry's own code. A `401` or `403` means
         \\the registry wants credentials this build of zbx does not send. A `429`
@@ -2474,6 +2475,23 @@ pub const registry = [_]Entry{
         \\
         \\The message says how many were not shown. Nothing to do unless one of
         \\mattered. The image is the same either way.
+        ,
+    },
+    .{
+        .code = .W0552,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "the push succeeded but this host did not record the tag",
+        .explanation =
+        \\The registry holds the image under the tag, and the manifest digest was
+        \\printed. This host's store could not write its record that the image has
+        \\that tag, so a later `zbx run` or `zbx sign` by that name will not find it
+        \\here, until the record is made.
+        \\
+        \\The cause names the destination and why the store could not be written
+        \\(a full or read-only disk, say). Fix that, then push the same image to the
+        \\same destination again: the registry already holds every blob, so nothing
+        \\is sent but the manifest, and the record is written.
         ,
     },
     .{
@@ -3571,7 +3589,7 @@ pub fn can_end_run(code: Code) bool {
         .W0410, .W0411, .W0412, .W0413 => false,
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
-        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526 => false,
+        .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0552 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0901, .E0902, .E0903, .E0910, .E0911 => false,
         .E1006, .E1007 => false,

@@ -10,6 +10,7 @@ const Diag = @import("../diag/diag.zig").Diag;
 const Sha256 = @import("../registry/digest.zig").Sha256;
 const export_mod = @import("export.zig");
 const pack = @import("pack.zig");
+const fs_mod = @import("../store/fs.zig");
 
 fn echo_of(storage: *[constants.arg_echo_bytes_max]u8, argument: []const u8) []const u8 {
     assert(argument.len <= constants.file_bytes_max);
@@ -164,6 +165,27 @@ pub fn too_many_pieces(diag: *Diag, host: []const u8, digest: Sha256, sent: Piec
     diag.context("chunk", "{d}", .{sent.chunk});
     diag.fix(.{ .sentence = "push with a larger piece size" });
     assert(diag.code.? == .E0555);
+}
+
+/// ZBX-W0552: the registry holds the image, and this host's store could not record the tag.
+pub fn tag_not_recorded(diag: *Diag, destination: []const u8, failure: fs_mod.Failure) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, destination);
+    var words: [constants.arg_echo_bytes_max + 48]u8 = undefined;
+    const operation = std.fmt.bufPrint(
+        &words,
+        "recording '{s}' in this host's store",
+        .{shown},
+    ) catch "recording the tag in this host's store";
+    diag.raise(.W0552);
+    diag.while_("pushing an image", .{});
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    diag.context("tag", "{s}", .{shown});
+    diag.fix(.{
+        .sentence = "the registry has the image; fix the store, then push again to record the tag",
+    });
+    assert(diag.code.? == .W0552);
 }
 
 /// ZBX-E0556: the registry refused the manifest, or answered with another digest.

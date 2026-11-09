@@ -1254,11 +1254,22 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
             return error.Failed;
         };
         buffer[text.len] = '\n';
-        return put(job, buffer[0 .. text.len + 1], diag);
+        try put(job, buffer[0 .. text.len + 1], diag);
+        return warn_tag_not_recorded(job, &pushed);
     }
     const line = std.fmt.bufPrint(&buffer, "{s}\n", .{pushed.report.manifest.text()}) catch
         unreachable;
     try put(job, line, diag);
+    warn_tag_not_recorded(job, &pushed);
+}
+
+/// The registry holds the image but this host's store could not record the tag (W0552).
+fn warn_tag_not_recorded(job: *const Job, pushed: *const push_run.Pushed) void {
+    const failure = pushed.record_failure orelse return;
+    var warning: Diag = undefined;
+    warning.reset();
+    push_diagnose.tag_not_recorded(&warning, pushed.destination_text(), failure);
+    write_diag(job, &warning);
 }
 
 // ---- verify --------------------------------------------------------------------------------
