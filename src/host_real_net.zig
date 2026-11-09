@@ -759,6 +759,24 @@ fn read_body(
     }
 }
 
+fn carries_credential(request: *const net.Request) bool {
+    assert(request.host.len > 0);
+    if (request.bearer.len > 0) assert(request.basic.len == 0);
+    return request.basic.len > 0 or request.bearer.len > 0;
+}
+
+/// Zeroes every buffer a request or its answer passes through. What TLS keeps inside its own
+/// client state (keys, std's cipher state) and what the kernel keeps are not ours to wipe.
+fn wipe_buffers(buffers: *Buffers) void {
+    std.crypto.secureZero(u8, &buffers.socket_read);
+    std.crypto.secureZero(u8, &buffers.socket_write);
+    std.crypto.secureZero(u8, &buffers.tls_read);
+    std.crypto.secureZero(u8, &buffers.tls_write);
+    std.crypto.secureZero(u8, &buffers.request_head);
+    assert(buffers.request_head[0] == 0);
+    assert(buffers.tls_write[0] == 0);
+}
+
 fn call(
     context: *anyopaque,
     request: *const net.Request,
@@ -772,6 +790,9 @@ fn call(
     assert(!memory.state.busy); // One call at a time on a `Memory`.
     memory.state.busy = true;
     defer memory.state.busy = false;
+    // The head, the plaintext TLS and socket write buffers, and the read buffers (a token
+    // service's answer is in them) held a credential: zero them on every way out.
+    defer if (carries_credential(request)) wipe_buffers(&memory.buffers);
     memory.state.errno_last = 0;
     var socket: Socket = undefined;
     const started = monotonic_ms();
@@ -950,6 +971,56 @@ fn probe(loopback: *Loopback, request: *const net.Request, storage: []u8) net.Er
     try interface(&real).get(request, &head, sink.sink());
     _ = loopback;
     return .{ .status = head.status, .content_length = head.content_length };
+}
+
+fn buffers_are_zero(buffers: *const Buffers) bool {
+    const names = [_][]const u8{
+        "socket_read", "socket_write", "tls_read", "tls_write", "request_head",
+    };
+    inline for (names) |name| {
+        for (@field(buffers, name)) |byte| if (byte != 0) return false;
+    }
+    return true;
+}
+
+test "a call that carried a credential leaves no byte in the socket buffers, on every way out" {
+    // Goal: the head (with its Authorization line) and the read and write buffers are zeroed
+    // after a success, a timeout and a refused connection. Method: fill every buffer with a known
+    // byte after the memory is initialised; a call without a credential must leave some of it
+    // (the control), and one with Basic or Bearer must leave none.
+    var loopback: Loopback = undefined;
+    try loopback.start(.normal);
+    var storage: [4096]u8 = undefined;
+    var sink: net.BufferSink = .{ .buffer = &storage };
+    var head: net.Head = .{};
+    var real = test_real();
+    var request = probe_request(loopback.server.port, 1000, 0);
+    @memset(std.mem.asBytes(&test_memory.buffers.request_head), 0xAA);
+    _ = try interface(&real).get(&request, &head, sink.sink());
+    try testing.expect(!buffers_are_zero(&test_memory.buffers)); // The control.
+    request.basic = "dXNlcjpzZWNyZXQtbWFya2Vy";
+    for ([_][]const u8{ "basic", "bearer" }) |kind| {
+        if (std.mem.eql(u8, kind, "bearer")) {
+            request.basic = "";
+            request.bearer = "secret-token-marker";
+        }
+        real = test_real();
+        @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
+        head = .{};
+        sink = .{ .buffer = &storage };
+        _ = try interface(&real).get(&request, &head, sink.sink());
+        try testing.expect(buffers_are_zero(&test_memory.buffers));
+    }
+    loopback.stop();
+    // A peer that takes the head and never answers: the head was written, then the call timed out.
+    try loopback.start(.stall);
+    defer loopback.stop();
+    request = probe_request(loopback.server.port, 200, 0);
+    request.bearer = "secret-token-marker";
+    real = test_real();
+    @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
+    try testing.expectError(error.TimedOut, interface(&real).get(&request, &head, sink.sink()));
+    try testing.expect(buffers_are_zero(&test_memory.buffers));
 }
 
 test "a peer that never answers is a timeout, idle or total, and quickly" {

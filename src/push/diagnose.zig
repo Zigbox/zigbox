@@ -99,8 +99,8 @@ pub const Refusal = struct {
 fn refusal_fix(diag: *Diag, refusal: Refusal) void {
     assert(refusal.status >= 200);
     switch (refusal.status) {
-        401, 403 => diag.fix(.{ .sentence = "the registry wants credentials; this build of zbx" ++
-            " pushes without any, so push to a registry that takes anonymous writes" }),
+        401, 403 => diag.fix(.{ .sentence = "check the user and the password file given with" ++
+            " --username and --password-file, and that they may write to this repository" }),
         429 => diag.fix(.{ .sentence = "wait, then run the same command again; what the" ++
             " registry already holds is not sent twice" }),
         else => diag.fix(.{ .sentence = "run the same command again; what the registry already" ++
@@ -250,7 +250,7 @@ pub fn no_credentials(diag: *Diag, host: []const u8, repository: []const u8) voi
     diag.context("repo", "{s}", .{echo_of(&repo_storage, repository)});
     diag.fix(.{
         .sentence = "give a user and a password file only you can read:",
-        .command = "zbx push <dest> --username <user> --password-file <file>",
+        .command = "zbx push <image> <dest> --username <user> --password-file <file>",
         .template = true,
     });
     assert(diag.code.? == .E0552);
@@ -316,26 +316,58 @@ pub fn credentials_refused(
     assert(diag.code.? == .E0553);
 }
 
-/// ZBX-E0554: the token service a registry named is on a host that may not be sent the password.
-pub fn realm_refused(diag: *Diag, registry: []const u8, realm_host: []const u8) void {
+/// Why a realm may not be sent the password.
+pub const RealmProblem = enum {
+    /// The realm is on a host that is neither the registry's nor a known pair.
+    other_host,
+    /// The realm is not a URL zbx can use.
+    not_a_url,
+    /// The realm is plain `http` and not on loopback.
+    plain_http,
+};
+
+/// ZBX-E0554: the token service a registry named may not be sent the password. `realm` is the
+/// realm's host for `other_host` and `plain_http`, and the realm's text for `not_a_url`.
+pub fn realm_refused(
+    diag: *Diag,
+    registry: []const u8,
+    realm: []const u8,
+    problem: RealmProblem,
+) void {
     assert(diag.code == null);
     var registry_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     var realm_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const shown = echo_of(&registry_storage, registry);
-    const realm_shown = echo_of(&realm_storage, realm_host);
+    const realm_shown = echo_of(&realm_storage, realm);
     diag.raise(.E0554);
     diag.while_("pushing an image", .{});
-    diag.cause(
-        "{s} named the token service {s}, which is not {s}, nor a service it is known to use;" ++
-            " the password was not sent",
-        .{ shown, realm_shown, shown },
-    );
+    switch (problem) {
+        .other_host => diag.cause(
+            "{s} named the token service {s}, which is not {s}, nor a service it is known to" ++
+                " use; the password was not sent",
+            .{ shown, realm_shown, shown },
+        ),
+        .not_a_url => diag.cause(
+            "{s} named a token service '{s}', which is not a URL zbx can use; the password" ++
+                " was not sent",
+            .{ shown, realm_shown },
+        ),
+        .plain_http => diag.cause(
+            "{s} named the token service {s} over plain http, which zbx speaks only on" ++
+                " loopback; the password was not sent",
+            .{ shown, realm_shown },
+        ),
+    }
     diag.context("host", "{s}", .{shown});
     diag.context("realm", "{s}", .{realm_shown});
-    diag.fix(.{
-        .sentence = "push to a registry whose token service is on its own host; zbx sends a" ++
+    diag.fix(.{ .sentence = switch (problem) {
+        .other_host => "push to a registry whose token service is on its own host; zbx sends a" ++
             " password only there",
-    });
+        .not_a_url => "ask the registry's operator to name its token service by an https URL;" ++
+            " zbx cannot push to it as it is",
+        .plain_http => "ask the registry's operator to serve its token service over https;" ++
+            " zbx sends a password only over TLS",
+    } });
     assert(diag.code.? == .E0554);
 }
 
@@ -392,12 +424,12 @@ pub fn password_unsafe(diag: *Diag, path: []const u8, problem: PasswordProblem) 
         .file_too_open => diag.fix_with("make it private to you:", "chmod 600 {s}", .{shown}),
         .stdin_is_terminal => diag.fix(.{
             .sentence = "pipe the password in, or give a file only you can read:",
-            .command = "zbx push <dest> --username <user> --password-file <file>",
+            .command = "zbx push <image> <dest> --username <user> --password-file <file>",
             .template = true,
         }),
         else => diag.fix(.{
             .sentence = "give the password as the first line of a file only you can read:",
-            .command = "zbx push <dest> --username <user> --password-file <file>",
+            .command = "zbx push <image> <dest> --username <user> --password-file <file>",
             .template = true,
         }),
     }

@@ -1,5 +1,5 @@
 error[ZBX-E0552]: the registry wants credentials and none were given
   cause  registry.test wants credentials to push, and none were given
-  fix    give a user and a password file only you can read:   zbx push <dest> --username <user> --password-file <file>
+  fix    give a user and a password file only you can read:   zbx push <image> <dest> --username <user> --password-file <file>
   more   zbx explain E0552 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0552.html

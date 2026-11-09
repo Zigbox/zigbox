@@ -209,3 +209,68 @@ test "the marker password is only in requests to the registry, and in no buffer 
         try testing.expect(!holds_secret(std.mem.asBytes(&credentials), &secret));
     }
 }
+
+/// Whether any request of the run carried both an `Authorization: Basic` and a Bearer token.
+fn sent_both_credentials(rig: *const Rig) bool {
+    var index: u32 = 0;
+    while (rig.wire.logged(index)) |entry| : (index += 1) {
+        if (entry.basic_len > 0 and entry.bearer_len > 0) return true;
+    }
+    return false;
+}
+
+test "a registry that switches its challenge mid-push is never sent both credentials" {
+    // Goal: Basic and Bearer are exclusive, in both directions (the real host asserts it, so a
+    // request with both would be a panic there and two Authorization headers here). Method: the
+    // registry serves in one mode, then, after some served requests, answers in the other; the
+    // push must end whole, with the second scheme's credential alone after the switch, and the
+    // wiped one gone from the workspace.
+    const pairs = [_][2]push_registry.Mode{
+        .{ .basic, .bearer },
+        .{ .bearer, .basic },
+    };
+    for (pairs) |pair| {
+        var after: u32 = 1;
+        while (after <= 5) : (after += 1) {
+            const rig = try Rig.create(31);
+            defer rig.destroy();
+            rig.registry.require(pair[0], marker);
+            rig.registry.switch_after = after;
+            rig.registry.switch_to = pair[1];
+            var credentials = credentials_mod.Credentials.of(push_registry.test_user, marker);
+            defer credentials.wipe();
+            try rig.push("push/ok", options_with(&credentials));
+            try testing.expect(rig.holds("push/ok", rig.made.layer));
+            try testing.expect(!sent_both_credentials(rig));
+            try testing.expect(!credential_left_the_registry(rig));
+            // The scheme in use at the end is the second one; the other's bytes are zero.
+            if (pair[1] == .bearer) {
+                try testing.expect(rig.registry.token_requests > 0);
+                try testing.expect(rig.ws.basic[0] == 0);
+            } else {
+                try testing.expectEqual(@as(u8, 0), rig.ws.token[0]);
+            }
+        }
+    }
+}
+
+test "a realm that is not a URL, or is plain http, is refused with its own cause" {
+    // Goal: E0554 names the reason (not the host) for a malformed realm and for plain http on a
+    // registry that is not on loopback, and no credential is sent in either case.
+    const cases = [_]struct { realm: []const u8, cause: []const u8 }{
+        .{ .realm = "htp:/x", .cause = "which is not a URL zbx can use" },
+        .{ .realm = "http://registry.test/token", .cause = "over plain http" },
+    };
+    for (cases) |case| {
+        const rig = try Rig.create(32);
+        defer rig.destroy();
+        rig.registry.require(.bearer, marker);
+        rig.registry.realm_override = case.realm;
+        var credentials = credentials_mod.Credentials.of(push_registry.test_user, marker);
+        defer credentials.wipe();
+        try testing.expectError(error.Failed, rig.push("push/ok", options_with(&credentials)));
+        try tests.expect_code(rig, .E0554);
+        try testing.expect(std.mem.indexOf(u8, rig.diag.last_cause().?, case.cause) != null);
+        try testing.expect(!sent_any_credential(rig));
+    }
+}

@@ -2425,8 +2425,10 @@ pub const registry = [_]Entry{
         \\password there. It does so only when the realm is on the registry's own
         \\host, is one of the pairs zbx knows (Docker Hub's registry and
         \\`auth.docker.io`), or, for a registry on loopback, is on loopback, and only
-        \\over HTTPS (plain HTTP on loopback). This realm is on another host, so a
-        \\password sent there would reach a service the registry merely pointed at.
+        \\over HTTPS (plain HTTP on loopback). The cause says which rule this realm
+        \\broke: it is on another host, so a password sent there would reach a
+        \\service the registry merely pointed at; it is not a URL zbx can use; or it
+        \\is plain `http` away from loopback.
         \\
         \\Nothing was sent. If the registry is yours, serve its token service from
         \\its own host; if it is not, do not use it with a password.

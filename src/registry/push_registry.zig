@@ -56,11 +56,26 @@ pub const PushRegistry = struct {
     leaked: u32 = 0,
     challenge: [256]u8 = undefined,
     token_body: [96]u8 = undefined,
+    /// After this many served requests (0 for never) the registry changes its mode to
+    /// `switch_to`: a registry whose challenge scheme changes in the middle of a push.
+    switch_after: u32 = 0,
+    switch_to: Mode = .open,
+    /// When not empty, the realm the Bearer challenge names, in place of the two fixed ones.
+    realm_override: []const u8 = "",
+    /// When not empty, the whole `WWW-Authenticate` value, and the body of the token answer
+    /// (fuzzers hand arbitrary bytes here).
+    challenge_override: []const u8 = "",
+    token_body_override: []const u8 = "",
 
     /// Starts the registry and gives `sim` the room to drain uploads into.
     pub fn init(registry: *PushRegistry, sim: *net_sim.SimNet) void {
         registry.fixture.init("https://" ++ registry_host, "https://" ++ other_host);
         registry.mode = .open;
+        registry.switch_after = 0;
+        registry.switch_to = .open;
+        registry.realm_override = "";
+        registry.challenge_override = "";
+        registry.token_body_override = "";
         registry.expected_len = 0;
         registry.expire_after = 0;
         registry.served_count = 0;
@@ -139,6 +154,10 @@ fn answer(
         if (has_credential) registry.leaked += 1;
         return delegate(registry, request, received, served);
     }
+    if (registry.switch_after > 0 and registry.served_count >= registry.switch_after) {
+        registry.mode = registry.switch_to;
+        registry.switch_after = 0;
+    }
     if (registry.mode == .open) return delegate(registry, request, received, served);
     if (std.mem.startsWith(u8, request.target, "/token")) {
         return token_endpoint(registry, request, served);
@@ -168,10 +187,11 @@ fn challenge(registry: *PushRegistry, request: *const net.Request, served: *net_
     assert(registry.mode != .open);
     var text: []const u8 = "Basic realm=\"fixture\"";
     if (registry.mode != .basic) {
-        const realm = if (registry.mode == .far_realm)
+        var realm: []const u8 = if (registry.mode == .far_realm)
             "https://evil.test/token"
         else
             "https://" ++ registry_host ++ "/token";
+        if (registry.realm_override.len > 0) realm = registry.realm_override;
         const error_part = if (request.bearer.len > 0) ",error=\"insufficient_scope\"" else "";
         text = std.fmt.bufPrint(
             &registry.challenge,
@@ -179,6 +199,7 @@ fn challenge(registry: *PushRegistry, request: *const net.Request, served: *net_
             .{ realm, error_part },
         ) catch unreachable; // the challenge buffer holds the longest form
     }
+    if (registry.challenge_override.len > 0) text = registry.challenge_override;
     served.* = .{ .status = 401, .www_authenticate = text };
 }
 
@@ -203,7 +224,11 @@ fn token_endpoint(
     const granted = if (registry.mode == .pull_only) "pull-token" else registry.push_token(&token);
     const body = std.fmt.bufPrint(&registry.token_body, "{{\"token\":\"{s}\"}}", .{granted}) catch
         unreachable;
-    served.* = .{ .status = 200, .content_type = "application/json", .body = body };
+    const answer_body = if (registry.token_body_override.len > 0)
+        registry.token_body_override
+    else
+        body;
+    served.* = .{ .status = 200, .content_type = "application/json", .body = answer_body };
 }
 
 fn delegate(

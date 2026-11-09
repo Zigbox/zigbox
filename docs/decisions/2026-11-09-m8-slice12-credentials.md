@@ -19,7 +19,16 @@ Traps found:
 - The registry fixture's `leaked` counts credentialed requests to a host that is not the
   registry; tests and the fuzzer assert it is 0.
 
-Next (slice 13): the push is complete for the registry API; what remains is the M8 demo wiring.
+Review fixes (PR #76):
+
+- Basic and Bearer are exclusive: a token replaces the Basic credential and the other way
+  round, each wiped on the switch, so a registry that changes its challenge never gets both.
+- After a network call that carried a credential, the request head and the read and write
+  buffers of the network memory are zeroed (`wipe_buffers` in host_real_net.zig).
+- The realm rule compares host names, not ports, on purpose: the realm is the registry's own
+  host, and the registry's token service and API commonly sit on different ports of it.
+- Not done: refusing a password file owned by another user (the review's NIT); it needs a
+  `geteuid` on the host interface and is left to the supervisor.
 
 Trap found by the live run: the simulated host accepts a read of standard input with no open file;
 `HostReal.read` did not. Any new use of a host call the simulator and the real host implement

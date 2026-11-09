@@ -432,12 +432,67 @@ fn seed_holder(rig: *Pushing, holder: []const u8) void {
 
 const secret = "fz-secret-password";
 
-/// Makes the registry ask for credentials, in a mode picked at random.
-fn require_login(rig: *Pushing, random: std.Random) void {
+/// The bytes a fuzzed challenge or token answer is made of: the real syntax, a realm the rule
+/// refuses, one it allows, and noise.
+const challenge_pieces = [_][]const u8{
+    "Bearer ",                 "Basic ",                       "bearer ",
+    "realm=\"",                "realm=",                       "https://registry.test/token",
+    "https://evil.test/t",     "http://registry.test/t",       "http://127.0.0.1/x",
+    "https://user@evil.test/", "\",",                          "service=\"s\"",
+    "scope=\"a:b:pull\"",      "error=\"insufficient_scope\"", "\"",
+    ",",                       "{\"token\":\"",                "{\"access_token\":\"",
+    "\",\"expires_in\":",      "99999999999999999999",         "}",
+    "\\u0041",
+};
+
+fn fuzz_text(random: std.Random, buffer: []u8) []const u8 {
+    var length: usize = 0;
+    while (length < buffer.len and random.uintLessThan(u8, 12) != 0) {
+        const piece = challenge_pieces[random.uintLessThan(usize, challenge_pieces.len)];
+        if (random.uintLessThan(u8, 5) == 0) {
+            const noise = @min(random.uintAtMost(usize, 12), buffer.len - length);
+            random.bytes(buffer[length..][0..noise]);
+            length += noise;
+        } else if (length + piece.len <= buffer.len) {
+            @memcpy(buffer[length..][0..piece.len], piece);
+            length += piece.len;
+        }
+    }
+    return buffer[0..length];
+}
+
+/// The memory a fuzzed challenge and token answer live in, for as long as the push.
+const Fuzzed = struct {
+    challenge: [220]u8 = undefined,
+    token_body: [220]u8 = undefined,
+};
+
+/// Makes the registry ask for credentials, in a mode picked at random; sometimes it changes its
+/// scheme part-way, and sometimes its challenge and its token answer are fuzzed bytes.
+fn require_login(rig: *Pushing, random: std.Random, fuzzed: *Fuzzed) void {
     const modes = [_]push_registry.Mode{ .basic, .bearer, .pull_only, .far_realm, .expiring };
     const mode = modes[random.uintLessThan(usize, modes.len)];
     assert(mode != .open);
     rig.registry.require(mode, secret);
+    if (random.uintLessThan(u8, 3) == 0) {
+        rig.registry.switch_after = random.intRangeAtMost(u32, 1, 8);
+        rig.registry.switch_to = if (random.boolean()) .basic else .bearer;
+    }
+    if (random.uintLessThan(u8, 3) == 0) {
+        rig.registry.challenge_override = fuzz_text(random, &fuzzed.challenge);
+    }
+    if (random.uintLessThan(u8, 3) == 0) {
+        rig.registry.token_body_override = fuzz_text(random, &fuzzed.token_body);
+    }
+}
+
+/// Whether any logged request carried both kinds of credential.
+fn sent_both(rig: *const Pushing) bool {
+    var index: u32 = 0;
+    while (rig.wire.logged(index)) |entry| : (index += 1) {
+        if (entry.basic_len > 0 and entry.bearer_len > 0) return true;
+    }
+    return false;
 }
 
 fn fuzz_upload(random: std.Random, seed: u64) void {
@@ -469,7 +524,8 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
     // Half the pushes log in, in a mode the registry picks at random; the secret must not leave.
     var credentials = credentials_mod.Credentials.of(push_registry.test_user, secret);
     defer credentials.wipe();
-    if (random.boolean()) require_login(rig, random);
+    var fuzzed: Fuzzed = .{};
+    if (random.boolean()) require_login(rig, random, &fuzzed);
     const options: upload.Options = .{
         .chunk_bytes = random.intRangeAtMost(u32, 16, 4096),
         .mount_from = if (random.boolean()) holder else "",
@@ -499,6 +555,7 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
     // The registry told the truth unless it was spoiled; then a manifest may name a missing blob.
     if (spoiler.spoiled == 0) assert(rig.registry.fixture.unknown_refusals == 0);
     assert(rig.registry.leaked == 0); // a credential reached no host but the registry's
+    assert(!sent_both(rig)); // Basic and Bearer are never sent together
     assert(std.mem.indexOf(u8, std.mem.asBytes(&diag), secret) == null);
 }
 

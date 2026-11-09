@@ -329,7 +329,9 @@ fn exchange(state: *Push, call: Call, diag: *Diag) Error!void {
     if (next == .give_up) return refuse_credentials(state, diag, .refused);
     if (call.piece) |piece| piece.at = start;
     try exchange_once(state, call, diag);
-    if (state.ws.head.status == 401) return refuse_credentials(state, diag, .refused);
+    // Credentials went with the repeat, so a 401 or a 403 is the answer to them.
+    const again = state.ws.head.status;
+    if (again == 401 or again == 403) return refuse_credentials(state, diag, .refused);
 }
 
 /// One request, as `exchange` makes it. A refusal (status 400 or more) whose body is over the
@@ -455,15 +457,17 @@ fn authenticate(state: *Push, diag: *Diag) Error!Next {
     var url_storage: [constants.registry_url_bytes_max * 2]u8 = undefined;
     const from = state.options.mount_from;
     const text = auth.push_token_url(&challenge, repository, from, &url_storage) catch {
-        push_diagnose.realm_refused(diag, host, challenge.realm);
+        push_diagnose.realm_refused(diag, host, challenge.realm, .not_a_url);
         return error.Failed;
     };
     const url = net.parse_url(text) catch {
-        push_diagnose.realm_refused(diag, host, challenge.realm);
+        push_diagnose.realm_refused(diag, host, challenge.realm, .not_a_url);
         return error.Failed;
     };
     if (!credentials_mod.realm_allowed(host, state.destination.origin.scheme, url)) {
-        push_diagnose.realm_refused(diag, host, url.host);
+        const plain = url.scheme == .http;
+        const why: push_diagnose.RealmProblem = if (plain) .plain_http else .other_host;
+        push_diagnose.realm_refused(diag, host, url.host, why);
         return error.Failed;
     }
     // The realm rule has passed: the password may go there, and only there.
@@ -475,8 +479,12 @@ fn use_basic(state: *Push, credentials: *const credentials_mod.Credentials) Next
     assert(credentials.present());
     if (state.basic.len > 0) return .give_up; // It was sent, and refused.
     const ws = state.ws;
+    // Exclusive: a registry that changes its challenge from Bearer to Basic gets the Basic
+    // credential alone, and the token it was granted is wiped.
+    drop_bearer(state);
     state.basic = credentials_mod.encode_basic(credentials, &ws.basic);
     assert(state.basic.len > 0);
+    assert(state.bearer.len == 0);
     return .retry;
 }
 
@@ -538,8 +546,26 @@ fn fetch_token(
         push_diagnose.credentials_refused(diag, host, repository, .token_unusable);
         return error.Failed;
     };
+    // Exclusive: the token replaces the Basic credential, which is wiped, so no request ever
+    // carries both (the real host asserts it).
+    drop_basic(state);
     state.bearer = found;
     assert(state.bearer.len > 0);
+    assert(state.basic.len == 0);
+}
+
+fn drop_basic(state: *Push) void {
+    std.crypto.secureZero(u8, &state.ws.basic);
+    state.basic = "";
+    assert(state.basic.len == 0);
+    assert(state.ws.basic[0] == 0);
+}
+
+fn drop_bearer(state: *Push) void {
+    std.crypto.secureZero(u8, &state.ws.token);
+    state.bearer = "";
+    assert(state.bearer.len == 0);
+    assert(state.ws.token[0] == 0);
 }
 
 /// The registry's `401` (or `403 DENIED`) to credentials that were in use. A token that says

@@ -1145,10 +1145,10 @@ test "the credential options: --password is refused without its value, and misus
     for (bad) |argv| {
         try testing.expectEqual(@as(u8, 1), try command(argv));
         try testing.expect(!seen("s3cret-value"));
-        try testing.expect(sim.stderr().len > 0);
+        // `pull` has no credential options at all, so it says "unknown option".
+        const code = if (std.mem.eql(u8, argv[0], "pull")) "ZBX-E0004" else "ZBX-E0003";
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), code) != null);
     }
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0003") != null or
-        std.mem.indexOf(u8, sim.stderr(), "ZBX-E00") != null);
 }
 
 test "the marker password is in no output, file or log, and only in requests to the registry" {
