@@ -697,6 +697,39 @@ const sign_schema =
     \\"signatures":{"type":"integer","minimum":1,"description":"lines in the tree's record now"}}}
 ;
 
+const policy_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/policy/1","version":1,
+    \\"title":"zbx policy check --output json",
+    \\"description":"stdout: each policy file read and, given an operand, what it says of a run.",
+    \\"type":"object","required":["schema","subject","files","allowed"],
+    \\"properties":{"schema":{"const":"zbx.policy/1"},
+    \\"subject":{"description":"null when no operand was given",
+    \\"oneOf":[{"type":"null"},{"type":"object","required":["operand","tree","binding"],
+    \\"properties":{"operand":{"type":"string"},
+    \\"tree":{"type":["string","null"],"pattern":"^b3:[0-9a-f]{64}$"},
+    \\"binding":{"enum":["none","result","manifest"]}}}]},
+    \\"files":{"type":"array","description":"each policy file that exists, system file first",
+    \\"items":{"type":"object",
+    \\"required":["path","require_signature","require_provenance","verify","keys","met",
+    \\"signatures"],
+    \\"properties":{"path":{"type":"string"},
+    \\"require_signature":{"type":"boolean"},"require_provenance":{"type":"boolean"},
+    \\"verify":{"enum":["cached","always"]},
+    \\"keys":{"type":"array","items":{"type":"object","required":["name","public"],
+    \\"properties":{"name":{"type":"string"},
+    \\"public":{"type":"string","pattern":"^zbx-ed25519:[0-9a-f]{64}$"}}}},
+    \\"met":{"type":["boolean","null"],
+    \\"description":"null: no operand, or the file asks nothing of a run"},
+    \\"signatures":{"type":"array","description":"the tree's record, judged against this file",
+    \\"items":{"type":"object","required":["public","key","reason"],
+    \\"properties":{"public":{"type":"string"},
+    \\"key":{"type":["string","null"],"description":"the policy's name for the key, if listed"},
+    \\"reason":{"enum":["counts","malformed","bad_signature","untrusted_key","other_tree",
+    \\"other_predicate","other_binding"]}}}}}}},
+    \\"allowed":{"type":"boolean","description":"every file is met; the run would start"}}}
+;
+
 const key_schema =
     \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
     \\"$id":"https://zigbox.github.io/zigbox/schema/key/1","version":1,
@@ -839,6 +872,7 @@ const table = [_]Entry{
     .{ .command = "build-graph", .text = build_graph_schema },
     .{ .command = "key", .text = key_schema },
     .{ .command = "sign", .text = sign_schema },
+    .{ .command = "policy", .text = policy_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
     .{ .command = "store-export", .text = store_export_schema },
@@ -853,7 +887,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 33);
+    assert(table.len == 34);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -882,7 +916,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 33), table.len);
+    try testing.expectEqual(@as(usize, 34), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

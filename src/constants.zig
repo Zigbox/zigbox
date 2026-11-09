@@ -400,7 +400,7 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 8;
+pub const record_version: u32 = 9;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 64 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
@@ -1518,6 +1518,14 @@ pub const statement_bytes_max: u32 = 128 * 1024;
 pub const signatures_per_tree_max: u32 = 8;
 /// Most signature records (and, from slice 4, provenance records) in the store.
 pub const trust_records_max: u32 = 4096;
+/// Most file objects one tree's `trust/verified` record holds (slice 3's tamper check): 56 bytes
+/// each, so a record is under 4 MiB. A tree with more objects is checked whole on every run and
+/// writes no record.
+pub const trust_verified_entries_max: u32 = 65536;
+/// The bytes of a `trust/verified` record: a 16-byte header and its entries.
+pub const trust_verified_entry_bytes: u32 = 56;
+pub const trust_verified_file_bytes_max: u32 =
+    16 + trust_verified_entries_max * trust_verified_entry_bytes;
 /// The one place our type URIs start (the owner's `2026-11-04-project-domain-zigbox-org.md`).
 /// Once a signature has been made with a URI it is part of the format.
 pub const type_uri_base = "https://zigbox.org";

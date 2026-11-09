@@ -181,6 +181,9 @@ pub const StartOptions = struct {
     /// The memory a run of a tree from the store (`Spec.image`) prepares it in, about 17 MiB:
     /// the caller's, in static or heap storage. Required exactly when `image` is set.
     image_workspace: ?*image_mod.Workspace = null,
+    /// A check of the tree's files in the store's child before it is materialized
+    /// (`image.Check`); a refusal ends the start with its diagnostic.
+    tree_check: ?image_mod.Check = null,
     /// Keep what the container writes to its standard output and error in its log
     /// (`logfile.zig`). The container's streams are then pipes this library reads until the
     /// container ends. A log that cannot be written is a warning, and the run goes on.
@@ -261,6 +264,8 @@ pub const Handle = struct {
     resolution: mounts_mod.Resolution,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
+    /// What the tree is bound to, for the record.
+    binding: spec_mod.Binding,
     /// The log of the container's output: open from before the container exists until it has
     /// ended, when `log_active`. `mirror` copies the output to the terminal too.
     log: logfile.Writer,
@@ -347,6 +352,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.user = container.user;
+    handle.binding = container.binding;
     reset_log(handle, options);
     handle.command = container.command;
     handle.labels = container.labels;
@@ -706,6 +712,7 @@ fn prepare_image(
         handle.name_slice(),
         container.read_only,
         null,
+        options.tree_check,
         &handle.image,
         diag,
     ) catch return error.StartFailed;
@@ -1298,6 +1305,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .state = handle.volumes.mount_slice(),
         .mounts = handle.mounts,
         .user = handle.user,
+        .binding = handle.binding,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",
     };
     records.save(handle.host, &dir, &view) catch |err| {

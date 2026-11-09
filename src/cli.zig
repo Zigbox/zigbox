@@ -33,8 +33,12 @@ const commands = @import("commands.zig");
 const store_commands = @import("store_commands.zig");
 const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
+const policy_commands = @import("trust/policy_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
+const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
+const trust_tamper = @import("trust/tamper.zig");
+const layout_mod = @import("store/layout.zig");
 const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
@@ -73,6 +77,8 @@ const help_text =
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  sign <what>     sign a build result, a tree or an image with a key (see below)
+    \\  policy check [what]   what the policy files say, and whether a run of <what> would pass
+    \\                  (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
@@ -205,6 +211,16 @@ const help_text =
     \\  the whole tree must be in the store and intact; the signature is added to the tree's
     \\  record, at most 8 per tree; signing again with the same key changes nothing
     \\
+    \\policy:
+    \\  zbx policy check [<what>]
+    \\  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
+    \\                  takes it; omitted: only describe the policy files
+    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
+    \\                  a run must pass each one that exists
+    \\  prints each file, its rules, each signature of the tree and why it counts or not, and
+    \\  whether the run would start; runs nothing. Exits 0 when it would start, 1 when a policy
+    \\  would refuse it (ZBX-E0905); a file that cannot be read is ZBX-E0904
+    \\
     \\push:
     \\  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
     \\                           manifest digest; sends nothing (the upload is not built yet)
@@ -274,6 +290,7 @@ pub const Command = enum {
     lock,
     logs,
     exec,
+    policy,
     ps,
     pull,
     push,
@@ -667,6 +684,7 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "lock")) found = .lock;
     if (std.mem.eql(u8, name, "logs")) found = .logs;
     if (std.mem.eql(u8, name, "exec")) found = .exec;
+    if (std.mem.eql(u8, name, "policy")) found = .policy;
     if (std.mem.eql(u8, name, "ps")) found = .ps;
     if (std.mem.eql(u8, name, "pull")) found = .pull;
     if (std.mem.eql(u8, name, "push")) found = .push;
@@ -688,7 +706,7 @@ fn operands_count(command: Command) u32 {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .push, .lock, .logs => 1,
         .exec, .inspect, .sign => 1,
-        .store, .state, .key => 2,
+        .store, .state, .key, .policy => 2,
     };
     assert(count <= 2);
     return count;
@@ -1637,6 +1655,7 @@ fn resolve(
     if (command == .store) return resolve_store(operands, invocation, diag);
     if (command == .state) return resolve_state(operands, invocation, diag);
     if (command == .key) return resolve_key(operands, invocation, diag);
+    if (command == .policy) return resolve_policy(operands, invocation, diag);
     defer if (invocation.command == .commit or invocation.command == .push) {
         const action: store_commands.Action = if (invocation.command == .push) .push else .commit;
         invocation.store = .{ .action = action, .operand = invocation.operand };
@@ -1803,6 +1822,40 @@ fn resolve_key(
     invocation.key.action = action;
     invocation.key.name = if (given == 1) operands[2] else null;
     assert((invocation.key.name != null) == (action != .list));
+}
+
+/// `policy check [OPERAND]`: the one subcommand, and what a run would be of (optional).
+fn resolve_policy(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .policy);
+    if (operands.len == 1) return policy_usage(diag, "'policy' needs a subcommand: check");
+    if (!std.mem.eql(u8, operands[1], "check")) {
+        var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a policy subcommand; the only one is check", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    }
+    if (operands.len > 3) return unexpected_argument(diag, .policy, operands[3]);
+    invocation.command = .policy;
+    invocation.operand = if (operands.len == 3) operands[2] else null;
+}
+
+fn policy_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "policy", .{});
+    diag.fix(.{ .sentence = "see what the policy files say:", .command = "zbx policy check" });
+    return error.MissingArgument;
 }
 
 fn key_usage(diag: *Diag, sentence: []const u8) ParseError {
@@ -2032,6 +2085,11 @@ fn unexpected_fix(diag: *Diag, command: Command) void {
         diag.fix(.{ .sentence = "print the project's lock:", .command = "zbx lock show" });
     } else if (command == .key) {
         diag.fix(.{ .sentence = "name one key at a time:", .command = "zbx key show release" });
+    } else if (command == .policy) {
+        diag.fix(.{
+            .sentence = "check one run at a time:",
+            .command = "zbx policy check alpine:3.20",
+        });
     } else if (command == .sign) {
         diag.fix(.{
             .sentence = "sign one thing at a time:",
@@ -2345,6 +2403,10 @@ pub const Storage = struct {
     sign: sign_commands.Workspace,
     /// The policy gate before a run: the policy files read.
     gate: trust_gate.Memory,
+    /// The tamper check of a run under a policy file (`trust/tamper.zig`).
+    tamper: trust_tamper.Workspace,
+    tamper_on: bool,
+    tamper_always: bool,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
     /// `zbx build`: the build file, its graph and the checks' findings.
@@ -2422,7 +2484,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
         .explain, .bundle, .schema, .stop, .run, .commit => true,
-        .push, .pull, .lock, .logs, .exec, .inspect, .sign => true,
+        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -2482,6 +2544,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .state => return run_state(host, invocation, storage, diag),
         .key => return run_key(host, invocation, diag),
         .sign => return run_sign(host, invocation, storage, diag),
+        .policy => return run_policy(host, invocation, storage, diag),
     }
     return constants.exit_ok;
 }
@@ -2610,6 +2673,11 @@ fn run_exec(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .json = invocation.options.output == .json,
         .warn = .{ .context = &reporter, .call = report_warning },
     };
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    trust_exec.check(host, &storage.gate, record, work, args.name, diag) catch {
+        return error.StartFailed;
+    };
     return exec_commands.run_exec(host, &args, &storage.exec, diag) catch error.StartFailed;
 }
 
@@ -2682,8 +2750,64 @@ fn run_state(
 fn run_sign(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(invocation.command == .sign);
     assert(invocation.sign.operand.len > 0);
-    const output: sign_commands.Output = .{ .json = invocation.options.output == .json };
-    return sign_commands.run(host, &storage.sign, invocation.sign, output, diag) catch
+    const mode = invocation.options.mode();
+    const output: sign_commands.Output = .{
+        .json = invocation.options.output == .json,
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+    };
+    return sign_commands.run_in_namespace(
+        host,
+        &storage.handle.facts,
+        &storage.sign,
+        invocation.sign,
+        output,
+        diag,
+    ) catch return error.CommandFailed;
+}
+
+/// `zbx policy check [OPERAND]`: the policy files, and the verdict on what `run` would run.
+fn run_policy(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .policy);
+    assert(diag.code == null);
+    var prepared: run_image.Prepared = .{
+        .tree = invocation.operand orelse "",
+        .command = &.{},
+        .env = &.{},
+        .workdir = "",
+        .user = null,
+    };
+    var from_result = false;
+    if (invocation.operand) |operand| {
+        if (!is_tree_operand(operand)) {
+            prepare_image(host, invocation, storage, operand, &prepared, diag) catch {
+                return error.CommandFailed;
+            };
+        } else {
+            const ws = &storage.run_image;
+            from_result = run_image.prepare_result(host, ws, operand, &.{}, &prepared, diag) catch {
+                return error.CommandFailed;
+            };
+        }
+    }
+    var digest_text: [constants.store_digest_text_bytes]u8 = undefined;
+    resolve_tree_prefix(host, storage, &prepared, &digest_text, diag) catch {
+        return error.CommandFailed;
+    };
+    var name_buffer: reference_mod.Formatted = undefined;
+    const subject: ?trust_gate.Subject = if (invocation.operand != null)
+        gate_subject_of(invocation, &prepared, from_result, &name_buffer)
+    else
+        null;
+    const record = &storage.sign.record;
+    const work = &storage.sign.record_work;
+    const output: policy_commands.Output = .{ .json = invocation.options.output == .json };
+    return policy_commands.run(host, &storage.gate, record, work, subject, output, diag) catch
         return error.CommandFailed;
 }
 
@@ -2845,10 +2969,21 @@ fn run_container(
         .state = given.state_slice(),
         .mounts = spec_mounts,
         .user_text = prepared.user_text,
+        .binding = binding_of(subject.binding),
     };
     const ran = ran_of(invocation, &prepared);
     if (given.detach) return run_detached(host, invocation, &container, times, storage, &ran, diag);
     return run_foreground(host, invocation, &container, times, storage, &ran, diag);
+}
+
+/// The binding as the run record keeps it (the runtime does not know the trust module).
+fn binding_of(binding: trust_statement.Binding) runtime_spec.Binding {
+    assert(@backingInt(binding) <= 2);
+    return switch (binding) {
+        .none => .none,
+        .result => |bytes| .{ .result = bytes },
+        .manifest => |bytes| .{ .manifest = bytes },
+    };
 }
 
 /// A tree given by a prefix (or bare hex) is resolved to its full digest before the gate, so the
@@ -2928,6 +3063,43 @@ fn check_policy(
     trust_gate.judge_all(host, &storage.gate, record, work, subject, diag) catch {
         return error.StartFailed;
     };
+    // Any policy file at all asks for the tamper check, whatever it requires (the strictest
+    // `verify` of them wins); with none there is no check.
+    storage.tamper_on = storage.gate.count > 0;
+    storage.tamper_always = false;
+    for (storage.gate.files[0..storage.gate.count]) |*loaded| {
+        if (loaded.policy.verify == .always) storage.tamper_always = true;
+    }
+}
+
+/// The check the store's child makes of the tree before it starts, or none.
+fn tree_check_of(storage: *Storage) ?image_mod.Check {
+    assert(@intFromPtr(storage) != 0);
+    assert(storage.gate.count <= constants.policy_files_max);
+    if (!storage.tamper_on) return null;
+    return .{ .context = storage, .call = tamper_call };
+}
+
+fn tamper_call(
+    context: *anyopaque,
+    store: *layout_mod.Store,
+    tree: digest_prefix.Digest,
+    diag: *Diag,
+) bool {
+    const storage: *Storage = @ptrCast(@alignCast(context));
+    assert(storage.tamper_on);
+    assert(tree.bytes.len == constants.store_digest_bytes);
+    assert(storage.gate.count > 0);
+    const sign = &storage.sign;
+    const lent: trust_tamper.Lent = .{
+        .scratch = &sign.verify.scratch,
+        .tree_buffer = &sign.tree_buffer,
+        .stack = &sign.stack,
+    };
+    trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
+        return false;
+    };
+    return true;
 }
 
 /// A run in the foreground: starts the container, waits for it, and reports how it ended.
@@ -2949,6 +3121,7 @@ fn run_foreground(
         .timeout_ms = times.timeout_ms,
         .grace_ms = times.grace_ms,
         .image_workspace = &storage.image,
+        .tree_check = tree_check_of(storage),
         .mirror = true,
     };
     const handle = &storage.handle;
@@ -3230,6 +3403,7 @@ fn supervise(
         .grace_ms = times.grace_ms,
         .detached = true,
         .image_workspace = &storage.image,
+        .tree_check = tree_check_of(storage),
     };
     var diag: Diag = undefined;
     diag.reset();
@@ -3881,6 +4055,7 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "inspect", .text = @embedFile("testdata/schema_inspect.stdout.txt") },
         .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
         .{ .topic = "sign", .text = @embedFile("testdata/schema_sign.stdout.txt") },
+        .{ .topic = "policy", .text = @embedFile("testdata/schema_policy.stdout.txt") },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };
@@ -4646,6 +4821,35 @@ test "run: a policy that requires a signature refuses a directory before anythin
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0905") != null);
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
     try testing.expect(sim.world.bus.scope_started == null);
+}
+
+test "run: any policy file with verify always makes the tamper check hash every object" {
+    // Goal: the strictest `verify` of the policy files wins. Method: a system file that says
+    // `cached` asks for the check but not for a full hash; adding a user file that says
+    // `always` turns the full hash on, whichever file is read first.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    policy_files.init(1);
+    sim.store_fs = &policy_files;
+    policy_files.put_dir("/etc", 0o755);
+    policy_files.put_dir("/etc/zbx", 0o755);
+    policy_files.put_dir("/home", 0o755);
+    policy_files.put_dir("/home/alice", 0o755);
+    policy_files.put_dir("/home/alice/.config", 0o755);
+    policy_files.put_dir("/home/alice/.config/zbx", 0o700);
+    const cached = ".{ .version = 1, .verify = \"cached\" }";
+    const always = ".{ .version = 1, .verify = \"always\" }";
+    policy_files.put_file(constants.policy_system_path, 0o644, cached);
+    const directory: trust_gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
+    var diag: Diag = undefined;
+    diag.reset();
+    try check_policy(sim.interface(), &shared_storage, directory, &diag);
+    try testing.expect(shared_storage.tamper_on);
+    try testing.expect(!shared_storage.tamper_always);
+    policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, always);
+    try check_policy(sim.interface(), &shared_storage, directory, &diag);
+    try testing.expect(shared_storage.tamper_on);
+    try testing.expect(shared_storage.tamper_always);
 }
 
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };

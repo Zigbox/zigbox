@@ -17,6 +17,13 @@ const verdict = @import("verdict.zig");
 
 const path_echo_bytes = constants.store_path_bytes_max;
 
+/// A name, `@sha256:` and 64 digits, or `b3:` and 64 digits, with room for the name.
+const digest_echo_bytes = 256;
+
+comptime {
+    assert(digest_echo_bytes >= constants.oci_digest_text_bytes + 128);
+}
+
 fn echo_of(storage: []u8, text: []const u8) []const u8 {
     assert(storage.len >= constants.arg_echo_bytes_max);
     return text_util.sanitise(storage, text);
@@ -287,6 +294,78 @@ pub const Refusal = enum {
     store_full,
 };
 
+/// What differs in the file the tamper check found.
+const too_large_fix = std.fmt.comptimePrint(
+    "zbx checks at most {d} files, directories and links in an image, and only so many " ++
+        "directories side by side; run a smaller image, or one that is less wide",
+    .{constants.store_walk_entries_max},
+);
+
+const farm_fix = "remove the image's directory under cache/ in the data directory (named by its " ++
+    "digest) and run again; zbx builds it afresh from the checked files";
+
+pub const Tampered = enum { bytes, mode, owner, missing, unreadable, too_large, farm };
+
+/// ZBX-E0907: a file object of the tree to run no longer matches its name. `path` is the file's
+/// path in the image (empty if it was not found), `object` the object's hex id.
+pub fn tampered(
+    diag: *Diag,
+    path: []const u8,
+    object: []const u8,
+    what: Tampered,
+    errno: u16,
+) void {
+    assert(diag.code == null);
+    assert(errno < 4096);
+    assert(object.len > 0);
+    var path_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const path_echo = echo_of(&path_storage, if (path.len > 0) path else "(unnamed)");
+    const short = object[0..@min(object.len, 12)];
+    diag.raise(.E0907);
+    diag.while_("checking the files of the image before running it", .{});
+    switch (what) {
+        .bytes => diag.cause(
+            "{s} (object {s}) has bytes that are not the image's",
+            .{ path_echo, short },
+        ),
+        .mode => diag.cause(
+            "{s} (object {s}) has a mode that is not the image's",
+            .{ path_echo, short },
+        ),
+        .owner => diag.cause(
+            "{s} (object {s}) has an owner that is not the image's",
+            .{ path_echo, short },
+        ),
+        .too_large => diag.cause(
+            "the image has more files or nested directories than zbx checks",
+            .{},
+        ),
+        .farm => diag.cause(
+            "{s} in the image's materialized directory is not the image's",
+            .{path_echo},
+        ),
+        .missing => diag.cause("{s} (object {s}) is missing from the store", .{ path_echo, short }),
+        .unreadable => if (errno == 0) {
+            diag.cause("{s} (object {s}) could not be read", .{ path_echo, short });
+        } else {
+            const err = host_mod.error_for_errno(errno);
+            errors.cause_host_error(diag, "reading a file of the image", err, errno);
+        },
+    }
+    diag.context("path", "{s}", .{path_echo});
+    diag.context("object", "{s}", .{short});
+    switch (what) {
+        .too_large => diag.fix(.{ .sentence = too_large_fix }),
+        .farm => diag.fix(.{ .sentence = farm_fix }),
+        else => diag.fix(.{
+            .sentence = "remove the damaged tree and pull or build it again; " ++
+                "this shows the damage:",
+            .command = "zbx store verify",
+        }),
+    }
+    assert(diag.code.? == .E0907);
+}
+
 /// ZBX-E0910: signing was refused, and nothing was written. `operand` is what was named.
 pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u16) void {
     assert(diag.code == null);
@@ -464,7 +543,7 @@ pub fn policy_unusable(diag: *Diag, path: []const u8, system: bool, fault: Polic
     assert(diag.code.? == .E0904);
 }
 
-fn reason_text(reason: verdict.Reason) []const u8 {
+pub fn reason_text(reason: verdict.Reason) []const u8 {
     return switch (reason) {
         .counts => "it counts",
         .malformed => "it is not a statement this zbx can read",
@@ -491,6 +570,8 @@ pub const Unsigned = struct {
     policy: *const policy_mod.Policy,
     /// The run has no tree to sign (a directory given as `--rootfs`).
     no_tree: bool,
+    /// The build step whose base was judged; empty for a run.
+    step: []const u8 = "",
 };
 
 /// ZBX-E0905: a run is refused because no trusted signature covers it.
@@ -503,7 +584,13 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
     const digest = echo_of(&digest_storage, what.digest);
     const path = echo_of(&path_storage, what.policy_path);
     diag.raise(.E0905);
-    if (what.no_tree) {
+    if (what.step.len > 0) {
+        var step_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const step = echo_of(&step_storage, what.step);
+        diag.while_("checking the base of step '{s}', {s}, against the policy {s}", .{
+            step, digest, path,
+        });
+    } else if (what.no_tree) {
         diag.while_("checking the directory run against the policy {s}", .{path});
     } else {
         diag.while_("checking {s} against the policy {s}", .{ digest, path });

@@ -3,6 +3,11 @@
 //! Every blob must also hash to its own file name, and the layer must read back with the guest's
 //! own `tar` and `gzip`, which are not ours. This is the slice's check, not the M8 demo, which
 //! needs the registry upload (slice 11). `zig build demo-m8`, or `-Daccel=tcg`.
+//!
+//! The SIGN part (slice 3): as `demo`, with a store and a config directory of its own, a key
+//! sealed by a passphrase file signs a pulled `alpine`; under `require_signature` the signed
+//! tree runs, an unsigned one is refused (E0905), and a changed object of the signed tree is
+//! refused (E0907) until it is put back.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,6 +20,9 @@ const H = harness;
 const script_path = "/root/m8-export.sh";
 const marker = "m8-export: identical";
 const timeout_s: u32 = 300;
+const sign_script_path = "/tmp/m8-sign.sh";
+const sign_marker = "m8-sign: refused, then run again";
+const sign_timeout_s: u32 = 900;
 
 /// The whole check, as one script: it prints `marker` as its last line when every step held.
 const script = body ++ "\necho '" ++ marker ++ "'\n";
@@ -47,6 +55,37 @@ const body =
     \\for f in blobs/sha256/*; do
     \\  if gzip -t "$f" 2>/dev/null; then tar -tvzf "$f"; fi
     \\done
+    \\true
+;
+
+/// The SIGN part's script, run as `demo` with `XDG_DATA_HOME` and `XDG_CONFIG_HOME` of its own,
+/// so that the other parts' store and policy are not touched. It prints `sign_marker` last.
+const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
+
+const sign_body =
+    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=$HOME/d XDG_CONFIG_HOME=$HOME/c
+    \\Z=/usr/local/bin/zbx
+    \\cd
+    \\f() { echo "FAIL: $*"; exit 1; }
+    \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME $XDG_CONFIG_HOME/zbx
+    \\echo 'correct horse' > ~/pw; chmod 600 ~/pw
+    \\$Z key new demo --passphrase-file ~/pw || f key
+    \\T=$($Z --output json pull alpine:3.20 | sed -n 's/.*"tree":"\(b3:[0-9a-f]*\)".*/\1/p')
+    \\P=$($Z --output json key show demo | sed -n 's/.*"public":"\([^"]*\)".*/\1/p')
+    \\[ -n "$T" ] && [ -n "$P" ] || f "tree or key"
+    \\Q=$XDG_CONFIG_HOME/zbx/policy.zon
+    \\echo ".{ .version = 1, .keys = .{ .{ .name = \"demo\", .public = \"$P\" } }," > $Q
+    \\echo ".require_signature = true }" >> $Q
+    \\$Z run $T -- true 2> /tmp/e1; [ $? = 125 ] || f "unsigned ran"
+    \\grep -m1 'E0905' /tmp/e1 || f "no E0905"
+    \\$Z sign $T --passphrase-file ~/pw || f sign
+    \\$Z run $T -- true || f "signed did not run"
+    \\O=$(find $XDG_DATA_HOME -path '*/objects/*' -type f ! -name '*.chunks' -size +2k | head -n 1)
+    \\M=$(stat -c %a $O); chmod u+w $O; printf x >> $O
+    \\$Z run $T -- true 2> /tmp/e2; [ $? = 125 ] || f "changed ran"
+    \\grep -m1 'E0907' /tmp/e2 || f "no E0907"
+    \\truncate -s -1 $O; chmod $M $O; $Z run $T -- true || f "put back"
+    \\rm -rf $XDG_CONFIG_HOME
     \\true
 ;
 
@@ -90,6 +129,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try export_check(&session, out);
+    try sign_check(&session, out);
     try session.shutdown();
 }
 
@@ -106,6 +146,20 @@ fn export_check(session: *Session, out: *Io.Writer) !void {
     try H.show(out, "export as two users", result);
     if (result.status != 0) return error.ExportCheckFailed;
     if (std.mem.indexOf(u8, result.output, marker) == null) return error.ExportCheckFailed;
+}
+
+fn sign_check(session: *Session, out: *Io.Writer) !void {
+    try session.put_file(sign_script_path, sign_script);
+    const command = H.as_demo ++ "sh " ++ sign_script_path ++ " 2>&1";
+    const result = try session.run(command, sign_timeout_s);
+    try H.show(out, "sign, run under a policy, change an object", result);
+    if (result.status != 0) return error.SignCheckFailed;
+    if (std.mem.indexOf(u8, result.output, sign_marker) == null) return error.SignCheckFailed;
+}
+
+test "the sign script ends with its marker and fits a put_file" {
+    try std.testing.expect(std.mem.endsWith(u8, sign_script, sign_marker ++ "'\n"));
+    try std.testing.expect(sign_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
 }
 
 test "the script ends with the marker the check looks for" {

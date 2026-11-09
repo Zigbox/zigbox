@@ -198,6 +198,7 @@ pub const Code = enum(u8) {
     E0903,
     E0904,
     E0905,
+    E0907,
     E0910,
     E0911,
     E1001,
@@ -3024,8 +3025,8 @@ pub const registry = [_]Entry{
         .explanation =
         \\A policy file says which keys you trust and what a run must have. zbx reads
         \\/etc/zbx/policy.zon and ~/.config/zbx/policy.zon (or $XDG_CONFIG_HOME/zbx/
-        \\policy.zon) before every "zbx run", and every file that exists must be a
-        \\policy: a file that is not is refused and nothing runs,
+        \\policy.zon) before every run, exec and build step, and every file that
+        \\exists must be a policy: a file that is not is refused and nothing runs,
         \\because a policy that cannot be read must not be taken for "no rules".
         \\
         \\A policy is a restricted ZON file:
@@ -3045,7 +3046,8 @@ pub const registry = [_]Entry{
         \\"chmod 644 /etc/zbx/policy.zon" put it right.
         \\
         \\The cause gives the line and column and what was expected there. Correct
-        \\the file, or remove it (the system file: ask the administrator).
+        \\the file, or remove it (the system file: ask the administrator). "zbx
+        \\policy check" reads the policy files and runs nothing.
         ,
     },
     .{
@@ -3066,9 +3068,47 @@ pub const registry = [_]Entry{
         \\present and the first reason it does not count.
         \\
         \\Sign it with a key the policy lists ("zbx sign <digest>"), or add the key
-        \\that signed it to the policy file the cause names. A directory given as
-        \\--rootfs has no tree and cannot be signed, so a policy that requires a
-        \\signature refuses it.
+        \\that signed it to the policy file the cause names. "zbx policy check
+        \\<digest>" shows the same verdict without running anything. A directory
+        \\given as --rootfs has no tree and cannot be signed, so a policy that
+        \\requires a signature refuses it.
+        ,
+    },
+    .{
+        .code = .E0907,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "a file of the image in the store was changed",
+        .explanation =
+        \\Before it starts anything, a run under a policy file checks that the
+        \\files of its image are the ones the image names: every file object the
+        \\tree reaches is hashed again, its bytes, mode, owner and attributes, and
+        \\compared with its name. A signature vouches for a tree's digest, so it
+        \\means something only if the files in the store still match it. Nothing
+        \\was started.
+        \\
+        \\The cause names the first file that differs, by its path in the image, and
+        \\says what differs: its bytes, its mode or its owner. The first checked run
+        \\of a tree hashes all of it and records what it saw in trust/verified in
+        \\the store; later runs look at each file's inode, size and change time and
+        \\hash again only a file that changed. The record is a cache, never trusted:
+        \\a damaged one is ignored and rewritten. verify = "always" in the policy
+        \\file hashes every file every run. A run with no policy file does no check.
+        \\
+        \\The check also compares the image's materialized directory, under cache/
+        \\in the data directory, with the tree: each file must be the same inode as
+        \\its object, and each directory and link must have the mode, owner and
+        \\target the tree gives, with no entry added or missing. Extended
+        \\attributes and times of directories and links are not compared. Such a
+        \\difference is refused and never repaired, as the directory may be in use
+        \\by a running container. A tree with more files, directories and links than
+        \\zbx checks (or too many directories side by side) is refused too: run a
+        \\smaller image.
+        \\
+        \\Run "zbx store verify" to see everything that is damaged, then remove the
+        \\damaged tree and pull or build it again; for a changed materialized
+        \\directory, remove it under cache/ and run again. A file changed between
+        \\the check and the start of the container is not seen.
         ,
     },
     .{

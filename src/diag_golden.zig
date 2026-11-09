@@ -131,7 +131,7 @@ fn prepare_disk_full(sim: *HostSim) void {
 fn prepare_records_unreadable(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.add_node(sim_run.runs_path, .dir);
-    const future = ".{\n    .version = 9,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage") == null);
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     for (0..constants.runs_max - 1) |number| {
@@ -719,6 +719,7 @@ const key_cases = [_]Case{
     .{ .code = .E0903, .args = &.{}, .direct = record_damaged, .exit = 1 },
     .{ .code = .E0904, .args = &.{}, .direct = policy_unreadable, .exit = 1 },
     .{ .code = .E0905, .args = &.{}, .direct = run_unsigned, .exit = 1 },
+    .{ .code = .E0907, .args = &.{}, .direct = run_tampered, .exit = 2 },
     .{ .code = .E0910, .args = &.{}, .direct = sign_refused_missing, .exit = 1 },
     .{ .code = .E0911, .args = &key_new_args, .prepare = prepare_keys_none, .exit = 1 },
 };
@@ -749,6 +750,10 @@ fn policy_unreadable(diag: *Diag) void {
     } };
     @memcpy(fault.problem.detail[0..5], "extra");
     trust_diagnose.policy_unusable(diag, golden_policy_path, false, fault);
+}
+
+fn run_tampered(diag: *Diag) void {
+    trust_diagnose.tampered(diag, "/usr/bin/tool", "0123456789abcdef0123", .bytes, 0);
 }
 
 fn run_unsigned(diag: *Diag) void {
