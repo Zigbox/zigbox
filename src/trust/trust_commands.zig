@@ -207,7 +207,9 @@ fn read_bundle(job: *Job, operand: []const u8) Error![]const u8 {
     var cwd: [constants.store_path_bytes_max]u8 = undefined;
     var path: PathBuf = undefined;
     const set = if (operand[0] == '/') path.set(&.{operand}) else blk: {
-        const base = job.host.working_directory(&cwd) catch "";
+        const base = job.host.working_directory(&cwd) catch |err| {
+            return source_unreadable(job, operand, err, job.host.last_errno());
+        };
         break :blk path.set(&.{ base, "/", operand });
     };
     set catch return source_unreadable(job, operand, error.PathTooLong, 0);
@@ -338,9 +340,9 @@ fn write_summary(
 ) std.Io.Writer.Error!void {
     if (as_json) {
         try writer.print(
-            "{{\"schema\":\"zbx.trust-prune/1\",\"apply\":{},\"orphans\":{d},\"damaged\":{d}," ++
+            "{{\"schema\":\"zbx.trust-prune/1\",\"dry_run\":{},\"orphans\":{d},\"damaged\":{d}," ++
                 "\"removed\":{d},\"truncated\":{},\"entries\":[]}}\n",
-            .{ apply, report.orphans, report.damaged, report.removed, report.truncated },
+            .{ !apply, report.orphans, report.damaged, report.removed, report.truncated },
         );
         return;
     }
@@ -351,7 +353,8 @@ fn write_summary(
     if (apply) try writer.print("; removed {d}", .{report.removed});
     try writer.writeAll("\n");
     if (!apply and report.orphans > 0) {
-        try writer.writeAll("run 'zbx trust prune --apply' to remove them\n");
+        try writer.writeAll("run 'zbx trust prune --apply' to remove them; to keep a record " ++
+            "outside the store first, run 'zbx trust export <tree>'\n");
     }
 }
 
@@ -376,9 +379,9 @@ fn write_pruned_json(
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
     try writer.print(
-        "{{\"schema\":\"zbx.trust-prune/1\",\"apply\":{},\"orphans\":{d},\"damaged\":{d}," ++
+        "{{\"schema\":\"zbx.trust-prune/1\",\"dry_run\":{},\"orphans\":{d},\"damaged\":{d}," ++
             "\"removed\":{d},\"truncated\":{},\"entries\":[",
-        .{ apply, report.orphans, report.damaged, report.removed, report.truncated },
+        .{ !apply, report.orphans, report.damaged, report.removed, report.truncated },
     );
     for (report.list(), 0..) |entry, at| {
         const text = entry.digest.text();

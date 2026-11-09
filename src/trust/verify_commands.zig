@@ -351,15 +351,18 @@ fn read_keys(job: *Job) Error!void {
     job.explicit.count += 1;
 }
 
-/// Whether `public` is trusted: named on the command line, or listed by every policy file there
-/// is (and there is at least one).
+/// Whether `public` is trusted: listed by every policy file there is, so that verify agrees with
+/// what `zbx run` would accept; only with no policy file at all do `--key` and `--public` name
+/// the key to trust (docs/decisions/2026-11-09-verify-policy-decides.md).
 fn trusted(job: *const Job, public: *const [constants.key_public_bytes]u8) bool {
     assert(job.explicit.count <= job.explicit.keys.len);
-    for (job.explicit.keys[0..job.explicit.count]) |named| {
-        if (std.mem.eql(u8, &named, public)) return true;
-    }
     const policies = &job.ws.policies;
-    if (policies.count == 0) return false;
+    if (policies.count == 0) {
+        for (job.explicit.keys[0..job.explicit.count]) |named| {
+            if (std.mem.eql(u8, &named, public)) return true;
+        }
+        return false;
+    }
     for (policies.files[0..policies.count]) |*loaded| {
         if (loaded.policy.trusted(public) == null) return false;
     }
@@ -454,7 +457,7 @@ fn link_tree(job: *Job) Error!void {
 fn link_provenance(job: *Job) Error!bool {
     const ws = job.ws;
     var index: u32 = 0;
-    var other = false;
+    var other: ?Digest = null; // The result the last trusted provenance of this tree is about.
     while (index < ws.record.count) : (index += 1) {
         const envelope = dsse.parse(&ws.dsse, ws.record.line(index)) catch continue;
         if (!trusted(job, &envelope.public)) continue;
@@ -464,15 +467,18 @@ fn link_provenance(job: *Job) Error!bool {
         const about = std.mem.eql(u8, &ws.signed.tree, &job.tree.bytes) and
             (job.result == null or std.mem.eql(u8, &ws.signed.result, &job.result.?.bytes));
         if (!about) {
-            other = true;
+            other = .{ .bytes = ws.signed.result };
             continue;
         }
         try compare_stored(job, envelope.payload);
         ws.report.set(.provenance, .ok);
         return true;
     }
-    if (other) return broken(job, .provenance, .provenance_other, "", 0);
-    if (job.args.require_provenance) return broken(job, .provenance, .no_provenance, "", 0);
+    if (job.args.require_provenance) {
+        const named = other orelse return broken(job, .provenance, .no_provenance, "", 0);
+        const text = named.text();
+        return broken(job, .provenance, .provenance_other, &text, 0);
+    }
     ws.report.set(.provenance, .skipped);
     ws.report.set(.inputs, .skipped);
     ws.report.set(.build_file, .skipped);
@@ -598,6 +604,7 @@ fn link_build_file(job: *Job) Error!void {
     var cwd: [constants.store_path_bytes_max]u8 = undefined;
     const base = job.host.working_directory(&cwd) catch "";
     var path: PathBuf = undefined;
+    var have_path = false; // `path` is set only when the project's directory was read and fits.
     const named = ws.signed.build_file_text();
     ws.report.build_file = if (base.len == 0) .skipped else blk: {
         const parts: []const []const u8 = if (named.len > 0 and named[0] == '/')
@@ -605,12 +612,13 @@ fn link_build_file(job: *Job) Error!void {
         else
             &.{ base, "/", named };
         path.set(parts) catch break :blk .skipped;
+        have_path = true;
         break :blk file_status(job, path.text(), ws.signed.build_file_digest);
     };
     if (ws.report.build_file == .failed) {
         return broken(job, .build_file, .build_file_changed, "the build file", 0);
     }
-    ws.report.lock = try check_lock(job, path.text());
+    ws.report.lock = if (have_path) check_lock(job, path.text()) else .skipped;
     if (ws.report.lock == .failed) {
         return broken(job, .build_file, .build_file_changed, "zbx.lock", 0);
     }
@@ -619,7 +627,7 @@ fn link_build_file(job: *Job) Error!void {
 }
 
 /// The lock's status; it lies beside the build file.
-fn check_lock(job: *Job, build_path: []const u8) Error!Status {
+fn check_lock(job: *const Job, build_path: []const u8) Status {
     const wanted = job.ws.signed.lock orelse return .skipped;
     const slash = std.mem.lastIndexOfScalar(u8, build_path, '/') orelse return .skipped;
     var path: PathBuf = undefined;

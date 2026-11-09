@@ -14,6 +14,7 @@ const result = @import("../build/result.zig");
 const sim_run = @import("../runtime/sim_run.zig");
 const fs_mod = @import("../store/fs.zig");
 const peer = @import("peer.zig");
+const provenance = @import("provenance.zig");
 const provenance_store = @import("provenance_store.zig");
 const record = @import("record.zig");
 const sign_commands = @import("sign_commands.zig");
@@ -292,4 +293,91 @@ test "prune reads at most the bound per directory and says so" {
     try peer.scan_limited(&store, &scanned, null, &report, limit, &failure);
     try testing.expect(report.truncated);
     try testing.expectEqual(limit, report.orphans + report.kept);
+}
+
+var provenance_record: provenance.Record = undefined;
+var provenance_bytes: [constants.statement_bytes_max]u8 = undefined;
+
+/// A result of `committed`, told from the others of it by `index`.
+fn save_labeled_result(committed: Digest, index: u32) !Digest {
+    var saved: result.Record = undefined;
+    saved.config.clear();
+    var label: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&label, "r{d}", .{index}) catch unreachable; // Short.
+    _ = saved.config.add_label("label", text).?;
+    saved.tree = committed;
+    var made: result.Failure = undefined;
+    return try result.save(&store, &saved, save_buffer, &made);
+}
+
+/// A provenance record a reader accepts, stored under `digest`.
+fn put_sound_provenance(digest: Digest, committed: Digest) !void {
+    const filled: provenance.Digest = @splat(0x5a);
+    const made = &provenance_record;
+    made.clear();
+    made.tree = committed.bytes;
+    made.result = digest.bytes;
+    made.set_build_file("zbx.build.zon");
+    made.build_file_digest = filled;
+    made.set_version("0.4.0", "linux/amd64");
+    made.image_key = filled;
+    made.zbx = filled;
+    const bytes = provenance.render(&provenance_bytes, made);
+    var saving: fs_mod.Failure = undefined;
+    try provenance_store.save(&store, digest, bytes, &saving);
+}
+
+/// One record of a random store, and whether the rules keep it.
+const Planned = struct { kind: peer.Kind, digest: Digest, keeps: bool };
+
+test "over random stores, prune removes exactly the records whose tree is gone, and only with apply" {
+    // Goal: the brief's property. Method: 48 seeds; each store gets signature records of present
+    // and absent trees, and provenance records (sound or damaged) of results that are present with
+    // a present tree, present with an absent tree, or not there. Prune without apply changes
+    // nothing and counts the orphans the rules name; with apply it removes exactly those.
+    var seed: u64 = 0;
+    while (seed < 48) : (seed += 1) {
+        _ = try start();
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+        var plan: [16]Planned = undefined;
+        var count: u32 = 0;
+        var orphans: u32 = 0;
+        const total = 1 + random.uintLessThan(u32, 12);
+        while (count < total) : (count += 1) {
+            const at: u8 = @intCast(count);
+            if (random.boolean()) {
+                // A signature record of an absent tree: a sound one needs the tree, so junk.
+                const digest = stray(100 + at);
+                put_junk(.signature, digest);
+                plan[count] = .{ .kind = .signature, .digest = digest, .keeps = false };
+                orphans += 1;
+                continue;
+            }
+            const where = random.uintLessThan(u32, 3);
+            const committed = if (where == 0) tree else stray(150 + at);
+            const digest = if (where == 2) stray(200 + at) else try save_labeled_result(committed, at);
+            const keeps = where == 0;
+            if (random.boolean()) {
+                try put_sound_provenance(digest, committed);
+            } else {
+                put_junk(.provenance, digest);
+            }
+            plan[count] = .{ .kind = .provenance, .digest = digest, .keeps = keeps };
+            if (!keeps) orphans += 1;
+        }
+        const before = files.live_count();
+        try prune(false);
+        try testing.expectEqual(before, files.live_count());
+        try testing.expectEqual(orphans, report.orphans);
+        try testing.expectEqual(@as(u32, 0), report.removed);
+        try prune(true);
+        try testing.expectEqual(orphans, report.removed);
+        for (plan[0..count]) |planned| {
+            try testing.expectEqual(planned.keeps, exists(planned.kind, planned.digest));
+        }
+        try testing.expect(exists(.signature, tree));
+        try prune(true);
+        try testing.expectEqual(@as(u32, 0), report.orphans);
+    }
 }
