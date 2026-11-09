@@ -78,6 +78,19 @@ pub const Logged = struct {
     method: net.Method,
     /// The bytes of an upload body the request carried.
     sent: u64,
+    /// The length of an `Authorization` value that was neither bearer nor basic (a SigV4
+    /// signature), the extra headers the request carried, how many of them were secret, and
+    /// whether it was allowed to use a proxy.
+    authorization_len: u32,
+    extra_headers: u8,
+    secret_headers: u8,
+    proxy: net.ProxyUse,
+
+    /// Whether any credential went with the request, of any kind.
+    pub fn credential_sent(entry: *const Logged) bool {
+        return entry.bearer_len > 0 or entry.basic_len > 0 or entry.authorization_len > 0 or
+            entry.secret_headers > 0;
+    }
 
     pub fn target_text(entry: *const Logged) []const u8 {
         return entry.target[0..entry.target_len];
@@ -168,6 +181,13 @@ pub const SimNet = struct {
         entry.range_from = request.range_from;
         entry.method = request.method;
         entry.sent = if (request.body) |body| body.length else 0;
+        entry.authorization_len = @intCast(request.authorization.len);
+        entry.extra_headers = @intCast(request.extra_headers.len);
+        entry.secret_headers = 0;
+        for (request.extra_headers) |header| {
+            if (header.secret) entry.secret_headers += 1;
+        }
+        entry.proxy = request.proxy;
     }
 
     fn injected(sim: *SimNet, index: u32) ?net.Error {

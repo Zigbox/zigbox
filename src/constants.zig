@@ -730,6 +730,53 @@ pub const registry_platforms_listed_max: u32 = 8;
 /// A proxy URL from the environment, and a NO_PROXY list.
 pub const net_proxy_url_bytes_max: u32 = 512;
 pub const net_no_proxy_bytes_max: u32 = 2048;
+/// Extra request headers a call may carry (the AWS calls: a signature, a date, a target, a
+/// session token, the instance metadata token), and the room one header's value gets (a session
+/// token is the longest).
+pub const net_extra_headers_max: u32 = 8;
+pub const net_header_value_bytes_max: u32 = 8 * 1024;
+
+// ---- AWS (M6c): credentials, SigV4, ECR ----------------------------------------------------
+/// An access key id (AWS says 16 to 128 characters), a secret access key, a session token (they
+/// run to a few KiB), and the account digits of an ECR registry host.
+pub const aws_key_id_bytes_max: u32 = 128;
+pub const aws_secret_key_bytes_max: u32 = 128;
+pub const aws_session_token_bytes_max: u32 = 8 * 1024;
+pub const aws_account_digits: u32 = 12;
+/// A region name (`ap-southeast-4`), a role ARN, a role session name (STS allows 2 to 64), and
+/// the service name a signature is scoped to.
+pub const aws_region_bytes_max: u32 = 24;
+pub const aws_service_bytes_max: u32 = 16;
+pub const aws_role_arn_bytes_max: u32 = 2048;
+pub const aws_role_session_name_bytes_max: u32 = 64;
+/// The web identity token file (STS takes up to 20000 characters; a JWT from GitHub or EKS is
+/// 1 to 2 KiB), and the form body that carries it to STS.
+pub const aws_web_identity_token_bytes_max: u32 = 16 * 1024;
+pub const aws_request_body_bytes_max: u32 = 32 * 1024;
+/// What STS, IMDS or ECR answers: a credentials document is 1 to 4 KiB, an error a few hundred
+/// bytes.
+pub const aws_response_bytes_max: u32 = 24 * 1024;
+/// The ECR `authorizationToken` (base64 of `AWS:` and a password about 1.1 KiB long).
+pub const aws_ecr_token_bytes_max: u32 = 4 * 1024;
+/// IMDS: how long a wait for the link-local address may take (a host off EC2 must not be
+/// slowed), the whole exchange, the session token's lifetime we ask for, the token it returns,
+/// and a role name.
+pub const aws_imds_timeout_ms: u32 = 1_000;
+pub const aws_imds_total_timeout_ms: u32 = 3_000;
+pub const aws_imds_token_ttl_s: u32 = 60;
+pub const aws_imds_token_bytes_max: u32 = 256;
+pub const aws_role_name_bytes_max: u32 = 128;
+/// Credentials that expire within this many seconds are refused as already expired.
+pub const aws_credentials_margin_s: u32 = 60;
+/// SigV4: the canonical request, the headers a signature covers, and the `Authorization` value.
+pub const aws_canonical_bytes_max: u32 = 16 * 1024;
+/// The most query parameters a signed target may carry.
+pub const aws_query_params_max = 16;
+pub const aws_signed_headers_max: u32 = 12;
+pub const aws_authorization_bytes_max: u32 = 1024;
+/// An AWS error's code name (`AccessDeniedException`), the only part of an error response a
+/// diagnostic may carry.
+pub const aws_error_code_bytes_max: u32 = 64;
 /// The CA certificates of the system, parsed once per process: the room for the bundle.
 pub const net_ca_arena_bytes: u32 = 2 * 1024 * 1024;
 /// The JSON result of a resolve: 128 layers of about 150 bytes, and the rest.
@@ -1346,6 +1393,29 @@ comptime {
     assert(registry_json_arena_bytes < registry_manifest_bytes_max);
     assert(registry_redirects_max > 0);
     assert(net_idle_timeout_ms < net_request_timeout_ms);
+    assert(net_extra_headers_max > 0);
+    // A request head holds a session token, a signature, the longest path and the fixed headers.
+    assert(net_header_value_bytes_max + aws_authorization_bytes_max + registry_url_bytes_max +
+        2048 <= registry_request_head_bytes_max);
+    assert(aws_session_token_bytes_max <= net_header_value_bytes_max);
+    assert(aws_authorization_bytes_max <= net_header_value_bytes_max);
+    assert(aws_account_digits == 12);
+    assert(aws_session_token_bytes_max * 2 <= aws_response_bytes_max);
+    assert(aws_ecr_token_bytes_max * 2 <= aws_response_bytes_max);
+    // The form that asks STS for credentials: the token file, a role ARN and a session name with
+    // every byte escaped, and the fixed words.
+    assert(aws_web_identity_token_bytes_max + aws_role_arn_bytes_max * 3 +
+        aws_role_session_name_bytes_max * 3 + 256 <= aws_request_body_bytes_max);
+    assert(aws_request_body_bytes_max <= push_chunk_bytes);
+    assert(aws_imds_timeout_ms < aws_imds_total_timeout_ms);
+    assert(aws_imds_total_timeout_ms < net_idle_timeout_ms);
+    assert(aws_imds_token_bytes_max <= net_header_value_bytes_max);
+    assert(aws_canonical_bytes_max >= aws_signed_headers_max * 128 + registry_url_bytes_max);
+    // The `Authorization` value: the scheme, the credential scope, the header list, 64 hex.
+    assert(aws_authorization_bytes_max >= 64 + aws_key_id_bytes_max + 80 +
+        aws_region_bytes_max + aws_service_bytes_max + aws_signed_headers_max * 24);
+    assert(aws_region_bytes_max + 16 <= 253);
+    assert(aws_error_code_bytes_max < aws_response_bytes_max);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
     // The last record of a report (a failure or a result) always fits, after the warnings.

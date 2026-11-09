@@ -12,7 +12,9 @@
 //! at `body_bytes_max`, refuses a head larger than the bound, and reports a body that ends before
 //! its declared length as `Truncated`.
 //!
-//! A bearer token is passed in and sent, and never stored, returned or put in an error.
+//! A bearer token is passed in and sent, and never stored, returned or put in an error. The same
+//! holds for every `secret` header (`Request.extra_headers`: an AWS signature or session token,
+//! the instance metadata token).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -94,11 +96,80 @@ pub const Source = struct {
     read: *const fn (context: *anyopaque, buffer: []u8) Read,
 };
 
+/// A body that is a slice already in memory (the AWS calls: a form, `{}`), read out in pieces.
+pub const SliceSource = struct {
+    bytes: []const u8,
+    at: u32 = 0,
+
+    pub fn body(self: *SliceSource) Body {
+        assert(self.at == 0);
+        assert(self.bytes.len <= constants.push_chunk_bytes);
+        return .{
+            .length = self.bytes.len,
+            .source = .{ .context = self, .read = read },
+        };
+    }
+
+    fn read(context: *anyopaque, buffer: []u8) Read {
+        const self: *SliceSource = @ptrCast(@alignCast(context));
+        assert(self.at <= self.bytes.len);
+        const count = @min(buffer.len, self.bytes.len - self.at);
+        @memcpy(buffer[0..count], self.bytes[self.at..][0..count]);
+        self.at += @intCast(count);
+        return count;
+    }
+};
+
 /// A request body: exactly `length` bytes from `source`. A source that runs dry early, or has
 /// more, fails the call with `SourceFailed`.
 pub const Body = struct {
     length: u64,
     source: Source,
+};
+
+/// One more request header, for a call that needs more than the fixed ones (a SigV4 signature,
+/// `X-Amz-Target`, a session token). The name is a token and the value has no control byte
+/// (`valid`): a value that came off the wire is checked by whoever passes it in, because a
+/// header is the one place a stray line break turns into a second request.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+    /// The value is a credential: the real network zeroes every buffer it passed through, and
+    /// nothing logs it.
+    secret: bool = false,
+
+    /// Whether this header may be sent. The names the network writes itself are refused.
+    pub fn valid(header: Header) bool {
+        if (header.name.len == 0) return false;
+        if (header.value.len > constants.net_header_value_bytes_max) return false;
+        for (header.name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
+        }
+        for (header.value) |byte| {
+            if (byte < 0x20 and byte != '\t') return false;
+            if (byte == 0x7f) return false;
+        }
+        for (reserved_header_names) |reserved| {
+            if (std.ascii.eqlIgnoreCase(header.name, reserved)) return false;
+        }
+        return true;
+    }
+};
+
+/// Headers the network writes itself, so an extra one never doubles or overrides them.
+const reserved_header_names = [_][]const u8{
+    "host",       "content-length",  "connection",    "transfer-encoding",
+    "user-agent", "accept",          "content-type",  "content-range",
+    "range",      "accept-encoding", "authorization",
+};
+
+/// Whether a request goes through `HTTPS_PROXY` when the environment names one.
+pub const ProxyUse = enum {
+    /// As every registry call does: the environment decides (`NO_PROXY` too).
+    environment,
+    /// Never, whatever the environment says. For the instance metadata address, which is
+    /// link-local: a proxy cannot reach it, and a credential must not be sent to one.
+    never,
 };
 
 pub const Request = struct {
@@ -131,6 +202,13 @@ pub const Request = struct {
     /// The base64 of `user:password` for `Authorization: Basic`; empty for none. Set only for a
     /// push's credentials, never together with `bearer`. Never logged, never returned.
     basic: []const u8 = "",
+    /// The whole value of an `Authorization` header that is neither bearer nor basic (an AWS
+    /// SigV4 signature); empty for none, and never together with those. Never logged, never
+    /// returned.
+    authorization: []const u8 = "",
+    /// More headers, at most `constants.net_extra_headers_max`, each `valid`.
+    extra_headers: []const Header = &.{},
+    proxy: ProxyUse = .environment,
 };
 
 /// A header value kept whole, or marked cut: a value past its bound is never half-used.
@@ -224,6 +302,10 @@ pub const Net = struct {
         assert(request.target[0] == '/');
         assert(request.target.len <= constants.registry_url_bytes_max);
         assert(request.bearer.len <= constants.registry_token_bytes_max);
+        assert(request.extra_headers.len <= constants.net_extra_headers_max);
+        for (request.extra_headers) |header| assert(header.valid());
+        assert(request.authorization.len <= constants.net_header_value_bytes_max);
+        if (request.authorization.len > 0) assert(request.bearer.len + request.basic.len == 0);
         assert(request.idle_timeout_ms > 0);
         assert(request.body_bytes_max > 0);
         head.reset();

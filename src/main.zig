@@ -172,6 +172,8 @@ test {
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
+    _ = @import("aws/sigv4.zig");
+    _ = @import("aws/sigv4_tests.zig");
     _ = @import("registry/net_sim.zig");
     _ = @import("registry/auth.zig");
     _ = @import("registry/manifest.zig");
