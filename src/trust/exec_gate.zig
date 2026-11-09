@@ -41,7 +41,7 @@ pub fn subject_of(parsed: *const records.Parsed) gate.Subject {
 /// A record with no binding says nothing, which no statement of a result or an image matches.
 fn binding_of(found: ?records.Binding) statement.Binding {
     const binding = found orelse return .none;
-    assert(@intFromEnum(binding) <= 2);
+    assert(@backingInt(binding) <= 2);
     return switch (binding) {
         .none => .none,
         .result => |bytes| .{ .result = bytes },
