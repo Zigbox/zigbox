@@ -7,6 +7,7 @@ const errors = @import("../diag/errors.zig");
 const host_mod = @import("../host.zig");
 const text_util = @import("../text.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const Sha256 = @import("../registry/digest.zig").Sha256;
 const export_mod = @import("export.zig");
 const pack = @import("pack.zig");
 
@@ -80,4 +81,106 @@ pub fn export_stopped(diag: *Diag, dir: []const u8, failure: *const export_mod.F
     diag.context("path", "{s}", .{echo});
     diag.fix(.{ .sentence = "name a directory that does not exist, or an empty one" });
     assert(diag.code.? == .E0557);
+}
+
+/// What a registry's refusal of an upload says.
+pub const Refusal = struct {
+    /// The step, as a phrase: "closing the upload".
+    step: []const u8,
+    status: u16,
+    /// The registry's own code ("BLOB_UPLOAD_INVALID"); empty for none.
+    code: []const u8,
+    /// A sentence about what zbx saw, for a refusal that is not a status; empty for none.
+    detail: []const u8,
+    retry_after: []const u8,
+};
+
+fn refusal_fix(diag: *Diag, refusal: Refusal) void {
+    assert(refusal.status >= 200);
+    switch (refusal.status) {
+        401, 403 => diag.fix(.{ .sentence = "the registry wants credentials; this build of zbx" ++
+            " pushes without any, so push to a registry that takes anonymous writes" }),
+        429 => diag.fix(.{ .sentence = "wait, then run the same command again; what the" ++
+            " registry already holds is not sent twice" }),
+        else => diag.fix(.{ .sentence = "run the same command again; what the registry already" ++
+            " holds is not sent twice" }),
+    }
+}
+
+fn refusal_context(diag: *Diag, host: []const u8, refusal: Refusal) void {
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    diag.context("host", "{s}", .{echo_of(&storage, host)});
+    diag.context("status", "{d}", .{refusal.status});
+    if (refusal.code.len > 0) diag.context("code", "{s}", .{refusal.code});
+    if (refusal.retry_after.len > 0) {
+        diag.context("retry", "{s}", .{echo_of(&storage, refusal.retry_after)});
+    }
+}
+
+/// ZBX-E0555: the registry refused a step of a blob's upload.
+pub fn blob_refused(diag: *Diag, host: []const u8, digest: Sha256, refusal: Refusal) void {
+    assert(diag.code == null);
+    assert(refusal.step.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, host);
+    const name = digest.text();
+    diag.raise(.E0555);
+    diag.while_("pushing an image", .{});
+    diag.cause("{s} refused {s} for blob {s}: it answered {d}", .{
+        shown,
+        refusal.step,
+        name[0 .. "sha256:".len + 12],
+        refusal.status,
+    });
+    if (refusal.detail.len > 0) diag.cause("{s}", .{refusal.detail});
+    refusal_context(diag, host, refusal);
+    diag.context("blob", "{s}", .{&name});
+    refusal_fix(diag, refusal);
+    assert(diag.code.? == .E0555);
+}
+
+/// ZBX-E0556: the registry refused the manifest, or answered with another digest.
+pub fn manifest_refused(diag: *Diag, host: []const u8, tag: []const u8, refusal: Refusal) void {
+    assert(diag.code == null);
+    assert(refusal.step.len > 0);
+    var host_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var tag_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&host_storage, host);
+    const tag_shown = echo_of(&tag_storage, tag);
+    diag.raise(.E0556);
+    diag.while_("pushing an image", .{});
+    diag.cause("{s} refused the manifest for tag '{s}': it answered {d}", .{
+        shown,
+        tag_shown,
+        refusal.status,
+    });
+    if (refusal.detail.len > 0) diag.cause("{s}", .{refusal.detail});
+    refusal_context(diag, host, refusal);
+    refusal_fix(diag, refusal);
+    assert(diag.code.? == .E0556);
+}
+
+/// ZBX-E0550: a blob the push has to send is not in the store, or is not its digest.
+pub fn blob_unreadable(diag: *Diag, digest: Sha256) void {
+    assert(diag.code == null);
+    diag.raise(.E0550);
+    diag.while_("pushing an image", .{});
+    diag.cause("stored blob {s} is missing or damaged", .{&digest.text()});
+    diag.context("blob", "{s}", .{&digest.text()});
+    diag.fix(.{ .sentence = "run the same command again, which packs the image afresh" });
+    assert(diag.code.? == .E0550);
+}
+
+/// ZBX-E0551: the destination of a push is not usable.
+pub fn destination_refused(diag: *Diag, operand: []const u8, why: []const u8) void {
+    assert(diag.code == null);
+    assert(why.len > 0);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&storage, operand);
+    diag.raise(.E0551);
+    diag.cause("'{s}' cannot be pushed to: {s}", .{ echo, why });
+    diag.context("dest", "{s}", .{echo});
+    diag.fix(.{ .sentence = "name a registry, a repository and a tag:" ++
+        " registry.example/team/app:1.0" });
+    assert(diag.code.? == .E0551);
 }

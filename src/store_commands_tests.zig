@@ -15,6 +15,8 @@ const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
 const support = @import("store/test_support.zig");
 const test_util = @import("test_util.zig");
+const net_sim = @import("registry/net_sim.zig");
+const push_registry = @import("registry/push_registry.zig");
 
 const testing = std.testing;
 const Digest = digest_mod.Digest;
@@ -964,11 +966,46 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expectEqualStrings(&expected, try printed_oci_digest());
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree }));
-    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--dry-run") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the destination") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
+var push_wire: net_sim.SimNet = undefined;
+var upload_registry: push_registry.PushRegistry = undefined;
+
+test "push puts the image in the registry, prints the digest, and a repeat sends nothing" {
+    // Goal: `zbx push <source> <destination>` end to end in the simulator. Method: import, push
+    // to a tag, push again; the digest is the dry run's, the JSON result lists each blob as
+    // uploaded and then as existing, and a destination without a tag is E0551.
+    start();
+    push_wire.init(1, upload_registry.responder());
+    upload_registry.init(&push_wire);
+    sim.wire = &push_wire;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    const target = push_registry.PushRegistry.destination(.ok);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", tree, target }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "push", tree, target }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqualStrings("zbx.push/1", object.get("schema").?.string);
+    try testing.expectEqualStrings(&expected, object.get("manifest").?.string);
+    for (object.get("blobs").?.array.items) |blob| {
+        try testing.expectEqualStrings("exists", blob.object.get("outcome").?.string);
+    }
+    const bare = push_registry.registry_host ++ "/push/ok";
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", tree, bare }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0551") != null);
 }
 
 test "export --output json is zbx.export/1, and its keys are the schema's" {

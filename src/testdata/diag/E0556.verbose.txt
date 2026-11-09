@@ -1,0 +1,9 @@
+error[ZBX-E0556]: the registry refused the manifest
+  while  pushing an image
+  cause  registry.test refused the manifest for tag 'v1': it answered 400
+  host   registry.test
+  status 400
+  code   MANIFEST_INVALID
+  fix    run the same command again; what the registry already holds is not sent twice
+  more   zbx explain E0556
+  docs   https://zigbox.github.io/zigbox/errors/E0556.html

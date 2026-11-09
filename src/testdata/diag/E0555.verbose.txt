@@ -1,0 +1,11 @@
+error[ZBX-E0555]: the registry refused a blob upload
+  while  pushing an image
+  cause  registry.test refused closing the upload for blob sha256:a479776e583f:
+         it answered 400
+  host   registry.test
+  status 400
+  code   DIGEST_INVALID
+  blob   sha256:a479776e583f8f0bc6ad270726ef330db6133302ba80bc73d7fee3275b04a6c6
+  fix    run the same command again; what the registry already holds is not sent twice
+  more   zbx explain E0555
+  docs   https://zigbox.github.io/zigbox/errors/E0555.html

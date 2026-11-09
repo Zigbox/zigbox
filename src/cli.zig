@@ -440,6 +440,8 @@ pub const StoreArgs = struct {
     trash: bool = false,
     /// `store du --by-image`.
     by_image: bool = false,
+    /// `push --dry-run`.
+    dry_run: bool = false,
 };
 
 /// What `state` was given: the subcommand and the volume's name (`rm`, `restore`).
@@ -682,7 +684,8 @@ fn operands_count(command: Command) u32 {
     assert(@tagName(command).len > 0);
     const count: u32 = switch (command) {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
-        .explain, .schema, .stop, .commit, .pull, .push, .lock, .logs => 1,
+        .explain, .schema, .stop, .commit, .pull, .lock, .logs => 1,
+        .push => 2,
         .exec, .inspect, .sign => 1,
         .store, .state, .key => 2,
     };
@@ -1114,8 +1117,11 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     if (invocation.command == .store and invocation.store.action == .@"export" and !gc_args.oci) {
         return store_usage(diag, .{ .missing = .oci });
     }
-    if (invocation.command == .push and !gc_args.dry_run) {
-        return missing_argument(diag, .push, .dry_run);
+    if (invocation.command == .push) {
+        invocation.store.dry_run = gc_args.dry_run;
+        if (!gc_args.dry_run and invocation.store.second == null) {
+            return missing_argument(diag, .push, .destination);
+        }
     }
     if (invocation.command == .run) try check_run_args(diag, &invocation.run, invocation.operand);
     if (invocation.command == .exec) try check_exec_args(diag, &invocation.run);
@@ -1633,16 +1639,22 @@ fn resolve(
     if (command == .store) return resolve_store(operands, invocation, diag);
     if (command == .state) return resolve_state(operands, invocation, diag);
     if (command == .key) return resolve_key(operands, invocation, diag);
+    var push_destination: ?[]const u8 = null; // `push`'s second operand, kept for the defer.
     defer if (invocation.command == .commit or invocation.command == .push) {
         const action: store_commands.Action = if (invocation.command == .push) .push else .commit;
-        invocation.store = .{ .action = action, .operand = invocation.operand };
+        invocation.store = .{
+            .action = action,
+            .operand = invocation.operand,
+            .second = push_destination,
+        };
     };
     // `bundle` takes at most one operand (a run's name) and checks the rest itself.
     // `run` takes at most one: the digest of the tree to run (or `--rootfs`, checked below).
     const wanted = if (command == .bundle or command == .run) 1 else operands_count(command);
     const given: u32 = @intCast(operands.len - 1);
     if (given > wanted) return unexpected_argument(diag, command, operands[1 + wanted]);
-    if (given < wanted and command != .bundle and command != .run) {
+    const lacking = given < wanted and !(command == .push and given == 1);
+    if (lacking and command != .bundle and command != .run) {
         const what: Missing = switch (command) {
             .stop, .commit, .logs, .exec => .container,
             .schema => .topic,
@@ -1656,7 +1668,8 @@ fn resolve(
         return missing_argument(diag, command, what);
     }
     invocation.command = command;
-    invocation.operand = if (given == 1) operands[1] else null;
+    invocation.operand = if (given >= 1) operands[1] else null;
+    push_destination = if (given == 2) operands[2] else null;
     if (invocation.operand == null) assert(given == 0);
     if (command == .sign) invocation.sign.operand = invocation.operand.?;
     if (command == .lock) {
@@ -2050,23 +2063,28 @@ const Missing = enum {
     action,
     result,
     source,
-    dry_run,
+    destination,
     subject,
 };
 
-/// What `push` lacks: the source to pack, or `--dry-run`, the only mode this build has.
+/// What `push` lacks: the source to pack, or the destination to put it under.
 fn missing_push(diag: *Diag, missing: Missing) void {
     assert(diag.code != null);
     assert(@backingInt(missing) >= @backingInt(Missing.source));
-    assert(@backingInt(missing) <= @backingInt(Missing.dry_run));
+    assert(@backingInt(missing) <= @backingInt(Missing.destination));
     if (missing == .source) {
-        diag.cause("'push' needs the build result, image or tree to pack", .{});
-    } else {
-        diag.cause("'push' needs --dry-run: this build packs and prints the digests only", .{});
+        diag.cause("'push' needs the build result, image or tree to push", .{});
+        diag.fix(.{
+            .sentence = "name it and where it goes:",
+            .command = "zbx push b3:<64 hex> registry.example/team/app:1.0",
+            .template = true,
+        });
+        return;
     }
+    diag.cause("'push' needs the destination: a registry, a repository and a tag", .{});
     diag.fix(.{
-        .sentence = "pack one and print its digests:",
-        .command = "zbx push --dry-run b3:<64 hex>",
+        .sentence = "name it after the source:",
+        .command = "zbx push b3:<64 hex> registry.example/team/app:1.0",
         .template = true,
     });
 }
@@ -2184,7 +2202,7 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
             diag.fix(.{ .sentence = "name one:", .command = "zbx schema ps" });
         },
         .reference => missing_pull(diag, missing),
-        .source, .dry_run => missing_push(diag, missing),
+        .source, .destination => missing_push(diag, missing),
         .action => missing_lock(diag),
         .result => {
             diag.cause("'inspect' needs the digest of a build result", .{});
@@ -2635,6 +2653,7 @@ fn run_store(
         .confirm = invocation.store.confirm,
         .trash = invocation.store.trash,
         .by_image = invocation.store.by_image,
+        .dry_run = invocation.store.dry_run,
     };
     return store_commands.run(
         host,

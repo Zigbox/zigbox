@@ -155,6 +155,9 @@ pub const Code = enum(u8) {
     E0525,
     E0526,
     E0550,
+    E0551,
+    E0555,
+    E0556,
     E0557,
     W0501,
     W0502,
@@ -2349,6 +2352,55 @@ pub const registry = [_]Entry{
         \\that is not whole, run `zbx store verify` to see what the store lost, and
         \\build or import the source again. A damaged blob is dropped, so the same
         \\command packs it afresh.
+        ,
+    },
+    .{
+        .code = .E0551,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the destination cannot be pushed to",
+        .explanation =
+        \\`zbx push <source> <destination>` puts an image under a tag in a registry,
+        \\and the destination named is not one it can use: it has no tag (a push by
+        \\digest alone is refused, because a registry may delete a manifest that no
+        \\tag points at),
+        \\or it names a digest, or it is not a reference at all.
+        \\
+        \\Name a tag: registry.example/team/app:1.0. The digest of what was pushed is
+        \\printed when the push is done, and `app@sha256:...` pulls it back.
+        ,
+    },
+    .{
+        .code = .E0555,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused a blob upload",
+        .explanation =
+        \\The registry did not take a blob of the image: it answered the check, the
+        \\mount request, a piece of the bytes or the closing request with a refusal,
+        \\or with something the upload protocol does not allow (a Location that names
+        \\another host, a Range that says it kept fewer bytes than were sent).
+        \\
+        \\The cause names the step and the registry's own code. A `401` or `403` means
+        \\the registry wants credentials this build of zbx does not send. A `429`
+        \\means wait and try again. Nothing is half-done in a way that matters: a
+        \\push again skips every blob the registry holds, and the manifest is only
+        \\put once all of its blobs are there.
+        ,
+    },
+    .{
+        .code = .E0556,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the registry refused the manifest",
+        .explanation =
+        \\All the blobs of the image are in the registry, and the registry refused the
+        \\manifest that names them, or answered with a digest other than the
+        \\manifest's own. The cause gives the registry's code (MANIFEST_INVALID,
+        \\MANIFEST_BLOB_UNKNOWN, a tag that may not be overwritten, and the like).
+        \\
+        \\The tag was not moved. A push again sends no blob bytes when the registry
+        \\holds them all.
         ,
     },
     .{

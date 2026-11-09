@@ -58,6 +58,7 @@ fn answer(
         .content_digest = out.content_digest,
         .location = out.location,
         .content_range = out.content_range,
+        .range = out.range,
         .body = out.body,
         .deliver = out.deliver,
     };
