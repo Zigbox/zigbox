@@ -1,0 +1,13 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema",
+"$id":"https://zigbox.github.io/zigbox/schema/trust/1","version":1,
+"title":"zbx trust import --output json",
+"description":"stdout: what importing a bundle added to a tree's record.",
+"type":"object",
+"required":["schema","action","tree","added","present","total"],
+"properties":{"schema":{"const":"zbx.trust/1"},
+"action":{"const":"import"},
+"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+"description":"the tree the bundle is about"},
+"added":{"type":"integer","minimum":0,"description":"lines the store did not have"},
+"present":{"type":"integer","minimum":0,"description":"lines it had already"},
+"total":{"type":"integer","minimum":1,"description":"lines in the tree's record now"}}}

@@ -751,7 +751,12 @@ fn verify_broken_tree(diag: *Diag) void {
 }
 
 fn trust_bundle_refused(diag: *Diag) void {
-    const failure: peer_mod.Failure = .{ .refusal = .malformed, .size = 0, .err = error.IoFailed, .errno = 0 };
+    const failure: peer_mod.Failure = .{
+        .refusal = .malformed,
+        .size = 0,
+        .err = error.IoFailed,
+        .errno = 0,
+    };
     trust_diagnose.trust_refused(diag, &failure, "importing the trust bundle bundle.jsonl");
 }
 

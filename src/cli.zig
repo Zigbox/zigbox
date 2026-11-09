@@ -885,6 +885,31 @@ fn take_output(diag: *Diag, args: []const []const u8, index: *usize) ParseError!
 
 /// Maps the arguments after the program name to an invocation. Pure; on failure the diagnostic
 /// is in `diag` and the caller renders it.
+/// What the option scan collects before `resolve` knows the command.
+const Parsed = struct {
+    run: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} },
+    bundle: BundleArgs = .{},
+    pull: PullArgs = .{},
+    build: BuildArgs = .{},
+    key: KeyArgs = .{ .action = .list, .name = null },
+    sign: SignArgs = .{ .operand = "" },
+    verify: VerifyArgs = .{ .operand = "" },
+    trust_apply: bool = false,
+
+    fn store(p: *const Parsed, invocation: *Invocation) void {
+        assert(@intFromPtr(p) != 0);
+        assert(@intFromPtr(invocation) != 0);
+        invocation.run = p.run;
+        invocation.bundle = p.bundle;
+        invocation.pull = p.pull;
+        invocation.build = p.build;
+        invocation.key = p.key;
+        invocation.sign = p.sign;
+        invocation.verify = p.verify;
+        invocation.trust = .{ .action = .prune, .apply = p.trust_apply };
+    }
+};
+
 pub fn parse(
     args: []const []const u8,
     invocation: *Invocation,
@@ -894,15 +919,8 @@ pub fn parse(
     assert(diag.code == null);
     var operands: [constants.args_count_max][]const u8 = undefined;
     var count: u32 = 0;
-    var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
-    var bundle_args: BundleArgs = .{};
-    var pull_args: PullArgs = .{};
-    var build_args: BuildArgs = .{};
-    var key_args: KeyArgs = .{ .action = .list, .name = null };
-    var sign_args: SignArgs = .{ .operand = "" };
-    var verify_args: VerifyArgs = .{ .operand = "" };
-    var trust_apply = false;
-    const flags: KeyFlags = .{ .key = &key_args, .sign = &sign_args, .verify = &verify_args };
+    var p: Parsed = .{};
+    const flags: KeyFlags = .{ .key = &p.key, .sign = &p.sign, .verify = &p.verify };
     var gc_args: GcArgs = .{};
     var export_file: ?[]const u8 = null;
     invocation.provenance = false;
@@ -914,21 +932,21 @@ pub fn parse(
             .verbose => {},
             .output_inline, .output_next => try take_output(diag, args, &index),
             .run_option_next, .run_option_inline, .env_next, .env_inline => {
-                try take_run_or_env(diag, &run_args, given, args, &index);
+                try take_run_or_env(diag, &p.run, given, args, &index);
             },
-            .all => try take_all_option(diag, &run_args, given, argument),
-            .follow => try take_follow(diag, &run_args, given, argument),
+            .all => try take_all_option(diag, &p.run, given, argument),
+            .follow => try take_follow(diag, &p.run, given, argument),
             .separator => {
                 if (!takes_command(given)) return unknown_option(diag, argument);
-                run_args.command = args[index + 1 ..];
+                p.run.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only => try take_run_flag(diag, &run_args, given, argument),
-            .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
+            .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
+            .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
-            .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
+            .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .graph, .file_next => try take_build_option(diag, &build_args, given, args, &index),
+            .graph, .file_next => try take_build_option(diag, &p.build, given, args, &index),
             .no_passphrase,
             .passphrase_file_next,
             .passphrase_file_inline,
@@ -936,7 +954,7 @@ pub fn parse(
             .key_inline,
             => try take_key_or_sign(diag, flags, given, args, &index),
             .strict, .require_provenance, .public_next, .public_inline, .apply => {
-                try take_verify_option(diag, flags, &trust_apply, given, args, &index);
+                try take_verify_option(diag, flags, &p.trust_apply, given, args, &index);
             },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
@@ -948,14 +966,7 @@ pub fn parse(
     }
     assert(count <= args.len);
     invocation.options = scan_options(args);
-    invocation.run = run_args;
-    invocation.bundle = bundle_args;
-    invocation.pull = pull_args;
-    invocation.build = build_args;
-    invocation.key = key_args;
-    invocation.sign = sign_args;
-    invocation.verify = verify_args;
-    invocation.trust = .{ .action = .prune, .apply = trust_apply };
+    p.store(invocation);
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
     invocation.state.out = export_file;
@@ -1070,6 +1081,7 @@ fn take_key_or_sign(
     index: *usize,
 ) ParseError!void {
     assert(index.* < args.len);
+    assert(classify(args[index.*]) != .operand);
     const first: ?Command = if (operands.len > 0) command_named(operands[0]) else null;
     if (first == .sign) return take_sign_option(diag, flags.sign, operands, args, index);
     if (first == .verify) return take_verify_option(diag, flags, null, operands, args, index);
@@ -1131,6 +1143,7 @@ fn take_verify_value(
     value: []const u8,
 ) ParseError!void {
     assert(option.len >= 2);
+    assert(diag.code == null);
     if (value.len == 0) return missing_option_value(diag, option);
     if (slot.* != null) return verify_option_twice(diag, option);
     slot.* = value;
@@ -2234,6 +2247,7 @@ fn resolve_trust(
 
 fn trust_usage(diag: *Diag, sentence: []const u8) ParseError {
     assert(diag.code == null);
+    assert(sentence.len > 0);
     diag.raise(.E0006);
     diag.while_("reading the command line", .{});
     diag.cause("{s}", .{sentence});
@@ -2896,6 +2910,42 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
     return code;
 }
 
+fn run_build(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(invocation.command == .build);
+    assert(diag.code == null);
+    build_commands.run(
+        host,
+        &storage.build,
+        invocation.build,
+        .{ .json = invocation.options.output == .json, .verbose = invocation.options.verbose },
+        &storage.handle.facts,
+        diag,
+    ) catch |err| return build_error(err);
+}
+
+fn run_inspect(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(invocation.command == .inspect);
+    assert(diag.code == null);
+    inspect_commands.run(
+        host,
+        &storage.inspect,
+        invocation.operand.?,
+        invocation.provenance,
+        invocation.options.output == .json,
+        diag,
+    ) catch |err| return inspect_error(err);
+}
+
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
@@ -2921,25 +2971,8 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             invocation.options.output == .json,
             diag,
         ) catch |err| return lock_error(err),
-        .build => build_commands.run(
-            host,
-            &storage.build,
-            invocation.build,
-            .{
-                .json = invocation.options.output == .json,
-                .verbose = invocation.options.verbose,
-            },
-            &storage.handle.facts,
-            diag,
-        ) catch |err| return build_error(err),
-        .inspect => inspect_commands.run(
-            host,
-            &storage.inspect,
-            invocation.operand.?,
-            invocation.provenance,
-            invocation.options.output == .json,
-            diag,
-        ) catch |err| return inspect_error(err),
+        .build => try run_build(host, invocation, storage, diag),
+        .inspect => try run_inspect(host, invocation, storage, diag),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -2970,6 +3003,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
 
 fn inspect_error(err: inspect_commands.Error) RunError {
     assert(@errorName(err).len > 0);
+    assert(@errorName(err)[0] != 0);
     return switch (err) {
         error.Failed => error.CommandFailed,
         error.OutputFailed => error.OutputFailed,
@@ -4531,6 +4565,12 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
         .{ .topic = "sign", .text = @embedFile("testdata/schema_sign.stdout.txt") },
         .{ .topic = "policy", .text = @embedFile("testdata/schema_policy.stdout.txt") },
+        .{ .topic = "verify", .text = @embedFile("testdata/schema_verify.stdout.txt") },
+        .{ .topic = "trust", .text = @embedFile("testdata/schema_trust.stdout.txt") },
+        .{
+            .topic = "trust-prune",
+            .text = @embedFile("testdata/schema_trust-prune.stdout.txt"),
+        },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };

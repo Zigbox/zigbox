@@ -777,7 +777,7 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
     const detail = echo_of(&detail_storage, what.detail);
     diag.raise(.E0908);
     diag.while_("verifying {s}, link {d} ({s})", .{
-        operand, @intFromEnum(what.link), what.link.words(),
+        operand, @backingInt(what.link), what.link.words(),
     });
     switch (what.cause) {
         .no_record => diag.cause("the store has no signature for the tree", .{}),
@@ -809,7 +809,7 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
         .build_file_changed => diag.cause("{s} differs from what was signed", .{detail}),
     }
     diag.context("arg", "{s}", .{operand});
-    diag.context("link", "{d}", .{@intFromEnum(what.link)});
+    diag.context("link", "{d}", .{@backingInt(what.link)});
     switch (what.cause) {
         .no_record => diag.fix_with(
             "sign it, or import the signer's bundle:",

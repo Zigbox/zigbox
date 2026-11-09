@@ -70,7 +70,8 @@ const Job = struct {
 pub fn run(host: Host, ws: *Workspace, args: Args, output: Output, diag: *Diag) Error!u8 {
     assert(diag.code == null);
     assert((args.operand != null) == (args.action != .prune));
-    assert(!args.apply or args.action == .prune);
+    if (args.apply) assert(args.action == .prune);
+    if (args.action != .prune) assert(!args.apply);
     var job: Job = .{
         .host = host,
         .ws = ws,
@@ -137,6 +138,7 @@ fn refused(job: *Job, failure: *const peer.Failure, what: []const u8, tree: ?Dig
 
 fn put(job: *const Job, text: []const u8) Error!void {
     assert(text.len <= constants.output_bytes_max);
+    assert(job.diag.code == null);
     job.host.write_all(.stdout, text) catch |err| {
         errors.output_failed(job.diag, .stdout, err, job.host.last_errno());
         return error.Failed;
@@ -287,6 +289,8 @@ fn warn_damaged(job: *Job) Error!void {
 const damaged_shown_max: u32 = 8;
 
 fn kind_word(kind: peer.Kind) []const u8 {
+    assert(@tagName(kind).len > 0);
+    assert(@backingInt(kind) <= 1);
     return switch (kind) {
         .signature => "signature",
         .provenance => "provenance",
@@ -294,6 +298,8 @@ fn kind_word(kind: peer.Kind) []const u8 {
 }
 
 fn fate_word(fate: peer.Fate) []const u8 {
+    assert(@tagName(fate).len > 0);
+    assert(@backingInt(fate) <= 1);
     return switch (fate) {
         .orphan => "orphan",
         .damaged => "damaged",

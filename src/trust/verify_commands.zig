@@ -122,7 +122,7 @@ const Report = struct {
     }
 
     fn set(report: *Report, link: Link, status: Status) void {
-        report.status[@intFromEnum(link) - 1] = status;
+        report.status[@backingInt(link) - 1] = status;
     }
 };
 
