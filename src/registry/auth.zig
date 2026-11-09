@@ -160,6 +160,63 @@ pub fn token_url(
     return url;
 }
 
+/// Whether any challenge of a `WWW-Authenticate` value is `Basic`: the registry takes the user
+/// and the password itself. Text that is not the grammar is not Basic.
+pub fn offers_basic(header: []const u8) bool {
+    assert(header.len <= constants.registry_challenge_bytes_max);
+    var at: usize = 0;
+    while (true) {
+        at = skip(header, at, " \t,");
+        if (at == header.len) return false;
+        const word_end = word_end_at(header, at);
+        if (word_end == at) return false;
+        const after = skip(header, word_end, " \t");
+        if (after < header.len and header[after] == '=') {
+            const value_start = skip(header, after + 1, " \t");
+            const value = read_value(header, value_start) catch return false;
+            at = value.end;
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(header[at..word_end], "basic")) return true;
+        at = word_end;
+    }
+}
+
+/// Where to ask for a token to push to `repository`: the realm, `service`, and the scope a push
+/// needs, `repository:<name>:pull,push`, and `repository:<from>:pull` when blobs may be mounted
+/// from `from` (empty for none). The challenge's own scope is not used: a registry may name a
+/// pull scope for the request that was refused, and a token for that cannot push.
+pub fn push_token_url(
+    challenge: *const Challenge,
+    repository: []const u8,
+    from: []const u8,
+    buffer: *[constants.registry_url_bytes_max * 2]u8,
+) TokenTargetError![]const u8 {
+    assert(repository.len > 0);
+    assert(challenge.realm.len > 0);
+    if (std.mem.indexOfScalar(u8, challenge.realm, '#') != null) return error.BadRealm;
+    var writer = std.Io.Writer.fixed(buffer);
+    const joiner: u8 = if (std.mem.indexOfScalar(u8, challenge.realm, '?') == null) '?' else '&';
+    writer.writeAll(challenge.realm) catch return error.TooLong;
+    var separator = joiner;
+    if (challenge.service) |service| {
+        writer.print("{c}service=", .{separator}) catch return error.TooLong;
+        encode_into(&writer, service) catch return error.TooLong;
+        separator = '&';
+    }
+    writer.print("{c}scope=repository%3A", .{separator}) catch return error.TooLong;
+    encode_into(&writer, repository) catch return error.TooLong;
+    writer.writeAll("%3Apull%2Cpush") catch return error.TooLong;
+    if (from.len > 0) {
+        writer.writeAll("&scope=repository%3A") catch return error.TooLong;
+        encode_into(&writer, from) catch return error.TooLong;
+        writer.writeAll("%3Apull") catch return error.TooLong;
+    }
+    const url = writer.buffered();
+    assert(url.len > challenge.realm.len);
+    return url;
+}
+
 const TokenDocument = struct {
     token: ?[]const u8 = null,
     access_token: ?[]const u8 = null,
@@ -277,4 +334,43 @@ test "a token is read from token or access_token and nothing else" {
     try testing.expect(parse_token("{\"token\":5}", fixed.allocator(), &out) == null);
     var tiny: [3]u8 = undefined;
     try testing.expect(parse_token("{\"token\":\"abcd\"}", fixed.allocator(), &tiny) == null);
+}
+
+test "the push token URL asks for pull and push, and a mount's source for pull" {
+    // Goal: the scope is ours, whatever the challenge says, and a mount adds its own scope.
+    var buffer: [constants.registry_url_bytes_max * 2]u8 = undefined;
+    const challenge: Challenge = .{
+        .realm = "https://auth.docker.io/token",
+        .service = "registry.docker.io",
+        .scope = "repository:me/app:pull",
+        .error_code = null,
+    };
+    const plain = "https://auth.docker.io/token?service=registry.docker.io" ++
+        "&scope=repository%3Ame%2Fapp%3Apull%2Cpush";
+    try testing.expectEqualStrings(plain, try push_token_url(&challenge, "me/app", "", &buffer));
+    const mount = plain ++ "&scope=repository%3Ame%2Fbase%3Apull";
+    try testing.expectEqualStrings(
+        mount,
+        try push_token_url(&challenge, "me/app", "me/base", &buffer),
+    );
+    var bare = challenge;
+    bare.service = null;
+    bare.realm = "https://a/t?x=1";
+    try testing.expectEqualStrings(
+        "https://a/t?x=1&scope=repository%3Aa%2Fb%3Apull%2Cpush",
+        try push_token_url(&bare, "a/b", "", &buffer),
+    );
+    bare.realm = "https://a/t#f";
+    try testing.expectError(error.BadRealm, push_token_url(&bare, "a/b", "", &buffer));
+}
+
+test "Basic is offered by a challenge that says so, and by no other" {
+    // Goal: the scheme word is found whatever its place and case, and a quoted value that
+    // contains the word is not one.
+    try testing.expect(offers_basic("Basic realm=\"registry\""));
+    try testing.expect(offers_basic("bearer realm=\"https://a/t\", BASIC realm=\"x\""));
+    try testing.expect(!offers_basic("Bearer realm=\"https://a/t\",service=\"Basic\""));
+    try testing.expect(!offers_basic("Bearer realm=\"https://a/t\""));
+    try testing.expect(!offers_basic(""));
+    try testing.expect(!offers_basic("Bearer realm=\"unterminated"));
 }

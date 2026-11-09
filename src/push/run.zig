@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const Diag = @import("../diag/diag.zig").Diag;
 const diagnose = @import("diagnose.zig");
+const credentials_mod = @import("credentials.zig");
 const fs_mod = @import("../store/fs.zig");
 const export_mod = @import("export.zig");
 const json = @import("../trust/json.zig");
@@ -175,6 +176,7 @@ pub fn push_operand(
     wire: net.Net,
     operand: []const u8,
     destination: *const reference_mod.Reference,
+    credentials: ?*const credentials_mod.Credentials,
     out: *Pushed,
     diag: *Diag,
 ) Error!void {
@@ -184,7 +186,7 @@ pub fn push_operand(
     try pack_operand(store, ws, operand, &made, diag);
     var holder: reference_mod.Reference = undefined;
     const from = mount_holder(store, &made, destination, &holder);
-    const options: upload.Options = .{ .mount_from = from };
+    const options: upload.Options = .{ .mount_from = from, .credentials = credentials };
     const target = upload.Destination.of(destination);
     upload.push(store, &ws.upload, wire, target, &made, options, &out.report, diag) catch
         return error.Failed;

@@ -441,7 +441,7 @@ fn append(session: *Session, bytes: []const u8) bool {
 }
 
 /// The value of `name` in a query text ("?mount=x&from=y" or "mount=x&from=y"); empty for none.
-fn query_value(text: []const u8, name: []const u8) []const u8 {
+pub fn query_value(text: []const u8, name: []const u8) []const u8 {
     var rest = if (text.len > 0 and text[0] == '?') text[1..] else text;
     while (rest.len > 0) {
         const end = std.mem.indexOfScalar(u8, rest, '&') orelse rest.len;

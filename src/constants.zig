@@ -1653,12 +1653,32 @@ pub const push_error_body_bytes: u32 = 4096;
 /// The blobs of one packed image: its config and its layer, in the order they are pushed.
 pub const push_blobs: u32 = 2;
 
+/// The bytes of a push's username and password together (owner, 2026-11-10, slice 12). A registry
+/// token is far longer and is not a credential the user types; 4 KiB holds any password.
+pub const push_credential_bytes_max: u32 = 4096;
+
+/// The bytes read from a password file or from standard input: the credential bound and a newline,
+/// so a line at the bound is read whole and one past it is seen to be too long.
+pub const push_password_read_bytes: u32 = push_credential_bytes_max + 2;
+
+/// The memory a token response's JSON is read in: the response bound with room for the copies the
+/// parser makes of its two token fields.
+pub const push_token_arena_bytes: u32 = 2 * registry_token_response_bytes_max;
+
+/// The `user:password` text and its base64 form, which is what `Authorization: Basic` carries.
+pub const push_basic_bytes_max: u32 = (push_credential_bytes_max + 1 + 2) / 3 * 4;
+
 comptime {
     assert(push_chunk_bytes >= pack_manifest_bytes_max);
     assert(push_chunk_bytes >= pack_io_bytes);
     assert(push_chunks_max > 0);
     assert(push_error_body_bytes < registry_manifest_bytes_max);
     assert(push_blobs == 2);
+    assert(push_credential_bytes_max >= 256);
+    assert(push_password_read_bytes > push_credential_bytes_max);
+    assert(push_basic_bytes_max > push_credential_bytes_max);
+    assert(push_credential_bytes_max < registry_token_bytes_max);
+    assert(push_token_arena_bytes > registry_token_response_bytes_max);
     assert(pack_links_max > 0);
     assert(std.math.isPowerOfTwo(pack_links_max));
     assert(pack_link_paths_bytes >= path_bytes_max + 1);

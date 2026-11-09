@@ -1,0 +1,7 @@
+error[ZBX-E0554]: the token service is on a host the password may not be sent to
+  cause  registry.test named the token service evil.test, which is not
+         registry.test, nor a service it is known to use; the password was not
+         sent
+  fix    push to a registry whose token service is on its own host; zbx sends a password only there
+  more   zbx explain E0554 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0554.html

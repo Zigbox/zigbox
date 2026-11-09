@@ -128,6 +128,9 @@ pub const Request = struct {
     content_type: []const u8 = "",
     /// The Content-Range of a chunk ("first-last"); empty for none.
     content_range: []const u8 = "",
+    /// The base64 of `user:password` for `Authorization: Basic`; empty for none. Set only for a
+    /// push's credentials, never together with `bearer`. Never logged, never returned.
+    basic: []const u8 = "",
 };
 
 /// A header value kept whole, or marked cut: a value past its bound is never half-used.
