@@ -17,6 +17,8 @@ commands:
   state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
   key <cmd>       signing keys: new, list, show (see below)
   sign <what>     sign a build result, a tree or an image with a key (see below)
+  verify <what>   check a signed result's chain offline, link by link (see below)
+  trust <cmd>     move signatures between stores: export, import, prune (see below)
   policy check [what]   what the policy files say, and whether a run of <what> would pass
                   (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
@@ -150,6 +152,23 @@ sign:
   --key <name>    the key to sign with; optional when there is exactly one
   the whole tree must be in the store and intact; the signature is added to the tree's
   record, at most 8 per tree; signing again with the same key changes nothing
+
+verify:
+  zbx verify <what> [--key <name>] [--public <ed25519:...>] [--strict] [--require-provenance]
+  <what>          a build result or a tree (b3:<64 hex>), or an image (name@sha256:...)
+  checks, in order, and stops at the first that fails (ZBX-E0908): the tree has signatures;
+  a signer is trusted (by every policy file, or by --key or --public); the tree is whole
+  and every object hashes to its id; a trusted signature carries provenance of this tree;
+  the trees it names are in the store and sound; the build file and zbx.lock here are
+  the ones it names. Reads the store and files only: no network, no registry
+  --strict        a tree it names that is not in the store fails (else ZBX-W0903)
+  --require-provenance   a tree signed without provenance fails
+
+trust:
+  zbx trust export <tree>     print the tree's signatures as a bundle
+  zbx trust import <file>     verify every line of a bundle, then add what is new
+  zbx trust prune [--apply]   list the signature and provenance records whose trees are
+                              gone; --apply removes them (a damaged one is kept, ZBX-W0902)
 
 policy:
   zbx policy check [<what>]

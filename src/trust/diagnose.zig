@@ -905,6 +905,20 @@ pub fn trust_refused(diag: *Diag, failure: *const peer.Failure, what: []const u8
     assert(diag.code.? == .E0909);
 }
 
+/// ZBX-E0909: the bundle file to import could not be read.
+pub fn bundle_unreadable(diag: *Diag, path: []const u8, err: host_mod.Error, errno: u16) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const echo = echo_of(&path_storage, path);
+    diag.raise(.E0909);
+    diag.while_("importing a bundle of signatures", .{});
+    errors.cause_host_error(diag, "reading the bundle file", err, errno);
+    diag.context("path", "{s}", .{echo});
+    diag.fix(.{ .sentence = "check the file's name and that you can read it" });
+    assert(diag.code.? == .E0909);
+}
+
 /// ZBX-W0902: prune kept a damaged record because its tree is in the store.
 pub fn prune_kept_damaged(diag: *Diag, path: []const u8) void {
     assert(diag.code == null);
