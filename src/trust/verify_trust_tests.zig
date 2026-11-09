@@ -496,9 +496,13 @@ test "--public trusts a key as --key does, when no policy file is present" {
     @memcpy(wrong[0..other.len], &other);
     wrong[other.len] = 0;
     const unknown: [:0]const u8 = wrong[0..other.len :0];
-    try testing.expectEqual(@as(u8, 1), command(&.{ "verify", tree_operand(), "--public", unknown }));
+    try testing.expectEqual(@as(u8, 1), command(&.{
+        "verify", tree_operand(), "--public", unknown,
+    }));
     try testing.expect(has(sim.stdout(), "2 signer: FAILED"));
-    try testing.expectEqual(@as(u8, 1), command(&.{ "verify", tree_operand(), "--public", "junk" }));
+    try testing.expectEqual(@as(u8, 1), command(&.{
+        "verify", tree_operand(), "--public", "junk",
+    }));
 }
 
 test "a policy file decides trust: --key and --public do not add to it" {

@@ -330,7 +330,7 @@ fn put_sound_provenance(digest: Digest, committed: Digest) !void {
 /// One record of a random store, and whether the rules keep it.
 const Planned = struct { kind: peer.Kind, digest: Digest, keeps: bool };
 
-test "over random stores, prune removes exactly the records whose tree is gone, and only with apply" {
+test "over random stores, prune removes exactly the orphaned records, and only with apply" {
     // Goal: the brief's property. Method: 48 seeds; each store gets signature records of present
     // and absent trees, and provenance records (sound or damaged) of results that are present with
     // a present tree, present with an absent tree, or not there. Prune without apply changes
@@ -356,7 +356,10 @@ test "over random stores, prune removes exactly the records whose tree is gone, 
             }
             const where = random.uintLessThan(u32, 3);
             const committed = if (where == 0) tree else stray(150 + at);
-            const digest = if (where == 2) stray(200 + at) else try save_labeled_result(committed, at);
+            const digest = if (where == 2)
+                stray(200 + at)
+            else
+                try save_labeled_result(committed, at);
             const keeps = where == 0;
             if (random.boolean()) {
                 try put_sound_provenance(digest, committed);
