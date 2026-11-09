@@ -16,14 +16,15 @@ pub const Error = up5.Error || error{
     RecordWrong,
 };
 
-/// The version of the run record each `zbx` writes: M6 wrote 7; this one writes 8 (it added the
-/// writable mounts and the user). Image records are still version 2.
+/// The version of the run record each `zbx` writes: M6 wrote 7; M6b wrote 8 (it added the
+/// writable mounts and the user) and later milestones write newer ones. Image records are still
+/// version 2.
 pub const run_record_version_m6: u32 = 7;
 pub const run_record_version = up5.run_record_version;
 pub const image_record_version = up5.image_record_version_m5;
 
 comptime {
-    std.debug.assert(run_record_version_m6 + 1 == run_record_version);
+    std.debug.assert(run_record_version_m6 < run_record_version);
 }
 
 pub const Running = struct { pid: u32, scope: []const u8 };
@@ -148,7 +149,7 @@ test "an old container still running is read with its pid and scope" {
 
 test "the versions are the ones the formats have" {
     try up5.check_record_version("    .version = 7,\n", run_record_version_m6);
-    try up5.check_record_version("    .version = 8,\n", run_record_version);
+    try up5.check_record_version("    .version = 9,\n", run_record_version);
     try testing.expectError(
         error.LineMissing,
         up5.check_record_version("    .version = 7,\n", run_record_version),
