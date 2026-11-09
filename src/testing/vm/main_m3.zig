@@ -363,13 +363,18 @@ fn record_version(
     };
 }
 
+const old_hold = "sh -c 'sleep 1'";
+const old_hold_exit3 = "sh -c 'sleep 1; exit 3'";
+
 fn step_upgrade(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try out.print("\ndemo-m3: UPGRADE: the M2 binary leaves state, the new one reads it\n", .{});
     const step = "UPGRADE";
     const dir = " run --rootfs " ++ rootfs_dir;
-    _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old1 -- true", 0);
+    // The old binary loses its child's SIGCHLD when the child ends before the parent blocks it
+    // (issue #80), so no old run may end at once: each command holds on for a second first.
+    _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old1 -- " ++ old_hold, 0);
     _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " -d --name old2 -- sleep 600", 0);
-    _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old3 -- sh -c 'exit 3'", 3);
+    _ = try expect_exit(session, out, step, old_zbx ++ dir ++ " --name old3 -- " ++ old_hold_exit3, 3);
     _ = try expect_exit(session, out, step, old_zbx ++ " stop old2", 0);
     const names = [_][]const u8{ "old1", "old2", "old3" };
     for (names) |name| try record_version(session, out, name, 3);
