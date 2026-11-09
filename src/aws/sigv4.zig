@@ -143,12 +143,12 @@ pub fn signing_key(
 }
 
 /// Appends to a bounded buffer; an overflow is remembered, never half-applied.
-const Writer = struct {
+pub const Writer = struct {
     buffer: []u8,
     len: u32 = 0,
     overflow: bool = false,
 
-    fn put(writer: *Writer, bytes: []const u8) void {
+    pub fn put(writer: *Writer, bytes: []const u8) void {
         assert(writer.len <= writer.buffer.len);
         if (writer.overflow) return;
         if (bytes.len > writer.buffer.len - writer.len) {
@@ -159,11 +159,11 @@ const Writer = struct {
         writer.len += @intCast(bytes.len);
     }
 
-    fn byte(writer: *Writer, value: u8) void {
+    pub fn byte(writer: *Writer, value: u8) void {
         writer.put(&.{value});
     }
 
-    fn text(writer: *const Writer) []const u8 {
+    pub fn text(writer: *const Writer) []const u8 {
         assert(!writer.overflow);
         return writer.buffer[0..writer.len];
     }
@@ -188,7 +188,7 @@ fn hex_value(digit: u8) ?u8 {
 /// which is encoded once); without it a `%` is encoded again (a path, which is encoded twice
 /// for every service but S3, so the canonical path is the sent path encoded once more).
 /// `keep_slash` leaves `/` alone (a path).
-fn put_encoded(writer: *Writer, text: []const u8, decode: bool, keep_slash: bool) void {
+pub fn put_encoded(writer: *Writer, text: []const u8, decode: bool, keep_slash: bool) void {
     var at: usize = 0;
     while (at < text.len) : (at += 1) {
         var value = text[at];

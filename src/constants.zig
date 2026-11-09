@@ -743,6 +743,8 @@ pub const aws_key_id_bytes_max: u32 = 128;
 pub const aws_secret_key_bytes_max: u32 = 128;
 pub const aws_session_token_bytes_max: u32 = 8 * 1024;
 pub const aws_account_digits: u32 = 12;
+/// The longest ECR registry host: 12 digits, `.dkr.ecr.`, a region and `.amazonaws.com`.
+pub const aws_ecr_host_bytes_max: u32 = 64;
 /// A region name (`ap-southeast-4`), a role ARN, a role session name (STS allows 2 to 64), and
 /// the service name a signature is scoped to.
 pub const aws_region_bytes_max: u32 = 24;
@@ -1415,6 +1417,7 @@ comptime {
     assert(aws_authorization_bytes_max >= 64 + aws_key_id_bytes_max + 80 +
         aws_region_bytes_max + aws_service_bytes_max + aws_signed_headers_max * 24);
     assert(aws_region_bytes_max + 16 <= 253);
+    assert(aws_account_digits + 9 + aws_region_bytes_max + 14 <= aws_ecr_host_bytes_max);
     assert(aws_error_code_bytes_max < aws_response_bytes_max);
     assert(net_addresses_max > 0);
     assert(registry_layers_max * 160 + 2048 <= pull_output_bytes_max);
