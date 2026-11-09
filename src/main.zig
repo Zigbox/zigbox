@@ -179,6 +179,7 @@ test {
     _ = @import("aws/aws_sim.zig");
     _ = @import("aws/credentials.zig");
     _ = @import("aws/credentials_tests.zig");
+    _ = @import("aws_library_tests.zig");
     _ = @import("registry/net_sim.zig");
     _ = @import("registry/auth.zig");
     _ = @import("registry/manifest.zig");

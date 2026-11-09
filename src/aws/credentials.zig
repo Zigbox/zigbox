@@ -4,7 +4,9 @@
 //! Three sources, tried in this order, the first that gives credentials wins:
 //!
 //! 1. The environment: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`
-//!    if the key is temporary. Used as given; never expires here.
+//!    if the key is temporary. Used as given; never expires here. The environment is the
+//!    caller's view (`Env`), not read from the process. Half of a pair, or a value that is not a
+//!    key (or a token over its bound), is the answer too: a refusal, never another identity.
 //! 2. Web identity, the way Kubernetes service accounts work: `AWS_ROLE_ARN` and
 //!    `AWS_WEB_IDENTITY_TOKEN_FILE` (and `AWS_ROLE_SESSION_NAME`, default `zbx`). The token file is
 //!    read and sent in an unsigned STS `AssumeRoleWithWebIdentity` call. Once the pair is set, this
@@ -38,6 +40,11 @@ pub const State = enum {
     not_configured,
     /// Some of what it needs was set, not all.
     incomplete,
+    /// A metadata service that will not give a session token (version 2 is off or absent behind
+    /// it): a 4xx on the token call. Version 1 is never asked. The fix is not "attach a role".
+    v1_only,
+    /// A metadata service with no role attached to the instance.
+    no_role,
     /// Switched off on purpose (`AWS_EC2_METADATA_DISABLED=true`).
     disabled,
     used,
@@ -75,6 +82,61 @@ pub const Trace = struct {
         assert(found.len <= trace.error_code.len);
         @memcpy(trace.error_code[0..found.len], found);
         trace.error_code_len = @intCast(found.len);
+    }
+};
+
+/// The environment as the caller sees it: name and value pairs, handed in so a caller that holds
+/// different settings per workload (or none in its own process) is not bound to the process's.
+/// Only the `names` below are ever looked at.
+pub const Env = struct {
+    pairs: []const Pair,
+
+    pub const Pair = struct { name: []const u8, value: []const u8 };
+
+    /// The names `resolve` reads.
+    pub const names = [_][]const u8{
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_ROLE_ARN",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_SESSION_NAME",
+        "AWS_EC2_METADATA_DISABLED",
+    };
+
+    /// The value of `name`, whole whatever its length, or null if not set.
+    pub fn get(env: Env, name: []const u8) ?[]const u8 {
+        for (env.pairs) |pair| {
+            if (std.mem.eql(u8, pair.name, name)) return pair.value;
+        }
+        return null;
+    }
+
+    /// The caller's view of this process, for the CLI: each name in `names` that the host has,
+    /// in `storage`. A value is read up to one byte past its bound, so a value over the bound
+    /// reaches `resolve` as over the bound and is refused, not cut or dropped.
+    pub fn from_host(host: host_mod.Host, storage: *[names.len]Pair) Env {
+        var count: u32 = 0;
+        inline for (names) |name| {
+            const limit = comptime value_limit(name) + 1;
+            if (host.environment(name, limit)) |value| {
+                storage[count] = .{ .name = name, .value = value };
+                count += 1;
+            }
+        }
+        return .{ .pairs = storage[0..count] };
+    }
+
+    fn value_limit(name: []const u8) u32 {
+        if (std.mem.eql(u8, name, "AWS_ACCESS_KEY_ID")) return constants.aws_key_id_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_SECRET_ACCESS_KEY")) return constants.aws_secret_key_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_SESSION_TOKEN")) return constants.aws_session_token_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_ROLE_ARN")) return constants.aws_role_arn_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_WEB_IDENTITY_TOKEN_FILE")) return constants.path_bytes_max;
+        if (std.mem.eql(u8, name, "AWS_ROLE_SESSION_NAME")) {
+            return constants.aws_role_session_name_bytes_max;
+        }
+        return 8;
     }
 };
 
@@ -162,12 +224,16 @@ const sts_service = "sts";
 const imds_host = "169.254.169.254";
 const role_path = "/latest/meta-data/iam/security-credentials/";
 
-/// Finds credentials for a call in `region` (the STS endpoint is the region's). On success
-/// `credentials` holds them and the trace says which source. The one function the library
-/// exports; see the module comment for the order and the rules.
+/// Finds credentials for a call in `region` at `now_s` (seconds since the epoch; the expiry of
+/// what a service hands out is judged against it). On success `credentials` holds them and the
+/// trace says which source. `env` is the caller's view of the environment; the host gives the
+/// file system, the network and nothing else here. The one function the library exports, as
+/// `aws_credentials_resolve`; see the module comment for the order and the rules.
 pub fn resolve(
     host: host_mod.Host,
+    env: Env,
     region: []const u8,
+    now_s: u64,
     workspace: *Workspace,
     credentials: *Credentials,
     trace: *Trace,
@@ -176,35 +242,42 @@ pub fn resolve(
     credentials.wipe();
     trace.* = .{};
     defer workspace.wipe();
-    if (from_environment(host, credentials, trace)) return;
-    // A configured role is the answer, whatever it says: no falling through to another identity.
-    web_identity(host, region, workspace, credentials, trace);
+    // Once a source is set up, even in part, it is the answer, success or not: zbx never goes on
+    // to another identity (the node's role, say) because the one the user named failed.
+    from_environment(env, credentials, trace);
+    if (trace.environment == .used) return;
+    if (trace.environment != .not_configured) return error.NoCredentials;
+    web_identity(host, env, region, now_s, workspace, credentials, trace);
     if (trace.web_identity == .used) return;
     if (trace.web_identity != .not_configured) return error.NoCredentials;
-    instance_metadata(host, workspace, credentials, trace);
+    instance_metadata(host, env, now_s, workspace, credentials, trace);
     if (trace.instance_metadata == .used) return;
     return error.NoCredentials;
 }
 
-fn from_environment(host: host_mod.Host, credentials: *Credentials, trace: *Trace) bool {
-    const key_id = host.environment("AWS_ACCESS_KEY_ID", constants.aws_key_id_bytes_max);
-    const secret = host.environment("AWS_SECRET_ACCESS_KEY", constants.aws_secret_key_bytes_max);
-    const token = host.environment("AWS_SESSION_TOKEN", constants.aws_session_token_bytes_max);
-    if (key_id == null and secret == null) return false;
+fn from_environment(env: Env, credentials: *Credentials, trace: *Trace) void {
+    const key_id = env.get("AWS_ACCESS_KEY_ID");
+    const secret = env.get("AWS_SECRET_ACCESS_KEY");
+    const token = env.get("AWS_SESSION_TOKEN");
+    if (key_id == null and secret == null) {
+        // A token alone is half of something too.
+        if (token != null) trace.environment = .incomplete;
+        return;
+    }
     if (key_id == null or secret == null) {
         trace.environment = .incomplete;
-        return false;
+        return;
     }
     const token_text = token orelse "";
+    // `token_valid` refuses a token over its bound, so it is refused here, not dropped.
     if (!parse.key_id_valid(key_id.?) or !parse.secret_valid(secret.?) or
         (token_text.len > 0 and !parse.token_valid(token_text)))
     {
         trace.environment = .malformed;
-        return false;
+        return;
     }
     credentials.set(.environment, key_id.?, secret.?, token_text, 0);
     trace.environment = .used;
-    return true;
 }
 
 /// Reads a token file into `buffer`, trims trailing blanks, and checks it looks like a JWT: base64
@@ -223,22 +296,28 @@ fn read_token(host: host_mod.Host, path: []const u8, buffer: []u8) ?[]const u8 {
 
 fn web_identity(
     host: host_mod.Host,
+    env: Env,
     region: []const u8,
+    now_s: u64,
     workspace: *Workspace,
     credentials: *Credentials,
     trace: *Trace,
 ) void {
-    const role = host.environment("AWS_ROLE_ARN", constants.aws_role_arn_bytes_max);
-    const path = host.environment("AWS_WEB_IDENTITY_TOKEN_FILE", constants.path_bytes_max);
+    const role = env.get("AWS_ROLE_ARN");
+    const path = env.get("AWS_WEB_IDENTITY_TOKEN_FILE");
     if (role == null and path == null) return;
     if (role == null or path == null or role.?.len == 0 or path.?.len == 0) {
         trace.web_identity = .incomplete;
         return;
     }
-    const session_name = host.environment(
-        "AWS_ROLE_SESSION_NAME",
-        constants.aws_role_session_name_bytes_max,
-    ) orelse "zbx";
+    const session_name = env.get("AWS_ROLE_SESSION_NAME") orelse "zbx";
+    if (role.?.len > constants.aws_role_arn_bytes_max or
+        path.?.len > constants.path_bytes_max or
+        session_name.len > constants.aws_role_session_name_bytes_max)
+    {
+        trace.web_identity = .malformed;
+        return;
+    }
     const token = read_token(host, path.?, &workspace.token_file) orelse {
         trace.web_identity = .unreadable;
         return;
@@ -273,6 +352,7 @@ fn web_identity(
         .method = .post,
         .body = source.body(),
         .content_type = "application/x-www-form-urlencoded",
+        .secret = true, // The token is in the body; the keys are in the answer.
     };
     host.network().call(&request, &head, sink.sink()) catch {
         trace.web_identity = .no_answer;
@@ -287,12 +367,12 @@ fn web_identity(
         trace.web_identity = .malformed;
         return;
     };
-    accept(host, parsed, .web_identity, credentials, &trace.web_identity);
+    accept(now_s, parsed, .web_identity, credentials, &trace.web_identity);
 }
 
 /// Takes parsed credentials unless they are out of date.
 fn accept(
-    host: host_mod.Host,
+    now_s: u64,
     parsed: parse.Credentials,
     source: Source,
     credentials: *Credentials,
@@ -305,7 +385,7 @@ fn accept(
         parsed.session_token,
         parsed.expiration_s,
     );
-    if (credentials.expired(host.time_now())) {
+    if (credentials.expired(now_s)) {
         credentials.wipe();
         state.* = .expired;
         return;
@@ -329,11 +409,13 @@ fn imds_call(
 
 fn instance_metadata(
     host: host_mod.Host,
+    env: Env,
+    now_s: u64,
     workspace: *Workspace,
     credentials: *Credentials,
     trace: *Trace,
 ) void {
-    if (host.environment("AWS_EC2_METADATA_DISABLED", 8)) |value| {
+    if (env.get("AWS_EC2_METADATA_DISABLED")) |value| {
         if (std.ascii.eqlIgnoreCase(value, "true")) {
             trace.instance_metadata = .disabled;
             return;
@@ -353,16 +435,17 @@ fn instance_metadata(
     request.body = empty.body();
     request.extra_headers = &.{ttl_header};
     const status = imds_call(host, &request, &sink) orelse return;
-    // Anything but a token is the end: version 1 is never asked.
+    // Anything but a token is the end: version 1 is never asked. A 4xx says the token service
+    // is not there (version 1 only, or version 2 off); a failing one (5xx, nonsense) is a refusal.
     if (status != 200 or !parse.imds_token_valid(sink.bytes())) {
-        trace.instance_metadata = .refused;
+        trace.instance_metadata = if (status >= 400 and status < 500) .v1_only else .refused;
         trace.status = status;
         return;
     }
     var session: [constants.aws_imds_token_bytes_max]u8 = undefined;
     defer std.crypto.secureZero(u8, &session);
     @memcpy(session[0..sink.len], sink.bytes());
-    fetch_role(host, session[0..sink.len], workspace, credentials, trace);
+    fetch_role(host, session[0..sink.len], now_s, workspace, credentials, trace);
 }
 
 fn imds_request(target: []const u8, response: []u8) net.Request {
@@ -377,12 +460,14 @@ fn imds_request(target: []const u8, response: []u8) net.Request {
         .idle_timeout_ms = constants.aws_imds_timeout_ms,
         .total_timeout_ms = constants.aws_imds_total_timeout_ms,
         .proxy = .never,
+        .secret = true, // The token is the answer to the PUT; the keys are the answer to a GET.
     };
 }
 
 fn fetch_role(
     host: host_mod.Host,
     session: []const u8,
+    now_s: u64,
     workspace: *Workspace,
     credentials: *Credentials,
     trace: *Trace,
@@ -401,7 +486,7 @@ fn fetch_role(
         return;
     };
     if (listed != 200) {
-        trace.instance_metadata = .refused;
+        trace.instance_metadata = if (listed == 404) .no_role else .refused;
         trace.status = listed;
         return;
     }
@@ -429,5 +514,5 @@ fn fetch_role(
         trace.instance_metadata = .malformed;
         return;
     };
-    accept(host, parsed, .instance_metadata, credentials, &trace.instance_metadata);
+    accept(now_s, parsed, .instance_metadata, credentials, &trace.instance_metadata);
 }

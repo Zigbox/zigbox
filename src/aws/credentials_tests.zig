@@ -7,6 +7,7 @@
 const std = @import("std");
 const testing = std.testing;
 const aws_sim = @import("aws_sim.zig");
+const constants = @import("../constants.zig");
 const credentials_mod = @import("credentials.zig");
 const host_sim = @import("../host_sim.zig");
 const net = @import("../registry/net.zig");
@@ -51,10 +52,19 @@ const Fixture = struct {
         std.heap.page_allocator.destroy(fixture);
     }
 
+    /// Resolves with the environment the fixture's host holds, read through `Env.from_host`.
     fn resolve(fixture: *Fixture) credentials_mod.Error!void {
+        var storage: [credentials_mod.Env.names.len]credentials_mod.Env.Pair = undefined;
+        const env = credentials_mod.Env.from_host(fixture.host.interface(), &storage);
+        return fixture.resolve_with(env);
+    }
+
+    fn resolve_with(fixture: *Fixture, env: credentials_mod.Env) credentials_mod.Error!void {
         return credentials_mod.resolve(
             fixture.host.interface(),
+            env,
             "us-east-1",
+            fixture.host.world.now,
             &fixture.workspace,
             &fixture.credentials,
             &fixture.trace,
@@ -96,26 +106,71 @@ test "environment credentials are used as given, with no network call" {
     for (fixture.credentials.secret_access_key) |byte| try testing.expectEqual(@as(u8, 0), byte);
 }
 
-// Goal: half an environment pair is reported and the next source is tried; a pair with a bad
-// character is reported too and never used.
-test "an incomplete or malformed environment pair is not used" {
-    const half = [_]host_sim.EnvironmentVariable{
-        .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" },
+// Goal: environment credentials that are half set, or not keys, are the answer: reported, never
+// used, and never replaced by another identity (web identity or the instance role).
+test "an incomplete or malformed environment pair is terminal" {
+    const long_token: [constants.aws_session_token_bytes_max + 1]u8 = @splat('t');
+    const key = credentials_mod.Env.Pair{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" };
+    const secret = credentials_mod.Env.Pair{
+        .name = "AWS_SECRET_ACCESS_KEY",
+        .value = aws_sim.issued_secret,
     };
-    const fixture = try Fixture.create(2, &.{}, &half);
+    const cases = [_]struct { pairs: []const credentials_mod.Env.Pair, state: credentials_mod.State }{
+        .{ .pairs = &.{key}, .state = .incomplete },
+        .{ .pairs = &.{secret}, .state = .incomplete },
+        .{
+            .pairs = &.{ .{ .name = "AWS_SESSION_TOKEN", .value = aws_sim.issued_token }, key },
+            .state = .incomplete,
+        },
+        .{ .pairs = &.{ .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIA EXAMPLE EXAMPLE" }, secret }, .state = .malformed },
+        .{ .pairs = &.{ .{ .name = "AWS_ACCESS_KEY_ID", .value = "SHORT" }, secret }, .state = .malformed },
+        .{
+            .pairs = &.{ .{ .name = "AWS_SECRET_ACCESS_KEY", .value = "wJalrXUtnFEMI/K7MDENG\n" }, key },
+            .state = .malformed,
+        },
+        // A token over its bound is refused with a reason, not dropped.
+        .{ .pairs = &.{ key, secret, .{ .name = "AWS_SESSION_TOKEN", .value = &long_token } }, .state = .malformed },
+    };
+    for (cases) |case| {
+        // Web identity is configured and the metadata service is there: neither is reached.
+        const fixture = try Fixture.create(2, &.{token_file}, &web_env);
+        defer fixture.destroy();
+        fixture.aws.imds = .v2;
+        try testing.expectError(error.NoCredentials, fixture.resolve_with(.{ .pairs = case.pairs }));
+        try testing.expectEqual(case.state, fixture.trace.environment);
+        try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.web_identity);
+        try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
+        try testing.expectEqual(@as(u32, 0), fixture.credentials.access_key_id_len);
+        try fixture.expect_wiped();
+    }
+}
+
+// Goal: the environment is the caller's: a host whose own process holds other settings (or
+// none) changes nothing, and a second caller with its own view gets its own answer.
+test "the environment is the caller's view, not the host's" {
+    const process_env = [_]host_sim.EnvironmentVariable{
+        .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAPROCESSPROCESS1" },
+        .{ .name = "AWS_SECRET_ACCESS_KEY", .value = "processsecretprocesssecret" },
+    };
+    const fixture = try Fixture.create(21, &.{token_file}, &process_env);
     defer fixture.destroy();
-    fixture.aws.imds = .v2;
-    try fixture.resolve();
-    try testing.expectEqual(credentials_mod.State.incomplete, fixture.trace.environment);
-    try testing.expectEqual(credentials_mod.Source.instance_metadata, fixture.credentials.source);
-    const bad = [_]host_sim.EnvironmentVariable{
-        .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIA EXAMPLE EXAMPLE" },
+    const workload_a = [_]credentials_mod.Env.Pair{
+        .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAWORKLOADAAAAA1" },
         .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
     };
-    fixture.host.environment_variables = &bad;
-    fixture.wire.faults.fail_per_mille = 1000;
-    try testing.expectError(error.NoCredentials, fixture.resolve());
-    try testing.expectEqual(credentials_mod.State.malformed, fixture.trace.environment);
+    try fixture.resolve_with(.{ .pairs = &workload_a });
+    try testing.expectEqualStrings("AKIAWORKLOADAAAAA1", fixture.credentials.key().access_key_id);
+    const workload_b = [_]credentials_mod.Env.Pair{
+        .{ .name = "AWS_ROLE_ARN", .value = role_arn },
+        .{ .name = "AWS_WEB_IDENTITY_TOKEN_FILE", .value = token_path },
+    };
+    try fixture.resolve_with(.{ .pairs = &workload_b });
+    try testing.expectEqual(credentials_mod.Source.web_identity, fixture.credentials.source);
+    // No view at all: the process's variables are not consulted, so the metadata service answers.
+    fixture.aws.imds = .v2;
+    try fixture.resolve_with(.{ .pairs = &.{} });
+    try testing.expectEqual(credentials_mod.Source.instance_metadata, fixture.credentials.source);
+    fixture.credentials.wipe();
 }
 
 // Goal: web identity sends the token file in an unsigned STS call, escaped, and takes the answer.
@@ -147,6 +202,7 @@ test "web identity failures are terminal and named" {
         .{ .mode = .refused, .state = .refused },
         .{ .mode = .malformed, .state = .malformed },
         .{ .mode = .expired, .state = .expired },
+        .{ .mode = .unavailable, .state = .refused },
     };
     for (cases) |case| {
         const fixture = try Fixture.create(4, &.{token_file}, &web_env);
@@ -217,6 +273,9 @@ test "metadata service: version 2 only, never through a proxy" {
         try testing.expectEqual(net.Scheme.http, logged.scheme);
         try testing.expectEqualStrings("169.254.169.254", logged.host_text());
         if (index > 0) try testing.expect(logged.secret_headers == 1);
+        // The short limits, not the registry's: a laptop off EC2 is not kept waiting.
+        try testing.expectEqual(constants.aws_imds_timeout_ms, logged.idle_timeout_ms);
+        try testing.expectEqual(constants.aws_imds_total_timeout_ms, logged.total_timeout_ms);
     }
     try testing.expectEqual(net.Method.put, fixture.wire.logged(0).?.method);
     try fixture.expect_wiped();
@@ -226,9 +285,10 @@ test "metadata service: version 2 only, never through a proxy" {
 // is simply not there ends in "no credentials" without ever asking for version 1.
 test "metadata service failures never fall back to version 1" {
     const modes = [_]struct { mode: aws_sim.ImdsMode, state: credentials_mod.State, calls: u32 }{
-        .{ .mode = .v1_only, .state = .refused, .calls = 1 },
-        .{ .mode = .no_role, .state = .refused, .calls = 2 },
+        .{ .mode = .v1_only, .state = .v1_only, .calls = 1 },
+        .{ .mode = .no_role, .state = .no_role, .calls = 2 },
         .{ .mode = .malformed, .state = .malformed, .calls = 3 },
+        .{ .mode = .unavailable, .state = .refused, .calls = 1 },
     };
     for (modes) |case| {
         const fixture = try Fixture.create(9, &.{}, &.{});

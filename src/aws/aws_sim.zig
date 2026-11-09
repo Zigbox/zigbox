@@ -30,9 +30,18 @@ pub const ImdsMode = enum {
     no_role,
     /// Version 2, and the credentials document is not JSON.
     malformed,
+    /// The service is failing: every call answers 503.
+    unavailable,
 };
 
-pub const StsMode = enum { ok, refused, malformed, expired };
+pub const StsMode = enum {
+    ok,
+    refused,
+    malformed,
+    expired,
+    /// Throttled or failing: 503.
+    unavailable,
+};
 
 pub const issued_key_id = "ASIAEXAMPLEEXAMPLE1";
 pub const issued_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
@@ -107,6 +116,10 @@ fn answer(
 fn imds(sim: *AwsSim, request: *const net.Request, served: *net_sim.Served) void {
     sim.imds_calls += 1;
     if (request.proxy != .never) sim.leaked += 1;
+    if (sim.imds == .unavailable) {
+        served.status = 503;
+        return;
+    }
     if (request.method == .put) {
         if (sim.imds == .v1_only) return;
         if (header_value(request, "X-aws-ec2-metadata-token-ttl-seconds") == null) {
@@ -178,6 +191,7 @@ fn sts(
         return;
     }
     switch (sim.sts) {
+        .unavailable => served.* = .{ .status = 503, .body = "<Error/>" },
         .refused => served.* = .{ .status = 400, .body = sts_error("InvalidIdentityToken") },
         .malformed => served.* = .{ .status = 200, .body = "<Oops/>" },
         .ok, .expired => {

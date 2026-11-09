@@ -1,7 +1,11 @@
 //! Known-answer and boundary tests for `sigv4.zig`. The known answers are the published ones of
 //! AWS's SigV4 documentation and its `aws-sig-v4-test-suite` (access key `AKIDEXAMPLE`, secret
 //! `wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY`, time `20150830T123600Z`); they come from outside
-//! this code, which is why they can show the signer is right.
+//! this code, which is why they can show the signer is right. They are the files in
+//! `src/testdata/aws_sigv4/`, copied from the suite (botocore's copy at
+//! https://github.com/boto/botocore/tree/develop/tests/unit/auth/aws4_testsuite) and the
+//! documentation pages named in that directory's `SOURCE.md`. Never regenerate one from the
+//! signer: a value the signer made proves nothing.
 
 const std = @import("std");
 const testing = std.testing;
@@ -13,6 +17,7 @@ const example_key: sigv4.Key = .{
     .secret_access_key = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
     .session_token = "",
 };
+const testdata = "../testdata/aws_sigv4/";
 const form_charset = "application/x-www-form-urlencoded; charset=utf-8";
 const example_time_s: u64 = 1440938160; // 20150830T123600Z
 
@@ -53,8 +58,9 @@ test "the date text and the signing key are the published ones" {
         "20150830",
         .{ .region = "us-east-1", .service = "iam" },
     );
+    const published = @embedFile(testdata ++ "signing-key.hex");
     try testing.expectEqualStrings(
-        "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+        std.mem.trimEnd(u8, published, "\n"),
         &std.fmt.bytesToHex(key, .lower),
     );
 }
@@ -70,29 +76,59 @@ test "the documentation's iam ListUsers request" {
         },
         "",
         .{ .region = "us-east-1", .service = "iam" },
-        "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
+        @embedFile(testdata ++ "iam-list-users.signature"),
     );
 }
 
-// Goal: the test suite's simplest request, then its query ordering, form post and header ordering.
+/// Signs the request in a suite `.req` file and compares the whole `Authorization` value with the
+/// suite's `.authz`. The suite's `X-Amz-Date` line is skipped: the signer adds its own, from the
+/// suite's time. Header values are given as the file has them, blanks and all.
+fn expect_suite_case(comptime name: []const u8) !void {
+    const req = @embedFile(testdata ++ name ++ ".req");
+    const authz = @embedFile(testdata ++ name ++ ".authz");
+    var lines = std.mem.splitScalar(u8, req, '\n');
+    var first = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+    const method_text = first.next().?;
+    const target = first.next().?;
+    var headers: [8]net.Header = undefined;
+    var count: usize = 0;
+    var body: []const u8 = "";
+    while (lines.next()) |line| {
+        if (line.len == 0) {
+            body = lines.rest();
+            break;
+        }
+        const colon = std.mem.indexOfScalar(u8, line, ':').?;
+        if (std.ascii.eqlIgnoreCase(line[0..colon], "x-amz-date")) continue;
+        headers[count] = .{ .name = line[0..colon], .value = line[colon + 1 ..] };
+        count += 1;
+    }
+    const method: net.Method = if (std.mem.eql(u8, method_text, "POST")) .post else .get;
+    var workspace: sigv4.Workspace = undefined;
+    var signed: sigv4.Signed = undefined;
+    try sigv4.sign(&.{
+        .method = method,
+        .target = target,
+        .headers = headers[0..count],
+        .body = body,
+        .scope = .{ .region = "us-east-1", .service = "service" },
+        .key = example_key,
+        .now_s = example_time_s,
+    }, &workspace, &signed);
+    testing.expectEqualStrings(authz, signed.authorization_text()) catch |err| {
+        std.debug.print("suite case {s} does not match its .authz\n", .{name});
+        return err;
+    };
+}
+
+// Goal: the test suite's simplest request, its query ordering, form post, header ordering (a
+// mixed-case custom header sorted in among the signer's own) and header value trimming.
 test "the aws-sig-v4-test-suite requests" {
-    const scope: sigv4.Scope = .{ .region = "us-east-1", .service = "service" };
-    const host: net.Header = .{ .name = "Host", .value = "example.amazonaws.com" };
-    const vanilla = "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31";
-    try expect_signature(.get, "/", &.{host}, "", scope, vanilla);
-    const query_order = "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500";
-    try expect_signature(.get, "/?Param2=value2&Param1=value1", &.{host}, "", scope, query_order);
-    try expect_signature(
-        .post,
-        "/",
-        &.{
-            host,
-            .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
-        },
-        "Param1=value1",
-        scope,
-        "ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a",
-    );
+    try expect_suite_case("get-vanilla");
+    try expect_suite_case("get-vanilla-query-order-key-case");
+    try expect_suite_case("post-x-www-form-urlencoded");
+    try expect_suite_case("post-header-key-sort");
+    try expect_suite_case("get-header-value-trim");
 }
 
 // Goal: a repeated header, a header the signer adds, a path with a dot segment and a target

@@ -85,6 +85,9 @@ pub const Logged = struct {
     extra_headers: u8,
     secret_headers: u8,
     proxy: net.ProxyUse,
+    /// The timeouts the request asked for, so a test can check a call used its own constant.
+    idle_timeout_ms: u32,
+    total_timeout_ms: u32,
 
     /// Whether any credential went with the request, of any kind.
     pub fn credential_sent(entry: *const Logged) bool {
@@ -188,6 +191,8 @@ pub const SimNet = struct {
             if (header.secret) entry.secret_headers += 1;
         }
         entry.proxy = request.proxy;
+        entry.idle_timeout_ms = request.idle_timeout_ms;
+        entry.total_timeout_ms = request.total_timeout_ms;
     }
 
     fn injected(sim: *SimNet, index: u32) ?net.Error {

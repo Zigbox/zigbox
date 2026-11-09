@@ -126,6 +126,20 @@ pub const Facts = @import("doctor.zig").Facts;
 /// coded `Diag`. `pull.zig` has the rest.
 pub const pull = @import("pull.zig");
 
+/// AWS credentials (M6c): `aws_credentials_resolve(host, env, region, now_s, workspace,
+/// credentials, trace)` finds the credentials a call in `region` runs with: the environment the
+/// caller passes as an `AwsEnv` view (never the process's own), web identity, then the instance
+/// metadata service (version 2 only). It knows nothing of pulls: ECR pull and push both call it.
+/// The caller owns the `AwsWorkspace` (about 75 KiB) and the `AwsCredentials`, wipes both when done,
+/// and reads the `AwsTrace` to say why nothing was found. Nothing is cached or written. Where the
+/// brief's `diag` is a `Trace` here: the diagnostics are registered with the ECR client.
+pub const aws_credentials = @import("aws/credentials.zig");
+pub const aws_credentials_resolve = aws_credentials.resolve;
+pub const AwsEnv = aws_credentials.Env;
+pub const AwsCredentials = aws_credentials.Credentials;
+pub const AwsWorkspace = aws_credentials.Workspace;
+pub const AwsTrace = aws_credentials.Trace;
+
 /// Push (M8, lane U): the packing a registry upload and an OCI layout share. `push.pack` makes
 /// the one deterministic gzip layer of a tree, its config and manifest (the caller's
 /// `push.Workspace`, about 8 MiB: static storage or the heap) and leaves them in the store's blob
@@ -193,6 +207,7 @@ test "the module's surface is what the contract names" {
     _ = exec_wait;
     _ = pull.pull;
     _ = pull.Workspace;
+    _ = aws_credentials_resolve;
     _ = push.pack.pack;
     _ = push.export_layout;
     _ = push.send;

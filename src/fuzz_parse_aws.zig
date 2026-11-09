@@ -34,6 +34,8 @@ const samples = [_][]const u8{
     "123456789012.dkr.ecr.us-east-1.amazonaws.com",
     "123456789012.dkr.ecr-fips.us-east-1.amazonaws.com",
     "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn",
+    "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com",
+    "123456789012.dkr.ecr.us-isob-east-1.amazonaws.com",
     "public.ecr.aws",
 };
 
@@ -107,6 +109,9 @@ fn check_host(input: []const u8) void {
         else => return,
     };
     assert(ecr.valid_region(private.region));
+    // Another partition is never classified as a private host to sign for.
+    assert(!std.mem.startsWith(u8, private.region, "us-gov-"));
+    assert(!std.mem.startsWith(u8, private.region, "cn-"));
     for (private.account) |digit| assert(std.ascii.isDigit(digit));
     var rebuilt: [constants.aws_ecr_host_bytes_max]u8 = undefined;
     const text = std.fmt.bufPrint(

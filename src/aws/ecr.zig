@@ -83,7 +83,14 @@ pub fn valid_region(region: []const u8) bool {
     if (part_length == 0) return false;
     parts += 1;
     if (parts < 3) return false;
-    return !std.mem.containsAtLeast(u8, region, 1, "fips");
+    if (std.mem.containsAtLeast(u8, region, 1, "fips")) return false;
+    // Other partitions (GovCloud, China, the isolated clouds) sign with other endpoints and
+    // other credentials: refused as unsupported, never signed for the wrong one.
+    const other_partitions = [_][]const u8{ "us-gov-", "us-iso", "eu-iso", "cn-" };
+    for (other_partitions) |prefix| {
+        if (std.mem.startsWith(u8, region, prefix)) return false;
+    }
+    return true;
 }
 
 /// The host of the AWS endpoint of `service` in `region`, `sts.us-east-1.amazonaws.com`.
@@ -157,6 +164,11 @@ test "region validity at its boundaries" {
     try std.testing.expect(!valid_region("us--east-1"));
     try std.testing.expect(!valid_region("-us-east-1"));
     try std.testing.expect(!valid_region("us-east-1-"));
+    for ([_][]const u8{ "us-gov-west-1", "us-gov-east-1", "us-isob-east-1", "eu-isoe-west-1" }) |other| {
+        try std.testing.expect(!valid_region(other));
+    }
+    const gov = "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com";
+    try std.testing.expect(classify(gov) == .unsupported);
     const long = "aaaaaaaa-bbbbbbbbb-cccccccc-d";
     try std.testing.expect(!valid_region(long));
 }

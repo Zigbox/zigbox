@@ -770,6 +770,7 @@ fn read_body(
 fn carries_credential(request: *const net.Request) bool {
     assert(request.host.len > 0);
     if (request.bearer.len > 0) assert(request.basic.len == 0);
+    if (request.secret) return true;
     for (request.extra_headers) |header| {
         if (header.secret) return true;
     }
@@ -1010,10 +1011,15 @@ test "a call that carried a credential leaves no byte in the socket buffers, on 
     _ = try interface(&real).get(&request, &head, sink.sink());
     try testing.expect(!buffers_are_zero(&test_memory.buffers)); // The control.
     request.basic = "dXNlcjpzZWNyZXQtbWFya2Vy";
-    for ([_][]const u8{ "basic", "bearer" }) |kind| {
+    for ([_][]const u8{ "basic", "bearer", "secret" }) |kind| {
         if (std.mem.eql(u8, kind, "bearer")) {
             request.basic = "";
             request.bearer = "secret-token-marker";
+        }
+        if (std.mem.eql(u8, kind, "secret")) {
+            // Only the flag: no header, no bearer (a token in the body, keys in the answer).
+            request.bearer = "";
+            request.secret = true;
         }
         real = test_real();
         @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
@@ -1205,6 +1211,10 @@ test "extra headers and an authorization value are written once, and mark the ca
     try testing.expect(carries_credential(&request)); // The session token alone is enough.
     request.extra_headers = headers[0..1];
     try testing.expect(!carries_credential(&request));
+    // A token in the body (STS) or credentials in the answer (IMDS) have no header: the flag
+    // alone marks the call, and the wipe then zeroes what a marker left in the buffers.
+    request.secret = true;
+    try testing.expect(carries_credential(&request));
 }
 
 test "a header with a line break, a colon in its name or a reserved name is not valid" {

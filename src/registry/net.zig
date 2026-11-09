@@ -209,6 +209,9 @@ pub const Request = struct {
     /// More headers, at most `constants.net_extra_headers_max`, each `valid`.
     extra_headers: []const Header = &.{},
     proxy: ProxyUse = .environment,
+    /// The request or its answer holds a secret that no header marks: a token in the body, or
+    /// credentials in the answer. The real network zeroes every buffer it used for the call.
+    secret: bool = false,
 };
 
 /// A header value kept whole, or marked cut: a value past its bound is never half-used.
