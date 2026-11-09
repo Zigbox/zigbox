@@ -229,7 +229,7 @@ const Checker = struct {
         var bytes: u64 = 0;
         const damage = verify.check_object_alone(
             checker.store,
-            checker.ws,
+            &checker.ws.scratch,
             ref.id,
             has_list,
             &bytes,

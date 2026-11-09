@@ -115,6 +115,8 @@ const Node = struct {
     xattr_at: u32,
     xattr_len: u32,
     mtime: u64,
+    /// The inode change time: a counter that every change of the inode moves forward.
+    ctime: u64,
     inode: u64,
     unreadable: bool,
     rdev_major: u32,
@@ -168,6 +170,8 @@ pub const SimFs = struct {
     /// The time the model stamps on what is created or written, for the tests that age things.
     clock: u64,
     next_inode: u64,
+    /// The last inode change time given out.
+    ctime_clock: u64,
     /// Bytes held by live files now.
     bytes_live: u64,
     builder: xattrs.Builder,
@@ -186,6 +190,7 @@ pub const SimFs = struct {
         sim.crashed = false;
         sim.errno_last = 0;
         sim.next_inode = 100;
+        sim.ctime_clock = 0;
         sim.bytes_live = 0;
         assert(sim.open_count() == 0);
         assert(sim.live_count() == 0);
@@ -316,12 +321,34 @@ pub const SimFs = struct {
             .rdev_major = node.rdev_major,
             .rdev_minor = node.rdev_minor,
             .mtime = node.mtime,
+            .ctime_ns = node.ctime,
             // A file system of 4 KiB blocks: a directory takes one, a file what its bytes need.
             .blocks = if (node.kind == .dir)
                 8
             else
                 8 * (std.math.divCeil(u64, node.data_len, 4096) catch unreachable), // 4096 > 0.
         };
+    }
+
+    /// Moves the change time of every name of the node's inode forward, as any change does.
+    fn touch(sim: *SimFs, index: u32) void {
+        const inode = sim.nodes[index].inode;
+        sim.ctime_clock += 1;
+        for (sim.nodes[0..sim.count]) |*node| {
+            if (node.alive and node.inode == inode) node.ctime = sim.ctime_clock;
+        }
+    }
+
+    /// A change by hand that moves the change time only (a `chmod` to the same mode, a link and
+    /// an unlink): what the tamper check must notice.
+    pub fn touch_ctime_of(sim: *SimFs, path: []const u8) void {
+        sim.touch(sim.find(path).?);
+    }
+
+    /// The change time of the file at `path`.
+    pub fn ctime_of(sim: *const SimFs, path: []const u8) ?u64 {
+        const index = sim.find(path) orelse return null;
+        return sim.nodes[index].ctime;
     }
 
     /// How many live names the inode has. A `link` makes a second node with the same inode and
@@ -391,9 +418,11 @@ pub const SimFs = struct {
     }
 
     pub fn set_owner_of(sim: *SimFs, path: []const u8, uid: u32, gid: u32) void {
-        const node = &sim.nodes[sim.find(path).?];
+        const index = sim.find(path).?;
+        const node = &sim.nodes[index];
         node.uid = uid;
         node.gid = gid;
+        sim.touch(index);
     }
 
     pub fn remove_xattrs_of(sim: *SimFs, path: []const u8) void {
@@ -410,10 +439,13 @@ pub const SimFs = struct {
         const node = &sim.nodes[sim.find(path).?];
         assert(at < node.data_len);
         sim.pool[node.data_at + at] ^= 0xff;
+        sim.touch(sim.find(path).?);
     }
 
     pub fn set_mode_of(sim: *SimFs, path: []const u8, mode: u16) void {
-        sim.nodes[sim.find(path).?].mode = mode;
+        const index = sim.find(path).?;
+        sim.nodes[index].mode = mode;
+        sim.touch(index);
     }
 
     pub fn set_mtime_of(sim: *SimFs, path: []const u8, seconds: u64) void {
@@ -447,6 +479,8 @@ pub const SimFs = struct {
         node.xattr_at = 0;
         node.xattr_len = 0;
         node.mtime = sim.clock;
+        sim.ctime_clock += 1;
+        node.ctime = sim.ctime_clock;
         node.unreadable = false;
         node.rdev_major = 0;
         node.rdev_minor = 0;
@@ -497,6 +531,7 @@ pub const SimFs = struct {
 
     /// Replaces the node's attribute section with its attributes but `drop`, and `add`.
     fn rewrite_xattrs(sim: *SimFs, index: u32, drop: []const u8, add: ?xattrs.Xattr) Error!void {
+        sim.touch(index);
         const node = &sim.nodes[index];
         sim.builder.reset();
         if (node.xattr_len > 0) {
@@ -1007,6 +1042,7 @@ pub const SimFs = struct {
         if (sim.pool_len + node.data_len + length > sim.pool.len) return sim.fail(errno_nospc);
         sim.append(node, bytes[0..length]);
         node.mtime = sim.clock;
+        sim.touch(slot.node);
         return @intCast(length);
     }
 
@@ -1034,6 +1070,7 @@ pub const SimFs = struct {
         // A change of owner clears the file capability and the setuid and setgid bits, as the
         // kernel does; the other attributes stay.
         node.mode &= 0o1777;
+        sim.touch(sim.slot_of(fd).node);
         try sim.rewrite_xattrs(sim.slot_of(fd).node, "security.capability", null);
     }
 
@@ -1041,6 +1078,7 @@ pub const SimFs = struct {
         const sim = from_context(context);
         try sim.begin_mutation();
         sim.nodes[sim.slot_of(fd).node].mode = mode;
+        sim.touch(sim.slot_of(fd).node);
     }
 
     fn set_xattr(context: *anyopaque, fd: Fd, name: [:0]const u8, value: []const u8) Error!void {
@@ -1053,6 +1091,7 @@ pub const SimFs = struct {
         const sim = from_context(context);
         try sim.begin_mutation();
         sim.nodes[sim.slot_of(fd).node].mtime = seconds;
+        sim.touch(sim.slot_of(fd).node);
     }
 
     fn rename(context: *anyopaque, from: [:0]const u8, to: [:0]const u8) Error!void {
@@ -1112,8 +1151,11 @@ pub const SimFs = struct {
         node.alive = false;
         // The bytes go with the last name of the inode.
         var shared = false;
+        sim.ctime_clock += 1;
         for (sim.nodes[0..sim.count]) |*other| {
-            if (other.alive and other.inode == node.inode) shared = true;
+            if (!other.alive or other.inode != node.inode) continue;
+            shared = true;
+            other.ctime = sim.ctime_clock; // The link count changed.
         }
         if (!shared) sim.bytes_live -= node.data_len;
     }
@@ -1174,6 +1216,7 @@ pub const SimFs = struct {
         node.* = source; // The same inode, bytes, owner, mode and attributes.
         @memcpy(node.path[0..path_len], path[0..path_len]);
         node.path_len = path_len;
+        sim.touch(made);
     }
 
     fn symlink(context: *anyopaque, target: [:0]const u8, path: [:0]const u8) Error!void {
@@ -1209,6 +1252,7 @@ pub const SimFs = struct {
             if (attributes.mode) |mode| node.mode = mode;
             node.mtime = attributes.mtime;
         }
+        sim.touch(index);
     }
 
     fn set_path_xattr(

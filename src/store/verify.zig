@@ -112,12 +112,19 @@ pub const Totals = struct {
     paths_truncated: bool = false,
 };
 
-/// The caller's memory, about 8 MiB; keep it in static or heap storage.
-pub const Workspace = struct {
+/// What checking one object needs, about 1 MiB: a read buffer, the chunk hashes and the chunk
+/// list, and the attribute scratch. Keep it in static or heap storage.
+pub const Scratch = struct {
     io: [constants.store_io_buffer_bytes]u8,
     chunks: [constants.store_chunks_max]Digest,
     list: [constants.store_chunks_max]Digest,
     list_bytes: [constants.store_chunks_max * constants.store_digest_bytes]u8,
+    xattr: xattrs.Scratch,
+};
+
+/// The caller's memory, about 8 MiB; keep it in static or heap storage.
+pub const Workspace = struct {
+    scratch: Scratch,
     tree_buffer: [constants.store_tree_bytes_max]u8,
     damage: [constants.store_verify_damaged_max]Damage,
     damage_count: u32,
@@ -129,7 +136,6 @@ pub const Workspace = struct {
     frames: [8192]Frame,
     frame_paths: [1 << 20]u8,
     current: [constants.path_bytes_max + 1]u8,
-    xattr: xattrs.Scratch,
 
     pub fn damage_slice(ws: *const Workspace) []const Damage {
         assert(ws.damage_count <= ws.damage.len);
@@ -290,7 +296,7 @@ fn check_object(run: *Run, id: Digest, has_list: bool) void {
     assert(run.store.root_len > 1);
     run.totals.objects += 1;
     var bytes: u64 = 0;
-    const found = check_object_alone(run.store, run.ws, id, has_list, &bytes);
+    const found = check_object_alone(run.store, &run.ws.scratch, id, has_list, &bytes);
     run.totals.object_bytes += bytes;
     if (found) |damage| run.damage(id, .object, damage.kind, damage.errno);
 }
@@ -304,7 +310,7 @@ pub const ObjectDamage = struct { kind: Kind, errno: u16 };
 /// store-wide `verify` and by anything that must not trust a cache (`zbx sign`).
 pub fn check_object_alone(
     store: *const Store,
-    ws: *Workspace,
+    ws: *Scratch,
     id: Digest,
     has_list: bool,
     bytes: *u64,

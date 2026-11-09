@@ -109,6 +109,7 @@ fn stat_at(dir: i32, path: [:0]const u8, flags: u32) host.Error!fs.Stat {
         .INO = true,
         .SIZE = true,
         .MTIME = true,
+        .CTIME = true,
         .BLOCKS = true,
     };
     var buffer: linux.Statx = undefined;
@@ -128,8 +129,17 @@ fn stat_at(dir: i32, path: [:0]const u8, flags: u32) host.Error!fs.Stat {
         .rdev_major = buffer.rdev_major,
         .rdev_minor = buffer.rdev_minor,
         .mtime = if (buffer.mask.MTIME and buffer.mtime.sec > 0) @intCast(buffer.mtime.sec) else 0,
+        .ctime_ns = ctime_ns_of(&buffer),
         .blocks = if (buffer.mask.BLOCKS) buffer.blocks else 0,
     };
+}
+
+/// The inode change time in nanoseconds, or zero when the kernel did not give it.
+fn ctime_ns_of(buffer: *const linux.Statx) u64 {
+    if (!buffer.mask.CTIME or buffer.ctime.sec <= 0) return 0;
+    assert(buffer.ctime.nsec < 1_000_000_000);
+    const seconds: u64 = @intCast(buffer.ctime.sec);
+    return seconds *% 1_000_000_000 +% buffer.ctime.nsec;
 }
 
 fn read_dir(context: *anyopaque, path: [:0]const u8, visitor: fs.Visitor) host.Error!void {
