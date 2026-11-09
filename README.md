@@ -59,9 +59,9 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 9 · Mac | The Mac (cuttable) | Not started. |
 | 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
 | 11 · Upload | The upload protocol, the test registry, `zbx push`, [PR #75](https://github.com/Zigbox/zigbox/pull/75) | **Built and reviewed.** |
-| 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR) | **In progress.** |
+| 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR), [PR #76](https://github.com/Zigbox/zigbox/pull/76); a push to GHCR passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42660370098) | **Built and reviewed.** |
 | 13 · ECR | ECR push on M6c (cuttable) | Not started. |
-| 14 · Derived binding | The derived binding | Not started. |
+| 14 · Derived binding | The derived binding: image record v3, labels, W0551, [PR #77](https://github.com/Zigbox/zigbox/pull/77) | **Built and reviewed.** |
 
 ## Installing
 
