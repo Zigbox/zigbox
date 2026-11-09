@@ -41,21 +41,21 @@ const push_body =
     \\export DEBIAN_FRONTEND=noninteractive
     \\apt-get update -qq >/tmp/err-apt 2>&1
     \\apt-get install -y -qq docker-registry >>/tmp/err-apt 2>&1
-    \\systemctl start docker-registry >/tmp/err-start 2>&1
+    \\{ echo 'version: 0.1'; echo 'storage: {filesystem: {rootdirectory: /var/lib/docker-registry}}'
+    \\  echo 'http: {addr: ":5000"}'; } >/etc/docker/registry/config.yml
+    \\systemctl restart docker-registry >/tmp/err-start 2>&1
     \\i=0
     \\until curl -fs http://localhost:5000/v2/ >/dev/null; do
     \\  i=$((i + 1))
     \\  [ "$i" -lt 30 ] || { echo 'the registry did not start'
-    \\    systemctl status docker-registry --no-pager -l | tail -15; ss -ltn | tail -5; exit 1; }
+    \\    systemctl status docker-registry --no-pager | tail -5; exit 1; }
     \\  sleep 1
     \\done
     \\zd() { u=$1; shift; runuser -u "$u" -- env HOME=/home/$u /usr/local/bin/zbx "$@"; }
     \\ref=localhost:5000/m8/tree:1
     \\p1=$(zd demo push "$d" $ref 2>/tmp/err-p1)
-    \\echo "pushed: $p1 (export: $m)"
     \\[ "$p1" = "$m" ] || { echo "push printed $p1"; exit 1; }
     \\j=$(zd demo --output json push "$d" $ref 2>/tmp/err-p2)
-    \\echo "again: $j"
     \\n=$(echo "$j" | grep -o '"outcome":"exists"' | wc -l)
     \\[ "$n" = 2 ] || { echo 'not all exist'; exit 1; }
     \\c=$(curl -fsI -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
