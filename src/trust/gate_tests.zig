@@ -164,3 +164,90 @@ test "a damaged record is E0903, not an unsigned tree" {
     files.flip_byte(where, 10);
     try testing.expectEqual(@as(?codes.Code, .E0903), gate_says(tree_subject()));
 }
+
+const system_path = "/etc/zbx/policy.zon";
+
+fn write_system(text: []const u8, mode: u16, uid: u32) void {
+    if (files.kind_of("/etc") == null) files.put_dir("/etc", 0o755);
+    if (files.kind_of("/etc/zbx") == null) files.put_dir("/etc/zbx", 0o755);
+    if (files.kind_of(system_path) != null) files.remove_path(system_path);
+    files.put_file(system_path, mode, text);
+    files.set_owner_of(system_path, uid, 0);
+}
+
+fn trusting_text(buffer: []u8, name: []const u8) ![]const u8 {
+    const public = try public_text_of(name);
+    return std.fmt.bufPrint(
+        buffer,
+        ".{{ .version = 1, .keys = .{{ .{{ .name = \"{s}\", .public = \"{s}\" }} }}, " ++
+            ".require_signature = true }}",
+        .{ name, public },
+    );
+}
+
+/// The text of the refusal the last `gate_says` left.
+fn refusal_text(buffer: []u8) []const u8 {
+    const render = @import("../diag/render.zig");
+    return render.render(&last_diag, .verbose, false, buffer);
+}
+
+test "the system policy applies with no user file at all" {
+    // Goal: the system file is read. Method: it requires a signature; no user file; the tree is
+    // unsigned, then signed by the listed key.
+    try start();
+    var buffer: [512]u8 = undefined;
+    write_system(try trusting_text(&buffer, "ci"), 0o644, 0);
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(tree_subject()));
+    var out: [constants.output_bytes_max]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, refusal_text(&out), system_path) != null);
+    try sign_as("ci");
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(tree_subject()));
+}
+
+test "both policy files apply; the user's keys cannot satisfy the system's rule" {
+    // Goal: a user cannot loosen the system rule. Method: the system file trusts `ci`, the user
+    // file trusts `other`; a tree signed by `other` only is refused, naming the system file; by
+    // `ci` only, refused by the user file; by both, it passes.
+    try start();
+    var out: [constants.output_bytes_max]u8 = undefined;
+    var buffer: [512]u8 = undefined;
+    write_system(try trusting_text(&buffer, "ci"), 0o644, 0);
+    var second: [512]u8 = undefined;
+    write_policy(try trusting_text(&second, "other"));
+    try sign_as("other");
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(tree_subject()));
+    try testing.expect(std.mem.indexOf(u8, refusal_text(&out), system_path) != null);
+    try testing.expectEqual(@as(u32, 2), memory.count);
+    // The other order, in a fresh store: signed by `ci` only.
+    try start();
+    write_system(try trusting_text(&buffer, "ci"), 0o644, 0);
+    write_policy(try trusting_text(&second, "other"));
+    try sign_as("ci");
+    try testing.expectEqual(@as(?codes.Code, .E0905), gate_says(tree_subject()));
+    try testing.expect(std.mem.indexOf(u8, refusal_text(&out), policy_path) != null);
+    try sign_as("other");
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(tree_subject()));
+}
+
+test "a system policy that cannot be used refuses, whatever the user's file says" {
+    // Goal: a bad system file is never "no rules". Method: with a permissive user file, a
+    // malformed system file; one that is not root's; one that others can write; each is E0904,
+    // and the cause names the fix. A root-owned 0644 file is accepted.
+    try start();
+    write_policy(".{ .version = 1 }");
+    write_system("not a policy", 0o644, 0);
+    try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+    write_system(".{ .version = 1 }", 0o644, 0);
+    try testing.expectEqual(@as(?codes.Code, null), gate_says(tree_subject()));
+    var out: [constants.output_bytes_max]u8 = undefined;
+    write_system(".{ .version = 1 }", 0o644, 1000);
+    try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+    const owned = refusal_text(&out);
+    try testing.expect(std.mem.indexOf(u8, owned, "owned by uid 1000") != null);
+    try testing.expect(std.mem.indexOf(u8, owned, "chown root:root") != null);
+    write_system(".{ .version = 1 }", 0o666, 0);
+    try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+    try testing.expect(std.mem.indexOf(u8, refusal_text(&out), "mode 0666") != null);
+    write_system(".{ .version = 1 }", 0o664, 0);
+    try testing.expectEqual(@as(?codes.Code, .E0904), gate_says(tree_subject()));
+}

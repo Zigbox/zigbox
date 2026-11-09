@@ -3024,8 +3024,8 @@ pub const registry = [_]Entry{
         .explanation =
         \\A policy file says which keys you trust and what a run must have. zbx reads
         \\/etc/zbx/policy.zon and ~/.config/zbx/policy.zon (or $XDG_CONFIG_HOME/zbx/
-        \\policy.zon) before every run, exec and build step, and every file that
-        \\exists must be a policy: a file that is not is refused and nothing runs,
+        \\policy.zon) before every "zbx run", and every file that exists must be a
+        \\policy: a file that is not is refused and nothing runs,
         \\because a policy that cannot be read must not be taken for "no rules".
         \\
         \\A policy is a restricted ZON file:
@@ -3039,9 +3039,13 @@ pub const registry = [_]Entry{
         \\at most 16 keys, none listed twice, and the file is at most 16 KiB.
         \\.require_provenance is not supported by this zbx yet and is refused.
         \\
+        \\The system file, /etc/zbx/policy.zon, must be owned by root and not
+        \\writable by group or others: a file anyone else could rewrite is no rule,
+        \\so it is refused too. As root, "chown root:root /etc/zbx/policy.zon" and
+        \\"chmod 644 /etc/zbx/policy.zon" put it right.
+        \\
         \\The cause gives the line and column and what was expected there. Correct
-        \\the file, or remove it. "zbx policy check" reads the policy files and
-        \\runs nothing.
+        \\the file, or remove it (the system file: ask the administrator).
         ,
     },
     .{
@@ -3062,10 +3066,9 @@ pub const registry = [_]Entry{
         \\present and the first reason it does not count.
         \\
         \\Sign it with a key the policy lists ("zbx sign <digest>"), or add the key
-        \\that signed it to the policy file the cause names. "zbx policy check
-        \\<digest>" shows the same verdict without running anything. A directory
-        \\given as --rootfs has no tree and cannot be signed, so a policy that
-        \\requires a signature refuses it.
+        \\that signed it to the policy file the cause names. A directory given as
+        \\--rootfs has no tree and cannot be signed, so a policy that requires a
+        \\signature refuses it.
         ,
     },
     .{

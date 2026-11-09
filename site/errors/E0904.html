@@ -76,9 +76,10 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a policy file cannot be read or is not a policy</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>A policy file says which keys you trust and what a run must have. zbx reads /etc/zbx/policy.zon and ~/.config/zbx/policy.zon (or $XDG_CONFIG_HOME/zbx/ policy.zon) before every run, exec and build step, and every file that exists must be a policy: a file that is not is refused and nothing runs, because a policy that cannot be read must not be taken for &quot;no rules&quot;.</p>
+<p>A policy file says which keys you trust and what a run must have. zbx reads /etc/zbx/policy.zon and ~/.config/zbx/policy.zon (or $XDG_CONFIG_HOME/zbx/ policy.zon) before every &quot;zbx run&quot;, and every file that exists must be a policy: a file that is not is refused and nothing runs, because a policy that cannot be read must not be taken for &quot;no rules&quot;.</p>
 <p>A policy is a restricted ZON file:     .{         .version = 1,         .keys = .{ .{ .name = &quot;release&quot;, .public = &quot;zbx-ed25519:...&quot; } },         .require_signature = true,         .verify = &quot;cached&quot;,     } Only .version is required. Fields come in any order, once each. There are at most 16 keys, none listed twice, and the file is at most 16 KiB. .require_provenance is not supported by this zbx yet and is refused.</p>
-<p>The cause gives the line and column and what was expected there. Correct the file, or remove it. &quot;zbx policy check&quot; reads the policy files and runs nothing.</p>
+<p>The system file, /etc/zbx/policy.zon, must be owned by root and not writable by group or others: a file anyone else could rewrite is no rule, so it is refused too. As root, &quot;chown root:root /etc/zbx/policy.zon&quot; and &quot;chmod 644 /etc/zbx/policy.zon&quot; put it right.</p>
+<p>The cause gives the line and column and what was expected there. Correct the file, or remove it (the system file: ask the administrator).</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0904</pre>

@@ -78,7 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>A policy file asked for require_signature, and the tree this run would start from has no signature that satisfies it. Nothing was started: no container, no run record.</p>
 <p>A signature counts when, in this order: its signature verifies, its key is one the policy lists, it is a statement about this tree, and what it is bound to fits the run. A signature of the tree alone counts for any run of it; one of a build result counts only for a run of that result, and one of an image only for a run of that image. The cause names each signature present and the first reason it does not count.</p>
-<p>Sign it with a key the policy lists (&quot;zbx sign &lt;digest&gt;&quot;), or add the key that signed it to the policy file the cause names. &quot;zbx policy check &lt;digest&gt;&quot; shows the same verdict without running anything. A directory given as --rootfs has no tree and cannot be signed, so a policy that requires a signature refuses it.</p>
+<p>Sign it with a key the policy lists (&quot;zbx sign &lt;digest&gt;&quot;), or add the key that signed it to the policy file the cause names. A directory given as --rootfs has no tree and cannot be signed, so a policy that requires a signature refuses it.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0905</pre>
