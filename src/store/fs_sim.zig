@@ -442,6 +442,14 @@ pub const SimFs = struct {
         sim.touch(sim.find(path).?);
     }
 
+    /// Flips a byte of a file's content without moving its change time: damage the tamper
+    /// check's record cannot see (a test of what the record is believed for).
+    pub fn flip_byte_quietly(sim: *SimFs, path: []const u8, at: u32) void {
+        const node = &sim.nodes[sim.find(path).?];
+        assert(at < node.data_len);
+        sim.pool[node.data_at + at] ^= 0xff;
+    }
+
     pub fn set_mode_of(sim: *SimFs, path: []const u8, mode: u16) void {
         const index = sim.find(path).?;
         sim.nodes[index].mode = mode;

@@ -3095,9 +3095,20 @@ pub const registry = [_]Entry{
         \\a damaged one is ignored and rewritten. verify = "always" in the policy
         \\file hashes every file every run. A run with no policy file does no check.
         \\
+        \\The check also compares the image's materialized directory, under cache/
+        \\in the data directory, with the tree: each file must be the same inode as
+        \\its object, and each directory and link must have the mode, owner and
+        \\target the tree gives, with no entry added or missing. Extended
+        \\attributes and times of directories and links are not compared. Such a
+        \\difference is refused and never repaired, as the directory may be in use
+        \\by a running container. A tree with more files, directories and links than
+        \\zbx checks (or too many directories side by side) is refused too: run a
+        \\smaller image.
+        \\
         \\Run "zbx store verify" to see everything that is damaged, then remove the
-        \\damaged tree and pull or build it again. A file changed between the check
-        \\and the start of the container is not seen.
+        \\damaged tree and pull or build it again; for a changed materialized
+        \\directory, remove it under cache/ and run again. A file changed between
+        \\the check and the start of the container is not seen.
         ,
     },
     .{

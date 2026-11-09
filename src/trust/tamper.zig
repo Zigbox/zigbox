@@ -10,6 +10,15 @@
 //! rewritten, and `ctime_ns == 0` (the file system gives none) is never trusted. A tree with
 //! more objects than `trust_verified_entries_max` is hashed whole and writes no record.
 //!
+//! The farm, `cache/<tree hex>`, is what the container's overlay really uses as its lower
+//! layer, and a farm already there is reused without a look (`materialize.ensure`). The objects
+//! being intact says nothing of a farm changed by a directory operation (a file renamed over
+//! another gets a new inode, an entry added or removed, a link changed), so every checked run
+//! also compares the farm with the tree: each file is the object's inode, each symlink has its
+//! target and owner, each directory its mode and owner and exactly the tree's entries. A farm is
+//! never repaired here (a running container may be using it): a difference is E0907 too.
+//! Extended attributes of directories and symlinks, and times, are not compared.
+//!
 //! A file changed between the check and `execve` is not seen (the brief's accepted limit).
 
 const std = @import("std");
@@ -22,6 +31,7 @@ const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
 const tree = @import("../store/tree.zig");
 const trees = @import("../store/trees.zig");
+const materialize = @import("../store/materialize.zig");
 const verify = @import("../store/verify.zig");
 const walk = @import("../store/walk.zig");
 const diagnose = @import("diagnose.zig");
@@ -32,11 +42,11 @@ const Store = layout.Store;
 
 pub const Error = error{Failed};
 
-const magic = "zbxverif";
-const version: u32 = 1;
-const header_bytes: u32 = 16;
-const entry_bytes = constants.trust_verified_entry_bytes;
-const entries_cap = constants.trust_verified_entries_max;
+pub const magic = "zbxverif";
+pub const version: u32 = 1;
+pub const header_bytes: u32 = 16;
+pub const entry_bytes = constants.trust_verified_entry_bytes;
+pub const entries_cap = constants.trust_verified_entries_max;
 
 pub const directory_name = "trust/verified";
 
@@ -58,6 +68,11 @@ pub const Workspace = struct {
     frames: [4096]Frame,
     frame_paths: [1 << 18]u8,
     current: [constants.path_bytes_max + 1]u8,
+    /// The farm's path of `current`, and a symlink's target read back.
+    farm: [constants.store_path_bytes_max + constants.path_bytes_max + 2]u8,
+    link: [constants.store_symlink_target_bytes_max + 1]u8,
+    /// How many times the id list was sorted in the last check (a test reads it).
+    compactions: u32,
 };
 
 /// The rest of the memory a check uses, lent by the caller: it is idle during a run.
@@ -128,18 +143,26 @@ const Collector = struct {
     store: *const Store,
     ws: *Workspace,
     scratch: *verify.Scratch,
+    /// How many ids fit: `entries_cap`, or less in a test.
+    cap: u32,
     count: u32,
     /// Some object was checked without room to record it: no record is written.
     partial: bool,
     found: ?Found,
 
     pub fn object(collector: *Collector, ref: *const walk.ObjectRef) void {
-        assert(collector.count <= entries_cap);
+        assert(collector.count <= collector.cap);
         if (collector.found != null) return;
-        if (collector.count == entries_cap) {
-            collector.count = compact(collector.ws.ids[0..collector.count]);
+        // Once partial, nothing is collected or sorted again: each object is hashed as it comes.
+        if (collector.partial) {
+            collector.found = check_one(collector.store, collector.scratch, ref.id);
+            return;
         }
-        if (collector.count == entries_cap) {
+        if (collector.count == collector.cap) {
+            collector.count = compact(collector.ws.ids[0..collector.count]);
+            collector.ws.compactions += 1;
+        }
+        if (collector.count == collector.cap) {
             collector.partial = true;
             collector.found = check_one(collector.store, collector.scratch, ref.id);
             return;
@@ -159,12 +182,42 @@ pub fn check(
     always: bool,
     diag: *Diag,
 ) Error!void {
+    return check_capped(store, ws, lent, root, always, entries_cap, diag);
+}
+
+/// `check` with room for `cap` ids: a test makes it small to reach the bound.
+pub fn check_capped(
+    store: *Store,
+    ws: *Workspace,
+    lent: Lent,
+    root: Digest,
+    always: bool,
+    cap: u32,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
+    assert(cap > 0);
+    assert(cap <= entries_cap);
     assert(lent.tree_buffer.len >= constants.store_tree_bytes_max);
+    try check_objects(store, ws, lent, root, always, cap, diag);
+    try check_farm(store, ws, lent, root, diag);
+}
+
+fn check_objects(
+    store: *Store,
+    ws: *Workspace,
+    lent: Lent,
+    root: Digest,
+    always: bool,
+    cap: u32,
+    diag: *Diag,
+) Error!void {
+    ws.compactions = 0;
     var collector: Collector = .{
         .store = store,
         .ws = ws,
         .scratch = lent.scratch,
+        .cap = cap,
         .count = 0,
         .partial = false,
         .found = null,
@@ -218,8 +271,14 @@ pub fn check(
     save(store, ws, root, fresh_count, old);
 }
 
-fn entry_at(index: u32) usize {
+pub fn entry_at(index: u32) usize {
     assert(index < entries_cap);
+    return entry_at_unbounded(index);
+}
+
+/// `entry_at` for a record one entry past the bound (a fuzzer builds one).
+pub fn entry_at_unbounded(index: u32) usize {
+    assert(index <= entries_cap);
     return header_bytes + @as(usize, index) * entry_bytes;
 }
 
@@ -258,6 +317,11 @@ fn load(store: *const Store, ws: *Workspace, root: Digest) u32 {
     assert(root.bytes.len == constants.store_digest_bytes);
     var path: PathBuf = undefined;
     const bytes = store.fs.read_whole(record_path(store, &path, root), &ws.old) catch return 0;
+    return parse(bytes);
+}
+
+/// The entry count of a record's `bytes`, zero if they are not what `save` writes.
+pub fn parse(bytes: []const u8) u32 {
     if (bytes.len < header_bytes) return 0;
     if (!std.mem.eql(u8, bytes[0..8], magic)) return 0;
     if (std.mem.readInt(u32, bytes[8..12], .little) != version) return 0;
@@ -266,8 +330,8 @@ fn load(store: *const Store, ws: *Workspace, root: Digest) u32 {
     if (bytes.len != header_bytes + @as(usize, count) * entry_bytes) return 0;
     var index: u32 = 1;
     while (index < count) : (index += 1) {
-        const before = ws.old[entry_at(index - 1)..][0..32];
-        const after = ws.old[entry_at(index)..][0..32];
+        const before = bytes[entry_at(index - 1)..][0..32];
+        const after = bytes[entry_at(index)..][0..32];
         if (std.mem.order(u8, before, after) != .lt) return 0;
     }
     return count;
@@ -277,9 +341,7 @@ fn load(store: *const Store, ws: *Workspace, root: Digest) u32 {
 fn save(store: *Store, ws: *Workspace, root: Digest, count: u32, old: u32) void {
     assert(count <= entries_cap);
     const length = entry_at_end(count);
-    @memcpy(ws.fresh[0..8], magic);
-    std.mem.writeInt(u32, ws.fresh[8..12], version, .little);
-    std.mem.writeInt(u32, ws.fresh[12..16], count, .little);
+    write_header(&ws.fresh, count);
     if (old == count and std.mem.eql(u8, ws.old[0..length], ws.fresh[0..length])) return;
     const fs = store.fs;
     var parent: PathBuf = undefined;
@@ -304,10 +366,210 @@ fn save(store: *Store, ws: *Workspace, root: Digest, count: u32, old: u32) void 
     ) catch {};
 }
 
+/// The first `header_bytes` of a record of `count` entries.
+pub fn write_header(buffer: []u8, count: u32) void {
+    assert(count <= entries_cap);
+    assert(buffer.len >= header_bytes);
+    @memcpy(buffer[0..8], magic);
+    std.mem.writeInt(u32, buffer[8..12], version, .little);
+    std.mem.writeInt(u32, buffer[12..16], count, .little);
+}
+
 fn entry_at_end(count: u32) usize {
     assert(count <= entries_cap);
     assert(entry_bytes > 0);
     return header_bytes + @as(usize, count) * entry_bytes;
+}
+
+const FarmFound = struct { length: usize, what: diagnose.Tampered, errno: u16 };
+
+fn farm_found(found: *FarmFound, length: usize, what: diagnose.Tampered, errno: u16) bool {
+    assert(errno < 4096);
+    found.* = .{ .length = length, .what = what, .errno = errno };
+    return true;
+}
+
+/// Compares the farm of `root` with the tree, if there is one. A refusal is E0907.
+fn check_farm(
+    store: *const Store,
+    ws: *Workspace,
+    lent: Lent,
+    root: Digest,
+    diag: *Diag,
+) Error!void {
+    var buffer: PathBuf = undefined;
+    const farm = materialize.farm_path(store, &buffer, root);
+    const fs = store.fs;
+    var found: FarmFound = undefined;
+    const top = fs.lstat(farm) catch |err| {
+        // None yet: `materialize.ensure` builds it from the objects checked above.
+        if (err == error.NotFound) return;
+        _ = farm_found(&found, 0, .unreadable, fs.last_errno());
+        return farm_refused(ws, root, found, diag);
+    };
+    // A file there is `ensure`'s to refuse.
+    if (top.kind != .dir) return;
+    @memcpy(ws.farm[0..farm.len], farm);
+    if (farm_differs(store, ws, lent, root, farm.len, &found)) {
+        return farm_refused(ws, root, found, diag);
+    }
+}
+
+fn farm_refused(ws: *const Workspace, root: Digest, found: FarmFound, diag: *Diag) Error {
+    const hex = root.hex();
+    diagnose.tampered(diag, ws.current[0..found.length], &hex, found.what, found.errno);
+    return error.Failed;
+}
+
+const NameCount = struct {
+    count: u32,
+
+    fn name(context: *anyopaque, text: []const u8) void {
+        assert(text.len > 0);
+        const counter: *NameCount = @ptrCast(@alignCast(context));
+        counter.count +|= 1;
+    }
+};
+
+/// The path of `ws.current[0..length]` in the farm, in `ws.farm` after the farm's own `prefix`.
+fn farm_text(ws: *Workspace, prefix: usize, length: usize) [:0]const u8 {
+    assert(prefix + length < ws.farm.len);
+    @memcpy(ws.farm[prefix..][0..length], ws.current[0..length]);
+    ws.farm[prefix + length] = 0;
+    return ws.farm[0 .. prefix + length :0];
+}
+
+/// True, with `found` set and the path in `ws.current`, if the farm is not the tree's.
+fn farm_differs(
+    store: *const Store,
+    ws: *Workspace,
+    lent: Lent,
+    root: Digest,
+    prefix: usize,
+    found: *FarmFound,
+) bool {
+    assert(prefix > 1);
+    const fs = store.fs;
+    var top: u32 = 1;
+    var used: u32 = 0;
+    ws.frames[0] = .{ .digest = root, .path_at = 0, .path_len = 0 };
+    var budget: u64 = constants.store_walk_entries_max;
+    while (top > 0) {
+        top -= 1;
+        const frame = ws.frames[top];
+        @memcpy(ws.current[0..frame.path_len], ws.frame_paths[frame.path_at..][0..frame.path_len]);
+        used = frame.path_at;
+        const dir_length: u32 = frame.path_len;
+        var errno: u16 = 0;
+        const bytes = trees.load(store, frame.digest, lent.tree_buffer, &errno) catch |err| {
+            const what: diagnose.Tampered = switch (err) {
+                error.NotFound => .missing,
+                error.Damaged => .bytes,
+                error.Unreadable => .unreadable,
+            };
+            return farm_found(found, dir_length, what, errno);
+        };
+        var decoder: tree.Decoder = undefined;
+        decoder.init(bytes) catch return farm_found(found, dir_length, .bytes, 0);
+        var entry: tree.Entry = undefined;
+        var names: u32 = 0;
+        while (true) {
+            const more = decoder.next(&entry) catch {
+                return farm_found(found, dir_length, .bytes, 0);
+            };
+            if (!more) break;
+            const length = dir_length + 1 + entry.name.len;
+            if (budget == 0 or length > constants.path_bytes_max) {
+                return farm_found(found, dir_length, .too_large, 0);
+            }
+            budget -= 1;
+            names += 1;
+            ws.current[dir_length] = '/';
+            @memcpy(ws.current[dir_length + 1 ..][0..entry.name.len], entry.name);
+            const path = farm_text(ws, prefix, length);
+            if (entry_differs(store, ws, &entry, path, length, found)) return true;
+            if (entry.kind != .dir) continue;
+            const fits = top < ws.frames.len and used + length <= ws.frame_paths.len;
+            if (!fits) return farm_found(found, dir_length, .too_large, 0);
+            @memcpy(ws.frame_paths[used..][0..length], ws.current[0..length]);
+            ws.frames[top] = .{
+                .digest = entry.subtree,
+                .path_at = used,
+                .path_len = @intCast(length),
+            };
+            top += 1;
+            used += @intCast(length);
+        }
+        const path = farm_text(ws, prefix, dir_length);
+        if (dir_differs(fs, path, dir_length, names, decoder.own, found)) return true;
+    }
+    return false;
+}
+
+/// True if the farm directory `path` is not the tree's: the root's own mode and owner, and an
+/// entry count that is not the tree's `names` (the names themselves were checked one by one).
+fn dir_differs(
+    fs: fs_mod.Fs,
+    path: [:0]const u8,
+    dir_length: u32,
+    names: u32,
+    own: tree.Own,
+    found: *FarmFound,
+) bool {
+    if (dir_length == 0) {
+        const stat = fs.lstat(path) catch return farm_found(found, 0, .farm, 0);
+        const same = stat.kind == .dir and stat.mode == own.mode and
+            stat.uid == own.uid and stat.gid == own.gid;
+        if (!same) return farm_found(found, 0, .farm, 0);
+    }
+    // Every name of the tree is there (checked above), so equal counts mean nothing else is.
+    var counter: NameCount = .{ .count = 0 };
+    fs.read_dir(path, .{ .context = &counter, .call = NameCount.name }) catch {
+        return farm_found(found, dir_length, .unreadable, fs.last_errno());
+    };
+    return counter.count != names and farm_found(found, dir_length, .farm, 0);
+}
+
+fn entry_differs(
+    store: *const Store,
+    ws: *Workspace,
+    entry: *const tree.Entry,
+    path: [:0]const u8,
+    length: usize,
+    found: *FarmFound,
+) bool {
+    const fs = store.fs;
+    const stat = fs.lstat(path) catch |err| {
+        if (err == error.NotFound) return farm_found(found, length, .farm, 0);
+        return farm_found(found, length, .unreadable, fs.last_errno());
+    };
+    switch (entry.kind) {
+        .file => {
+            var object: PathBuf = undefined;
+            const made = fs.lstat(store.object_path(&object, entry.object)) catch {
+                return farm_found(found, length, .unreadable, fs.last_errno());
+            };
+            const same = stat.kind == .file and stat.inode == made.inode;
+            if (!same) return farm_found(found, length, .farm, 0);
+        },
+        .symlink => {
+            const owned = stat.kind == .symlink and stat.uid == entry.uid and
+                stat.gid == entry.gid;
+            if (!owned) return farm_found(found, length, .farm, 0);
+            const target = fs.read_link(path, &ws.link) catch {
+                return farm_found(found, length, .unreadable, fs.last_errno());
+            };
+            if (!std.mem.eql(u8, target, entry.target)) {
+                return farm_found(found, length, .farm, 0);
+            }
+        },
+        .dir => {
+            const same = stat.kind == .dir and stat.mode == entry.mode and
+                stat.uid == entry.uid and stat.gid == entry.gid;
+            if (!same) return farm_found(found, length, .farm, 0);
+        },
+    }
+    return false;
 }
 
 fn walk_failed(diag: *Diag, failure: *const walk.Failure) Error {

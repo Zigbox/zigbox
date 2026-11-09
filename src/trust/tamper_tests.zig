@@ -150,3 +150,145 @@ test "a missing object is found" {
     try testing.expectError(error.Failed, check_tree(false));
     try cause_has("missing");
 }
+
+const materialize = @import("../store/materialize.zig");
+
+var farm_work: materialize.Workspace = undefined;
+
+fn make_farm() !void {
+    var diag: Diag = undefined;
+    diag.reset();
+    try testing.expect(try materialize.ensure(&store, &farm_work, tree, &diag));
+}
+
+/// The path `name` has in the farm of the tree.
+fn farm_file(name: []const u8) []const u8 {
+    var buffer: [512]u8 = undefined;
+    const hex = tree.hex();
+    const path = std.fmt.bufPrint(&buffer, "{s}/cache/{s}{s}", .{
+        support.user_store, &hex, name,
+    }) catch unreachable; // 512 bytes hold the store path, the hex and a short name.
+    return keep(path);
+}
+
+fn expect_farm_refused(path_in_image: []const u8) !void {
+    try testing.expectError(error.Failed, check_tree(false));
+    try testing.expect(last_diag.code.? == .E0907);
+    try cause_has(path_in_image);
+    try cause_has("materialized");
+    // `always` finds it too, and a refusal leaves the farm as it was.
+    try testing.expectError(error.Failed, check_tree(true));
+}
+
+test "an intact farm passes, with and without a record" {
+    // Goal: the farm check has no false alarm. Method: build the farm from the objects, check.
+    try start();
+    try check_tree(false);
+    try make_farm();
+    try check_tree(false);
+    try check_tree(true);
+}
+
+test "a file of the farm replaced by rename is found" {
+    // Goal: the farm is a lower layer of its own: `sed -i` gives its file a new inode and leaves
+    // the object intact. Method: replace the farm's /etc/passwd by a file of other content.
+    try start();
+    try check_tree(false);
+    try make_farm();
+    files.remove_path(farm_file("/etc/passwd"));
+    files.put_file(farm_file("/etc/passwd"), 0o644, "root:x:0:0 evil\n");
+    try expect_farm_refused("/etc/passwd");
+}
+
+test "an entry added to a farm directory is found" {
+    try start();
+    try check_tree(false);
+    try make_farm();
+    files.put_file(farm_file("/etc/extra"), 0o644, "more\n");
+    try expect_farm_refused("/etc");
+}
+
+test "an entry removed from the farm is found" {
+    try start();
+    try check_tree(false);
+    try make_farm();
+    files.remove_path(farm_file("/bin/su"));
+    try expect_farm_refused("/bin/su");
+}
+
+test "a changed symlink of the farm is found" {
+    try start();
+    try check_tree(false);
+    try make_farm();
+    files.remove_path(farm_file("/bin/busybox"));
+    files.put_symlink(farm_file("/bin/busybox"), "/etc/passwd");
+    try expect_farm_refused("/bin/busybox");
+}
+
+test "a farm directory with another mode is found" {
+    try start();
+    try check_tree(false);
+    try make_farm();
+    files.set_mode_of(farm_file("/etc"), 0o777);
+    try expect_farm_refused("/etc");
+}
+
+test "the record is believed: a change that leaves the change time is not hashed again" {
+    // Goal: the record is a cache that works, and `always` ignores it. Method: damage an object
+    // without moving its inode, size or change time: with a record the check passes (that is
+    // what a record is: it cannot see this, and the kernel's ctime does not allow it), with
+    // `always` it fails.
+    try start();
+    try check_tree(false);
+    files.flip_byte_quietly(object_with("root:x:0:0\n"), 0);
+    try check_tree(false);
+    try testing.expectError(error.Failed, check_tree(true));
+    try testing.expect(last_diag.code.? == .E0907);
+}
+
+fn check_capped(cap: u32) !void {
+    last_diag.reset();
+    const lent: tamper.Lent = .{
+        .scratch = &scratch,
+        .tree_buffer = &tree_buffer,
+        .stack = &stack,
+    };
+    try tamper.check_capped(&store, &workspace, lent, tree, false, cap, &last_diag);
+}
+
+const contents = [_][]const u8{ "#!shell\n", "setuid\n", "root:x:0:0\n", "root:!\n" };
+
+test "a tree of exactly the id capacity is recorded, one past it is not" {
+    // Goal: the bound of the record (`trust_verified_entries_max`, 65536 in real life; a
+    // test-only cap of the same code path stands in, as 65537 files are too slow in the
+    // simulation). The tree has 6 distinct objects: at a cap of 6 the record is written and
+    // believed; at 5 nothing is written, every object is hashed, and damage past the cap is found.
+    try start();
+    try check_capped(6);
+    try testing.expect(files.kind_of(record_path()) == .file);
+    const passwd = object_with("root:x:0:0\n");
+    files.flip_byte_quietly(passwd, 0);
+    try check_capped(6); // Believed.
+    files.flip_byte_quietly(passwd, 0);
+    files.remove_path(record_path());
+    try check_capped(5);
+    try testing.expect(files.kind_of(record_path()) == null);
+    for (contents) |content| {
+        const path = object_with(content);
+        files.flip_byte(path, 0);
+        try testing.expectError(error.Failed, check_capped(5));
+        try testing.expect(last_diag.code.? == .E0907);
+        files.flip_byte(path, 0);
+        try check_capped(5);
+    }
+    try testing.expect(files.kind_of(record_path()) == null);
+}
+
+test "once the id list is full and partial it is sorted no more" {
+    // Goal: a tree past the cap does not sort the list for every further object. Method: with
+    // room for 2 ids and 6 objects, the list is sorted once, at the third.
+    try start();
+    try check_capped(2);
+    try testing.expectEqual(@as(u32, 1), workspace.compactions);
+    try testing.expect(files.kind_of(record_path()) == null);
+}

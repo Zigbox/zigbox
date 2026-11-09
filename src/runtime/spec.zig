@@ -166,7 +166,6 @@ pub fn publish_problem(network: Network, list: []const Publish) ?PublishListProb
     return null;
 }
 
-/// A user and group id inside the container.
 /// What a policy statement about the run's tree may name: nothing (a bare tree), the build
 /// result the run named, or the image manifest it resolved to. The digests are raw bytes.
 pub const Binding = union(enum) {
@@ -175,6 +174,7 @@ pub const Binding = union(enum) {
     manifest: [32]u8,
 };
 
+/// A user and group id inside the container.
 pub const User = struct {
     uid: u32,
     gid: u32,

@@ -3,8 +3,10 @@
 //! subject's tree and why it counts or not. It runs nothing and writes nothing.
 //!
 //! It asks the same question as the run gate: `gate.load` reads the files, `gate.read_record`
-//! reads the tree's signatures and `verdict.judge` judges each file, so the preview cannot
-//! drift from the gate. Without an operand it only describes the files. The exit code is 0
+//! reads the tree's signatures and `verdict.judge` judges each file, so the policy part of the
+//! preview cannot drift from the gate. It does not run the tamper check (`trust/tamper.zig`):
+//! a run that would start can still be refused with E0907 for a damaged file, and the output
+//! says so. Without an operand it only describes the files. The exit code is 0
 //! when the run would start (or no operand was given) and 1 when a policy would refuse it; an
 //! unreadable policy file is E0904, as for a run.
 
@@ -275,6 +277,10 @@ fn write_end_text(
     const verb = if (allowed) "would start" else "would be refused (ZBX-E0905)";
     const what = if (asked.text.len > 0) asked.text else "a directory";
     writer.print("run of {s}: {s}\n", .{ what, verb }) catch unreachable; // Fits.
+    if (allowed and memory.count > 0) {
+        writer.writeAll("file integrity is not checked here: the run still refuses " ++
+            "damaged files (ZBX-E0907)\n") catch unreachable; // Fits.
+    }
 }
 
 fn yes_no(value: bool) []const u8 {

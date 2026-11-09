@@ -118,6 +118,7 @@ test "the preview says why each signature counts, and agrees with the gate" {
     try sign_as("ci");
     try testing.expectEqual(@as(u8, 0), command(&.{ "policy", "check", operand }));
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "signed by ci: it counts") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "file integrity is not checked") != null);
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "run of ") != null);
     // The gate agrees: a run of the same tree is not refused (it fails later, with no image).
     try testing.expectEqual(@as(u8, 0), command(&.{ "policy", "check" }));

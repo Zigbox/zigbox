@@ -295,7 +295,16 @@ pub const Refusal = enum {
 };
 
 /// What differs in the file the tamper check found.
-pub const Tampered = enum { bytes, mode, owner, missing, unreadable, too_large };
+const too_large_fix = std.fmt.comptimePrint(
+    "zbx checks at most {d} files, directories and links in an image, and only so many " ++
+        "directories side by side; run a smaller image, or one that is less wide",
+    .{constants.store_walk_entries_max},
+);
+
+const farm_fix = "remove the image's directory under cache/ in the data directory (named by its " ++
+    "digest) and run again; zbx builds it afresh from the checked files";
+
+pub const Tampered = enum { bytes, mode, owner, missing, unreadable, too_large, farm };
 
 /// ZBX-E0907: a file object of the tree to run no longer matches its name. `path` is the file's
 /// path in the image (empty if it was not found), `object` the object's hex id.
@@ -327,7 +336,14 @@ pub fn tampered(
             "{s} (object {s}) has an owner that is not the image's",
             .{ path_echo, short },
         ),
-        .too_large => diag.cause("the image has more files than zbx checks", .{}),
+        .too_large => diag.cause(
+            "the image has more files or nested directories than zbx checks",
+            .{},
+        ),
+        .farm => diag.cause(
+            "{s} in the image's materialized directory is not the image's",
+            .{path_echo},
+        ),
         .missing => diag.cause("{s} (object {s}) is missing from the store", .{ path_echo, short }),
         .unreadable => if (errno == 0) {
             diag.cause("{s} (object {s}) could not be read", .{ path_echo, short });
@@ -338,10 +354,15 @@ pub fn tampered(
     }
     diag.context("path", "{s}", .{path_echo});
     diag.context("object", "{s}", .{short});
-    diag.fix(.{
-        .sentence = "remove the damaged tree and pull or build it again; this shows the damage:",
-        .command = "zbx store verify",
-    });
+    switch (what) {
+        .too_large => diag.fix(.{ .sentence = too_large_fix }),
+        .farm => diag.fix(.{ .sentence = farm_fix }),
+        else => diag.fix(.{
+            .sentence = "remove the damaged tree and pull or build it again; " ++
+                "this shows the damage:",
+            .command = "zbx store verify",
+        }),
+    }
     assert(diag.code.? == .E0907);
 }
 

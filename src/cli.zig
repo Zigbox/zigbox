@@ -4823,6 +4823,35 @@ test "run: a policy that requires a signature refuses a directory before anythin
     try testing.expect(sim.world.bus.scope_started == null);
 }
 
+test "run: any policy file with verify always makes the tamper check hash every object" {
+    // Goal: the strictest `verify` of the policy files wins. Method: a system file that says
+    // `cached` asks for the check but not for a full hash; adding a user file that says
+    // `always` turns the full hash on, whichever file is read first.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 6);
+    policy_files.init(1);
+    sim.store_fs = &policy_files;
+    policy_files.put_dir("/etc", 0o755);
+    policy_files.put_dir("/etc/zbx", 0o755);
+    policy_files.put_dir("/home", 0o755);
+    policy_files.put_dir("/home/alice", 0o755);
+    policy_files.put_dir("/home/alice/.config", 0o755);
+    policy_files.put_dir("/home/alice/.config/zbx", 0o700);
+    const cached = ".{ .version = 1, .verify = \"cached\" }";
+    const always = ".{ .version = 1, .verify = \"always\" }";
+    policy_files.put_file(constants.policy_system_path, 0o644, cached);
+    const directory: trust_gate.Subject = .{ .tree = null, .binding = .none, .text = "" };
+    var diag: Diag = undefined;
+    diag.reset();
+    try check_policy(sim.interface(), &shared_storage, directory, &diag);
+    try testing.expect(shared_storage.tamper_on);
+    try testing.expect(!shared_storage.tamper_always);
+    policy_files.put_file("/home/alice/.config/zbx/policy.zon", 0o644, always);
+    try check_policy(sim.interface(), &shared_storage, directory, &diag);
+    try testing.expect(shared_storage.tamper_on);
+    try testing.expect(shared_storage.tamper_always);
+}
+
 const Frame = struct { tag: u8, head: ?u8, body: []const u8 };
 
 const test_ran: Ran = .{ .kind = .rootfs, .text = "/srv/root", .manifest = null };
