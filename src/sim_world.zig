@@ -716,6 +716,12 @@ pub const World = struct {
         return count;
     }
 
+    /// Whether standard input exists and the first process holds its read end.
+    pub fn input_is_held_by_first(world: *const World) bool {
+        const handle = world.input_handle orelse return false;
+        return world.processes[0].holds[end_index(handle)];
+    }
+
     pub fn make_pipe(world: *World) ?host.Pipe {
         for (&world.pipes, 0..) |*pipe, index| {
             if (pipe.used) continue;

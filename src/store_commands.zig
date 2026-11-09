@@ -20,6 +20,7 @@ const render = @import("diag/render.zig");
 const text_util = @import("text.zig");
 const diagnose = @import("store/diagnose.zig");
 const push_diagnose = @import("push/diagnose.zig");
+const push_credentials = @import("push/credentials.zig");
 const digest_mod = @import("store/digest.zig");
 const diff = @import("store/diff.zig");
 const generation = @import("store/generation.zig");
@@ -68,6 +69,10 @@ pub const Args = struct {
     by_image: bool = false,
     /// `push --dry-run`: pack and print the digest, send nothing.
     dry_run: bool = false,
+    /// `push --username`, and its password's source: a file, or standard input.
+    username: ?[]const u8 = null,
+    password_file: ?[]const u8 = null,
+    password_stdin: bool = false,
 };
 
 /// How results and diagnostics are written.
@@ -1246,7 +1251,12 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
     var pushed: push_run.Pushed = undefined;
     const wire = job.host.network();
     const workspace = &job.workspace.push;
-    try push_run.push_operand(&store, workspace, wire, operand, &destination, &pushed, diag);
+    var credentials = push_credentials.Credentials.empty();
+    defer credentials.wipe();
+    try read_credentials(job, &credentials, diag);
+    const given: ?*const push_credentials.Credentials =
+        if (credentials.present()) &credentials else null;
+    try push_run.push_operand(&store, workspace, wire, operand, &destination, given, &pushed, diag);
     if (job.output.json) {
         const text = push_run.push_json(&pushed, buffer[0 .. buffer.len - 1]) catch {
             diag.raise(.B0001);
@@ -1261,6 +1271,23 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
         unreachable;
     try put(job, line, diag);
     warn_tag_not_recorded(job, &pushed);
+}
+
+/// Reads the password for `--username` from its file or standard input (E0558 when unusable).
+/// Without `--username` nothing is read.
+fn read_credentials(job: *const Job, out: *push_credentials.Credentials, diag: *Diag) Error!void {
+    assert(!out.present());
+    assert(diag.code == null);
+    const user = job.args.username orelse return;
+    var source: push_credentials.Source = .stdin;
+    if (job.args.password_file) |path| source = .{ .file = path };
+    var problem: push_diagnose.PasswordProblem = undefined;
+    push_credentials.acquire(job.host, user, source, out, &problem) catch {
+        const path = job.args.password_file orelse "";
+        push_diagnose.password_unsafe(diag, path, problem);
+        return error.Failed;
+    };
+    assert(out.present());
 }
 
 /// The registry holds the image but this host's store could not record the tag (W0552).

@@ -17,9 +17,11 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const auth = @import("../registry/auth.zig");
 const blobs_mod = @import("../registry/blobs.zig");
 const client_mod = @import("../registry/client.zig");
 const constants = @import("../constants.zig");
+const credentials_mod = @import("credentials.zig");
 const diagnose = @import("../registry/diagnose.zig");
 const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
@@ -88,9 +90,13 @@ pub const Options = struct {
     mount_from: []const u8 = "",
     /// The size of a piece; tests make it small.
     chunk_bytes: u32 = constants.push_chunk_bytes,
+    /// The user and password for a registry that asks; null for none (a registry that asks is then
+    /// E0552). The caller owns them and wipes them.
+    credentials: ?*const credentials_mod.Credentials = null,
 };
 
-/// The memory a push works in, owned by the caller (about 12 KiB).
+/// The memory a push works in, owned by the caller (about 140 KiB). What a credential touches in
+/// it (`basic`, `token`, `token_body`, `arena`) is zeroed when the push ends, whatever the way.
 pub const Workspace = struct {
     head: net.Head,
     error_body: [constants.push_error_body_bytes]u8,
@@ -101,6 +107,13 @@ pub const Workspace = struct {
     location_target: [constants.registry_url_bytes_max]u8,
     close_target: [constants.registry_url_bytes_max + digest_param_bytes]u8,
     range_text: [range_bytes]u8,
+    /// The base64 of `user:password`, for `Authorization: Basic`.
+    basic: [constants.push_basic_bytes_max]u8,
+    /// The token the realm granted.
+    token: [constants.registry_token_bytes_max]u8,
+    /// The realm's answer, and the memory its JSON is read in.
+    token_body: [constants.registry_token_response_bytes_max]u8,
+    token_arena: [constants.push_token_arena_bytes]u8,
 };
 
 /// What `client.follow` takes for a host name.
@@ -129,8 +142,10 @@ const Push = struct {
     destination: Destination,
     options: Options,
     bytes_sent: u64,
-    /// The credential for the destination's origin; empty until credentials exist (slice 12).
+    /// The token for the destination's origin, in `ws.token`; empty until one is granted.
     bearer: []const u8,
+    /// The Basic credential for the destination's origin, in `ws.basic`; empty until one is used.
+    basic: []const u8,
 };
 
 /// An upload session: where it is, which may be another origin than the registry's.
@@ -146,6 +161,16 @@ fn bearer_for(state: *const Push, origin: Origin) []const u8 {
     assert(origin.host.len > 0);
     if (!origin.same(state.destination.origin)) return "";
     return state.bearer;
+}
+
+/// The Basic credential a request to `origin` carries: the registry's own origin only, and then
+/// only over TLS or to loopback (a registry on plain HTTP elsewhere is never named by a
+/// reference). Never to an upload `Location` on another origin.
+fn basic_for(state: *const Push, origin: Origin) []const u8 {
+    assert(origin.host.len > 0);
+    if (!origin.same(state.destination.origin)) return "";
+    if (origin.scheme == .http) assert(reference_mod.is_loopback(origin.host));
+    return state.basic;
 }
 
 /// The number of requests a blob of `size` bytes takes in pieces of `chunk` bytes.
@@ -187,7 +212,9 @@ pub fn push(
         .options = options,
         .bytes_sent = 0,
         .bearer = "",
+        .basic = "",
     };
+    defer wipe_secrets(ws);
     try check_pieces(&state, made.config, made.config_size, diag);
     try check_pieces(&state, made.layer, made.layer_size, diag);
     // The config, then the layer: the order of the report.
@@ -271,7 +298,9 @@ const Call = struct {
     /// The registry's origin, or the one an upload's `Location` named.
     origin: Origin,
     target: []const u8,
-    body: ?net.Body = null,
+    /// The bytes of the body; rewound to where they started when the call is made again after
+    /// authenticating.
+    piece: ?*Piece = null,
     content_type: []const u8 = "",
     content_range: []const u8 = "",
     accept: []const u8 = "",
@@ -282,10 +311,32 @@ fn registry_call(state: *const Push, method: net.Method, target: []const u8) Cal
     return .{ .method = method, .origin = state.destination.origin, .target = target };
 }
 
-/// Makes `call`. The answer is in `ws.head` and `ws.error_body`; a network failure is on `diag`. A
-/// refusal (status 400 or more) whose body is over the bound is still an answer: its status is
-/// kept and its body dropped.
+/// Makes `call`; a `401` from the registry's own origin is answered by authenticating and making
+/// it once more, with the body from its start. The answer is in `ws.head` and `ws.error_body`.
 fn exchange(state: *Push, call: Call, diag: *Diag) Error!void {
+    assert(call.target.len > 0);
+    const start: u64 = if (call.piece) |piece| piece.at else 0;
+    try exchange_once(state, call, diag);
+    const status = state.ws.head.status;
+    if (status == 403 and state.bearer.len + state.basic.len > 0) {
+        if (std.mem.eql(u8, registry_code(state.ws), "DENIED")) {
+            return refuse_credentials(state, diag, .no_push_scope);
+        }
+    }
+    if (status != 401) return;
+    if (!call.origin.same(state.destination.origin)) return;
+    const next = try authenticate(state, diag);
+    if (next == .give_up) return refuse_credentials(state, diag, .refused);
+    if (call.piece) |piece| piece.at = start;
+    try exchange_once(state, call, diag);
+    // Credentials went with the repeat, so a 401 or a 403 is the answer to them.
+    const again = state.ws.head.status;
+    if (again == 401 or again == 403) return refuse_credentials(state, diag, .refused);
+}
+
+/// One request, as `exchange` makes it. A refusal (status 400 or more) whose body is over the
+/// bound is still an answer: its status is kept and its body dropped.
+fn exchange_once(state: *Push, call: Call, diag: *Diag) Error!void {
     assert(call.target.len > 0);
     assert(call.target[0] == '/');
     const origin = call.origin;
@@ -300,11 +351,12 @@ fn exchange(state: *Push, call: Call, diag: *Diag) Error!void {
         .target = call.target,
         .accept = call.accept,
         .bearer = bearer_for(state, origin),
+        .basic = basic_for(state, origin),
         .body_bytes_max = constants.push_error_body_bytes,
         .idle_timeout_ms = constants.net_idle_timeout_ms,
         .total_timeout_ms = constants.net_request_timeout_ms,
         .method = call.method,
-        .body = if (call.method.has_body() and call.body == null) empty_body else call.body,
+        .body = body_of(call),
         .content_type = call.content_type,
         .content_range = call.content_range,
     };
@@ -320,6 +372,12 @@ fn exchange(state: *Push, call: Call, diag: *Diag) Error!void {
     };
     ws.error_len = sink.len;
     assert(ws.head.status >= 200);
+}
+
+fn body_of(call: Call) ?net.Body {
+    assert(call.target.len > 0);
+    if (call.piece) |piece| return piece.body();
+    return if (call.method.has_body()) empty_body else null;
 }
 
 /// The registry's own code for what it refused ("BLOB_UPLOAD_INVALID"), from the first error of
@@ -365,6 +423,184 @@ fn blob_target(state: *Push, comptime middle: []const u8, tail: []const u8) []co
         destination.repository,
         tail,
     }) catch unreachable; // The repository and a digest fit a target (constants.zig).
+}
+
+// ---- Authentication ------------------------------------------------------------------------
+
+const Next = enum { retry, give_up };
+
+/// Answers a `401` from the registry: with the Basic credential when the challenge is Basic, or
+/// with a token the realm grants for `pull,push` on the repository. `retry` means the request may
+/// be made again; `give_up` that the credentials were already in use and are refused. A failure
+/// (no credentials, a realm that may not be sent the password, a token service that refuses) is
+/// on `diag`. Nothing is sent to the realm before the realm rule has passed.
+fn authenticate(state: *Push, diag: *Diag) Error!Next {
+    assert(state.ws.head.status == 401);
+    const host = state.destination.origin.host;
+    const repository = state.destination.repository;
+    const credentials = state.options.credentials orelse {
+        push_diagnose.no_credentials(diag, host, repository);
+        return error.Failed;
+    };
+    if (!credentials.present()) {
+        push_diagnose.no_credentials(diag, host, repository);
+        return error.Failed;
+    }
+    const header = state.ws.head.www_authenticate.slice() orelse "";
+    const challenge = auth.parse_challenge(header) catch |err| {
+        if (err == error.NoBearer and auth.offers_basic(header)) {
+            return use_basic(state, credentials);
+        }
+        push_diagnose.credentials_refused(diag, host, repository, .no_challenge);
+        return error.Failed;
+    };
+    var url_storage: [constants.registry_url_bytes_max * 2]u8 = undefined;
+    const from = state.options.mount_from;
+    const text = auth.push_token_url(&challenge, repository, from, &url_storage) catch {
+        push_diagnose.realm_refused(diag, host, challenge.realm, .not_a_url);
+        return error.Failed;
+    };
+    const url = net.parse_url(text) catch {
+        push_diagnose.realm_refused(diag, host, challenge.realm, .not_a_url);
+        return error.Failed;
+    };
+    if (!credentials_mod.realm_allowed(host, state.destination.origin.scheme, url)) {
+        const plain = url.scheme == .http;
+        const why: push_diagnose.RealmProblem = if (plain) .plain_http else .other_host;
+        push_diagnose.realm_refused(diag, host, url.host, why);
+        return error.Failed;
+    }
+    // The realm rule has passed: the password may go there, and only there.
+    try fetch_token(state, credentials, url, diag);
+    return .retry;
+}
+
+fn use_basic(state: *Push, credentials: *const credentials_mod.Credentials) Next {
+    assert(credentials.present());
+    if (state.basic.len > 0) return .give_up; // It was sent, and refused.
+    const ws = state.ws;
+    // Exclusive: a registry that changes its challenge from Bearer to Basic gets the Basic
+    // credential alone, and the token it was granted is wiped.
+    drop_bearer(state);
+    state.basic = credentials_mod.encode_basic(credentials, &ws.basic);
+    assert(state.basic.len > 0);
+    assert(state.bearer.len == 0);
+    return .retry;
+}
+
+/// Asks the realm for a token with `Authorization: Basic`, in one request that follows no
+/// redirect, and keeps the token in `ws.token` for the registry's origin.
+fn fetch_token(
+    state: *Push,
+    credentials: *const credentials_mod.Credentials,
+    url: net.Url,
+    diag: *Diag,
+) Error!void {
+    assert(url.target[0] == '/');
+    const ws = state.ws;
+    const host = state.destination.origin.host;
+    const repository = state.destination.repository;
+    defer std.crypto.secureZero(u8, &ws.token_body);
+    defer std.crypto.secureZero(u8, &ws.token_arena);
+    const basic = credentials_mod.encode_basic(credentials, &ws.basic);
+    var head: net.Head = .{};
+    var sink: net.BufferSink = .{ .buffer = &ws.token_body };
+    const request: net.Request = .{
+        .scheme = url.scheme,
+        .host = url.host,
+        .port = url.port,
+        .target = url.target,
+        .accept = "application/json",
+        .bearer = "",
+        .basic = basic,
+        .body_bytes_max = constants.registry_token_response_bytes_max,
+        .idle_timeout_ms = constants.net_idle_timeout_ms,
+        .total_timeout_ms = constants.net_request_timeout_ms,
+    };
+    state.wire.call(&request, &head, sink.sink()) catch |err| {
+        const where: diagnose.Target = .{
+            .host = url.host,
+            .port = url.port,
+            .scheme = url.scheme,
+        };
+        if (err == error.TooLarge) {
+            push_diagnose.credentials_refused(diag, host, repository, .token_unusable);
+        } else {
+            diagnose.network_failed(diag, err, where, state.wire.last_errno());
+        }
+        return error.Failed;
+    };
+    switch (head.status) {
+        200 => {},
+        401, 403 => {
+            push_diagnose.credentials_refused(diag, host, repository, .refused);
+            return error.Failed;
+        },
+        else => {
+            push_diagnose.credentials_refused(diag, host, repository, .token_unusable);
+            return error.Failed;
+        },
+    }
+    var arena = std.heap.FixedBufferAllocator.init(&ws.token_arena);
+    const found = auth.parse_token(sink.bytes(), arena.allocator(), &ws.token) orelse {
+        push_diagnose.credentials_refused(diag, host, repository, .token_unusable);
+        return error.Failed;
+    };
+    // Exclusive: the token replaces the Basic credential, which is wiped, so no request ever
+    // carries both (the real host asserts it).
+    drop_basic(state);
+    state.bearer = found;
+    assert(state.bearer.len > 0);
+    assert(state.basic.len == 0);
+}
+
+fn drop_basic(state: *Push) void {
+    std.crypto.secureZero(u8, &state.ws.basic);
+    state.basic = "";
+    assert(state.basic.len == 0);
+    assert(state.ws.basic[0] == 0);
+}
+
+fn drop_bearer(state: *Push) void {
+    std.crypto.secureZero(u8, &state.ws.token);
+    state.bearer = "";
+    assert(state.bearer.len == 0);
+    assert(state.ws.token[0] == 0);
+}
+
+/// The registry's `401` (or `403 DENIED`) to credentials that were in use. A token that says
+/// `insufficient_scope` is one the realm granted without `push`.
+fn refuse_credentials(
+    state: *const Push,
+    diag: *Diag,
+    kind: push_diagnose.CredentialsRefusal,
+) Error {
+    assert(state.ws.head.status >= 401);
+    var refusal = kind;
+    if (kind == .refused and state.bearer.len > 0 and says_insufficient_scope(&state.ws.head)) {
+        refusal = .no_push_scope;
+    }
+    const host = state.destination.origin.host;
+    push_diagnose.credentials_refused(diag, host, state.destination.repository, refusal);
+    return error.Failed;
+}
+
+fn says_insufficient_scope(head: *const net.Head) bool {
+    const header = head.www_authenticate.slice() orelse return false;
+    const challenge = auth.parse_challenge(header) catch return false;
+    const code = challenge.error_code orelse return false;
+    return std.mem.eql(u8, code, "insufficient_scope");
+}
+
+/// Zeroes everything of a credential that is in the workspace: the Basic text, the token, the
+/// realm's answer and the memory it was read in. Whatever way a push ends.
+fn wipe_secrets(ws: *Workspace) void {
+    std.crypto.secureZero(u8, &ws.basic);
+    std.crypto.secureZero(u8, &ws.token);
+    std.crypto.secureZero(u8, &ws.token_body);
+    std.crypto.secureZero(u8, &ws.token_arena);
+    assert(ws.basic[0] == 0);
+    assert(ws.token[0] == 0);
 }
 
 // ---- Blobs ---------------------------------------------------------------------------------
@@ -490,7 +726,7 @@ fn send_piece(
         .method = .patch,
         .origin = session.origin,
         .target = session.target,
-        .body = piece.body(),
+        .piece = piece,
         .content_type = octet_stream,
         .content_range = range,
     }, diag);
@@ -559,7 +795,7 @@ fn close_session(
         .method = .put,
         .origin = session.origin,
         .target = target,
-        .body = piece.body(),
+        .piece = piece,
         .content_type = octet_stream,
         .content_range = range,
     }, diag);
@@ -592,7 +828,7 @@ fn push_manifest(state: *Push, made: *const pack.Packed, diag: *Diag) Error!void
     };
     const target = blob_target(state, "/manifests/", state.destination.tag);
     var call = registry_call(state, .put, target);
-    call.body = piece.body();
+    call.piece = &piece;
     call.content_type = constants.oci_manifest_media_type;
     try exchange(state, call, diag);
     const status = ws.head.status;

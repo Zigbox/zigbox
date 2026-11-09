@@ -68,6 +68,10 @@ pub const Logged = struct {
     /// fixture's token is shorter than this, and `bearer_len` is the real length.
     bearer: [96]u8,
     bearer_len: u32,
+    /// The `Authorization: Basic` value the request carried, likewise (base64 of a short
+    /// `user:password` in tests); `basic_len` is the real length.
+    basic: [128]u8,
+    basic_len: u32,
     status: u16,
     /// The offset a resumed download asked for; zero for none.
     range_from: u64,
@@ -81,6 +85,10 @@ pub const Logged = struct {
 
     pub fn host_text(entry: *const Logged) []const u8 {
         return entry.host[0..entry.host_len];
+    }
+
+    pub fn basic_text(entry: *const Logged) []const u8 {
+        return entry.basic[0..@min(entry.basic_len, entry.basic.len)];
     }
 
     pub fn bearer_text(entry: *const Logged) []const u8 {
@@ -153,6 +161,9 @@ pub const SimNet = struct {
         entry.target_len = @intCast(target_len);
         entry.port = request.port;
         entry.bearer_len = @intCast(request.bearer.len);
+        const basic_kept = @min(request.basic.len, entry.basic.len);
+        @memcpy(entry.basic[0..basic_kept], request.basic[0..basic_kept]);
+        entry.basic_len = @intCast(request.basic.len);
         entry.status = 0;
         entry.range_from = request.range_from;
         entry.method = request.method;

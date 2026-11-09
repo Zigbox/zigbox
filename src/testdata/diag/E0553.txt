@@ -1,0 +1,6 @@
+error[ZBX-E0553]: the registry or its token service refused the credentials
+  cause  registry.test would not let these credentials push to 'push/ok' (no
+         'push' scope): they may only pull
+  fix    use credentials that may push to this repository (a token with write access), or push to a repository you own
+  more   zbx explain E0553 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0553.html

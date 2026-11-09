@@ -24,7 +24,7 @@ const testing = std.testing;
 const store_root = "/data/store";
 
 /// Everything one test owns: the store with a packed image, and the registry. On the heap.
-const Rig = struct {
+pub const Rig = struct {
     host: host_sim.HostSim,
     files: fs_sim.SimFs,
     store: layout.Store,
@@ -38,7 +38,7 @@ const Rig = struct {
     made: pack.Packed,
     report: upload.Report,
 
-    fn create(seed: u64) !*Rig {
+    pub fn create(seed: u64) !*Rig {
         const rig = try std.heap.page_allocator.create(Rig);
         rig.host.init(seed, &.{});
         rig.files.init(seed);
@@ -71,15 +71,15 @@ const Rig = struct {
         return rig;
     }
 
-    fn destroy(rig: *Rig) void {
+    pub fn destroy(rig: *Rig) void {
         std.heap.page_allocator.destroy(rig);
     }
 
-    fn holds(rig: *const Rig, repository: []const u8, digest: oci.Sha256) bool {
+    pub fn holds(rig: *const Rig, repository: []const u8, digest: oci.Sha256) bool {
         return rig.registry.fixture.has_blob(repository, &digest.text());
     }
 
-    fn push(rig: *Rig, repository: []const u8, options: upload.Options) upload.Error!void {
+    pub fn push(rig: *Rig, repository: []const u8, options: upload.Options) upload.Error!void {
         rig.diag.reset();
         const destination: upload.Destination = .{
             .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
@@ -99,9 +99,9 @@ const Rig = struct {
     }
 };
 
-const pieces: upload.Options = .{ .chunk_bytes = 64 };
+pub const pieces: upload.Options = .{ .chunk_bytes = 64 };
 
-fn expect_code(rig: *Rig, code: codes.Code) !void {
+pub fn expect_code(rig: *Rig, code: codes.Code) !void {
     try testing.expect(rig.diag.code != null);
     try testing.expectEqual(code, rig.diag.code.?);
 }

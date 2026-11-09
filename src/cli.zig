@@ -224,7 +224,11 @@ const help_text =
     \\push:
     \\  zbx push <source> <registry/repository:tag>
     \\                           pack a build result, an image or a tree and put it in the
-    \\                           registry (no credentials yet); prints the manifest digest
+    \\                           registry; prints the manifest digest. A user name and a password,
+    \\                           read from a file or stdin (never the command line), log in:
+    \\  zbx push --username <name> --password-stdin <source> <reference>
+    \\  zbx push --username <name> --password-file <file> <source> <reference>
+    \\                           the file must be mode 0600 or tighter; one line, at most 4096 bytes
     \\  zbx push --dry-run <source>   pack it and print the manifest digest; sends nothing
     \\
     \\pull:
@@ -465,6 +469,10 @@ pub const StoreArgs = struct {
     by_image: bool = false,
     /// `push --dry-run`.
     dry_run: bool = false,
+    /// `push --username NAME`, and one of `--password-file FILE` or `--password-stdin`.
+    username: ?[]const u8 = null,
+    password_file: ?[]const u8 = null,
+    password_stdin: bool = false,
 };
 
 /// What `state` was given: the subcommand and the volume's name (`rm`, `restore`).
@@ -573,6 +581,14 @@ const Token = union(enum) {
     oci,
     /// `--dry-run`: `push`'s.
     dry_run,
+    /// `--username`, `--password-file` (value next or after an `=`) and `--password-stdin`:
+    /// `push`'s. `--password` is a token of its own, so the refusal never echoes a secret.
+    username_next,
+    username_inline: []const u8,
+    password_file_next,
+    password_file_inline: []const u8,
+    password_stdin,
+    password_refused,
     /// `--last` and `--no-redact`: options of `bundle`.
     last,
     no_redact,
@@ -611,6 +627,25 @@ fn run_option_of(argument: []const u8) ?Token {
     return null;
 }
 
+/// `--username`, `--password-file`, `--password-stdin` and the refused `--password`, or null.
+fn credential_option_of(argument: []const u8) ?Token {
+    assert(argument.len <= constants.arg_bytes_max);
+    const eql = std.mem.eql;
+    const starts = std.mem.startsWith;
+    if (eql(u8, argument, "--username")) return .username_next;
+    if (starts(u8, argument, "--username=")) {
+        return .{ .username_inline = argument["--username=".len..] };
+    }
+    if (eql(u8, argument, "--password-file")) return .password_file_next;
+    if (starts(u8, argument, "--password-file=")) {
+        return .{ .password_file_inline = argument["--password-file=".len..] };
+    }
+    if (eql(u8, argument, "--password-stdin")) return .password_stdin;
+    if (eql(u8, argument, "--password")) return .password_refused;
+    if (starts(u8, argument, "--password=")) return .password_refused;
+    return null;
+}
+
 fn classify(argument: []const u8) Token {
     assert(argument.len <= constants.arg_bytes_max);
     assert(std.mem.indexOfScalar(u8, argument, 0) == null); // Arguments are C strings.
@@ -640,6 +675,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--trash")) return .trash;
     if (std.mem.eql(u8, argument, "--oci")) return .oci;
     if (std.mem.eql(u8, argument, "--dry-run")) return .dry_run;
+    if (credential_option_of(argument)) |token| return token;
     if (std.mem.eql(u8, argument, "--by-image")) return .by_image;
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
@@ -749,6 +785,11 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_next, .out_next, .file_next, .passphrase_file_next, .key_next => {
                 if (index + 1 < args.len) index += 1;
             },
+            .username_next, .password_file_next => {
+                if (index + 1 < args.len) index += 1;
+            },
+            .username_inline, .password_file_inline, .password_stdin => {},
+            .password_refused => {},
             .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
             .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline => {},
@@ -819,14 +860,9 @@ pub fn parse(
                 break;
             },
             .detach, .read_only => try take_run_flag(diag, &run_args, given, argument),
-            .confirm_next, .confirm_inline, .trash => {
-                try take_gc_option(diag, &gc_args, given, args, &index);
-            },
-            .oci, .dry_run => try take_pack_flag(diag, &gc_args, given, argument),
             .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
             .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .by_image => try take_by_image(diag, &gc_args, given, argument),
             .graph, .file_next => try take_build_option(diag, &build_args, given, args, &index),
             .no_passphrase,
             .passphrase_file_next,
@@ -839,6 +875,7 @@ pub fn parse(
                 operands[count] = argument;
                 count += 1;
             },
+            else => try take_store_option(diag, &gc_args, given, args, &index),
         }
     }
     assert(count <= args.len);
@@ -1143,6 +1180,10 @@ fn check_options(gc_args: *const GcArgs, invocation: *Invocation, diag: *Diag) P
     }
     if (invocation.command == .push) {
         invocation.store.dry_run = gc_args.dry_run;
+        try check_credentials(diag, gc_args);
+        invocation.store.username = gc_args.username;
+        invocation.store.password_file = gc_args.password_file;
+        invocation.store.password_stdin = gc_args.password_stdin;
         if (!gc_args.dry_run and invocation.store.second == null) {
             return missing_argument(diag, .push, .destination);
         }
@@ -1159,11 +1200,42 @@ const GcArgs = struct {
     by_image: bool = false,
     oci: bool = false,
     dry_run: bool = false,
+    username: ?[]const u8 = null,
+    password_file: ?[]const u8 = null,
+    password_stdin: bool = false,
 };
 
 fn is_gc(operands: []const []const u8) bool {
     return operands.len >= 2 and command_named(operands[0]) == .store and
         std.mem.eql(u8, operands[1], "gc");
+}
+
+/// The options that only `store` commands and `push` take: the rest of what `parse` does not
+/// route itself.
+fn take_store_option(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    switch (classify(argument)) {
+        .confirm_next, .confirm_inline, .trash => {
+            try take_gc_option(diag, gc_args, operands, args, index);
+        },
+        .oci, .dry_run => try take_pack_flag(diag, gc_args, operands, argument),
+        .by_image => try take_by_image(diag, gc_args, operands, argument),
+        .username_next, .username_inline, .password_file_next => {
+            try take_credential_option(diag, gc_args, operands, args, index);
+        },
+        .password_file_inline, .password_stdin, .password_refused => {
+            try take_credential_option(diag, gc_args, operands, args, index);
+        },
+        // `parse` handles every other token itself and never passes it here.
+        else => unreachable,
+    }
 }
 
 /// `--by-image`, which only `store du` takes.
@@ -1200,6 +1272,108 @@ fn take_pack_flag(
         if (!is_push) return unknown_option(diag, argument);
         gc_args.dry_run = true;
     }
+}
+
+/// Why a credential option was refused. None of them carries a secret.
+const CredentialRefusal = enum {
+    given_twice,
+    password_on_command_line,
+    needs_password,
+    needs_username,
+    two_sources,
+};
+
+/// `--username`, `--password-file`, `--password-stdin` and `--password`: `push`'s.
+fn take_credential_option(
+    diag: *Diag,
+    gc_args: *GcArgs,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    const token = classify(argument);
+    const is_push = operands.len >= 1 and command_named(operands[0]) == .push;
+    if (!is_push) return unknown_option(diag, argument);
+    var value: []const u8 = "";
+    var option: []const u8 = "--password-stdin";
+    switch (token) {
+        .password_refused => {
+            return credential_refused(diag, "--password", .password_on_command_line);
+        },
+        .password_stdin => {
+            if (gc_args.password_stdin) return credential_refused(diag, option, .given_twice);
+            gc_args.password_stdin = true;
+            return;
+        },
+        .username_inline => |text| {
+            option = "--username";
+            value = text;
+        },
+        .password_file_inline => |text| {
+            option = "--password-file";
+            value = text;
+        },
+        .username_next, .password_file_next => {
+            option = if (token == .username_next) "--username" else "--password-file";
+            if (index.* + 1 == args.len) return missing_option_value(diag, option);
+            index.* += 1;
+            value = args[index.*];
+        },
+        else => unreachable, // Only the credential tokens come here.
+    }
+    if (value.len == 0) return missing_option_value(diag, option);
+    const slot = if (std.mem.eql(u8, option, "--username"))
+        &gc_args.username
+    else
+        &gc_args.password_file;
+    if (slot.* != null) return credential_refused(diag, option, .given_twice);
+    slot.* = value;
+}
+
+/// The credential options together: a user needs a password source, and one source only.
+fn check_credentials(diag: *Diag, gc_args: *const GcArgs) ParseError!void {
+    assert(diag.code == null);
+    const has_source = gc_args.password_file != null or gc_args.password_stdin;
+    if (gc_args.password_file != null and gc_args.password_stdin) {
+        return credential_refused(diag, "--password-file", .two_sources);
+    }
+    if (gc_args.username != null and !has_source) {
+        return credential_refused(diag, "--username", .needs_password);
+    }
+    if (has_source and gc_args.username == null) {
+        return credential_refused(diag, "--password-stdin", .needs_username);
+    }
+}
+
+/// One line saying which credential option was refused; it never repeats a value.
+fn credential_refused(diag: *Diag, option: []const u8, why: CredentialRefusal) ParseError {
+    assert(diag.code == null);
+    assert(option.len >= 2);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    switch (why) {
+        .given_twice => diag.cause("{s} given twice; a push has one credential", .{option}),
+        .password_on_command_line => diag.cause(
+            "--password is refused: a password on the command line shows in ps and history",
+            .{},
+        ),
+        .needs_password => diag.cause("--username needs --password-stdin or --password-file", .{}),
+        .needs_username => diag.cause("a password source needs --username", .{}),
+        .two_sources => diag.cause(
+            "--password-file and --password-stdin cannot be combined; use one",
+            .{},
+        ),
+    }
+    diag.context("cmd", "{s}", .{"push"});
+    diag.context("arg", "{s}", .{option});
+    diag.fix(.{
+        .sentence = "pipe the password in:",
+        .command = "zbx push IMAGE REGISTRY/NAME:TAG --username NAME --password-stdin",
+    });
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
 }
 
 /// `--confirm <hash>`, `--confirm=<hash>` and `--trash`, which only `store gc` takes.
@@ -2730,6 +2904,9 @@ fn run_store(
         .trash = invocation.store.trash,
         .by_image = invocation.store.by_image,
         .dry_run = invocation.store.dry_run,
+        .username = invocation.store.username,
+        .password_file = invocation.store.password_file,
+        .password_stdin = invocation.store.password_stdin,
     };
     return store_commands.run(
         host,

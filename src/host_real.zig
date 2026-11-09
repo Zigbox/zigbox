@@ -187,7 +187,8 @@ pub const HostReal = struct {
 
     fn read(context: *anyopaque, handle: host.Handle, buffer: []u8) host.Error!u32 {
         const self = from_context(context);
-        assert(self.open_count > 0);
+        // Descriptor 0 is standard input (`--password-stdin`), which no open_read produced.
+        if (handle != 0) assert(self.open_count > 0);
         assert(buffer.len > 0);
         assert(buffer.len <= constants.file_bytes_max);
         const descriptor: i32 = @intCast(handle);
