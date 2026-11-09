@@ -132,8 +132,12 @@ pub const pull = @import("pull.zig");
 /// cache; `push.export_layout` writes them as an OCI image layout. The same tree and settings
 /// give the same digests, in any store and at any buffer size. Nothing here reads the
 /// environment, touches the network or prints; a refusal is a `Stopped` error whose `Failure`
-/// says which step and why (`push/diagnose.zig` turns one into a coded `Diag`). The upload
-/// itself is slice 11 and is not here yet.
+/// says which step and why (`push/diagnose.zig` turns one into a coded `Diag`). `push.send` puts
+/// a packed image in a registry without credentials, over the caller's `net.Net` (its own
+/// `push.UploadWorkspace`, about 12 KiB): each blob is found there, mounted from another
+/// repository of the registry, or uploaded in pieces, and only then is the manifest put under
+/// the tag and its digest checked. A repeat sends no blob bytes. A refusal is a coded `Diag`
+/// (E0555 for a blob, E0556 for the manifest).
 pub const push = struct {
     pub const pack = @import("push/pack.zig");
     pub const export_mod = @import("push/export.zig");
@@ -143,6 +147,12 @@ pub const push = struct {
     pub const Packed = pack.Packed;
     pub const Exported = export_mod.Exported;
     pub const export_layout = export_mod.export_layout;
+    pub const upload = @import("push/upload.zig");
+    pub const UploadWorkspace = upload.Workspace;
+    pub const Destination = upload.Destination;
+    pub const UploadOptions = upload.Options;
+    pub const UploadReport = upload.Report;
+    pub const send = upload.push;
 };
 
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
@@ -185,6 +195,8 @@ test "the module's surface is what the contract names" {
     _ = pull.Workspace;
     _ = push.pack.pack;
     _ = push.export_layout;
+    _ = push.send;
+    _ = push.UploadWorkspace;
     _ = exec_signal;
     _ = ExecHandle;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);

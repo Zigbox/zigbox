@@ -202,8 +202,10 @@ const help_text =
     \\  record, at most 8 per tree; signing again with the same key changes nothing
     \\
     \\push:
-    \\  zbx push --dry-run <source>   pack a build result, an image or a tree and print the
-    \\                           manifest digest; sends nothing (the upload is not built yet)
+    \\  zbx push <source> <registry/repository:tag>
+    \\                           pack a build result, an image or a tree and put it in the
+    \\                           registry (no credentials yet); prints the manifest digest
+    \\  zbx push --dry-run <source>   pack it and print the manifest digest; sends nothing
     \\
     \\pull:
     \\  zbx pull [--resolve-only] <reference>

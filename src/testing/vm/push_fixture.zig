@@ -139,7 +139,11 @@ pub const PushFixture = struct {
     }
 
     /// The bytes of blob `digest` in `repo`; null for none.
-    pub fn blob_bytes(fixture: *const PushFixture, repo: []const u8, digest: []const u8) ?[]const u8 {
+    pub fn blob_bytes(
+        fixture: *const PushFixture,
+        repo: []const u8,
+        digest: []const u8,
+    ) ?[]const u8 {
         const blob = fixture.find_blob(repo, digest) orelse return null;
         return blob.bytes[0..blob.len];
     }
@@ -264,7 +268,8 @@ pub const PushFixture = struct {
         session.repo_len = @intCast(parsed.repo.len);
         @memcpy(session.repo[0..parsed.repo.len], parsed.repo);
         fixture.next_session += 1;
-        out.* = .{ .status = 202, .location = fixture.location_of(parsed, session.id), .range = "0-0" };
+        const location = fixture.location_of(parsed, session.id);
+        out.* = .{ .status = 202, .location = location, .range = "0-0" };
     }
 
     fn mount(fixture: *PushFixture, parsed: Parsed, source: *const Blob, out: *Answer) void {
@@ -301,7 +306,8 @@ pub const PushFixture = struct {
         out: *Answer,
     ) void {
         if (parsed.fault == .refusechunk) return fixture.refuse(out, 416, "BLOB_UPLOAD_INVALID");
-        const dash = std.mem.indexOfScalar(u8, query.content_range, '-') orelse query.content_range.len;
+        const spanned = query.content_range;
+        const dash = std.mem.indexOfScalar(u8, spanned, '-') orelse spanned.len;
         const first = std.fmt.parseInt(u32, query.content_range[0..dash], 10) catch {
             return fixture.refuse(out, 416, "BLOB_UPLOAD_INVALID");
         };
@@ -311,9 +317,11 @@ pub const PushFixture = struct {
         const kept = if (parsed.fault == .shortrange) session.len - 2 else session.len - 1;
         var range: []const u8 = "";
         if (parsed.fault != .norange) {
+            // The buffer holds "0-" and a number.
             range = std.fmt.bufPrint(&fixture.range_text, "0-{d}", .{kept}) catch unreachable;
         }
-        out.* = .{ .status = 202, .location = fixture.location_of(parsed, session.id), .range = range };
+        const location = fixture.location_of(parsed, session.id);
+        out.* = .{ .status = 202, .location = location, .range = range };
     }
 
     /// `PUT <session>?digest=`: appends the last bytes and checks the whole against the digest.
@@ -374,7 +382,7 @@ pub const PushFixture = struct {
         @memcpy(stored.bytes[0..query.body.len], query.body);
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(query.body, &hash, .{});
-        _ = std.fmt.bufPrint(&stored.digest, "sha256:{x}", .{&hash}) catch unreachable;
+        _ = std.fmt.bufPrint(&stored.digest, "sha256:{x}", .{&hash}) catch unreachable; // 7 + 64.
         fixture.manifest_puts += 1;
         fixture.digest_text = stored.digest;
         if (parsed.fault == .wrongdigest) @memset(fixture.digest_text["sha256:".len..], '0');
@@ -458,26 +466,31 @@ test "an upload through the fixture ends with the blob and the manifest stored" 
     fixture.answer(.{ .method = .post, .target = "/v2/push/ok/blobs/uploads/" }, &out);
     try std.testing.expectEqual(@as(u16, 202), out.status);
     var location: [128]u8 = undefined;
-    const target = std.fmt.bufPrint(&location, "{s}", .{out.location}) catch unreachable;
+    const target = std.fmt.bufPrint(&location, "{s}", .{out.location}) catch {
+        unreachable; // The buffer outsizes a location.
+    };
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("hello", &hash, .{});
     var closing: [200]u8 = undefined;
     const close = std.fmt.bufPrint(&closing, "{s}?digest=sha256:{x}", .{ target, &hash }) catch {
-        unreachable;
+        unreachable; // The buffer outsizes both.
     };
     fixture.answer(.{ .method = .put, .target = close, .body = "hello" }, &out);
     try std.testing.expectEqual(@as(u16, 201), out.status);
     var digest: [digest_text_bytes]u8 = undefined;
-    _ = std.fmt.bufPrint(&digest, "sha256:{x}", .{&hash}) catch unreachable;
+    _ = std.fmt.bufPrint(&digest, "sha256:{x}", .{&hash}) catch unreachable; // 7 + 64.
     try std.testing.expect(fixture.has_blob("push/ok", &digest));
     try std.testing.expect(!fixture.has_blob("push/ok-src", &digest));
     var manifest: [128]u8 = undefined;
-    const body = std.fmt.bufPrint(&manifest, "{{\"digest\":\"{s}\"}}", .{&digest}) catch unreachable;
+    const text = "{{\"digest\":\"{s}\"}}";
+    const body = std.fmt.bufPrint(&manifest, text, .{&digest}) catch unreachable; // Fits.
     fixture.answer(.{ .method = .put, .target = "/v2/push/ok/manifests/v1", .body = body }, &out);
     try std.testing.expectEqual(@as(u16, 201), out.status);
     try std.testing.expectEqual(@as(u32, 1), fixture.manifest_puts);
     try std.testing.expect(fixture.tag_digest("push/ok", "v1") != null);
-    fixture.answer(.{ .method = .put, .target = "/v2/push/ok/manifests/v2", .body = "{\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}" }, &out);
+    const zeros = "{\"digest\":\"sha256:" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"}";
+    fixture.answer(.{ .method = .put, .target = "/v2/push/ok/manifests/v2", .body = zeros }, &out);
     try std.testing.expectEqual(@as(u16, 404), out.status);
     try std.testing.expectEqual(@as(u32, 1), fixture.unknown_refusals);
 }

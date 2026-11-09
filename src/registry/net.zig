@@ -5,8 +5,9 @@
 //!
 //! One call is one HTTP request and one response (GET and HEAD to read, POST, PATCH and PUT to
 //! upload; a body is streamed from a `Source`, never held whole): the vtable does not follow
-//! redirects, retry, or authenticate. Those are the client's (`client.zig`), written once, so the simulator exercises
-//! the code that runs in production. What the vtable does own is everything a wire can do wrong:
+//! redirects, retry, or authenticate. Those are the client's (`client.zig`), written once, so
+//! the simulator exercises the code that runs in production. What the vtable does own is
+//! everything a wire can do wrong:
 //! the connection (DNS, connect, the proxy, TLS), the timeouts, and the bounds. It stops reading
 //! at `body_bytes_max`, refuses a head larger than the bound, and reports a body that ends before
 //! its declared length as `Truncated`.
@@ -78,11 +79,14 @@ pub const Method = enum {
     }
 };
 
+/// What a `Source.read` answers: how many bytes it wrote.
+pub const Read = error{SourceFailed}!usize;
+
 /// Where a request body's bytes come from, as they are sent. `read` fills the front of `buffer`
 /// and returns how many bytes it wrote; it is asked again until the body's length is reached.
 pub const Source = struct {
     context: *anyopaque,
-    read: *const fn (context: *anyopaque, buffer: []u8) error{SourceFailed}!usize,
+    read: *const fn (context: *anyopaque, buffer: []u8) Read,
 };
 
 /// A request body: exactly `length` bytes from `source`. A source that runs dry early, or has

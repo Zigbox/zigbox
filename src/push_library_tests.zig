@@ -12,6 +12,8 @@ const host_sim = @import("host_sim.zig");
 const images = @import("store/images.zig");
 const import = @import("store/import.zig");
 const support = @import("store/test_support.zig");
+const net_sim = @import("registry/net_sim.zig");
+const push_registry = @import("registry/push_registry.zig");
 const Store = @import("store/layout.zig").Store;
 
 const testing = std.testing;
@@ -24,6 +26,9 @@ const Caller = struct {
     store: Store,
     imports: import.Workspace,
     packing: zigbox.push.Workspace,
+    uploading: zigbox.push.UploadWorkspace,
+    wire: net_sim.SimNet,
+    registry: push_registry.PushRegistry,
     diag: Diag,
     settings: images.Settings,
 
@@ -38,11 +43,36 @@ const Caller = struct {
         support.make_source(&caller.files, order);
         caller.diag.reset();
         caller.settings.clear();
+        caller.wire.init(seed, caller.registry.responder());
+        caller.registry.init(&caller.wire);
         return caller;
     }
 
     fn destroy(caller: *Caller) void {
         std.heap.page_allocator.destroy(caller);
+    }
+
+    /// Pushes `made` to the caller's own registry; the bytes of blobs it sent.
+    fn send(caller: *Caller, made: *const zigbox.push.Packed) !u64 {
+        const destination: zigbox.push.Destination = .{
+            .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
+            .repository = "push/ok",
+            .tag = "v1",
+        };
+        var report: zigbox.push.UploadReport = undefined;
+        caller.diag.reset();
+        try zigbox.push.send(
+            &caller.store,
+            &caller.uploading,
+            caller.wire.interface(),
+            destination,
+            made,
+            .{},
+            &report,
+            &caller.diag,
+        );
+        try testing.expect(report.manifest.eql(made.manifest));
+        return report.bytes_sent;
     }
 
     /// Imports `/src`, packs it and writes the layout to `/layout`.
@@ -105,4 +135,22 @@ test "two callers of zigbox.push, with stores of their own, make the same image"
     try zigbox.push.pack.pack(&first.store, &first.packing, input, &again, &failure);
     try testing.expect(again.cached);
     try testing.expectEqualSlices(u8, &one.manifest.bytes, &again.manifest.bytes);
+}
+
+test "two callers of zigbox.push.send, with registries of their own, share nothing" {
+    // Goal: the upload has no hidden state. Method: two callers push the same image to their
+    // own test registries; each sends its bytes once, a repeat sends none, and the first
+    // caller's registry holds the tag while the second's, before its own push, does not.
+    const first = try Caller.create(3, 0);
+    defer first.destroy();
+    const second = try Caller.create(4, 1);
+    defer second.destroy();
+    var one = try first.pack_and_export();
+    var two = try second.pack_and_export();
+    const sent = try first.send(&one);
+    try testing.expect(sent > 0);
+    try testing.expect(first.registry.fixture.tag_digest("push/ok", "v1") != null);
+    try testing.expect(second.registry.fixture.tag_digest("push/ok", "v1") == null);
+    try testing.expectEqual(@as(u64, 0), try first.send(&one));
+    try testing.expectEqual(sent, try second.send(&two));
 }

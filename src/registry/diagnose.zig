@@ -171,7 +171,11 @@ pub fn network_failed(diag: *Diag, err: net.Error, target: Target, errno: u16) v
             diag.cause("{s} closed the connection before the whole answer arrived", .{host});
             diag.fix(.{ .sentence = "run the command again" });
         },
-        error.TooLarge, error.BadResponse, error.SinkFailed, error.IoFailed, error.Unsupported,
+        error.TooLarge,
+        error.BadResponse,
+        error.SinkFailed,
+        error.IoFailed,
+        error.Unsupported,
         error.SourceFailed,
         => {
             unusable_wire(diag, err, host);

@@ -12,6 +12,11 @@
 //!      digest of the platform manifest the registry really has, whatever was changed on the
 //!      way, because every manifest is hashed before it is used. It never makes more requests
 //!      than one flow and one repeat, and a failure is always an E05xx diagnostic.
+//!   4. `upload`: a push to the test registry whose answers are made worse by the seed (an
+//!      error status, a lost `Location`, a wrong `Range`, failed and cut requests). The upload
+//!      property: a push that succeeds leaves the manifest and both blobs in the registry, and
+//!      the manifest was never put before they were there; one that fails is E0555, E0556 or
+//!      another E05xx code, never a crash.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,6 +27,15 @@ const constants = @import("constants.zig");
 const manifest = @import("registry/manifest.zig");
 const net = @import("registry/net.zig");
 const net_sim = @import("registry/net_sim.zig");
+const fs_sim = @import("store/fs_sim.zig");
+const host_sim = @import("host_sim.zig");
+const images = @import("store/images.zig");
+const import_mod = @import("store/import.zig");
+const layout = @import("store/layout.zig");
+const pack = @import("push/pack.zig");
+const push_registry = @import("registry/push_registry.zig");
+const support = @import("store/test_support.zig");
+const upload = @import("push/upload.zig");
 const reference_mod = @import("registry/reference.zig");
 const test_registry = @import("registry/test_registry.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -201,12 +215,135 @@ fn fuzz_resolve(random: std.Random, seed: u64) void {
     assert(wire.requests <= 40);
 }
 
+/// A store with one packed image, made once and kept; the registry and the wire are new each time.
+const Pushing = struct {
+    host: host_sim.HostSim,
+    files: fs_sim.SimFs,
+    store: layout.Store,
+    imports: import_mod.Workspace,
+    packing: pack.Workspace,
+    uploading: upload.Workspace,
+    wire: net_sim.SimNet,
+    registry: push_registry.PushRegistry,
+    settings: images.Settings,
+    made: pack.Packed,
+};
+
+var pushing: ?*Pushing = null;
+
+fn pushing_ready() *Pushing {
+    if (pushing) |ready| return ready;
+    const rig = std.heap.page_allocator.create(Pushing) catch @panic("out of memory");
+    rig.host.init(1, &.{});
+    rig.files.init(1);
+    rig.host.store_fs = &rig.files;
+    rig.files.put_dir("/data", 0o755);
+    support.make_store_directories(&rig.files, "/data/store");
+    rig.store.at(rig.host.interface(), "/data/store");
+    support.make_source(&rig.files, 0);
+    rig.settings.clear();
+    var diag: Diag = undefined;
+    diag.reset();
+    var result: import_mod.Result = undefined;
+    const options: import_mod.Options = .{ .squash_owner = false, .warn = null };
+    import_mod.import(&rig.store, &rig.imports, "/src", options, &result, &diag) catch {
+        @panic("the fuzzer's source does not import");
+    };
+    const input: pack.Input = .{ .tree = result.digest, .settings = &rig.settings, .labels = null };
+    var failure: pack.Failure = undefined;
+    rig.packing.piece = 4096;
+    pack.pack(&rig.store, &rig.packing, input, &rig.made, &failure) catch {
+        @panic("the fuzzer's image does not pack");
+    };
+    pushing = rig;
+    return rig;
+}
+
+/// Serves the push registry and makes one answer in a few worse.
+const Spoiler = struct {
+    inner: net_sim.Responder,
+    random: std.Random,
+    spoil_per_mille: u16,
+
+    fn responder(spoiler: *Spoiler) net_sim.Responder {
+        return .{ .context = spoiler, .answer = answer };
+    }
+
+    fn answer(
+        context: *anyopaque,
+        request: *const net.Request,
+        received: []const u8,
+        served: *net_sim.Served,
+    ) void {
+        const spoiler: *Spoiler = @ptrCast(@alignCast(context));
+        spoiler.inner.answer(spoiler.inner.context, request, received, served);
+        if (spoiler.random.uintLessThan(u16, 1000) >= spoiler.spoil_per_mille) return;
+        const statuses = [_]u16{ 400, 401, 403, 404, 416, 429, 500, 503 };
+        switch (spoiler.random.uintLessThan(u8, 3)) {
+            0 => served.status = statuses[spoiler.random.uintLessThan(usize, statuses.len)],
+            1 => served.location = "",
+            else => served.range = "bytes=0-x",
+        }
+    }
+};
+
+fn fuzz_upload(random: std.Random, seed: u64) void {
+    const rig = pushing_ready();
+    rig.wire.init(seed, rig.registry.responder());
+    rig.registry.init(&rig.wire);
+    const faults = [_]push_registry.Fault{ .ok, .absolute, .norange, .throttle, .nomount };
+    const fault = faults[random.uintLessThan(usize, faults.len)];
+    var spoiler: Spoiler = .{
+        .inner = rig.registry.responder(),
+        .random = random,
+        .spoil_per_mille = random.uintLessThan(u16, 300),
+    };
+    rig.wire.init(seed, spoiler.responder());
+    rig.wire.received = &rig.registry.drained;
+    rig.wire.faults.fail_per_mille = random.uintLessThan(u16, 100);
+    rig.wire.faults.cut_per_mille = random.uintLessThan(u16, 100);
+    var repository: [48]u8 = undefined;
+    const name = std.fmt.bufPrint(&repository, "push/{s}", .{@tagName(fault)}) catch
+        unreachable; // 48 bytes hold "push/" and the longest fault name
+    const destination: upload.Destination = .{
+        .origin = .{ .scheme = .https, .host = push_registry.registry_host, .port = 443 },
+        .repository = name,
+        .tag = "v1",
+    };
+    const options: upload.Options = .{ .chunk_bytes = random.intRangeAtMost(u32, 16, 4096) };
+    var report: upload.Report = undefined;
+    var diag: Diag = undefined;
+    diag.reset();
+    const store = &rig.store;
+    const wire = rig.wire.interface();
+    const pushed = upload.push(
+        store,
+        &rig.uploading,
+        wire,
+        destination,
+        &rig.made,
+        options,
+        &report,
+        &diag,
+    );
+    if (pushed) |_| {
+        const held = &rig.registry.fixture;
+        assert(held.has_blob(name, &rig.made.layer.text()));
+        assert(held.has_blob(name, &rig.made.config.text()));
+        assert(held.tag_digest(name, "v1") != null);
+    } else |_| {
+        assert(std.mem.startsWith(u8, @tagName(diag.code.?), "E05"));
+    }
+    assert(rig.registry.fixture.unknown_refusals == 0);
+}
+
 pub fn fuzz_registry(seed: u64) void {
     var prng = std.Random.Xoshiro256.init(seed);
     const random = prng.random();
-    switch (random.uintLessThan(u8, 3)) {
+    switch (random.uintLessThan(u8, 4)) {
         0 => fuzz_challenge(random),
         1 => fuzz_document(random),
+        2 => fuzz_upload(random, seed),
         else => fuzz_resolve(random, seed),
     }
 }

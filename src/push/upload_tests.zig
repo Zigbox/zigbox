@@ -58,7 +58,11 @@ const Rig = struct {
             &result,
             &rig.diag,
         );
-        const input: pack.Input = .{ .tree = result.digest, .settings = &rig.settings, .labels = null };
+        const input: pack.Input = .{
+            .tree = result.digest,
+            .settings = &rig.settings,
+            .labels = null,
+        };
         var failure: pack.Failure = undefined;
         rig.packing.piece = 4096;
         try pack.pack(&rig.store, &rig.packing, input, &rig.made, &failure);

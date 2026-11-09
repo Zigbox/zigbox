@@ -180,8 +180,10 @@ pub fn push_operand(
     var made: pack.Packed = undefined;
     try pack_operand(store, ws, operand, &made, diag);
     var holder: reference_mod.Reference = undefined;
-    const options: upload.Options = .{ .mount_from = mount_holder(store, &made, destination, &holder) };
-    upload.push(store, &ws.upload, wire, upload.Destination.of(destination), &made, options, &out.report, diag) catch
+    const from = mount_holder(store, &made, destination, &holder);
+    const options: upload.Options = .{ .mount_from = from };
+    const target = upload.Destination.of(destination);
+    upload.push(store, &ws.upload, wire, target, &made, options, &out.report, diag) catch
         return error.Failed;
     out.destination_len = @intCast(destination.format(&out.destination).len);
     const input: pack.Input = .{

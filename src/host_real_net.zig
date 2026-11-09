@@ -823,6 +823,7 @@ const client_tests = @import("registry/client_tests.zig");
 const fixture_mod = @import("testing/vm/registry_fixture.zig");
 const manifest = @import("registry/manifest.zig");
 const reference_mod = @import("registry/reference.zig");
+const push_fixture = @import("testing/vm/push_fixture.zig");
 const registry_server = @import("testing/vm/registry_server.zig");
 const Diag = @import("diag/diag.zig").Diag;
 const HostSim = @import("host_sim.zig").HostSim;
@@ -1139,4 +1140,91 @@ test "over TCP a blob arrives whole, resumes with Range, and follows a redirect 
         try testing.expectError(error.Failed, fetch_first_layer(&loopback, .badblob, 0, &diag));
         try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0511), diag.code);
     }
+}
+
+const PushWire = struct {
+    server: registry_server.Server,
+    fixture: fixture_mod.Fixture,
+    uploads: push_fixture.PushFixture,
+    body: []const u8 = "",
+    at: u32 = 0,
+
+    fn read(context: *anyopaque, buffer: []u8) net.Read {
+        const wire: *PushWire = @ptrCast(@alignCast(context));
+        const count = @min(buffer.len, wire.body.len - wire.at);
+        @memcpy(buffer[0..count], wire.body[wire.at..][0..count]);
+        wire.at += @intCast(count);
+        return count;
+    }
+
+    /// One call with `body` ("" for none), answered by the upload fixture; the head.
+    fn send(
+        wire: *PushWire,
+        method: net.Method,
+        target: []const u8,
+        body: []const u8,
+        range: []const u8,
+    ) !net.Head {
+        wire.body = body;
+        wire.at = 0;
+        var request = probe_request(wire.server.port, 5000, 10_000);
+        request.target = target;
+        request.method = method;
+        request.content_range = range;
+        if (method.has_body()) {
+            request.body = .{ .length = body.len, .source = .{ .context = wire, .read = read } };
+        }
+        var real = test_real();
+        var storage: [1024]u8 = undefined;
+        var sink: net.BufferSink = .{ .buffer = &storage };
+        var head: net.Head = .{};
+        try interface(&real).call(&request, &head, sink.sink());
+        return head;
+    }
+};
+
+test "an upload goes over TCP: open, a piece with its range, the close, the manifest" {
+    // Goal: the real wire sends HEAD, POST, PATCH and PUT with their bodies and the Content-Range,
+    // and reads Location and Range back, as the simulator's test registry does.
+    var wire: PushWire = undefined;
+    wire.server = .{ .mode = .normal };
+    try wire.server.bind();
+    var base: [48]u8 = undefined;
+    const here = try std.fmt.bufPrint(&base, "http://127.0.0.1:{d}", .{wire.server.port});
+    wire.fixture.init(here, here);
+    wire.uploads.init(here, here);
+    wire.server.push = &wire.uploads;
+    try wire.server.serve(&wire.fixture);
+    defer wire.server.stop();
+    const text = "hello world";
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &hash, .{});
+    const absent = try wire.send(.head, "/v2/push/ok/blobs/sha256:00", "", "");
+    try testing.expectEqual(@as(u16, 404), absent.status);
+    const opened = try wire.send(.post, "/v2/push/ok/blobs/uploads/", "", "");
+    try testing.expectEqual(@as(u16, 202), opened.status);
+    const first = opened.location.slice().?;
+    var next: [256]u8 = undefined;
+    const target = try std.fmt.bufPrint(&next, "{s}", .{path_of(first)});
+    const piece = try wire.send(.patch, target, text[0..6], "0-5");
+    try testing.expectEqual(@as(u16, 202), piece.status);
+    try testing.expectEqualStrings("0-5", piece.range.slice().?);
+    var again: [256]u8 = undefined;
+    const closing = try std.fmt.bufPrint(&again, "{s}?digest=sha256:{x}", .{
+        path_of(piece.location.slice().?),
+        &hash,
+    });
+    const closed = try wire.send(.put, closing, text[6..], "6-10");
+    try testing.expectEqual(@as(u16, 201), closed.status);
+    var digest: [71]u8 = undefined;
+    _ = try std.fmt.bufPrint(&digest, "sha256:{x}", .{&hash});
+    try testing.expect(wire.uploads.has_blob("push/ok", &digest));
+    try testing.expectEqual(@as(u64, 11), wire.uploads.received_bytes);
+}
+
+/// The path of an absolute Location (`http://host:port/path`).
+fn path_of(location: []const u8) []const u8 {
+    const scheme = std.mem.indexOf(u8, location, "://") orelse return location;
+    const slash = std.mem.indexOfScalarPos(u8, location, scheme + 3, '/') orelse return location;
+    return location[slash..];
 }

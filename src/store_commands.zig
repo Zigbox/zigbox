@@ -1245,7 +1245,8 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
     assert(job.args.second != null);
     var pushed: push_run.Pushed = undefined;
     const wire = job.host.network();
-    try push_run.push_operand(&store, &job.workspace.push, wire, operand, &destination, &pushed, diag);
+    const workspace = &job.workspace.push;
+    try push_run.push_operand(&store, workspace, wire, operand, &destination, &pushed, diag);
     if (job.output.json) {
         const text = push_run.push_json(&pushed, buffer[0 .. buffer.len - 1]) catch {
             diag.raise(.B0001);

@@ -151,12 +151,13 @@ pub fn push(
         .manifest_size = made.manifest_size,
         .bytes_sent = state.bytes_sent,
     };
-    assert(report.layer.outcome != .mounted or options.mount_from.len > 0);
+    if (report.layer.outcome == .mounted) assert(options.mount_from.len > 0);
+    assert(report.manifest_size > 0);
 }
 
 // ---- Requests ------------------------------------------------------------------------------
 
-fn read_nothing(context: *anyopaque, buffer: []u8) error{SourceFailed}!usize {
+fn read_nothing(context: *anyopaque, buffer: []u8) net.Read {
     assert(@intFromPtr(context) != 0);
     assert(buffer.len > 0);
     return 0;
@@ -178,7 +179,7 @@ const Piece = struct {
     at: u64,
     end: u64,
 
-    fn read(context: *anyopaque, buffer: []u8) error{SourceFailed}!usize {
+    fn read(context: *anyopaque, buffer: []u8) net.Read {
         const piece: *Piece = @ptrCast(@alignCast(context));
         assert(piece.at <= piece.end);
         const want: usize = @intCast(@min(buffer.len, piece.end - piece.at));

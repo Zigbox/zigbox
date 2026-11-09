@@ -994,7 +994,8 @@ test "push puts the image in the registry, prints the digest, and a repeat sends
     try testing.expectEqual(@as(u8, 0), try command(&.{ "push", tree, target }));
     try testing.expectEqualStrings(&expected, try printed_oci_digest());
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
-    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "push", tree, target }));
+    const json_push = [_][:0]const u8{ "--output", "json", "push", tree, target };
+    try testing.expectEqual(@as(u8, 0), try command(&json_push));
     const parsed = try parse_stdout();
     defer parsed.deinit();
     const object = parsed.value.object;
