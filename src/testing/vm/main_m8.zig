@@ -41,10 +41,12 @@ const push_body =
     \\export DEBIAN_FRONTEND=noninteractive
     \\apt-get update -qq >/tmp/err-apt 2>&1
     \\apt-get install -y -qq docker-registry >>/tmp/err-apt 2>&1
+    \\systemctl start docker-registry >/tmp/err-start 2>&1
     \\i=0
     \\until curl -fs http://localhost:5000/v2/ >/dev/null; do
     \\  i=$((i + 1))
-    \\  [ "$i" -lt 60 ] || { echo 'the registry did not start'; exit 1; }
+    \\  [ "$i" -lt 30 ] || { echo 'the registry did not start'
+    \\    systemctl status docker-registry --no-pager -l | tail -15; ss -ltn | tail -5; exit 1; }
     \\  sleep 1
     \\done
     \\zd() { u=$1; shift; runuser -u "$u" -- env HOME=/home/$u /usr/local/bin/zbx "$@"; }
