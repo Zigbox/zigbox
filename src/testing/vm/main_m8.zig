@@ -65,6 +65,7 @@ const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
 const sign_body =
     \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=$HOME/d XDG_CONFIG_HOME=$HOME/c
     \\Z=/usr/local/bin/zbx
+    \\cd
     \\f() { echo "FAIL: $*"; exit 1; }
     \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME $XDG_CONFIG_HOME/zbx
     \\echo 'correct horse' > ~/pw; chmod 600 ~/pw
