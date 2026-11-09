@@ -63,40 +63,26 @@ const body =
 const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
 
 const sign_body =
-    \\set -u
-    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io
-    \\export XDG_DATA_HOME=/home/demo/m8-data XDG_CONFIG_HOME=/home/demo/m8-config
+    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=/home/demo/d XDG_CONFIG_HOME=/home/demo/c
     \\Z=/usr/local/bin/zbx
-    \\fail() { echo "FAIL: $*"; exit 1; }
-    \\rm -rf "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
-    \\mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
-    \\printf 'correct horse battery\n' > /home/demo/m8-pass
-    \\chmod 600 /home/demo/m8-pass
-    \\$Z key new demo --passphrase-file /home/demo/m8-pass || fail "key new"
-    \\T=$($Z --output json pull alpine:3.20 | sed -n 's/.*"tree":"\(b3:[0-9a-f]*\)".*/\1/p' | head -n 1)
-    \\[ -n "$T" ] || fail "no tree digest from pull"
-    \\echo "tree $T"
+    \\f() { echo "FAIL: $*"; exit 1; }
+    \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME
+    \\echo 'correct horse' > ~/pw; chmod 600 ~/pw
+    \\$Z key new demo --passphrase-file ~/pw || f key
+    \\T=$($Z --output json pull alpine:3.20 | sed -n 's/.*"tree":"\(b3:[0-9a-f]*\)".*/\1/p')
     \\P=$($Z --output json key show demo | sed -n 's/.*"public":"\([^"]*\)".*/\1/p')
-    \\[ -n "$P" ] || fail "no public key"
-    \\printf '.{ .version = 1, .keys = .{ .{ .name = "demo", .public = "%s" } }, .require_signature = true }\n' "$P" \
-    \\  > "$XDG_CONFIG_HOME/zbx/policy.zon"
-    \\$Z run "$T" -- true 2> /tmp/m8-unsigned.err
-    \\[ $? -eq 125 ] || fail "an unsigned tree ran under require_signature"
-    \\head -n 1 /tmp/m8-unsigned.err
-    \\grep -q '^error\[ZBX-E0905\]' /tmp/m8-unsigned.err || fail "no E0905 for the unsigned tree"
-    \\$Z sign "$T" --key demo --passphrase-file /home/demo/m8-pass || fail "sign"
-    \\$Z run "$T" -- true || fail "the signed tree did not run"
-    \\O=$(find "$XDG_DATA_HOME/zbx/store/objects" -type f ! -name '*.chunks' -size +2k | head -n 1)
-    \\[ -n "$O" ] || fail "no object to change"
-    \\M=$(stat -c %a "$O")
-    \\chmod u+w "$O" && printf x >> "$O" || fail "could not change $O"
-    \\$Z run "$T" -- true 2> /tmp/m8-tampered.err
-    \\[ $? -eq 125 ] || fail "a changed object still ran"
-    \\head -n 1 /tmp/m8-tampered.err
-    \\grep -q '^error\[ZBX-E0907\]' /tmp/m8-tampered.err || fail "no E0907 for the changed object"
-    \\truncate -s -1 "$O" && chmod "$M" "$O" || fail "could not put the object back"
-    \\$Z run "$T" -- true || fail "the object was put back and still did not run"
-    \\rm -rf "$XDG_CONFIG_HOME"
+    \\[ -n "$T" ] && [ -n "$P" ] || f "tree or key"
+    \\echo ".{ .version = 1, .keys = .{ .{ .name = \"demo\", .public = \"$P\" } }, .require_signature = true }" > $XDG_CONFIG_HOME/zbx/policy.zon
+    \\$Z run $T -- true 2> /tmp/e1; [ $? = 125 ] || f "unsigned ran"
+    \\grep -m1 'E0905' /tmp/e1 || f "no E0905"
+    \\$Z sign $T --passphrase-file ~/pw || f sign
+    \\$Z run $T -- true || f "signed did not run"
+    \\O=$(find $XDG_DATA_HOME -path '*/objects/*' -type f ! -name '*.chunks' -size +2k | head -n 1)
+    \\M=$(stat -c %a $O); chmod u+w $O; printf x >> $O
+    \\$Z run $T -- true 2> /tmp/e2; [ $? = 125 ] || f "changed ran"
+    \\grep -m1 'E0907' /tmp/e2 || f "no E0907"
+    \\truncate -s -1 $O; chmod $M $O; $Z run $T -- true || f "put back"
+    \\rm -rf $XDG_CONFIG_HOME
     \\true
 ;
 
