@@ -184,7 +184,10 @@ fn ask(job: *Job, name: []const u8, phrase: *passphrase_mod.Passphrase, diag: *D
     var problem: diagnose.PassphraseProblem = undefined;
     const file = job.args.passphrase_file;
     passphrase_mod.acquire(job.host, file, name, true, phrase, &problem) catch {
-        diagnose.passphrase(diag, name, file orelse "", problem);
+        diagnose.passphrase(diag, name, file orelse "", problem, .{
+            .command = .key_new,
+            .mac = diagnose.forwarded_from_mac(job.host),
+        });
         return error.Failed;
     };
     assert(phrase.length > 0);

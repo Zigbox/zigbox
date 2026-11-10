@@ -340,7 +340,12 @@ fn guest_json(ctx: *const commands.Context, buffer: []u8, diag: *Diag) ?[]const 
     if (descriptor < 0) return null;
     forward.stdout_descriptor = descriptor;
     const words = [_][]const u8{ "--output", "json", "doctor" };
-    const command: forward.Command = .{ .words = &words, .json = true, .is_run = false };
+    const command: forward.Command = .{
+        .words = &words,
+        .json = true,
+        .is_run = false,
+        .terminal = true,
+    };
     _ = forward.run(ctx, &command, diag) catch {};
     forward.stdout_descriptor = 1;
     files.close(descriptor);
@@ -384,7 +389,12 @@ pub fn run(ctx: *const commands.Context, host_cpus: u32, diag: *Diag) u8 {
     if (running and !ctx.json) {
         commands.print(guest_heading);
         const words = [_][]const u8{"doctor"};
-        const command: forward.Command = .{ .words = &words, .json = false, .is_run = false };
+        const command: forward.Command = .{
+            .words = &words,
+            .json = false,
+            .is_run = false,
+            .terminal = true,
+        };
         _ = forward.run(ctx, &command, diag) catch {};
         diag.reset();
     }

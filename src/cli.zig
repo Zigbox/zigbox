@@ -767,7 +767,7 @@ fn output_format_named(value: []const u8) ?OutputFormat {
 }
 
 /// Exact match only: near misses such as `Help` or `version` are unknown commands.
-fn command_named(name: []const u8) ?Command {
+pub fn command_named(name: []const u8) ?Command {
     assert(name.len <= constants.arg_bytes_max); // collect() refuses longer arguments.
     var found: ?Command = null;
     if (std.mem.eql(u8, name, "build")) found = .build;
