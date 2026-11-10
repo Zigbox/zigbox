@@ -117,6 +117,10 @@ pub const HostReal = struct {
         .remove_directory = remove_directory,
         .create_file = create_file,
         .bring_up_loopback = bring_up_loopback,
+        .channel = channel,
+        .listen_loopback = listen_loopback,
+        .send_handle = send_handle,
+        .receive_handle = receive_handle,
         .symlink = symlink,
         .set_hostname = set_hostname,
         .set_umask = set_umask,
@@ -626,6 +630,109 @@ pub const HostReal = struct {
         const result = set_interface_up(descriptor, "lo");
         _ = linux.close(descriptor); // Nothing buffered: the ioctls were the operation.
         try result;
+    }
+
+    fn channel(context: *anyopaque) host.Error!host.Pipe {
+        const self = from_context(context);
+        var descriptors: [2]i32 = undefined;
+        const kind = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
+        try check(linux.socketpair(linux.AF.UNIX, kind, 0, &descriptors));
+        self.open_count += 2;
+        assert(descriptors[0] >= 0);
+        assert(descriptors[1] >= 0);
+        return .{ .read = @intCast(descriptors[0]), .write = @intCast(descriptors[1]) };
+    }
+
+    /// `socket`, `bind` to 127.0.0.1, `listen`. Close-on-exec, so that the command never gets it
+    /// even if the child forgot to close it. A failure closes the socket and keeps the errno of
+    /// the call that failed.
+    fn listen_loopback(context: *anyopaque, port: u16) host.Error!host.Handle {
+        const self = from_context(context);
+        assert(port > 0);
+        const created = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+        try check(created);
+        const descriptor: i32 = @intCast(created);
+        const loopback: u32 = std.mem.nativeToBig(u32, 0x7f000001);
+        const address: linux.sockaddr.in = .{
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = loopback,
+        };
+        const bound = check(linux.bind(descriptor, @ptrCast(&address), @sizeOf(@TypeOf(address))));
+        bound catch |err| return close_failed(descriptor, err);
+        check(linux.listen(descriptor, constants.listen_backlog)) catch |err| {
+            return close_failed(descriptor, err);
+        };
+        self.open_count += 1;
+        return @intCast(descriptor);
+    }
+
+    fn close_failed(descriptor: i32, err: host.Error) host.Error {
+        const errno_call = errno_last;
+        _ = linux.close(descriptor);
+        errno_last = errno_call; // The close must not hide why the call failed.
+        return err;
+    }
+
+    /// One byte of data carries the descriptor: `SCM_RIGHTS` needs at least one.
+    fn send_handle(
+        context: *anyopaque,
+        channel_end: host.Handle,
+        handle: host.Handle,
+    ) host.Error!void {
+        _ = from_context(context);
+        var byte = [1]u8{0};
+        var iov = [1]std.posix.iovec_const{.{ .base = &byte, .len = 1 }};
+        const Control = extern struct { header: linux.cmsghdr, fd: i32, pad: i32 = 0 };
+        comptime assert(@sizeOf(Control) == 24); // CMSG_SPACE(4) on a 64-bit kernel.
+        var control: Control = .{
+            .header = .{
+                .len = @sizeOf(linux.cmsghdr) + 4,
+                .level = linux.SOL.SOCKET,
+                .type = linux.SCM.RIGHTS,
+            },
+            .fd = @intCast(handle),
+        };
+        const message: linux.msghdr_const = .{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &control,
+            .controllen = @sizeOf(Control),
+            .flags = 0,
+        };
+        const sent = linux.sendmsg(@intCast(channel_end), &message, linux.MSG.NOSIGNAL);
+        try check(sent);
+        assert(sent == 1);
+    }
+
+    fn receive_handle(context: *anyopaque, channel_end: host.Handle) host.Error!host.Handle {
+        const self = from_context(context);
+        var byte: [1]u8 = undefined;
+        var iov = [1]std.posix.iovec{.{ .base = &byte, .len = 1 }};
+        const Control = extern struct { header: linux.cmsghdr, fd: i32, pad: i32 = 0 };
+        var control: Control = undefined;
+        var message: linux.msghdr = .{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &control,
+            .controllen = @sizeOf(Control),
+            .flags = 0,
+        };
+        const got = linux.recvmsg(@intCast(channel_end), &message, linux.MSG.CMSG_CLOEXEC);
+        try check(got);
+        const header_ok = message.controllen >= @sizeOf(linux.cmsghdr) + 4 and
+            control.header.level == linux.SOL.SOCKET and control.header.type == linux.SCM.RIGHTS;
+        if (got == 0 or !header_ok) {
+            // The peer closed without sending, or sent bytes with no descriptor.
+            errno_last = @backingInt(linux.E.PIPE);
+            return error.IoFailed;
+        }
+        assert(control.fd >= 0);
+        self.open_count += 1;
+        return @intCast(control.fd);
     }
 
     fn symlink(context: *anyopaque, target: [:0]const u8, link: [:0]const u8) host.Error!void {

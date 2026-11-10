@@ -29,10 +29,16 @@ const Open = struct {
     ready_write: bool,
     report_read: bool,
     report_write: bool,
+    /// The listener's channel (a plan with a listener): the parent's end, and the child's until
+    /// the child has its own copy.
+    channel_read: bool,
+    channel_write: bool,
 
     fn any(open: Open) bool {
-        assert(@sizeOf(Open) == 4); // Four flags, one per pipe end.
-        return open.ready_read or open.ready_write or open.report_read or open.report_write;
+        assert(@sizeOf(Open) == 6); // Six flags, one per pipe or channel end.
+        const pipes = open.ready_read or open.ready_write or open.report_read or
+            open.report_write;
+        return pipes or open.channel_read or open.channel_write;
     }
 };
 
@@ -110,6 +116,8 @@ pub const Session = struct {
     /// making until the child has its copies.
     output_read: [2]?host_mod.Handle,
     output_write: [2]?host_mod.Handle,
+    /// The listener the child made, once received; the caller owns it (`take_listener`).
+    listener: ?host_mod.Handle,
 
     pub fn start(
         session: *Session,
@@ -123,13 +131,22 @@ pub const Session = struct {
         session.host = host;
         session.plan = plan;
         session.facts = facts;
-        session.child = .{ .host = host, .plan = plan, .ready = undefined, .report = undefined };
+        session.child = .{
+            .host = host,
+            .plan = plan,
+            .ready = undefined,
+            .report = undefined,
+            .channel = undefined,
+        };
+        session.listener = null;
         session.pid = null;
         session.open = .{
             .ready_read = false,
             .ready_write = false,
             .report_read = false,
             .report_write = false,
+            .channel_read = false,
+            .channel_write = false,
         };
         session.report.reset();
         session.helper = null;
@@ -245,6 +262,7 @@ pub const Session = struct {
             .await_pasta => try session.await_pasta(),
             .release_child => try session.release_child(),
             .await_report => try session.await_report(),
+            .receive_listener => try session.receive_listener(),
             .reap => unreachable, // `wait` does it.
             else => unreachable, // The child's steps.
         }
@@ -267,12 +285,49 @@ pub const Session = struct {
             .ready_write = true,
             .report_read = true,
             .report_write = true,
+            .channel_read = false,
+            .channel_write = false,
         };
+        if (session.plan.has_listener) {
+            session.make_channel() catch |err| {
+                session.close_all();
+                return err;
+            };
+        }
         if (!session.capture) return;
         session.make_output_pipes() catch |err| {
             session.close_all();
             return err;
         };
+    }
+
+    fn make_channel(session: *Session) host_mod.Error!void {
+        assert(session.plan.has_listener);
+        assert(!session.open.channel_read);
+        session.child.channel = try session.host.channel();
+        session.open.channel_read = true;
+        session.open.channel_write = true;
+    }
+
+    /// Takes the listener the child sent (the plan's step after `await_report`). A child that
+    /// failed has written its failure record and sent nothing: that is diagnosed from the
+    /// record, so there is nothing to receive and this step does nothing.
+    fn receive_listener(session: *Session) host_mod.Error!void {
+        assert(session.plan.has_listener);
+        assert(session.listener == null);
+        assert(session.open.channel_read);
+        if (session.report.failure != null) return;
+        session.listener = try session.host.receive_handle(session.child.channel.read);
+        session.host.close(session.child.channel.read);
+        session.open.channel_read = false;
+    }
+
+    /// Hands the listener to the caller, who owns it from here: null if the plan has none or it
+    /// was taken already.
+    pub fn take_listener(session: *Session) ?host_mod.Handle {
+        const taken = session.listener;
+        session.listener = null;
+        return taken;
     }
 
     fn make_output_pipes(session: *Session) host_mod.Error!void {
@@ -338,6 +393,12 @@ pub const Session = struct {
         session.open.ready_read = false;
         host.close(session.child.report.write);
         session.open.report_write = false;
+        if (session.plan.has_listener) {
+            // The child sends over its own copy of its end; ours would keep the receiver from
+            // seeing the end of file if the child ends without sending.
+            host.close(session.child.channel.write);
+            session.open.channel_write = false;
+        }
     }
 
     /// Runs `newuidmap` or `newgidmap` for the child: its name, the child's pid, and the words
@@ -856,11 +917,17 @@ pub const Session = struct {
         if (session.open.ready_write) host.close(session.child.ready.write);
         if (session.open.report_read) host.close(session.child.report.read);
         if (session.open.report_write) host.close(session.child.report.write);
+        if (session.open.channel_read) host.close(session.child.channel.read);
+        if (session.open.channel_write) host.close(session.child.channel.write);
+        if (session.listener) |handle| host.close(handle);
+        session.listener = null;
         session.open = .{
             .ready_read = false,
             .ready_write = false,
             .report_read = false,
             .report_write = false,
+            .channel_read = false,
+            .channel_write = false,
         };
     }
 

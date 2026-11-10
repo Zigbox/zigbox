@@ -248,6 +248,17 @@ pub const plan_steps_max: u32 = 224;
 
 /// `--publish` given at most this many times.
 pub const publish_count_max: u32 = 16;
+// The listener handoff (M8b, docs/briefs/M8b-listen.md).
+
+/// A container has at most one listener handed out (`--listen`).
+pub const listen_count_max: u32 = 1;
+/// The backlog of that listener: connections the kernel queues for an accept the holder has not
+/// made yet. The workload is one process on the loopback, so a short queue is enough.
+pub const listen_backlog: u32 = 16;
+/// The listener's address is IPv4 loopback, in text, as `--listen` takes it ("127.0.0.1:65535").
+pub const listen_text_bytes_max: u32 = 15;
+/// The simulator's room for listeners made in one world.
+pub const sim_listeners_max: u32 = 4;
 /// The address a `--net user` container's /etc/resolv.conf names. pasta's `--dns-forward` maps
 /// DNS sent to it to the host's own first resolver, from the host's side, which is how a
 /// container reaches systemd-resolved's stub at 127.0.0.53. Link-local, like Podman's choice,
@@ -1291,6 +1302,10 @@ comptime {
     assert(sim_written_bytes_max > 1024);
 
     assert(publish_count_max > 0);
+    assert(listen_count_max == 1);
+    assert(listen_backlog > 0);
+    assert(listen_text_bytes_max == "127.0.0.1:65535".len);
+    assert(sim_listeners_max > listen_count_max);
     assert(run_env_count_max > 0);
     assert(run_env_count_max <= env_vars_count_max / 2); // Room for the image's own variables.
     assert(2 * run_env_count_max + 16 <= args_count_max);
