@@ -106,7 +106,7 @@ fn build_and_sign(session: *Session, out: *Io.Writer) ![]const u8 {
 
 fn listing(session: *Session, out: *Io.Writer) ![]const u8 {
     const command = H.as_demo ++ "sh -c 'ls " ++ common.state_dir ++ "/runs " ++
-        common.state_dir ++ "/scopes 2>&1; " ++ zh ++ " ps -a --output json'";
+        common.state_dir ++ "/scopes 2>&1; /home/demo/zh ps -a --output json'";
     const result = try run(session, out, command, 0);
     return session.scratch_allocator().dupe(u8, result.streams.stdout);
 }
