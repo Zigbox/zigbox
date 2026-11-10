@@ -2913,6 +2913,10 @@ pub const registry = [_]Entry{
         \\
         \\Drop --net (or give --net none), and add --listen-send with the number of
         \\the Unix socket the parent passed down.
+        \\
+        \\On macOS --listen is not available at all: the container runs in a
+        \\virtual machine, and a socket cannot be handed across to the process
+        \\that started zbx.
         ,
     },
     .{

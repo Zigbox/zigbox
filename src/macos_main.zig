@@ -25,6 +25,7 @@ const render = @import("diag/render.zig");
 const schemas = @import("schemas.zig");
 const settings_file = @import("mac/settings_file.zig");
 const text_util = @import("text.zig");
+const mac_diagnose = @import("mac/diagnose.zig");
 const Diag = @import("diag/diag.zig").Diag;
 
 pub const panic = std.debug.FullPanic(panic_handler);
@@ -203,6 +204,10 @@ fn forward_command(words: []const []const u8, invocation: *const Invocation, dia
         diagnose_home(diag);
         return fail(diag, invocation);
     };
+    if (runs_container(words) and names_listen(words)) {
+        mac_diagnose.listen_unavailable(diag);
+        return fail_in(diag, invocation, .container_run);
+    }
     const context: commands.Context = .{
         .paths = &paths,
         .json = invocation.json,
@@ -228,6 +233,21 @@ fn runs_container(words: []const []const u8) bool {
         } else if (!std.mem.startsWith(u8, word, "-")) {
             return std.mem.eql(u8, word, "run") or std.mem.eql(u8, word, "exec");
         }
+    }
+    return false;
+}
+
+/// True if the command line, before its "--", has the option `--listen` or `--listen-send` (M8b).
+fn names_listen(words: []const []const u8) bool {
+    assert(words.len <= constants.args_count_max);
+    assert(constants.args_count_max > 0);
+    for (words) |word| {
+        if (std.mem.eql(u8, word, "--")) return false;
+        if (std.mem.eql(u8, word, "--listen") or std.mem.startsWith(u8, word, "--listen=")) {
+            return true;
+        }
+        if (std.mem.eql(u8, word, "--listen-send")) return true;
+        if (std.mem.startsWith(u8, word, "--listen-send=")) return true;
     }
     return false;
 }
@@ -639,6 +659,14 @@ test {
     _ = @import("vm_guest_storage.zig");
     _ = @import("schemas.zig");
     _ = @import("mac/vm_golden.zig");
+}
+
+test "--listen is named before the command's own words, not after them" {
+    // Goal: the Mac refuses --listen but never a program's own argument. Method: both places.
+    try std.testing.expect(names_listen(&.{ "run", "--listen", "127.0.0.1:80", "alpine" }));
+    try std.testing.expect(names_listen(&.{ "run", "--listen-send=3", "alpine" }));
+    try std.testing.expect(!names_listen(&.{ "run", "alpine", "--", "tool", "--listen" }));
+    try std.testing.expect(!names_listen(&.{ "run", "--net", "none", "alpine" }));
 }
 
 test "run and exec end with 125, whatever global options come before them" {
