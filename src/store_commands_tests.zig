@@ -1257,7 +1257,7 @@ test "export refuses what cannot be packed or written with one coded line" {
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
 }
 
-// ---- Push credentials: which one the command line picks (M8 slice 13) ----------------------------
+// ---- Push credentials: which one the command line picks (M8 slice 13) ---------------------
 
 const ecr_host = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
 var ecr_aws: aws_sim.AwsSim = .{};
@@ -1341,7 +1341,13 @@ test "push to ECR with no --username resolves AWS credentials and sends the AWS 
     try testing.expectEqual(@as(u32, 1), ecr_aws.ecr_ok);
     const token = comptime basic_of("AWS:" ++ aws_sim.ecr_password);
     try testing.expect(try basic_requests_to(ecr_host, token) > 0);
-    for ([_][]const u8{ token, aws_sim.ecr_password, aws_sim.issued_secret, aws_sim.issued_token }) |secret| {
+    const secrets = [_][]const u8{
+        token,
+        aws_sim.ecr_password,
+        aws_sim.issued_secret,
+        aws_sim.issued_token,
+    };
+    for (secrets) |secret| {
         try testing.expect(!seen(secret));
     }
 }
