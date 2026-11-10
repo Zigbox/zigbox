@@ -764,6 +764,8 @@ pub const VerifyBroken = struct {
     link: VerifyLink,
     cause: VerifyCause,
     detail: []const u8 = "",
+    /// Link 2 with a policy file present: the policy files' paths, which decide trust.
+    policy: []const u8 = "",
     errno: u16 = 0,
 };
 
@@ -775,13 +777,19 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
     var detail_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const operand = echo_of(&operand_storage, what.operand);
     const detail = echo_of(&detail_storage, what.detail);
+    var policy_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const policy = echo_of(&policy_storage, what.policy);
     diag.raise(.E0908);
     diag.while_("verifying {s}, link {d} ({s})", .{
         operand, @backingInt(what.link), what.link.words(),
     });
     switch (what.cause) {
         .no_record => diag.cause("the store has no signature for the tree", .{}),
-        .no_trusted_signer => diag.cause(
+        .no_trusted_signer => if (policy.len > 0) diag.cause(
+            "no signer is trusted (signers: {s}): the policy file {s} decides, and --key and " ++
+                "--public do not apply while one is present",
+            .{ detail, policy },
+        ) else diag.cause(
             "no signer is trusted (signers: {s}), and no policy file, --key or --public " ++
                 "names one that counts",
             .{detail},
@@ -816,7 +824,9 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
             "zbx sign {s}",
             .{operand},
         ),
-        .no_trusted_signer => diag.fix(.{
+        .no_trusted_signer => if (policy.len > 0) diag.fix(.{
+            .sentence = "list the signer's key in the policy file, or remove the file",
+        }) else diag.fix(.{
             .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
                 "or --public <text>",
         }),

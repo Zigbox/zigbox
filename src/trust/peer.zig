@@ -66,6 +66,8 @@ pub const Failure = struct {
     size: u64,
     err: host_mod.Error,
     errno: u16,
+    /// `local_unusable`: the record is of a newer zbx, not damaged.
+    newer: bool = false,
 
     fn make(refusal: Refusal) Failure {
         return .{ .refusal = refusal, .size = 0, .err = error.IoFailed, .errno = 0 };
@@ -126,7 +128,11 @@ fn load_existing(store: *const Store, memory: *Memory, tree: Digest, failure: *F
         switch (err) {
             error.NotFound => return .absent,
             error.Damaged => return .damaged,
-            error.Newer => return fail(failure, .local_unusable),
+            error.Newer => {
+                failure.* = Failure.make(.local_unusable);
+                failure.newer = true;
+                return error.Failed;
+            },
             error.Unreadable => {
                 failure.* = Failure.make(.unreadable);
                 failure.errno = errno;

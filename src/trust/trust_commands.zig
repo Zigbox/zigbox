@@ -130,7 +130,7 @@ fn refused(job: *Job, failure: *const peer.Failure, what: []const u8, tree: ?Dig
         .local_unusable => {
             var path: PathBuf = undefined;
             const text = record_mod.record_path(&job.store, &path, tree.?);
-            diagnose.record_unusable(diag, text, .damaged);
+            diagnose.record_unusable(diag, text, if (failure.newer) .newer else .damaged);
         },
     }
     return error.Failed;

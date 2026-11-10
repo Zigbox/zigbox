@@ -112,6 +112,13 @@ fn put_junk(kind: peer.Kind, digest: Digest) void {
     files.put_file(path_of(kind, digest), 0o644, "junk\n");
 }
 
+/// A record of `length` bytes of one kind of junk (zero bytes, then a newline).
+fn put_junk_bytes(kind: peer.Kind, digest: Digest, length: u32) void {
+    var bytes: [40]u8 = @splat('x');
+    if (length > 0) bytes[length - 1] = '\n';
+    files.put_file(path_of(kind, digest), 0o644, bytes[0..length]);
+}
+
 fn exists(kind: peer.Kind, digest: Digest) bool {
     return files.kind_of(path_of(kind, digest)) != null;
 }
@@ -349,7 +356,11 @@ test "over random stores, prune removes exactly the orphaned records, and only w
             if (random.boolean()) {
                 // A signature record of an absent tree: a sound one needs the tree, so junk.
                 const digest = stray(100 + at);
-                put_junk(.signature, digest);
+                if (random.boolean()) {
+                    put_junk(.signature, digest);
+                } else {
+                    put_junk_bytes(.signature, digest, random.uintLessThan(u32, 40));
+                }
                 plan[count] = .{ .kind = .signature, .digest = digest, .keeps = false };
                 orphans += 1;
                 continue;

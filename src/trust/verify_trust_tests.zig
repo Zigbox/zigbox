@@ -93,6 +93,24 @@ fn has(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
 
+/// `text` with each line break and the indent after it folded to one space, so an assertion
+/// does not depend on where the renderer wrapped.
+fn unwrapped(out: []u8, text: []const u8) []const u8 {
+    var len: usize = 0;
+    var at: usize = 0;
+    while (at < text.len and len < out.len) : (at += 1) {
+        if (text[at] != '\n') {
+            out[len] = text[at];
+            len += 1;
+            continue;
+        }
+        while (at + 1 < text.len and text[at + 1] == ' ') at += 1;
+        out[len] = ' ';
+        len += 1;
+    }
+    return out[0..len];
+}
+
 /// The tree's digest as text a command line can carry.
 var tree_text: [constants.store_digest_text_bytes:0]u8 = undefined;
 
@@ -521,6 +539,14 @@ test "a policy file decides trust: --key and --public do not add to it" {
     files.put_file(policy_path, 0o644, elsewhere);
     try testing.expectEqual(@as(u8, 1), command(&.{ "verify", tree_operand(), "--key", "ci" }));
     try testing.expect(has(sim.stdout(), "2 signer: FAILED"));
+    // The user is told the flags did not apply, and where to look instead.
+    var flat: [2048]u8 = undefined;
+    const shown = unwrapped(&flat, sim.stderr());
+    try testing.expect(has(shown, "the policy file " ++ policy_path ++ " decides, and " ++
+        "--key and --public do not apply while one is present"));
+    try testing.expect(has(shown, " list the signer's key in the policy file, or remove " ++
+        "the file"));
+    try testing.expect(!has(shown, "or pass --key"));
     const public = try public_text_of("ci");
     var argument: [constants.key_public_text_bytes + 1]u8 = undefined;
     @memcpy(argument[0..public.len], &public);

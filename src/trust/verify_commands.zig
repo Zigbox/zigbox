@@ -246,6 +246,22 @@ fn broken(
     detail: []const u8,
     errno: u16,
 ) Error {
+    return broken_at(job, link, cause, detail, "", errno);
+}
+
+/// Link 2: `policy` lists the policy files present, or is empty when there are none.
+fn broken_with_policy(job: *Job, signers: []const u8, policy: []const u8) Error {
+    return broken_at(job, .signer, .no_trusted_signer, signers, policy, 0);
+}
+
+fn broken_at(
+    job: *Job,
+    link: Link,
+    cause: diagnose.VerifyCause,
+    detail: []const u8,
+    policy: []const u8,
+    errno: u16,
+) Error {
     assert(job.args.operand.len > 0);
     assert(errno < 4096);
     job.ws.report.set(link, .failed);
@@ -255,6 +271,7 @@ fn broken(
         .link = link,
         .cause = cause,
         .detail = detail,
+        .policy = policy,
         .errno = errno,
     });
     return error.Failed;
@@ -429,7 +446,14 @@ fn link_signer(job: *Job) Error!void {
         // A full buffer only shortens the list of ids in the message.
         writer.print("{s}{s}", .{ separator, id[0..16] }) catch break;
     }
-    return broken(job, .signer, .no_trusted_signer, writer.buffered(), 0);
+    var names: [constants.arg_echo_bytes_max]u8 = undefined;
+    var policy_writer = std.Io.Writer.fixed(&names);
+    const policies = &job.ws.policies;
+    for (policies.files[0..policies.count], 0..) |*loaded, at| {
+        const separator: []const u8 = if (at == 0) "" else ", ";
+        policy_writer.print("{s}{s}", .{ separator, loaded.path.text() }) catch break;
+    }
+    return broken_with_policy(job, writer.buffered(), policy_writer.buffered());
 }
 
 // ---- Link 3: the tree ----
