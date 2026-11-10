@@ -481,10 +481,11 @@ fn connect_wait(memory: *Memory, fds: []i32, idle_ms: u32, deadline_ms: u64) err
     return error.Connect;
 }
 
-/// Connects to the first address of `host` that answers. Every address is started at once and the
-/// first to complete wins (curl does the same), so one family that accepts and then stalls, which
-/// a forwarder such as pasta can do on one of `localhost`'s two addresses, costs nothing while
-/// the other answers; the connect has the idle timeout as a whole, not once per address.
+/// Connects to the first address of `host` that answers. Every address is started at once (IPv4
+/// ones first) and the first to complete wins (curl does the same), so a family that does not
+/// answer costs nothing while the other does; the connect has the idle timeout as a whole, not
+/// once per address. A forwarder such as pasta can accept on `::1` and then stall, so a peer that
+/// completes on both families is taken on IPv4.
 fn connect_host(
     memory: *Memory,
     host: []const u8,
@@ -500,17 +501,22 @@ fn connect_host(
     assert(count <= addresses.len);
     var fds: [constants.net_addresses_max]i32 = undefined;
     var pending: u32 = 0;
-    for (addresses[0..count]) |address| {
-        switch (connect_start(memory, address, port)) {
-            .done => |fd| {
-                close_all(fds[0..pending]);
-                return fd;
-            },
-            .pending => |fd| {
-                fds[pending] = fd;
-                pending += 1;
-            },
-            .failed => {},
+    // IPv4 first: a peer that completes at once on both families (a forwarder) is taken on the
+    // first one started, and a forwarder can accept on `::1` and then say nothing.
+    for ([2]bool{ true, false }) |want_ip4| {
+        for (addresses[0..count]) |address| {
+            if ((address == .ip4) != want_ip4) continue;
+            switch (connect_start(memory, address, port)) {
+                .done => |fd| {
+                    close_all(fds[0..pending]);
+                    return fd;
+                },
+                .pending => |fd| {
+                    fds[pending] = fd;
+                    pending += 1;
+                },
+                .failed => {},
+            }
         }
     }
     if (pending > 0) {

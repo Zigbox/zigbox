@@ -8,7 +8,10 @@ only, a stalled `::1` attempt used the whole timeout before the second address w
 timeout was reported as "did not answer". The fix: the attempts start together (non-blocking
 connects, polled), the first to complete wins and the others are closed. A timeout after the
 connection is made is a new `registry.net.Stalled` (E0503 says the host answered and then stalled);
-only the connect phase gives `TimedOut`. No new code and no changed bound: E0503 keeps its number,
+only the connect phase gives `TimedOut`. Run 245 still stalled once ("connected, then sent nothing
+for 30 seconds"): a forwarder can complete the connect on both families at once and say nothing on
+`::1`, so a race alone does not help. The IPv4 addresses are now started first, and a peer that
+completes at once is taken on the first one started. No new code and no changed bound: E0503 keeps its number,
 and the idle timeout is unchanged.
 
 ## `policy check` for a missing provenance (E0906)
