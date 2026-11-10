@@ -2400,8 +2400,6 @@ fn build_warnings_dropped(diag: *Diag) void {
     image_diagnose.warnings_dropped(diag, 7);
 }
 
-/// E0437 comes from the library calls of Zigcube's contract (`store/image_peer.zig`), which no
-/// zbx command makes: the golden is the diagnostic as `store/diagnose.zig` builds it.
 /// E0527 to E0535 come from an ECR pull; `aws/ecr_tests.zig` runs each end to end, and these are
 /// the diagnostics as `aws/diagnose.zig` and `registry/diagnose.zig` build them.
 const ecr_host_golden = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
@@ -2445,6 +2443,8 @@ fn ecr_rejected(diag: *Diag) void {
     @import("registry/diagnose.zig").ecr_token_rejected(diag, ecr_host_golden);
 }
 
+/// E0437 comes from the library calls of Zigcube's contract (`store/image_peer.zig`), which no
+/// zbx command makes: the golden is the diagnostic as `store/diagnose.zig` builds it.
 fn store_image_refused(diag: *Diag) void {
     const store_diagnose = @import("store/diagnose.zig");
     var sim: HostSim = undefined;

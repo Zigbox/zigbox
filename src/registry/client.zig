@@ -37,7 +37,7 @@ pub const Workspace = struct {
     token: [constants.registry_token_bytes_max]u8,
     token_body: [constants.registry_token_response_bytes_max]u8,
     /// The ECR authorization token (base64 of `AWS:<password>`), sent as `Basic` to the registry's
-    /// own origin. Secret: `Client.wipe` zeroes it.
+    /// own origin. Secret: `Workspace.wipe` zeroes it.
     basic: [constants.aws_ecr_token_bytes_max]u8,
 
     /// Zeroes every secret in it: the bearer token, the token service's answer (which also holds
@@ -112,16 +112,6 @@ pub const Client = struct {
         assert(client.basic_len <= constants.aws_ecr_token_bytes_max);
         assert(client.workspace.basic.len == constants.aws_ecr_token_bytes_max);
         return client.workspace.basic[0..client.basic_len];
-    }
-
-    /// Zeroes every secret the client holds: the bearer token, the token service's answer and the
-    /// ECR authorization token. Called when a pull or resolve ends, on every path.
-    pub fn wipe(client: *Client) void {
-        assert(client.basic_len <= constants.aws_ecr_token_bytes_max);
-        Workspace.wipe(client.workspace);
-        client.token_len = 0;
-        client.basic_len = 0;
-        assert(client.basic_len == 0);
     }
 
     fn token(client: *const Client) []const u8 {
@@ -452,18 +442,25 @@ fn check_status(
     const url = url_of(&url_storage, origin, target);
     const registry = reference.registry();
     const repository = reference.repository();
+    // The ECR credential is the registry's: an answer from the host a redirect led to (S3 for a
+    // layer) says nothing of the AWS identity, so it is never read as the registry's refusal.
+    const basic = seen.basic and !head.elsewhere;
+    if (head.elsewhere and head.status == 403) {
+        diagnose.http_error(diag, head.status, url, "the host it redirects to refused the request");
+        return error.Failed;
+    }
     switch (head.status) {
         200 => return,
-        401 => if (seen.basic) {
+        401 => if (basic) {
             diagnose.ecr_token_rejected(diag, registry);
         } else diagnose.auth_refused(diag, .token_rejected, registry, repository),
-        403 => if (seen.basic) {
+        403 => if (basic) {
             const blob = std.mem.indexOf(u8, target, "/blobs/") != null;
             diagnose.ecr_repository_denied(diag, registry, repository, blob);
         } else diagnose.http_error(diag, head.status, url, null),
         404 => {
             const name = target[std.mem.lastIndexOf(u8, target, "/").? + 1 ..];
-            if (seen.basic and names_unknown(seen.body)) {
+            if (basic and names_unknown(seen.body)) {
                 diagnose.ecr_repository_missing(diag, registry, repository);
             } else diagnose.not_found(diag, registry, repository, name);
         },
@@ -665,6 +662,7 @@ fn request_following(
             diagnose.network_failed(diag, err, target_info, client.net.last_errno());
             return error.Failed;
         };
+        head.elsewhere = !current.same(origin);
         if (!is_redirect(head.status)) return;
         var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
         const here = url_of(&url_storage, current, current_target);

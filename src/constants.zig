@@ -161,6 +161,11 @@ pub const diag_skip_bytes_max: u32 = 4096;
 // this; the index lists every code and outgrew 32 KiB with M6c. The bound is what the tool's
 // buffers and file reads use.
 pub const errors_page_bytes_max: u32 = 64 * 1024;
+/// One row of the index (link, summary, blame), and the stylesheet and head every page carries.
+/// `errors_site.zig` asserts at compile time that the registry's rows fit in a page, so the next
+/// milestone's codes fail the build there, not in the tool's run.
+pub const errors_index_row_bytes_max: u32 = 256;
+pub const errors_index_head_bytes_max: u32 = 6 * 1024;
 
 // Host simulator.
 pub const sim_files_max: u32 = 128;

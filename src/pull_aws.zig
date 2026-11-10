@@ -24,12 +24,11 @@ pub const Storage = struct {
     trace: credentials_mod.Trace,
 
     pub fn wipe(storage: *Storage) void {
-        assert(storage.pairs.len > 0);
         storage.workspace.wipe();
         storage.credentials.wipe();
         // The pairs point into the host's environment, which is not ours to zero.
-        storage.pairs = undefined;
-        assert(storage.pairs.len > 0);
+        assert(storage.credentials.secret_access_key_len == 0);
+        assert(storage.credentials.session_token_len == 0);
     }
 };
 

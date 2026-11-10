@@ -102,7 +102,12 @@ pub fn none_given(diag: *Diag, registry: []const u8) void {
     diag.cause("{s} is an Amazon ECR registry and the pull was given no AWS credentials", .{shown});
     diag.context("host", "{s}", .{shown});
     diag.fix(.{
-        .sentence = "resolve credentials first (aws_credentials_resolve) and give them to the pull",
+        .sentence = "run zbx pull on the image first " ++
+            "(zbx build does not fetch AWS credentials yet)",
+    });
+    diag.fix(.{
+        .sentence = "a library caller resolves them with aws_credentials_resolve " ++
+            "and passes them in",
     });
     assert(diag.code != null);
 }

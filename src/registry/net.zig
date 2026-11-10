@@ -199,8 +199,9 @@ pub const Request = struct {
     content_type: []const u8 = "",
     /// The Content-Range of a chunk ("first-last"); empty for none.
     content_range: []const u8 = "",
-    /// The base64 of `user:password` for `Authorization: Basic`; empty for none. Set only for a
-    /// push's credentials, never together with `bearer`. Never logged, never returned.
+    /// The base64 of `user:password` for `Authorization: Basic`; empty for none. Set for a push's
+    /// credentials and for an ECR pull's token, never together with `bearer`. Never logged, never
+    /// returned.
     basic: []const u8 = "",
     /// The whole value of an `Authorization` header that is neither bearer nor basic (an AWS
     /// SigV4 signature); empty for none, and never together with those. Never logged, never
@@ -259,6 +260,9 @@ pub const Head = struct {
     range: HeaderValue(constants.registry_header_bytes_max) = .{},
     /// Body bytes handed to the sink.
     body_len: u64 = 0,
+    /// Set by the client, never by the network: this answer came from a host the client was
+    /// redirected to, not from the origin it started with.
+    elsewhere: bool = false,
 
     pub fn reset(head: *Head) void {
         head.* = .{};

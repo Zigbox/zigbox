@@ -27,6 +27,9 @@ pub const Fault = enum {
     missing_repo,
     /// 401 whatever Basic is presented: the token is not accepted.
     bad_token,
+    /// The blob host (S3) answers 403, as it does for an expired presigned URL: the registry
+    /// itself has given nothing to refuse.
+    s3_forbidden,
 };
 
 pub const EcrSim = struct {
@@ -119,6 +122,10 @@ fn s3(sim: *EcrSim, request: *const net.Request, served: *net_sim.Served) void {
     assert(std.mem.eql(u8, request.host, s3_host));
     assert(request.target.len > 0);
     const sent = request.bearer.len + request.basic.len + request.authorization.len;
+    if (sim.fault == .s3_forbidden) {
+        served.* = .{ .status = 403, .body = error_body("AccessDenied") };
+        return;
+    }
     if (sent > 0) {
         sim.s3_leaked += 1;
         served.* = .{ .status = 400, .body = error_body("InvalidArgument") };
