@@ -453,11 +453,11 @@ test "the demo's fifth step: no secret in the JSON, the lock, the store or a bun
     var world: World = undefined;
     world.setup(50, &keys_env);
     world.prepare_run("web-1");
-    const json_pull = [_][]const u8{ "zbx", "--output", "json", "-v", "pull", ecr_sim.reference };
+    const json_pull = [_][:0]const u8{ "zbx", "--output", "json", "-v", "pull", ecr_sim.reference };
     try testing.expectEqual(@as(u8, 0), world.run(&json_pull));
     try testing.expect(std.mem.indexOf(u8, world.sim.stdout(), "\"tree\"") != null);
     try world.expect_clean();
-    const run_web = [_][]const u8{ "zbx", "run", "--name", "web-1", ecr_sim.reference };
+    const run_web = [_][:0]const u8{ "zbx", "run", "--name", "web-1", ecr_sim.reference };
     try testing.expectEqual(@as(u8, 0), world.run(&run_web));
     try testing.expectEqual(@as(u8, 0), world.run(&.{ "zbx", "bundle", "web-1" }));
     const tar = try bundle_tar(&world, plain);
