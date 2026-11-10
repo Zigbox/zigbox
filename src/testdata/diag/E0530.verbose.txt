@@ -1,0 +1,7 @@
+error[ZBX-E0530]: the AWS identity may not get an ECR authorization token
+  cause  the AWS identity may not call ecr:GetAuthorizationToken
+  aws    AccessDeniedException
+  perm   ecr:GetAuthorizationToken
+  fix    allow ecr:GetAuthorizationToken on resource "*" in the role's policy
+  more   zbx explain E0530
+  docs   https://zigbox.github.io/zigbox/errors/E0530.html

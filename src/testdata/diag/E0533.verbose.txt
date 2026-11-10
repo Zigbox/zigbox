@@ -1,0 +1,8 @@
+error[ZBX-E0533]: the web identity token file can't be read
+  cause  AWS_WEB_IDENTITY_TOKEN_FILE (/var/run/secrets/eks/token) can't be read,
+         or holds no token
+  var    AWS_WEB_IDENTITY_TOKEN_FILE
+  fix    check that the file exists, is readable by this user, and is not empty
+         in GitHub Actions the job needs 'permissions: id-token: write'
+  more   zbx explain E0533
+  docs   https://zigbox.github.io/zigbox/errors/E0533.html

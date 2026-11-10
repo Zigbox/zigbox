@@ -1,0 +1,8 @@
+error[ZBX-E0532]: the ECR repository does not exist
+  cause  123456789012.dkr.ecr.us-east-1.amazonaws.com has no repository
+         fixture/cdn
+  host   123456789012.dkr.ecr.us-east-1.amazonaws.com
+  repo   fixture/cdn
+  fix    check the repository's name, and that the registry's region is right
+  more   zbx explain E0532
+  docs   https://zigbox.github.io/zigbox/errors/E0532.html

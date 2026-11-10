@@ -37,7 +37,9 @@ const codes = @import("diag/codes.zig");
 const config_mod = @import("registry/config.zig");
 const constants = @import("constants.zig");
 const diagnose = @import("registry/diagnose.zig");
+const credentials_mod = @import("aws/credentials.zig");
 const doctor = @import("doctor.zig");
+const ecr_login = @import("registry/ecr_login.zig");
 const fs_mod = @import("store/fs.zig");
 const host_mod = @import("host.zig");
 const image_diagnose = @import("image_diagnose.zig");
@@ -81,6 +83,10 @@ pub const Request = struct {
     /// `constants.registry_mirrors_bytes_max` bytes and `registry_mirrors_max` entries; more is
     /// refused (E0514).
     mirrors: []const u8,
+    /// The AWS credentials for a private Amazon ECR reference, from `aws_credentials_resolve`
+    /// (the library reads no environment). Null for any other registry; a null for an ECR one is
+    /// refused (E0527). Only the pull's own call uses them, and the caller wipes them.
+    aws: ?*const credentials_mod.Credentials = null,
 };
 
 pub const Event = union(enum) {
@@ -197,6 +203,9 @@ fn resolve_with(
     client.mirrors = request.mirrors;
     if (request.platform.architecture) |architecture| client.architecture = architecture;
     client.fallback = request.platform.fallback;
+    ecr_login.login(host, request.aws, workspace.reference.registry(), client, diag) catch {
+        return error.Failed;
+    };
     client_mod.resolve(client, &workspace.reference, &workspace.resolved, diag) catch {
         return error.Failed;
     };
@@ -208,6 +217,7 @@ fn resolve_with(
 /// is in `workspace.resolved` and `workspace.reference`.
 pub fn resolve(host: Host, request: *const Request, workspace: *Workspace, diag: *Diag) Error!void {
     var client: client_mod.Client = undefined;
+    defer client_mod.Workspace.wipe(&workspace.client);
     try resolve_with(host, request, workspace, &client, diag);
 }
 
@@ -242,6 +252,7 @@ pub fn pull(
 ) Error!void {
     assert(diag.code == null);
     var client: client_mod.Client = undefined;
+    defer client_mod.Workspace.wipe(&workspace.client);
     try resolve_with(host, request, workspace, &client, diag);
     const sink: Sink = .{ .progress = progress };
     if (progress) |watcher| watcher.call(watcher.context, .{ .resolved = &workspace.resolved });

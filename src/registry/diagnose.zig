@@ -351,7 +351,61 @@ pub fn auth_refused(
     diag.context("host", "{s}", .{shown});
     diag.context("repo", "{s}", .{repository});
     diag.fix(.{ .sentence = "check that the image is public and its name is right" });
-    diag.fix(.{ .sentence = "private registries are not supported yet" });
+    diag.fix(.{ .sentence = "only Amazon ECR is supported as a private registry so far" });
+}
+
+/// ZBX-E0531: ECR answered 403 for a repository the identity may not read. `blob` says whether
+/// it was a layer or the manifest that was refused, which names the permission.
+pub fn ecr_repository_denied(
+    diag: *Diag,
+    registry: []const u8,
+    repository: []const u8,
+    blob: bool,
+) void {
+    assert(diag.code == null);
+    var storage: [echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, registry);
+    const permission = if (blob) "ecr:GetDownloadUrlForLayer" else "ecr:BatchGetImage";
+    diag.raise(.E0531);
+    diag.cause("{s} refused the AWS identity for the repository {s}", .{ shown, repository });
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{repository});
+    diag.context("perm", "{s}", .{permission});
+    diag.fix(.{
+        .sentence = "allow ecr:BatchGetImage and ecr:GetDownloadUrlForLayer on the repository",
+    });
+    diag.fix(.{ .sentence = "or pull with an identity of the account that owns it" });
+    assert(diag.code != null);
+}
+
+/// ZBX-E0532: ECR says the repository does not exist (`NAME_UNKNOWN`).
+pub fn ecr_repository_missing(diag: *Diag, registry: []const u8, repository: []const u8) void {
+    assert(diag.code == null);
+    var storage: [echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, registry);
+    diag.raise(.E0532);
+    diag.cause("{s} has no repository {s}", .{ shown, repository });
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{repository});
+    diag.fix(.{
+        .sentence = "check the repository's name, and that the registry's region is right",
+    });
+    assert(diag.code != null);
+}
+
+/// ZBX-E0535: ECR answered 401 to the authorization token it had just given.
+pub fn ecr_token_rejected(diag: *Diag, registry: []const u8) void {
+    assert(diag.code == null);
+    var storage: [echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&storage, registry);
+    diag.raise(.E0535);
+    diag.cause("{s} answered 401 to the authorization token AWS had just given", .{shown});
+    diag.context("host", "{s}", .{shown});
+    diag.fix(.{
+        .sentence = "check that the registry's region is the one the token was asked for",
+    });
+    diag.fix(.{ .sentence = "run the command again: the token lasts twelve hours" });
+    assert(diag.code != null);
 }
 
 /// ZBX-E0508: 404. `name` is the tag or digest that was asked for.

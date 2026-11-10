@@ -154,6 +154,15 @@ pub const Code = enum(u8) {
     E0524,
     E0525,
     E0526,
+    E0527,
+    E0528,
+    E0529,
+    E0530,
+    E0531,
+    E0532,
+    E0533,
+    E0534,
+    E0535,
     E0550,
     E0551,
     E0552,
@@ -2044,13 +2053,14 @@ pub const registry = [_]Entry{
         .explanation =
         \\zbx pulls anonymously: when a registry answers 401 it asks for a token
         \\from the realm in the WWW-Authenticate header, with no credentials, and
-        \\repeats the request once. This time that did not work: the token
-        \\service refused, the registry refused the token, or the challenge asked
-        \\for credentials (Basic) that zbx does not have.
+        \\repeats the request once. This time that did not work: the token service
+        \\refused, the registry refused the token, or the challenge asked for
+        \\credentials (Basic) that zbx does not have.
         \\
         \\A private image, or one that does not exist (some registries answer
-        \\"denied" for both), ends here. Private registries are not supported
-        \\yet. Check the name; the message says which step was refused.
+        \\"denied" for both), ends here. Amazon ECR is the one private registry
+        \\zbx signs in to (see ZBX-E0527); other private registries are not
+        \\supported yet. Check the name; the message says which step was refused.
         ,
     },
     .{
@@ -2349,6 +2359,169 @@ pub const registry = [_]Entry{
         \\directory or any directory above it. There is none. A lock is made by the
         \\first pull (or the first run of a tag) in the project directory, so pull
         \\an image to make one, from the directory the project lives in.
+        ,
+    },
+    .{
+        .code = .E0527,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "there are no AWS credentials to pull from Amazon ECR",
+        .explanation =
+        \\zbx pulls from a private Amazon ECR registry
+        \\(<account>.dkr.ecr.<region>.amazonaws.com) with the AWS credentials it
+        \\finds, in this order, and uses the first source that is set up: the
+        \\environment (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, with
+        \\AWS_SESSION_TOKEN for temporary keys), a web identity (AWS_ROLE_ARN and
+        \\AWS_WEB_IDENTITY_TOKEN_FILE, as on EKS and in GitHub Actions), and the
+        \\role of an EC2 instance (the instance metadata service, version 2 only).
+        \\None gave any, or the one that was set up is not complete. The message
+        \\says what each source did.
+        \\
+        \\An instance metadata service that answers 403, 404 or 405 to the token
+        \\request is one that does not serve version 2; zbx never asks version 1.
+        \\Raise the instance's metadata hop limit or require version 2, or pass
+        \\the keys in the environment.
+        \\
+        \\Profiles in ~/.aws, single sign-on and credential_process are not read
+        \\yet. To use one, export its keys first:
+        \\
+        \\    export $(aws configure export-credentials --format env)
+        \\
+        \\The macOS zbx runs pulls in its Linux guest, which has no AWS
+        \\credentials yet.
+        ,
+    },
+    .{
+        .code = .E0528,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "AWS refused the credentials",
+        .explanation =
+        \\AWS answered the call for an ECR authorization token (or the exchange of
+        \\a web identity for keys) with a refusal that is about the credentials:
+        \\they are expired, the key is unknown, the secret is wrong, or the token
+        \\is not valid. The message names the source of the credentials and AWS's
+        \\error code. It never repeats AWS's message text, which can hold account
+        \\details.
+        \\
+        \\Temporary keys expire (the environment's AWS_SESSION_TOKEN, a role's
+        \\session): get new ones and run the command again. zbx resolves
+        \\credentials for every pull and keeps none.
+        ,
+    },
+    .{
+        .code = .E0529,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the clock of this machine is too far from AWS's",
+        .explanation =
+        \\AWS refused the signed request because its time is too far from the time
+        \\AWS has (more than five minutes). The signature includes the time, so a
+        \\machine whose clock is wrong cannot sign for AWS, even with the right
+        \\keys.
+        \\
+        \\Set the clock (zbx doctor does not check it): enable time
+        \\synchronisation, for example with timedatectl set-ntp true or chrony,
+        \\and run the command again. A virtual machine that was suspended often
+        \\has a clock that is hours behind.
+        ,
+    },
+    .{
+        .code = .E0530,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the AWS identity may not get an ECR authorization token",
+        .explanation =
+        \\The credentials are valid, and AWS says the identity they belong to is
+        \\not allowed to call ecr:GetAuthorizationToken. That permission cannot be
+        \\limited to one repository: grant it on resource "*". Reading an image
+        \\takes three more: ecr:BatchGetImage, ecr:GetDownloadUrlForLayer and
+        \\ecr:BatchCheckLayerAvailability, on the repository.
+        \\
+        \\Ask whoever owns the IAM role or user to add them. The message names the
+        \\permission and AWS's error code.
+        ,
+    },
+    .{
+        .code = .E0531,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the ECR repository may not be read by this identity",
+        .explanation =
+        \\The registry answered 403 for a repository: the credentials are valid,
+        \\and the identity may not read it. Reading an image needs
+        \\ecr:BatchGetImage for the manifest and ecr:GetDownloadUrlForLayer for
+        \\each layer, on that repository (and the repository's own policy may
+        \\refuse the account). The message names the repository and the permission
+        \\that the failed request needs.
+        \\
+        \\Registries also answer this for a repository that is in another account
+        \\or region than the host names. Check the host, then the role's policy.
+        ,
+    },
+    .{
+        .code = .E0532,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the ECR repository does not exist",
+        .explanation =
+        \\The registry answered that it has no repository of this name
+        \\(NAME_UNKNOWN). This is not the same as a missing tag, which is
+        \\ZBX-E0508: the repository itself is not in the registry the host names.
+        \\Amazon ECR creates a repository only when someone does, and each account
+        \\and region has its own.
+        \\
+        \\Check the spelling of the repository, and the account and region in the
+        \\host name (<account>.dkr.ecr.<region>.amazonaws.com).
+        ,
+    },
+    .{
+        .code = .E0533,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the web identity token file can't be read",
+        .explanation =
+        \\AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE name a web identity: zbx
+        \\reads the token from the file and exchanges it with STS for temporary
+        \\keys. The file is missing, cannot be read by this user, is empty, or
+        \\does not hold a token (a token is letters, digits, dashes, underscores,
+        \\dots and equals signs on one line). Because the user chose this
+        \\identity, zbx does not go on to the instance's own role.
+        \\
+        \\On EKS the file is mounted by the service account's token projection; in
+        \\GitHub Actions the workflow fetches it and needs "id-token: write".
+        \\Check the path in AWS_WEB_IDENTITY_TOKEN_FILE and its permissions.
+        ,
+    },
+    .{
+        .code = .E0534,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "this Amazon ECR registry is not supported yet",
+        .explanation =
+        \\zbx signs for the standard AWS partition's ECR registries, which are
+        \\named <12 digits>.dkr.ecr.<region>.amazonaws.com. It refuses a registry
+        \\in another partition (GovCloud, China, the isolated clouds), a FIPS or
+        \\dual-stack endpoint, or a host whose region is not a region name,
+        \\instead of signing for the wrong endpoint. Nothing was sent.
+        \\
+        \\Pull through a registry host in the standard partition, or wait for
+        \\support.
+        ,
+    },
+    .{
+        .code = .E0535,
+        .severity = .@"error",
+        .blame = .external,
+        .summary = "the ECR registry did not accept its authorization token",
+        .explanation =
+        \\zbx got an authorization token from ECR and sent it as Basic credentials
+        \\to the registry, and the registry answered 401. The token is valid for
+        \\twelve hours and for the region it was issued in.
+        \\
+        \\Check that the registry host's region is the one the credentials are
+        \\for, and that the machine's clock is right; then run the command again.
+        \\zbx asks for a new token on every pull.
         ,
     },
     .{
@@ -3929,6 +4102,7 @@ pub fn can_end_run(code: Code) bool {
         .E0501, .E0502, .E0503, .E0504, .E0505, .E0506, .E0507 => false,
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
+        .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,

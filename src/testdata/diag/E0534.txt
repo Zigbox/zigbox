@@ -1,0 +1,6 @@
+error[ZBX-E0534]: this Amazon ECR registry is not supported yet
+  cause  123456789012.dkr.ecr-fips.us-east-1.amazonaws.com is an Amazon ECR host
+         of a kind zbx does not support yet
+  fix    use <account>.dkr.ecr.<region>.amazonaws.com in the standard AWS partition
+  more   zbx explain E0534 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0534.html

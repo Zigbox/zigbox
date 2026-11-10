@@ -14,6 +14,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const cli = @import("cli.zig");
 const image_diagnose = @import("image_diagnose.zig");
+const aws_diagnose = @import("aws/diagnose.zig");
 const push_diagnose = @import("push/diagnose.zig");
 const build_diagnose = @import("build/diagnose.zig");
 const trust_diagnose = @import("trust/diagnose.zig");
@@ -2097,6 +2098,15 @@ const image_cases = [_]Case{
         .exit = 2,
     },
     .{ .code = .E0526, .args = &.{ "lock", "show" }, .prepare = prepare_image_world, .exit = 1 },
+    .{ .code = .E0527, .args = &.{}, .direct = aws_none, .exit = 2 },
+    .{ .code = .E0528, .args = &.{}, .direct = aws_refused, .exit = 2 },
+    .{ .code = .E0529, .args = &.{}, .direct = aws_skew, .exit = 2 },
+    .{ .code = .E0530, .args = &.{}, .direct = aws_token_denied, .exit = 1 },
+    .{ .code = .E0531, .args = &.{}, .direct = ecr_denied, .exit = 1 },
+    .{ .code = .E0532, .args = &.{}, .direct = ecr_missing, .exit = 1 },
+    .{ .code = .E0533, .args = &.{}, .direct = aws_web_file, .exit = 2 },
+    .{ .code = .E0534, .args = &.{}, .direct = aws_unsupported, .exit = 1 },
+    .{ .code = .E0535, .args = &.{}, .direct = ecr_rejected, .exit = 3 },
     .{
         .code = .E0550,
         .args = &.{ "store", "export", "--oci", "no-such-image", "/out" },
@@ -2392,6 +2402,49 @@ fn build_warnings_dropped(diag: *Diag) void {
 
 /// E0437 comes from the library calls of Zigcube's contract (`store/image_peer.zig`), which no
 /// zbx command makes: the golden is the diagnostic as `store/diagnose.zig` builds it.
+/// E0527 to E0535 come from an ECR pull; `aws/ecr_tests.zig` runs each end to end, and these are
+/// the diagnostics as `aws/diagnose.zig` and `registry/diagnose.zig` build them.
+const ecr_host_golden = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+
+fn aws_none(diag: *Diag) void {
+    var trace: @import("aws/credentials.zig").Trace = .{};
+    trace.instance_metadata = .no_role;
+    aws_diagnose.no_credentials(diag, ecr_host_golden, &trace);
+}
+
+fn aws_refused(diag: *Diag) void {
+    aws_diagnose.refused(diag, .environment, 400, "ExpiredTokenException");
+}
+
+fn aws_skew(diag: *Diag) void {
+    aws_diagnose.clock_skew(diag, "api.ecr.us-east-1.amazonaws.com");
+}
+
+fn aws_token_denied(diag: *Diag) void {
+    aws_diagnose.token_denied(diag, "AccessDeniedException");
+}
+
+fn ecr_denied(diag: *Diag) void {
+    const registry_diagnose = @import("registry/diagnose.zig");
+    registry_diagnose.ecr_repository_denied(diag, ecr_host_golden, "fixture/cdn", false);
+}
+
+fn ecr_missing(diag: *Diag) void {
+    @import("registry/diagnose.zig").ecr_repository_missing(diag, ecr_host_golden, "fixture/cdn");
+}
+
+fn aws_web_file(diag: *Diag) void {
+    aws_diagnose.web_identity_file(diag, "/var/run/secrets/eks/token");
+}
+
+fn aws_unsupported(diag: *Diag) void {
+    aws_diagnose.unsupported_host(diag, "123456789012.dkr.ecr-fips.us-east-1.amazonaws.com");
+}
+
+fn ecr_rejected(diag: *Diag) void {
+    @import("registry/diagnose.zig").ecr_token_rejected(diag, ecr_host_golden);
+}
+
 fn store_image_refused(diag: *Diag) void {
     const store_diagnose = @import("store/diagnose.zig");
     var sim: HostSim = undefined;

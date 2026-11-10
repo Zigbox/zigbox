@@ -1,0 +1,12 @@
+error[ZBX-E0527]: there are no AWS credentials to pull from Amazon ECR
+  cause  no AWS credentials were found to pull from
+         123456789012.dkr.ecr.us-east-1.amazonaws.com
+  host   123456789012.dkr.ecr.us-east-1.amazonaws.com
+  env    not set
+  web    not set
+  imds   answered, with no role attached to the instance
+  fix    attach an IAM role to this instance, or pass keys in the environment
+         or set AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE for a web identity
+         or export the keys of a profile first:   export $(aws configure export-credentials --format env)
+  more   zbx explain E0527
+  docs   https://zigbox.github.io/zigbox/errors/E0527.html

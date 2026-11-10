@@ -1,0 +1,7 @@
+error[ZBX-E0531]: the ECR repository may not be read by this identity
+  cause  123456789012.dkr.ecr.us-east-1.amazonaws.com refused the AWS identity
+         for the repository fixture/cdn
+  fix    allow ecr:BatchGetImage and ecr:GetDownloadUrlForLayer on the repository
+         or pull with an identity of the account that owns it
+  more   zbx explain E0531 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0531.html
