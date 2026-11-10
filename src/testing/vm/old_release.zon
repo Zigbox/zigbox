@@ -20,4 +20,7 @@
     // The same for `demo-m7`: 6da1ff2, "Version 0.2.0". Its `zbx` pulls alpine:3.20 and starts a
     // container; M7's `zbx` has to read the store, the lock and the version-8 run record it leaves.
     .m7_commit = "6da1ff2",
+    // The same for `demo-m8`: the latest tag, v0.3.1. Its `zbx` has no trust commands; this `zbx`
+    // has to read its store, lock, run record and build cache.
+    .m8_tag = "v0.3.1",
 }
