@@ -22,6 +22,7 @@ const blobs_mod = @import("../registry/blobs.zig");
 const client_mod = @import("../registry/client.zig");
 const constants = @import("../constants.zig");
 const credentials_mod = @import("credentials.zig");
+const ecr = @import("../aws/ecr.zig");
 const diagnose = @import("../registry/diagnose.zig");
 const fs_mod = @import("../store/fs.zig");
 const layout = @import("../store/layout.zig");
@@ -93,6 +94,11 @@ pub const Options = struct {
     /// The user and password for a registry that asks; null for none (a registry that asks is then
     /// E0552). The caller owns them and wipes them.
     credentials: ?*const credentials_mod.Credentials = null,
+    /// For a private Amazon ECR registry: the authorization token AWS issued (the base64 of
+    /// `AWS:<password>`), sent as `Basic` to the registry's own origin and nowhere else. The
+    /// caller fetched it (`push/ecr.zig`), owns it and wipes it; the push copies it into its
+    /// workspace and zeroes that copy when it ends. Empty for any other registry.
+    ecr_token: []const u8 = "",
 };
 
 /// The memory a push works in, owned by the caller (about 140 KiB). What a credential touches in
@@ -146,6 +152,8 @@ const Push = struct {
     bearer: []const u8,
     /// The Basic credential for the destination's origin, in `ws.basic`; empty until one is used.
     basic: []const u8,
+    /// Whether `basic` is an ECR authorization token (and then there is no other credential).
+    ecr: bool,
 };
 
 /// An upload session: where it is, which may be another origin than the registry's.
@@ -213,8 +221,10 @@ pub fn push(
         .bytes_sent = 0,
         .bearer = "",
         .basic = "",
+        .ecr = false,
     };
     defer wipe_secrets(ws);
+    use_ecr_token(&state);
     try check_pieces(&state, made.config, made.config_size, diag);
     try check_pieces(&state, made.layer, made.layer_size, diag);
     // The config, then the layer: the order of the report.
@@ -239,6 +249,27 @@ pub fn push(
     };
     if (report.layer.outcome == .mounted) assert(options.mount_from.len > 0);
     assert(report.manifest_size > 0);
+}
+
+/// Takes the ECR token the caller passed, into the workspace, as the Basic credential. Only for
+/// a private ECR host: any other registry is never handed an AWS token, whatever was passed.
+fn use_ecr_token(state: *Push) void {
+    const token = state.options.ecr_token;
+    if (token.len == 0) return;
+    comptime assert(constants.aws_ecr_token_bytes_max <= constants.push_basic_bytes_max);
+    assert(token.len <= constants.push_basic_bytes_max);
+    if (ecr_host(state.destination.origin.host) == null) return;
+    @memcpy(state.ws.basic[0..token.len], token);
+    state.basic = state.ws.basic[0..token.len];
+    state.ecr = true;
+}
+
+/// The region of `host` when it is a private Amazon ECR registry, else null.
+fn ecr_host(host: []const u8) ?[]const u8 {
+    return switch (ecr.classify(host)) {
+        .private => |found| found.region,
+        else => null,
+    };
 }
 
 // ---- Requests ------------------------------------------------------------------------------
@@ -406,6 +437,7 @@ fn refuse_blob(
 ) Error {
     assert(state.ws.head.status >= 200);
     assert(step.len > 0);
+    if (missing_ecr_repository(state, diag)) return error.Failed;
     push_diagnose.blob_refused(diag, state.destination.origin.host, digest, .{
         .step = step,
         .status = state.ws.head.status,
@@ -414,6 +446,16 @@ fn refuse_blob(
         .retry_after = state.ws.head.retry_after.slice() orelse "",
     });
     return error.Failed;
+}
+
+/// Amazon ECR answers `NAME_UNKNOWN` to a push into a repository that does not exist, and does
+/// not create one: raises that as its own diagnostic, true when it did.
+fn missing_ecr_repository(state: *const Push, diag: *Diag) bool {
+    const region = ecr_host(state.destination.origin.host) orelse return false;
+    if (!std.mem.eql(u8, registry_code(state.ws), "NAME_UNKNOWN")) return false;
+    const host = state.destination.origin.host;
+    push_diagnose.ecr_repository_missing(diag, host, state.destination.repository, region);
+    return true;
 }
 
 fn blob_target(state: *Push, comptime middle: []const u8, tail: []const u8) []const u8 {
@@ -438,14 +480,11 @@ fn authenticate(state: *Push, diag: *Diag) Error!Next {
     assert(state.ws.head.status == 401);
     const host = state.destination.origin.host;
     const repository = state.destination.repository;
+    if (state.ecr) return .give_up; // The token was sent, and refused.
     const credentials = state.options.credentials orelse {
-        push_diagnose.no_credentials(diag, host, repository);
-        return error.Failed;
+        return no_credentials(host, repository, diag);
     };
-    if (!credentials.present()) {
-        push_diagnose.no_credentials(diag, host, repository);
-        return error.Failed;
-    }
+    if (!credentials.present()) return no_credentials(host, repository, diag);
     const header = state.ws.head.www_authenticate.slice() orelse "";
     const challenge = auth.parse_challenge(header) catch |err| {
         if (err == error.NoBearer and auth.offers_basic(header)) {
@@ -473,6 +512,15 @@ fn authenticate(state: *Push, diag: *Diag) Error!Next {
     // The realm rule has passed: the password may go there, and only there.
     try fetch_token(state, credentials, url, diag);
     return .retry;
+}
+
+fn no_credentials(host: []const u8, repository: []const u8, diag: *Diag) Error {
+    if (ecr_host(host) != null) {
+        push_diagnose.no_ecr_credentials(diag, host, repository);
+    } else {
+        push_diagnose.no_credentials(diag, host, repository);
+    }
+    return error.Failed;
 }
 
 fn use_basic(state: *Push, credentials: *const credentials_mod.Credentials) Next {
@@ -577,6 +625,7 @@ fn refuse_credentials(
 ) Error {
     assert(state.ws.head.status >= 401);
     var refusal = kind;
+    if (state.ecr) refusal = if (kind == .no_push_scope) .ecr_no_push else .ecr_refused;
     if (kind == .refused and state.bearer.len > 0 and says_insufficient_scope(&state.ws.head)) {
         refusal = .no_push_scope;
     }
@@ -862,6 +911,7 @@ fn confirm_manifest(state: *Push, target: []const u8, ours: []const u8, diag: *D
 
 fn refuse_manifest(state: *const Push, diag: *Diag, detail: []const u8) Error {
     assert(state.ws.head.status >= 200);
+    if (missing_ecr_repository(state, diag)) return error.Failed;
     push_diagnose.manifest_refused(diag, state.destination.origin.host, state.destination.tag, .{
         .step = "putting the manifest",
         .status = state.ws.head.status,

@@ -256,6 +256,56 @@ pub fn no_credentials(diag: *Diag, host: []const u8, repository: []const u8) voi
     assert(diag.code.? == .E0552);
 }
 
+/// ZBX-E0552 for an Amazon ECR registry: the push was given no AWS credentials. The library
+/// reads no environment of its own, so its caller resolves them and passes the token in.
+pub fn no_ecr_credentials(diag: *Diag, host: []const u8, repository: []const u8) void {
+    assert(diag.code == null);
+    var host_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var repo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&host_storage, host);
+    diag.raise(.E0552);
+    diag.while_("pushing an image", .{});
+    diag.cause("{s} is an Amazon ECR registry and the push was given no AWS credentials", .{shown});
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{echo_of(&repo_storage, repository)});
+    diag.fix(.{
+        .sentence = "give zbx AWS credentials (zbx push finds them as zbx pull does), or call" ++
+            " aws_credentials_resolve and pass the ECR token in",
+    });
+    assert(diag.code.? == .E0552);
+}
+
+/// ZBX-E0556 for an Amazon ECR registry that has no such repository: ECR does not create one
+/// on push.
+pub fn ecr_repository_missing(
+    diag: *Diag,
+    host: []const u8,
+    repository: []const u8,
+    region: []const u8,
+) void {
+    assert(diag.code == null);
+    var host_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var repo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const shown = echo_of(&host_storage, host);
+    const repo_shown = echo_of(&repo_storage, repository);
+    diag.raise(.E0556);
+    diag.while_("pushing an image", .{});
+    diag.cause("{s} has no repository '{s}', and Amazon ECR does not create one on push", .{
+        shown,
+        repo_shown,
+    });
+    diag.context("host", "{s}", .{shown});
+    diag.context("repo", "{s}", .{repo_shown});
+    diag.context("code", "NAME_UNKNOWN", .{});
+    diag.fix_with(
+        "create the repository, then push again:",
+        "aws ecr create-repository --repository-name {s} --region {s}",
+        .{ repo_shown, region },
+    );
+    diag.mark_last_fix_template();
+    assert(diag.code.? == .E0556);
+}
+
 /// What the registry or its token service said to the credentials.
 pub const CredentialsRefusal = enum {
     /// The registry, or the realm, answered the user and password with 401 or 403.
@@ -266,7 +316,16 @@ pub const CredentialsRefusal = enum {
     token_unusable,
     /// The registry's challenge is neither Basic nor Bearer, or is not there.
     no_challenge,
+    /// Amazon ECR did not accept the authorization token AWS issued (it lasts 12 hours).
+    ecr_refused,
+    /// Amazon ECR accepted the token and the AWS identity may not push to the repository.
+    ecr_no_push,
 };
+
+/// The IAM actions a push to Amazon ECR needs on the repository (`ecr:GetAuthorizationToken` is
+/// separate, on `*`).
+pub const ecr_push_actions = "ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, " ++
+    "ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage";
 
 /// ZBX-E0553: the registry or its token service refused the credentials, or granted no push
 /// scope. The username and the password are never named.
@@ -299,11 +358,30 @@ pub fn credentials_refused(
                 " Basic and Bearer)",
             .{shown},
         ),
+        .ecr_refused => diag.cause(
+            "{s} did not accept the authorization token AWS issued for this push",
+            .{shown},
+        ),
+        .ecr_no_push => diag.cause(
+            "{s} would not let this AWS identity push to '{s}': it may not write to the" ++
+                " repository",
+            .{ shown, repo_shown },
+        ),
     }
     diag.context("host", "{s}", .{shown});
     diag.context("repo", "{s}", .{repo_shown});
     if (refusal == .no_push_scope) diag.context("scope", "push", .{});
+    if (refusal == .ecr_no_push) diag.context("perm", "{s}", .{ecr_push_actions});
     switch (refusal) {
+        .ecr_refused => diag.fix(.{
+            .sentence = "run the command again, and check that the AWS credentials are current" ++
+                " and belong to the account that owns the registry",
+        }),
+        .ecr_no_push => diag.fix(.{
+            .sentence = "allow ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload," ++
+                " ecr:UploadLayerPart, ecr:CompleteLayerUpload and ecr:PutImage on the" ++
+                " repository in the role's policy",
+        }),
         .no_push_scope => diag.fix(.{
             .sentence = "use credentials that may push to this repository (a token with write" ++
                 " access), or push to a repository you own",

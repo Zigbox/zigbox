@@ -168,6 +168,7 @@ test {
     _ = @import("push/upload.zig");
     _ = @import("push/upload_tests.zig");
     _ = @import("push/auth_tests.zig");
+    _ = @import("push/ecr_tests.zig");
     _ = @import("push/credentials_tests.zig");
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");

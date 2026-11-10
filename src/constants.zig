@@ -1794,6 +1794,7 @@ comptime {
     assert(push_credential_bytes_max >= 256);
     assert(push_password_read_bytes > push_credential_bytes_max);
     assert(push_basic_bytes_max > push_credential_bytes_max);
+    assert(aws_ecr_token_bytes_max <= push_basic_bytes_max);
     assert(push_credential_bytes_max < registry_token_bytes_max);
     assert(push_token_arena_bytes > registry_token_response_bytes_max);
     assert(pack_links_max > 0);

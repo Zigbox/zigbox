@@ -41,6 +41,10 @@ pub const PushRegistry = struct {
     /// Where the simulator drains an upload body to.
     drained: [fixture_mod.blob_bytes_max]u8,
     mode: Mode = .open,
+    /// The host the registry answers as (`registry_host`; an ECR test names an ECR host), and the
+    /// user it accepts.
+    host: []const u8 = registry_host,
+    user: []const u8 = test_user,
     /// The base64 of `test_user:<password>` the registry accepts; empty accepts none.
     expected: [(test_user.len + 1 + password_bytes_max + 2) / 3 * 4]u8 = undefined,
     expected_len: u8 = 0,
@@ -71,6 +75,8 @@ pub const PushRegistry = struct {
     pub fn init(registry: *PushRegistry, sim: *net_sim.SimNet) void {
         registry.fixture.init("https://" ++ registry_host, "https://" ++ other_host);
         registry.mode = .open;
+        registry.host = registry_host;
+        registry.user = test_user;
         registry.switch_after = 0;
         registry.switch_to = .open;
         registry.realm_override = "";
@@ -93,14 +99,27 @@ pub const PushRegistry = struct {
 
     /// Makes the registry ask for credentials; `password` is what it will accept.
     pub fn require(registry: *PushRegistry, mode: Mode, password: []const u8) void {
+        registry.require_as(test_user, mode, password);
+    }
+
+    /// As `require`, for a registry whose user is `user` (Amazon ECR's is `AWS`).
+    pub fn require_as(
+        registry: *PushRegistry,
+        user: []const u8,
+        mode: Mode,
+        password: []const u8,
+    ) void {
         assert(mode != .open);
+        assert(user.len > 0);
+        assert(user.len <= test_user.len);
+        registry.user = user;
         assert(password.len > 0);
         assert(password.len <= password_bytes_max);
         var plain: [test_user.len + 1 + password_bytes_max]u8 = undefined;
         const text = std.fmt.bufPrint(
             &plain,
             "{s}:{s}",
-            .{ test_user, password },
+            .{ user, password },
         ) catch unreachable; // plain fits user, colon and password
         const encoded = std.base64.standard.Encoder.encode(&registry.expected, text);
         registry.expected_len = @intCast(encoded.len);
@@ -150,7 +169,7 @@ fn answer(
 ) void {
     const registry: *PushRegistry = @ptrCast(@alignCast(context));
     const has_credential = request.basic.len > 0 or request.bearer.len > 0;
-    if (!std.mem.eql(u8, request.host, registry_host)) {
+    if (!std.mem.eql(u8, request.host, registry.host)) {
         if (has_credential) registry.leaked += 1;
         return delegate(registry, request, received, served);
     }

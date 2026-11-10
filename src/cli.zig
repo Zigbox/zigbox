@@ -250,6 +250,9 @@ const help_text =
     \\  zbx push --username <name> --password-stdin <source> <reference>
     \\  zbx push --username <name> --password-file <file> <source> <reference>
     \\                           the file must be mode 0600 or tighter; one line, at most 4096 bytes
+    \\  zbx push <source> <account>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>
+    \\                           Amazon ECR: AWS credentials are found as `zbx pull` finds them (no
+    \\                           --username); the repository must exist, ECR creates none
     \\  zbx push --dry-run <source>   pack it and print the manifest digest; sends nothing
     \\
     \\pull:

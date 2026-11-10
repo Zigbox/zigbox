@@ -77,7 +77,8 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
 <p>The registry answered a push with `401`: it wants a user and a password, and the command gave none. Nothing was sent to the registry's token service.</p>
-<p>Give a user name and a file only you can read whose first line is the password (or an access token, which most registries prefer): `zbx push &lt;image&gt; &lt;destination&gt; --username &lt;user&gt; --password-file &lt;file&gt;`. To read the password from standard input instead, use `--password-stdin`; that is the way for a CI job, whose secret is then in no argument and no file. zbx reads no environment variable, no `config.json` and no credential helper, and an anonymous push is refused by every registry that matters.</p>
+<p>Give a user name and a file only you can read whose first line is the password (or an access token, which most registries prefer): `zbx push &lt;image&gt; &lt;destination&gt; --username &lt;user&gt; --password-file &lt;file&gt;`. To read the password from standard input instead, use `--password-stdin`; that is the way for a CI job, whose secret is then in no argument and no file. zbx reads no environment variable for this, no `config.json` and no credential helper, and an anonymous push is refused by every registry that matters.</p>
+<p>An Amazon ECR registry (`&lt;account&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com`) is the exception: `zbx push` finds AWS credentials as `zbx pull` does (see ZBX-E0527) and asks ECR for a token itself, so it needs no user and password. It is this code for ECR only when a library caller gave the push no AWS credentials.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0552</pre>
