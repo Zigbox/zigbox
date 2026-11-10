@@ -10,7 +10,9 @@
 # Environment: EVENT (github.event_name), HEAD_REF (the PR's head branch), LABELS (the PR's
 # labels, space separated). See docs/decisions/2026-11-04-ci-affected-demos.md.
 #
-# The rules err toward running. A path no rule below names runs every demo.
+# The rules err toward running. A path no rule below names runs every VM demo, but not the
+# packages demo: that one runs only for the package files, the VM guests, the build and the
+# workflow (docs/demos/m8.md).
 set -euo pipefail
 
 demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8)
@@ -26,7 +28,9 @@ index_of() {
   exit 1
 }
 
-want_all() { local d; for d in "${demos[@]}"; do want[$d]=1; done; want_packages=1; }
+want_all() { local d; for d in "${demos[@]}"; do want[$d]=1; done; }
+# Every demo and the packages demo: what the harness, the build or CI itself is made of.
+want_everything() { want_all; want_packages=1; }
 want_one() { want[$1]=1; }
 # The demo and every later one: a demo repeats the parts of the demos before it.
 want_from() {
@@ -52,7 +56,7 @@ classify() {
     # What the harness, the build or CI itself is made of: every demo.
     build.zig | build.zig.zon | .github/* | vm/* | src/testing/vm/lib/* | \
       src/testing/vm/alpine.zon | src/testing/vm/old_release.zon | src/testing/vm/zbx.lock | \
-      src/testing/check.zig) want_all; return ;;
+      src/testing/check.zig) want_everything; return ;;
   esac
   case "$p" in
     # Not part of any CI demo: the Mac build, the weekly top-20 run, the Z7 check, packaging, docs

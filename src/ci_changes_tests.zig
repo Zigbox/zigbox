@@ -43,6 +43,14 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_m8_packages.zig"},
         .true_outputs = &.{ "code", "demo_m8_packages" },
     },
+    // The runtime every demo runs on selects every VM demo, not the packages demo.
+    .{
+        .paths = &.{"src/cli.zig"},
+        .true_outputs = &.{
+            "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8",
+        },
+    },
     // The M8 demo: its harness files and its source area select demo_m8 and not the packages.
     .{
         .paths = &.{"src/testing/vm/checks_m8.zig"},
