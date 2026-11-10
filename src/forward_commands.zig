@@ -62,7 +62,8 @@ pub fn forwarded(words: []const []const u8) bool {
 pub fn runs_container(words: []const []const u8) bool {
     assert(words.len <= constants.args_count_max);
     const operand = first_operand(words) orelse return false;
-    assert(listed(&linux_commands, "run") and listed(&linux_commands, "exec"));
+    assert(listed(&linux_commands, "run"));
+    assert(listed(&linux_commands, "exec"));
     return std.mem.eql(u8, operand, "run") or std.mem.eql(u8, operand, "exec");
 }
 

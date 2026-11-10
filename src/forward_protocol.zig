@@ -235,7 +235,9 @@ pub fn environment_name_allowed(name: []const u8) bool {
     for (denied) |entry| {
         if (std.mem.eql(u8, name, entry)) return false;
     }
-    const denied_prefixes = [_][]const u8{ "LD_", "XDG_", "DBUS_", "ZBX_CGROUP", "ZBX_FORWARDED", "DYLD_" };
+    const denied_prefixes = [_][]const u8{
+        "LD_", "XDG_", "DBUS_", "ZBX_CGROUP", "ZBX_FORWARDED", "DYLD_",
+    };
     for (denied_prefixes) |prefix| {
         if (std.mem.startsWith(u8, name, prefix)) return false;
     }
