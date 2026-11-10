@@ -24,6 +24,14 @@ pub const Error = error{
     PruneWrong,
     /// A bundle line is not a DSSE envelope of an in-toto statement.
     BundleWrong,
+    /// A script printed no evidence block of the name the check reads.
+    EvidenceMissing,
+    /// `policy check` and `run` disagree, or `policy check` crashed.
+    AgreementWrong,
+    /// The store listing, tree digest, gc report or record count is not what the demo needs.
+    StoreWrong,
+    /// A push did not report what the brief requires.
+    PushWrong,
     OutOfMemory,
 };
 
@@ -566,9 +574,540 @@ test "a missing passphrase is E0911 with exit 1, and the bundle is one envelope 
     try std.testing.expectError(error.BundleWrong, check_bundle("junk\n"));
 }
 
+// ---- ACCEPT8: the evidence the shell scripts print ------------------------------------------
+//
+// A script only runs commands. For each it prints `@@ev NAME RC`, the stdout, `@@err`, the
+// stderr and `@@end`; everything the demo asserts is read back from those blocks by the pure
+// functions below.
+
+/// One captured command: its exit status, stdout and stderr.
+pub const Evidence = struct { rc: u8, out: []const u8, err: []const u8 };
+
+/// The block `name` of `output`; the block layout is described above.
+pub fn evidence(output: []const u8, name: []const u8) Error!Evidence {
+    var head: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&head, "@@ev {s} ", .{name}) catch return error.EvidenceMissing;
+    var from: usize = 0;
+    const at = while (std.mem.indexOfPos(u8, output, from, needle)) |found| {
+        if (found == 0 or output[found - 1] == '\n') break found;
+        from = found + 1;
+    } else return error.EvidenceMissing;
+    const rest = output[at + needle.len ..];
+    const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse return error.EvidenceMissing;
+    const rc = std.fmt.parseInt(u8, rest[0..line_end], 10) catch return error.EvidenceMissing;
+    const body = rest[line_end + 1 ..];
+    const split = std.mem.indexOf(u8, body, "\n@@err\n") orelse return error.EvidenceMissing;
+    const tail = body[split + 7 ..];
+    const end = std.mem.indexOf(u8, tail, "\n@@end") orelse return error.EvidenceMissing;
+    return .{ .rc = rc, .out = body[0..split], .err = tail[0..end] };
+}
+
+/// The text after `key` up to the next quote: the first string member of that name.
+fn string_after(text: []const u8, key: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, text, key) orelse return null;
+    const rest = text[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return rest[0..end];
+}
+
+/// The `tree` a command printed as JSON: a `b3:` digest.
+pub fn tree_of(text: []const u8) Error![]const u8 {
+    const tree = string_after(text, "\"tree\":\"") orelse return error.StoreWrong;
+    if (!is_b3(tree)) return error.StoreWrong;
+    return tree;
+}
+
+fn ran(e: Evidence) Error!void {
+    if (e.rc != 0) return error.RefusalWrong;
+}
+
+/// `zbx run` refused for want of a signed provenance: `E0906`, the file and the rule named.
+pub fn check_provenance_refusal(e: Evidence, policy_path: []const u8) Error!void {
+    return refusal(e.err, e.rc, "E0906", &.{ policy_path, "require_provenance" });
+}
+
+/// `policy check --output json` beside the `run` it previews: a run that started is allowed
+/// and exits 0; a refused one (`code`, exit 125) is `allowed:false` with that code and exit 1.
+/// A crash (any other status) or text on stderr with an errno fails.
+pub fn check_agrees(run: Evidence, check: Evidence, code: ?[]const u8) Error!void {
+    if (std.mem.indexOf(u8, check.err, "errno") != null) return error.AgreementWrong;
+    if (code == null) {
+        if (run.rc != 0 or check.rc != 0) return error.AgreementWrong;
+        if (std.mem.indexOf(u8, check.out, "\"allowed\":true}") == null) {
+            return error.AgreementWrong;
+        }
+        return;
+    }
+    if (run.rc != 125 or check.rc != 1) return error.AgreementWrong;
+    if (std.mem.indexOf(u8, check.out, "\"allowed\":false}") == null) return error.AgreementWrong;
+    var want: [48]u8 = undefined;
+    // The buffer is sized for the longest code.
+    const text = std.fmt.bufPrint(
+        &want,
+        "\"code\":\"ZBX-{s}\"",
+        .{code.?},
+    ) catch unreachable; // the buffer fits the longest code
+    if (std.mem.indexOf(u8, check.out, text) == null) return error.AgreementWrong;
+}
+
+/// `store ls --output json` lists the tree.
+pub fn check_tree_listed(e: Evidence, tree: []const u8) Error!void {
+    try ran(e);
+    if (!is_b3(tree) or std.mem.indexOf(u8, e.out, tree) == null) return error.StoreWrong;
+}
+
+/// `store ls --output json` no longer lists the tree: the removal and gc really took it.
+pub fn check_tree_gone(e: Evidence, tree: []const u8) Error!void {
+    try ran(e);
+    if (!is_b3(tree) or e.out.len == 0 or std.mem.indexOf(u8, e.out, tree) != null) {
+        return error.StoreWrong;
+    }
+}
+
+/// A pull printed the tree the store held before.
+pub fn check_pull_tree(e: Evidence, tree: []const u8) Error!void {
+    try ran(e);
+    if (!std.mem.eql(u8, try tree_of(e.out), tree)) return error.StoreWrong;
+}
+
+/// Two `inspect --provenance` documents name the same tree (the same image, two results).
+pub fn check_same_tree(first: Evidence, second: Evidence) Error!void {
+    try ran(first);
+    try ran(second);
+    if (!std.mem.eql(u8, try tree_of(first.out), try tree_of(second.out))) return error.StoreWrong;
+}
+
+/// `store gc --output json` (the plan) says `trust_orphans` is exactly `count`.
+pub fn check_gc_orphans(e: Evidence, count: u32) Error!void {
+    try ran(e);
+    const key = "\"trust_orphans\":";
+    const at = std.mem.indexOf(u8, e.out, key) orelse return error.StoreWrong;
+    var end = at + key.len;
+    while (end < e.out.len and std.ascii.isDigit(e.out[end])) end += 1;
+    const got = std.fmt.parseInt(u32, e.out[at + key.len .. end], 10) catch return error.StoreWrong;
+    if (got != count) return error.StoreWrong;
+}
+
+/// A record count printed by `wc -l`.
+pub fn check_count(e: Evidence, count: u32) Error!void {
+    try ran(e);
+    const got = std.fmt.parseInt(u32, std.mem.trim(u8, e.out, " \n"), 10) catch
+        return error.StoreWrong;
+    if (got != count) return error.StoreWrong;
+}
+
+const PruneEntry = struct { kind: []const u8, fate: []const u8, digest: []const u8 };
+const PruneList = struct {
+    schema: []const u8,
+    dry_run: bool,
+    orphans: u32,
+    removed: u32,
+    damaged: u32,
+    entries: []const PruneEntry,
+};
+
+/// The dry run lists exactly one orphan, the signature record of `tree`, and removes nothing.
+pub fn check_prune_listing(arena: Allocator, e: Evidence, tree: []const u8) Error!void {
+    try ran(e);
+    const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    const doc = std.json.parseFromSliceLeaky(PruneList, arena, e.out, options) catch
+        return error.PruneWrong;
+    if (!std.mem.eql(u8, doc.schema, "zbx.trust-prune/1")) return error.PruneWrong;
+    if (!doc.dry_run or doc.orphans != 1 or doc.removed != 0 or doc.damaged != 0) {
+        return error.PruneWrong;
+    }
+    if (doc.entries.len != 1) return error.PruneWrong;
+    const entry = doc.entries[0];
+    if (!std.mem.eql(u8, entry.digest, tree)) return error.PruneWrong;
+    if (!std.mem.eql(u8, entry.kind, "signature")) return error.PruneWrong;
+    if (!std.mem.eql(u8, entry.fate, "orphan")) return error.PruneWrong;
+}
+
+/// `--apply` removed exactly one record and damaged none.
+pub fn check_prune_one_removed(arena: Allocator, e: Evidence) Error!void {
+    try ran(e);
+    try check_prune_applied(arena, e.out, 1);
+    const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    const doc = std.json.parseFromSliceLeaky(PruneList, arena, e.out, options) catch
+        return error.PruneWrong;
+    if (doc.orphans != 1) return error.PruneWrong;
+}
+
+/// A refused build of a step whose base is unsigned: `E0905`, the step named, no errno.
+pub fn check_base_refused(e: Evidence, step_name: []const u8) Error!void {
+    if (e.rc == 0 or std.mem.indexOf(u8, e.err, "errno") != null) return error.RefusalWrong;
+    if (!std.mem.startsWith(u8, e.err, "error[ZBX-E0905]: ")) return error.RefusalWrong;
+    var buffer: [128]u8 = undefined;
+    // The buffer holds any step name the demo uses.
+    const want = std.fmt.bufPrint(
+        &buffer,
+        "base of step '{s}'",
+        .{step_name},
+    ) catch unreachable; // the buffer fits any demo step name
+    var flat_buffer: [8192]u8 = undefined;
+    const flat = flatten(&flat_buffer, e.err);
+    if (std.mem.indexOf(u8, flat, want) == null) return error.RefusalWrong;
+}
+
+/// A malformed policy: `E0904`, with the line and the column.
+pub fn check_malformed_policy(e: Evidence) Error!void {
+    return refusal(e.err, e.rc, "E0904", &.{"line 2, column"});
+}
+
+const Push = struct {
+    schema: []const u8,
+    manifest: []const u8,
+    destination: []const u8,
+    blobs: []const struct { digest: []const u8, outcome: []const u8, size: u64 },
+};
+
+fn parse_push(arena: Allocator, e: Evidence) Error!Push {
+    try ran(e);
+    const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    const doc = std.json.parseFromSliceLeaky(Push, arena, e.out, options) catch
+        return error.PushWrong;
+    if (!std.mem.eql(u8, doc.schema, "zbx.push/1")) return error.PushWrong;
+    if (!std.mem.startsWith(u8, doc.manifest, "sha256:") or doc.blobs.len == 0) {
+        return error.PushWrong;
+    }
+    return doc;
+}
+
+/// Two pushes of the same result: the same manifest digest and destination, the first sent
+/// something, and the second found every blob already there.
+pub fn check_push_pair(arena: Allocator, first: Evidence, second: Evidence) Error!void {
+    const one = try parse_push(arena, first);
+    const two = try parse_push(arena, second);
+    if (!std.mem.eql(u8, one.manifest, two.manifest)) return error.PushWrong;
+    if (!std.mem.eql(u8, one.destination, two.destination)) return error.PushWrong;
+    var sent: u32 = 0;
+    for (one.blobs) |blob| {
+        if (std.mem.eql(u8, blob.outcome, "uploaded")) sent += 1;
+    }
+    if (sent == 0) return error.PushWrong;
+    for (two.blobs) |blob| {
+        if (!std.mem.eql(u8, blob.outcome, "exists")) return error.PushWrong;
+    }
+}
+
+/// The command printed exactly the greeting and exited 0.
+pub fn check_greeting(e: Evidence) Error!void {
+    try ran(e);
+    if (!std.mem.eql(u8, std.mem.trim(u8, e.out, "\n"), "hello from zigbox")) {
+        return error.RefusalWrong;
+    }
+}
+
+const private_policy = "/home/demo/ac/zbx/policy.zon";
+const second_policy = "/home/demo2/.config/zbx/policy.zon";
+
+/// Script 1: signed alpine runs with provenance off and `policy check` agrees; with provenance
+/// required the run is `E0906` and `policy check` agrees.
+pub fn check_a1(arena: Allocator, output: []const u8) Error!void {
+    _ = arena;
+    const pull = try evidence(output, "pull1");
+    const tree = try tree_of(pull.out);
+    try ran(pull);
+    try check_tree_listed(try evidence(output, "ls0"), tree);
+    try check_agrees(try evidence(output, "run1"), try evidence(output, "chk1"), null);
+    const refused = try evidence(output, "run2");
+    try check_provenance_refusal(refused, private_policy);
+    try check_agrees(refused, try evidence(output, "chk2"), "E0906");
+}
+
+/// Script 2: the signature survives `store rm`, gc and a re-pull: the tree is really gone
+/// before the pull, the pull brings back the same tree, and the run passes with `policy check`.
+pub fn check_a2(arena: Allocator, output: []const u8) Error!void {
+    _ = arena;
+    const tree = std.mem.trim(u8, (try evidence(output, "tree")).out, " \n");
+    try ran(try evidence(output, "rm1"));
+    try check_tree_gone(try evidence(output, "ls1"), tree);
+    try check_pull_tree(try evidence(output, "pull2"), tree);
+    try check_agrees(try evidence(output, "run3"), try evidence(output, "chk3"), null);
+}
+
+/// Script 3: prune. gc counts one orphan before, the dry run names `alpine`'s record and removes
+/// nothing, `--apply` removes exactly it, gc counts none after, and the re-pulled image is
+/// `E0905` with `policy check` agreeing.
+pub fn check_a3(arena: Allocator, output: []const u8) Error!void {
+    const tree = std.mem.trim(u8, (try evidence(output, "tree")).out, " \n");
+    try ran(try evidence(output, "sign2"));
+    try check_count(try evidence(output, "n0"), 2);
+    try ran(try evidence(output, "rm2"));
+    try check_gc_orphans(try evidence(output, "orph0"), 1);
+    try check_prune_listing(arena, try evidence(output, "dry"), tree);
+    try check_count(try evidence(output, "n1"), 2);
+    try check_prune_one_removed(arena, try evidence(output, "app"));
+    try check_count(try evidence(output, "n2"), 1);
+    try check_gc_orphans(try evidence(output, "orph1"), 0);
+    try ran(try evidence(output, "pull3"));
+    const refused = try evidence(output, "run4");
+    try check_policy_refusal(refused.err, refused.rc, private_policy);
+    try check_agrees(refused, try evidence(output, "chk4"), "E0905");
+}
+
+/// Script 4: a step whose base is unsigned is refused, naming the step; a malformed policy is
+/// `E0904` with its line and column.
+pub fn check_a4(arena: Allocator, output: []const u8) Error!void {
+    _ = arena;
+    try check_base_refused(try evidence(output, "bld"), "probe");
+    try check_malformed_policy(try evidence(output, "run5"));
+}
+
+/// Script 5: the registry takes the push twice; the second finds every blob.
+pub fn check_b1(arena: Allocator, output: []const u8) Error!void {
+    try check_push_pair(arena, try evidence(output, "push1"), try evidence(output, "push2"));
+}
+
+/// Script 6: a second result with the same tree and another entrypoint is pushed, and the
+/// exported bundle is one envelope per line.
+pub fn check_b2(arena: Allocator, output: []const u8) Error!void {
+    const built = try evidence(output, "bld2");
+    try ran(built);
+    try check_same_tree(try evidence(output, "ins1"), try evidence(output, "ins2"));
+    _ = try parse_push(arena, try evidence(output, "push3"));
+    const bundle = try evidence(output, "exp");
+    try ran(bundle);
+    try check_bundle(bundle.out);
+}
+
+/// Script 7: as the second user, the pulled image is refused before the trust import (and
+/// `policy check` agrees), runs after it (and agrees), the second result is refused under the
+/// first one's signature (and agrees), and `-- <cmd>` on the signed result stays allowed.
+pub fn check_b3(arena: Allocator, output: []const u8) Error!void {
+    _ = arena;
+    const before = try evidence(output, "run_before");
+    try check_policy_refusal(before.err, before.rc, second_policy);
+    try check_agrees(before, try evidence(output, "chk_before"), "E0905");
+    try ran(try evidence(output, "import"));
+    const after = try evidence(output, "run_after");
+    try check_greeting(after);
+    try check_agrees(after, try evidence(output, "chk_after"), null);
+    const other = try evidence(output, "run_other");
+    try check_policy_refusal(other.err, other.rc, second_policy);
+    try check_agrees(other, try evidence(output, "chk_other"), "E0905");
+    try check_greeting(try evidence(output, "run_override"));
+}
+
+/// One block as a script prints it (a test fixture).
+fn block(
+    comptime name: []const u8,
+    comptime rc: []const u8,
+    comptime out: []const u8,
+    comptime err: []const u8,
+) []const u8 {
+    return "@@ev " ++ name ++ " " ++ rc ++ "\n" ++ out ++ "\n@@err\n" ++ err ++ "\n@@end\n";
+}
+
 /// `text` repeated `count` times (a test fixture).
 fn rep(comptime text: []const u8, comptime count: usize) [text.len * count]u8 {
     var buffer: [text.len * count]u8 = undefined;
     for (0..count) |n| @memcpy(buffer[n * text.len ..][0..text.len], text);
     return buffer;
+}
+
+const t_a = "b3:" ++ rep("a", 64);
+const t_b = "b3:" ++ rep("b", 64);
+const allowed_json = "{\"files\":[],\"allowed\":true}\n";
+fn refused_json(comptime code: []const u8) []const u8 {
+    return "{\"files\":[{\"code\":\"ZBX-" ++ code ++ "\"}],\"allowed\":false}\n";
+}
+fn refused_text(
+    comptime code: []const u8,
+    comptime path: []const u8,
+    comptime rule: []const u8,
+) []const u8 {
+    return "error[ZBX-" ++ code ++ "]: refused\n  while  checking against the policy " ++ path ++
+        "\n  cause  " ++ rule ++ " is on\n";
+}
+
+test "an evidence block is found by its exact name, with empty and full streams" {
+    const output = comptime "noise\n" ++ block("run1", "0", "", "") ++
+        block("run10", "125", "o\n", "e") ++ block("tail", "3", "x", "y");
+    const one = try evidence(output, "run1");
+    try std.testing.expectEqual(@as(u8, 0), one.rc);
+    try std.testing.expectEqualStrings("", one.out);
+    const ten = try evidence(output, "run10");
+    try std.testing.expectEqual(@as(u8, 125), ten.rc);
+    try std.testing.expectEqualStrings("o\n", ten.out);
+    try std.testing.expectEqualStrings("e", ten.err);
+    try std.testing.expectEqualStrings("y", (try evidence(output, "tail")).err);
+    try std.testing.expectError(error.EvidenceMissing, evidence(output, "run"));
+    try std.testing.expectError(error.EvidenceMissing, evidence("@@ev run1 0\nx", "run1"));
+    try std.testing.expectError(error.EvidenceMissing, evidence("x@@ev a 0\n", "a"));
+}
+
+test "policy check agrees with run on the three cases, and a crash does not" {
+    const ok: Evidence = .{ .rc = 0, .out = "", .err = "" };
+    const check_ok: Evidence = .{ .rc = 0, .out = allowed_json, .err = "" };
+    try check_agrees(ok, check_ok, null);
+    const no: Evidence = .{ .rc = 125, .out = "", .err = "" };
+    const check_no: Evidence = .{ .rc = 1, .out = refused_json("E0905"), .err = "" };
+    try check_agrees(no, check_no, "E0905");
+    const check_six: Evidence = .{ .rc = 1, .out = refused_json("E0906"), .err = "" };
+    try check_agrees(no, check_six, "E0906");
+    const wrong = error.AgreementWrong;
+    try std.testing.expectError(wrong, check_agrees(no, check_six, "E0905"));
+    try std.testing.expectError(wrong, check_agrees(ok, check_no, null));
+    try std.testing.expectError(wrong, check_agrees(no, check_ok, "E0905"));
+    // A crash is not exit 1: the old `|| true` would have hidden it.
+    const crashed: Evidence = .{ .rc = 139, .out = check_no.out, .err = "" };
+    try std.testing.expectError(wrong, check_agrees(no, crashed, "E0905"));
+    const zero: Evidence = .{ .rc = 0, .out = check_no.out, .err = "" };
+    try std.testing.expectError(wrong, check_agrees(no, zero, "E0905"));
+    const noisy: Evidence = .{ .rc = 0, .out = allowed_json, .err = "errno 2" };
+    try std.testing.expectError(wrong, check_agrees(ok, noisy, null));
+}
+
+test "the tree must be gone before the pull and the same after it" {
+    const gone: Evidence = .{ .rc = 0, .out = "{\"roots\":[]}", .err = "" };
+    const there: Evidence = .{ .rc = 0, .out = "{\"roots\":[\"" ++ t_a ++ "\"]}", .err = "" };
+    try check_tree_gone(gone, t_a);
+    try check_tree_listed(there, t_a);
+    try std.testing.expectError(error.StoreWrong, check_tree_gone(there, t_a));
+    try std.testing.expectError(error.StoreWrong, check_tree_listed(gone, t_a));
+    const silent: Evidence = .{ .rc = 0, .out = "", .err = "" };
+    try std.testing.expectError(error.StoreWrong, check_tree_gone(silent, t_a));
+    const pulled: Evidence = .{ .rc = 0, .out = "{\"tree\":\"" ++ t_a ++ "\"}", .err = "" };
+    try check_pull_tree(pulled, t_a);
+    try std.testing.expectError(error.StoreWrong, check_pull_tree(pulled, t_b));
+    const other: Evidence = .{ .rc = 0, .out = "{\"tree\":\"" ++ t_b ++ "\"}", .err = "" };
+    try check_same_tree(pulled, pulled);
+    try std.testing.expectError(error.StoreWrong, check_same_tree(pulled, other));
+}
+
+test "counts are exact: ten orphans are not one, thirteen removals are not one" {
+    const one: Evidence = .{ .rc = 0, .out = "{\"x\":1,\"trust_orphans\":1}\n", .err = "" };
+    const ten: Evidence = .{ .rc = 0, .out = "{\"trust_orphans\":10}\n", .err = "" };
+    const none: Evidence = .{ .rc = 0, .out = "{\"x\":1}\n", .err = "" };
+    try check_gc_orphans(one, 1);
+    try std.testing.expectError(error.StoreWrong, check_gc_orphans(ten, 1));
+    try std.testing.expectError(error.StoreWrong, check_gc_orphans(none, 0));
+    try std.testing.expectError(error.StoreWrong, check_gc_orphans(one, 0));
+    const two: Evidence = .{ .rc = 0, .out = "2\n", .err = "" };
+    try check_count(two, 2);
+    try std.testing.expectError(error.StoreWrong, check_count(two, 1));
+    const twelve: Evidence = .{ .rc = 0, .out = "12\n", .err = "" };
+    try std.testing.expectError(error.StoreWrong, check_count(twelve, 2));
+}
+
+test "prune lists exactly the signature record of the tree, and removes exactly one" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const entry = "{\"kind\":\"signature\",\"fate\":\"orphan\",\"digest\":\"" ++ t_a ++ "\"}";
+    const head = "{\"schema\":\"zbx.trust-prune/1\",\"dry_run\":";
+    const dry: Evidence = .{ .rc = 0, .err = "", .out = head ++
+        "true,\"orphans\":1,\"damaged\":0,\"removed\":0,\"truncated\":false,\"entries\":[" ++
+        entry ++ "]}" };
+    try check_prune_listing(arena, dry, t_a);
+    try std.testing.expectError(error.PruneWrong, check_prune_listing(arena, dry, t_b));
+    const ten = try std.mem.replaceOwned(u8, arena, dry.out, "\"orphans\":1,", "\"orphans\":10,");
+    const many: Evidence = .{ .rc = 0, .out = ten, .err = "" };
+    try std.testing.expectError(error.PruneWrong, check_prune_listing(arena, many, t_a));
+    const applied: Evidence = .{ .rc = 0, .err = "", .out = head ++
+        "false,\"orphans\":1,\"damaged\":0,\"removed\":1,\"truncated\":false,\"entries\":[]}" };
+    try check_prune_one_removed(arena, applied);
+    const text = try std.mem.replaceOwned(
+        u8,
+        arena,
+        applied.out,
+        "\"removed\":1",
+        "\"removed\":13",
+    );
+    const thirteen: Evidence = .{ .rc = 0, .out = text, .err = "" };
+    try std.testing.expectError(error.PruneWrong, check_prune_one_removed(arena, thirteen));
+    try std.testing.expectError(error.PruneWrong, check_prune_one_removed(arena, dry));
+}
+
+test "a push pair has one manifest, and the second finds every blob" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const m = "sha256:" ++ rep("1", 64);
+    const head = "{\"blobs\":[{\"digest\":\"sha256:" ++ rep("2", 64) ++ "\",\"outcome\":\"";
+    const tail = "\",\"size\":5}],\"destination\":\"localhost:5000/m8/hello:demo\",\"manifest\":\"";
+    const end = "\",\"schema\":\"zbx.push/1\"}\n";
+    const up: Evidence = .{ .rc = 0, .out = head ++ "uploaded" ++ tail ++ m ++ end, .err = "" };
+    const there: Evidence = .{ .rc = 0, .out = head ++ "exists" ++ tail ++ m ++ end, .err = "" };
+    try check_push_pair(arena, up, there);
+    try std.testing.expectError(error.PushWrong, check_push_pair(arena, up, up));
+    try std.testing.expectError(error.PushWrong, check_push_pair(arena, there, there));
+    const m2 = "sha256:" ++ rep("3", 64);
+    const moved: Evidence = .{ .rc = 0, .out = head ++ "exists" ++ tail ++ m2 ++ end, .err = "" };
+    try std.testing.expectError(error.PushWrong, check_push_pair(arena, up, moved));
+    const failed: Evidence = .{ .rc = 1, .out = there.out, .err = "" };
+    try std.testing.expectError(error.RefusalWrong, check_push_pair(arena, up, failed));
+}
+
+test "an unsigned base names its step; a malformed policy names its line" {
+    const text = "error[ZBX-E0905]: refused\n  while  checking the base of step 'probe', b3:1, " ++
+        "against the policy /p\n";
+    const refused: Evidence = .{ .rc = 125, .out = "", .err = text };
+    try check_base_refused(refused, "probe");
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(refused, "other"));
+    const built: Evidence = .{ .rc = 0, .out = "", .err = text };
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(built, "probe"));
+    const bad: Evidence = .{
+        .rc = 125,
+        .out = "",
+        .err = refused_text("E0904", "/p", "line 2, column 3"),
+    };
+    try check_malformed_policy(bad);
+    try std.testing.expectError(error.RefusalWrong, check_malformed_policy(refused));
+}
+
+test "script 1 needs the E0906 refusal and every policy check beside its run" {
+    const run_ok = comptime block("run1", "0", "", "");
+    const chk_ok = comptime block("chk1", "0", allowed_json, "");
+    const refused = comptime refused_text("E0906", private_policy, "require_provenance");
+    const run_six = comptime block("run2", "125", "", refused);
+    const chk_six = comptime block("chk2", "1", refused_json("E0906"), "");
+    const prefix = comptime block("pull1", "0", "{\"tree\":\"" ++ t_a ++ "\"}", "") ++
+        block("ls0", "0", "[\"" ++ t_a ++ "\"]", "");
+    const good = prefix ++ run_ok ++ chk_ok ++ run_six ++ chk_six;
+    try check_a1(std.testing.allocator, good);
+    // The check missing, or crashed: refused.
+    const chk_gone = prefix ++ run_ok ++ chk_ok ++ run_six;
+    try std.testing.expectError(error.EvidenceMissing, check_a1(std.testing.allocator, chk_gone));
+    const chk_bad = comptime block("chk2", "139", refused_json("E0906"), "");
+    const crashed = comptime prefix ++ run_ok ++ chk_ok ++ run_six ++ chk_bad;
+    try std.testing.expectError(error.AgreementWrong, check_a1(std.testing.allocator, crashed));
+    const chk_off = comptime block("chk2", "1", refused_json("E0905"), "");
+    const wrong = comptime prefix ++ run_ok ++ chk_ok ++ run_six ++ chk_off;
+    try std.testing.expectError(error.AgreementWrong, check_a1(std.testing.allocator, wrong));
+}
+
+test "script 2 refuses a tree that was never gone or a different one after the pull" {
+    const tree = comptime block("tree", "0", t_a ++ "\n", "") ++ block("rm1", "0", "", "");
+    const tail = comptime block("run3", "0", "", "") ++ block("chk3", "0", allowed_json, "");
+    const gone = comptime block("ls1", "0", "[]", "");
+    const same = comptime block("pull2", "0", "{\"tree\":\"" ++ t_a ++ "\"}", "");
+    try check_a2(std.testing.allocator, tree ++ gone ++ same ++ tail);
+    const kept = comptime block("ls1", "0", "[\"" ++ t_a ++ "\"]", "");
+    try std.testing.expectError(error.StoreWrong, check_a2(std.testing.allocator, tree ++ kept ++
+        same ++ tail));
+    const other = comptime block("pull2", "0", "{\"tree\":\"" ++ t_b ++ "\"}", "");
+    try std.testing.expectError(error.StoreWrong, check_a2(std.testing.allocator, tree ++ gone ++
+        other ++ tail));
+}
+
+test "script 7 refuses the second result under the first one's signature" {
+    const refused = comptime refused_text("E0905", second_policy, "require_signature");
+    const pre = comptime block("run_before", "125", "", refused) ++
+        block("chk_before", "1", refused_json("E0905"), "") ++
+        block("import", "0", "", "");
+    const after = comptime block("run_after", "0", "hello from zigbox\n", "") ++
+        block("chk_after", "0", allowed_json, "");
+    const other = comptime block("run_other", "125", "", refused) ++
+        block("chk_other", "1", refused_json("E0905"), "");
+    const over = comptime block("run_override", "0", "hello from zigbox\n", "");
+    try check_b3(std.testing.allocator, pre ++ after ++ other ++ over);
+    const ran_other = comptime block("run_other", "0", "hello from zigbox\n", "") ++
+        block("chk_other", "0", allowed_json, "");
+    try std.testing.expectError(error.RefusalWrong, check_b3(std.testing.allocator, pre ++ after ++
+        ran_other ++ over));
+    const blocked = comptime block("run_override", "125", "", refused);
+    try std.testing.expectError(error.RefusalWrong, check_b3(std.testing.allocator, pre ++ after ++
+        other ++ blocked));
 }
