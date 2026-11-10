@@ -1831,7 +1831,9 @@ fn check_listen_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
             break :blk if (given_send) .send_without_listen else null;
         }
         var network: runtime_spec.Network = .none;
-        if (run_args.net) |value| network = net_word_named(value).?;
+        if (run_args.net) |value| {
+            network = if (net_word_named(value).? == .none) .none else .host;
+        }
         if (run_args.publish_count > 0) network = .user;
         if (runtime_spec.listen_options_problem(network, given_send)) |found| break :blk found;
         break :blk if (run_args.detach) .detached else null;

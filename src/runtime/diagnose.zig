@@ -181,7 +181,6 @@ pub fn step_failed(
 ) void {
     assert(diag.code == null);
     assert(failure.step < plan.count);
-    const helper = details.helper;
     const step = &plan.steps[failure.step];
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
