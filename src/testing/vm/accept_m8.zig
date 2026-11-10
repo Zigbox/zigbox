@@ -62,7 +62,8 @@ const lib =
     \\z() { runuser -u demo -- env $B $X $Z "$@"; }
     \\m() { runuser -u demo -- env $B $Z "$@"; }
     \\w() { runuser -u demo2 -- env $B HOME=/home/demo2 XDG_RUNTIME_DIR=/run/user/1001 $Z "$@"; }
-    \\g() { h=$(z store gc 2>&1 | sed -n 's/^confirm with: zbx store gc --confirm //p')
+    \\g() { z store gc >/tmp/a-plan 2>&1; cat /tmp/a-plan
+    \\  h=$(sed -n 's/^confirm with: zbx store gc --confirm //p' /tmp/a-plan)
     \\  [ -n "$h" ] || f "no gc plan"
     \\  z store gc --confirm "$h" >/dev/null 2>&1 || f "gc confirm"; }
     \\code() { grep -q "ZBX-$1" "$2" || { cat "$2"; f "expected $1"; }; }
