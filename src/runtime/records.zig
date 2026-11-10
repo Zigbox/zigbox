@@ -856,6 +856,13 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "listen")) return parse_listen_field(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
+    return parse_limit_field(key, value, out);
+}
+
+/// The limit fields: null if `key` is not one, else whether the value was good.
+fn parse_limit_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
+    assert(key.len > 0);
+    assert(value.len > 0);
     if (std.mem.eql(u8, key, "limit_memory")) {
         out.limits.memory_bytes = parse_limit(u64, value) orelse return false;
         return true;

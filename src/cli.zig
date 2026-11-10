@@ -1830,10 +1830,9 @@ fn check_listen_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
         if (run_args.listen == null) {
             break :blk if (given_send) .send_without_listen else null;
         }
-        const network: runtime_spec.Network = if (run_args.publish_count > 0) .user else if (run_args.net) |value|
-            (if (net_word_named(value).? == .none) .none else .host)
-        else
-            .none;
+        var network: runtime_spec.Network = .none;
+        if (run_args.net) |value| network = net_word_named(value).?;
+        if (run_args.publish_count > 0) network = .user;
         if (runtime_spec.listen_options_problem(network, given_send)) |found| break :blk found;
         break :blk if (run_args.detach) .detached else null;
     };
@@ -3716,8 +3715,11 @@ fn hand_on_listener(
     diag: *Diag,
 ) RunError!void {
     assert(diag.code == null);
+    assert(invocation.command == .run);
     const text = invocation.run.listen_send.?; // check_listen_args refused a --listen without it.
     const listener = runtime.take_listener(handle).?; // The run started, so the child sent it.
+    assert(text.len > 0);
+    assert(runtime.take_listener(handle) == null); // Taken once: ours alone from here.
     const number = std.fmt.parseInt(u32, text, 10) catch null;
     var failure: ?diagnose.Failure = null;
     if (number) |descriptor| {

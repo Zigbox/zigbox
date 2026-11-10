@@ -824,7 +824,8 @@ fn check_listen(container: *const Spec, diag: *Diag) Error!void {
 /// when the run had no `--listen`, or the listener was taken already. Call it once the run
 /// has started.
 pub fn take_listener(handle: *Handle) ?host_mod.Handle {
-    assert(handle.status == .running or handle.status == .stopped);
+    assert(handle.status == .running);
+    if (handle.listen) |listen| assert(listen.port > 0);
     if (handle.listen == null) return null;
     return handle.session.take_listener();
 }

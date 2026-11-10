@@ -325,14 +325,17 @@ pub const Session = struct {
     /// Hands the listener to the caller, who owns it from here: null if the plan has none or it
     /// was taken already.
     pub fn take_listener(session: *Session) ?host_mod.Handle {
+        if (session.listener != null) assert(session.plan.has_listener);
         const taken = session.listener;
         session.listener = null;
+        assert(session.listener == null);
         return taken;
     }
 
     /// Closes the listener if the caller never took it (a run that ends, a library caller that
     /// does not serve it), so nothing outlives the run.
     pub fn release_listener(session: *Session) void {
+        if (session.listener != null) assert(session.plan.has_listener);
         const handle = session.listener orelse return;
         session.host.close(handle);
         session.listener = null;

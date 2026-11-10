@@ -206,6 +206,28 @@ pub fn step_failed(
         step_context(diag, plan, failure.step);
         return;
     }
+    step_kind_failed(host, diag, plan, step, info, failure, details);
+    starting(diag, info);
+    step_context(diag, plan, failure.step);
+    assert(diag.code != null);
+    assert(diag.causes.count > 0);
+}
+
+/// The diagnostic of a failed step that is neither a state mount nor a bind mount, by its kind.
+fn step_kind_failed(
+    host: Host,
+    diag: *Diag,
+    plan: *const Plan,
+    step: *const plan_mod.Step,
+    info: RunInfo,
+    failure: Failure,
+    details: Details,
+) void {
+    assert(diag.code == null);
+    assert(failure.step < plan.count);
+    const helper = details.helper;
+    var buffer: [160]u8 = undefined;
+    const operation = plan_mod.describe(step, &buffer);
     switch (step.kind) {
         .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
@@ -239,10 +261,6 @@ pub fn step_failed(
         => read_only_failed(diag, step, operation, failure, info),
         else => setup_failed(diag, step, operation, failure, info),
     }
-    starting(diag, info);
-    step_context(diag, plan, failure.step);
-    assert(diag.code != null);
-    assert(diag.causes.count > 0);
 }
 
 fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {

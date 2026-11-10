@@ -176,7 +176,8 @@ pub const Listen = struct {
         assert(listen.port > 0);
         assert(buffer.len == listen_text_bytes_max);
         // Cannot fail: the address and a port of at most five digits fit the buffer.
-        const result = std.fmt.bufPrint(buffer, "{s}:{d}", .{ listen_address, listen.port }) catch unreachable;
+        const parts = .{ listen_address, listen.port };
+        const result = std.fmt.bufPrint(buffer, "{s}:{d}", parts) catch unreachable; // Sized.
         assert(result.len > listen_address.len + 1);
         return result;
     }
