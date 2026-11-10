@@ -77,8 +77,8 @@ const lib =
     \\z() { runuser -u demo -- env $B $X $Z "$@"; }
     \\m() { runuser -u demo -- env $B $Z "$@"; }
     \\w() { runuser -u demo2 -- env $B HOME=/home/demo2 XDG_RUNTIME_DIR=/run/user/1001 $Z "$@"; }
-    \\x() { n=$1; shift; "$@" >/tmp/xo 2>/tmp/xe && r=0 || r=$?
-    \\  printf '@@ev %s %s\n' "$n" "$r"; cat /tmp/xo; printf '\n@@err\n'
+    \\x() { xn=$1; shift; "$@" >/tmp/xo 2>/tmp/xe && xr=0 || xr=$?
+    \\  printf '@@ev %s %s\n' "$xn" "$xr"; cat /tmp/xo; printf '\n@@err\n'
     \\  cat /tmp/xe; printf '\n@@end\n'; }
     \\g() { z store gc >/tmp/a-plan 2>&1
     \\  h=$(sed -n 's/^confirm with: zbx store gc --confirm //p' /tmp/a-plan)
