@@ -673,7 +673,7 @@ fn ran(e: Evidence) Error!void {
 
 /// `zbx run` refused for want of a signed provenance: `E0906`, the file and the rule named.
 pub fn check_provenance_refusal(e: Evidence, policy_path: []const u8) Error!void {
-    return refusal(e.err, e.rc, "E0906", &.{ policy_path, "require_provenance" });
+    return refusal(e.err, e.rc, "E0906", &.{ policy_path, "requires signed provenance" });
 }
 
 /// `policy check --output json` beside the `run` it previews: a run that started is allowed
@@ -1110,7 +1110,7 @@ test "an unsigned base names its step; a malformed policy names its line" {
 test "script 1 needs the E0906 refusal and every policy check beside its run" {
     const run_ok = comptime block("run1", "0", "", "");
     const chk_ok = comptime block("chk1", "0", allowed_json, "");
-    const refused = comptime refused_text("E0906", private_policy, "require_provenance");
+    const refused = comptime refused_text("E0906", private_policy, "requires signed provenance");
     const run_six = comptime block("run2", "125", "", refused);
     const chk_six = comptime block("chk2", "1", refused_json("E0906"), "");
     const prefix = comptime block("pull1", "0", "{\"tree\":\"" ++ t_a ++ "\"}", "") ++
