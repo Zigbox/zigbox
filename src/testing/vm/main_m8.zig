@@ -17,6 +17,10 @@
 //! tree runs, an unsigned one is refused (E0905), and a changed object of the signed tree is
 //! refused (E0907) until it is put back.
 //!
+//! The VERIFY part (slice 5): a tree is signed, then `zbx verify` runs with no network at all (a
+//! network namespace with nothing in it), passes; with the record deleted it is refused (E0908);
+//! the exported bundle is imported again and it passes.
+//!
 //! This is not the M8 demo, which needs slices 12 to 14. `zig build demo-m8`, or `-Daccel=tcg`.
 
 const std = @import("std");
@@ -112,6 +116,37 @@ const body =
     \\true
 ;
 
+/// The VERIFY part's script, run as root, which drops to `demo` (and, for `verify`, into a
+/// network namespace with no link) with a store and config directory of their own.
+const verify_script = verify_body ++ "\necho '" ++ verify_marker ++ "'\n";
+const verify_script_path = "/tmp/m8-verify.sh";
+const verify_marker = "m8-verify: offline, refused, imported";
+
+const verify_body =
+    \\set -eu
+    \\trap 'cat /tmp/err-v* 2>/dev/null' EXIT
+    \\f() { echo "FAIL: $*"; exit 1; }
+    \\E="env HOME=/home/demo XDG_DATA_HOME=/home/demo/v XDG_CONFIG_HOME=/home/demo/vc"
+    \\Z=/usr/local/bin/zbx
+    \\z() { runuser -u demo -- $E $Z "$@"; }
+    \\n() { unshare -n runuser -u demo -- $E $Z "$@"; }
+    \\rm -rf /home/demo/v /home/demo/vc
+    \\mkdir -p /home/demo/v /home/demo/vc/zbx
+    \\chown -R demo /home/demo/v /home/demo/vc
+    \\d=$(z store import /srv/m8/tree 2>/tmp/err-v1)
+    \\z key new ci --no-passphrase 2>>/tmp/err-v1 || f key
+    \\z sign "$d" 2>>/tmp/err-v1 || f sign
+    \\n verify "$d" --key ci >/tmp/v-out 2>/tmp/err-v2 || f "verify with no link"
+    \\grep -q '3 tree: ok' /tmp/v-out || f "the tree link"
+    \\z trust export "$d" >/tmp/v-bundle 2>/tmp/err-v3 || f export
+    \\find /home/demo/v -path '*/trust/signatures/*' -type f -delete
+    \\if n verify "$d" --key ci >/dev/null 2>/tmp/err-v4; then f "verified without a record"; fi
+    \\grep -q E0908 /tmp/err-v4 || f "no E0908"
+    \\z trust import /tmp/v-bundle >/dev/null 2>/tmp/err-v5 || f import
+    \\n verify "$d" --key ci >/dev/null 2>/tmp/err-v6 || f "verify after the import"
+    \\true
+;
+
 /// The SIGN part's script, run as `demo` with `XDG_DATA_HOME` and `XDG_CONFIG_HOME` of its own,
 /// so that the other parts' store and policy are not touched. It prints `sign_marker` last.
 const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
@@ -184,6 +219,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
     try H.provision(&session, out, &timer, options.reuse_overlay);
     try export_check(&session, out);
     try sign_check(&session, out);
+    try verify_check(&session, out);
     try session.shutdown();
 }
 
@@ -214,6 +250,19 @@ fn sign_check(session: *Session, out: *Io.Writer) !void {
     try H.show(out, "sign, run under a policy, change an object", result);
     if (result.status != 0) return error.SignCheckFailed;
     if (std.mem.indexOf(u8, result.output, sign_marker) == null) return error.SignCheckFailed;
+}
+
+fn verify_check(session: *Session, out: *Io.Writer) !void {
+    try session.put_file(verify_script_path, verify_script);
+    const result = try session.run("sh " ++ verify_script_path ++ " 2>&1", timeout_s);
+    try H.show(out, "verify offline, with the link down", result);
+    if (result.status != 0) return error.VerifyCheckFailed;
+    if (std.mem.indexOf(u8, result.output, verify_marker) == null) return error.VerifyCheckFailed;
+}
+
+test "the verify script ends with its marker and fits a put_file" {
+    try std.testing.expect(std.mem.endsWith(u8, verify_script, verify_marker ++ "'\n"));
+    try std.testing.expect(verify_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
 }
 
 test "the sign script ends with its marker and fits a put_file" {

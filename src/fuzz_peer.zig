@@ -24,6 +24,10 @@
 //!      what parses renders and parses again to the same text; a refusal writes nothing under
 //!      images/ or roots/, and an acceptance leaves a record that loads with that tree. No input
 //!      reaches an assertion.
+//!   7. `trust import` of a signed bundle with one byte flipped (or the bundle cut, or extended)
+//!      is refused whole, writing nothing, or re-verifies: what it stored is exactly the bytes
+//!      given, and loads as a record of its tree. The unmodified bundle is always taken, and
+//!      `export_record` gives its bytes back.
 //!   6. Outside the namespace, an owner the map does not reach makes a one-chunk object an
 //!      error (with `out` zero), and an object of several chunks reads as before.
 
@@ -43,6 +47,10 @@ const layout = @import("store/layout.zig");
 const object = @import("store/object.zig");
 const object_mod = object; // `Counter.object` hides `object` inside it.
 const owners = @import("store/owners.zig");
+const dsse = @import("trust/dsse.zig");
+const peer = @import("trust/peer.zig");
+const record = @import("trust/record.zig");
+const statement = @import("trust/statement.zig");
 const support = @import("store/test_support.zig");
 const tree = @import("store/tree.zig");
 const trees = @import("store/trees.zig");
@@ -77,6 +85,7 @@ pub fn fuzz_peer(seed: u64) void {
     store.owners = .inside;
     fuzz_put(random);
     fuzz_image(random);
+    fuzz_bundle(random);
     assert(sim.open_count() == 0);
 }
 
@@ -577,4 +586,62 @@ fn fuzz_image(random: std.Random) void {
         if (named) assert(bad_tag); // Only a bad tag refuses a record naming tree and image.
         assert(image_files() == before); // A refusal writes nothing.
     }
+}
+
+var bundle_memory: peer.Memory = undefined;
+var bundle_work: dsse.Work = undefined;
+var bundle_line: [constants.envelope_bytes_max]u8 = undefined;
+var bundle_good: record.Record = undefined;
+var bundle_check: record.Record = undefined;
+var bundle_offered: [constants.signature_record_bytes_max + 64]u8 = undefined;
+
+/// A bundle of one to three signed lines about `whole`, flipped, cut or extended: refused whole
+/// or stored exactly (property 7).
+fn fuzz_bundle(random: std.Random) void {
+    var empty_writer = tree.Writer.init(&tree_bytes);
+    const whole = Digest.of(empty_writer.finish()); // The tree of `fuzz_image`: no entries.
+    bundle_good.clear();
+    const lines = random.intRangeAtMost(u32, 1, 3);
+    while (bundle_good.count < lines) {
+        var seed: [constants.key_seed_bytes]u8 = undefined;
+        random.bytes(&seed);
+        const found = statement.Statement.for_tree(whole.bytes, random.int(u32));
+        var rendered: [statement.render_bytes_max]u8 = undefined;
+        const text = statement.render(&rendered, &found);
+        const signed = dsse.sign(&bundle_work, &bundle_line, seed, text) catch
+            unreachable; // The statement is small, so it fits.
+        _ = bundle_good.add(signed) catch unreachable; // At most three lines.
+    }
+    const good = bundle_good.text();
+    assert(good.len <= constants.signature_record_bytes_max);
+    var failure: peer.Failure = undefined;
+    var length: usize = good.len;
+    @memcpy(bundle_offered[0..length], good);
+    const intact = random.uintLessThan(u8, 8) == 0;
+    if (!intact) switch (random.uintLessThan(u8, 3)) {
+        0, 1 => bundle_offered[random.uintLessThan(usize, length)] ^= @as(u8, 1) << random.int(u3),
+        else => length = random.uintAtMost(usize, length),
+    };
+    const offered_text = bundle_offered[0..length];
+    const taken = peer.import_record(&store, &bundle_memory, offered_text, whole, &failure);
+    var errno: u16 = 0;
+    const loaded = record.load(&store, &bundle_memory.work, whole, &bundle_check, &errno);
+    if (taken) |imported| {
+        // Accepted: it is the bytes given, and they load as a record of the tree.
+        assert(imported.total >= 1);
+        if (intact) assert(std.mem.eql(u8, offered_text, good));
+        loaded catch unreachable; // What was stored loads.
+        assert(std.mem.eql(u8, bundle_check.text(), offered_text));
+    } else |_| {
+        // Refused whole: nothing was written, so there is no record of the tree.
+        assert(!intact);
+        assert(std.meta.isError(loaded));
+        loaded catch |err| assert(err == error.NotFound);
+        return;
+    }
+    // Taken again, the same bundle adds nothing, and the export gives the bytes back.
+    const again = peer.import_record(&store, &bundle_memory, offered_text, whole, &failure);
+    assert((again catch unreachable).added == 0); // The same lines are all there.
+    const back = peer.export_record(&store, &bundle_memory, whole, &failure);
+    assert(std.mem.eql(u8, (back catch unreachable), offered_text)); // Stored as given.
 }

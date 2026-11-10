@@ -13,6 +13,7 @@ const errors = @import("../diag/errors.zig");
 const store = @import("key_store.zig");
 const key_mod = @import("key.zig");
 const policy_mod = @import("policy.zig");
+const peer = @import("peer.zig");
 const verdict = @import("verdict.zig");
 
 const path_echo_bytes = constants.store_path_bytes_max;
@@ -411,8 +412,8 @@ pub fn sign_refused(diag: *Diag, operand: []const u8, refusal: Refusal, errno: u
                 "trust/signatures in the store (its signatures are lost), then sign again",
         }),
         .store_full => diag.fix(.{
-            .sentence = "remove the files of trees you no longer need from " ++
-                "trust/signatures in the store; a later release adds a command for it",
+            .sentence = "run 'zbx trust prune' to see the records whose trees are gone, " ++
+                "then 'zbx trust prune --apply' to remove them",
         }),
     }
     assert(diag.code.? == .E0910);
@@ -712,4 +713,239 @@ pub fn provenance_missing(diag: *Diag, what: *const ProvenanceRefused) void {
         .not_derived => diag.fix(.{ .sentence = "pull the image again" }),
     }
     assert(diag.code.? == .E0906);
+}
+
+/// The links `zbx verify` walks, in order (docs/briefs/M8-trust.md, "`zbx verify <digest>`").
+pub const VerifyLink = enum(u8) {
+    signature = 1,
+    signer,
+    tree,
+    provenance,
+    inputs,
+    build_file,
+
+    pub fn words(link: VerifyLink) []const u8 {
+        return switch (link) {
+            .signature => "the signatures",
+            .signer => "a trusted signer",
+            .tree => "the tree",
+            .provenance => "the provenance",
+            .inputs => "the inputs",
+            .build_file => "the build file",
+        };
+    }
+};
+
+/// What is wrong at the link; `VerifyBroken.detail` completes the sentence.
+pub const VerifyCause = enum {
+    /// Link 1: the store holds no signature for the tree.
+    no_record,
+    /// Link 2: no signer is trusted. Detail: the signers' ids, or "none".
+    no_trusted_signer,
+    /// Link 3: part of the tree is missing, damaged, unreadable or too large.
+    tree_missing,
+    tree_damaged,
+    tree_unreadable,
+    tree_too_large,
+    /// Link 4: `--require-provenance` and no trusted signed provenance covers the tree.
+    no_provenance,
+    /// Link 4: a trusted line carries provenance that is not about this tree (or result).
+    provenance_other,
+    /// Link 5: an input is damaged. Detail: which one.
+    input_damaged,
+    /// Link 5: `--strict` and an input is not in the store. Detail: which one.
+    input_absent,
+    /// Link 6: the build file or the lock differs from the signed hash. Detail: which.
+    build_file_changed,
+};
+
+pub const VerifyBroken = struct {
+    operand: []const u8,
+    link: VerifyLink,
+    cause: VerifyCause,
+    detail: []const u8 = "",
+    /// Link 2 with a policy file present: the policy files' paths, which decide trust.
+    policy: []const u8 = "",
+    errno: u16 = 0,
+};
+
+fn verify_fix(diag: *Diag, cause: VerifyCause, operand: []const u8, policy: bool) void {
+    switch (cause) {
+        .no_record => diag.fix_with(
+            "sign it, or import the signer's bundle:",
+            "zbx sign {s}",
+            .{operand},
+        ),
+        .no_trusted_signer => if (policy) diag.fix(.{
+            .sentence = "list the signer's key in the policy file, or remove the file",
+        }) else diag.fix(.{
+            .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
+                "or --public <text>",
+        }),
+        .tree_missing, .tree_damaged, .tree_too_large, .input_damaged => diag.fix(.{
+            .sentence = "run 'zbx store verify', remove what is damaged, then pull or build again",
+        }),
+        .tree_unreadable => diag.fix(.{
+            .sentence = "check the store's permissions and disk, then run it again",
+        }),
+        .no_provenance, .provenance_other => diag.fix(.{
+            .sentence = "build it with this zbx and sign the result with 'zbx sign <result>'",
+        }),
+        .input_absent => diag.fix(.{
+            .sentence = "pull or build the input again, or leave out --strict",
+        }),
+        .build_file_changed => diag.fix(.{
+            .sentence = "restore the file that was signed, or build and sign again",
+        }),
+    }
+}
+
+/// ZBX-E0908: `zbx verify` found a broken link; links before it held.
+pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
+    assert(diag.code == null);
+    assert(what.errno < 4096);
+    var operand_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var detail_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const operand = echo_of(&operand_storage, what.operand);
+    const detail = echo_of(&detail_storage, what.detail);
+    var policy_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const policy = echo_of(&policy_storage, what.policy);
+    diag.raise(.E0908);
+    diag.while_("verifying {s}, link {d} ({s})", .{
+        operand, @backingInt(what.link), what.link.words(),
+    });
+    switch (what.cause) {
+        .no_record => diag.cause("the store has no signature for the tree", .{}),
+        .no_trusted_signer => if (policy.len > 0) diag.cause(
+            "no signer is trusted (signers: {s}): the policy file {s} decides, and --key and " ++
+                "--public do not apply while one is present",
+            .{ detail, policy },
+        ) else diag.cause(
+            "no signer is trusted (signers: {s}), and no policy file, --key or --public " ++
+                "names one that counts",
+            .{detail},
+        ),
+        .tree_missing => diag.cause("part of the tree is missing from the store", .{}),
+        .tree_damaged => diag.cause("a file of the tree in the store is damaged", .{}),
+        .tree_unreadable => errors.cause_host_error(
+            diag,
+            "reading the tree",
+            host_mod.error_for_errno(what.errno),
+            what.errno,
+        ),
+        .tree_too_large => diag.cause("the tree has more entries than zbx checks", .{}),
+        .no_provenance => diag.cause(
+            "no trusted signature covers signed provenance of the tree, and " ++
+                "--require-provenance was given",
+            .{},
+        ),
+        .provenance_other => diag.cause(
+            "the signed provenance is not about this tree and result ({s})",
+            .{detail},
+        ),
+        .input_damaged => diag.cause("{s} is damaged in the store", .{detail}),
+        .input_absent => diag.cause("{s} is not in the store, and --strict was given", .{detail}),
+        .build_file_changed => diag.cause("{s} differs from what was signed", .{detail}),
+    }
+    diag.context("arg", "{s}", .{operand});
+    diag.context("link", "{d}", .{@backingInt(what.link)});
+    verify_fix(diag, what.cause, operand, policy.len > 0);
+    assert(diag.code.? == .E0908);
+}
+
+/// Which input W0903 could not check.
+pub fn verify_absent_input(diag: *Diag, operand: []const u8, input: []const u8) void {
+    assert(diag.code == null);
+    var operand_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    var input_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const operand_echo = echo_of(&operand_storage, operand);
+    const input_echo = echo_of(&input_storage, input);
+    diag.raise(.W0903);
+    diag.while_("verifying {s}, link 5 (the inputs)", .{operand_echo});
+    diag.cause("{s} is not in the store, so it cannot be checked offline", .{input_echo});
+    diag.context("arg", "{s}", .{operand_echo});
+    diag.fix(.{ .sentence = "pull or build the input again to check it, or use --strict to fail" });
+    assert(diag.code.? == .W0903);
+}
+
+/// ZBX-E0909 for a trust bundle or a signature record that `zbx trust export` or `import` did
+/// not take; a busy store, a failed read and a failed write are E0436, E0423 and E0417 as
+/// elsewhere, and an unusable local record is E0903.
+pub fn trust_refused(diag: *Diag, failure: *const peer.Failure, what: []const u8) void {
+    assert(diag.code == null);
+    assert(failure.refusal != .busy);
+    assert(failure.refusal != .store_failed);
+    assert(failure.refusal != .unreadable);
+    assert(failure.refusal != .write_failed);
+    assert(failure.refusal != .local_unusable);
+    var what_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = echo_of(&what_storage, what);
+    diag.raise(.E0909);
+    diag.while_("{s}", .{echo});
+    switch (failure.refusal) {
+        .no_record => diag.cause("the store has no signature for that tree", .{}),
+        .too_large => diag.cause(
+            "the bundle is {d} bytes, more than the {d} any record has",
+            .{ failure.size, constants.signature_record_bytes_max },
+        ),
+        .malformed => diag.cause(
+            "the text is not a bundle this zbx reads: a line is not an envelope, its " ++
+                "signature does not verify, or its statement is not about one tree",
+            .{},
+        ),
+        .newer => diag.cause("a statement in the bundle is of a form from a newer zbx", .{}),
+        .tree_full => diag.cause(
+            "the tree would hold more than {d} signatures, the most it keeps",
+            .{constants.signatures_per_tree_max},
+        ),
+        .store_full => diag.cause(
+            "the store already holds signatures for {d} trees (trust_records_max)",
+            .{constants.trust_records_max},
+        ),
+        .busy, .store_failed, .unreadable, .write_failed, .local_unusable => unreachable,
+    }
+    switch (failure.refusal) {
+        .no_record => diag.fix(.{ .sentence = "sign the tree, or import a bundle for it" }),
+        .tree_full => diag.fix(.{ .sentence = "keep the record the store has" }),
+        .store_full => diag.fix(.{
+            .sentence = "run 'zbx trust prune' to see the records whose trees are gone, " ++
+                "then 'zbx trust prune --apply'",
+        }),
+        .newer => diag.fix(.{ .sentence = "upgrade zbx, then import again" }),
+        else => diag.fix(.{
+            .sentence = "export the bundle again with 'zbx trust export <tree>' where it was made",
+        }),
+    }
+    assert(diag.code.? == .E0909);
+}
+
+/// ZBX-E0909: the bundle file to import could not be read.
+pub fn bundle_unreadable(diag: *Diag, path: []const u8, err: host_mod.Error, errno: u16) void {
+    assert(diag.code == null);
+    assert(path.len > 0);
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const echo = echo_of(&path_storage, path);
+    diag.raise(.E0909);
+    diag.while_("importing a bundle of signatures", .{});
+    errors.cause_host_error(diag, "reading the bundle file", err, errno);
+    diag.context("path", "{s}", .{echo});
+    diag.fix(.{ .sentence = "check the file's name and that you can read it" });
+    assert(diag.code.? == .E0909);
+}
+
+/// ZBX-W0902: prune kept a damaged record because its tree is in the store.
+pub fn prune_kept_damaged(diag: *Diag, path: []const u8) void {
+    assert(diag.code == null);
+    var path_storage: [path_echo_bytes]u8 = undefined;
+    const echo = echo_of(&path_storage, path);
+    diag.raise(.W0902);
+    diag.while_("pruning the trust records", .{});
+    diag.cause("{s} is damaged, or of a newer zbx, but its tree is in the store, so it was kept", .{
+        echo,
+    });
+    diag.context("path", "{s}", .{echo});
+    diag.fix(.{
+        .sentence = "import the tree's bundle again or sign it again; upgrade zbx if newer",
+    });
+    assert(diag.code.? == .W0902);
 }

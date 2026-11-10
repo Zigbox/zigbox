@@ -209,9 +209,13 @@ pub const Code = enum(u8) {
     E0905,
     E0906,
     E0907,
+    E0908,
+    E0909,
     E0910,
     E0911,
     W0901,
+    W0902,
+    W0903,
     E1001,
     E1002,
     E1003,
@@ -3320,6 +3324,59 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0908,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "zbx verify found a broken link",
+        .explanation =
+        \\"zbx verify" walks, offline, from the signature on a tree to everything the
+        \\signed build provenance names, and stops at the first link that is broken.
+        \\It never uses the network, a registry or zbx.lock. The six links:
+        \\
+        \\  1. the tree's signatures: a record exists and every signature verifies.
+        \\  2. a trusted signer: a key every policy file lists, or the one given with
+        \\     --key or --public. With no policy file and neither flag, verify names
+        \\     the signers it found and stops here.
+        \\  3. the tree: every object is present and hashes to its id, uncached.
+        \\  4. the provenance: a trusted signature covers SLSA provenance of this
+        \\     tree. A tree signed without provenance stops after link 3 and passes
+        \\     unless --require-provenance is given.
+        \\  5. the inputs: each base tree, each step's input and output tree and the
+        \\     image's output, present and sound. One that is not in the store is
+        \\     ZBX-W0903 (garbage collection may have taken it) and fails only with
+        \\     --strict; a damaged one fails always.
+        \\  6. the build file and zbx.lock: when the project's files are in the
+        \\     working directory, their hashes must be the signed ones; if they are
+        \\     not there, that is reported and is not a failure.
+        \\
+        \\The cause names the link and what is wrong with it. Pull or build what is
+        \\missing and sign again, or trust the signer's key; "zbx store verify"
+        \\shows a damaged tree.
+        ,
+    },
+    .{
+        .code = .E0909,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a trust bundle was refused",
+        .explanation =
+        \\"zbx trust import" reads an in-toto bundle, one envelope per line, and
+        \\takes it whole or not at all. It is refused when it is longer than any
+        \\record, when a line is not an envelope this zbx reads or its statement is
+        \\not about the tree, when a signature does not verify, when a statement is
+        \\of a newer form, or when the store already holds 4096 signed trees
+        \\(trust_records_max) or the tree 8 signatures. Nothing was written.
+        \\
+        \\"zbx trust export" refuses with this code when the store has no signature
+        \\for the tree. A signature by a key this host does not trust is kept: trust
+        \\is decided when something runs, by policy.
+        \\
+        \\Ask for the bundle again, from "zbx trust export <tree>" on the machine
+        \\that signed. At the bound, "zbx trust prune" shows the records whose trees
+        \\are gone, and "zbx trust prune --apply" removes them.
+        ,
+    },
+    .{
         .code = .E0910,
         .severity = .@"error",
         .blame = .user,
@@ -3338,9 +3395,8 @@ pub const registry = [_]Entry{
         \\thing is not a refusal: it changes nothing and says so.
         \\
         \\For a missing or damaged tree, pull or build it again, then sign it. For a
-        \\bound, remove a record file of the tree (or of trees you no longer need)
-        \\from trust/signatures in the store; a later release adds a command for
-        \\that. Nothing was written.
+        \\bound, run "zbx trust prune" to see the records whose trees are gone and
+        \\"zbx trust prune --apply" to remove them. Nothing was written.
         ,
     },
     .{
@@ -3383,6 +3439,36 @@ pub const registry = [_]Entry{
         \\no provenance stored) until there is room for its record. Remove the
         \\records of results you no longer need from trust/provenance in the
         \\store, then build again: the build is a cache hit and writes the record.
+        ,
+    },
+    .{
+        .code = .W0902,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "a damaged trust record was kept; its tree is in the store",
+        .explanation =
+        \\"zbx trust prune" removes only the records of trees that are gone. This
+        \\record is damaged or of a newer format, but its tree (or, for provenance,
+        \\its result) is in the store, so it was kept: removing it would give up a
+        \\signature that may still be wanted, and a run reads a damaged record as
+        \\ZBX-E0903.
+        \\
+        \\Import the tree's bundle again ("zbx trust import") or sign the tree
+        \\again to replace the record, or upgrade zbx if the record is newer.
+        ,
+    },
+    .{
+        .code = .W0903,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "zbx verify could not check an input that is not in the store",
+        .explanation =
+        \\An input the signed provenance names (a base image's tree, a step's input
+        \\or output tree, or the image's output) is not in the store, perhaps because
+        \\"zbx store gc" took it after the build. Offline, verify cannot check
+        \\something it does not have, so it says so and goes on; the other links
+        \\still hold. "zbx verify --strict" fails on it. Pull or build the input
+        \\again to check it.
         ,
     },
     .{
@@ -3844,7 +3930,7 @@ pub fn can_end_run(code: Code) bool {
         .E0508, .E0509, .E0510, .E0511, .E0512, .E0513, .E0514 => false,
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0901, .E0902, .E0910, .E0911, .W0901 => false,
+        .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
         else => true,

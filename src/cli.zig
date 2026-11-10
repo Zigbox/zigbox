@@ -35,6 +35,8 @@ const state_commands = @import("state_commands.zig");
 const key_commands = @import("trust/key_commands.zig");
 const policy_commands = @import("trust/policy_commands.zig");
 const sign_commands = @import("trust/sign_commands.zig");
+const trust_commands = @import("trust/trust_commands.zig");
+const verify_commands = @import("trust/verify_commands.zig");
 const trust_exec = @import("trust/exec_gate.zig");
 const trust_gate = @import("trust/gate.zig");
 const trust_tamper = @import("trust/tamper.zig");
@@ -77,6 +79,8 @@ const help_text =
     \\  state <cmd>     volumes that outlive containers: ls, rm, export, restore (see below)
     \\  key <cmd>       signing keys: new, list, show (see below)
     \\  sign <what>     sign a build result, a tree or an image with a key (see below)
+    \\  verify <what>   check a signed result's chain offline, link by link (see below)
+    \\  trust <cmd>     move signatures between stores: export, import, prune (see below)
     \\  policy check [what]   what the policy files say, and whether a run of <what> would pass
     \\                  (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
@@ -211,6 +215,23 @@ const help_text =
     \\  the whole tree must be in the store and intact; the signature is added to the tree's
     \\  record, at most 8 per tree; signing again with the same key changes nothing
     \\
+    \\verify:
+    \\  zbx verify <what> [--key <name>] [--public <ed25519:...>] [--strict] [--require-provenance]
+    \\  <what>          a build result or a tree (b3:<64 hex>), or an image (name@sha256:...)
+    \\  checks, in order, and stops at the first that fails (ZBX-E0908): the tree has signatures;
+    \\  a signer is trusted (by every policy file, or by --key or --public); the tree is whole
+    \\  and every object hashes to its id; a trusted signature carries provenance of this tree;
+    \\  the trees it names are in the store and sound; the build file and zbx.lock here are
+    \\  the ones it names. Reads the store and files only: no network, no registry
+    \\  --strict        a tree it names that is not in the store fails (else ZBX-W0903)
+    \\  --require-provenance   a tree signed without provenance fails
+    \\
+    \\trust:
+    \\  zbx trust export <tree>     print the tree's signatures as a bundle
+    \\  zbx trust import <file>     verify every line of a bundle, then add what is new
+    \\  zbx trust prune [--apply]   list the signature and provenance records whose trees are
+    \\                              gone; --apply removes them (a damaged one is kept, ZBX-W0902)
+    \\
     \\policy:
     \\  zbx policy check [<what>]
     \\  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
@@ -308,6 +329,8 @@ pub const Command = enum {
     stop,
     store,
     state,
+    trust,
+    verify,
     version,
 };
 
@@ -491,6 +514,12 @@ pub const KeyArgs = key_commands.Args;
 /// What `sign` was given: the operand to sign, `--key` and `--passphrase-file`.
 pub const SignArgs = sign_commands.Args;
 
+/// What `verify` was given: the operand, `--key`, `--public`, `--strict`, `--require-provenance`.
+pub const VerifyArgs = verify_commands.Args;
+
+/// What `trust` was given: the subcommand, its operand and `--apply`.
+pub const TrustArgs = trust_commands.Args;
+
 /// What `pull` was given besides its reference.
 pub const PullArgs = struct {
     resolve_only: bool = false,
@@ -525,6 +554,10 @@ pub const Invocation = struct {
     key: KeyArgs,
     /// Set only when `command` is `sign`.
     sign: SignArgs,
+    /// Set only when `command` is `verify`.
+    verify: VerifyArgs,
+    /// Set only when `command` is `trust`.
+    trust: TrustArgs,
 };
 
 pub const ParseError = error{
@@ -612,6 +645,13 @@ const Token = union(enum) {
     key_inline: []const u8,
     /// `--provenance`: `inspect`'s.
     provenance,
+    /// `--strict` and `--require-provenance`: `verify`'s. `--public`, value next or after an `=`.
+    strict,
+    require_provenance,
+    public_next,
+    public_inline: []const u8,
+    /// `--apply`: `trust prune`'s.
+    apply,
     /// `--`: after `run`, everything that follows is the command.
     separator,
     unknown_option,
@@ -697,6 +737,13 @@ fn classify(argument: []const u8) Token {
         return .{ .key_inline = argument["--key=".len..] };
     }
     if (std.mem.eql(u8, argument, "--provenance")) return .provenance;
+    if (std.mem.eql(u8, argument, "--strict")) return .strict;
+    if (std.mem.eql(u8, argument, "--require-provenance")) return .require_provenance;
+    if (std.mem.eql(u8, argument, "--public")) return .public_next;
+    if (std.mem.startsWith(u8, argument, "--public=")) {
+        return .{ .public_inline = argument["--public=".len..] };
+    }
+    if (std.mem.eql(u8, argument, "--apply")) return .apply;
     if (std.mem.eql(u8, argument, "--last")) return .last;
     if (std.mem.eql(u8, argument, "--no-redact")) return .no_redact;
     // "--help" and "--version" are commands that look like options; a lone "-" and the empty
@@ -741,6 +788,8 @@ fn command_named(name: []const u8) ?Command {
     if (std.mem.eql(u8, name, "stop")) found = .stop;
     if (std.mem.eql(u8, name, "store")) found = .store;
     if (std.mem.eql(u8, name, "state")) found = .state;
+    if (std.mem.eql(u8, name, "trust")) found = .trust;
+    if (std.mem.eql(u8, name, "verify")) found = .verify;
     if (std.mem.eql(u8, name, "--help")) found = .help;
     if (std.mem.eql(u8, name, "--version")) found = .version;
     if (found != null) assert(name.len > 0); // The empty string is never a command.
@@ -753,8 +802,8 @@ fn operands_count(command: Command) u32 {
         .build, .bundle, .doctor, .help, .ps, .run, .version => 0,
         .explain, .schema, .stop, .commit, .pull, .lock, .logs => 1,
         .push => 2,
-        .exec, .inspect, .sign => 1,
-        .store, .state, .key, .policy => 2,
+        .exec, .inspect, .sign, .verify => 1,
+        .store, .state, .key, .policy, .trust => 2,
     };
     assert(count <= 2);
     return count;
@@ -789,7 +838,10 @@ pub fn scan_options(args: []const []const u8) Options {
             .separator => {
                 if (is_run) break;
             },
-            .confirm_next, .out_next, .file_next, .passphrase_file_next, .key_next => {
+            .confirm_next, .out_next, .file_next, .passphrase_file_next => {
+                if (index + 1 < args.len) index += 1;
+            },
+            .key_next, .public_next => {
                 if (index + 1 < args.len) index += 1;
             },
             .username_next, .password_file_next => {
@@ -800,6 +852,7 @@ pub fn scan_options(args: []const []const u8) Options {
             .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
             .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
+            .strict, .require_provenance, .public_inline, .apply => {},
             .run_option_inline, .env_inline, .unknown_option, .last, .no_redact => {},
             .read_only, .detach, .all, .follow => {},
             .operand => {
@@ -832,6 +885,31 @@ fn take_output(diag: *Diag, args: []const []const u8, index: *usize) ParseError!
 
 /// Maps the arguments after the program name to an invocation. Pure; on failure the diagnostic
 /// is in `diag` and the caller renders it.
+/// What the option scan collects before `resolve` knows the command.
+const Parsed = struct {
+    run: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} },
+    bundle: BundleArgs = .{},
+    pull: PullArgs = .{},
+    build: BuildArgs = .{},
+    key: KeyArgs = .{ .action = .list, .name = null },
+    sign: SignArgs = .{ .operand = "" },
+    verify: VerifyArgs = .{ .operand = "" },
+    trust_apply: bool = false,
+
+    fn store(p: *const Parsed, invocation: *Invocation) void {
+        assert(@intFromPtr(p) != 0);
+        assert(@intFromPtr(invocation) != 0);
+        invocation.run = p.run;
+        invocation.bundle = p.bundle;
+        invocation.pull = p.pull;
+        invocation.build = p.build;
+        invocation.key = p.key;
+        invocation.sign = p.sign;
+        invocation.verify = p.verify;
+        invocation.trust = .{ .action = .prune, .apply = p.trust_apply };
+    }
+};
+
 pub fn parse(
     args: []const []const u8,
     invocation: *Invocation,
@@ -841,12 +919,8 @@ pub fn parse(
     assert(diag.code == null);
     var operands: [constants.args_count_max][]const u8 = undefined;
     var count: u32 = 0;
-    var run_args: RunArgs = .{ .rootfs = null, .name = null, .command = &.{} };
-    var bundle_args: BundleArgs = .{};
-    var pull_args: PullArgs = .{};
-    var build_args: BuildArgs = .{};
-    var key_args: KeyArgs = .{ .action = .list, .name = null };
-    var sign_args: SignArgs = .{ .operand = "" };
+    var p: Parsed = .{};
+    const flags: KeyFlags = .{ .key = &p.key, .sign = &p.sign, .verify = &p.verify };
     var gc_args: GcArgs = .{};
     var export_file: ?[]const u8 = null;
     invocation.provenance = false;
@@ -858,27 +932,30 @@ pub fn parse(
             .verbose => {},
             .output_inline, .output_next => try take_output(diag, args, &index),
             .run_option_next, .run_option_inline, .env_next, .env_inline => {
-                try take_run_or_env(diag, &run_args, given, args, &index);
+                try take_run_or_env(diag, &p.run, given, args, &index);
             },
-            .all => try take_all_option(diag, &run_args, given, argument),
-            .follow => try take_follow(diag, &run_args, given, argument),
+            .all => try take_all_option(diag, &p.run, given, argument),
+            .follow => try take_follow(diag, &p.run, given, argument),
             .separator => {
                 if (!takes_command(given)) return unknown_option(diag, argument);
-                run_args.command = args[index + 1 ..];
+                p.run.command = args[index + 1 ..];
                 break;
             },
-            .detach, .read_only => try take_run_flag(diag, &run_args, given, argument),
-            .last, .no_redact => try take_bundle_flag(diag, &bundle_args, given, argument),
+            .detach, .read_only => try take_run_flag(diag, &p.run, given, argument),
+            .last, .no_redact => try take_bundle_flag(diag, &p.bundle, given, argument),
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
-            .resolve_only => try take_pull_option(diag, &pull_args, given, argument),
+            .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .graph, .file_next => try take_build_option(diag, &build_args, given, args, &index),
+            .graph, .file_next => try take_build_option(diag, &p.build, given, args, &index),
             .no_passphrase,
             .passphrase_file_next,
             .passphrase_file_inline,
             .key_next,
             .key_inline,
-            => try take_key_or_sign(diag, &key_args, &sign_args, given, args, &index),
+            => try take_key_or_sign(diag, flags, given, args, &index),
+            .strict, .require_provenance, .public_next, .public_inline, .apply => {
+                try take_verify_option(diag, flags, &p.trust_apply, given, args, &index);
+            },
             .unknown_option => return unknown_option(diag, argument),
             .operand => {
                 operands[count] = argument;
@@ -889,12 +966,7 @@ pub fn parse(
     }
     assert(count <= args.len);
     invocation.options = scan_options(args);
-    invocation.run = run_args;
-    invocation.bundle = bundle_args;
-    invocation.pull = pull_args;
-    invocation.build = build_args;
-    invocation.key = key_args;
-    invocation.sign = sign_args;
+    p.store(invocation);
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
     invocation.state.out = export_file;
@@ -1003,19 +1075,92 @@ fn take_out_option(
 /// `--no-passphrase` and `--passphrase-file`.
 fn take_key_or_sign(
     diag: *Diag,
-    key_args: *KeyArgs,
-    sign_args: *SignArgs,
+    flags: KeyFlags,
     operands: []const []const u8,
     args: []const []const u8,
     index: *usize,
 ) ParseError!void {
     assert(index.* < args.len);
-    const signing = operands.len > 0 and command_named(operands[0]) == .sign;
-    if (signing) return take_sign_option(diag, sign_args, operands, args, index);
+    assert(classify(args[index.*]) != .operand);
+    const first: ?Command = if (operands.len > 0) command_named(operands[0]) else null;
+    if (first == .sign) return take_sign_option(diag, flags.sign, operands, args, index);
+    if (first == .verify) return take_verify_option(diag, flags, null, operands, args, index);
     switch (classify(args[index.*])) {
         .key_next, .key_inline => return unknown_option(diag, args[index.*]),
-        else => return take_key_option(diag, key_args, operands, args, index),
+        else => return take_key_option(diag, flags.key, operands, args, index),
     }
+}
+
+/// Where the options that more than one command takes are collected.
+const KeyFlags = struct {
+    key: *KeyArgs,
+    sign: *SignArgs,
+    verify: *VerifyArgs,
+};
+
+/// `verify`'s options (`--key`, `--public`, `--strict`, `--require-provenance`) and `trust
+/// prune`'s `--apply`. `apply` is null where the caller has no `--apply` to take.
+fn take_verify_option(
+    diag: *Diag,
+    flags: KeyFlags,
+    apply: ?*bool,
+    operands: []const []const u8,
+    args: []const []const u8,
+    index: *usize,
+) ParseError!void {
+    assert(index.* < args.len);
+    const argument = args[index.*];
+    if (operands.len == 0) return unknown_option(diag, argument);
+    const command = command_named(operands[0]) orelse return unknown_option(diag, argument);
+    const token = classify(argument);
+    if (token == .apply) {
+        if (command != .trust or apply == null) return unknown_option(diag, argument);
+        apply.?.* = true;
+        return;
+    }
+    if (command != .verify) return unknown_option(diag, argument);
+    const verify = flags.verify;
+    switch (token) {
+        .strict => verify.strict = true,
+        .require_provenance => verify.require_provenance = true,
+        .key_inline => |value| try take_verify_value(diag, &verify.key, "--key", value),
+        .public_inline => |value| try take_verify_value(diag, &verify.public, "--public", value),
+        .key_next, .public_next => {
+            const option: []const u8 = if (token == .key_next) "--key" else "--public";
+            if (index.* + 1 == args.len) return missing_option_value(diag, option);
+            index.* += 1;
+            const slot = if (token == .key_next) &verify.key else &verify.public;
+            try take_verify_value(diag, slot, option, args[index.*]);
+        },
+        else => unreachable, // Only these tokens come here.
+    }
+}
+
+fn take_verify_value(
+    diag: *Diag,
+    slot: *?[]const u8,
+    option: []const u8,
+    value: []const u8,
+) ParseError!void {
+    assert(option.len >= 2);
+    assert(diag.code == null);
+    if (value.len == 0) return missing_option_value(diag, option);
+    if (slot.* != null) return verify_option_twice(diag, option);
+    slot.* = value;
+}
+
+/// A `verify` option a second time.
+fn verify_option_twice(diag: *Diag, option: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(option.len >= 2);
+    diag.raise(.E0003);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s} given twice; verify takes each once", .{option});
+    diag.context("cmd", "{s}", .{"verify"});
+    diag.context("arg", "{s}", .{option});
+    diag.fix(.{ .sentence = "give it once:", .command = "zbx verify b3:<64 hex> --key release" });
+    assert(diag.code.? == .E0003);
+    return error.UnexpectedArgument;
 }
 
 /// `--no-passphrase` and `--passphrase-file FILE`, which only `key new` takes (checked once the
@@ -1861,6 +2006,7 @@ fn resolve(
     if (command == .state) return resolve_state(operands, invocation, diag);
     if (command == .key) return resolve_key(operands, invocation, diag);
     if (command == .policy) return resolve_policy(operands, invocation, diag);
+    if (command == .trust) return resolve_trust(operands, invocation, diag);
     var push_destination: ?[]const u8 = null; // `push`'s second operand, kept for the defer.
     defer if (invocation.command == .commit or invocation.command == .push) {
         const action: store_commands.Action = if (invocation.command == .push) .push else .commit;
@@ -1882,7 +2028,7 @@ fn resolve(
             .schema => .topic,
             .lock => .action,
             .inspect => .result,
-            .sign => .subject,
+            .sign, .verify => .subject,
             .pull => .reference,
             .push => .source,
             else => .code,
@@ -1894,6 +2040,7 @@ fn resolve(
     push_destination = if (given == 2) operands[2] else null;
     if (invocation.operand == null) assert(given == 0);
     if (command == .sign) invocation.sign.operand = invocation.operand.?;
+    if (command == .verify) invocation.verify.operand = invocation.operand.?;
     if (command == .lock) {
         if (!std.mem.eql(u8, invocation.operand.?, "show")) {
             return lock_unknown(diag, invocation.operand.?);
@@ -2058,6 +2205,55 @@ fn resolve_policy(
     if (operands.len > 3) return unexpected_argument(diag, .policy, operands[3]);
     invocation.command = .policy;
     invocation.operand = if (operands.len == 3) operands[2] else null;
+}
+
+/// `trust export <tree>`, `trust import <file>` and `trust prune [--apply]`.
+fn resolve_trust(
+    operands: []const []const u8,
+    invocation: *Invocation,
+    diag: *Diag,
+) ParseError!void {
+    assert(operands.len >= 1);
+    assert(command_named(operands[0]) == .trust);
+    if (operands.len == 1) {
+        return trust_usage(diag, "'trust' needs a subcommand: export, import or prune");
+    }
+    const action = std.meta.stringToEnum(trust_commands.Action, operands[1]) orelse {
+        var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        const echo = echo_of(&storage, operands[1]);
+        diag.raise(.E0001);
+        diag.while_("reading the command line", .{});
+        diag.cause("'{s}' is not a trust subcommand; they are export, import and prune", .{echo});
+        diag.context("arg", "{s}", .{echo});
+        diag.fix(.{ .sentence = "see the commands:", .command = "zbx help" });
+        return error.UnknownCommand;
+    };
+    const wanted: usize = if (action == .prune) 0 else 1;
+    const given: usize = operands.len - 2;
+    if (given > wanted) return unexpected_argument(diag, .trust, operands[2 + wanted]);
+    if (given < wanted) {
+        return trust_usage(diag, if (action == .@"export")
+            "'trust export' needs the tree whose signatures to print"
+        else
+            "'trust import' needs the bundle file to read");
+    }
+    if (invocation.trust.apply and action != .prune) return unknown_option(diag, "--apply");
+    invocation.command = .trust;
+    invocation.operand = null;
+    invocation.trust.action = action;
+    invocation.trust.operand = if (given == 1) operands[2] else null;
+    assert((invocation.trust.operand != null) == (action != .prune));
+}
+
+fn trust_usage(diag: *Diag, sentence: []const u8) ParseError {
+    assert(diag.code == null);
+    assert(sentence.len > 0);
+    diag.raise(.E0006);
+    diag.while_("reading the command line", .{});
+    diag.cause("{s}", .{sentence});
+    diag.context("cmd", "trust", .{});
+    diag.fix(.{ .sentence = "see what could be pruned:", .command = "zbx trust prune" });
+    return error.MissingArgument;
 }
 
 fn policy_usage(diag: *Diag, sentence: []const u8) ParseError {
@@ -2626,7 +2822,8 @@ pub const Storage = struct {
     tamper_always: bool,
     /// `zbx exec`: the library's handle and the `-e` values.
     exec: exec_commands.Workspace,
-    /// `zbx build`: the build file, its graph and the checks' findings.
+    /// `zbx build`: the build file, its graph and the checks' findings. `verify` and `trust` work
+    /// in the same memory (`verify_workspace`, `trust_workspace`): a command line runs one command.
     build: build_commands.Workspace,
     inspect: inspect_commands.Workspace,
     /// A run's `--mount` sources, resolved before the image is looked for (`resolve_writable`),
@@ -2639,6 +2836,22 @@ pub const Storage = struct {
     /// `gc.tables_bytes_min`. `zbx` gives it a static region of `store_gc_tables_bytes`.
     gc_tables: []align(8) u8,
 };
+
+/// The memory `zbx verify` works in: the build workspace's, which no verify uses. Each `Storage`
+/// is hundreds of MiB and the image is bounded (2 GiB of static memory), so two more workspaces
+/// of tens of MiB would not fit.
+fn verify_workspace(storage: *Storage) *verify_commands.Workspace {
+    comptime assert(@sizeOf(verify_commands.Workspace) <= @sizeOf(build_commands.Workspace));
+    comptime assert(@alignOf(verify_commands.Workspace) <= @alignOf(build_commands.Workspace));
+    return @ptrCast(@alignCast(&storage.build));
+}
+
+/// The same for `zbx trust`.
+fn trust_workspace(storage: *Storage) *trust_commands.Workspace {
+    comptime assert(@sizeOf(trust_commands.Workspace) <= @sizeOf(build_commands.Workspace));
+    comptime assert(@alignOf(trust_commands.Workspace) <= @alignOf(build_commands.Workspace));
+    return @ptrCast(@alignCast(&storage.build));
+}
 
 /// One shared `Storage` for callers that run one command line at a time (the tests, the
 /// fuzzers). Two at once is a bug in the caller, and the assertion says so; a caller that wants
@@ -2697,11 +2910,47 @@ pub fn run_slice(host: Host, args: []const []const u8, storage: *Storage) u8 {
     return code;
 }
 
+fn run_build(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(invocation.command == .build);
+    assert(diag.code == null);
+    build_commands.run(
+        host,
+        &storage.build,
+        invocation.build,
+        .{ .json = invocation.options.output == .json, .verbose = invocation.options.verbose },
+        &storage.handle.facts,
+        diag,
+    ) catch |err| return build_error(err);
+}
+
+fn run_inspect(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!void {
+    assert(invocation.command == .inspect);
+    assert(diag.code == null);
+    inspect_commands.run(
+        host,
+        &storage.inspect,
+        invocation.operand.?,
+        invocation.provenance,
+        invocation.options.output == .json,
+        diag,
+    ) catch |err| return inspect_error(err);
+}
+
 fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: *Diag) RunError!u8 {
     assert(diag.code == null);
     const takes_operand = switch (invocation.command) {
         .explain, .bundle, .schema, .stop, .run, .commit => true,
-        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy => true,
+        .push, .pull, .lock, .logs, .exec, .inspect, .sign, .policy, .verify => true,
         else => false,
     };
     if (invocation.command == .explain) assert(invocation.operand != null);
@@ -2722,25 +2971,8 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
             invocation.options.output == .json,
             diag,
         ) catch |err| return lock_error(err),
-        .build => build_commands.run(
-            host,
-            &storage.build,
-            invocation.build,
-            .{
-                .json = invocation.options.output == .json,
-                .verbose = invocation.options.verbose,
-            },
-            &storage.handle.facts,
-            diag,
-        ) catch |err| return build_error(err),
-        .inspect => inspect_commands.run(
-            host,
-            &storage.inspect,
-            invocation.operand.?,
-            invocation.provenance,
-            invocation.options.output == .json,
-            diag,
-        ) catch |err| return inspect_error(err),
+        .build => try run_build(host, invocation, storage, diag),
+        .inspect => try run_inspect(host, invocation, storage, diag),
         .doctor => return run_doctor(host, invocation.options, &storage.handle.facts, diag),
         .run => return run_container(host, invocation, storage, diag),
         .ps => commands.run_ps(
@@ -2762,6 +2994,8 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         .state => return run_state(host, invocation, storage, diag),
         .key => return run_key(host, invocation, diag),
         .sign => return run_sign(host, invocation, storage, diag),
+        .verify => return run_verify(host, invocation, storage, diag),
+        .trust => return run_trust(host, invocation, storage, diag),
         .policy => return run_policy(host, invocation, storage, diag),
     }
     return constants.exit_ok;
@@ -2769,6 +3003,7 @@ fn dispatch(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
 
 fn inspect_error(err: inspect_commands.Error) RunError {
     assert(@errorName(err).len > 0);
+    assert(@errorName(err)[0] != 0);
     return switch (err) {
         error.Failed => error.CommandFailed,
         error.OutputFailed => error.OutputFailed,
@@ -2987,6 +3222,50 @@ fn run_sign(host: Host, invocation: *const Invocation, storage: *Storage, diag: 
         output,
         diag,
     ) catch return error.CommandFailed;
+}
+
+/// `zbx verify OPERAND`: the six links, offline.
+fn run_verify(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .verify);
+    assert(invocation.verify.operand.len > 0);
+    const mode = invocation.options.mode();
+    const output: verify_commands.Output = .{
+        .json = invocation.options.output == .json,
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+    };
+    return verify_commands.run_in_namespace(
+        host,
+        &storage.handle.facts,
+        verify_workspace(storage),
+        invocation.verify,
+        output,
+        diag,
+    ) catch return error.CommandFailed;
+}
+
+/// `zbx trust export|import|prune`.
+fn run_trust(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    diag: *Diag,
+) RunError!u8 {
+    assert(invocation.command == .trust);
+    assert((invocation.trust.operand != null) == (invocation.trust.action != .prune));
+    const mode = invocation.options.mode();
+    const output: trust_commands.Output = .{
+        .json = invocation.options.output == .json,
+        .mode = mode,
+        .color = mode != .json and host.color_enabled(.stderr),
+    };
+    return trust_commands.run(host, trust_workspace(storage), invocation.trust, output, diag) catch
+        return error.CommandFailed;
 }
 
 /// `zbx policy check [OPERAND]`: the policy files, and the verdict on what `run` would run.
@@ -3318,9 +3597,9 @@ fn tamper_call(
     assert(storage.gate.count > 0);
     const sign = &storage.sign;
     const lent: trust_tamper.Lent = .{
-        .scratch = &sign.verify.scratch,
-        .tree_buffer = &sign.tree_buffer,
-        .stack = &sign.stack,
+        .scratch = &sign.tree.verify.scratch,
+        .tree_buffer = &sign.tree.tree_buffer,
+        .stack = &sign.tree.stack,
     };
     trust_tamper.check(store, &storage.tamper, lent, tree, storage.tamper_always, diag) catch {
         return false;
@@ -4286,6 +4565,12 @@ test "snapshot: explain --output json is the zbx.explain/1 document; schemas for
         .{ .topic = "key", .text = @embedFile("testdata/schema_key.stdout.txt") },
         .{ .topic = "sign", .text = @embedFile("testdata/schema_sign.stdout.txt") },
         .{ .topic = "policy", .text = @embedFile("testdata/schema_policy.stdout.txt") },
+        .{ .topic = "verify", .text = @embedFile("testdata/schema_verify.stdout.txt") },
+        .{ .topic = "trust", .text = @embedFile("testdata/schema_trust.stdout.txt") },
+        .{
+            .topic = "trust-prune",
+            .text = @embedFile("testdata/schema_trust-prune.stdout.txt"),
+        },
     };
     for (goldens) |golden| {
         const args = [_][:0]const u8{ "zbx", "schema", golden.topic };

@@ -450,6 +450,7 @@ const store_gc_schema =
     \\"gc":{"type":"string","description":"applied only: the id of the trash"},
     \\"expires":{"type":"integer","description":"applied only: when the trash is emptied"},
     \\"expired":{"type":"integer","description":"applied only: old trash emptied now"},
+    \\"trust_orphans":{"type":"integer","description":"trust records whose tree is gone"},
     \\"objects":{"type":"integer"},"lists":{"type":"integer","description":"chunk lists"},
     \\"trees":{"type":"integer"},"farms":{"type":"integer","description":"materialized dirs"},
     \\"blobs":{"type":"integer","description":"downloaded blobs no image names"},
@@ -901,6 +902,75 @@ const inspect_provenance_schema =
     \\"signed":{"enum":["this record","an earlier build"]}}}}}}
 ;
 
+const verify_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/verify/1","version":1,
+    \\"title":"zbx verify --output json",
+    \\"description":"stdout: the six links of a tree's chain; a broken one also raises ZBX-E0908.",
+    \\"type":"object",
+    \\"required":["schema","subject","tree","ok","links","signers","provenance_record","inputs",
+    \\"build_file","lock"],
+    \\"properties":{"schema":{"const":"zbx.verify/1"},
+    \\"subject":{"type":"string","description":"the operand, as given"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the tree the operand names"},
+    \\"ok":{"type":"boolean","description":"no link failed and every one was reached"},
+    \\"links":{"type":"array","minItems":6,"maxItems":6,
+    \\"description":"signatures, signer, tree, provenance, inputs, build_file, in that order",
+    \\"items":{"type":"object","required":["n","name","status"],
+    \\"properties":{"n":{"type":"integer","minimum":1,"maximum":6},
+    \\"name":{"enum":["signatures","signer","tree","provenance","inputs","build_file"]},
+    \\"status":{"enum":["ok","skipped","partial","failed","not_reached"],
+    \\"description":"partial: some input trees are not in the store (ZBX-W0903)"}}}},
+    \\"signers":{"type":"array","items":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    \\"description":"the key ids that signed the tree"},
+    \\"provenance_record":{"enum":["none","same","differs","absent"],
+    \\"description":"whether the stored provenance record is the signed bytes; none: not asked"},
+    \\"inputs":{"type":"object","required":["checked","not_in_store"],
+    \\"properties":{"checked":{"type":"integer","minimum":0},
+    \\"not_in_store":{"type":"integer","minimum":0}}},
+    \\"build_file":{"enum":["ok","skipped","partial","failed","not_reached"]},
+    \\"lock":{"enum":["ok","skipped","partial","failed","not_reached"]}}}
+;
+
+const trust_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/trust/1","version":1,
+    \\"title":"zbx trust import --output json",
+    \\"description":"stdout: what importing a bundle added to a tree's record.",
+    \\"type":"object",
+    \\"required":["schema","action","tree","added","present","total"],
+    \\"properties":{"schema":{"const":"zbx.trust/1"},
+    \\"action":{"const":"import"},
+    \\"tree":{"type":"string","pattern":"^b3:[0-9a-f]{64}$",
+    \\"description":"the tree the bundle is about"},
+    \\"added":{"type":"integer","minimum":0,"description":"lines the store did not have"},
+    \\"present":{"type":"integer","minimum":0,"description":"lines it had already"},
+    \\"total":{"type":"integer","minimum":1,"description":"lines in the tree's record now"}}}
+;
+
+const trust_prune_schema =
+    \\{"$schema":"https://json-schema.org/draft/2020-12/schema",
+    \\"$id":"https://zigbox.github.io/zigbox/schema/trust-prune/1","version":1,
+    \\"title":"zbx trust prune --output json",
+    \\"description":"stdout: records whose trees are gone; with --apply, how many were removed.",
+    \\"type":"object",
+    \\"required":["schema","dry_run","orphans","damaged","removed","truncated","entries"],
+    \\"properties":{"schema":{"const":"zbx.trust-prune/1"},
+    \\"dry_run":{"type":"boolean","description":"true: nothing was removed"},
+    \\"orphans":{"type":"integer","minimum":0},
+    \\"damaged":{"type":"integer","minimum":0},
+    \\"removed":{"type":"integer","minimum":0},
+    \\"truncated":{"type":"boolean","description":"more records than the list holds; run it again"},
+    \\"entries":{"type":"array","items":{"type":"object",
+    \\"required":["kind","fate","digest","lines","bytes"],
+    \\"properties":{"kind":{"enum":["signature","provenance"]},
+    \\"fate":{"enum":["orphan","damaged"]},
+    \\"digest":{"type":"string","pattern":"^b3:[0-9a-f]{64}$"},
+    \\"lines":{"type":"integer","minimum":0},
+    \\"bytes":{"type":"integer","minimum":0}}}}}}
+;
+
 const Entry = struct { command: []const u8, text: []const u8 };
 
 const table = [_]Entry{
@@ -930,6 +1000,9 @@ const table = [_]Entry{
     .{ .command = "key", .text = key_schema },
     .{ .command = "sign", .text = sign_schema },
     .{ .command = "policy", .text = policy_schema },
+    .{ .command = "verify", .text = verify_schema },
+    .{ .command = "trust", .text = trust_schema },
+    .{ .command = "trust-prune", .text = trust_prune_schema },
     .{ .command = "build", .text = build_schema },
     .{ .command = "inspect", .text = inspect_schema },
     .{ .command = "inspect-provenance", .text = inspect_provenance_schema },
@@ -945,7 +1018,7 @@ const table = [_]Entry{
 /// The schema of a command's output, or null if it has none.
 pub fn of(command: []const u8) ?[]const u8 {
     assert(command.len <= 4096);
-    assert(table.len == 36);
+    assert(table.len == 39);
     for (table) |entry| {
         if (std.mem.eql(u8, entry.command, command)) return entry.text;
     }
@@ -974,7 +1047,7 @@ test "every schema is valid JSON, names its command and its version" {
     }
     try testing.expect(of("lock") == null);
     try testing.expect(of("") == null);
-    try testing.expectEqual(@as(usize, 36), table.len);
+    try testing.expectEqual(@as(usize, 39), table.len);
 }
 
 test "run and doctor are one object schema without a $ref, as an agent can follow it" {

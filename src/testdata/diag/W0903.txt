@@ -1,0 +1,6 @@
+warning[ZBX-W0903]: zbx verify could not check an input that is not in the store
+  cause  the base alpine@sha256:0123 is not in the store, so it cannot be
+         checked offline
+  fix    pull or build the input again to check it, or use --strict to fail
+  more   zbx explain W0903 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0903.html

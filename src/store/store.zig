@@ -122,6 +122,14 @@ pub const put_tree = trees.put_checked;
 pub const export_image = image_peer.export_record;
 pub const import_image = image_peer.import_record;
 
+/// M8: the signature record of a tree for a peer (`export_trust`), a bundle from a peer merged
+/// into it (`import_trust`), and the removal of the records of trees that are gone
+/// (`prune_trust`); `trust/peer.zig` says what is checked.
+pub const trust_peer = @import("../trust/peer.zig");
+pub const export_trust = trust_peer.export_record;
+pub const import_trust = trust_peer.import_record;
+pub const prune_trust = trust_peer.prune_records;
+
 test {
     _ = digest;
     _ = tree;

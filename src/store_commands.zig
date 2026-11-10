@@ -39,6 +39,7 @@ const trees = @import("store/trees.zig");
 const usage = @import("store/usage.zig");
 const verify = @import("store/verify.zig");
 const gc = @import("store/gc.zig");
+const peer = @import("trust/peer.zig");
 const image_find = @import("store/image_find.zig");
 const push_run = @import("push/run.zig");
 const export_mod = @import("push/export.zig");
@@ -1556,7 +1557,7 @@ fn do_gc(job: *Job, diag: *Diag) Error!void {
             diagnose.gc_failed(diag, &store, &failure);
             return error.Failed;
         };
-        return put_plan(job, &planned, diag);
+        return put_plan(job, &planned, count_trust_orphans(&store, ws), diag);
     }
     var applied: gc.Applied = undefined;
     gc.apply(&store, &ws.gc, &ws.import.arena, live, job.confirm, &applied, &failure) catch |err| {
@@ -1567,7 +1568,52 @@ fn do_gc(job: *Job, diag: *Diag) Error!void {
         }
         return error.Failed;
     };
-    try put_applied(job, &applied, diag);
+    try put_applied(job, &applied, count_trust_orphans(&store, ws), diag);
+}
+
+/// What counting the orphans reads with.
+const OrphanScan = struct {
+    memory: peer.ScanMemory,
+    report: peer.Report,
+};
+
+/// The trust records whose tree is gone, for gc's report; null when they could not be counted,
+/// which leaves the figure out rather than guessing. The scan reads with the import memory, which
+/// gc is done with by then.
+fn count_trust_orphans(store: *Store, ws: *Workspace) ?u32 {
+    comptime assert(@sizeOf(OrphanScan) <= @sizeOf(import.Workspace));
+    comptime assert(@alignOf(import.Workspace) >= @alignOf(OrphanScan));
+    assert(store.root_len > 1);
+    assert(@intFromPtr(ws) != 0);
+    const scan: *OrphanScan = @ptrCast(&ws.import);
+    scan.report.clear();
+    var failure: peer.Failure = undefined;
+    return peer.count_orphans(store, &scan.memory, &scan.report, &failure) catch null;
+}
+
+/// The JSON object in `buffer[0..len]` with `"trust_orphans"` added, when the count is known.
+fn json_orphans(buffer: *[constants.output_bytes_max]u8, len: usize, orphans: ?u32) []const u8 {
+    assert(len >= 2);
+    assert(buffer[len - 1] == '\n');
+    const count = orphans orelse return buffer[0..len];
+    const head = buffer[0 .. len - 2]; // Without "}\n".
+    assert(buffer[len - 2] == '}');
+    const field = ",\"trust_orphans\":{d}}}\n";
+    const tail = std.fmt.bufPrint(buffer[head.len..], field, .{count}) catch {
+        return buffer[0..len]; // No room: leave the figure out.
+    };
+    return buffer[0 .. head.len + tail.len];
+}
+
+fn put_trust_orphans(writer: *std.Io.Writer, orphans: ?u32) void {
+    assert(writer.end <= writer.buffer.len);
+    const count = orphans orelse return;
+    if (count == 0) return;
+    // Cannot fail: one short line in a buffer that holds a few.
+    writer.print(
+        "  {d} trust records name trees that are gone; see them with: zbx trust prune\n",
+        .{count},
+    ) catch unreachable; // Same bound.
 }
 
 fn counts_words(counts: *const gc.Counts, buffer: *[constants.output_bytes_max]u8) []const u8 {
@@ -1592,7 +1638,12 @@ fn counts_words(counts: *const gc.Counts, buffer: *[constants.output_bytes_max]u
     }) catch unreachable; // Same bound.
 }
 
-fn put_plan(job: *const Job, planned: *const gc.Plan, diag: *Diag) Error!void {
+fn put_plan(
+    job: *const Job,
+    planned: *const gc.Plan,
+    orphans: ?u32,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
     assert(planned.counts.total() < 1 << 40);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -1613,7 +1664,7 @@ fn put_plan(job: *const Job, planned: *const gc.Plan, diag: *Diag) Error!void {
             counts.tmp,
             counts.bytes,
         }) catch unreachable; // One short object.
-        return put(job, text, diag);
+        return put(job, json_orphans(&buffer, text.len, orphans), diag);
     }
     var words: [constants.output_bytes_max]u8 = undefined;
     const moved = counts_words(counts, &words);
@@ -1635,10 +1686,16 @@ fn put_plan(job: *const Job, planned: *const gc.Plan, diag: *Diag) Error!void {
         "confirm with: zbx store gc --confirm {s}\n",
         .{planned.hash.text()},
     ) catch unreachable; // Same.
+    put_trust_orphans(&writer, orphans);
     try put(job, writer.buffered(), diag);
 }
 
-fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!void {
+fn put_applied(
+    job: *const Job,
+    applied: *const gc.Applied,
+    orphans: ?u32,
+    diag: *Diag,
+) Error!void {
     assert(diag.code == null);
     assert(applied.expires > 0);
     var buffer: [constants.output_bytes_max]u8 = undefined;
@@ -1663,7 +1720,7 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
             counts.bytes,
             applied.expired,
         }) catch unreachable; // One short object.
-        return put(job, text, diag);
+        return put(job, json_orphans(&buffer, text.len, orphans), diag);
     }
     var words: [constants.output_bytes_max]u8 = undefined;
     var when: [19]u8 = undefined;
@@ -1688,6 +1745,7 @@ fn put_applied(job: *const Job, applied: *const gc.Applied, diag: *Diag) Error!v
         "emptied {d} expired trash\n",
         .{applied.expired},
     ) catch unreachable; // Same.
+    put_trust_orphans(&writer, orphans);
     try put(job, writer.buffered(), diag);
 }
 

@@ -1536,6 +1536,9 @@ pub const statement_bytes_max: u32 =
 pub const signatures_per_tree_max: u32 = 8;
 /// Most signature records (and, from slice 4, provenance records) in the store.
 pub const trust_records_max: u32 = 4096;
+/// Most records one `trust prune` scan keeps in its report: each of the two directories
+/// (signatures, provenance) is read up to `trust_records_max` entries.
+pub const trust_prune_entries_max: u32 = 2 * trust_records_max;
 /// Most file objects one tree's `trust/verified` record holds (slice 3's tamper check): 56 bytes
 /// each, so a record is under 4 MiB. A tree with more objects is checked whole on every run and
 /// writes no record.

@@ -181,7 +181,7 @@ Offline by construction: no registry, no network, no `zbx.lock` resolution. It w
 
 A tree signed without provenance stops after link 3 and says so; that passes unless `--require-provenance` is given.
 
-An input that is absent, because gc took it, is `W0901` (it cannot be checked offline) and fails only with `--strict`. A damaged input is `E0908`. Output: one line per link in text, and `zbx.verify/1` in JSON with every link's status. A simulation test asserts that `verify` makes no network or registry call (`host_sim` records them).
+An input that is absent, because gc took it, is `W0903` (it cannot be checked offline) and fails only with `--strict`. A damaged input is `E0908`. Output: one line per link in text, and `zbx.verify/1` in JSON with every link's status. A simulation test asserts that `verify` makes no network or registry call (`host_sim` records them).
 
 ### Records, gc, export and import (owner)
 
@@ -209,7 +209,7 @@ An input that is absent, because gc took it, is `W0901` (it cannot be checked of
 - `E0909` a trust bundle is refused (size, a malformed envelope or statement, a bad signature, or `trust_records_max` reached).
 - `E0910` signing is refused: the digest is not in the store, its tree is not whole or sound, or a bound (`signatures_per_tree_max`, `trust_records_max`) is reached.
 - `E0911` a passphrase is needed and none is available (no `--passphrase-file` and no terminal), the passphrase file is too open or too long, or the passphrase does not open the key. Fix: pass `--passphrase-file`; a forgotten passphrase is a lost key.
-- `W0901` `zbx verify` could not check an input that is not in the store.
+- `W0903` `zbx verify` could not check an input that is not in the store.
 - `W0902` `zbx trust prune` kept a damaged trust record because its tree is in the store (fix: `zbx trust import` again or sign again, as for `E0903`).
 
 DIAGNOSTICS "Exit codes" applies: `run` uses 125 for its refusals, and every other command uses 1 or 2 by blame. Errors from the packaging step (`zig build packages`) are build-tool errors, one `package: ...` line each, like the harness's `VM-F` codes, and are not product codes.
@@ -317,7 +317,7 @@ Sizes are relative to M7's slices (M is a typical M7 slice). The owner's answers
    - Fuzzer: the `provenance` statement fuzzer, with the same property as slice 2's.
    - *Mechanical:* the schema entry and goldens.
 5. **Verify, export, import and prune (T).**
-   - Work: `zbx verify` (the six links, `W0901`, `--strict`, `--require-provenance`, `--key`, `--public`, `E0908`); `zbx trust export|import` and `E0909`; `store.export_trust` and `store.import_trust` with the second-caller library test; gc's orphan count; and `zbx trust prune [--apply]` with `W0902` and `store.prune_trust` (Records, gc, export and import).
+   - Work: `zbx verify` (the six links, `W0903`, `--strict`, `--require-provenance`, `--key`, `--public`, `E0908`); `zbx trust export|import` and `E0909`; `store.export_trust` and `store.import_trust` with the second-caller library test; gc's orphan count; and `zbx trust prune [--apply]` with `W0902` and `store.prune_trust` (Records, gc, export and import).
    - Simulation tests:
      - `verify` never touches the network or the registry;
      - over random stores, prune never removes a record whose tree (or, for provenance, whose result and its tree) is present, and without `--apply` removes nothing;
@@ -568,7 +568,7 @@ The brief above is written to these answers. It also made the smaller choices th
 - **"Policy refusals happen before any process starts."** The tamper check must read objects owned by container ids, which only the store's namespace child can do. The brief reads the criterion as "before any workload process". The spec could say so.
 - **"Tamper with one file in the stored tree"** is also tampering with every materialized farm of it (hardlinks share the inode). The spec does not say what checking costs. The brief measured it (Fixed decisions, "The tamper check").
 - **"Require provenance"** does not say whether the provenance must be signed. Unsigned provenance is a claim anyone can write, so the brief requires a trusted envelope carrying it.
-- **"`zbx verify` walks to every input"**: inputs can be collected by gc after the build. The brief reports absent inputs as `W0901` and fails only on damage, or on absence with `--strict`.
+- **"`zbx verify` walks to every input"**: inputs can be collected by gc after the build. The brief reports absent inputs as `W0903` and fails only on damage, or on absence with `--strict`.
 - **Agent operability's policy file** ("a minimal form of M8's run policy, brought forward", denying `--net host` or mounting `$HOME`) was never built. M8's policy file is its natural home. The brief leaves the rules out (Non-goals) but keeps the schema open for them. The spec could move that bullet to M8 or later.
 - **Formats.** The spec does not name a signature or provenance format. The owner chose in-toto Statement v1 in DSSE envelopes, with SLSA v1 provenance (decision `2026-11-04-m8-owner-answers.md`). The live doc could say so.
 - **"Trust in zbx itself"** (signed releases, an SBOM) is partly met by M8's signed packages. The SBOM and M8-key signatures on release binaries are not in M8.

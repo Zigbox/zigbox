@@ -299,8 +299,12 @@ test {
     _ = @import("trust/passphrase.zig");
     _ = @import("trust/key_commands.zig");
     _ = @import("trust/key_commands_tests.zig");
+    _ = @import("trust/verify_commands.zig");
+    _ = @import("trust/trust_commands.zig");
     _ = @import("trust/sign_commands.zig");
     _ = @import("trust/sign_commands_tests.zig");
+    _ = @import("trust/verify_trust_tests.zig");
+    _ = @import("trust/peer_tests.zig");
     _ = @import("trust/key_store_tests.zig");
     _ = @import("fuzz_key.zig");
     _ = @import("fuzz_openpgp.zig");
