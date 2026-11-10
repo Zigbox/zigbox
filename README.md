@@ -57,7 +57,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
 | 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
 | 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
-| 9 · Mac | The Mac (cuttable) | Not started. |
+| 9 · Mac | The Mac forwards key, sign, verify, trust and policy, [PR #88](https://github.com/Zigbox/zigbox/pull/88) | **Built and reviewed.** Not yet run on a real Mac: the virtiofs checks are listed in `docs/demos/m8.md`. |
 | 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
 | 11 · Upload | The upload protocol, the test registry, `zbx push`, [PR #75](https://github.com/Zigbox/zigbox/pull/75) | **Built and reviewed.** |
 | 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR), [PR #76](https://github.com/Zigbox/zigbox/pull/76); a push to GHCR passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42660370098) | **Built and reviewed.** |
