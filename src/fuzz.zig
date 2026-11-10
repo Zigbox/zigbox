@@ -65,6 +65,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "cli", .run_iteration = fuzz_cli },
     .{ .name = "text", .run_iteration = fuzz_text },
     .{ .name = "publish", .run_iteration = fuzz_publish },
+    .{ .name = "listen", .run_iteration = fuzz_listen },
     .{ .name = "doctor", .run_iteration = fuzz_doctor },
     .{ .name = "diag", .run_iteration = diag_fuzz.fuzz_diag },
     .{ .name = "diagnostic", .run_iteration = diagnostic_fuzz.fuzz_diagnostic },
@@ -241,19 +242,21 @@ fn random_args(
     const pull_words = [_][]const u8{ "pull", "alpine:3.20", "--resolve-only", "Alpine", "a:1@x" };
     // M5's network options, their good values and some that are not.
     const net_words = [_][]const u8{
-        "--net",   "user",        "host",      "none",         "--publish",
-        "8080:80", "80:80",       "8080",      "0:1",          "--net=user",
+        "--net",    "user",          "host",           "none",         "--publish",
+        "8080:80",  "80:80",         "8080",           "0:1",          "--net=user",
+        // M8b: the listener and where it goes.
+        "--listen", "--listen-send", "127.0.0.1:8080", "10.0.0.1:80",  "3",
         // M6's other mounts and the export.
-        "--tmpfs", "--bind",      "--secret",  "/scratch:64m", "/srv/a:/data",
-        "-o",      "state",       "export",    "pgdata",
+        "--tmpfs",  "--bind",        "--secret",       "/scratch:64m", "/srv/a:/data",
+        "-o",       "state",         "export",         "pgdata",
         // M6b's writable mounts and `--user`: good values, relative and escaping sources, and
         // users that are not USER[:GROUP].
               "--mount",
-        "--user",  "site:/srv",   "../x:/y",   "/:/y",         ".:/y",
-        "a:b:c",   "0",           "1000:1000", "app:",         "--user=0",
+        "--user",   "site:/srv",     "../x:/y",        "/:/y",         ".:/y",
+        "a:b:c",    "0",             "1000:1000",      "app:",         "--user=0",
         // M6b's exec: its options and their values.
-        "exec",    "--workdir",   "/srv",      "srv",          "-e",
-        "A=1",     "--workdir=/",
+        "exec",     "--workdir",     "/srv",           "srv",          "-e",
+        "A=1",      "--workdir=/",
     };
     @memset(long, random.int(u8) | 1); // Never NUL: arguments are C strings.
     var args: FuzzArgs = .{ .items = undefined, .count = 1, .index = 0 };
@@ -758,6 +761,60 @@ fn publish_reference(text: []const u8) ?runtime_spec.Publish {
         ports[index] = @intCast(value);
     }
     return .{ .host = ports[0], .container = ports[1] };
+}
+
+/// Property of `--listen` parsing (runtime/spec.zig): a text parses exactly when an oracle
+/// written apart from the parser says it is "127.0.0.1:" and a port of 1 to 65535 without leading
+/// zeros, and what parses renders back to the same text. The texts are valid ones damaged by one
+/// change, and random bytes over the characters that matter.
+fn fuzz_listen(seed: u64) void {
+    var prng = std.Random.Xoshiro256.init(seed);
+    const random = prng.random();
+    var buffer: [24]u8 = undefined;
+    var length: usize = 0;
+    if (random.boolean()) {
+        const alphabet = "0123456789:..:/-+ x";
+        length = random.uintAtMost(usize, buffer.len);
+        for (buffer[0..length]) |*byte| byte.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+    } else {
+        const valid: runtime_spec.Listen = .{ .port = random.intRangeAtMost(u16, 1, 65535) };
+        var rendered: [runtime_spec.listen_text_bytes_max]u8 = undefined;
+        const text = valid.text(&rendered);
+        @memcpy(buffer[0..text.len], text);
+        length = text.len;
+        if (random.boolean()) {
+            const at = random.uintLessThan(usize, length);
+            buffer[at] = "0123456789:a."[random.uintLessThan(usize, 13)];
+        }
+    }
+    const input = buffer[0..length];
+    const parsed = runtime_spec.parse_listen(input);
+    const expected = listen_reference(input);
+    switch (parsed) {
+        .ok => |listen| {
+            assert(expected != null);
+            assert(listen.port == expected.?);
+            var rendered: [runtime_spec.listen_text_bytes_max]u8 = undefined;
+            assert(std.mem.eql(u8, listen.text(&rendered), input));
+        },
+        .problem => assert(expected == null),
+    }
+}
+
+/// The oracle: compound conditions on purpose, so that it does not mirror the parser.
+fn listen_reference(text: []const u8) ?u16 {
+    const prefix = "127.0.0.1:";
+    if (text.len <= prefix.len or text.len > prefix.len + 5) return null;
+    if (!std.mem.eql(u8, text[0..prefix.len], prefix)) return null;
+    const digits = text[prefix.len..];
+    if (digits[0] == '0') return null;
+    var value: u32 = 0;
+    for (digits) |byte| {
+        if (byte < '0' or byte > '9') return null;
+        value = value * 10 + (byte - '0');
+    }
+    if (value == 0 or value > 65535) return null;
+    return @intCast(value);
 }
 
 /// Errors a doctor fault may inject. NotFound is excluded because it is a legitimate answer
