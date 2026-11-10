@@ -58,7 +58,7 @@ const lib =
     \\[ ! -f /home/demo/ca.crt ] || B="$B SSL_CERT_FILE=/home/demo/ca.crt"
     \\Z=/usr/local/bin/zbx
     \\cd /home/demo
-    \\X="XDG_DATA_HOME=/home/demo/a XDG_CONFIG_HOME=/home/demo/ac"
+    \\X="XDG_DATA_HOME=/home/demo/a XDG_CONFIG_HOME=/home/demo/ac XDG_STATE_HOME=/home/demo/as"
     \\z() { runuser -u demo -- env $B $X $Z "$@"; }
     \\m() { runuser -u demo -- env $B $Z "$@"; }
     \\w() { runuser -u demo2 -- env $B HOME=/home/demo2 XDG_RUNTIME_DIR=/run/user/1001 $Z "$@"; }
@@ -72,9 +72,9 @@ const lib =
 const a1 =
     \\. /tmp/m8a-lib.sh
     \\install -m 755 /home/demo/zbx $Z
-    \\rm -rf /home/demo/a /home/demo/ac
-    \\mkdir -p /home/demo/a /home/demo/ac/zbx
-    \\chown -R demo /home/demo/a /home/demo/ac
+    \\rm -rf /home/demo/a /home/demo/ac /home/demo/as
+    \\mkdir -p /home/demo/a /home/demo/ac/zbx /home/demo/as
+    \\chown -R demo /home/demo/a /home/demo/ac /home/demo/as
     \\P=/home/demo/ac/zbx/policy.zon
     \\z key new ci --no-passphrase 2>/tmp/err-a1 || f key
     \\pub=$(z --output json key show ci | sed -n 's/.*"public":"\([^"]*\)".*/\1/p')
@@ -90,7 +90,7 @@ const a1 =
     \\z run alpine:3.20 -- true 2>/tmp/err-a4 && f "ran with a tree-only signature"
     \\code E0906 /tmp/err-a4
     \\z policy check alpine:3.20 --output json >/tmp/a-check 2>&1 || true
-    \\grep -q '"allowed":false' /tmp/a-check || { head -c 1400 /tmp/a-check | tail -c 800; f "policy check"; }
+    \\grep -q '"allowed":false' /tmp/a-check || { tail -c 500 /tmp/a-check; f "policy check"; }
     \\policy "$pub" $P false
     \\z store rm "$t" 2>/tmp/err-a5 || f "store rm"
     \\z store gc 2>>/tmp/err-a5 || f "store gc"
