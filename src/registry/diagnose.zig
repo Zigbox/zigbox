@@ -180,7 +180,7 @@ pub fn network_failed(diag: *Diag, err: net.Error, target: Target, errno: u16) v
         => {
             unusable_wire(diag, err, host);
         },
-        error.ConnectFailed, error.ProxyFailed, error.TimedOut => {
+        error.ConnectFailed, error.ProxyFailed, error.TimedOut, error.Stalled => {
             cannot_connect(diag, err, host, target.port);
         },
     }
@@ -211,6 +211,10 @@ fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void
             port,
             constants.net_idle_timeout_ms / 1000,
         }),
+        error.Stalled => diag.cause(
+            "{s}:{d} connected, then sent nothing for {d} seconds while the request was running",
+            .{ host, port, constants.net_idle_timeout_ms / 1000 },
+        ),
         error.ProxyFailed => diag.cause(
             "the proxy refused to open a tunnel to {s}:{d}, or is not a proxy",
             .{ host, port },

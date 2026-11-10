@@ -38,7 +38,11 @@ const Judged = enum {
     /// The file asks nothing of a run.
     asks_nothing,
     met,
+    /// No trusted signature covers the subject: `run` says ZBX-E0905.
     refused,
+    /// A trusted signature covers it, but `require_provenance` finds no signed provenance:
+    /// `run` says ZBX-E0906.
+    refused_provenance,
 };
 
 /// Reads the policy files and judges `subject` (null: only describe the files) against each.
@@ -62,16 +66,21 @@ pub fn run(
         };
     }
     var allowed = true;
+    // What the first refusing file said: the gate stops at the first, so the code is its.
+    var first_refusal: Judged = .met;
     var out: Printer = .{ .host = host, .output = output, .diag = diag };
     try out.begin(subject, memory);
     for (memory.files[0..memory.count], 0..) |*loaded, index| {
         var report: verdict.Report = undefined;
         report.clear();
         const judged = judge_one(loaded, record, work, subject, &report);
-        if (judged == .refused) allowed = false;
+        if (judged == .refused or judged == .refused_provenance) {
+            if (allowed) first_refusal = judged;
+            allowed = false;
+        }
         try out.file(loaded, judged, &report, index > 0);
     }
-    try out.end(memory, subject, allowed);
+    try out.end(memory, subject, first_refusal);
     return if (allowed) constants.exit_ok else 1;
 }
 
@@ -91,9 +100,9 @@ fn judge_one(
         .derived = asked.derived,
     };
     // The gate's own rule: a signature is not enough when the policy asks for provenance too.
-    const met = verdict.judge(&work.envelope, &loaded.policy, record, have, report) and
-        verdict.provenance_met(&loaded.policy, report);
-    return if (met) .met else .refused;
+    if (!verdict.judge(&work.envelope, &loaded.policy, record, have, report)) return .refused;
+    if (!verdict.provenance_met(&loaded.policy, report)) return .refused_provenance;
+    return .met;
 }
 
 const Printer = struct {
@@ -150,14 +159,16 @@ const Printer = struct {
         printer: *const Printer,
         memory: *const gate.Memory,
         subject: ?gate.Subject,
-        allowed: bool,
+        refusal: Judged,
     ) Error!void {
+        assert(refusal != .asks_nothing);
+        const allowed = refusal == .met;
         var buffer: [constants.output_bytes_max]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         if (printer.output.json) {
             writer.print("],\"allowed\":{}}}\n", .{allowed}) catch unreachable; // Fits.
         } else {
-            write_end_text(&writer, memory, printer.host, subject, allowed);
+            write_end_text(&writer, memory, printer.host, subject, refusal);
         }
         try printer.put(writer.buffered());
     }
@@ -212,7 +223,17 @@ fn write_file_json(
     switch (judged) {
         .asks_nothing => writer.writeAll("null") catch unreachable, // Fits.
         .met => writer.writeAll("true") catch unreachable, // Fits.
-        .refused => writer.writeAll("false") catch unreachable, // Fits.
+        .refused, .refused_provenance => writer.writeAll("false") catch unreachable, // Fits.
+    }
+    // Why not, when not: the code `run` would give, and the rule behind it.
+    switch (judged) {
+        .refused => writer.writeAll(",\"code\":\"ZBX-E0905\",\"refusal\":\"unsigned\"") catch
+            unreachable, // Fits.
+        .refused_provenance => writer.writeAll(
+            ",\"code\":\"ZBX-E0906\",\"refusal\":\"provenance\"",
+        ) catch unreachable, // Fits.
+        .asks_nothing, .met => writer.writeAll(",\"code\":null,\"refusal\":null") catch
+            unreachable, // Fits.
     }
     writer.writeAll(",\"signatures\":[") catch unreachable; // Fits.
     for (report.lines[0..report.count], 0..) |line, index| {
@@ -260,7 +281,9 @@ fn write_file_text(
     const word = switch (judged) {
         .asks_nothing => "asks nothing of a run",
         .met => "met",
-        .refused => "not met",
+        .refused => "not met: no trusted signature covers it (ZBX-E0905)",
+        .refused_provenance => "not met: signed, but no trusted signed provenance covers it " ++
+            "(ZBX-E0906)",
     };
     writer.print("  verdict: {s}\n", .{word}) catch unreachable; // Fits.
 }
@@ -270,8 +293,9 @@ fn write_end_text(
     memory: *const gate.Memory,
     host: Host,
     subject: ?gate.Subject,
-    allowed: bool,
+    refusal: Judged,
 ) void {
+    const allowed = refusal == .met;
     if (memory.count == 0) {
         var user: fs_mod.PathBuf = undefined;
         const looked = if (gate.user_path(host, &user)) user.text() else "(no home)";
@@ -280,7 +304,10 @@ fn write_end_text(
         }) catch unreachable; // Fits.
     }
     const asked = subject orelse return;
-    const verb = if (allowed) "would start" else "would be refused (ZBX-E0905)";
+    const verb = if (allowed) "would start" else if (refusal == .refused_provenance)
+        "would be refused (ZBX-E0906)"
+    else
+        "would be refused (ZBX-E0905)";
     const what = if (asked.text.len > 0) asked.text else "a directory";
     writer.print("run of {s}: {s}\n", .{ what, verb }) catch unreachable; // Fits.
     if (allowed and memory.count > 0) {

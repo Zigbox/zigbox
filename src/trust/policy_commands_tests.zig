@@ -190,6 +190,17 @@ test "the preview refuses a tree-only signature when the policy requires provena
     const operand = sentinel(&text, &zbuf);
     try testing.expectEqual(@as(u8, 1), command(&.{ "policy", "check", operand }));
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "verdict: not met") != null);
+    // The text names E0906, as `run` does, and not E0905.
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "would be refused (ZBX-E0906)") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "E0905") == null);
+    // The JSON gives the refusal, not just the signature's own "counts".
+    try testing.expectEqual(
+        @as(u8, 1),
+        command(&.{ "policy", "check", operand, "--output", "json" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "\"code\":\"ZBX-E0906\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "\"refusal\":\"provenance\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "\"allowed\":false") != null);
     try write_policy("ci", false);
     try testing.expectEqual(@as(u8, 0), command(&.{ "policy", "check", operand }));
 }

@@ -40,8 +40,10 @@ pub const Error = error{
     TlsFailed,
     /// No CA certificates could be loaded, so no HTTPS peer can be verified.
     NoCertificates,
-    /// A wait for the peer ran out of time.
+    /// The connection could not be made within the time allowed.
     TimedOut,
+    /// The peer connected and then said nothing for the idle timeout, mid-request.
+    Stalled,
     /// The connection ended before the body did.
     Truncated,
     /// A body, or a head, over its bound.
