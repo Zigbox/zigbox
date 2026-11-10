@@ -114,7 +114,7 @@ const a2 =
     \\n() { find /home/demo/a -path '*/trust/signatures/*' -type f | wc -l; }
     \\[ "$(n)" = 2 ] || f "expected two records, have $(n)"
     \\z store rm "$t" 2>>/tmp/err-a7 || f "store rm"
-    \\z store ls; ls -R /home/demo/as | head -20; ls /home/demo/a/zbx/store
+    \\rm -rf /home/demo/as/zbx/containers /home/demo/as/zbx/runs /home/demo/as/zbx/logs
     \\g
     \\z trust prune --output json >/tmp/a-dry 2>>/tmp/err-a7 || f "prune"
     \\grep -q '"dry_run":true' /tmp/a-dry || f "prune is not a dry run"
