@@ -42,6 +42,8 @@ const zh_offline = "unshare -n " ++ zh;
 
 /// The result digest of the first build, kept between the checks of the part.
 var digest_storage: [67]u8 = undefined;
+/// The release `--version` printed, copied because the next command reuses the output buffer.
+var version_storage: [32]u8 = undefined;
 
 fn run(session: *Session, out: *Io.Writer, command: []const u8, want: u8) !H.SplitResult {
     return state.expect_long_split(session, out, command, want, short_s);
@@ -79,9 +81,12 @@ fn build_and_sign(session: *Session, out: *Io.Writer) ![]const u8 {
     const signed = zh ++ " sign {s} --passphrase-file " ++ pass_file;
     _ = try run(session, out, try fmt(session, signed, .{digest}), 0);
     const shown = try run(session, out, zh ++ " --version", 0);
-    const version = checks.version_of(shown.streams.stdout) catch |err| {
+    const printed = checks.version_of(shown.streams.stdout) catch |err| {
         return fail_step(out, step, "expected --version to print the release", err);
     };
+    if (printed.len > version_storage.len) return fail_step(out, step, "version too long", error.ProvenanceWrong);
+    @memcpy(version_storage[0..printed.len], printed);
+    const version = version_storage[0..printed.len];
     const as_json = try fmt(session, "{s} inspect --provenance {s} --output json", .{ zh, digest });
     const prov = try run(session, out, as_json, 0);
     checks.check_provenance(arena, prov.streams.stdout, digest, version) catch |err| {
