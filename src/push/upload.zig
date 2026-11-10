@@ -91,14 +91,21 @@ pub const Options = struct {
     mount_from: []const u8 = "",
     /// The size of a piece; tests make it small.
     chunk_bytes: u32 = constants.push_chunk_bytes,
-    /// The user and password for a registry that asks; null for none (a registry that asks is then
-    /// E0552). The caller owns them and wipes them.
-    credentials: ?*const credentials_mod.Credentials = null,
+    /// What a registry that asks gets: at most one credential, by type (a registry that asks
+    /// when this is `none` is E0552).
+    credential: Credential = .none,
+};
+
+/// The one credential a push may carry. The caller owns the memory and wipes it.
+pub const Credential = union(enum) {
+    none,
+    /// The user and password of `--username`, for any registry.
+    basic: *const credentials_mod.Credentials,
     /// For a private Amazon ECR registry: the authorization token AWS issued (the base64 of
     /// `AWS:<password>`), sent as `Basic` to the registry's own origin and nowhere else. The
-    /// caller fetched it (`push/ecr.zig`), owns it and wipes it; the push copies it into its
-    /// workspace and zeroes that copy when it ends. Empty for any other registry.
-    ecr_token: []const u8 = "",
+    /// caller fetched it (`push/ecr.zig`); the push copies it into its workspace and zeroes that
+    /// copy when it ends. A host that is not private ECR is never handed it.
+    ecr: []const u8,
 };
 
 /// The memory a push works in, owned by the caller (about 140 KiB). What a credential touches in
@@ -254,7 +261,10 @@ pub fn push(
 /// Takes the ECR token the caller passed, into the workspace, as the Basic credential. Only for
 /// a private ECR host: any other registry is never handed an AWS token, whatever was passed.
 fn use_ecr_token(state: *Push) void {
-    const token = state.options.ecr_token;
+    const token = switch (state.options.credential) {
+        .ecr => |text| text,
+        else => return,
+    };
     if (token.len == 0) return;
     comptime assert(constants.aws_ecr_token_bytes_max <= constants.push_basic_bytes_max);
     assert(token.len <= constants.push_basic_bytes_max);
@@ -481,8 +491,9 @@ fn authenticate(state: *Push, diag: *Diag) Error!Next {
     const host = state.destination.origin.host;
     const repository = state.destination.repository;
     if (state.ecr) return .give_up; // The token was sent, and refused.
-    const credentials = state.options.credentials orelse {
-        return no_credentials(host, repository, diag);
+    const credentials = switch (state.options.credential) {
+        .basic => |given| given,
+        .none, .ecr => return no_credentials(host, repository, diag),
     };
     if (!credentials.present()) return no_credentials(host, repository, diag);
     const header = state.ws.head.www_authenticate.slice() orelse "";

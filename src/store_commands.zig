@@ -43,6 +43,7 @@ const peer = @import("trust/peer.zig");
 const image_find = @import("store/image_find.zig");
 const push_ecr = @import("push/ecr.zig");
 const push_run = @import("push/run.zig");
+const upload = @import("push/upload.zig");
 const pull_aws = @import("pull_aws.zig");
 const export_mod = @import("push/export.zig");
 const pack = @import("push/pack.zig");
@@ -1260,19 +1261,16 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
     var credentials = push_credentials.Credentials.empty();
     defer credentials.wipe();
     try read_credentials(job, &credentials, diag);
-    const given: ?*const push_credentials.Credentials =
-        if (credentials.present()) &credentials else null;
     defer job.workspace.push_aws.wipe();
     defer job.workspace.push_ecr.wipe();
-    const ecr_token = try ecr_token_for(job, &destination, given, diag);
+    const credential = try push_credential(job, &destination, &credentials, diag);
     try push_run.push_operand(
         &store,
         workspace,
         wire,
         operand,
         &destination,
-        given,
-        ecr_token,
+        credential,
         &pushed,
         diag,
     );
@@ -1292,23 +1290,25 @@ fn do_push(job: *Job, diag: *Diag) Error!void {
     warn_tag_not_recorded(job, &pushed);
 }
 
-/// The ECR authorization token for a push to a private ECR registry, empty for any other. An
-/// explicit `--username` wins: the user chose to send that password, so AWS is not asked.
-fn ecr_token_for(
+/// The one credential a push carries: the user's `--username` password when given (the user chose
+/// to send it, so AWS is not asked), else the ECR authorization token for a private ECR registry,
+/// else none.
+fn push_credential(
     job: *const Job,
     destination: *const reference_mod.Reference,
-    given: ?*const push_credentials.Credentials,
+    given: *const push_credentials.Credentials,
     diag: *Diag,
-) Error![]const u8 {
+) Error!upload.Credential {
     const registry = destination.registry();
     job.workspace.push_ecr.reset();
-    if (given != null or !push_ecr.needs_aws(registry)) return "";
+    if (given.present()) return .{ .basic = given };
+    if (!push_ecr.needs_aws(registry)) return .none;
     const aws = pull_aws.credentials_for(job.host, registry, &job.workspace.push_aws, diag) catch {
         return error.Failed;
     };
     const repository = destination.repository();
     try push_ecr.authorize(job.host, aws, registry, repository, &job.workspace.push_ecr, diag);
-    return job.workspace.push_ecr.text();
+    return .{ .ecr = job.workspace.push_ecr.text() };
 }
 
 /// Reads the password for `--username` from its file or standard input (E0558 when unusable).

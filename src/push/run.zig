@@ -176,8 +176,7 @@ pub fn push_operand(
     wire: net.Net,
     operand: []const u8,
     destination: *const reference_mod.Reference,
-    credentials: ?*const credentials_mod.Credentials,
-    ecr_token: []const u8,
+    credential: upload.Credential,
     out: *Pushed,
     diag: *Diag,
 ) Error!void {
@@ -189,8 +188,7 @@ pub fn push_operand(
     const from = mount_holder(store, &made, destination, &holder);
     const options: upload.Options = .{
         .mount_from = from,
-        .credentials = credentials,
-        .ecr_token = ecr_token,
+        .credential = credential,
     };
     const target = upload.Destination.of(destination);
     upload.push(store, &ws.upload, wire, target, &made, options, &out.report, diag) catch
