@@ -769,6 +769,37 @@ pub const VerifyBroken = struct {
     errno: u16 = 0,
 };
 
+fn verify_fix(diag: *Diag, cause: VerifyCause, operand: []const u8, policy: bool) void {
+    switch (cause) {
+        .no_record => diag.fix_with(
+            "sign it, or import the signer's bundle:",
+            "zbx sign {s}",
+            .{operand},
+        ),
+        .no_trusted_signer => if (policy) diag.fix(.{
+            .sentence = "list the signer's key in the policy file, or remove the file",
+        }) else diag.fix(.{
+            .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
+                "or --public <text>",
+        }),
+        .tree_missing, .tree_damaged, .tree_too_large, .input_damaged => diag.fix(.{
+            .sentence = "run 'zbx store verify', remove what is damaged, then pull or build again",
+        }),
+        .tree_unreadable => diag.fix(.{
+            .sentence = "check the store's permissions and disk, then run it again",
+        }),
+        .no_provenance, .provenance_other => diag.fix(.{
+            .sentence = "build it with this zbx and sign the result with 'zbx sign <result>'",
+        }),
+        .input_absent => diag.fix(.{
+            .sentence = "pull or build the input again, or leave out --strict",
+        }),
+        .build_file_changed => diag.fix(.{
+            .sentence = "restore the file that was signed, or build and sign again",
+        }),
+    }
+}
+
 /// ZBX-E0908: `zbx verify` found a broken link; links before it held.
 pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
     assert(diag.code == null);
@@ -818,34 +849,7 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
     }
     diag.context("arg", "{s}", .{operand});
     diag.context("link", "{d}", .{@backingInt(what.link)});
-    switch (what.cause) {
-        .no_record => diag.fix_with(
-            "sign it, or import the signer's bundle:",
-            "zbx sign {s}",
-            .{operand},
-        ),
-        .no_trusted_signer => if (policy.len > 0) diag.fix(.{
-            .sentence = "list the signer's key in the policy file, or remove the file",
-        }) else diag.fix(.{
-            .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
-                "or --public <text>",
-        }),
-        .tree_missing, .tree_damaged, .tree_too_large, .input_damaged => diag.fix(.{
-            .sentence = "run 'zbx store verify', remove what is damaged, then pull or build again",
-        }),
-        .tree_unreadable => diag.fix(.{
-            .sentence = "check the store's permissions and disk, then run it again",
-        }),
-        .no_provenance, .provenance_other => diag.fix(.{
-            .sentence = "build it with this zbx and sign the result with 'zbx sign <result>'",
-        }),
-        .input_absent => diag.fix(.{
-            .sentence = "pull or build the input again, or leave out --strict",
-        }),
-        .build_file_changed => diag.fix(.{
-            .sentence = "restore the file that was signed, or build and sign again",
-        }),
-    }
+    verify_fix(diag, what.cause, operand, policy.len > 0);
     assert(diag.code.? == .E0908);
 }
 
