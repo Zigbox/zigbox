@@ -221,6 +221,9 @@ pub fn step_failed(
         .start_pasta => pasta_not_started(diag, plan, operation, failure),
         .await_pasta => pasta_not_ready(host, diag, plan, operation, failure, details.pasta),
         .exec => command_failed(diag, plan, info, failure),
+        .make_listener, .send_listener, .receive_listener => {
+            listener_failed(diag, operation, plan.listen_port, failure);
+        },
         .mount_overlay => overlay_failed(diag, operation, failure),
         .restrict_capabilities,
         .clear_ambient,
@@ -1178,6 +1181,69 @@ pub fn pasta_too_old(diag: *Diag, path: []const u8, version: []const u8) void {
         .command = "sudo " ++ pasta_install,
     });
     assert(diag.code.? == .E0602);
+}
+
+/// ZBX-E0608: the listener `--listen` asked for could not be made inside the container (the
+/// socket, the bind or the listen), or taken out of it.
+fn listener_failed(diag: *Diag, operation: []const u8, port: u16, failure: Failure) void {
+    assert(diag.code == null);
+    assert(port > 0);
+    diag.raise(.E0608);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    diag.context("listen", "127.0.0.1:{d}", .{port});
+    diag.fix(.{ .sentence = "see what this host allows:", .command = "zbx doctor" });
+    assert(diag.code.? == .E0608);
+}
+
+/// ZBX-E0606: `--listen` with a network other than `none`, or without `--listen-send`.
+pub fn listen_options_invalid(diag: *Diag, problem: spec.ListenOptionsProblem) void {
+    assert(diag.code == null);
+    diag.raise(.E0606);
+    diag.while_("checking --listen", .{});
+    switch (problem) {
+        .network_not_none => diag.cause("--listen is for a container with no network of its own " ++
+            "(--net none); a container with a network reaches the host without it", .{}),
+        .no_listen_send => diag.cause("--listen has nowhere to hand the listener: " ++
+            "--listen-send FD is missing", .{}),
+    }
+    diag.fix(.{
+        .sentence = "hand the listener to the Unix socket you pass down as descriptor 3:",
+        .command = "zbx run --listen 127.0.0.1:8080 --listen-send 3 alpine -- sh",
+        .template = true,
+    });
+    assert(diag.code.? == .E0606);
+}
+
+/// ZBX-E0607: a `--listen` value that is not an IPv4 loopback address and a port.
+pub fn listen_value_invalid(diag: *Diag, value: []const u8, problem: spec.ListenProblem) void {
+    assert(diag.code == null);
+    assert(value.len <= constants.arg_bytes_max);
+    diag.raise(.E0607);
+    diag.while_("checking --listen", .{});
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, value);
+    diag.cause("--listen '{s}': {s}", .{ echo, problem.sentence() });
+    diag.fix(.{
+        .sentence = "give the loopback address and a port:",
+        .command = "zbx run --listen 127.0.0.1:8080 --listen-send 3 alpine -- sh",
+        .template = true,
+    });
+    assert(diag.code.? == .E0607);
+}
+
+/// ZBX-E0609: the listener could not be handed on, and the container was stopped.
+pub fn listen_send_failed(diag: *Diag, descriptor: u32, cause: []const u8, stopped: bool) void {
+    assert(diag.code == null);
+    assert(cause.len > 0);
+    diag.raise(.E0609);
+    diag.while_("handing the listener to --listen-send", .{});
+    diag.cause("descriptor {d}: {s}", .{ descriptor, cause });
+    if (stopped) diag.cause("the container was stopped", .{});
+    diag.context("listen-send", "{d}", .{descriptor});
+    diag.fix(.{
+        .sentence = "pass one end of a Unix stream socketpair as that descriptor",
+    });
+    assert(diag.code.? == .E0609);
 }
 
 /// ZBX-E0605: a host port below `net.ipv4.ip_unprivileged_port_start`, refused before anything

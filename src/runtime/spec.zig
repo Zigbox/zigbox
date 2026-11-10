@@ -166,6 +166,83 @@ pub fn publish_problem(network: Network, list: []const Publish) ?PublishListProb
     return null;
 }
 
+/// The one `--listen ADDR:PORT`: a TCP listener the container's loopback gets (M8b). The address
+/// is always IPv4 loopback, so only the port is kept.
+pub const Listen = struct {
+    port: u16,
+
+    /// "127.0.0.1:PORT", the way it is shown in records and `zbx ps`.
+    pub fn text(listen: Listen, buffer: *[listen_text_bytes_max]u8) []const u8 {
+        assert(listen.port > 0);
+        assert(buffer.len == listen_text_bytes_max);
+        // Cannot fail: the address and a port of at most five digits fit the buffer.
+        const result = std.fmt.bufPrint(buffer, "{s}:{d}", .{ listen_address, listen.port }) catch unreachable;
+        assert(result.len > listen_address.len + 1);
+        return result;
+    }
+};
+
+pub const listen_address = "127.0.0.1";
+pub const listen_text_bytes_max: u32 = constants.listen_text_bytes_max;
+
+/// Why a `--listen` value is refused (ZBX-E0607).
+pub const ListenProblem = enum {
+    /// No colon between an address and a port.
+    not_address_colon_port,
+    /// Not the IPv4 loopback address, written exactly "127.0.0.1".
+    not_loopback,
+    /// The port is not a number.
+    port_not_a_number,
+    /// The port is 0 or above 65535.
+    port_out_of_range,
+
+    pub fn sentence(problem: ListenProblem) []const u8 {
+        const result: []const u8 = switch (problem) {
+            .not_address_colon_port => "it is not ADDR:PORT, an address and a port with a colon",
+            .not_loopback => "the address is not 127.0.0.1, the only address a listener may have",
+            .port_not_a_number => "the port is not a number",
+            .port_out_of_range => "the port is outside 1 to 65535",
+        };
+        assert(result.len > 0);
+        assert(result[result.len - 1] != '.');
+        return result;
+    }
+};
+
+pub const ListenParse = union(enum) {
+    ok: Listen,
+    problem: ListenProblem,
+};
+
+/// Reads "127.0.0.1:PORT". Only what `Listen.text` writes parses.
+pub fn parse_listen(value: []const u8) ListenParse {
+    assert(value.len <= constants.arg_bytes_max);
+    const colon = std.mem.lastIndexOfScalar(u8, value, ':') orelse {
+        return .{ .problem = .not_address_colon_port };
+    };
+    if (!std.mem.eql(u8, value[0..colon], listen_address)) return .{ .problem = .not_loopback };
+    const port = switch (parse_port(value[colon + 1 ..])) {
+        .port => |port| port,
+        .problem => |problem| return .{ .problem = switch (problem) {
+            .out_of_range => .port_out_of_range,
+            else => .port_not_a_number,
+        } },
+    };
+    assert(port > 0);
+    return .{ .ok = .{ .port = port } };
+}
+
+/// What is wrong with a `--listen` given the rest of the run (ZBX-E0606): it needs `--net none`
+/// and a descriptor to hand the listener to.
+pub const ListenOptionsProblem = enum { network_not_none, no_listen_send };
+
+pub fn listen_options_problem(network: Network, send_given: bool) ?ListenOptionsProblem {
+    if (network != .none) return .network_not_none;
+    if (!send_given) return .no_listen_send;
+    assert(network == .none);
+    return null;
+}
+
 /// What a policy statement about the run's tree may name: nothing (a bare tree), the build
 /// result the run named, or the image manifest it resolved to. The digests are raw bytes.
 pub const Binding = union(enum) {
@@ -214,6 +291,8 @@ pub const Spec = struct {
     network: Network = .none,
     /// The host's TCP ports forwarded to the container's (`--publish`); only with `user`.
     publish: []const Publish = &.{},
+    /// A listener on the container's loopback, handed to the caller (`--listen`); only `none`.
+    listen: ?Listen = null,
     /// The state volumes it mounts (`--state`): each made on first use, held for the run's whole
     /// life (one writer, or readers), and named in the run record.
     state: []const volume.Mount = &.{},

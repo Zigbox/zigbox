@@ -330,6 +330,15 @@ pub const Session = struct {
         return taken;
     }
 
+    /// Closes the listener if the caller never took it (a run that ends, a library caller that
+    /// does not serve it), so nothing outlives the run.
+    pub fn release_listener(session: *Session) void {
+        const handle = session.listener orelse return;
+        session.host.close(handle);
+        session.listener = null;
+        assert(session.listener == null);
+    }
+
     fn make_output_pipes(session: *Session) host_mod.Error!void {
         assert(session.output_write[0] == null);
         assert(session.capture);
