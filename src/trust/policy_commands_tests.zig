@@ -71,6 +71,10 @@ fn sign_as(name: []const u8) !void {
 }
 
 fn write_trusting(name: []const u8) !void {
+    try write_policy(name, false);
+}
+
+fn write_policy(name: []const u8, provenance: bool) !void {
     var paths: key_store.Paths = undefined;
     try testing.expect(key_store.locate(sim.interface(), &paths));
     var failure: key_store.Failure = undefined;
@@ -81,8 +85,8 @@ fn write_trusting(name: []const u8) !void {
     const text = try std.fmt.bufPrint(
         &buffer,
         ".{{ .version = 1, .keys = .{{ .{{ .name = \"{s}\", .public = \"{s}\" }} }}, " ++
-            ".require_signature = true }}",
-        .{ name, public },
+            ".require_signature = true, .require_provenance = {} }}",
+        .{ name, public, provenance },
     );
     if (files.kind_of(policy_path) != null) files.remove_path(policy_path);
     files.put_file(policy_path, 0o644, text);
@@ -173,4 +177,19 @@ test "the command line: a subcommand is needed and only check exists" {
     try testing.expectEqual(@as(u8, 1), command(&.{ "policy", "show" }));
     try testing.expectEqual(@as(u8, 1), command(&.{ "policy", "check", "a", "b" }));
     try testing.expect(constants.exit_ok == 0);
+}
+
+test "the preview refuses a tree-only signature when the policy requires provenance" {
+    // Goal: the preview agrees with the gate (E0906). Method: a trusted signature on the tree
+    // passes `require_signature` and fails `require_provenance`, as in `zbx run`.
+    try start();
+    try write_policy("ci", true);
+    try sign_as("ci");
+    const text = tree.text();
+    var zbuf: [67:0]u8 = undefined;
+    const operand = sentinel(&text, &zbuf);
+    try testing.expectEqual(@as(u8, 1), command(&.{ "policy", "check", operand }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "verdict: not met") != null);
+    try write_policy("ci", false);
+    try testing.expectEqual(@as(u8, 0), command(&.{ "policy", "check", operand }));
 }

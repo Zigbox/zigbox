@@ -90,7 +90,9 @@ fn judge_one(
         .binding = asked.binding,
         .derived = asked.derived,
     };
-    const met = verdict.judge(&work.envelope, &loaded.policy, record, have, report);
+    // The gate's own rule: a signature is not enough when the policy asks for provenance too.
+    const met = verdict.judge(&work.envelope, &loaded.policy, record, have, report) and
+        verdict.provenance_met(&loaded.policy, report);
     return if (met) .met else .refused;
 }
 
