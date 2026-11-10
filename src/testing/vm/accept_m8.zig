@@ -62,6 +62,9 @@ const lib =
     \\z() { runuser -u demo -- env $B $X $Z "$@"; }
     \\m() { runuser -u demo -- env $B $Z "$@"; }
     \\w() { runuser -u demo2 -- env $B HOME=/home/demo2 XDG_RUNTIME_DIR=/run/user/1001 $Z "$@"; }
+    \\g() { h=$(z store gc 2>&1 | sed -n 's/^confirm with: zbx store gc --confirm //p')
+    \\  [ -n "$h" ] || f "no gc plan"
+    \\  z store gc --confirm "$h" >/dev/null 2>&1 || f "gc confirm"; }
     \\code() { grep -q "ZBX-$1" "$2" || { cat "$2"; f "expected $1"; }; }
     \\policy() { printf '.{ .version = 1, .keys = .{ .{ .name = "ci", .public = "%s" } },\n' \
     \\  "$1" >"$2"
@@ -93,7 +96,7 @@ const a1 =
     \\grep -q '"allowed":false' /tmp/a-check || { tail -c 500 /tmp/a-check; f "policy check"; }
     \\policy "$pub" $P false
     \\z store rm "$t" 2>/tmp/err-a5 || f "store rm"
-    \\z store gc 2>>/tmp/err-a5 || f "store gc"
+    \\g
     \\z pull alpine:3.20 >/dev/null 2>>/tmp/err-a5 || f "re-pull"
     \\z run alpine:3.20 -- true 2>/tmp/err-a6 || f "the signature did not survive the re-pull"
 ;
@@ -110,7 +113,7 @@ const a2 =
     \\n() { find /home/demo/a -path '*/trust/signatures/*' -type f | wc -l; }
     \\[ "$(n)" = 2 ] || f "expected two records, have $(n)"
     \\z store rm "$t" 2>>/tmp/err-a7 || f "store rm"
-    \\z store gc 2>>/tmp/err-a7 || f "store gc"
+    \\g
     \\z trust prune --output json >/tmp/a-dry 2>>/tmp/err-a7 || f "prune"
     \\grep -q '"dry_run":true' /tmp/a-dry || f "prune is not a dry run"
     \\grep -q '"orphans":1' /tmp/a-dry || { cat /tmp/a-dry; f "expected one orphan"; }
