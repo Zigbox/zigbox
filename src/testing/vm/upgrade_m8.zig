@@ -253,6 +253,8 @@ const policy_path = config_dir ++ "/zbx/policy.zon";
 
 /// A policy that requires a signature refuses what the old binary pulled, in one line.
 fn old_image_under_policy(session: *Session, out: *Io.Writer) !void {
+    const mkdir = "mkdir -p " ++ config_dir ++ "/zbx && chown -R demo " ++ config_dir;
+    _ = try session.run(mkdir, limits.command_timeout_kvm_s);
     _ = try expect_exit(session, out, step, zc ++ " key new m8up --no-passphrase", 0);
     const shown = try expect_exit(session, out, step, zc ++ " --output json key show m8up", 0);
     const public = m8.public_of_key_show(shown.streams.stdout) orelse {
@@ -261,8 +263,6 @@ fn old_image_under_policy(session: *Session, out: *Io.Writer) !void {
     const text = try common.format(session, ".{{ .version = 1, .keys = .{{ .{{ .name = " ++
         "\"up\", .public = \"{s}\" }} }},\n  .require_signature = true," ++
         " .require_provenance = false }}\n", .{public});
-    const mkdir = "mkdir -p " ++ config_dir ++ "/zbx && chown -R demo " ++ config_dir;
-    _ = try session.run(mkdir, limits.command_timeout_kvm_s);
     try H.put_file(session, policy_path, text);
     const refused = try common.run_shown(session, out, zc ++ " run " ++ alpine ++ " -- true");
     _ = try session.run("rm -f " ++ policy_path, limits.command_timeout_kvm_s);
