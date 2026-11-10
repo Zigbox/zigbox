@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b
 #
 # Environment: EVENT (github.event_name), HEAD_REF (the PR's head branch), LABELS (the PR's
 # labels, space separated). See docs/decisions/2026-11-04-ci-affected-demos.md.
@@ -11,7 +11,7 @@
 # The rules err toward running. A path no rule below names runs every demo.
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8)
+demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b)
 declare -A want=()
 
 index_of() {
@@ -56,7 +56,7 @@ classify() {
     # and the site, and tests of the code (they never reach the zbx binary a demo runs).
     docs/demos/m*.md)
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
-      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8) want_one "$suffix" ;; esac
+      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m8b) want_one "$suffix" ;; esac
       return ;;
     src/mac/* | src/package.zig | src/package_*.zig | src/package/* | src/macos_main.zig | src/mac_release.zig | src/testing/mac* | packaging/* | \
       src/testing/vm/*top20* | src/testing/vm/*z7* | LICENSE | docs/* | site/* | *.md) return ;;
@@ -64,6 +64,7 @@ classify() {
       src/size_check.zig | src/testdata/* | src/*/fixtures/*) return ;;
     # A harness file named for a demo (checks_m3.zig, upgrade_m6b.zig, m7_project/): that demo and
     # every later one, which repeat its parts. The files named for no demo are shared.
+    src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;
     src/testing/vm/*_m6b.zig) want_from m6b; return ;;
     src/testing/vm/*_m6.zig) want_from m6; return ;;
