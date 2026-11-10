@@ -148,8 +148,7 @@ const b1 =
     \\echo "$p" | grep -q '^sha256:' || f "push printed $p"
     \\m push "$d" localhost:5000/m8/hello:demo >/dev/null 2>/tmp/err-a3 || f "second push"
     \\q=$(m inspect --provenance "$d" --output json)
-    \\e='s/^{"schema":"[^"]*","result":"[^"]*","tree":"\\(b3:[0-9a-f]*\\)".*/\\1/p'
-    \\t=$(echo "$q" | sed -n "$e")
+    \\t=$(echo "$q" | grep -o '"tree":"b3:[0-9a-f]*' | head -1 | cut -d'"' -f4)
     \\[ -n "$t" ] || f "no tree in the provenance"
     \\m trust export "$t" >/tmp/m8-bundle 2>/tmp/err-a4 || f export
     \\chmod 644 /tmp/m8-bundle
@@ -159,7 +158,7 @@ const b1 =
 
 const b2 =
     \\. /tmp/m8a-lib.sh
-    \\pub=$(m --output json key show demo | sed -n 's/.*"public":"\\([^"]*\\)".*/\\1/p')
+    \\pub=$(m --output json key show demo | grep -o '"public":"[^"]*' | cut -d'"' -f4)
     \\d=$(cat /tmp/m8-digest)
     \\r=localhost:5000/m8/hello:demo
     \\mkdir -p /home/demo2/.config/zbx /home/demo2/p && chown -R demo2 /home/demo2
