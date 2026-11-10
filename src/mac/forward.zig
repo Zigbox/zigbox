@@ -156,6 +156,9 @@ pub const Command = struct {
     json: bool,
     /// A `run` or an `exec` ends with 125 when this process loses the connection; else with 2.
     is_run: bool,
+    /// False for a command that could ask for a passphrase: the guest then sees no terminal and
+    /// refuses with its own one-line ZBX-E0911, rather than reading a passphrase through the relay.
+    terminal: bool = true,
 };
 
 const Frames = struct {
@@ -241,6 +244,9 @@ const Streams = struct {
     pty: bool,
     stderr_pipe: bool,
 
+    /// What a command with `terminal` false sees: pipes only, whatever this process has.
+    const pipes: Streams = .{ .pty = false, .stderr_pipe = true };
+
     fn of_this_process() Streams {
         const pty = c.isatty(0) == 1 and c.isatty(1) == 1;
         return .{ .pty = pty, .stderr_pipe = !pty or c.isatty(2) != 1 };
@@ -281,7 +287,7 @@ pub fn run(ctx: *const commands.Context, given: *const Command, diag: *Diag) Err
     var reserved: ports.PortSet = .{};
     defer if (reserved.count > 0) release_ports(ctx, &reserved);
     try reserve_ports(ctx, &command, &reserved, diag);
-    const streams = Streams.of_this_process();
+    const streams = if (command.terminal) Streams.of_this_process() else Streams.pipes;
     const payload = start_frame(&command, streams, platform) orelse {
         diag.raise(.E0008);
         diag.while_("reading the command line", .{});
@@ -500,7 +506,12 @@ fn take_platform(given: *const Command, platform: *?[]const u8, diag: *Diag) Err
         }
     }
     assert(kept <= given.words.len);
-    return .{ .words = frames.arguments[0..kept], .json = given.json, .is_run = given.is_run };
+    return .{
+        .words = frames.arguments[0..kept],
+        .json = given.json,
+        .is_run = given.is_run,
+        .terminal = given.terminal,
+    };
 }
 
 /// A linux/amd64 command needs Rosetta in the machine; any other platform does not.
@@ -644,6 +655,22 @@ fn read_exact(descriptor: i32, buffer: []u8) bool {
         done += @intCast(count);
     }
     return true;
+}
+
+test "a command without a terminal is all pipes, and take_platform keeps the field" {
+    try std.testing.expect(!Streams.pipes.pty);
+    try std.testing.expect(Streams.pipes.stderr_pipe);
+    const given: Command = .{
+        .words = &.{"key"},
+        .json = false,
+        .is_run = false,
+        .terminal = false,
+    };
+    var platform: ?[]const u8 = null;
+    var diag: Diag = undefined;
+    diag.reset();
+    const kept = try take_platform(&given, &platform, &diag);
+    try std.testing.expect(!kept.terminal);
 }
 
 test "a Linux signal number is given for the signals zbx forwards, and none for the others" {
