@@ -1,0 +1,8 @@
+error[ZBX-E0535]: the ECR registry did not accept its authorization token
+  cause  123456789012.dkr.ecr.us-east-1.amazonaws.com answered 401 to the
+         authorization token AWS had just given
+  host   123456789012.dkr.ecr.us-east-1.amazonaws.com
+  fix    check that the registry's region is the one the token was asked for
+         run the command again: the token lasts twelve hours
+  more   zbx explain E0535
+  docs   https://zigbox.github.io/zigbox/errors/E0535.html

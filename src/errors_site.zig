@@ -218,6 +218,12 @@ pub fn render_page(code: codes.Code, buffer: []u8) []const u8 {
     return page;
 }
 
+comptime {
+    // The index lists every code in a page buffer of `errors_page_bytes_max`.
+    const rows = codes.registry.len * constants.errors_index_row_bytes_max;
+    assert(constants.errors_index_head_bytes_max + rows <= constants.errors_page_bytes_max);
+}
+
 /// The index: every code, its summary, blame and a link to its page.
 pub fn render_index(buffer: []u8) []const u8 {
     assert(buffer.len >= constants.errors_page_bytes_max);
@@ -229,6 +235,7 @@ pub fn render_index(buffer: []u8) []const u8 {
     emit(&writer, "<code>zbx explain &lt;code&gt;</code> prints the same text offline.</p>\n");
     emit(&writer, "<table>\n<tr><th>Code</th><th>Summary</th><th>Blame</th></tr>\n");
     for (codes.registry) |entry| {
+        const row_start = writer.end;
         var file_buffer: [16]u8 = undefined;
         const file = page_name(&file_buffer, entry.code);
         emit_format(&writer, "<tr><td class=\"code\"><a href=\"{s}\">{s}</a></td><td>", .{
@@ -236,6 +243,7 @@ pub fn render_index(buffer: []u8) []const u8 {
         });
         write_escaped(&writer, entry.summary);
         emit_format(&writer, "</td><td>{s}</td></tr>\n", .{@tagName(entry.blame)});
+        assert(writer.end - row_start <= constants.errors_index_row_bytes_max);
     }
     emit(&writer, "</table>\n");
     emit(&writer, foot);

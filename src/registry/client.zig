@@ -36,6 +36,19 @@ pub const Workspace = struct {
     arena: [constants.registry_json_arena_bytes]u8,
     token: [constants.registry_token_bytes_max]u8,
     token_body: [constants.registry_token_response_bytes_max]u8,
+    /// The ECR authorization token (base64 of `AWS:<password>`), sent as `Basic` to the registry's
+    /// own origin. Secret: `Workspace.wipe` zeroes it.
+    basic: [constants.aws_ecr_token_bytes_max]u8,
+
+    /// Zeroes every secret in it: the bearer token, the token service's answer (which also holds
+    /// the ECR API's answer) and the ECR authorization token.
+    pub fn wipe(workspace: *Workspace) void {
+        std.crypto.secureZero(u8, &workspace.token);
+        std.crypto.secureZero(u8, &workspace.token_body);
+        std.crypto.secureZero(u8, &workspace.basic);
+        assert(workspace.basic[0] == 0);
+        assert(workspace.token_body[0] == 0);
+    }
 };
 
 /// The failure is in the `Diag`.
@@ -65,6 +78,8 @@ pub const Client = struct {
     fallback: ?manifest.Architecture,
     machine: []const u8,
     token_len: u32,
+    /// The bytes of `workspace.basic` in use; 0 for a registry that is not ECR.
+    basic_len: u32,
     /// The mirrors for docker.io, comma separated (`ZBX_REGISTRY_MIRRORS`); empty for none.
     mirrors: []const u8,
     /// The places the last resolve could ask, for the blobs.
@@ -86,10 +101,17 @@ pub const Client = struct {
             .fallback = null,
             .machine = machine,
             .token_len = 0,
+            .basic_len = 0,
             .mirrors = "",
             .places = undefined,
             .winner = 0,
         };
+    }
+
+    fn basic(client: *const Client) []const u8 {
+        assert(client.basic_len <= constants.aws_ecr_token_bytes_max);
+        assert(client.workspace.basic.len == constants.aws_ecr_token_bytes_max);
+        return client.workspace.basic[0..client.basic_len];
     }
 
     fn token(client: *const Client) []const u8 {
@@ -345,7 +367,7 @@ fn fetch_manifest(
         .{ reference.repository(), name },
     ) catch unreachable; // The storage holds the longest repository and name.
     var sink: net.BufferSink = .{ .buffer = &client.workspace.body };
-    const had_token = client.token_len > 0;
+    const had_token = client.token_len > 0 or client.basic_len > 0;
     const receiver = Receiver.of_buffer(&sink);
     try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     if (head.status == 401 and !had_token) {
@@ -353,7 +375,8 @@ fn fetch_manifest(
         try authenticate(client, reference, origin, head, diag);
         try request_following(client, origin, target, manifest.accept, true, receiver, head, diag);
     }
-    try check_status(reference, origin, target, head, diag);
+    const seen: Seen = .{ .basic = client.basic_len > 0, .body = sink.bytes() };
+    try check_status(reference, origin, target, head, seen, diag);
     assert(head.status == 200);
     return verify_manifest(reference, name, head, sink.bytes(), diag);
 }
@@ -390,27 +413,56 @@ fn verify_manifest(
     return .{ .digest = actual, .body_len = @intCast(body.len) };
 }
 
+/// What a refusal's mapping knows of the request: whether it carried the ECR `Basic` credential,
+/// and the answer's body (empty where the caller has none), which is read for the registry's
+/// error code and never kept.
+const Seen = struct {
+    basic: bool = false,
+    body: []const u8 = "",
+};
+
+/// Whether the registry's error body names `NAME_UNKNOWN`: the repository does not exist.
+fn names_unknown(body: []const u8) bool {
+    assert(body.len <= constants.registry_manifest_bytes_max);
+    return std.mem.indexOf(u8, body, "NAME_UNKNOWN") != null;
+}
+
 /// Maps the status of the answer to the manifest request. Anything but 200 is a refusal.
 fn check_status(
     reference: *const Reference,
     origin: Origin,
     target: []const u8,
     head: *const net.Head,
+    seen: Seen,
     diag: *Diag,
 ) Error!void {
     assert(target.len > 0);
     assert(diag.code == null);
     var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
     const url = url_of(&url_storage, origin, target);
+    const registry = reference.registry();
+    const repository = reference.repository();
+    // The ECR credential is the registry's: an answer from the host a redirect led to (S3 for a
+    // layer) says nothing of the AWS identity, so it is never read as the registry's refusal.
+    const basic = seen.basic and !head.elsewhere;
+    if (head.elsewhere and head.status == 403) {
+        diagnose.http_error(diag, head.status, url, "the host it redirects to refused the request");
+        return error.Failed;
+    }
     switch (head.status) {
         200 => return,
-        401 => {
-            const registry = reference.registry();
-            diagnose.auth_refused(diag, .token_rejected, registry, reference.repository());
-        },
+        401 => if (basic) {
+            diagnose.ecr_token_rejected(diag, registry);
+        } else diagnose.auth_refused(diag, .token_rejected, registry, repository),
+        403 => if (basic) {
+            const blob = std.mem.indexOf(u8, target, "/blobs/") != null;
+            diagnose.ecr_repository_denied(diag, registry, repository, blob);
+        } else diagnose.http_error(diag, head.status, url, null),
         404 => {
             const name = target[std.mem.lastIndexOf(u8, target, "/").? + 1 ..];
-            diagnose.not_found(diag, reference.registry(), reference.repository(), name);
+            if (basic and names_unknown(seen.body)) {
+                diagnose.ecr_repository_missing(diag, registry, repository);
+            } else diagnose.not_found(diag, registry, repository, name);
         },
         429 => diagnose.rate_limited(diag, url, head.retry_after.slice()),
         else => diagnose.http_error(diag, head.status, url, null),
@@ -547,6 +599,35 @@ const Receiver = struct {
     }
 };
 
+/// The request for one hop. The credential goes only to the origin the client started with
+/// (`own`): a hop elsewhere (ECR sends blobs to S3, which refuses any Authorization) gets neither.
+fn request_of(
+    client: *const Client,
+    own: bool,
+    at: Origin,
+    target: []const u8,
+    accept: []const u8,
+    receiver: Receiver,
+) net.Request {
+    assert(target.len > 0);
+    assert(at.port != 0);
+    const basic: []const u8 = if (own) client.basic() else "";
+    return .{
+        .scheme = at.scheme,
+        .host = at.host,
+        .port = at.port,
+        .target = target,
+        .accept = accept,
+        .bearer = if (own) client.token() else "",
+        .basic = basic,
+        .body_bytes_max = receiver.body_bytes_max,
+        .idle_timeout_ms = constants.net_idle_timeout_ms,
+        .total_timeout_ms = receiver.total_timeout_ms,
+        .range_from = receiver.range_from,
+        .secret = basic.len > 0, // An ECR answer is held under the same care as its token.
+    };
+}
+
 /// One GET that follows redirects. The token goes only to the origin the client started with
 /// (`use_token`, and the same origin); a hop to another host drops it.
 fn request_following(
@@ -569,19 +650,8 @@ fn request_following(
     var current_target = target;
     for (0..constants.registry_redirects_max + 1) |hop| {
         if (receiver.buffer) |buffer| buffer.len = 0;
-        const bearer: []const u8 = if (use_token and current.same(origin)) client.token() else "";
-        const request: net.Request = .{
-            .scheme = current.scheme,
-            .host = current.host,
-            .port = current.port,
-            .target = current_target,
-            .accept = accept,
-            .bearer = bearer,
-            .body_bytes_max = receiver.body_bytes_max,
-            .idle_timeout_ms = constants.net_idle_timeout_ms,
-            .total_timeout_ms = receiver.total_timeout_ms,
-            .range_from = receiver.range_from,
-        };
+        const own = use_token and current.same(origin);
+        const request = request_of(client, own, current, current_target, accept, receiver);
         client.net.get(&request, head, receiver.sink) catch |err| {
             const target_info: diagnose.Target = .{
                 .host = current.host,
@@ -592,6 +662,7 @@ fn request_following(
             diagnose.network_failed(diag, err, target_info, client.net.last_errno());
             return error.Failed;
         };
+        head.elsewhere = !current.same(origin);
         if (!is_redirect(head.status)) return;
         var url_storage: [constants.registry_url_bytes_max]u8 = undefined;
         const here = url_of(&url_storage, current, current_target);
@@ -828,7 +899,7 @@ fn request_blob(
             download.abandon();
             return blob_sink_failed(download, diag, err);
         };
-        if (head.status == 401 and attempt == 0) {
+        if (head.status == 401 and attempt == 0 and client.basic_len == 0) {
             // A token lasts minutes and a layer can take longer: ask for a fresh one, once.
             client.token_len = 0;
             try authenticate(client, reference, origin, head, diag);
@@ -837,7 +908,8 @@ fn request_blob(
         break;
     }
     if (head.status == 416) return true;
-    if (head.status != 206) try check_status(reference, origin, target, head, diag);
+    const seen: Seen = .{ .basic = client.basic_len > 0 };
+    if (head.status != 206) try check_status(reference, origin, target, head, seen, diag);
     return false;
 }
 

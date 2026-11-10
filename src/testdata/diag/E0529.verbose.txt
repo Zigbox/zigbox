@@ -1,0 +1,8 @@
+error[ZBX-E0529]: the clock of this machine is too far from AWS's
+  cause  api.ecr.us-east-1.amazonaws.com refused the request: this machine's
+         clock is too far from AWS's
+  host   api.ecr.us-east-1.amazonaws.com
+  fix    set the clock right, then run the command again
+         turn on time synchronisation:   timedatectl set-ntp true
+  more   zbx explain E0529
+  docs   https://zigbox.github.io/zigbox/errors/E0529.html

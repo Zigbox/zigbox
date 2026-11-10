@@ -158,8 +158,14 @@ pub const diag_skip_depth_max: u32 = 8;
 pub const diag_skip_bytes_max: u32 = 4096;
 
 // The generated diagnostics pages (src/errors_site.zig): one page, CSS included, is far below
-// this; the bound is what the tool's buffers and file reads use.
-pub const errors_page_bytes_max: u32 = 32 * 1024;
+// this; the index lists every code and outgrew 32 KiB with M6c. The bound is what the tool's
+// buffers and file reads use.
+pub const errors_page_bytes_max: u32 = 64 * 1024;
+/// One row of the index (link, summary, blame), and the stylesheet and head every page carries.
+/// `errors_site.zig` asserts at compile time that the registry's rows fit in a page, so the next
+/// milestone's codes fail the build there, not in the tool's run.
+pub const errors_index_row_bytes_max: u32 = 256;
+pub const errors_index_head_bytes_max: u32 = 6 * 1024;
 
 // Host simulator.
 pub const sim_files_max: u32 = 128;
@@ -1404,6 +1410,7 @@ comptime {
     assert(aws_account_digits == 12);
     assert(aws_session_token_bytes_max * 2 <= aws_response_bytes_max);
     assert(aws_ecr_token_bytes_max * 2 <= aws_response_bytes_max);
+    assert(aws_response_bytes_max <= registry_token_response_bytes_max);
     // The form that asks STS for credentials: the token file, a role ARN and a session name with
     // every byte escaped, and the fixed words.
     assert(aws_web_identity_token_bytes_max + aws_role_arn_bytes_max * 3 +

@@ -5,6 +5,6 @@ error[ZBX-E0507]: the registry refused anonymous access
   host   registry.test
   repo   fixture/denied
   fix    check that the image is public and its name is right
-         private registries are not supported yet
+         only Amazon ECR is supported as a private registry so far
   more   zbx explain E0507
   docs   https://zigbox.github.io/zigbox/errors/E0507.html

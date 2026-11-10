@@ -66,6 +66,8 @@ pub const AwsSim = struct {
     imds: ImdsMode = .v2,
     sts: StsMode = .ok,
     lifetime_s: u64 = 3600,
+    /// The ECR API refuses a well-signed call: the identity may not get an authorization token.
+    api_denied: bool = false,
     /// The key the ECR API accepts.
     accepted_key_id: []const u8 = issued_key_id,
     accepted_secret: []const u8 = issued_secret,
@@ -233,6 +235,10 @@ const api_error_bad_signature =
     "\"message\":\"" ++ message_marker ++ "\"}";
 const api_error_skew =
     "{\"__type\":\"com.amazon.coral.service#InvalidSignatureException\"," ++
+    "\"message\":\"Signature expired: " ++ message_marker ++ "\"}";
+
+const api_error_denied =
+    "{\"__type\":\"com.amazon.coral.service#AccessDeniedException\"," ++
     "\"message\":\"" ++ message_marker ++ "\"}";
 
 /// The ECR API's `GetAuthorizationToken`, signature and clock checked.
@@ -256,6 +262,10 @@ fn ecr_api(sim: *AwsSim, request: *const net.Request, served: *net_sim.Served) v
     }
     if (!signature_matches(sim, request, signed_at)) {
         served.* = .{ .status = 400, .body = api_error_bad_signature };
+        return;
+    }
+    if (sim.api_denied) {
+        served.* = .{ .status = 400, .body = api_error_denied };
         return;
     }
     sim.ecr_ok += 1;

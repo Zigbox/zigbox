@@ -24,6 +24,7 @@ const images = @import("store/images.zig");
 const import = @import("store/import.zig");
 const lock_file = @import("lock_file.zig");
 const manifest = @import("registry/manifest.zig");
+const pull_aws = @import("pull_aws.zig");
 const pull_lib = @import("pull.zig");
 const reference_mod = @import("registry/reference.zig");
 const render_diag = @import("diag/render.zig");
@@ -39,6 +40,8 @@ pub const Workspace = struct {
     output: [constants.pull_output_bytes_max]u8,
     /// The project's zbx.lock, read before the pull and updated after it.
     locking: lock_file.Workspace,
+    /// The AWS credentials of an ECR pull; wiped when the command ends.
+    aws: pull_aws.Storage,
 };
 
 pub const Args = struct {
@@ -58,13 +61,26 @@ pub const Output = struct {
 /// The request the command line makes: the reference as typed, the platform the macOS zbx sets
 /// in the virtual machine and the mirrors, all read from the environment here and nowhere in the
 /// library.
-fn request_of(host: Host, text: []const u8) pull_lib.Request {
+/// The AWS credentials are found here, for a private ECR reference only (`pull_aws.zig`); the
+/// reference in `workspace.library` must already be parsed.
+fn request_of(
+    host: Host,
+    text: []const u8,
+    workspace: *Workspace,
+    diag: *Diag,
+) Error!pull_lib.Request {
     assert(text.len <= constants.arg_bytes_max);
+    assert(workspace.library.reference.registry_len > 0);
     const mirrors = host.environment("ZBX_REGISTRY_MIRRORS", constants.registry_mirrors_bytes_max);
+    const registry = workspace.library.reference.registry();
+    const aws = pull_aws.credentials_for(host, registry, &workspace.aws, diag) catch {
+        return error.Failed;
+    };
     return .{
         .reference = text,
         .platform = platform_of(host),
         .mirrors = mirrors orelse "",
+        .aws = aws,
     };
 }
 
@@ -89,9 +105,10 @@ pub fn run_resolve(host: Host, args: Args, workspace: *Workspace, diag: *Diag) E
     assert(args.reference.len <= constants.arg_bytes_max);
     assert(@sizeOf(Workspace) > constants.pull_output_bytes_max);
     const library = &workspace.library;
-    pull_lib.resolve(host, &request_of(host, args.reference), library, diag) catch {
-        return error.Failed;
-    };
+    defer workspace.aws.wipe();
+    pull_lib.parse_reference(library, args.reference, diag) catch return error.Failed;
+    const request = try request_of(host, args.reference, workspace, diag);
+    pull_lib.resolve(host, &request, library, diag) catch return error.Failed;
     const text = render(args.json, &library.reference, &library.resolved, &workspace.output);
     host.write_all(.stdout, text) catch |err| {
         errors.output_failed(diag, .stdout, err, host.last_errno());
@@ -114,15 +131,17 @@ pub fn run_pull(
     assert(diag.code == null);
     assert(args.reference.len <= constants.arg_bytes_max);
     const library = &workspace.library;
+    defer workspace.aws.wipe();
     pull_lib.parse_reference(library, args.reference, diag) catch return error.Failed;
     try check_lock(host, workspace, diag);
+    const request = try request_of(host, args.reference, workspace, diag);
     var reporter: Reporter = .{ .host = host, .output = output };
     const progress: pull_lib.Progress = .{ .context = &reporter, .call = report_event };
     var result: pull_lib.Result = undefined;
     pull_lib.pull(
         host,
         facts,
-        &request_of(host, args.reference),
+        &request,
         progress,
         library,
         import_workspace,
