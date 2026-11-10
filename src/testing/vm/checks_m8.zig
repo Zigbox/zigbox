@@ -214,6 +214,15 @@ pub fn check_policy_refusal(stderr: []const u8, status: u8, policy_path: []const
     return refusal(stderr, status, "E0905", &.{ policy_path, "require_signature" });
 }
 
+/// A signature that is bound to another result: exit 125, `E0905`, the signer named and the
+/// words "bound to another result".
+pub fn check_bound_refusal(stderr: []const u8, status: u8, signer: []const u8) Error!void {
+    var want: [64]u8 = undefined;
+    // The buffer holds any key name the demo uses.
+    const named = std.fmt.bufPrint(&want, "signed by '{s}'", .{signer}) catch unreachable;
+    return refusal(stderr, status, "E0905", &.{ named, "bound to another result" });
+}
+
 /// A changed object: exit 125, `E0907`, the path in the image named.
 pub fn check_tamper_refusal(stderr: []const u8, status: u8, path: []const u8) Error!void {
     return refusal(stderr, status, "E0907", &.{path});
@@ -934,7 +943,7 @@ pub fn check_b3(arena: Allocator, output: []const u8) Error!void {
     try check_greeting(after);
     try check_agrees(after, try evidence(output, "chk_after"), null);
     const other = try evidence(output, "run_other");
-    try check_policy_refusal(other.err, other.rc, second_policy);
+    try check_bound_refusal(other.err, other.rc, "ci");
     try check_agrees(other, try evidence(output, "chk_other"), "E0905");
     try check_greeting(try evidence(output, "run_override"));
 }
@@ -1090,6 +1099,17 @@ test "a push pair has one manifest, and the second finds every blob" {
     try std.testing.expectError(error.RefusalWrong, check_push_pair(arena, up, failed));
 }
 
+test "a signature bound to another result names its signer" {
+    // Goal: the derived-binding refusal is told from the unsigned one.
+    const text = "error[ZBX-E0905]: no trusted signature covers what was to run\n" ++
+        "  cause  signed by 'ci': it is bound to another result or image than this run's\n";
+    try check_bound_refusal(text, 125, "ci");
+    try std.testing.expectError(error.RefusalWrong, check_bound_refusal(text, 125, "other"));
+    try std.testing.expectError(error.RefusalWrong, check_bound_refusal(text, 1, "ci"));
+    const unsigned = "error[ZBX-E0905]: x\n  cause  nothing has signed it\n";
+    try std.testing.expectError(error.RefusalWrong, check_bound_refusal(unsigned, 125, "ci"));
+}
+
 test "an unsigned base names its image; a malformed policy names its line" {
     const text = "error[ZBX-E0905]: refused\n" ++
         "  cause  /p requires a signature, and nothing has signed\n" ++
@@ -1150,7 +1170,9 @@ test "script 7 refuses the second result under the first one's signature" {
         block("import", "0", "", "");
     const after = comptime block("run_after", "0", "hello from zigbox\n", "") ++
         block("chk_after", "0", allowed_json, "");
-    const other = comptime block("run_other", "125", "", refused) ++
+    const bound = "error[ZBX-E0905]: no trusted signature covers what was to run\n" ++
+        "  cause  signed by 'ci': it is bound to another result or image than this run's\n";
+    const other = comptime block("run_other", "125", "", bound) ++
         block("chk_other", "1", refused_json("E0905"), "");
     const over = comptime block("run_override", "0", "hello from zigbox\n", "");
     try check_b3(std.testing.allocator, pre ++ after ++ other ++ over);
