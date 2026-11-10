@@ -136,12 +136,14 @@ const a2 =
 const b1 =
     \\. /tmp/m8a-lib.sh
     \\d=$(cat /tmp/m8-digest)
-    \\cd /home/demo/hello
-    \\m run -d --name m8reg --publish 5000:5000 registry:2 >/tmp/err-a1 2>&1 || f "registry:2"
+    \\mkdir -p /home/demo/reg && chown demo /home/demo/reg && cd /home/demo/reg
+    \\m pull registry:2 >/dev/null 2>/tmp/err-a1 || f "pull registry:2"
+    \\m run -d --name m8reg --publish 5000:5000 registry:2 >>/tmp/err-a1 2>&1 || f "registry:2"
     \\i=0
     \\until curl -fs http://localhost:5000/v2/ >/dev/null; do
     \\  i=$((i + 1)); [ "$i" -lt 60 ] || f "the registry did not start"; sleep 1
     \\done
+    \\cd /home/demo/hello
     \\p=$(m push "$d" localhost:5000/m8/hello:demo 2>/tmp/err-a2) || f push
     \\echo "$p" | grep -q '^sha256:' || f "push printed $p"
     \\m push "$d" localhost:5000/m8/hello:demo >/dev/null 2>/tmp/err-a3 || f "second push"
