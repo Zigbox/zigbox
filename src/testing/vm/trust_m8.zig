@@ -169,7 +169,7 @@ fn tamper(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     checks.check_tamper_refusal(refused.streams.stderr, refused.status, binary) catch |err| {
         return fail_step(out, step, "expected E0907 naming " ++ binary, err);
     };
-    const verify = try run(session, out, zh ++ " store verify 2>&1", 1);
+    const verify = try run(session, out, zh ++ " store verify 2>&1", 2);
     checks.check_store_verify_names(verify.streams.stdout, id) catch |err| {
         return fail_step(out, step, "expected store verify to name the same object", err);
     };
