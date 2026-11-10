@@ -246,21 +246,25 @@ fn old_cache_reused(session: *Session, out: *Io.Writer) !void {
     };
 }
 
-const policy_path = "/home/demo/.config/zbx/policy.zon";
+/// A config directory of its own: the key made here must not be one more key for TRUST8's `sign`.
+const config_dir = "/home/demo/upc";
+const zc = H.as_demo ++ "XDG_CONFIG_HOME=" ++ config_dir ++ " /home/demo/z";
+const policy_path = config_dir ++ "/zbx/policy.zon";
 
 /// A policy that requires a signature refuses what the old binary pulled, in one line.
 fn old_image_under_policy(session: *Session, out: *Io.Writer) !void {
-    _ = try expect_exit(session, out, step, z ++ " key new m8up --no-passphrase", 0);
-    const shown = try expect_exit(session, out, step, z ++ " --output json key show m8up", 0);
+    _ = try expect_exit(session, out, step, zc ++ " key new m8up --no-passphrase", 0);
+    const shown = try expect_exit(session, out, step, zc ++ " --output json key show m8up", 0);
     const public = m8.public_of_key_show(shown.streams.stdout) orelse {
         return fail_step(out, step, "expected key show to name the key", error.KeyWrong);
     };
     const text = try common.format(session, ".{{ .version = 1, .keys = .{{ .{{ .name = " ++
         "\"up\", .public = \"{s}\" }} }},\n  .require_signature = true," ++
         " .require_provenance = false }}\n", .{public});
-    _ = try session.run("mkdir -p /home/demo/.config/zbx", limits.command_timeout_kvm_s);
+    const mkdir = "mkdir -p " ++ config_dir ++ "/zbx && chown -R demo " ++ config_dir;
+    _ = try session.run(mkdir, limits.command_timeout_kvm_s);
     try H.put_file(session, policy_path, text);
-    const refused = try common.run_shown(session, out, z ++ " run " ++ alpine ++ " -- true");
+    const refused = try common.run_shown(session, out, zc ++ " run " ++ alpine ++ " -- true");
     _ = try session.run("rm -f " ++ policy_path, limits.command_timeout_kvm_s);
     m8.check_old_image_refused(refused.streams.stderr, refused.status, policy_path) catch |err| {
         return fail_step(out, step, "expected the policy to refuse the old image", err);
