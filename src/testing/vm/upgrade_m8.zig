@@ -231,9 +231,11 @@ fn old_cache_reused(session: *Session, out: *Io.Writer) !void {
     m8.check_old_cache_hit(built.streams.stdout, "probe") catch |err| {
         return fail_step(out, step, "expected this build to find the old binary's cache", err);
     };
-    const result = m8.build_result(built.streams.stdout) catch |err| {
+    const printed = m8.build_result(built.streams.stdout) catch |err| {
         return fail_step(out, step, "expected the build to print its result", err);
     };
+    // The next command reuses the output buffer `printed` points into.
+    const result = try arena.dupe(u8, printed);
     const command = try common.format(session, z ++ " inspect --provenance {s} --output json", .{
         result,
     });
