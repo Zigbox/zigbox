@@ -157,13 +157,13 @@ const a3 =
 const a4 =
     \\. /tmp/m8a-lib.sh
     \\P=/home/demo/ac/zbx/policy.zon
-    \\mkdir -p /home/demo/a-proj && cd /home/demo/a-proj && echo in >in.txt
+    \\mkdir -p /tmp/m8a-proj && cd /tmp/m8a-proj && echo in >in.txt
     \\cat >zbx.build.zon <<'EOF'
     \\.{ .version = 1, .steps = .{ .{ .name = "probe", .base = "alpine:3.20",
     \\  .inputs = .{"in.txt"}, .run = .{ "sh", "-c", "cp in.txt /out/" } } },
     \\  .image = .{ .base = "alpine:3.20", .add = .{ .{ .from = "probe", .to = "/" } } } }
     \\EOF
-    \\chown -R demo /home/demo/a-proj
+    \\chown -R demo /tmp/m8a-proj
     \\z pull alpine:3.20 >/dev/null 2>&1 || f "pull in the project"
     \\x bld z build
     \\printf '.{ .version = 1,\n  .bogus = 1 }\n' >$P
