@@ -140,7 +140,11 @@ const b1 =
     \\p=$(m push "$d" localhost:5000/m8/hello:demo 2>/tmp/err-a2) || f push
     \\echo "$p" | grep -q '^sha256:' || f "push printed $p"
     \\m push "$d" localhost:5000/m8/hello:demo >/dev/null 2>/tmp/err-a3 || f "second push"
-    \\m trust export "$d" >/tmp/m8-bundle 2>/tmp/err-a4 || f export
+    \\q=$(m inspect --provenance "$d" --output json)
+    \\e='s/^{"schema":"[^"]*","result":"[^"]*","tree":"\\(b3:[0-9a-f]*\\)".*/\\1/p'
+    \\t=$(echo "$q" | sed -n "$e")
+    \\[ -n "$t" ] || f "no tree in the provenance"
+    \\m trust export "$t" >/tmp/m8-bundle 2>/tmp/err-a4 || f export
     \\chmod 644 /tmp/m8-bundle
     \\id demo2 >/dev/null 2>&1 || useradd -m -s /bin/sh demo2
     \\true

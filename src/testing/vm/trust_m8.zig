@@ -195,6 +195,21 @@ fn verify_offline(session: *Session, out: *Io.Writer, digest: []const u8) !void 
     };
 }
 
+/// The tree the result `digest` names, from its provenance record; `trust export` takes a tree.
+fn tree_of(session: *Session, out: *Io.Writer, digest: []const u8) ![]const u8 {
+    const pattern = "{s} inspect --provenance {s} --output json";
+    const command = try fmt(session, pattern, .{ zh, digest });
+    const shown = try run(session, out, command, 0);
+    const key = "\"tree\":\"";
+    const at = std.mem.indexOf(u8, shown.streams.stdout, key) orelse {
+        const why = "expected the provenance to name the tree";
+        return fail_step(out, step, why, error.ProvenanceWrong);
+    };
+    const start = at + key.len;
+    const end = std.mem.indexOfScalarPos(u8, shown.streams.stdout, start, '"') orelse start;
+    return session.scratch_allocator().dupe(u8, shown.streams.stdout[start..end]);
+}
+
 /// ACCEPT, the parts that need no registry.
 fn accept(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     const check = try fmt(session, "{s} policy check {s} --output json", .{ zh, digest });
@@ -208,6 +223,7 @@ fn accept(session: *Session, out: *Io.Writer, digest: []const u8) !void {
         return fail_step(out, step, "expected E0911 at once with no passphrase file", err);
     };
     try hello.put_text(session, home ++ "/wrong", "not the passphrase\n");
+    _ = try common.expect_exit(session, out, step, "chmod 600 " ++ home ++ "/wrong", 0);
     const wrong_cmd = try fmt(
         session,
         "{s} sign {s} --passphrase-file " ++ home ++ "/wrong" ++ nobody,
@@ -217,7 +233,8 @@ fn accept(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     checks.check_exit1_code(wrong.streams.stderr, wrong.status, "E0911") catch |err| {
         return fail_step(out, step, "expected E0911 for a wrong passphrase", err);
     };
-    const export_cmd = try fmt(session, "{s} trust export {s}", .{ zh, digest });
+    const tree = try tree_of(session, out, digest);
+    const export_cmd = try fmt(session, "{s} trust export {s}", .{ zh, tree });
     const bundle = try run(session, out, export_cmd, 0);
     checks.check_bundle(bundle.streams.stdout) catch |err| {
         return fail_step(out, step, "expected one in-toto envelope per line", err);
