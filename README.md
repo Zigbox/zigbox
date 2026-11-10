@@ -53,7 +53,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 2 (part 2) · Sign | `zbx sign` and the signature record, [PR #70](https://github.com/Zigbox/zigbox/pull/70) | **Built and reviewed.** |
 | 3 · Policy | Policy and the run gate, `zbx policy check`, the tamper check, [PR #73](https://github.com/Zigbox/zigbox/pull/73) and [PR #74](https://github.com/Zigbox/zigbox/pull/74) | **Built and reviewed.** |
 | 4 · Provenance | Provenance as an SLSA v1 statement, `inspect --provenance`, `require_provenance` and E0906, W0901, [PR #78](https://github.com/Zigbox/zigbox/pull/78) | **Built and reviewed.** |
-| 5 · Verify | `zbx verify`, `trust export`, `import` and `prune` | Not started. |
+| 5 · Verify | `zbx verify`, `trust export`, `import` and `prune`, [PR #82](https://github.com/Zigbox/zigbox/pull/82) | **Built and reviewed.** |
 | 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
 | 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
 | 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
