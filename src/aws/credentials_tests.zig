@@ -553,7 +553,8 @@ test "an empty variable is unset, never terminal" {
         defer fixture.destroy();
         fixture.aws.imds = .v2;
         try fixture.resolve();
-        try testing.expectEqual(credentials_mod.Source.instance_metadata, fixture.credentials.source);
+        const source = fixture.credentials.source;
+        try testing.expectEqual(credentials_mod.Source.instance_metadata, source);
         try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.environment);
         try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.web_identity);
     }

@@ -108,12 +108,14 @@ test "a region the resolver does not sign for is a refusal the caller can read, 
         try testing.expectError(error.UnsupportedRegion, caller.resolve(&.{}, region, 1));
         try testing.expectEqual(@as(u32, 0), caller.wire.requests);
         try testing.expectEqual(@as(u32, 0), caller.credentials.access_key_id_len);
-        try testing.expectEqual(zigbox.aws_credentials.State.not_configured, caller.trace.instance_metadata);
+        const state = caller.trace.instance_metadata;
+        try testing.expectEqual(zigbox.aws_credentials.State.not_configured, state);
     }
     const text = zigbox.aws_credentials.reason(error.UnsupportedRegion);
     try testing.expect(text.len > 0);
     try testing.expect(std.mem.indexOfScalar(u8, text, '\n') == null);
     // A good region still resolves through the same caller.
     try caller.resolve(&.{}, "us-east-1", caller.host.world.now);
-    try testing.expectEqual(zigbox.aws_credentials.Source.instance_metadata, caller.credentials.source);
+    const source = caller.credentials.source;
+    try testing.expectEqual(zigbox.aws_credentials.Source.instance_metadata, source);
 }
