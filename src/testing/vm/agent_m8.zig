@@ -112,7 +112,7 @@ fn step_sign(session: *Session, out: *Io.Writer, schema: []const u8, digest: []c
 }
 
 fn step_verify(session: *Session, out: *Io.Writer, schema: []const u8, digest: []const u8) !void {
-    const command = try common.format(session, "{s} verify {s} --output json", .{ zh, digest });
+    const command = try common.format(session, "{s} verify {s} --key demo --output json", .{ zh, digest });
     const done = try state.expect_long_split(session, out, command, 0, short_s);
     const arena = session.scratch_allocator();
     try expect_lines_follow(arena, out, schema, done.streams.stdout, "the verify document");
