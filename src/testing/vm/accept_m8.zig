@@ -85,9 +85,9 @@ const a1 =
     \\echo "$t" >/tmp/m8-alpine
     \\z sign "$t" 2>>/tmp/err-a2 || f sign
     \\policy "$pub" $P false
-    \\z run alpine:3.20 true 2>/tmp/err-a3 || f "the signed image did not run"
+    \\z run alpine:3.20 -- true 2>/tmp/err-a3 || f "the signed image did not run"
     \\policy "$pub" $P true
-    \\z run alpine:3.20 true 2>/tmp/err-a4 && f "ran with a tree-only signature"
+    \\z run alpine:3.20 -- true 2>/tmp/err-a4 && f "ran with a tree-only signature"
     \\code E0906 /tmp/err-a4
     \\z policy check alpine:3.20 --output json >/tmp/a-check 2>/dev/null || true
     \\grep -q '"allowed":false' /tmp/a-check || f "policy check disagrees with run"
@@ -95,7 +95,7 @@ const a1 =
     \\z store rm "$t" 2>/tmp/err-a5 || f "store rm"
     \\z store gc 2>>/tmp/err-a5 || f "store gc"
     \\z pull alpine:3.20 >/dev/null 2>>/tmp/err-a5 || f "re-pull"
-    \\z run alpine:3.20 true 2>/tmp/err-a6 || f "the signature did not survive the re-pull"
+    \\z run alpine:3.20 -- true 2>/tmp/err-a6 || f "the signature did not survive the re-pull"
 ;
 
 const a2 =
@@ -119,10 +119,10 @@ const a2 =
     \\grep -q '"removed":1' /tmp/a-app || { cat /tmp/a-app; f "expected one removed"; }
     \\[ "$(n)" = 1 ] || f "expected the other record kept"
     \\z pull alpine:3.20 >/dev/null 2>>/tmp/err-a7 || f "re-pull"
-    \\z run alpine:3.20 true 2>/tmp/err-a8 && f "ran after the prune"
+    \\z run alpine:3.20 -- true 2>/tmp/err-a8 && f "ran after the prune"
     \\code E0905 /tmp/err-a8
     \\printf '.{ .version = 1,\n  .bogus = 1 }\n' >$P
-    \\z run alpine:3.20 true 2>/tmp/err-a9 && f "ran under a malformed policy"
+    \\z run alpine:3.20 -- true 2>/tmp/err-a9 && f "ran under a malformed policy"
     \\code E0904 /tmp/err-a9
     \\grep -q 'line 2, column' /tmp/err-a9 || { cat /tmp/err-a9; f "no line and column"; }
     \\rm -f $P

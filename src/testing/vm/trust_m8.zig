@@ -132,7 +132,7 @@ fn policy_refuses(session: *Session, out: *Io.Writer, digest: []const u8) !void 
     };
     _ = try run(session, out, zh ++ " pull alpine:3.20", 0);
     const before = try listing(session, out);
-    const refused = try run(session, out, zh ++ " run alpine:3.20 true", 125);
+    const refused = try run(session, out, zh ++ " run alpine:3.20 -- true", 125);
     checks.check_policy_refusal(refused.streams.stderr, refused.status, policy_file) catch |err| {
         return fail_step(out, step, "expected E0905 naming the policy and the rule", err);
     };
