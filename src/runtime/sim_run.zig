@@ -393,6 +393,7 @@ pub const Started = struct {
 pub fn started(sim: *const HostSim, expected: Started) ?[]const u8 {
     const child = &sim.world.processes[1];
     if (!child.execd) return "the command was not started";
+    if (sim.world.listener_leaked) return "a listener survived exec into the command's table";
     if (!child.sealed) return "the descriptors were not sealed before exec";
     if (!child.die_with_parent) return "the child was not tied to its parent";
     if (child.old_root_attached) return "the old root was not detached";

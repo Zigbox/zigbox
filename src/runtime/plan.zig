@@ -1326,6 +1326,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
         .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
         .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
+        .receive_listener => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
