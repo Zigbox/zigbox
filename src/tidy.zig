@@ -122,6 +122,7 @@ const shipped_files = [_][]const u8{
     "src/mac/ports.zig",
     "src/vm_protocol.zig",
     "src/forward_protocol.zig",
+    "src/forward_commands.zig",
     "src/guest_serve.zig",
     "src/vm_dhcp.zig",
     "src/mac/forward.zig",

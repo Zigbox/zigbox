@@ -272,6 +272,8 @@ test {
     _ = @import("mac/vm_golden.zig");
     _ = @import("vm_protocol.zig");
     _ = @import("forward_protocol.zig");
+    _ = @import("forward_commands.zig");
+    _ = @import("forward_commands_tests.zig");
     _ = @import("vm_dhcp.zig");
     _ = @import("vm_guest_storage.zig");
     _ = @import("vm_ports.zig");

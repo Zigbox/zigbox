@@ -158,7 +158,7 @@ pub const Command = struct {
     is_run: bool,
     /// False for a command that could ask for a passphrase: the guest then sees no terminal and
     /// refuses with its own one-line ZBX-E0911, rather than reading a passphrase through the relay.
-    terminal: bool = true,
+    terminal: bool,
 };
 
 const Frames = struct {
