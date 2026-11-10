@@ -47,7 +47,7 @@ pub fn run_agent(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const sign_schema = try fetch_schema(session, out, "sign", "zbx.sign/1");
     const verify_schema = try fetch_schema(session, out, "verify", "zbx.verify/1");
     const prune_schema = try fetch_schema(session, out, "trust-prune", "zbx.trust-prune/1");
-    _ = try fetch_schema(session, out, "inspect", "zbx.inspect/1");
+    _ = try fetch_schema(session, out, "inspect-provenance", "zbx.provenance/1");
     const report = try hello.json_report(session, out, step);
     try step_sign(session, out, sign_schema, report.digest);
     try step_verify(session, out, verify_schema, report.digest);
