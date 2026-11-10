@@ -364,7 +364,8 @@ pub fn credentials_refused(
         ),
         .ecr_no_push => diag.cause(
             "{s} would not let this AWS identity push to '{s}': it may not write to the" ++
-                " repository",
+                " repository, or the authorization token may have expired (ECR answers both" ++
+                " the same way)",
             .{ shown, repo_shown },
         ),
     }
@@ -378,9 +379,10 @@ pub fn credentials_refused(
                 " and belong to the account that owns the registry",
         }),
         .ecr_no_push => diag.fix(.{
-            .sentence = "allow ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload," ++
-                " ecr:UploadLayerPart, ecr:CompleteLayerUpload and ecr:PutImage on the" ++
-                " repository in the role's policy",
+            .sentence = "run the command again, which fetches a fresh token (it lasts 12 hours);" ++
+                " if it is refused again, allow ecr:BatchCheckLayerAvailability," ++
+                " ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload and" ++
+                " ecr:PutImage on the repository in the role's policy",
         }),
         .no_push_scope => diag.fix(.{
             .sentence = "use credentials that may push to this repository (a token with write" ++

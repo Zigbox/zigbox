@@ -529,7 +529,7 @@ fn fuzz_upload(random: std.Random, seed: u64) void {
     const options: upload.Options = .{
         .chunk_bytes = random.intRangeAtMost(u32, 16, 4096),
         .mount_from = if (random.boolean()) holder else "",
-        .credentials = if (random.boolean()) &credentials else null,
+        .credential = if (random.boolean()) .{ .basic = &credentials } else .none,
     };
     diag.reset();
     const store = &rig.store;

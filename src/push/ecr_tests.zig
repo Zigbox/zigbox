@@ -99,7 +99,7 @@ const World = struct {
             rig.wire.interface(),
             destination,
             &rig.made,
-            .{ .chunk_bytes = 64, .ecr_token = world.token.text() },
+            .{ .chunk_bytes = 64, .credential = .{ .ecr = world.token.text() } },
             &rig.report,
             &rig.diag,
         );
@@ -140,6 +140,9 @@ const World = struct {
     /// No request to a host but the registry's (and the AWS ones, signed) carried a credential.
     fn expect_credential_stayed(world: *const World) !void {
         try testing.expectEqual(@as(u32, 0), world.rig.registry.leaked);
+        // The log holds `log_entries_max` entries: a longer run would leave its end unchecked.
+        try testing.expect(world.rig.wire.requests > 0);
+        try testing.expect(world.rig.wire.requests <= net_sim.log_entries_max);
         var index: u32 = 0;
         while (world.rig.wire.logged(index)) |entry| : (index += 1) {
             const host = entry.host_text();
@@ -248,6 +251,17 @@ test "a token the registry does not accept is E0553 and is not tried twice" {
     var buffer: [constants.output_bytes_max]u8 = undefined;
     const text = world.rendered(&buffer);
     try testing.expect(std.mem.indexOf(u8, text, "authorization token AWS issued") != null);
+    // Sent once and refused once: a second try would be a second 401 to a Basic request.
+    var sent: u32 = 0;
+    var refused: u32 = 0;
+    var index: u32 = 0;
+    while (world.rig.wire.logged(index)) |entry| : (index += 1) {
+        if (entry.basic_len == 0) continue;
+        sent += 1;
+        if (entry.status == 401) refused += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), sent);
+    try testing.expectEqual(@as(u32, 1), refused);
     try world.expect_credential_stayed();
     try world.expect_clean();
     world.token.wipe();
@@ -267,6 +281,9 @@ test "an identity that may not push is E0553 naming the IAM actions" {
     const text = world.rendered(&buffer);
     try testing.expect(std.mem.indexOf(u8, text, "ecr:InitiateLayerUpload") != null);
     try testing.expect(std.mem.indexOf(u8, text, "ecr:PutImage") != null);
+    // ECR answers an expired token the same way, so the cause and the fix say that too.
+    try testing.expect(std.mem.indexOf(u8, text, "may have expired") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "fresh token") != null);
     try world.expect_clean();
     world.token.wipe();
 }
@@ -339,9 +356,11 @@ test "a token handed to a push for a host that is not ECR is never sent" {
     // Goal: an AWS token goes to ECR hosts only, whatever the caller passed.
     const rig = try Rig.create(9);
     defer rig.destroy();
-    try rig.push("push/ok", .{ .ecr_token = "QVdTOmVjci1wYXNzd29yZC0wMTIzNDU2Nzg5" });
+    try rig.push("push/ok", .{ .credential = .{ .ecr = "QVdTOmVjci1wYXNzd29yZC0wMTIzNDU2Nzg5" } });
     var index: u32 = 0;
     while (rig.wire.logged(index)) |entry| : (index += 1) {
         try testing.expectEqual(@as(u32, 0), entry.basic_len);
     }
+    // The loop ran: the push made requests, and none carried the token.
+    try testing.expect(index > 0);
 }

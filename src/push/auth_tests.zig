@@ -17,7 +17,7 @@ const Rig = tests.Rig;
 const marker = "Zq7-marker-pass-4417";
 
 fn options_with(credentials: *const credentials_mod.Credentials) upload.Options {
-    return .{ .credentials = credentials };
+    return .{ .credential = .{ .basic = credentials } };
 }
 
 /// Whether any request of the run went to a host other than the registry's with a credential.
@@ -199,7 +199,7 @@ test "the marker password is only in requests to the registry, and in no buffer 
         rig.wire.faults = .{ .fail_per_mille = random.uintLessThan(u16, 40) };
         var credentials = credentials_mod.Credentials.of(push_registry.test_user, &secret);
         const repository = faults[random.uintLessThan(usize, faults.len)];
-        _ = rig.push(repository, .{ .credentials = &credentials }) catch {};
+        _ = rig.push(repository, .{ .credential = .{ .basic = &credentials } }) catch {};
         credentials.wipe();
         try testing.expect(!credential_left_the_registry(rig));
         try testing.expect(!holds_secret(std.mem.asBytes(&rig.ws), &secret));

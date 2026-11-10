@@ -15,9 +15,12 @@ const digest_mod = @import("store/digest.zig");
 const fs_sim = @import("store/fs_sim.zig");
 const support = @import("store/test_support.zig");
 const test_util = @import("test_util.zig");
+const aws_sim = @import("aws/aws_sim.zig");
 const net_sim = @import("registry/net_sim.zig");
 const push_registry = @import("registry/push_registry.zig");
 
+const assert = std.debug.assert;
+const net = @import("registry/net.zig");
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 const Sha256 = @import("registry/digest.zig").Sha256;
@@ -1252,4 +1255,137 @@ test "export refuses what cannot be packed or written with one coded line" {
     try testing.expectEqual(@as(u8, 1), try command(&.{ "store", "export", "--oci", tree, "/o" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0557") != null);
     try testing.expectEqual(@as(usize, 0), sim.stdout().len);
+}
+
+// ---- Push credentials: which one the command line picks (M8 slice 13) ---------------------
+
+const ecr_host = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+var ecr_aws: aws_sim.AwsSim = .{};
+
+const ecr_env = [_]host_sim.EnvironmentVariable{
+    .{ .name = "HOME", .value = "/home/alice" },
+    .{ .name = "AWS_ACCESS_KEY_ID", .value = aws_sim.issued_key_id },
+    .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
+    .{ .name = "AWS_SESSION_TOKEN", .value = aws_sim.issued_token },
+};
+
+fn ecr_answer(
+    context: *anyopaque,
+    request: *const net.Request,
+    received: []const u8,
+    served: *net_sim.Served,
+) void {
+    assert(@intFromPtr(context) != 0);
+    const is_aws = std.mem.startsWith(u8, request.host, "api.ecr.") or
+        std.mem.startsWith(u8, request.host, "sts.") or
+        std.mem.eql(u8, request.host, "169.254.169.254");
+    const inner = if (is_aws) ecr_aws.responder() else upload_registry.responder();
+    inner.answer(inner.context, request, received, served);
+}
+
+/// A store with the sample tree, an ECR-named registry that wants `AWS` and the model's password
+/// (or, with `user_secret`, the test user and that), and AWS keys in the process environment.
+fn start_ecr(buffer: *[80]u8, user_secret: ?[]const u8) ![:0]const u8 {
+    start();
+    ecr_aws = .{};
+    ecr_aws.now_s = sim.world.now;
+    var token: u8 = 0;
+    push_wire.init(1, .{ .context = &token, .answer = ecr_answer });
+    upload_registry.init(&push_wire);
+    upload_registry.host = ecr_host;
+    upload_registry.fixture.init("https://" ++ ecr_host, "https://" ++ push_registry.other_host);
+    if (user_secret) |secret| {
+        upload_registry.require(.basic, secret);
+    } else {
+        upload_registry.require_as("AWS", .basic, aws_sim.ecr_password);
+    }
+    sim.wire = &push_wire;
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    sim.environment_variables = &ecr_env;
+    return term(buffer, try printed_digest());
+}
+
+/// How many requests to `host` carried a Basic credential, and that credential's text each time
+/// must be `expected`.
+fn basic_requests_to(host: []const u8, expected: []const u8) !u32 {
+    var count: u32 = 0;
+    var index: u32 = 0;
+    while (push_wire.logged(index)) |entry| : (index += 1) {
+        if (entry.basic_len == 0) continue;
+        try testing.expectEqualStrings(host, entry.host_text());
+        try testing.expectEqualStrings(expected, entry.basic_text());
+        count += 1;
+    }
+    return count;
+}
+
+fn basic_of(comptime plain: []const u8) []const u8 {
+    const length = comptime std.base64.standard.Encoder.calcSize(plain.len);
+    const encoded = comptime blk: {
+        var out: [length]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&out, plain);
+        break :blk out;
+    };
+    return &encoded;
+}
+
+test "push to ECR with no --username resolves AWS credentials and sends the AWS token" {
+    // Goal: the command line's AWS step. Method: keys in the environment, no --username; the ECR
+    // API is asked once, every registry request that carries a credential carries the AWS token,
+    // and neither output stream (JSON included) holds the token, the password or a secret.
+    var buffer: [80]u8 = undefined;
+    const tree = try start_ecr(&buffer, null);
+    const target = ecr_host ++ "/push/ok:v1";
+    const json = [_][:0]const u8{ "--output", "json", "push", tree, target };
+    try testing.expectEqual(@as(u8, 0), try command(&json));
+    try testing.expectEqual(@as(u32, 1), ecr_aws.ecr_ok);
+    const token = comptime basic_of("AWS:" ++ aws_sim.ecr_password);
+    try testing.expect(try basic_requests_to(ecr_host, token) > 0);
+    const secrets = [_][]const u8{
+        token,
+        aws_sim.ecr_password,
+        aws_sim.issued_secret,
+        aws_sim.issued_token,
+    };
+    for (secrets) |secret| {
+        try testing.expect(!seen(secret));
+    }
+}
+
+test "push to ECR with --username beats AWS: AWS is never asked and the user's password is sent" {
+    // Goal: "an explicit --username beats AWS credentials". Method: the same environment, plus
+    // --username; the model sees no ECR, STS or IMDS call, and the one credential on the wire is
+    // the user's.
+    const secret = "Hunter-22-marker";
+    var buffer: [80]u8 = undefined;
+    const tree = try start_ecr(&buffer, secret);
+    files.put_file("/pw", 0o600, secret ++ "\n");
+    const target = ecr_host ++ "/push/ok:v1";
+    const user = push_registry.test_user;
+    const argv = &.{ "push", tree, target, "--username", user, "--password-file", "/pw" };
+    try testing.expectEqual(@as(u8, 0), try command(argv));
+    try testing.expectEqual(@as(u32, 0), ecr_aws.ecr_calls);
+    try testing.expectEqual(@as(u32, 0), ecr_aws.sts_calls);
+    try testing.expectEqual(@as(u32, 0), ecr_aws.imds_calls);
+    const expected = comptime basic_of(push_registry.test_user ++ ":" ++ secret);
+    try testing.expect(try basic_requests_to(ecr_host, expected) > 0);
+    try testing.expect(!seen(secret));
+}
+
+test "push to a registry that is not ECR never asks AWS, whatever the environment holds" {
+    // Goal: AWS credentials are resolved for private ECR hosts only. Method: keys in the
+    // environment, an open registry that is not ECR; the push works and the model is untouched.
+    var buffer: [80]u8 = undefined;
+    const tree = try start_push(&buffer);
+    ecr_aws = .{};
+    sim.environment_variables = &ecr_env;
+    const target = push_registry.PushRegistry.destination(.ok);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", tree, target }));
+    try testing.expectEqual(@as(u32, 0), ecr_aws.ecr_calls);
+    var index: u32 = 0;
+    while (push_wire.logged(index)) |entry| : (index += 1) {
+        try testing.expectEqual(@as(u32, 0), entry.basic_len);
+        try testing.expectEqual(@as(u32, 0), entry.authorization_len);
+    }
+    try testing.expect(push_wire.requests > 0);
 }
