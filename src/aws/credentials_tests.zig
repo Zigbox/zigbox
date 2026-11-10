@@ -71,6 +71,20 @@ const Fixture = struct {
         );
     }
 
+    /// Every call that carried a credential, and every call to the metadata service or STS (whose
+    /// secret is in a body or an answer, not a header), was marked `secret`, so the real network
+    /// wipes its buffers after it.
+    fn expect_secret_marked(fixture: *const Fixture) !void {
+        var index: u32 = 0;
+        while (fixture.wire.logged(index)) |entry| : (index += 1) {
+            const host = entry.host_text();
+            const holds_one = std.mem.startsWith(u8, host, "sts.") or
+                std.mem.eql(u8, host, "169.254.169.254") or entry.credential_sent();
+            if (holds_one) try testing.expect(entry.secret);
+        }
+        try testing.expect(index == @min(fixture.wire.requests, net_sim.log_entries_max));
+    }
+
     fn expect_wiped(fixture: *const Fixture) !void {
         for (fixture.workspace.token_file) |byte| try testing.expectEqual(@as(u8, 0), byte);
         for (fixture.workspace.request_body) |byte| try testing.expectEqual(@as(u8, 0), byte);
@@ -196,6 +210,10 @@ test "web identity: an unsigned call with the escaped form, credentials with an 
     try testing.expectEqualStrings("sts.us-east-1.amazonaws.com", logged.host_text());
     try testing.expectEqual(net.Scheme.https, logged.scheme);
     try testing.expectEqual(@as(u32, 0), logged.authorization_len);
+    // The token is in the body and the keys are in the answer: the call must be marked, or the
+    // real network leaves both in its buffers.
+    try testing.expect(logged.secret);
+    try fixture.expect_secret_marked();
     try fixture.expect_wiped();
 }
 
@@ -277,22 +295,35 @@ test "metadata service: version 2 only, never through a proxy" {
         try testing.expectEqual(net.Scheme.http, logged.scheme);
         try testing.expectEqualStrings("169.254.169.254", logged.host_text());
         if (index > 0) try testing.expect(logged.secret_headers == 1);
+        // The token PUT has no secret header, but its answer is the session token.
+        try testing.expect(logged.secret);
         // The short limits, not the registry's: a laptop off EC2 is not kept waiting.
         try testing.expectEqual(constants.aws_imds_timeout_ms, logged.idle_timeout_ms);
         try testing.expectEqual(constants.aws_imds_total_timeout_ms, logged.total_timeout_ms);
     }
     try testing.expectEqual(net.Method.put, fixture.wire.logged(0).?.method);
+    try fixture.expect_secret_marked();
     try fixture.expect_wiped();
 }
 
 // Goal: a service that does not offer version 2, has no role, answers nonsense, is switched off or
 // is simply not there ends in "no credentials" without ever asking for version 1.
 test "metadata service failures never fall back to version 1" {
-    const modes = [_]struct { mode: aws_sim.ImdsMode, state: credentials_mod.State, calls: u32 }{
-        .{ .mode = .v1_only, .state = .v1_only, .calls = 1 },
-        .{ .mode = .no_role, .state = .no_role, .calls = 2 },
-        .{ .mode = .malformed, .state = .malformed, .calls = 3 },
-        .{ .mode = .unavailable, .state = .refused, .calls = 1 },
+    // Only 403, 404 and 405 on the token call mean "no version 2" (botocore's fallback statuses);
+    // a 400 or a 5xx is a refusal.
+    const Case = struct {
+        mode: aws_sim.ImdsMode,
+        state: credentials_mod.State,
+        calls: u32,
+        status: u16,
+    };
+    const modes = [_]Case{
+        .{ .mode = .v1_only, .state = .v1_only, .calls = 1, .status = 404 },
+        .{ .mode = .token_forbidden, .state = .v1_only, .calls = 1, .status = 403 },
+        .{ .mode = .token_bad_request, .state = .refused, .calls = 1, .status = 400 },
+        .{ .mode = .no_role, .state = .no_role, .calls = 2, .status = 404 },
+        .{ .mode = .malformed, .state = .malformed, .calls = 3, .status = 0 },
+        .{ .mode = .unavailable, .state = .refused, .calls = 1, .status = 503 },
     };
     for (modes) |case| {
         const fixture = try Fixture.create(9, &.{}, &.{});
@@ -301,7 +332,9 @@ test "metadata service failures never fall back to version 1" {
         try testing.expectError(error.NoCredentials, fixture.resolve());
         try testing.expectEqual(case.state, fixture.trace.instance_metadata);
         try testing.expectEqual(case.calls, fixture.aws.imds_calls);
+        try testing.expectEqual(case.status, fixture.trace.status);
         try testing.expectEqual(@as(u32, 0), fixture.aws.imds_v1_served);
+        try fixture.expect_secret_marked();
         try fixture.expect_wiped();
     }
     const absent = try Fixture.create(10, &.{}, &.{});
@@ -373,6 +406,7 @@ fn call_ecr(fixture: *Fixture, key: sigv4.Key, now_s: u64) !u16 {
         .body = source.body(),
         .content_type = "application/x-amz-json-1.1",
         .authorization = signed.authorization_text(),
+        .secret = true, // The answer is an authorization token.
         .extra_headers = headers[0..if (key.session_token.len > 0) 3 else 2],
     }, &head, sink.sink());
     if (head.status == 200) {
@@ -404,6 +438,7 @@ test "resolved credentials sign for the simulated ECR; skew and bad keys are ref
     untokened.session_token = "";
     try testing.expectEqual(@as(u16, 400), try call_ecr(fixture, untokened, now));
     try testing.expectEqual(@as(u32, 2), fixture.aws.ecr_ok);
+    try fixture.expect_secret_marked();
 }
 
 // Goal: S3 refuses a request that carries an Authorization, which is why the client must strip it
@@ -458,6 +493,95 @@ test "seeded faults: the right key or no credentials, and clean buffers" {
         }
         try testing.expectEqual(@as(u32, 0), fixture.aws.imds_v1_served);
         try testing.expectEqual(@as(u32, 0), fixture.aws.leaked);
+        try fixture.expect_secret_marked();
         try fixture.expect_wiped();
     }
+}
+
+// Goal: a value over its bound is refused with a reason, however far over, when it comes through
+// `Env.from_host` (the CLI's path), not only when a caller hands it in. Method: a host holding a
+// session token, then a role session name, at bound+1, bound+2 and twice the bound.
+test "a value over its bound is refused, not dropped, through from_host" {
+    var long: [2 * constants.aws_session_token_bytes_max]u8 = undefined;
+    @memset(&long, 't');
+    const bound = constants.aws_session_token_bytes_max;
+    for ([_]usize{ bound + 1, bound + 2, 2 * bound }) |length| {
+        const env = [_]host_sim.EnvironmentVariable{
+            .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" },
+            .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
+            .{ .name = "AWS_SESSION_TOKEN", .value = long[0..length] },
+        };
+        const fixture = try Fixture.create(30, &.{}, &env);
+        defer fixture.destroy();
+        try testing.expectError(error.NoCredentials, fixture.resolve());
+        try testing.expectEqual(credentials_mod.State.malformed, fixture.trace.environment);
+        try testing.expectEqual(@as(u32, 0), fixture.credentials.access_key_id_len);
+    }
+    // At the bound the token is taken whole.
+    const at_bound = [_]host_sim.EnvironmentVariable{
+        .{ .name = "AWS_ACCESS_KEY_ID", .value = "AKIAEXAMPLEEXAMPLE1" },
+        .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
+        .{ .name = "AWS_SESSION_TOKEN", .value = long[0..bound] },
+    };
+    const whole = try Fixture.create(31, &.{}, &at_bound);
+    defer whole.destroy();
+    try whole.resolve();
+    try testing.expectEqual(@as(u32, bound), whole.credentials.session_token_len);
+    const name_bound = constants.aws_role_session_name_bytes_max;
+    for ([_]usize{ name_bound + 1, name_bound + 2, 2 * name_bound }) |length| {
+        const env = [_]host_sim.EnvironmentVariable{
+            .{ .name = "AWS_ROLE_ARN", .value = role_arn },
+            .{ .name = "AWS_WEB_IDENTITY_TOKEN_FILE", .value = token_path },
+            .{ .name = "AWS_ROLE_SESSION_NAME", .value = long[0..length] },
+        };
+        const fixture = try Fixture.create(32, &.{token_file}, &env);
+        defer fixture.destroy();
+        try testing.expectError(error.NoCredentials, fixture.resolve());
+        try testing.expectEqual(credentials_mod.State.malformed, fixture.trace.web_identity);
+        try testing.expectEqual(@as(u32, 0), fixture.wire.requests);
+    }
+}
+
+// Goal: an empty variable is unset, as the AWS SDKs read it, for every name the resolver reads:
+// it makes no source terminal and blocks no later one (docs/decisions/2026-11-10-aws-empty-env-
+// is-unset.md). Method: each name alone, empty, with the metadata service there; then an empty
+// session token beside a web identity, and beside a key pair.
+test "an empty variable is unset, never terminal" {
+    for (credentials_mod.Env.names) |name| {
+        const env = [_]host_sim.EnvironmentVariable{.{ .name = name, .value = "" }};
+        const fixture = try Fixture.create(33, &.{}, &env);
+        defer fixture.destroy();
+        fixture.aws.imds = .v2;
+        try fixture.resolve();
+        try testing.expectEqual(credentials_mod.Source.instance_metadata, fixture.credentials.source);
+        try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.environment);
+        try testing.expectEqual(credentials_mod.State.not_configured, fixture.trace.web_identity);
+    }
+    // IRSA with an image that also sets an empty token: the pod's own role is used.
+    const irsa = [_]host_sim.EnvironmentVariable{
+        .{ .name = "AWS_SESSION_TOKEN", .value = "" },
+        .{ .name = "AWS_ROLE_ARN", .value = role_arn },
+        .{ .name = "AWS_WEB_IDENTITY_TOKEN_FILE", .value = token_path },
+    };
+    const pod = try Fixture.create(34, &.{token_file}, &irsa);
+    defer pod.destroy();
+    try pod.resolve();
+    try testing.expectEqual(credentials_mod.Source.web_identity, pod.credentials.source);
+    // An empty key id beside a real secret is half a pair; an empty role beside a token file is
+    // half a role. Both are terminal as before, because the other half is set.
+    const half_key = [_]credentials_mod.Env.Pair{
+        .{ .name = "AWS_ACCESS_KEY_ID", .value = "" },
+        .{ .name = "AWS_SECRET_ACCESS_KEY", .value = aws_sim.issued_secret },
+    };
+    const keys = try Fixture.create(35, &.{}, &.{});
+    defer keys.destroy();
+    try testing.expectError(error.NoCredentials, keys.resolve_with(.{ .pairs = &half_key }));
+    try testing.expectEqual(credentials_mod.State.incomplete, keys.trace.environment);
+    const half_role = [_]credentials_mod.Env.Pair{
+        .{ .name = "AWS_ROLE_ARN", .value = "" },
+        .{ .name = "AWS_WEB_IDENTITY_TOKEN_FILE", .value = token_path },
+    };
+    try testing.expectError(error.NoCredentials, keys.resolve_with(.{ .pairs = &half_role }));
+    try testing.expectEqual(credentials_mod.State.incomplete, keys.trace.web_identity);
+    try testing.expectEqual(@as(u32, 0), keys.wire.requests);
 }

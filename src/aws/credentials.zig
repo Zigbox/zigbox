@@ -6,7 +6,8 @@
 //! 1. The environment: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`
 //!    if the key is temporary. Used as given; never expires here. The environment is the
 //!    caller's view (`Env`), not read from the process. Half of a pair, or a value that is not a
-//!    key (or a token over its bound), is the answer too: a refusal, never another identity.
+//!    key (or a token over its bound), is the answer too: a refusal, never another identity. An
+//!    empty variable is unset, as the AWS SDKs read it.
 //! 2. Web identity, the way Kubernetes service accounts work: `AWS_ROLE_ARN` and
 //!    `AWS_WEB_IDENTITY_TOKEN_FILE` (and `AWS_ROLE_SESSION_NAME`, default `zbx`). The token file is
 //!    read and sent in an unsigned STS `AssumeRoleWithWebIdentity` call. Once the pair is set, this
@@ -41,7 +42,9 @@ pub const State = enum {
     /// Some of what it needs was set, not all.
     incomplete,
     /// A metadata service that will not give a session token (version 2 is off or absent behind
-    /// it): a 4xx on the token call. Version 1 is never asked. The fix is not "attach a role".
+    /// it): 403, 404 or 405 on the token call, the statuses botocore falls back to version 1 on
+    /// (403 is also what a forwarding proxy earns, so word it from `Trace.status`). Version 1 is
+    /// never asked. The fix is not "attach a role".
     v1_only,
     /// A metadata service with no role attached to the instance.
     no_role,
@@ -104,50 +107,49 @@ pub const Env = struct {
         "AWS_EC2_METADATA_DISABLED",
     };
 
-    /// The value of `name`, whole whatever its length, or null if not set.
+    /// The value of `name`, whole whatever its length, or null if not set. An empty value counts
+    /// as not set, as the AWS SDKs read it (docs/decisions/2026-11-10-aws-empty-env-is-unset.md).
     pub fn get(env: Env, name: []const u8) ?[]const u8 {
         for (env.pairs) |pair| {
-            if (std.mem.eql(u8, pair.name, name)) return pair.value;
+            if (!std.mem.eql(u8, pair.name, name)) continue;
+            if (pair.value.len == 0) return null;
+            return pair.value;
         }
         return null;
     }
 
     /// The caller's view of this process, for the CLI: each name in `names` that the host has,
-    /// in `storage`. A value is read up to one byte past its bound, so a value over the bound
-    /// reaches `resolve` as over the bound and is refused, not cut or dropped.
+    /// in `storage`, whole whatever its length (the host hands out a slice of its own memory, so
+    /// reading a long value copies nothing). A value over its bound reaches `resolve` as it is
+    /// and is refused there, not cut or dropped.
     pub fn from_host(host: host_mod.Host, storage: *[names.len]Pair) Env {
         var count: u32 = 0;
         inline for (names) |name| {
-            const limit = comptime value_limit(name) + 1;
-            if (host.environment(name, limit)) |value| {
+            if (host.environment(name, std.math.maxInt(u32))) |value| {
                 storage[count] = .{ .name = name, .value = value };
                 count += 1;
             }
         }
         return .{ .pairs = storage[0..count] };
     }
-
-    fn value_limit(name: []const u8) u32 {
-        if (std.mem.eql(u8, name, "AWS_ACCESS_KEY_ID")) return constants.aws_key_id_bytes_max;
-        if (std.mem.eql(u8, name, "AWS_SECRET_ACCESS_KEY")) {
-            return constants.aws_secret_key_bytes_max;
-        }
-        if (std.mem.eql(u8, name, "AWS_SESSION_TOKEN")) {
-            return constants.aws_session_token_bytes_max;
-        }
-        if (std.mem.eql(u8, name, "AWS_ROLE_ARN")) return constants.aws_role_arn_bytes_max;
-        if (std.mem.eql(u8, name, "AWS_WEB_IDENTITY_TOKEN_FILE")) return constants.path_bytes_max;
-        if (std.mem.eql(u8, name, "AWS_ROLE_SESSION_NAME")) {
-            return constants.aws_role_session_name_bytes_max;
-        }
-        return 8;
-    }
 };
 
 pub const Error = error{
     /// No source gave credentials; the trace says what each did.
     NoCredentials,
+    /// The region is not one this resolver signs for (a name that is not a region, or another
+    /// partition: GovCloud, China, the isolated clouds). Nothing was tried; `reason` says it.
+    UnsupportedRegion,
 };
+
+/// A one-line reason for a refusal that is not about a source, for the caller to show.
+pub fn reason(err: Error) []const u8 {
+    return switch (err) {
+        error.NoCredentials => "no AWS credentials were found; see the trace for each source",
+        error.UnsupportedRegion => "the region is not a supported AWS commercial region name " ++
+            "(GovCloud, China and isolated partitions are not supported yet)",
+    };
+}
 
 /// Credentials in their own storage, so they need no allocation and can be wiped.
 pub const Credentials = struct {
@@ -242,9 +244,10 @@ pub fn resolve(
     credentials: *Credentials,
     trace: *Trace,
 ) Error!void {
-    assert(ecr.valid_region(region));
     credentials.wipe();
     trace.* = .{};
+    // The region is the caller's data, so a bad one is a refusal, not a crash.
+    if (!ecr.valid_region(region)) return error.UnsupportedRegion;
     defer workspace.wipe();
     // Once a source is set up, even in part, it is the answer, success or not: zbx never goes on
     // to another identity (the node's role, say) because the one the user named failed.
@@ -327,7 +330,7 @@ fn web_identity(
     const role = env.get("AWS_ROLE_ARN");
     const path = env.get("AWS_WEB_IDENTITY_TOKEN_FILE");
     if (role == null and path == null) return;
-    if (role == null or path == null or role.?.len == 0 or path.?.len == 0) {
+    if (role == null or path == null) {
         trace.web_identity = .incomplete;
         return;
     }
@@ -449,10 +452,14 @@ fn instance_metadata(
     request.body = empty.body();
     request.extra_headers = &.{ttl_header};
     const status = imds_call(host, &request, &sink) orelse return;
-    // Anything but a token is the end: version 1 is never asked. A 4xx says the token service
-    // is not there (version 1 only, or version 2 off); a failing one (5xx, nonsense) is a refusal.
+    // Anything but a token is the end: version 1 is never asked. Only the statuses botocore falls
+    // back to version 1 on (403, 404 and 405) say the token service is not there; any other
+    // answer, 400 (a malformed request) included, is a refusal. botocore/utils.py,
+    // `IMDSFetcher._fetch_metadata_token`: `elif response.status_code in (404, 403, 405): return
+    // None` and `elif response.status_code in (400,): raise BadIMDSRequestError(request)`.
     if (status != 200 or !parse.imds_token_valid(sink.bytes())) {
-        trace.instance_metadata = if (status >= 400 and status < 500) .v1_only else .refused;
+        const not_there = status == 403 or status == 404 or status == 405;
+        trace.instance_metadata = if (not_there) .v1_only else .refused;
         trace.status = status;
         return;
     }

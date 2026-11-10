@@ -88,6 +88,9 @@ pub const Logged = struct {
     /// The timeouts the request asked for, so a test can check a call used its own constant.
     idle_timeout_ms: u32,
     total_timeout_ms: u32,
+    /// Whether the request said its body or its answer is a credential (`Request.secret`), so a
+    /// test can pin that a call that must be wiped is marked.
+    secret: bool,
 
     /// Whether any credential went with the request, of any kind.
     pub fn credential_sent(entry: *const Logged) bool {
@@ -193,6 +196,7 @@ pub const SimNet = struct {
         entry.proxy = request.proxy;
         entry.idle_timeout_ms = request.idle_timeout_ms;
         entry.total_timeout_ms = request.total_timeout_ms;
+        entry.secret = request.secret;
     }
 
     fn injected(sim: *SimNet, index: u32) ?net.Error {

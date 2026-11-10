@@ -26,6 +26,10 @@ pub const ImdsMode = enum {
     v2,
     /// No token endpoint (it answers 404) but credentials for a request without a token.
     v1_only,
+    /// The token call answers 403 (a forwarding proxy), then serves nothing without a token.
+    token_forbidden,
+    /// The token call answers 400 (a malformed request).
+    token_bad_request,
     /// Version 2, and the role list is empty (404).
     no_role,
     /// Version 2, and the credentials document is not JSON.
@@ -122,6 +126,14 @@ fn imds(sim: *AwsSim, request: *const net.Request, served: *net_sim.Served) void
     }
     if (request.method == .put) {
         if (sim.imds == .v1_only) return;
+        if (sim.imds == .token_forbidden) {
+            served.status = 403;
+            return;
+        }
+        if (sim.imds == .token_bad_request) {
+            served.status = 400;
+            return;
+        }
         if (header_value(request, "X-aws-ec2-metadata-token-ttl-seconds") == null) {
             served.status = 400;
             return;

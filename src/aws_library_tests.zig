@@ -88,3 +88,32 @@ test "a second caller resolves from its own environment, region and clock" {
     try testing.expectError(error.NoCredentials, callers[1].resolve(&web, "ap-southeast-2", far));
     try testing.expectEqual(zigbox.aws_credentials.State.expired, callers[1].trace.web_identity);
 }
+
+test "a region the resolver does not sign for is a refusal the caller can read, not a crash" {
+    // Goal: the exported call takes the region from the caller's data, so a bad one must come
+    // back as an error with a one-line reason, with nothing tried and the outputs clean. Method:
+    // a GovCloud region, another partition, a region with a stray blank and an empty one, each
+    // with the metadata service there to be (wrongly) reached.
+    const caller = try std.heap.page_allocator.create(Caller);
+    defer std.heap.page_allocator.destroy(caller);
+    caller.host.init(7, &.{});
+    caller.aws = .{};
+    caller.aws.now_s = caller.host.world.now;
+    caller.wire.init(7, caller.aws.responder());
+    caller.wire.received = &caller.received;
+    caller.host.wire = &caller.wire;
+    caller.credentials.access_key_id_len = 5; // Stale, to see the call clear it.
+    const regions = [_][]const u8{ "us-gov-west-1", "cn-north-1", "eu-west-1 ", "", "FIPS" };
+    for (regions) |region| {
+        try testing.expectError(error.UnsupportedRegion, caller.resolve(&.{}, region, 1));
+        try testing.expectEqual(@as(u32, 0), caller.wire.requests);
+        try testing.expectEqual(@as(u32, 0), caller.credentials.access_key_id_len);
+        try testing.expectEqual(zigbox.aws_credentials.State.not_configured, caller.trace.instance_metadata);
+    }
+    const text = zigbox.aws_credentials.reason(error.UnsupportedRegion);
+    try testing.expect(text.len > 0);
+    try testing.expect(std.mem.indexOfScalar(u8, text, '\n') == null);
+    // A good region still resolves through the same caller.
+    try caller.resolve(&.{}, "us-east-1", caller.host.world.now);
+    try testing.expectEqual(zigbox.aws_credentials.Source.instance_metadata, caller.credentials.source);
+}
