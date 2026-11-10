@@ -89,8 +89,8 @@ const a1 =
     \\policy "$pub" $P true
     \\z run alpine:3.20 -- true 2>/tmp/err-a4 && f "ran with a tree-only signature"
     \\code E0906 /tmp/err-a4
-    \\z policy check alpine:3.20 --output json >/tmp/a-check 2>/dev/null || true
-    \\grep -q '"allowed":false' /tmp/a-check || f "policy check disagrees with run"
+    \\z policy check alpine:3.20 --output json >/tmp/a-check 2>&1 || true
+    \\grep -q '"allowed":false' /tmp/a-check || { head -c 600 /tmp/a-check; f "policy check"; }
     \\policy "$pub" $P false
     \\z store rm "$t" 2>/tmp/err-a5 || f "store rm"
     \\z store gc 2>>/tmp/err-a5 || f "store gc"
