@@ -108,7 +108,6 @@ test {
     _ = @import("redact.zig");
     _ = @import("bundle.zig");
     _ = @import("bundle_tests.zig");
-    _ = @import("ci_changes_tests.zig");
     _ = @import("runtime/session.zig");
     _ = @import("runtime/ids.zig");
     _ = @import("runtime/records.zig");
@@ -226,6 +225,8 @@ test {
     // and the runs that use it, in the simulator.
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
+    // CI path selection (`.github/ci-changes.sh`).
+    _ = @import("ci_changes_tests.zig");
 }
 
 test {

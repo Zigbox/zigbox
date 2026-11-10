@@ -48,7 +48,8 @@ fn is_sha256(text: []const u8) bool {
 fn line_value(text: []const u8, prefix: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, prefix)) return std.mem.trim(u8, line[prefix.len..], " \r");
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        return std.mem.trim(u8, line[prefix.len..], " \r");
     }
     return null;
 }
@@ -187,6 +188,7 @@ fn flatten(buffer: []u8, text: []const u8) []const u8 {
 fn refusal(stderr: []const u8, status: u8, code: []const u8, wants: []const []const u8) Error!void {
     if (status != 125) return error.RefusalWrong;
     var head: [32]u8 = undefined;
+    // 32 bytes hold the prefix.
     const text = std.fmt.bufPrint(&head, "error[ZBX-{s}]: ", .{code}) catch unreachable;
     if (!std.mem.startsWith(u8, stderr, text)) return error.RefusalWrong;
     if (std.mem.indexOf(u8, stderr, "errno") != null) return error.RefusalWrong;
@@ -257,7 +259,9 @@ pub fn check_verify_ok(arena: Allocator, stdout: []const u8, status: u8) Error!v
         return error.VerifyWrong;
     if (!std.mem.eql(u8, doc.schema, "zbx.verify/1") or !doc.ok) return error.VerifyWrong;
     if (doc.links.len != 6) return error.VerifyWrong;
-    const names = [_][]const u8{ "signatures", "signer", "tree", "provenance", "inputs", "build_file" };
+    const names = [_][]const u8{
+        "signatures", "signer", "tree", "provenance", "inputs", "build_file",
+    };
     for (doc.links, names, 1..) |link, name, n| {
         if (link.n != n or !std.mem.eql(u8, link.name, name)) return error.VerifyWrong;
         if (!std.mem.eql(u8, link.status, "ok")) return error.VerifyWrong;
@@ -299,6 +303,7 @@ fn parse_prune(arena: Allocator, stdout: []const u8) Error!Prune {
 pub fn check_exit1_code(stderr: []const u8, status: u8, code: []const u8) Error!void {
     if (status != 1) return error.RefusalWrong;
     var head: [32]u8 = undefined;
+    // 32 bytes hold the prefix.
     const text = std.fmt.bufPrint(&head, "error[ZBX-{s}]: ", .{code}) catch unreachable;
     if (!std.mem.startsWith(u8, stderr, text)) return error.RefusalWrong;
     if (std.mem.indexOf(u8, stderr, "errno") != null) return error.RefusalWrong;
@@ -328,7 +333,11 @@ pub fn check_old_image_refused(stderr: []const u8, status: u8, policy_path: []co
 
 /// A build that reused the old binary's cache wrote complete provenance: the record lists every
 /// step of the build file and a base for each.
-pub fn check_cached_provenance(arena: Allocator, stdout: []const u8, result: []const u8) Error!void {
+pub fn check_cached_provenance(
+    arena: Allocator,
+    stdout: []const u8,
+    result: []const u8,
+) Error!void {
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     const doc = std.json.parseFromSliceLeaky(Provenance, arena, stdout, options) catch
         return error.ProvenanceWrong;
@@ -338,12 +347,12 @@ pub fn check_cached_provenance(arena: Allocator, stdout: []const u8, result: []c
     try expect_step(doc.steps, "notice");
 }
 
-const golden_digest = "b3:" ++ "0123456789abcdef" ** 4;
+const golden_digest = "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn sample_provenance(signed: []const u8, bases: u32) [1200]u8 {
-    var buffer: [1200]u8 = @splat(0);
+fn sample_provenance(signed: []const u8, bases: u32) [2400]u8 {
+    var buffer: [2400]u8 = @splat(0);
     const second = if (bases == 2)
-        ",{\"reference\":\"x/golang:1.23-alpine\",\"manifest\":\"sha256:" ++ "ab" ** 32 ++
+        ",{\"reference\":\"x/golang:1.23-alpine\",\"manifest\":\"sha256:" ++ rep("ab", 32) ++
             "\",\"tree\":\"" ++ golden_digest ++ "\"}"
     else
         "";
@@ -357,25 +366,26 @@ fn sample_provenance(signed: []const u8, bases: u32) [1200]u8 {
         "{{\"name\":\"notice\",\"key\":\"{s}\",\"base\":0,\"input\":\"{s}\",\"needs\":{{}}," ++
         "\"output\":\"{s}\",\"network\":false}}],\"image\":{{\"key\":\"{s}\",\"base\":0}}," ++
         "\"signatures\":[{{\"key\":\"zbx-ed25519:aa\",\"id\":\"bb\",\"signed\":\"{s}\"}}]}}\n", .{
-        golden_digest, golden_digest, golden_digest, golden_digest, golden_digest,
-        "cd" ** 32,    golden_digest, second,        golden_digest, golden_digest,
-        golden_digest, golden_digest, golden_digest, golden_digest, golden_digest,
+        golden_digest,          golden_digest, golden_digest, golden_digest, golden_digest,
+        comptime rep("cd", 32), golden_digest, second,        golden_digest, golden_digest,
+        golden_digest,          golden_digest, golden_digest, golden_digest, golden_digest,
         signed,
-    }) catch unreachable;
+    }) catch unreachable; // The buffer is sized for the longest fixture.
     return buffer;
 }
 
-fn text_of(buffer: *const [1200]u8) []const u8 {
+fn text_of(buffer: *const [2400]u8) []const u8 {
     return std.mem.sliceTo(buffer, 0);
 }
 
 test "the key's lines are read, and a missing encryption is refused" {
     // Goal: the output of `key new` is checked line by line.
-    const ok = "key: demo\nid: " ++ "ab" ** 32 ++ "\npublic: zbx-ed25519:" ++ "cd" ** 32 ++
+    const ok = "key: demo\nid: " ++ rep("ab", 32) ++ "\npublic: zbx-ed25519:" ++ rep("cd", 32) ++
         "\nencryption: passphrase\n";
-    try std.testing.expectEqualStrings("ab" ** 32, try check_key_new(ok, "demo"));
+    try std.testing.expectEqualStrings(&comptime rep("ab", 32), try check_key_new(ok, "demo"));
     try std.testing.expectError(error.KeyWrong, check_key_new(ok, "other"));
-    const clear = "key: demo\nid: " ++ "ab" ** 32 ++ "\npublic: zbx-ed25519:aa\nencryption: none\n";
+    const clear = "key: demo\nid: " ++ rep("ab", 32) ++
+        "\npublic: zbx-ed25519:aa\nencryption: none\n";
     try std.testing.expectError(error.KeyWrong, check_key_new(clear, "demo"));
     try std.testing.expectError(error.KeyWrong, check_key_new("", "demo"));
     const short = "key: demo\nid: abc\npublic: zbx-ed25519:a\nencryption: passphrase\n";
@@ -401,7 +411,7 @@ test "a provenance record is checked for bases, steps, version and signature" {
     );
     try std.testing.expectError(
         error.ProvenanceWrong,
-        check_provenance(arena, text_of(&good), "b3:" ++ "00" ** 32, "0.4.0"),
+        check_provenance(arena, text_of(&good), "b3:" ++ rep("00", 32), "0.4.0"),
     );
     const earlier = sample_provenance("an earlier build", 2);
     try std.testing.expectError(
@@ -441,7 +451,8 @@ test "the policy refusal names the file and the rule, and carries no errno" {
     const path = "/home/demo/.config/zbx/policy.zon";
     try check_policy_refusal(text, 125, path);
     try std.testing.expectError(error.RefusalWrong, check_policy_refusal(text, 1, path));
-    try std.testing.expectError(error.RefusalWrong, check_policy_refusal(text, 125, "/x/policy.zon"));
+    const wrong = check_policy_refusal(text, 125, "/x/policy.zon");
+    try std.testing.expectError(error.RefusalWrong, wrong);
     try std.testing.expectError(error.RefusalWrong, check_policy_refusal("", 125, path));
     const dump = text ++ "errno 13\n";
     try std.testing.expectError(error.RefusalWrong, check_policy_refusal(dump, 125, path));
@@ -453,7 +464,8 @@ test "the tamper refusal names the path; store verify names the object" {
         "  cause  /usr/local/bin/hello (object 0123456789ab) has bytes that are not the image's\n";
     try check_tamper_refusal(text, 125, "/usr/local/bin/hello");
     try std.testing.expectError(error.RefusalWrong, check_tamper_refusal(text, 125, "/usr/bin/x"));
-    try std.testing.expectError(error.RefusalWrong, check_tamper_refusal(text, 0, "/usr/local/bin/hello"));
+    const wrong = check_tamper_refusal(text, 0, "/usr/local/bin/hello");
+    try std.testing.expectError(error.RefusalWrong, wrong);
     try check_store_verify_names("damaged: /ab/0123456789abcdef", "0123456789abcdef00");
     try std.testing.expectError(
         error.RefusalWrong,
@@ -472,7 +484,8 @@ test "the object to change is the largest, found by listing" {
     );
     try std.testing.expectError(error.NoObject, largest_object(""));
     try std.testing.expectError(error.NoObject, largest_object("junk\n"));
-    try std.testing.expectEqualStrings("cdef012345678", try object_id_of_path("/s/ab/cdef012345678"));
+    const id = try object_id_of_path("/s/ab/cdef012345678");
+    try std.testing.expectEqualStrings("cdef012345678", id);
     try std.testing.expectError(error.NoObject, object_id_of_path("/s/ab/c"));
     try check_unchanged("a\nb\n", "a\nb\n");
     try std.testing.expectError(error.ListingChanged, check_unchanged("a\n", "a\nb\n"));
@@ -484,7 +497,9 @@ test "verify offline needs all six links ok and exit 0" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const head = "{\"schema\":\"zbx.verify/1\",\"subject\":\"b3:x\",\"ok\":true,\"links\":[";
-    const names = [_][]const u8{ "signatures", "signer", "tree", "provenance", "inputs", "build_file" };
+    const names = [_][]const u8{
+        "signatures", "signer", "tree", "provenance", "inputs", "build_file",
+    };
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try writer.writeAll(head);
@@ -496,7 +511,8 @@ test "verify offline needs all six links ok and exit 0" {
     const good = writer.buffered();
     try check_verify_ok(arena, good, 0);
     try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, good, 1));
-    const bad = try std.mem.replaceOwned(u8, arena, good, "\"status\":\"ok\"}]", "\"status\":\"failed\"}]");
+    const ok_tail = "\"status\":\"ok\"}]";
+    const bad = try std.mem.replaceOwned(u8, arena, good, ok_tail, "\"status\":\"failed\"}]");
     try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, bad, 0));
     try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, "{}", 0));
 }
@@ -527,4 +543,11 @@ test "a missing passphrase is E0911 with exit 1, and the bundle is one envelope 
     try std.testing.expectError(error.BundleWrong, check_bundle(""));
     try std.testing.expectError(error.BundleWrong, check_bundle("{\"payloadType\":\"x\"}\n"));
     try std.testing.expectError(error.BundleWrong, check_bundle("junk\n"));
+}
+
+/// `text` repeated `count` times (a test fixture).
+fn rep(comptime text: []const u8, comptime count: usize) [text.len * count]u8 {
+    var buffer: [text.len * count]u8 = undefined;
+    for (0..count) |n| @memcpy(buffer[n * text.len ..][0..text.len], text);
+    return buffer;
 }

@@ -156,8 +156,9 @@ fn tamper(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     _ = try common.expect_exit(session, out, step, append, 0);
     const ran = try fmt(session, "{s} run {s}", .{ zh, digest });
     const refused = try run(session, out, ran, 125);
-    checks.check_tamper_refusal(refused.streams.stderr, refused.status, "/usr/local/bin/hello") catch |err| {
-        return fail_step(out, step, "expected E0907 naming /usr/local/bin/hello", err);
+    const binary = "/usr/local/bin/hello";
+    checks.check_tamper_refusal(refused.streams.stderr, refused.status, binary) catch |err| {
+        return fail_step(out, step, "expected E0907 naming " ++ binary, err);
     };
     const verify = try run(session, out, zh ++ " store verify 2>&1", 1);
     checks.check_store_verify_names(verify.streams.stdout, id) catch |err| {
@@ -177,7 +178,8 @@ fn tamper(session: *Session, out: *Io.Writer, digest: []const u8) !void {
 fn verify_offline(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     const command = try fmt(session, "{s} verify {s} --output json", .{ zh_offline, digest });
     const result = try run(session, out, command, 0);
-    checks.check_verify_ok(session.scratch_allocator(), result.streams.stdout, result.status) catch |err| {
+    const arena = session.scratch_allocator();
+    checks.check_verify_ok(arena, result.streams.stdout, result.status) catch |err| {
         return fail_step(out, step, "expected six links ok with no network", err);
     };
 }

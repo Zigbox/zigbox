@@ -26,7 +26,7 @@ const checks_up6 = @import("checks_upgrade_m6.zig");
 const checks = @import("checks_upgrade_m6b.zig");
 
 /// The run record version v0.3.1 wrote; this binary reads it as it is and writes its own.
-// TODO(m8): confirm against v0.3.1
+// v0.3.1 writes run record version 8 (constants.zig at the tag).
 const run_record_version_old: u32 = 8;
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");

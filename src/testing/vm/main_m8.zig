@@ -25,20 +25,28 @@
 
 const std = @import("std");
 const Io = std.Io;
+const accept = @import("accept_m4.zig");
+const agent = @import("agent_m8.zig");
+const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
+const hello = @import("hello_m7.zig");
+const image = @import("image.zig");
+const limits = @import("limits.zig");
+const old_release = @import("old_release.zon");
+const old_wrapper = @import("upgrade_m5.zig");
 const session_mod = @import("session.zig");
 
 const Session = session_mod.Session;
 const H = harness;
+const spec_m6b = @import("spec_m6b.zig");
+const trust = @import("trust_m8.zig");
+const upgrade = @import("upgrade_m8.zig");
 
 const script_path = "/root/m8-export.sh";
 const push_path = "/root/m8-push.sh";
 const marker = "m8-export: identical";
 const push_marker = "m8-push: ok";
 const timeout_s: u32 = 300;
-const sign_script_path = "/tmp/m8-sign.sh";
-const sign_marker = "m8-sign: refused, then run again";
-const sign_timeout_s: u32 = 900;
 
 /// The whole check, as one script: it prints `marker` as its last line when every step held.
 const script = body ++ "\necho '" ++ marker ++ "'\n";
@@ -147,37 +155,6 @@ const verify_body =
     \\true
 ;
 
-/// The SIGN part's script, run as `demo` with `XDG_DATA_HOME` and `XDG_CONFIG_HOME` of its own,
-/// so that the other parts' store and policy are not touched. It prints `sign_marker` last.
-const sign_script = sign_body ++ "\necho '" ++ sign_marker ++ "'\n";
-
-const sign_body =
-    \\export ZBX_REGISTRY_MIRRORS=mirror.gcr.io XDG_DATA_HOME=$HOME/d XDG_CONFIG_HOME=$HOME/c
-    \\Z=/usr/local/bin/zbx
-    \\cd
-    \\f() { echo "FAIL: $*"; exit 1; }
-    \\rm -rf $XDG_DATA_HOME $XDG_CONFIG_HOME; mkdir -p $XDG_DATA_HOME $XDG_CONFIG_HOME/zbx
-    \\echo 'correct horse' > ~/pw; chmod 600 ~/pw
-    \\$Z key new demo --passphrase-file ~/pw || f key
-    \\T=$($Z --output json pull alpine:3.20 | sed -n 's/.*"tree":"\(b3:[0-9a-f]*\)".*/\1/p')
-    \\P=$($Z --output json key show demo | sed -n 's/.*"public":"\([^"]*\)".*/\1/p')
-    \\[ -n "$T" ] && [ -n "$P" ] || f "tree or key"
-    \\Q=$XDG_CONFIG_HOME/zbx/policy.zon
-    \\echo ".{ .version = 1, .keys = .{ .{ .name = \"demo\", .public = \"$P\" } }," > $Q
-    \\echo ".require_signature = true }" >> $Q
-    \\$Z run $T -- true 2> /tmp/e1; [ $? = 125 ] || f "unsigned ran"
-    \\grep -m1 'E0905' /tmp/e1 || f "no E0905"
-    \\$Z sign $T --passphrase-file ~/pw || f sign
-    \\$Z run $T -- true || f "signed did not run"
-    \\O=$(find $XDG_DATA_HOME -path '*/objects/*' -type f ! -name '*.chunks' -size +2k | head -n 1)
-    \\M=$(stat -c %a $O); chmod u+w $O; printf x >> $O
-    \\$Z run $T -- true 2> /tmp/e2; [ $? = 125 ] || f "changed ran"
-    \\grep -m1 'E0907' /tmp/e2 || f "no E0907"
-    \\truncate -s -1 $O; chmod $M $O; $Z run $T -- true || f "put back"
-    \\rm -rf $XDG_CONFIG_HOME
-    \\true
-;
-
 pub fn main(init: std.process.Init) !u8 {
     harness.demo_name = "demo-m8";
     var buffer: [4096]u8 = undefined;
@@ -199,7 +176,6 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
-    const image = @import("image.zig");
     const accel = harness.choose_accel(options.accel, H.kvm_usable(init.io)) catch |err| {
         if (err == error.NoKvm) {
             try out.print("demo-m8: /dev/kvm is not usable here; add -Daccel=tcg\n", .{});
@@ -207,21 +183,52 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !void {
         return err;
     };
     const binary = try H.check_binaries(init, out, options);
-    const base = try image.ensure(init, options.cache_dir, out);
+    if (options.old_zbx.len == 0) {
+        try out.print("demo-m8: --old-zbx is missing: the upgrade test needs {s}\n", .{
+            old_release.m8_tag,
+        });
+        return error.MissingBinary;
+    }
     const arena = init.arena.allocator();
+    const limit: Io.Limit = .limited(limits.elf_bytes_max);
+    const old_binary = try Io.Dir.cwd().readFileAlloc(init.io, options.old_zbx, arena, limit);
+    const base = try image.ensure(init, options.cache_dir, out);
+    var ca_file: []const u8 = "";
+    if (options.ca_file.len > 0) {
+        const body_limit: Io.Limit = .limited(limits.http_body_bytes_max);
+        ca_file = try Io.Dir.cwd().readFileAlloc(init.io, options.ca_file, arena, body_limit);
+    }
     const format = "{s}/overlay-demo-m8.qcow2";
     const overlay = try std.fmt.allocPrint(arena, format, .{options.cache_dir});
     if (!options.reuse_overlay) try image.make_overlay(init, base, overlay);
     var session: Session = undefined;
-    try session_mod.start(&session, init, out, overlay, accel, .{ .binary = binary });
+    try session_mod.start(&session, init, out, overlay, accel, .{
+        .binary = binary,
+        .old_binary = old_binary,
+        .ca_file = ca_file,
+    });
     defer session.deinit();
     var timer = H.Timer.start();
     try H.provision(&session, out, &timer, options.reuse_overlay);
+    try H.install_binary(&session, out, &timer);
+    const with_ca = ca_file.len > 0;
+    try accept.install_old(&session, out);
+    try common.write_wrappers(&session, out, with_ca);
+    try old_wrapper.write_old_wrapper(&session, out, with_ca);
+    inline for (parts) |part| try part(&session, out, &timer);
     try export_check(&session, out);
-    try sign_check(&session, out);
     try verify_check(&session, out);
     try session.shutdown();
 }
+
+/// The parts, in order. A part is `fn (*Session, *Io.Writer, *H.Timer) !void`.
+const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
+    upgrade.step_upgrade,
+    spec_m6b.step_spec,
+    hello.step_first,
+    trust.step_trust,
+    agent.run_agent,
+};
 
 fn export_check(session: *Session, out: *Io.Writer) !void {
     const copied = try session.copy_in(.{
@@ -243,15 +250,6 @@ fn export_check(session: *Session, out: *Io.Writer) !void {
     if (std.mem.indexOf(u8, pushed.output, push_marker) == null) return error.CheckFailed;
 }
 
-fn sign_check(session: *Session, out: *Io.Writer) !void {
-    try session.put_file(sign_script_path, sign_script);
-    const command = H.as_demo ++ "sh " ++ sign_script_path ++ " 2>&1";
-    const result = try session.run(command, sign_timeout_s);
-    try H.show(out, "sign, run under a policy, change an object", result);
-    if (result.status != 0) return error.SignCheckFailed;
-    if (std.mem.indexOf(u8, result.output, sign_marker) == null) return error.SignCheckFailed;
-}
-
 fn verify_check(session: *Session, out: *Io.Writer) !void {
     try session.put_file(verify_script_path, verify_script);
     const result = try session.run("sh " ++ verify_script_path ++ " 2>&1", timeout_s);
@@ -265,11 +263,6 @@ test "the verify script ends with its marker and fits a put_file" {
     try std.testing.expect(verify_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
 }
 
-test "the sign script ends with its marker and fits a put_file" {
-    try std.testing.expect(std.mem.endsWith(u8, sign_script, sign_marker ++ "'\n"));
-    try std.testing.expect(sign_script.len <= @import("zigbox_vm").limits.put_file_bytes_max);
-}
-
 test "the scripts end with the markers the check looks for" {
     try std.testing.expect(std.mem.endsWith(u8, script, marker ++ "'\n"));
     try std.testing.expect(std.mem.endsWith(u8, push_script, push_marker ++ "'\n"));
@@ -279,4 +272,12 @@ test "the scripts fit a put_file" {
     const limit = @import("zigbox_vm").limits.put_file_bytes_max;
     try std.testing.expect(script.len <= limit);
     try std.testing.expect(push_script.len <= limit);
+}
+
+test {
+    // The files this demo is made of carry their own unit tests; a test root reaches them here.
+    _ = @import("checks_m8.zig");
+    _ = @import("trust_m8.zig");
+    _ = @import("upgrade_m8.zig");
+    _ = @import("agent_m8.zig");
 }
