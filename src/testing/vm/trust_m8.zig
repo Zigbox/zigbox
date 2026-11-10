@@ -146,7 +146,7 @@ fn policy_refuses(session: *Session, out: *Io.Writer, digest: []const u8) !void 
 fn tamper(session: *Session, out: *Io.Writer, digest: []const u8) !void {
     const find = H.as_demo ++ "sh -c 'for f in $(grep -rl \"" ++ greeting ++ "\" " ++
         common.store_dir ++ "); do [ \"$(head -c4 $f | tail -c3)\" = ELF ] && " ++
-        "echo \"$(stat -c %s $f) $f\"; done'";
+        "echo \"$(stat -c %s $f) $f\"; done; true'";
     const found = try run(session, out, find, 0);
     const path = checks.largest_object(found.streams.stdout) catch |err| {
         return fail_step(out, step, "expected the hello binary among the store's objects", err);
