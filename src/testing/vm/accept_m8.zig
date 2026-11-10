@@ -144,7 +144,7 @@ const b1 =
     \\  i=$((i + 1)); [ "$i" -lt 60 ] || f "the registry did not start"; sleep 1
     \\done
     \\cd /home/demo/hello
-    \\p=$(m push "$d" localhost:5000/m8/hello:demo 2>/tmp/err-a2) || f push
+    \\p=$(m push "$d" localhost:5000/m8/hello:demo 2>/tmp/err-a2) || { ss -ltn; m logs m8reg 2>&1 | tail -5; curl -sv http://localhost:5000/v2/ 2>&1 | tail -5; f push; }
     \\echo "$p" | grep -q '^sha256:' || f "push printed $p"
     \\m push "$d" localhost:5000/m8/hello:demo >/dev/null 2>/tmp/err-a3 || f "second push"
     \\q=$(m inspect --provenance "$d" --output json)
