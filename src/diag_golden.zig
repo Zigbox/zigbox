@@ -81,6 +81,10 @@ fn prepare_step_refused(sim: *HostSim, index: u32, errno: u16) void {
     sim.faults.fail_step_errno = errno;
 }
 
+fn prepare_listener_refused(sim: *HostSim) void {
+    prepare_step_refused(sim, sim_run.step_index_listen(.make_listener), 98); // EADDRINUSE.
+}
+
 fn prepare_capabilities_refused(sim: *HostSim) void {
     prepare_step_refused(sim, step_of(.restrict_capabilities), 1);
 }
@@ -135,7 +139,7 @@ fn prepare_disk_full(sim: *HostSim) void {
 fn prepare_records_unreadable(sim: *HostSim) void {
     sim_run.init(sim, 1);
     sim.world.add_node(sim_run.runs_path, .dir);
-    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage") == null);
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     for (0..constants.runs_max - 1) |number| {
@@ -601,6 +605,25 @@ fn prepare_store_unmapped(sim: *HostSim) void {
     prepare_store_source(sim);
     // The overflow id: what the kernel shows for an owner the namespace has no mapping for.
     golden_files.set_owner_of("/src/etc/passwd", constants.store_overflow_id, 0);
+}
+
+const listen_host_args = [_][:0]const u8{
+    "run",      "--net",       "host",   "--listen", "127.0.0.1:8080", "--listen-send", "3",
+    "--rootfs", "/srv/alpine", "--name", "web-1",    "--",             "/bin/sh",
+};
+
+const listen_remote_args = [_][:0]const u8{
+    "run",      "--listen",    "10.0.0.1:8080", "--listen-send", "3",
+    "--rootfs", "/srv/alpine", "--name",        "web-1",         "--",
+    "/bin/sh",
+};
+
+fn listen_run_args(comptime send: [:0]const u8) [11][:0]const u8 {
+    return .{
+        "run",      "--listen",    "127.0.0.1:8080", "--listen-send", send,
+        "--rootfs", "/srv/alpine", "--name",         "web-1",         "--",
+        "/bin/sh",
+    };
 }
 
 const many_arguments: [constants.args_count_max + 1][:0]const u8 = @splat("a");
@@ -1070,6 +1093,28 @@ const base_cases = [_]Case{
     .{
         .code = .E0605,
         .args = &publish_args("80:80"),
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .E0606,
+        .args = &listen_host_args,
+        .exit = 125,
+    },
+    .{
+        .code = .E0607,
+        .args = &listen_remote_args,
+        .exit = 125,
+    },
+    .{
+        .code = .E0608,
+        .args = &listen_run_args("3"),
+        .prepare = prepare_listener_refused,
+        .exit = 125,
+    },
+    .{
+        .code = .E0609,
+        .args = &listen_run_args("99"),
         .prepare = prepare_container,
         .exit = 125,
     },

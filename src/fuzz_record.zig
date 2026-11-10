@@ -237,7 +237,7 @@ fn check_round_trip(random: std.Random) void {
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     records.parse(text, &parsed) catch unreachable; // A rendered record always reads back.
-    assert(parsed.version == constants.record_version);
+    assert(parsed.version == constants.record_version_plain);
     assert(std.mem.eql(u8, parsed.name_slice(), view.name));
     assert(std.mem.eql(u8, parsed.rootfs_slice(), view.rootfs));
     assert(parsed.started == view.started);
@@ -337,7 +337,7 @@ fn check_reach_accepted(parsed: *const records.Parsed) void {
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{constants.record_version});
+    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{constants.record_version_plain});
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

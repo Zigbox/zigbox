@@ -234,7 +234,13 @@ pub fn parse_listen(value: []const u8) ListenParse {
 
 /// What is wrong with a `--listen` given the rest of the run (ZBX-E0606): it needs `--net none`
 /// and a descriptor to hand the listener to.
-pub const ListenOptionsProblem = enum { network_not_none, no_listen_send };
+pub const ListenOptionsProblem = enum {
+    network_not_none,
+    no_listen_send,
+    /// The command line only: `--listen-send` without `--listen`, or `--listen` with `-d`.
+    send_without_listen,
+    detached,
+};
 
 pub fn listen_options_problem(network: Network, send_given: bool) ?ListenOptionsProblem {
     if (network != .none) return .network_not_none;

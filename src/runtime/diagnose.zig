@@ -1205,6 +1205,10 @@ pub fn listen_options_invalid(diag: *Diag, problem: spec.ListenOptionsProblem) v
             "(--net none); a container with a network reaches the host without it", .{}),
         .no_listen_send => diag.cause("--listen has nowhere to hand the listener: " ++
             "--listen-send FD is missing", .{}),
+        .send_without_listen => diag.cause("--listen-send names where to hand a listener, " ++
+            "and there is no --listen to make one", .{}),
+        .detached => diag.cause("--listen hands the listener to this process, which a " ++
+            "detached run (-d) does not wait for", .{}),
     }
     diag.fix(.{
         .sentence = "hand the listener to the Unix socket you pass down as descriptor 3:",
@@ -1231,15 +1235,27 @@ pub fn listen_value_invalid(diag: *Diag, value: []const u8, problem: spec.Listen
     assert(diag.code.? == .E0607);
 }
 
-/// ZBX-E0609: the listener could not be handed on, and the container was stopped.
-pub fn listen_send_failed(diag: *Diag, descriptor: u32, cause: []const u8, stopped: bool) void {
+/// ZBX-E0609: the listener could not be handed on, and the container was stopped. `failure` is
+/// null when `--listen-send` is not a descriptor number at all.
+pub fn listen_send_failed(
+    diag: *Diag,
+    descriptor: []const u8,
+    failure: ?Failure,
+    stopped: bool,
+) void {
     assert(diag.code == null);
-    assert(cause.len > 0);
+    assert(descriptor.len <= constants.arg_bytes_max);
     diag.raise(.E0609);
     diag.while_("handing the listener to --listen-send", .{});
-    diag.cause("descriptor {d}: {s}", .{ descriptor, cause });
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, descriptor);
+    if (failure) |found| {
+        errors.cause_host_error(diag, "sending the listener", found.err, found.errno);
+    } else {
+        diag.cause("--listen-send '{s}' is not a descriptor number", .{echo});
+    }
     if (stopped) diag.cause("the container was stopped", .{});
-    diag.context("listen-send", "{d}", .{descriptor});
+    diag.context("fd", "{s}", .{echo});
     diag.fix(.{
         .sentence = "pass one end of a Unix stream socketpair as that descriptor",
     });

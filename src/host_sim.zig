@@ -828,6 +828,8 @@ pub const HostSim = struct {
         const sim = from_context(context);
         assert(handle >= sim_world.listener_handle_base);
         try sim.begin_call();
+        // A descriptor that is no pipe end of the model is no Unix socket (ENOTSOCK).
+        if (channel_end < sim_world.pipe_handle_base) return sim.model_error(88);
         if (sim.world.send_listener(channel_end, handle)) |errno| return sim.model_error(errno);
     }
 

@@ -418,6 +418,9 @@ pub const limit_text_bytes_max: u32 = 24;
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
 pub const record_version: u32 = 10;
+/// What a record without a listener is written as: a run that never asked for `--listen` leaves
+/// the same bytes it did before version 10 (which only added `.listen`).
+pub const record_version_plain: u32 = 9;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 64 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
@@ -1334,6 +1337,7 @@ comptime {
     assert(container_name_bytes_max + record_suffix.len <= dir_name_bytes_max);
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
+    assert(record_version_plain + 1 == record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);

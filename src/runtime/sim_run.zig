@@ -205,6 +205,20 @@ pub fn sample_plan_mounts(
     network: spec_mod.Network,
     mounts: []const plan_mod.MountInput,
 ) void {
+    sample_plan_listen(plan, full, scoped, read_only, image, network, mounts, null);
+}
+
+/// Like `sample_plan_mounts`, for a run that hands a listener on (`listen`, a port) or not.
+pub fn sample_plan_listen(
+    plan: *plan_mod.Plan,
+    full: bool,
+    scoped: bool,
+    read_only: bool,
+    image: bool,
+    network: spec_mod.Network,
+    mounts: []const plan_mod.MountInput,
+    listen: ?u16,
+) void {
     const mapping: plan_mod.Mapping = if (full) .{ .full = .{
         .newuidmap = "/usr/bin/newuidmap",
         .newgidmap = "/usr/bin/newgidmap",
@@ -223,6 +237,7 @@ pub fn sample_plan_mounts(
         .read_only = read_only,
         .network = network,
         .mounts = mounts,
+        .listen = listen,
         .pasta = if (network == .user) .{
             .path = "/usr/bin/pasta",
             .log = logs_path ++ "/oracle.pasta.log",
@@ -246,6 +261,16 @@ pub fn step_index_read_only(kind: plan_mod.Kind) u32 {
         if (step.kind == kind) return @intCast(index);
     }
     unreachable; // Every kind asked for is in a read-only plan.
+}
+
+/// The index of the first step of `kind` in the plan of a run that hands a listener on.
+pub fn step_index_listen(kind: plan_mod.Kind) u32 {
+    var plan: plan_mod.Plan = undefined;
+    sample_plan_listen(&plan, true, true, false, false, .none, &.{}, 8080);
+    for (plan.steps[0..plan.count], 0..) |step, index| {
+        if (step.kind == kind) return @intCast(index);
+    }
+    unreachable; // Every kind asked for is in a listener plan.
 }
 
 /// The index of the first step of `kind` in the plan for `full` or single-id mapping.

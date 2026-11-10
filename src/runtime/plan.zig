@@ -910,7 +910,7 @@ pub const Plan = struct {
         plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
-        assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+        assert(plan.count == plan.steps_expected() - plan.tail_count()); // The parent's tail remains.
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound

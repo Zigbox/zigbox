@@ -880,6 +880,15 @@ pub const Session = struct {
         session.send(number, flooded) catch {}; // The container may just have ended.
     }
 
+    /// Ends the container with SIGKILL, as zbx's own decision: no signal was asked for, so none
+    /// is reported in its place.
+    pub fn kill(session: *Session) host_mod.Error!void {
+        const pid = session.pid.?;
+        assert(pid > 1);
+        assert(session.substituted == null);
+        try session.host.signal(pid, constants.signal_kill);
+    }
+
     /// Delivers a signal to the container's PID 1, replacing it with SIGKILL when PID 1 has no
     /// handler for it (or when `force` says to end the container).
     pub fn send(session: *Session, number: u8, force: bool) host_mod.Error!void {

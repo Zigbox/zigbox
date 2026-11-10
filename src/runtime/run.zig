@@ -650,6 +650,14 @@ pub fn signal(handle: *Handle, number: u8) host_mod.Error!void {
     try handle.session.send(number, false);
 }
 
+/// Ends the container at once with SIGKILL, whatever PID 1 handles (a run whose listener could
+/// not be handed on, M8b). The caller still waits for it.
+pub fn stop(handle: *Handle) host_mod.Error!void {
+    assert(handle.status == .running);
+    assert(constants.signal_kill == 9);
+    try handle.session.kill();
+}
+
 /// The exit reason of a run that did not start, from the diagnostic that said why.
 pub fn failed_start(diag: *const Diag) ExitReason {
     assert(diag.code != null);

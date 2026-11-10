@@ -171,7 +171,10 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     assert(view.command.len > 0);
     var writer = std.Io.Writer.fixed(buffer);
     write_bytes(&writer, ".{\n");
-    write_format(&writer, "    .version = {d},\n", .{constants.record_version});
+    // A record without a listener stays at the plain version, byte for byte as before M8b.
+    const plain = constants.record_version_plain;
+    const version = if (view.listen != null) constants.record_version else plain;
+    write_format(&writer, "    .version = {d},\n", .{version});
     write_bytes(&writer, "    .name = ");
     write_string(&writer, view.name);
     write_bytes(&writer, ",\n    .rootfs = ");
@@ -256,12 +259,13 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_listen(writer, view.listen);
 }
 
-/// `.listen = "127.0.0.1:8080",`; an empty string is no listener.
+/// `.listen = "127.0.0.1:8080",` for a run with a listener; no line for one without.
 fn write_listen(writer: *std.Io.Writer, listen: ?spec_mod.Listen) void {
     assert(writer.end <= writer.buffer.len);
+    // Only a run with a listener writes the line, and then the record is version 10.
+    const found = listen orelse return;
     var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
-    const text = if (listen) |found| found.text(&storage) else "";
-    write_format(writer, "    .listen = \"{s}\",\n", .{text});
+    write_format(writer, "    .listen = \"{s}\",\n", .{found.text(&storage)});
 }
 
 fn write_binding(writer: *std.Io.Writer, binding: Binding) void {
@@ -1487,11 +1491,11 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         view.ended = if (exit == .running) null else 1_760_000_042;
         var buffer: [constants.record_bytes_max]u8 = undefined;
         const text = render(&view, &buffer);
-        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 10,\n"));
+        try testing.expect(std.mem.startsWith(u8, text, ".{\n    .version = 9,\n"));
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(constants.record_version, parsed.version);
+        try testing.expectEqual(constants.record_version_plain, parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -1753,7 +1757,7 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "    .tree = ")) continue;
         if (std.mem.startsWith(u8, line, "    .upper = ")) continue;
-        const now = std.fmt.comptimePrint("    .version = {d},", .{constants.record_version});
+        const now = std.fmt.comptimePrint("    .version = {d},", .{constants.record_version_plain});
         const fixed = if (std.mem.eql(u8, line, now)) "    .version = 3," else line;
         @memcpy(old[length..][0..fixed.len], fixed);
         old[length + fixed.len] = '\n';
@@ -1958,7 +1962,7 @@ test "version 6 keeps the state volumes; versions 4 and 5, as written, read with
     try testing.expect(std.mem.indexOf(u8, text, line) != null);
     var parsed: Parsed = undefined;
     try parse(text, &parsed);
-    try testing.expectEqual(constants.record_version, parsed.version);
+    try testing.expectEqual(constants.record_version_plain, parsed.version);
     try testing.expectEqual(@as(u8, 2), parsed.state_count);
     try testing.expectEqualStrings("pgdata", parsed.state_mount(0).name);
     try testing.expectEqualStrings("/etc/app", parsed.state_mount(1).target);

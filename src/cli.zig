@@ -113,6 +113,9 @@ const help_text =
     \\                  or user (the network through pasta, as the user: apt install passt)
     \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
     \\                  implies --net user)
+    \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
+    \\                  --net none only) and hand it to the caller with --listen-send
+    \\  --listen-send <fd>  the inherited Unix socket the listener is sent over (SCM_RIGHTS)
     \\  -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
     \\                  =<value> that value, without it zbx's own (an error if unset there).
     \\                  A value is never stored or printed; zbx ps and a bundle show the name
@@ -389,6 +392,10 @@ pub const RunArgs = struct {
     /// The `--publish` values, parsed as each was read (a bad one is refused there, E0600).
     publish: [constants.publish_count_max]runtime_spec.Publish = undefined,
     publish_count: u32 = 0,
+    /// `--listen`, parsed as it was read (a bad one is refused there, E0607), and `--listen-send`
+    /// as typed (the descriptor number is read when the listener is sent, E0609).
+    listen: ?runtime_spec.Listen = null,
+    listen_send: ?[]const u8 = null,
     /// The `-e` options, each read as it came (a bad one is refused there, E0010). A value stays
     /// in the argument it came in and is never copied; `run_env.resolve` merges them at the start.
     env: [constants.run_env_count_max]run_env.Setting = undefined,
@@ -442,6 +449,8 @@ const RunOption = enum {
     grace,
     net,
     publish,
+    listen,
+    listen_send,
     state,
     tmpfs,
     bind,
@@ -453,7 +462,7 @@ const RunOption = enum {
     workdir,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 17);
+        assert(@backingInt(option) <= 19);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -465,6 +474,8 @@ const RunOption = enum {
             .grace => "--grace",
             .net => "--net",
             .publish => "--publish",
+            .listen => "--listen",
+            .listen_send => "--listen-send",
             .state => "--state",
             .tmpfs => "--tmpfs",
             .bind => "--bind",
@@ -664,7 +675,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 18);
+    assert(std.enums.values(RunOption).len == 20);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1615,6 +1626,7 @@ fn take_run_option(
         },
     };
     if (option == .publish) return take_publish(diag, run_args, value);
+    if (option == .listen) return take_listen(diag, run_args, value, argument);
     if (option == .state) return take_state(diag, run_args, value);
     if (option == .tmpfs) return take_mount(diag, run_args, .tmpfs, value);
     if (option == .bind) return take_mount(diag, run_args, .bind, value);
@@ -1630,6 +1642,8 @@ fn take_run_option(
         .grace => &run_args.grace,
         .net => &run_args.net,
         .publish => unreachable, // Repeatable: `take_publish` above.
+        .listen => unreachable, // `take_listen` above.
+        .listen_send => &run_args.listen_send,
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
         .user => &run_args.user,
@@ -1738,6 +1752,7 @@ fn take_env(
 fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
     try check_network_args(diag, run_args);
+    try check_listen_args(diag, run_args);
     if (run_args.rootfs == null and digest == null) {
         return missing_argument(diag, .run, .rootfs);
     }
@@ -1804,6 +1819,47 @@ fn check_network_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
         .template = true,
     });
     return error.UnexpectedArgument;
+}
+
+/// `--listen` and `--listen-send` fit the run (E0606): `--net none` (or no `--net`), no forwards,
+/// no `-d`, and the two flags together.
+fn check_listen_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
+    assert(diag.code == null);
+    const given_send = run_args.listen_send != null;
+    const problem: ?runtime_spec.ListenOptionsProblem = blk: {
+        if (run_args.listen == null) {
+            break :blk if (given_send) .send_without_listen else null;
+        }
+        const network: runtime_spec.Network = if (run_args.publish_count > 0) .user else if (run_args.net) |value|
+            (if (net_word_named(value).? == .none) .none else .host)
+        else
+            .none;
+        if (runtime_spec.listen_options_problem(network, given_send)) |found| break :blk found;
+        break :blk if (run_args.detach) .detached else null;
+    };
+    const found = problem orelse return;
+    diagnose.listen_options_invalid(diag, found);
+    return error.UnexpectedArgument;
+}
+
+/// One `--listen`: parsed now, so that the diagnostic quotes the value that is wrong (E0607).
+fn take_listen(
+    diag: *Diag,
+    run_args: *RunArgs,
+    value: []const u8,
+    argument: []const u8,
+) ParseError!void {
+    assert(diag.code == null);
+    assert(value.len <= constants.arg_bytes_max);
+    if (run_args.listen != null) return unexpected_argument(diag, .run, argument);
+    switch (runtime_spec.parse_listen(value)) {
+        .ok => |listen| run_args.listen = listen,
+        .problem => |problem| {
+            diagnose.listen_value_invalid(diag, value, problem);
+            return error.BadOptionValue;
+        },
+    }
+    assert(run_args.listen != null);
 }
 
 /// One `--publish`: parsed now, so that the diagnostic quotes the value that is wrong.
@@ -3471,6 +3527,7 @@ fn run_container(
         .user = prepared.user,
         .network = network_of(&given),
         .publish = given.publish_slice(),
+        .listen = given.listen,
         .state = given.state_slice(),
         .mounts = spec_mounts,
         .user_text = prepared.user_text,
@@ -3637,6 +3694,7 @@ fn run_foreground(
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
     };
+    if (container.listen != null) try hand_on_listener(host, invocation, handle, diag);
     const reason = runtime.wait(handle);
     const code = reason.code() orelse {
         diag.* = handle.lost_diag; // The only reason a started run has no code.
@@ -3645,6 +3703,34 @@ fn run_foreground(
     };
     report_outcome(host, invocation.options, handle, &reason, ran, invocation.run.net != null);
     return code;
+}
+
+/// `--listen`: sends the listener the container made over the inherited socket
+/// `--listen-send` names, then closes this process's own copy, so the receiver holds the only
+/// one the container's lifetime does not (a closed receiver means "connection refused" inside).
+/// One send. If it fails, the container is stopped, and the run fails with E0609.
+fn hand_on_listener(
+    host: Host,
+    invocation: *const Invocation,
+    handle: *runtime.Handle,
+    diag: *Diag,
+) RunError!void {
+    assert(diag.code == null);
+    const text = invocation.run.listen_send.?; // check_listen_args refused a --listen without it.
+    const listener = runtime.take_listener(handle).?; // The run started, so the child sent it.
+    const number = std.fmt.parseInt(u32, text, 10) catch null;
+    var failure: ?diagnose.Failure = null;
+    if (number) |descriptor| {
+        host.send_handle(descriptor, listener) catch |err| {
+            failure = .{ .err = err, .errno = host.last_errno(), .step = 0 };
+        };
+    }
+    host.close(listener); // Ours is closed on every path, sent or not.
+    if (number != null and failure == null) return;
+    runtime.stop(handle) catch {}; // The container may just have ended.
+    _ = runtime.wait(handle);
+    diagnose.listen_send_failed(diag, text, failure, true);
+    return error.StartFailed;
 }
 
 /// `--user` names a user of an image: a run of a directory or a bare tree has no image whose
