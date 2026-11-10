@@ -61,7 +61,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
 | 11 · Upload | The upload protocol, the test registry, `zbx push`, [PR #75](https://github.com/Zigbox/zigbox/pull/75) | **Built and reviewed.** |
 | 12 · Credentials | Credentials and write-scoped tokens (Docker Hub, GHCR), [PR #76](https://github.com/Zigbox/zigbox/pull/76); a push to GHCR passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42660370098) | **Built and reviewed.** |
-| 13 · ECR | ECR push on M6c (cuttable) | Not started. |
+| 13 · ECR | ECR push on M6c (cuttable) | `zbx push` to ECR (token as Basic at the registry origin only; E0552, E0553, E0556), [PR #86](https://github.com/Zigbox/zigbox/pull/86) | **Built and reviewed.** A real ECR push rides with M6c slice 3. |
 | 14 · Derived binding | The derived binding: image record v3, labels, W0551, [PR #77](https://github.com/Zigbox/zigbox/pull/77) | **Built and reviewed.** |
 
 ## Installing
