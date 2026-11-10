@@ -26,6 +26,7 @@
 const std = @import("std");
 const Io = std.Io;
 const accept = @import("accept_m4.zig");
+const accept_m8 = @import("accept_m8.zig");
 const agent = @import("agent_m8.zig");
 const common = @import("common_m4.zig");
 const harness = @import("harness.zig");
@@ -94,7 +95,7 @@ const push_body =
 const body =
     \\set -eu
     \\trap 'cat /tmp/err-* 2>/dev/null' EXIT
-    \\useradd -m -s /bin/sh demo2
+    \\id demo2 >/dev/null 2>&1 || useradd -m -s /bin/sh demo2
     \\mkdir -p /srv/m8/tree/sub /srv/m8/tree/empty
     \\printf 'hello\n' > /srv/m8/tree/sub/a.txt
     \\printf '#!/bin/sh\n' > /srv/m8/tree/run.sh
@@ -227,6 +228,7 @@ const parts = [_]*const fn (*Session, *Io.Writer, *H.Timer) anyerror!void{
     spec_m6b.step_spec,
     hello.step_first,
     trust.step_trust,
+    accept_m8.step_accept,
     agent.run_agent,
 };
 
@@ -278,6 +280,7 @@ test {
     // The files this demo is made of carry their own unit tests; a test root reaches them here.
     _ = @import("checks_m8.zig");
     _ = @import("trust_m8.zig");
+    _ = @import("accept_m8.zig");
     _ = @import("upgrade_m8.zig");
     _ = @import("agent_m8.zig");
 }

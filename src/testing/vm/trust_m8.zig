@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const accept_m8 = @import("accept_m8.zig");
 const checks = @import("checks_m8.zig");
 const checks_m7 = @import("checks_m7.zig");
 const common = @import("common_m4.zig");
@@ -89,6 +90,7 @@ fn build_and_sign(session: *Session, out: *Io.Writer) ![]const u8 {
     }
     @memcpy(version_storage[0..printed.len], printed);
     const version = version_storage[0..printed.len];
+    try H.put_file(session, accept_m8.digest_file, digest);
     const as_json = try fmt(session, "{s} inspect --provenance {s} --output json", .{ zh, digest });
     const prov = try run(session, out, as_json, 0);
     checks.check_provenance(arena, prov.streams.stdout, digest, version) catch |err| {
