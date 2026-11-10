@@ -478,6 +478,7 @@ fn proxy_for(
 ) net.Error!?proxy_mod.Proxy {
     assert(request.host.len > 0);
     assert(request.port != 0);
+    if (request.proxy == .never) return null;
     if (request.scheme == .http) return null;
     const url = host.environment("HTTPS_PROXY", constants.net_proxy_url_bytes_max) orelse
         host.environment("https_proxy", constants.net_proxy_url_bytes_max) orelse return null;
@@ -637,6 +638,13 @@ fn write_request(writer: *Io.Writer, request: *const net.Request) Io.Writer.Erro
     if (request.basic.len > 0) {
         try writer.print("Authorization: Basic {s}\r\n", .{request.basic});
     }
+    if (request.authorization.len > 0) {
+        try writer.print("Authorization: {s}\r\n", .{request.authorization});
+    }
+    for (request.extra_headers) |header| {
+        assert(header.valid());
+        try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
+    }
     if (request.content_type.len > 0) {
         try writer.print("Content-Type: {s}\r\n", .{request.content_type});
     }
@@ -762,7 +770,11 @@ fn read_body(
 fn carries_credential(request: *const net.Request) bool {
     assert(request.host.len > 0);
     if (request.bearer.len > 0) assert(request.basic.len == 0);
-    return request.basic.len > 0 or request.bearer.len > 0;
+    if (request.secret) return true;
+    for (request.extra_headers) |header| {
+        if (header.secret) return true;
+    }
+    return request.basic.len > 0 or request.bearer.len > 0 or request.authorization.len > 0;
 }
 
 /// Zeroes every buffer a request or its answer passes through. What TLS keeps inside its own
@@ -999,10 +1011,15 @@ test "a call that carried a credential leaves no byte in the socket buffers, on 
     _ = try interface(&real).get(&request, &head, sink.sink());
     try testing.expect(!buffers_are_zero(&test_memory.buffers)); // The control.
     request.basic = "dXNlcjpzZWNyZXQtbWFya2Vy";
-    for ([_][]const u8{ "basic", "bearer" }) |kind| {
+    for ([_][]const u8{ "basic", "bearer", "secret" }) |kind| {
         if (std.mem.eql(u8, kind, "bearer")) {
             request.basic = "";
             request.bearer = "secret-token-marker";
+        }
+        if (std.mem.eql(u8, kind, "secret")) {
+            // Only the flag: no header, no bearer (a token in the body, keys in the answer).
+            request.bearer = "";
+            request.secret = true;
         }
         real = test_real();
         @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
@@ -1140,6 +1157,81 @@ test "the proxy comes from the environment and NO_PROXY bypasses it" {
     try testing.expect((try proxy_for(sim.interface(), &request, &storage)) == null);
     sim.environment_variables = &.{.{ .name = "HTTPS_PROXY", .value = "socks5://proxy:1080" }};
     try testing.expectError(error.ProxyFailed, proxy_for(sim.interface(), &request, &storage));
+}
+
+test "a request that says it never uses the proxy does not, whatever the environment says" {
+    // Goal: the instance metadata call (`proxy = .never`) goes direct under HTTPS_PROXY with and
+    // without NO_PROXY, in either scheme, while the same request without it would be proxied.
+    var sim: HostSim = undefined;
+    sim.init(1, &.{});
+    sim.environment_variables = &.{
+        .{ .name = "HTTPS_PROXY", .value = "http://proxy.corp:3128" },
+        .{ .name = "https_proxy", .value = "http://proxy.corp:3128" },
+    };
+    var storage: [constants.net_proxy_url_bytes_max]u8 = undefined;
+    var request = probe_request(443, 1000, 0);
+    request.scheme = .https;
+    request.host = "metadata.test";
+    request.port = 443;
+    try testing.expect((try proxy_for(sim.interface(), &request, &storage)) != null);
+    request.proxy = .never;
+    try testing.expect((try proxy_for(sim.interface(), &request, &storage)) == null);
+    request.scheme = .http;
+    request.host = "169.254.169.254";
+    request.port = 80;
+    try testing.expect((try proxy_for(sim.interface(), &request, &storage)) == null);
+}
+
+test "extra headers and an authorization value are written once, and mark the call secret" {
+    // Goal: the head carries each extra header and the signature value exactly as given, in the
+    // order given, and a call with a secret header is one whose buffers get wiped.
+    var storage: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&storage);
+    const headers = [_]net.Header{
+        .{ .name = "X-Amz-Date", .value = "20150830T123600Z" },
+        .{ .name = "X-Amz-Security-Token", .value = "SESSION-MARKER", .secret = true },
+    };
+    var request = probe_request(443, 1000, 0);
+    request.method = .post;
+    request.authorization = "AWS4-HMAC-SHA256 Credential=K/20150830/us-east-1/ecr/aws4_request";
+    request.extra_headers = &headers;
+    request.content_type = "application/x-amz-json-1.1";
+    var source: net.SliceSource = .{ .bytes = "{}" };
+    request.body = source.body();
+    try write_request(&writer, &request);
+    const text = writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "Authorization: AWS4-HMAC-SHA256 Cred") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "X-Amz-Date: 20150830T123600Z\r\n") != null);
+    const token_line = "X-Amz-Security-Token: SESSION-MARKER\r\n";
+    try testing.expect(std.mem.indexOf(u8, text, token_line) != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Content-Length: 2\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, text, "\r\n\r\n"));
+    try testing.expect(carries_credential(&request));
+    request.authorization = "";
+    try testing.expect(carries_credential(&request)); // The session token alone is enough.
+    request.extra_headers = headers[0..1];
+    try testing.expect(!carries_credential(&request));
+    // A token in the body (STS) or credentials in the answer (IMDS) have no header: the flag
+    // alone marks the call, and the wipe then zeroes what a marker left in the buffers.
+    request.secret = true;
+    try testing.expect(carries_credential(&request));
+}
+
+test "a header with a line break, a colon in its name or a reserved name is not valid" {
+    // Goal: the check that stops a header becoming a second request, at each of its edges.
+    const net_header = net.Header;
+    try testing.expect((net_header{ .name = "X-Amz-Target", .value = "a b" }).valid());
+    try testing.expect(!(net_header{ .name = "X-A", .value = "a\r\nHost: evil" }).valid());
+    try testing.expect(!(net_header{ .name = "X-A", .value = "a\x00b" }).valid());
+    try testing.expect(!(net_header{ .name = "X:A", .value = "v" }).valid());
+    try testing.expect(!(net_header{ .name = "", .value = "v" }).valid());
+    try testing.expect(!(net_header{ .name = "Host", .value = "v" }).valid());
+    try testing.expect(!(net_header{ .name = "content-length", .value = "0" }).valid());
+    try testing.expect(!(net_header{ .name = "Authorization", .value = "x" }).valid());
+    const full: [constants.net_header_value_bytes_max]u8 = @splat('v');
+    try testing.expect((net_header{ .name = "X-A", .value = &full }).valid());
+    const over: [constants.net_header_value_bytes_max + 1]u8 = @splat('v');
+    try testing.expect(!(net_header{ .name = "X-A", .value = &over }).valid());
 }
 
 const blobs_mod = @import("registry/blobs.zig");

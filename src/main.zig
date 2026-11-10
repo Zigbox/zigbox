@@ -172,6 +172,14 @@ test {
     _ = @import("layer/diagnose.zig");
     _ = @import("registry/reference.zig");
     _ = @import("registry/net.zig");
+    _ = @import("aws/sigv4.zig");
+    _ = @import("aws/sigv4_tests.zig");
+    _ = @import("aws/ecr.zig");
+    _ = @import("aws/parse.zig");
+    _ = @import("aws/aws_sim.zig");
+    _ = @import("aws/credentials.zig");
+    _ = @import("aws/credentials_tests.zig");
+    _ = @import("aws_library_tests.zig");
     _ = @import("registry/net_sim.zig");
     _ = @import("registry/auth.zig");
     _ = @import("registry/manifest.zig");
