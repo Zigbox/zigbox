@@ -26,6 +26,8 @@ pub const Error = error{
     BundleWrong,
     /// A script printed no evidence block of the name the check reads.
     EvidenceMissing,
+    /// A build's output is not the cache hit or the result the test needs.
+    BuildWrong,
     /// `policy check` and `run` disagree, or `policy check` crashed.
     AgreementWrong,
     /// The store listing, tree digest, gc report or record count is not what the demo needs.
@@ -353,14 +355,36 @@ pub fn check_cached_provenance(
     arena: Allocator,
     stdout: []const u8,
     result: []const u8,
+    step_name: []const u8,
+    bases: usize,
 ) Error!void {
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     const doc = std.json.parseFromSliceLeaky(Provenance, arena, stdout, options) catch
         return error.ProvenanceWrong;
     if (!std.mem.eql(u8, doc.result, result)) return error.ProvenanceWrong;
-    if (doc.bases.len != 2) return error.ProvenanceWrong;
-    try expect_step(doc.steps, "compile");
-    try expect_step(doc.steps, "notice");
+    if (doc.bases.len != bases) return error.ProvenanceWrong;
+    try expect_step(doc.steps, step_name);
+}
+
+/// The result digest a `--output json` build printed in its `build_result` line.
+pub fn build_result(stdout: []const u8) Error![]const u8 {
+    const at = std.mem.lastIndexOf(u8, stdout, "\"build_result\":{\"digest\":\"") orelse
+        return error.BuildWrong;
+    const rest = stdout[at + "\"build_result\":{\"digest\":\"".len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.BuildWrong;
+    if (!is_b3(rest[0..end])) return error.BuildWrong;
+    return rest[0..end];
+}
+
+/// The build with this binary found the step in the cache the old binary wrote: its
+/// `zbx.build/1` line for the step says `hit`, and no step missed.
+pub fn check_old_cache_hit(stdout: []const u8, step_name: []const u8) Error!void {
+    var buffer: [128]u8 = undefined;
+    const want = std.fmt.bufPrint(&buffer, "\"step\":\"{s}\",\"cache\":\"hit\"", .{
+        step_name,
+    }) catch return error.BuildWrong; // A step name that long is not the demo's.
+    if (std.mem.indexOf(u8, stdout, want) == null) return error.BuildWrong;
+    if (std.mem.indexOf(u8, stdout, "\"cache\":\"miss\"") != null) return error.BuildWrong;
 }
 
 const golden_digest = "b3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -443,11 +467,37 @@ test "a provenance record is checked for bases, steps, version and signature" {
         error.ProvenanceWrong,
         check_provenance(arena, "{}", golden_digest, "0.4.0"),
     );
-    try check_cached_provenance(arena, text_of(&good), golden_digest);
+    try check_cached_provenance(arena, text_of(&good), golden_digest, "compile", 2);
+    try check_cached_provenance(arena, text_of(&one_base), golden_digest, "compile", 1);
     try std.testing.expectError(
         error.ProvenanceWrong,
-        check_cached_provenance(arena, text_of(&one_base), golden_digest),
+        check_cached_provenance(arena, text_of(&one_base), golden_digest, "compile", 2),
     );
+    try std.testing.expectError(
+        error.ProvenanceWrong,
+        check_cached_provenance(arena, text_of(&good), golden_digest, "absent", 2),
+    );
+}
+
+test "the result digest is cut out of the build_result line" {
+    const line = "{\"schema\":\"zbx.build/1\",\"build_result\":{\"digest\":\"" ++
+        golden_digest ++ "\"}}\n";
+    try std.testing.expectEqualStrings(golden_digest, try build_result(line));
+    try std.testing.expectError(error.BuildWrong, build_result(""));
+    const short = "\"build_result\":{\"digest\":\"x\"}";
+    try std.testing.expectError(error.BuildWrong, build_result(short));
+}
+
+test "a build is a cache hit only when its step hit and nothing missed" {
+    const hit = "{\"schema\":\"zbx.build/1\",\"step\":\"probe\",\"cache\":\"hit\"}\n" ++
+        "{\"schema\":\"zbx.build/1\",\"step\":\"image\",\"cache\":\"hit\"}\n";
+    try check_old_cache_hit(hit, "probe");
+    const miss = "{\"schema\":\"zbx.build/1\",\"step\":\"probe\",\"cache\":\"miss\"}\n";
+    try std.testing.expectError(error.BuildWrong, check_old_cache_hit(miss, "probe"));
+    try std.testing.expectError(error.BuildWrong, check_old_cache_hit(hit, "other"));
+    const mixed = hit ++ miss;
+    try std.testing.expectError(error.BuildWrong, check_old_cache_hit(mixed, "probe"));
+    try std.testing.expectError(error.BuildWrong, check_old_cache_hit("", "probe"));
 }
 
 test "the provenance text names two bases, two steps and the builder" {

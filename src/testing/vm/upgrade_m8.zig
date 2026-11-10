@@ -13,7 +13,14 @@
 //!     listed stopped beside the one this `zbx` writes;
 //!   - this `zbx` runs the image with the same volume and reads the file.
 //!
-//! Every assertion is a function of checks_upgrade_m6b.zig, checks_upgrade_m5.zig,
+//! Two more things come from the old binary, in the same project directory:
+//!
+//!   - a build with the old binary (one step on alpine) fills the build cache; this `zbx` builds
+//!     the same file and finds the step in that cache (`hit`), and its provenance record is
+//!     complete (the step and its base) though the old binary wrote none;
+//!   - a policy that requires a signature refuses the image the old binary pulled (E0905).
+//!
+//! Every assertion is a function of checks_m8.zig, checks_upgrade_m6b.zig, checks_upgrade_m5.zig,
 //! checks_writable_m6b.zig, checks_exec_m6b.zig, checks_state_m6.zig or checks_m4.zig with a
 //! unit test.
 
@@ -33,6 +40,7 @@ const harness = @import("harness.zig");
 const limits = @import("limits.zig");
 const net_user = @import("net_user_m5.zig");
 const m4 = @import("checks_m4.zig");
+const m8 = @import("checks_m8.zig");
 const session_mod = @import("session.zig");
 const state = @import("state_m6.zig");
 const up5 = @import("upgrade_m5.zig");
@@ -69,6 +77,8 @@ pub fn step_upgrade(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     try read_running(session, out);
     try exec_and_logs(session, out);
     try stop_and_reuse(session, out);
+    try old_cache_reused(session, out);
+    try old_image_under_policy(session, out);
     try timer.lap(out, "upgrade8");
 }
 
@@ -199,6 +209,59 @@ fn stop_and_reuse(session: *Session, out: *Io.Writer) !void {
     const verified = try expect_exit(session, out, step, z ++ " --output json store verify", 0);
     m4.check_verify_ok(arena, verified.streams, verified.status, 1) catch |err| {
         return fail_step(out, step, "expected store verify to find no damage", err);
+    };
+}
+
+const build_file =
+    \\.{ .version = 1,
+    \\  .steps = .{ .{ .name = "probe", .base = "alpine:3.20", .inputs = .{"in.txt"},
+    \\    .run = .{ "sh", "-c", "cp in.txt /out/" } } },
+    \\  .image = .{ .base = "alpine:3.20", .add = .{ .{ .from = "probe", .to = "/" } } } }
+    \\
+;
+
+/// The old binary builds a one-step file; this binary builds it again from the old cache and
+/// writes complete provenance.
+fn old_cache_reused(session: *Session, out: *Io.Writer) !void {
+    const arena = session.scratch_allocator();
+    try H.put_file(session, common.project ++ "/in.txt", "from the old build\n");
+    try H.put_file(session, common.project ++ "/zbx.build.zon", build_file);
+    _ = try expect_exit(session, out, step, zbx_old ++ " build", 0);
+    const built = try expect_exit(session, out, step, z ++ " --output json build", 0);
+    m8.check_old_cache_hit(built.streams.stdout, "probe") catch |err| {
+        return fail_step(out, step, "expected this build to find the old binary's cache", err);
+    };
+    const result = m8.build_result(built.streams.stdout) catch |err| {
+        return fail_step(out, step, "expected the build to print its result", err);
+    };
+    const command = try common.format(session, z ++ " inspect --provenance {s} --output json", .{
+        result,
+    });
+    const shown = try expect_exit(session, out, step, command, 0);
+    const checked = m8.check_cached_provenance(arena, shown.streams.stdout, result, "probe", 1);
+    checked catch |err| {
+        return fail_step(out, step, "expected complete provenance for the cached build", err);
+    };
+}
+
+const policy_path = "/home/demo/.config/zbx/policy.zon";
+
+/// A policy that requires a signature refuses what the old binary pulled, in one line.
+fn old_image_under_policy(session: *Session, out: *Io.Writer) !void {
+    _ = try expect_exit(session, out, step, z ++ " key new m8up --no-passphrase", 0);
+    const shown = try expect_exit(session, out, step, z ++ " --output json key show m8up", 0);
+    const public = m8.public_of_key_show(shown.streams.stdout) orelse {
+        return fail_step(out, step, "expected key show to name the key", error.KeyWrong);
+    };
+    const text = try common.format(session, ".{{ .version = 1, .keys = .{{ .{{ .name = " ++
+        "\"up\", .public = \"{s}\" }} }},\n  .require_signature = true," ++
+        " .require_provenance = false }}\n", .{public});
+    _ = try session.run("mkdir -p /home/demo/.config/zbx", limits.command_timeout_kvm_s);
+    try H.put_file(session, policy_path, text);
+    const refused = try common.run_shown(session, out, z ++ " run " ++ alpine ++ " -- true");
+    _ = try session.run("rm -f " ++ policy_path, limits.command_timeout_kvm_s);
+    m8.check_old_image_refused(refused.streams.stderr, refused.status, policy_path) catch |err| {
+        return fail_step(out, step, "expected the policy to refuse the old image", err);
     };
 }
 
