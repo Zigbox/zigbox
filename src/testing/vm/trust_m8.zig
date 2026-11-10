@@ -37,6 +37,8 @@ const pass_file = home ++ "/pass";
 const policy_dir = home ++ "/.config/zbx";
 const policy_file = policy_dir ++ "/policy.zon";
 const greeting = "hello from zigbox";
+/// `z` runs in another project, so that the hello project's `zbx.lock` stays as it was signed.
+const elsewhere = H.as_demo ++ "/home/demo/z";
 const nobody = " </dev/null";
 /// `zh` with no network: the same command in a network namespace with nothing in it.
 const zh_offline = "unshare -n " ++ zh;
@@ -130,9 +132,9 @@ fn policy_refuses(session: *Session, out: *Io.Writer, digest: []const u8) !void 
     checks_m7.check_stdout_is(ok.streams.stdout, greeting) catch |err| {
         return fail_step(out, step, "expected the signed result to print its greeting", err);
     };
-    _ = try run(session, out, zh ++ " pull alpine:3.20", 0);
+    _ = try run(session, out, elsewhere ++ " pull alpine:3.20", 0);
     const before = try listing(session, out);
-    const refused = try run(session, out, zh ++ " run alpine:3.20 -- true", 125);
+    const refused = try run(session, out, elsewhere ++ " run alpine:3.20 -- true", 125);
     checks.check_policy_refusal(refused.streams.stderr, refused.status, policy_file) catch |err| {
         return fail_step(out, step, "expected E0905 naming the policy and the rule", err);
     };
