@@ -113,14 +113,37 @@ fn drain(sim: *HostSim, pair: host_mod.Pipe) void {
     host.close(pair.write);
 }
 
+test "--listen: a descriptor that is no open Unix socket is refused before anything starts" {
+    // Goal: M8b review MUST 1. Method: a number past a descriptor (4294967295, 2147483648), one
+    // that is not a number, and one no socket holds are each refused with E0606, 125, and
+    // nothing started or left. Before the fix the first two panicked after the start.
+    const texts = [_][:0]const u8{ "4294967295", "2147483648", "-1", "x", "99", "3" };
+    for (texts, 0..) |text, index| {
+        var sim: HostSim = undefined;
+        sim_run.init(&sim, 63 + @as(u64, index));
+        const before = sim_run.baseline(&sim);
+        try testing.expectEqual(@as(u8, 125), run_with(&sim, text));
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0606]") != null);
+        try testing.expect(std.mem.indexOf(u8, sim.stderr(), "errno") == null);
+        try testing.expect(!sim.world.listener_leaked);
+        try no_leak(&sim, &before);
+    }
+}
+
 test "--listen: a send that fails stops the container with E0609" {
-    // Goal: the receiver is not a socket (a descriptor the model does not know). Method: the
-    // run fails 125 with E0609, the container is gone, nothing is left.
+    // Goal: the receiver closed its end after the run began checking. Method: the descriptor
+    // is an open socket whose peer is gone; the send fails (EPIPE), the run fails 125 with
+    // E0609, the container is gone, nothing is left.
     var sim: HostSim = undefined;
-    sim_run.init(&sim, 63);
+    sim_run.init(&sim, 70);
     const before = sim_run.baseline(&sim);
-    try testing.expectEqual(@as(u8, 125), run_with(&sim, "99"));
+    const host = sim.interface();
+    const pair = try host.channel();
+    host.close(pair.read);
+    var buffer: [16:0]u8 = undefined;
+    try testing.expectEqual(@as(u8, 125), run_with(&sim, send_text(&buffer, pair.write)));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0609]") != null);
     try testing.expect(!sim.world.listener_leaked);
+    host.close(pair.write);
     try no_leak(&sim, &before);
 }

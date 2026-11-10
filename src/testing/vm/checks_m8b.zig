@@ -72,7 +72,9 @@ const refusals = [_]Refusal{
     .{ .label = "host", .code = "ZBX-E0606" },
     .{ .label = "publish", .code = "ZBX-E0606" },
     .{ .label = "nosend", .code = "ZBX-E0606" },
-    .{ .label = "notsocket", .code = "ZBX-E0609" },
+    .{ .label = "notsocket", .code = "ZBX-E0606" },
+    .{ .label = "badfd", .code = "ZBX-E0606" },
+    .{ .label = "gone", .code = "ZBX-E0609" },
     .{ .label = "remote", .code = "ZBX-E0607" },
 };
 
@@ -91,6 +93,12 @@ pub fn check_refusals(output: []const u8) Error!void {
         seen += 1;
     }
     if (seen != refusals.len) return error.RefusalWrong;
+    // The send to a gone peer stopped the container: zbx came back long before the 30 s sleep
+    // would have ended, and no sleep is left.
+    const seconds = value_of(output, "GONE-SECS:") orelse return error.RefusalWrong;
+    const took = std.fmt.parseInt(u32, seconds, 10) catch return error.RefusalWrong;
+    if (took >= 20) return error.RefusalWrong;
+    if (!expect_value(output, "GONE-LEFT:", "0")) return error.RefusalWrong;
 }
 
 const hello_good =
@@ -179,11 +187,15 @@ test "closed fails when the connection worked or the container died" {
 }
 
 const refusals_good =
-    \\REFUSED host rc=125 error[ZBX-E0606]: --listen needs --net none and --listen-send
-    \\REFUSED publish rc=125 error[ZBX-E0606]: --listen needs --net none and --listen-send
-    \\REFUSED nosend rc=125 error[ZBX-E0606]: --listen needs --net none and --listen-send
-    \\REFUSED notsocket rc=125 error[ZBX-E0609]: the listener could not be handed on
+    \\REFUSED host rc=125 error[ZBX-E0606]: --listen is refused with these options
+    \\REFUSED publish rc=125 error[ZBX-E0606]: --listen is refused with these options
+    \\REFUSED nosend rc=125 error[ZBX-E0606]: --listen is refused with these options
+    \\REFUSED notsocket rc=125 error[ZBX-E0606]: --listen is refused with these options
+    \\REFUSED badfd rc=125 error[ZBX-E0606]: --listen is refused with these options
     \\REFUSED remote rc=125 error[ZBX-E0607]: --listen takes 127.0.0.1 and a port
+    \\REFUSED gone rc=125 error[ZBX-E0609]: the listener could not be handed on
+    \\GONE-SECS:1
+    \\GONE-LEFT:0
     \\
 ;
 
@@ -197,8 +209,11 @@ test "refusals fail on a missing line, a wrong code, an exit code or an errno du
         .{ "ZBX-E0607", "ZBX-E0606" },
         .{ "rc=125 error[ZBX-E0609]", "rc=1 error[ZBX-E0609]" },
         .{ "handed on", "handed on (errno 88)" },
+        .{ "GONE-SECS:1", "GONE-SECS:30" },
+        .{ "GONE-LEFT:0", "GONE-LEFT:1" },
+        .{ "REFUSED gone ", "REFUSED gon " },
     };
-    var buffer: [768]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     for (swaps) |swap| {
         const count = std.mem.replacementSize(u8, refusals_good, swap[0], swap[1]);
         try std.testing.expect(count <= buffer.len);

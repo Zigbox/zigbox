@@ -121,6 +121,7 @@ pub const HostReal = struct {
         .listen_loopback = listen_loopback,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
+        .is_unix_stream = is_unix_stream,
         .symlink = symlink,
         .set_hostname = set_hostname,
         .set_umask = set_umask,
@@ -704,6 +705,24 @@ pub const HostReal = struct {
         const sent = linux.sendmsg(@intCast(channel_end), &message, linux.MSG.NOSIGNAL);
         try check(sent);
         assert(sent == 1);
+    }
+
+    fn is_unix_stream(context: *anyopaque, handle: host.Handle) bool {
+        _ = from_context(context);
+        if (handle > std.math.maxInt(i32)) return false;
+        const descriptor: i32 = @intCast(handle);
+        var domain: i32 = 0;
+        var length: linux.socklen_t = @sizeOf(i32);
+        const level = linux.SOL.SOCKET;
+        const option = linux.SO.DOMAIN;
+        const got_domain = linux.getsockopt(descriptor, level, option, @ptrCast(&domain), &length);
+        if (linux.errno(got_domain) != .SUCCESS) return false; // Closed, or no socket.
+        var kind: i32 = 0;
+        length = @sizeOf(i32);
+        const option_type = linux.SO.TYPE;
+        const got_kind = linux.getsockopt(descriptor, level, option_type, @ptrCast(&kind), &length);
+        if (linux.errno(got_kind) != .SUCCESS) return false;
+        return domain == linux.AF.UNIX and kind == linux.SOCK.STREAM;
     }
 
     fn receive_handle(context: *anyopaque, channel_end: host.Handle) host.Error!host.Handle {

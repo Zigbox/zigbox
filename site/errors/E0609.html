@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the listener could not be handed on to --listen-send</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1 (125 in zbx run)</dd></div></dl>
 <h2>What it means</h2>
-<p>zbx hands the listener to the descriptor named by --listen-send with SCM_RIGHTS, so that program can accept connections. That descriptor is not a Unix stream socket here, or the send failed; the container was stopped, so no one is left holding a listener nobody serves.</p>
+<p>zbx hands the listener to the descriptor named by --listen-send with SCM_RIGHTS, so that program can accept connections. The send failed: the descriptor no longer takes it, usually because the other end was closed after zbx started; the container was stopped, so no one is left holding a listener nobody serves. A descriptor that is not an open Unix stream socket is refused earlier, with E0606, before anything starts.</p>
 <p>Pass one end of a socketpair(AF_UNIX, SOCK_STREAM), keep the other end, and read the listener from it with recvmsg.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

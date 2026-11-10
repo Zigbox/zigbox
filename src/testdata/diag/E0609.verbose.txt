@@ -1,8 +1,8 @@
 error[ZBX-E0609]: the listener could not be handed on to --listen-send
   while  handing the listener to --listen-send
-  cause  sending the listener failed: the kernel returned ENOTSOCK
-  cause  the container was stopped
-  fd     99
-  fix    pass one end of a Unix stream socketpair as that descriptor
+  cause  sending the listener failed: broken pipe (EPIPE)
+  fd     1001
+  result the container was stopped
+  fix    keep the other end of the socket open until zbx has sent the listener
   more   zbx explain E0609
   docs   https://zigbox.github.io/zigbox/errors/E0609.html

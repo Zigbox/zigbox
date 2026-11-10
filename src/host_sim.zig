@@ -379,6 +379,7 @@ pub const HostSim = struct {
         .listen_loopback = listen_loopback,
         .send_handle = send_handle,
         .receive_handle = receive_handle,
+        .is_unix_stream = is_unix_stream,
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
@@ -832,6 +833,12 @@ pub const HostSim = struct {
         // A descriptor that is no pipe end of the model is no Unix socket (ENOTSOCK).
         if (channel_end < sim_world.pipe_handle_base) return sim.model_error(88);
         if (sim.world.send_listener(channel_end, handle)) |errno| return sim.model_error(errno);
+    }
+
+    /// A pipe end the current process holds stands for a Unix socket; nothing else is one.
+    fn is_unix_stream(context: *anyopaque, handle: host.Handle) bool {
+        const sim = from_context(context);
+        return sim.world.holds_channel_end(handle);
     }
 
     fn receive_handle(context: *anyopaque, channel_end: host.Handle) host.Error!host.Handle {

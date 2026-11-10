@@ -81,8 +81,15 @@ fn prepare_step_refused(sim: *HostSim, index: u32, errno: u16) void {
     sim.faults.fail_step_errno = errno;
 }
 
+/// The Unix socket the `--listen-send 1001` of a listen case names; closed after the run.
+var golden_socket: ?@import("host.zig").Pipe = null;
+
 fn prepare_listener_refused(sim: *HostSim) void {
-    prepare_step_refused(sim, sim_run.step_index_listen(.make_listener), 98); // EADDRINUSE.
+    sim_run.init(sim, 1);
+    golden_socket = sim.interface().channel() catch unreachable; // A fresh simulator has room.
+    assert(golden_socket.?.write == 1001);
+    sim.faults.fail_step = sim_run.step_index_listen(.make_listener);
+    sim.faults.fail_step_errno = 98; // EADDRINUSE.
 }
 
 fn prepare_capabilities_refused(sim: *HostSim) void {
@@ -99,6 +106,17 @@ fn prepare_no_tmp(sim: *HostSim) void {
 
 fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
+}
+
+/// A channel whose read end is closed: `--listen-send 1001` names its write end, a Unix socket
+/// that is open (so the run starts) and has no one to take the listener (EPIPE on the send).
+fn prepare_send_peer_gone(sim: *HostSim) void {
+    sim_run.init(sim, 1);
+    const host = sim.interface();
+    const pair = host.channel() catch unreachable; // A fresh simulator has room.
+    assert(pair.write == 1001);
+    host.close(pair.read);
+    golden_socket = .{ .read = pair.read, .write = pair.write };
 }
 
 fn prepare_no_pasta(sim: *HostSim) void {
@@ -1108,14 +1126,14 @@ const base_cases = [_]Case{
     },
     .{
         .code = .E0608,
-        .args = &listen_run_args("3"),
+        .args = &listen_run_args("1001"),
         .prepare = prepare_listener_refused,
         .exit = 125,
     },
     .{
         .code = .E0609,
-        .args = &listen_run_args("99"),
-        .prepare = prepare_container,
+        .args = &listen_run_args("1001"),
+        .prepare = prepare_send_peer_gone,
         .exit = 125,
     },
     .{
@@ -2308,6 +2326,13 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     if (golden_lock) |fd| {
         golden_files.interface().close(fd);
         golden_lock = null;
+    }
+    if (golden_socket) |pair| {
+        const host = sim.interface();
+        // The peer of the E0609 case was closed by its prepare: close only what is open.
+        if (sim.world.holds_channel_end(pair.read)) host.close(pair.read);
+        host.close(pair.write);
+        golden_socket = null;
     }
     try testing.expectEqual(@as(u32, 0), sim.open_count());
     return code;

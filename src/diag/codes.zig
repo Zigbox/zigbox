@@ -2902,7 +2902,7 @@ pub const registry = [_]Entry{
         .code = .E0606,
         .severity = .@"error",
         .blame = .user,
-        .summary = "--listen needs --net none and --listen-send",
+        .summary = "--listen is refused with these options",
         .explanation =
         \\--listen ADDR:PORT makes a TCP listener on the container's own loopback
         \\and hands it to the program that started zbx, which accepts the
@@ -2912,7 +2912,9 @@ pub const registry = [_]Entry{
         \\with, to carry the listener on. Nothing was started.
         \\
         \\Drop --net (or give --net none), and add --listen-send with the number of
-        \\the Unix socket the parent passed down.
+        \\the Unix socket the parent passed down. The number is a descriptor
+        \\(0 to 2147483647) that is already open in zbx and is a Unix stream
+        \\socket; zbx checks that before it starts anything.
         \\
         \\On macOS --listen is not available at all: the container runs in a
         \\virtual machine, and a socket cannot be handed across to the process
@@ -2956,9 +2958,11 @@ pub const registry = [_]Entry{
         .summary = "the listener could not be handed on to --listen-send",
         .explanation =
         \\zbx hands the listener to the descriptor named by --listen-send with
-        \\SCM_RIGHTS, so that program can accept connections. That descriptor is
-        \\not a Unix stream socket here, or the send failed; the container was
-        \\stopped, so no one is left holding a listener nobody serves.
+        \\SCM_RIGHTS, so that program can accept connections. The send failed: the
+        \\descriptor no longer takes it, usually because the other end was closed
+        \\after zbx started; the container was stopped, so no one is left holding a
+        \\listener nobody serves. A descriptor that is not an open Unix stream
+        \\socket is refused earlier, with E0606, before anything starts.
         \\
         \\Pass one end of a socketpair(AF_UNIX, SOCK_STREAM), keep the other end,
         \\and read the listener from it with recvmsg.

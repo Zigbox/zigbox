@@ -1,5 +1,5 @@
 error[ZBX-E0609]: the listener could not be handed on to --listen-send
-  cause  the container was stopped
-  fix    pass one end of a Unix stream socketpair as that descriptor
+  cause  sending the listener failed: broken pipe (EPIPE)
+  fix    keep the other end of the socket open until zbx has sent the listener
   more   zbx explain E0609 · rerun with --verbose for the full cause chain
   docs   https://zigbox.github.io/zigbox/errors/E0609.html

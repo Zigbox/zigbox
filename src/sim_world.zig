@@ -731,6 +731,13 @@ pub const World = struct {
         return count;
     }
 
+    /// Whether `handle` is a pipe or channel end the current process holds.
+    pub fn holds_channel_end(world: *const World, handle: host.Handle) bool {
+        if (handle < pipe_handle_base) return false;
+        if (handle - pipe_handle_base >= constants.sim_pipe_ends_max) return false;
+        return world.processes[world.current].holds[end_index(handle)];
+    }
+
     /// Whether standard input exists and the first process holds its read end.
     pub fn input_is_held_by_first(world: *const World) bool {
         const handle = world.input_handle orelse return false;

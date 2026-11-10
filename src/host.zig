@@ -468,6 +468,10 @@ pub const VTable = struct {
     listen_loopback: *const fn (context: *anyopaque, port: u16) Error!Handle,
     /// Sends `handle` over the channel end `channel` (`SCM_RIGHTS`, one byte of data).
     send_handle: *const fn (context: *anyopaque, channel: Handle, handle: Handle) Error!void,
+    /// Whether `handle` is an open descriptor of this process that is a Unix stream socket
+    /// (`getsockopt` `SO_DOMAIN` and `SO_TYPE`). A descriptor that is closed, or not a socket,
+    /// is not one; so is a number past what a descriptor can be.
+    is_unix_stream: *const fn (context: *anyopaque, handle: Handle) bool,
     /// Receives one descriptor over the channel end `channel` (close-on-exec in this process).
     /// End of file with nothing sent is `error.IoFailed` with errno `EPIPE`.
     receive_handle: *const fn (context: *anyopaque, channel: Handle) Error!Handle,
@@ -1031,6 +1035,10 @@ pub const Host = struct {
         assert(channel_end != handle);
         try host.vtable.send_handle(host.context, channel_end, handle);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn is_unix_stream(host: Host, handle: Handle) bool {
+        return host.vtable.is_unix_stream(host.context, handle);
     }
 
     pub fn receive_handle(host: Host, channel_end: Handle) Error!Handle {

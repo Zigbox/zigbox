@@ -1213,7 +1213,11 @@ fn listener_failed(diag: *Diag, operation: []const u8, port: u16, failure: Failu
 }
 
 /// ZBX-E0606: `--listen` with a network other than `none`, or without `--listen-send`.
-pub fn listen_options_invalid(diag: *Diag, problem: spec.ListenOptionsProblem) void {
+pub fn listen_options_invalid(
+    diag: *Diag,
+    problem: spec.ListenOptionsProblem,
+    send: ?[]const u8,
+) void {
     assert(diag.code == null);
     diag.raise(.E0606);
     diag.while_("checking --listen", .{});
@@ -1226,6 +1230,18 @@ pub fn listen_options_invalid(diag: *Diag, problem: spec.ListenOptionsProblem) v
             "and there is no --listen to make one", .{}),
         .detached => diag.cause("--listen hands the listener to this process, which a " ++
             "detached run (-d) does not wait for", .{}),
+        .send_not_a_descriptor, .send_not_a_socket => {
+            var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+            const echo = @import("../text.zig").sanitise(&storage, send.?);
+            if (problem == .send_not_a_descriptor) {
+                diag.cause("--listen-send '{s}' is not a descriptor number (0 to 2147483647)", .{
+                    echo,
+                });
+            } else {
+                diag.cause("--listen-send {s} is not an open Unix stream socket of this " ++
+                    "process; nothing was started", .{echo});
+            }
+        },
     }
     diag.fix(.{
         .sentence = "hand the listener to the Unix socket you pass down as descriptor 3:",
@@ -1252,29 +1268,21 @@ pub fn listen_value_invalid(diag: *Diag, value: []const u8, problem: spec.Listen
     assert(diag.code.? == .E0607);
 }
 
-/// ZBX-E0609: the listener could not be handed on, and the container was stopped. `failure` is
-/// null when `--listen-send` is not a descriptor number at all.
-pub fn listen_send_failed(
-    diag: *Diag,
-    descriptor: []const u8,
-    failure: ?Failure,
-    stopped: bool,
-) void {
+/// ZBX-E0609: the send of the listener failed (the peer is gone, say), and the container was
+/// stopped. The send's own failure is the cause shown; that the container was stopped is
+/// context.
+pub fn listen_send_failed(diag: *Diag, descriptor: []const u8, failure: Failure) void {
     assert(diag.code == null);
     assert(descriptor.len <= constants.arg_bytes_max);
     diag.raise(.E0609);
     diag.while_("handing the listener to --listen-send", .{});
     var storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const echo = @import("../text.zig").sanitise(&storage, descriptor);
-    if (failure) |found| {
-        errors.cause_host_error(diag, "sending the listener", found.err, found.errno);
-    } else {
-        diag.cause("--listen-send '{s}' is not a descriptor number", .{echo});
-    }
-    if (stopped) diag.cause("the container was stopped", .{});
+    errors.cause_host_error(diag, "sending the listener", failure.err, failure.errno);
     diag.context("fd", "{s}", .{echo});
+    diag.context("result", "the container was stopped", .{});
     diag.fix(.{
-        .sentence = "pass one end of a Unix stream socketpair as that descriptor",
+        .sentence = "keep the other end of the socket open until zbx has sent the listener",
     });
     assert(diag.code.? == .E0609);
 }

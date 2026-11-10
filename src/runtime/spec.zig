@@ -241,7 +241,31 @@ pub const ListenOptionsProblem = enum {
     /// The command line only: `--listen-send` without `--listen`, or `--listen` with `-d`.
     send_without_listen,
     detached,
+    /// The command line only: `--listen-send` is not a descriptor number (digits, at most
+    /// `maxInt(i32)`).
+    send_not_a_descriptor,
+    /// The command line only: the descriptor is not an open Unix stream socket of this process.
+    send_not_a_socket,
 };
+
+/// The descriptor `--listen-send` names: decimal digits only, from 0 to `maxInt(i32)`, or null.
+pub fn parse_listen_send(text: []const u8) ?u32 {
+    if (text.len == 0 or text.len > 10) return null;
+    for (text) |byte| if (byte < '0' or byte > '9') return null;
+    const number = std.fmt.parseInt(u32, text, 10) catch return null;
+    if (number > std.math.maxInt(i32)) return null;
+    return number;
+}
+
+test "parse_listen_send takes a descriptor number and nothing else" {
+    try std.testing.expectEqual(@as(?u32, 0), parse_listen_send("0"));
+    try std.testing.expectEqual(@as(?u32, 3), parse_listen_send("3"));
+    try std.testing.expectEqual(@as(?u32, 2147483647), parse_listen_send("2147483647"));
+    const bad = [_][]const u8{
+        "", "2147483648", "4294967295", "99999999999", "-1", "+3", "3 ", "x", "0x3", "1_0",
+    };
+    for (bad) |text| try std.testing.expectEqual(@as(?u32, null), parse_listen_send(text));
+}
 
 pub fn listen_options_problem(network: Network, send_given: bool) ?ListenOptionsProblem {
     if (network != .none) return .network_not_none;

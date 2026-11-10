@@ -658,6 +658,14 @@ pub fn stop(handle: *Handle) host_mod.Error!void {
     try handle.session.kill();
 }
 
+/// The listener was never handed out (the send failed): the run's final record does not say
+/// it listens. Call it before `wait`, which writes that record.
+pub fn forget_listener(handle: *Handle) void {
+    assert(handle.status == .running);
+    assert(handle.listen != null);
+    handle.listen = null;
+}
+
 /// The exit reason of a run that did not start, from the diagnostic that said why.
 pub fn failed_start(diag: *const Diag) ExitReason {
     assert(diag.code != null);
@@ -814,7 +822,7 @@ fn check_listen(container: *const Spec, diag: *Diag) Error!void {
     const listen = container.listen orelse return;
     assert(listen.port > 0);
     if (spec_mod.listen_options_problem(container.network, true)) |problem| {
-        diagnose.listen_options_invalid(diag, problem);
+        diagnose.listen_options_invalid(diag, problem, null);
         return error.StartFailed;
     }
     assert(container.publish.len == 0); // Forwards imply `--net user`, refused above.

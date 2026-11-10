@@ -1836,10 +1836,13 @@ fn check_listen_args(diag: *Diag, run_args: *const RunArgs) ParseError!void {
         }
         if (run_args.publish_count > 0) network = .user;
         if (runtime_spec.listen_options_problem(network, given_send)) |found| break :blk found;
+        if (runtime_spec.parse_listen_send(run_args.listen_send.?) == null) {
+            break :blk .send_not_a_descriptor;
+        }
         break :blk if (run_args.detach) .detached else null;
     };
     const found = problem orelse return;
-    diagnose.listen_options_invalid(diag, found);
+    diagnose.listen_options_invalid(diag, found, run_args.listen_send);
     return error.UnexpectedArgument;
 }
 
@@ -3691,6 +3694,7 @@ fn run_foreground(
         .mirror = true,
     };
     const handle = &storage.handle;
+    if (container.listen != null) try check_listen_send(host, invocation, diag);
     runtime.start(host, container, options, handle, diag) catch {
         keep_bundle_of_bug(host, &storage.workspace, handle, diag);
         return error.StartFailed;
@@ -3706,10 +3710,24 @@ fn run_foreground(
     return code;
 }
 
+/// `--listen-send` names an open Unix stream socket of this process, before anything starts
+/// (E0606). Being open, the number is one that this process's own descriptors, the listener
+/// among them, can never be given, so a send cannot land on its own end.
+fn check_listen_send(host: Host, invocation: *const Invocation, diag: *Diag) RunError!void {
+    assert(diag.code == null);
+    assert(invocation.command == .run);
+    const text = invocation.run.listen_send.?; // check_listen_args refused a --listen without it.
+    const number = runtime_spec.parse_listen_send(text).?; // ... and a bad number.
+    if (host.is_unix_stream(number)) return;
+    diagnose.listen_options_invalid(diag, .send_not_a_socket, text);
+    return error.StartFailed;
+}
+
 /// `--listen`: sends the listener the container made over the inherited socket
 /// `--listen-send` names, then closes this process's own copy, so the receiver holds the only
 /// one the container's lifetime does not (a closed receiver means "connection refused" inside).
-/// One send. If it fails, the container is stopped, and the run fails with E0609.
+/// One send; `check_listen_send` vetted the descriptor. If it fails (the peer is gone), the
+/// container is stopped, and the run fails with E0609.
 fn hand_on_listener(
     host: Host,
     invocation: *const Invocation,
@@ -3722,19 +3740,18 @@ fn hand_on_listener(
     const listener = runtime.take_listener(handle).?; // The run started, so the child sent it.
     assert(text.len > 0);
     assert(runtime.take_listener(handle) == null); // Taken once: ours alone from here.
-    const number = std.fmt.parseInt(u32, text, 10) catch null;
-    var failure: ?diagnose.Failure = null;
-    if (number) |descriptor| {
-        host.send_handle(descriptor, listener) catch |err| {
-            failure = .{ .err = err, .errno = host.last_errno(), .step = 0 };
-        };
-    }
-    host.close(listener); // Ours is closed on every path, sent or not.
-    if (number != null and failure == null) return;
-    runtime.stop(handle) catch {}; // The container may just have ended.
-    _ = runtime.wait(handle);
-    diagnose.listen_send_failed(diag, text, failure, true);
-    return error.StartFailed;
+    const number = runtime_spec.parse_listen_send(text).?;
+    var failure: diagnose.Failure = undefined;
+    host.send_handle(number, listener) catch |err| {
+        failure = .{ .err = err, .errno = host.last_errno(), .step = 0 };
+        host.close(listener); // Ours is closed on every path, sent or not.
+        runtime.forget_listener(handle); // The record must not say a listener was handed out.
+        runtime.stop(handle) catch {}; // The container may just have ended.
+        _ = runtime.wait(handle);
+        diagnose.listen_send_failed(diag, text, failure);
+        return error.StartFailed;
+    };
+    host.close(listener);
 }
 
 /// `--user` names a user of an image: a run of a directory or a bare tree has no image whose
