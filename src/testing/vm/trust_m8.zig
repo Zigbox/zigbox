@@ -84,7 +84,9 @@ fn build_and_sign(session: *Session, out: *Io.Writer) ![]const u8 {
     const printed = checks.version_of(shown.streams.stdout) catch |err| {
         return fail_step(out, step, "expected --version to print the release", err);
     };
-    if (printed.len > version_storage.len) return fail_step(out, step, "version too long", error.ProvenanceWrong);
+    if (printed.len > version_storage.len) {
+        return fail_step(out, step, "version too long", error.ProvenanceWrong);
+    }
     @memcpy(version_storage[0..printed.len], printed);
     const version = version_storage[0..printed.len];
     const as_json = try fmt(session, "{s} inspect --provenance {s} --output json", .{ zh, digest });
