@@ -2572,9 +2572,15 @@ pub const registry = [_]Entry{
         \\`zbx push <image> <destination> --username <user> --password-file <file>`.
         \\To read the password from standard input instead, use `--password-stdin`;
         \\that is the way for a CI job, whose secret is then in no argument and no
-        \\file. zbx reads no environment variable, no `config.json` and no
+        \\file. zbx reads no environment variable for this, no `config.json` and no
         \\credential helper, and an anonymous push is refused by every registry that
         \\matters.
+        \\
+        \\An Amazon ECR registry (`<account>.dkr.ecr.<region>.amazonaws.com`) is the
+        \\exception: `zbx push` finds AWS credentials as `zbx pull` does (see
+        \\ZBX-E0527) and asks ECR for a token itself, so it needs no user and
+        \\password. It is this code for ECR only when a library caller gave the push
+        \\no AWS credentials.
         ,
     },
     .{
@@ -2586,6 +2592,12 @@ pub const registry = [_]Entry{
         \\The credentials were sent, and the registry, or the token service it named,
         \\refused them (`401` or `403`), or the token it gave back does not allow a
         \\push: it grants the scope `pull` only, or no scope at all.
+        \\
+        \\On Amazon ECR it is the authorization token AWS issued that was refused
+        \\(it lasts 12 hours; run the command again), or the AWS identity that may
+        \\not write to the repository: the cause names the five actions the role's
+        \\policy needs (`ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`,
+        \\`ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage`).
         \\
         \\The cause says which. For a refusal, check the user and the password file;
         \\many registries want an access token and not the account's password. For a
@@ -2646,6 +2658,12 @@ pub const registry = [_]Entry{
         \\
         \\The tag was not moved. A push again sends no blob bytes when the registry
         \\holds them all.
+        \\
+        \\On Amazon ECR this is also the code for a repository that does not exist
+        \\(`NAME_UNKNOWN`), at any step of the push: ECR never creates one on push.
+        \\Create it with
+        \\`aws ecr create-repository --repository-name <name> --region <region>`
+        \\and push again.
         ,
     },
     .{

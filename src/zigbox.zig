@@ -167,6 +167,7 @@ pub const push = struct {
     pub const UploadOptions = upload.Options;
     pub const UploadReport = upload.Report;
     pub const send = upload.push;
+    pub const ecr = @import("push/ecr.zig");
 };
 
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).

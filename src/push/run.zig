@@ -177,6 +177,7 @@ pub fn push_operand(
     operand: []const u8,
     destination: *const reference_mod.Reference,
     credentials: ?*const credentials_mod.Credentials,
+    ecr_token: []const u8,
     out: *Pushed,
     diag: *Diag,
 ) Error!void {
@@ -186,7 +187,11 @@ pub fn push_operand(
     try pack_operand(store, ws, operand, &made, diag);
     var holder: reference_mod.Reference = undefined;
     const from = mount_holder(store, &made, destination, &holder);
-    const options: upload.Options = .{ .mount_from = from, .credentials = credentials };
+    const options: upload.Options = .{
+        .mount_from = from,
+        .credentials = credentials,
+        .ecr_token = ecr_token,
+    };
     const target = upload.Destination.of(destination);
     upload.push(store, &ws.upload, wire, target, &made, options, &out.report, diag) catch
         return error.Failed;

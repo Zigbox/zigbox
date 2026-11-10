@@ -78,6 +78,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <h2>What it means</h2>
 <p>All the blobs of the image are in the registry, and the registry refused the manifest that names them, or answered with a digest other than the manifest's own. The cause gives the registry's code (MANIFEST_INVALID, MANIFEST_BLOB_UNKNOWN, a tag that may not be overwritten, and the like).</p>
 <p>The tag was not moved. A push again sends no blob bytes when the registry holds them all.</p>
+<p>On Amazon ECR this is also the code for a repository that does not exist (`NAME_UNKNOWN`), at any step of the push: ECR never creates one on push. Create it with `aws ecr create-repository --repository-name &lt;name&gt; --region &lt;region&gt;` and push again.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0556</pre>

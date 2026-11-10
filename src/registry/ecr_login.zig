@@ -78,7 +78,7 @@ fn ask(
     client.basic_len = length;
 }
 
-fn failed(
+pub fn failed(
     host: host_mod.Host,
     aws: *const credentials_mod.Credentials,
     region: []const u8,
