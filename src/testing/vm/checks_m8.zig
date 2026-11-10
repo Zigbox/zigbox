@@ -249,9 +249,14 @@ pub fn object_id_of_path(path: []const u8) Error![]const u8 {
 // ---- Step 4: verify, offline ---------------------------------------------------------------
 
 const Link = struct { n: u32, name: []const u8, status: []const u8 };
-const Verify = struct { schema: []const u8, ok: bool, links: []const Link };
+const Counts = struct { checked: u32 = 0, not_in_store: u32 = 0 };
+const Verify = struct { schema: []const u8, ok: bool, links: []const Link, inputs: Counts = .{} };
+/// The most inputs verify may find missing: the two base trees, which a build does not keep
+/// (their pulled trees differ from the build's), so link 5 is `partial` on them (ZBX-W0903).
+const bases_missing_max: u32 = 2;
 
-/// `zbx verify --output json` exits 0 and every one of the six links is `ok`.
+/// `zbx verify --output json` exits 0 and every link is `ok`; link 5 may be `partial` for the
+/// base trees alone, never for a step's tree.
 pub fn check_verify_ok(arena: Allocator, stdout: []const u8, status: u8) Error!void {
     if (status != 0) return error.VerifyWrong;
     const options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
@@ -264,7 +269,10 @@ pub fn check_verify_ok(arena: Allocator, stdout: []const u8, status: u8) Error!v
     };
     for (doc.links, names, 1..) |link, name, n| {
         if (link.n != n or !std.mem.eql(u8, link.name, name)) return error.VerifyWrong;
-        if (!std.mem.eql(u8, link.status, "ok")) return error.VerifyWrong;
+        if (std.mem.eql(u8, link.status, "ok")) continue;
+        const bases_only = n == 5 and std.mem.eql(u8, link.status, "partial") and
+            doc.inputs.not_in_store <= bases_missing_max;
+        if (!bases_only) return error.VerifyWrong;
     }
 }
 
@@ -515,6 +523,19 @@ test "verify offline needs all six links ok and exit 0" {
     const bad = try std.mem.replaceOwned(u8, arena, good, ok_tail, "\"status\":\"failed\"}]");
     try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, bad, 0));
     try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, "{}", 0));
+    // Link 5 partial on the two base trees is allowed; on more, or on another link, it is not.
+    const ok5 = "\"inputs\",\"status\":\"ok\"";
+    const part5 = "\"inputs\",\"status\":\"partial\"";
+    const counts = ",\"inputs\":{\"checked\":4,\"not_in_store\":2}}";
+    const partial = try std.mem.replaceOwned(u8, arena, good[0 .. good.len - 1], ok5, part5);
+    const two = try std.mem.concat(arena, u8, &.{ partial, counts });
+    try check_verify_ok(arena, two, 0);
+    const many = try std.mem.replaceOwned(u8, arena, two, "_store\":2", "_store\":3");
+    try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, many, 0));
+    const ok2 = "\"signer\",\"status\":\"ok\"";
+    const part2 = "\"signer\",\"status\":\"partial\"";
+    const other = try std.mem.replaceOwned(u8, arena, two, ok2, part2);
+    try std.testing.expectError(error.VerifyWrong, check_verify_ok(arena, other, 0));
 }
 
 test "prune is a dry run first, and then removes" {
