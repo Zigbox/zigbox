@@ -40,13 +40,13 @@ Zigbox is a rootless, daemonless Linux container runtime, image store and builde
 
 ## Working as the implementer subagent
 
-- Work in slices as the brief defines them. At the end of each slice, commit locally and stop with a report. **Do not push to the working branch.** The supervisor reviews each slice adversarially; what the review finds is fixed before the next slice, by a fresh agent (see below).
+- Work in slices as the brief defines them. At the end of each slice, commit and stop with a report. The supervisor reviews each slice adversarially; what the review finds is fixed before the next slice, by a fresh agent (see below).
 - **Before you report, run [REVIEW.md](REVIEW.md) on your own diff**, and say which of its items your slice touched and what you checked.
 - **Gates are `zig build check`, on the commit you report.** Paste its last line (`check: PASS <commit>`, without `+dirty`) into the report. A report without that line, or with another commit's, is not a report. Run the fuzzers you touched as well, and say which.
 - Stop and ask the supervisor before a change alters a user-visible bound, limit or default, or registers a new code; give the evidence and the choice. Do not pick one and leave it to review.
 - Run long commands (`zig build check`, long fuzz runs) in the background and wait for them to finish; do not poll with sleep loops. Kill what earlier runs left before running again.
-- Run every gate once, on the final commit, then report (or push, where you were told to push) once. Never report or push before the gates finish.
-- **VM checks run on CI's KVM runners, not under TCG here.** Push the commit to a scratch branch named `vm/<demo>-<slug>` (`<demo>` is `m0` to `m6`, or `all`; for example `git push origin HEAD:vm/m4-slice4`). `.github/workflows/vm.yml` runs that demo in minutes. Read the result with the GitHub tools (`actions_list` with the branch, then `get_job_logs`), quote the run link in your report. The run deletes its branch when it ends, so push a new commit to the same name to run again. Scratch branches are the only branches you may push to. Use local TCG only to debug something CI cannot show.
+- Run every gate once, on the final commit, then report once. Never report, or open a pull request, before the gates finish.
+- **VM checks run on CI's KVM runners, not under TCG here.** Push the commit to a scratch branch named `vm/<demo>-<slug>` (`<demo>` is `m0` to `m6`, or `all`; for example `git push origin HEAD:vm/m4-slice4`). `.github/workflows/vm.yml` runs that demo in minutes. Read the result with the GitHub tools (`actions_list` with the branch, then `get_job_logs`), quote the run link in your report. The run deletes its branch when it ends, so push a new commit to the same name to run again. Push only to your own session branch and to scratch branches. Use local TCG only to debug something CI cannot show.
 - Report what you ran and its output, what you did not run and why, every deviation from the brief, and anything in the spec or brief that seemed wrong. End the report with the handoff note described below.
 
 ## Agent context discipline
@@ -101,7 +101,9 @@ in this file or `docs/decisions/` in the same PR.
 
 ## Git
 
-- Develop on the branch you were given and commit in small, meaningful steps. The supervisor pushes, with `git push -u origin <branch>`, after review.
+- Develop on the branch you were given and commit in small, meaningful steps.
+- **Push your work about every 10 minutes** (owner, 2026-11-10), with `git push -u origin <branch>`, to your own session branch, even when it is unfinished: the container is ephemeral, and unpushed commits are lost when it is reclaimed or reset. Never push to `main` or to another session's branch.
+- **Do not open a pull request until the work is ready:** gates pass on the final commit and the report is written. Pushing to a branch with an open pull request runs CI, so the pull request comes last.
 - Never report an unpushed commit as pushed.
 - CI (`ci.yml`) runs only on pull requests and on `main`, never on a plain branch push. A pull request runs the VM demos its changed paths can affect, and nothing but the `changes` job when it changes only docs; `main`, `claude/release-*` pull requests and `full-ci` pull requests run all demos (docs/decisions/2026-11-04-ci-affected-demos.md). Zig jobs restore a build cache keyed on `build.zig`, `build.zig.zon` and `src/**`. When a change needs CI, open a PR (or push to an open one); do not push to trigger CI, and batch small follow-ups into one push. Actions time is limited. The exception is `vm.yml`: a push to a `vm/*` scratch branch runs one demo, for checking work in progress (see the implementer section).
 - A commit that only records status (README.md and `site/index.html` updated after a CI result) carries `[skip ci]` in its message, so it does not start a run of its own. Never use `[skip ci]` on a commit that changes code, tests, the harness, CI or generated files.
