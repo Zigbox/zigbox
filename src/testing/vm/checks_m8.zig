@@ -783,17 +783,17 @@ pub fn check_prune_one_removed(arena: Allocator, e: Evidence) Error!void {
     if (doc.orphans != 1) return error.PruneWrong;
 }
 
-/// A refused build of a step whose base is unsigned: `E0905`, the step named, no errno.
-pub fn check_base_refused(e: Evidence, step_name: []const u8) Error!void {
+/// A refused build whose base image is unsigned: `E0905`, the base named, no errno.
+pub fn check_base_refused(e: Evidence, base_name: []const u8) Error!void {
     if (e.rc == 0 or std.mem.indexOf(u8, e.err, "errno") != null) return error.RefusalWrong;
     if (!std.mem.startsWith(u8, e.err, "error[ZBX-E0905]: ")) return error.RefusalWrong;
     var buffer: [128]u8 = undefined;
-    // The buffer holds any step name the demo uses.
+    // The buffer holds any base name the demo uses.
     const want = std.fmt.bufPrint(
         &buffer,
-        "base of step '{s}'",
-        .{step_name},
-    ) catch unreachable; // the buffer fits any demo step name
+        "nothing has signed {s}@",
+        .{base_name},
+    ) catch unreachable; // the buffer fits any demo base name
     var flat_buffer: [8192]u8 = undefined;
     const flat = flatten(&flat_buffer, e.err);
     if (std.mem.indexOf(u8, flat, want) == null) return error.RefusalWrong;
@@ -900,7 +900,7 @@ pub fn check_a3(arena: Allocator, output: []const u8) Error!void {
 /// `E0904` with its line and column.
 pub fn check_a4(arena: Allocator, output: []const u8) Error!void {
     _ = arena;
-    try check_base_refused(try evidence(output, "bld"), "probe");
+    try check_base_refused(try evidence(output, "bld"), "alpine");
     try check_malformed_policy(try evidence(output, "run5"));
 }
 
@@ -1090,14 +1090,15 @@ test "a push pair has one manifest, and the second finds every blob" {
     try std.testing.expectError(error.RefusalWrong, check_push_pair(arena, up, failed));
 }
 
-test "an unsigned base names its step; a malformed policy names its line" {
-    const text = "error[ZBX-E0905]: refused\n  while  checking the base of step 'probe', b3:1, " ++
-        "against the policy /p\n";
+test "an unsigned base names its image; a malformed policy names its line" {
+    const text = "error[ZBX-E0905]: refused\n" ++
+        "  cause  /p requires a signature, and nothing has signed\n" ++
+        "         alpine@sha256:1\n";
     const refused: Evidence = .{ .rc = 125, .out = "", .err = text };
-    try check_base_refused(refused, "probe");
+    try check_base_refused(refused, "alpine");
     try std.testing.expectError(error.RefusalWrong, check_base_refused(refused, "other"));
     const built: Evidence = .{ .rc = 0, .out = "", .err = text };
-    try std.testing.expectError(error.RefusalWrong, check_base_refused(built, "probe"));
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(built, "alpine"));
     const bad: Evidence = .{
         .rc = 125,
         .out = "",
