@@ -58,8 +58,9 @@ changes to a whole root file system. M9 adds what that needs, and nothing else:
   `0755 0:0`. Each entry is `.{ .from = "<input path>" | "step:<name>" | "<locked ref>",
   .src = .{ ... }, .to = "/abs/path", .chown = "...", .chmod = "0644" }`. Sources from a step or
   an image may use globs (`*`, `?`, `[...]`), matched at build time against that tree. `chown`
-  names are resolved as `.user` is, against the destination tree. It is pure store work, like
-  M7's image assembly: no container, cached the same way, reported as a step.
+  names are resolved as `.user` is, against the destination tree. An entry may give `.exclude`, as
+  inputs do (`COPY --exclude`). It is pure store work, like M7's image assembly: no container,
+  cached the same way, reported as a step.
 - **Input globs and excludes.** `inputs` may use the same globs, and a step or the file may give
   `.exclude`, a list in `.dockerignore` syntax (`**`, `!` re-includes, later lines win). Both are
   evaluated at build time against the project, so a new file that a `COPY *.go` would take is
@@ -125,17 +126,19 @@ zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]
 | `FROM <stage>` | 70% multi-stage | `base = "step:<last step of stage>"` |
 | `RUN` (shell form) | 97% | a root step, argv = current `SHELL` (default `/bin/sh -c`) + the text |
 | `RUN` (exec form) | | a root step with that argv |
-| `RUN <<EOF` heredoc | 5% | the body is the shell's script; `<<-` strips tabs |
-| `RUN --mount=type=cache` | 28% | `.caches` (`id` defaults to the target path); flagged |
-| `RUN --mount=type=bind` | 10% | `.binds` (`from` a stage or the context) |
+| `RUN <<EOF` heredoc | 5% | the body is the shell's script; `<<-` strips tabs; an interpreter after the delimiter, a shebang body or two heredocs in one `RUN` is `E0811` |
+| `RUN --mount=type=cache` | 28% | `.caches` (`id` defaults to the target path; `ro`, `mode`, `uid`, `gid` kept; `sharing` is always `locked`; `from` is `E0811`); flagged |
+| `RUN --mount=type=bind` | 10% | `.binds` (`from` a stage, a locked image or the context, `source` within it); `rw` is `E0811` |
 | `RUN --mount=type=secret\|ssh\|tmpfs` | 2% / 0% / 0% | `E0811` |
 | `RUN --network=none\|default` | | no network / per `--network`; `host` is `E0811` |
+| `RUN --security`, `RUN --device` | | `sandbox` noted (`W0811`); `insecure` and `--device` are `E0811` (devices: M10) |
 | `COPY src... dest` | 92% | a `copy` step from project inputs |
 | `COPY --from=<stage\|image>` | 69% | a `copy` step from `step:` or the locked image; globs at build time |
 | `COPY --chown`, `--chmod` | 13%, 7% | `.chown`, `.chmod` |
-| `COPY --link` | 10% | ignored: our copy has its meaning already (noted in the report) |
-| `COPY <<EOF` heredoc, `--parents`, `--exclude` | | `E0811` |
-| `ADD` local file or directory | 11% | as `COPY` |
+| `COPY --link` | 10% | ignored: our copy has its meaning already (`W0811`) |
+| `COPY --exclude` | | the copy entry's `.exclude` |
+| `COPY <<EOF` heredoc, `--parents` | | `E0811` |
+| `ADD` local file or directory | 11% | as `COPY` (a local archive only with `--unpack=false`) |
 | `ADD` URL, git URL, or a local tar | 3%, 2%, 0% | `E0811`, the fix showing a `RUN` with a checksum |
 | `ENV` | 79% | resolved and carried into each later step's `env` and the config |
 | `ARG` | 79% | resolved at import from `--build-arg` or the default; a needed `ARG` with neither is `E0812`. `TARGETOS`, `TARGETARCH`, `TARGETPLATFORM`, `BUILDPLATFORM` and friends are the host's. A `RUN` sees in-scope args in its env, as Docker's does |
@@ -144,12 +147,19 @@ zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]
 | `SHELL` | 10% | changes the argv prefix of later shell-form instructions |
 | `ENTRYPOINT`, `CMD` | 75%, 48% | config, Docker's shell-form and inheritance rules |
 | `LABEL` | 38% | config labels; a key outside `[a-z0-9._/-]` is `E0811` naming it |
-| `EXPOSE`, `VOLUME`, `HEALTHCHECK`, `STOPSIGNAL` | 62%, 28%, 23%, 2% | labels `org.zigbox.import.expose`, `.volume`, `.healthcheck`, `.stopsignal`, the value as written; listed in the report (`W0811`) |
+| `EXPOSE`, `VOLUME`, `HEALTHCHECK`, `STOPSIGNAL` | 62%, 28%, 23%, 2% | labels `org.zigbox.import.expose`, `.volume`, `.healthcheck`, `.stopsignal`, the value as written (a `HEALTHCHECK`'s flags included); listed in the report (`W0811`) |
 | `ONBUILD`, `MAINTAINER` | 0% | `E0811`; `MAINTAINER` becomes a label |
-| `# syntax=`, `# escape=`, `# check=` | | `syntax` and `check` ignored (noted); `escape` honoured |
+| `# syntax=`, `# escape=`, `# check=` | | `syntax` and `check` ignored (`W0811`); `escape` honoured |
+| `BUILDKIT_*` and `SOURCE_DATE_EPOCH` args | | ignored (`W0811`); the fixed environment keeps its `SOURCE_DATE_EPOCH` |
+| `HTTP_PROXY` and the other proxy args | | from `--build-arg` only, in `network = true` steps' env, never in the config |
 
-Variable substitution follows Docker's (`$X`, `${X}`, `${X:-w}`, `${X:+w}`, escapes) in the
-instructions Docker substitutes in, and nowhere else. A `RUN`'s own text is left to its shell.
+Variable substitution follows Docker's (`$X`, `${X}`, `${X:-w}`, `${X:+w}`, `${X-w}`, `${X+w}`,
+`${X?m}` and `${X:?m}` as `E0812`, escapes) in the instructions Docker substitutes in, and nowhere
+else. A `RUN`'s own text is left to its shell. The pattern forms (`${X#p}`, `${X%p}`, `${X/p/r}`
+and their doubles) are pre-release Docker syntax and `E0811`.
+
+Every option of every instruction, with its disposition, is in `M9-dockerfile-flags.md`. Where
+that table and this section disagree, this section wins.
 
 **Network detection** (`--network detect`): a `RUN` gets `network = true` when its text holds a
 word from a checked-in table (`apk add`, `apt-get`, `apt`, `dnf`, `yum`, `pip install`,
@@ -183,7 +193,7 @@ the builder's. Registered by the supervisor with this brief.
 - `W0802` the build has steps with cache mounts (named).
 - `W0810` the import has steps that are not hermetic (named, with why).
 - `W0811` parts of the Dockerfile did not carry over as instructions (named, with what became of
-  each).
+  each: a label, or ignored).
 
 An import that is refused exits 1 and writes nothing.
 
@@ -324,7 +334,7 @@ E0811`.
 - BuildKit frontends (`# syntax=` is ignored), `RUN --security`, multi-platform builds, and
   cross-building.
 - Secret and ssh mounts, tmpfs mounts, `ADD` of URLs, git repositories or tar archives,
-  `COPY <<EOF`, `ONBUILD`. Each is refused by name.
+  `COPY <<EOF`, `ONBUILD`, named build contexts. Each is refused by name.
 - Keeping a Dockerfile and its build file in sync, or importing on every build. The build file is
   the source once written.
 - Compose files, `docker-compose build`, and anything that needs several containers (Zigcube).
