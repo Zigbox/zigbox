@@ -969,7 +969,11 @@ fn check_doctor_cli(
 /// True if the interrupts the simulator injected could have made a write give up
 /// (`Host.write_all` stops after `eintr_retries_max` in a row) and what reached the streams
 /// is less than the report says. A run with fewer interrupts than that has no such excuse.
-fn doctor_output_cut_by_interrupts(sim: *const HostSim, report: *const doctor.Report, json: bool) bool {
+fn doctor_output_cut_by_interrupts(
+    sim: *const HostSim,
+    report: *const doctor.Report,
+    json: bool,
+) bool {
     if (sim.interrupts_injected <= constants.eintr_retries_max) return false;
     var failed: u32 = 0;
     for (&report.checks) |*check| failed += @intFromBool(check.status == .fail);
