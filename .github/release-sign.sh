@@ -51,20 +51,25 @@ gpg_sign() { GNUPGHOME=$signing_home gpg --batch --no-tty --pinentry-mode loopba
 (umask 077 && printf '%s' "$ZIGBOX_SIGNING_PASSPHRASE" > "$signing_home/passphrase")
 printf '%s\n' "$ZIGBOX_SIGNING_KEY" | gpg_sign --import 2> "$work/import.log" ||
   { echo "release-sign: gpg could not import ZIGBOX_SIGNING_KEY" >&2; exit 1; }
+# Only gpg needed these, once. Unset them so that zig, rpm and tar do not inherit them.
+unset ZIGBOX_SIGNING_KEY ZIGBOX_SIGNING_PASSPHRASE
 
 # The one signing subkey, which must belong to the primary key named by ZIGBOX_SIGNING_FPR.
 # A colon listing: `sec`/`sec#` opens the key, then `fpr` is its fingerprint; `ssb` opens a
-# subkey (field 2 validity, field 12 capabilities), then its `fpr`.
+# subkey (field 2 validity, field 3 bits, field 4 algorithm, field 12 capabilities), then its
+# `fpr`. The policy is RSA 4096 (algorithm 1) for both, as published.
 listing=$(GNUPGHOME=$signing_home gpg --batch --list-secret-keys --with-colons 2>/dev/null)
 subkey=$(awk -F: -v primary="$primary" '
-  $1 == "sec" { section = "sec"; next }
-  $1 == "ssb" { section = ($2 == "e" || $2 == "r") ? "bad" : (index($12, "s") ? "sign" : "other"); next }
+  $1 == "sec" { section = "sec"; if ($3 != 4096 || $4 != 1) weak = 1; next }
+  $1 == "ssb" { section = ($2 == "e" || $2 == "r") ? "bad" : (index($12, "s") ? "sign" : "other")
+                if (section == "sign" && ($3 != 4096 || $4 != 1)) weak = 1; next }
   $1 == "fpr" && section == "sec" { top = $10; section = ""; next }
   $1 == "fpr" && section == "sign" { print $10; section = "" }
-  END { if (top != primary) print "WRONG-PRIMARY" }
+  END { if (top != primary) print "WRONG-PRIMARY"; if (weak) print "WEAK" }
 ' <<< "$listing")
 case "$subkey" in
   *WRONG-PRIMARY*) fail "the imported key is not by the primary key ZIGBOX_SIGNING_FPR" ;;
+  *WEAK*) fail "the primary and the signing subkey must be RSA 4096 (docs/releases/packaging.md)" ;;
   "") fail "the imported key has no usable (unexpired, unrevoked) signing subkey" ;;
 esac
 [ "$(wc -l <<< "$subkey")" -eq 1 ] || fail "the imported key has more than one signing subkey"
