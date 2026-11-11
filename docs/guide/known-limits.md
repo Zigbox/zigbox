@@ -38,7 +38,7 @@ problems we know about. If you hit something not listed here, please
 - **Mac:** `zbx push` runs on Linux only; to get an image off a Mac, use `zbx store export --oci`.
   `zbx build` and the signing commands have not been tested on a real Mac yet.
 - **Claude Code cloud sessions:** containers run, but ports, user-mode networking and builds do
-  not. See [Try in Claude Code](try-claude-code.md#zbx-inside-a-claude-code-cloud-session).
+  not. See [Try in Claude Code](try-claude-code.md#what-works-in-a-cloud-session).
 - **Linux packages** are built for the Debian and Fedora families (apt and dnf). Other
   distributions are not packaged yet.
 
