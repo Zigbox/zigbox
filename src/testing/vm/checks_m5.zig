@@ -3,6 +3,7 @@
 //! net_m5.zig, which demo-m4 runs after its own steps.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const checks = @import("checks.zig");
 
 const Streams = checks.Streams;
@@ -175,18 +176,33 @@ pub fn check_nginx_page(text: []const u8, status: u8) Error!void {
     if (!contains(text, "Welcome to nginx!")) return error.PageWrong;
 }
 
+/// Whether the local address (the fourth column) of an `ss` line ends in `:port`. Only that
+/// field counts: a match anywhere in the line also hits `ino:5433`, the inode column, which once
+/// made systemd-resolved's port-53 listener look like a listener on port 5433.
+pub fn local_port_is(line: []const u8, port: u16) bool {
+    var fields = std.mem.tokenizeAny(u8, line, " \t");
+    var column: u32 = 0;
+    while (fields.next()) |field| {
+        column += 1;
+        if (column < 4) continue;
+        assert(column == 4);
+        const colon = std.mem.lastIndexOfScalar(u8, field, ':') orelse return false;
+        const digits = field[colon + 1 ..];
+        const parsed = std.fmt.parseInt(u16, digits, 10) catch return false;
+        return parsed == port;
+    }
+    return false;
+}
+
 /// The lines of `ss -tlnpe` (as root) that listen on the host's `port`: there are some exactly
 /// when `want`, and every one is pasta's (on amd64 the process is `pasta.avx2`, which pasta
 /// executes when the CPU has AVX2), owned by uid 1000 (the demo user).
 pub fn check_listener(text: []const u8, port: u16, want: bool) Error!void {
-    var needle: [16]u8 = undefined;
-    const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
     var found: u32 = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
-        // The local address is the fourth column; the peer's ("0.0.0.0:*") never ends ":PORT ".
-        if (!contains(line, local)) continue;
+        if (!local_port_is(line, port)) continue;
         found += 1;
         if (!contains(line, "((\"pasta")) return error.ListenerWrong;
         if (!contains(line, " uid:1000 ")) return error.ListenerWrong;
@@ -362,6 +378,21 @@ test "the listener is pasta's, as the user, and gone when it should be" {
     const root = "LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"pasta\",pid=9,fd=7)) ino:1 sk:2\n";
     try testing.expectError(error.ListenerWrong, check_listener(root, 8080, true));
     try check_listener(pasta, 808, false);
+}
+
+test "only the local address's port counts, not an inode that looks like one" {
+    // Goal: regression for demo-m6's false "port 5433 free" failure. Method: the line of
+    // systemd-resolved's listener on port 53 whose inode is 5433; the port is free, and a real
+    // listener on 5433 still counts, IPv6 and wildcard forms included.
+    const resolved = "LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* " ++
+        "users:((\"systemd-resolve\",pid=611,fd=14)) uid:991 ino:5433 sk:7 <->\n";
+    try check_listener(resolved, 5433, false);
+    try testing.expect(!local_port_is(resolved, 5433));
+    try testing.expect(local_port_is(resolved, 53));
+    try testing.expect(!local_port_is("LISTEN 0 1 0.0.0.0:80 0.0.0.0:5433 x\n", 5433));
+    try testing.expect(local_port_is("LISTEN 0 1 [::]:5433 [::]:* x", 5433));
+    try testing.expect(local_port_is("LISTEN 0 1 *:5433 *:*", 5433));
+    try testing.expect(!local_port_is("LISTEN 0 1", 5433));
 }
 
 test "the host's rules are unchanged" {
