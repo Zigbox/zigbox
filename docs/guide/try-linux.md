@@ -5,7 +5,7 @@ you need `sudo` only to install packages and change a few host settings, once.
 
 Zigbox is tested on Ubuntu 24.04. The packages are also installed and run on Debian, Fedora and
 Rocky Linux in CI. Other distributions with cgroup v2 and systemd should work; tell us if one does
-not.
+not. The output on this page is from `zbx 0.4.0`.
 
 ## 1. Install
 
