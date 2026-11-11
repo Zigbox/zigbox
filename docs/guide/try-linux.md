@@ -1,7 +1,7 @@
 # Try Zigbox on Linux
 
 You need Linux on x86_64 or arm64 (aarch64), kernel 5.15 or newer. `zbx` runs as your own user;
-you need `sudo` only to install packages and change a few host settings, once.
+you need `sudo` only to install the package and change a few host settings, once.
 
 Zigbox is tested on Ubuntu 24.04. The packages are also installed and run on Debian, Fedora and
 Rocky Linux in CI. Other distributions with cgroup v2 and systemd should work; tell us if one does
@@ -9,7 +9,8 @@ not. The output on this page is from `zbx 0.4.0`.
 
 ## 1. Install
 
-Pick one.
+`zbx` is one static binary, packaged for Debian and Fedora families and signed. Add the
+repository for your distribution and install the `zigbox` package.
 
 ### From the apt repository (Debian, Ubuntu)
 
@@ -41,41 +42,10 @@ sudo dnf install zigbox
 The package holds the one `zbx` binary. It recommends `uidmap` (on Fedora, `shadow-utils`) and
 `passt`, which step 2 needs. It does not change `/etc/subuid` or `/etc/subgid`.
 
-<!-- owner: on 2026-11-11 https://zigbox.org/apt, /rpm and the keyring return 404, and no release
-carries zigbox-repos.tar.gz yet. These commands are the README's and the ones demo-m8-packages
+<!-- owner: on 2026-11-11 https://zigbox.org/apt, /rpm and the keyring return 404: the site
+serves them from the first release that carries zigbox-repos.tar.gz (0.5.0). These commands are the README's and the ones demo-m8-packages
 runs against a local copy of the tree; they have not been run against zigbox.org. Run them on a
 clean Ubuntu and Fedora before 0.5.1 is announced. -->
-
-### The static binary
-
-`zbx` is one static file with no dependencies. Download it from the
-[latest release](https://github.com/Zigbox/zigbox/releases/latest) and put it on your `PATH`:
-
-```sh
-curl -fsSLo zbx https://github.com/Zigbox/zigbox/releases/download/v0.5.1/zbx-0.5.1-linux-x86_64
-chmod +x zbx && sudo mv zbx /usr/local/bin/
-zbx --version
-```
-
-On arm64, take `zbx-0.5.1-linux-aarch64`. Install `uidmap` and `passt` from your distribution
-too (step 2).
-
-<!-- owner: no release up to 0.4.0 carries a Linux binary (0.4.0 has no assets; 0.3.x only the
-Mac zip), and nothing in the repository names one. The file name above is a placeholder: fix it
-to the 0.5.1 asset's name, or drop this section. -->
-
-### From source
-
-With [Zig 0.17.0](https://ziglang.org/download/) (exactly that version) and nothing else:
-
-```sh
-git clone --branch v0.4.0 https://github.com/Zigbox/zigbox && cd zigbox
-zig build release
-sudo cp zig-out/release/x86_64-linux/zbx /usr/local/bin/zbx
-```
-
-`zig build release` builds both static binaries, `zig-out/release/x86_64-linux/zbx` and
-`zig-out/release/aarch64-linux/zbx` (3.6 MB and 3.2 MB for 0.4.0), in a few minutes.
 
 ## 2. Check the host
 

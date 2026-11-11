@@ -39,9 +39,8 @@ problems we know about. If you hit something not listed here, please
   `zbx build` and the signing commands have not been tested on a real Mac yet.
 - **Claude Code cloud sessions:** containers run, but ports, user-mode networking and builds do
   not. See [Try in Claude Code](try-claude-code.md#zbx-inside-a-claude-code-cloud-session).
-- **Packages and binaries.** <!-- owner: as of 2026-11-11 no release carries a Linux binary and
-  the apt and dnf repositories on zigbox.org are not live; update this line for 0.5.1. --> Until a
-  Linux binary is published, build `zbx` from source ([Try on Linux](try-linux.md#from-source)).
+- **Linux packages** are built for the Debian and Fedora families (apt and dnf). Other
+  distributions are not packaged yet.
 
 ## Known problems
 
@@ -59,8 +58,6 @@ Found while writing this guide, with `zbx 0.4.0`:
   files): files linked under several names seem to be counted once per name.
 - **`zbx exec <name> -- cat /etc/hostname`** prints `localhost`, while the container's hostname
   is its name.
-- **Errors link to the old documentation address** (`https://zigbox.github.io/zigbox/errors/...`).
-  Those pages work; the current address is `https://zigbox.org/errors/box/<code>`.
 - **Pushing through a published port** to a registry in another container can stall and fail with
   [E0503](https://zigbox.org/errors/box/E0503) after 30 seconds; trying again works. Seen in CI,
   where the registry runs behind `pasta`; a direct connection does not stall.

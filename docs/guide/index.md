@@ -21,9 +21,9 @@ newest release on 2026-11-11. Re-run them with 0.5.1 before the beta is announce
 ## Try it
 
 - **[Try on a Mac](try-mac.md)**: Apple Silicon, `brew install`, about five minutes.
-- **[Try on Linux](try-linux.md)**: one static binary, or a package from our apt and dnf
-  repositories, then `zbx doctor`.
-- **[Try in Claude Code](try-claude-code.md)**: let an agent drive `zbx` through its JSON
-  output, and what works inside a Claude Code cloud session.
+- **[Try on Linux](try-linux.md)**: a signed package from our apt and dnf repositories, then
+  `zbx doctor`.
+- **[Try in Claude Code](try-claude-code.md)**: containers inside a Claude Code cloud session,
+  where Docker's daemon does not run, and an agent driving `zbx` through its JSON output.
 
 Then take the **[tour](tour.md)**: one short example of each command in the core loop.
