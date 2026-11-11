@@ -72,6 +72,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -90,6 +91,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -104,6 +106,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -118,6 +121,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -134,7 +138,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -156,6 +160,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
@@ -174,10 +179,13 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m0 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m0
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -209,10 +217,13 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m1 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m1
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -249,10 +260,13 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m2 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m2
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -291,7 +305,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m3 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       # The whole history: the upgrade test builds the M2 commit (src/testing/vm/old_release.zon)
       # in a git worktree, and a shallow clone does not have it.
@@ -299,6 +313,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m3
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -339,7 +356,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m4 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -348,6 +365,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m4
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -389,7 +409,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m5 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 25
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -398,6 +418,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m5
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -426,7 +449,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m6 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 25
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -435,6 +458,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m6
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -463,7 +489,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m6b == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -472,6 +498,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m6b
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -498,7 +527,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m7 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -507,6 +536,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m7
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -531,7 +563,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m8 == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 25
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -540,6 +572,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m8
       - name: Install QEMU
         run: |
           sudo apt-get update
@@ -565,7 +600,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.demo_m8_packages == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       ZBX_REGISTRY_MIRRORS: mirror.gcr.io
     steps:
@@ -573,6 +608,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-zig
+      - uses: ./.github/actions/zig-cache
+        with:
+          name: demo-m8-packages
       - name: Install QEMU
         run: |
           sudo apt-get update
