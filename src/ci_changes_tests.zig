@@ -44,6 +44,24 @@ const rows = [_]Row{
         .paths = &.{"src/testing/vm/main_m8_packages.zig"},
         .true_outputs = &.{ "code", "demo_m8_packages" },
     },
+    // The release workflow and its signing script run on a tag and in their own test job: no demo.
+    .{
+        .paths = &.{ ".github/workflows/release.yml", ".github/release-sign.sh" },
+        .true_outputs = &.{"code"},
+    },
+    .{
+        .paths = &.{".github/release-sign-test.sh"},
+        .true_outputs = &.{"code"},
+    },
+    // The other workflows are CI itself: every demo and the packages demo.
+    .{
+        .paths = &.{".github/workflows/ci.yml"},
+        .true_outputs = &.{
+            "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "demo_m8_packages",
+        },
+    },
     // The runtime every demo runs on selects every VM demo, not the packages demo.
     .{
         .paths = &.{"src/cli.zig"},
