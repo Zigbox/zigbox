@@ -20,8 +20,15 @@ the release. 0.4.0 gets no archive ([decision](../decisions/2026-11-11-no-packag
 The workflow runs on a push of a `v*` tag, and on `workflow_dispatch` with a `tag` input to sign
 an existing release again. Start a manual run from the tag itself (Run workflow, "Use workflow
 from": the tag): the `release` environment only deploys tags, and the run refuses a `tag` input
-that is not the ref it started from, or is not `vX.Y.Z`. The run fails before signing when the
+that is not the ref it started from, or is not `vX.Y.Z` (a pre-release suffix such as `-rc.1` is accepted, and signs as usual). The run fails before signing when the
 GitHub release does not exist yet; create it and re-run.
+
+Before approving a `release` run, open the run and check that its commit is the release-gated
+commit on `main` (the tag points at it, and `release.yml` and `release-sign.sh` are as reviewed):
+the workflow and script that run are the ones at the tag, so an approval hands the key to
+whatever that commit holds. Set up, once, on the repository: a tag ruleset that restricts who can
+create `v*` tags, and on the `release` environment "Prevent self-review", the two secrets as
+environment secrets (not repository secrets) and a deployment policy that admits tags only.
 
 ## The release key
 
@@ -47,15 +54,15 @@ KEY=$(gpg --list-keys --with-colons "Zigbox releases" | awk -F: '$1 == "fpr" { p
 gpg --quick-add-key "$KEY" rsa4096 sign 1y
 SUBKEY=$(gpg --list-keys --with-colons "$KEY" | awk -F: '$1 == "sub" { s = 1; next } $1 == "fpr" && s { print $10; exit }')
 
-# Offline backup of the whole secret key and a revocation certificate, onto media kept offline.
-gpg --armor --export-secret-keys "$KEY" > zigbox-primary-backup.asc
-gpg --gen-revoke "$KEY" > zigbox-revoke.asc
+# Offline backup of the whole secret key and a revocation certificate, straight onto media kept offline (never the setup machine's disk).
+gpg --armor --export-secret-keys "$KEY" > /media/OFFLINE/zigbox-primary-backup.asc
+gpg --gen-revoke "$KEY" > /media/OFFLINE/zigbox-revoke.asc
 ```
 
 Later, `gpg --edit-key "$KEY"`, `key 0`, `keytocard` moves the primary onto a YubiKey. Store the
 backup before that, as `keytocard` replaces the key on disk with a stub.
 
-Give the `release` environment its three values (the environment, with owner approval and a
+Give the `release` environment its two secrets (the environment, with owner approval and a
 tag-only deployment policy, already exists). The subkey export contains the subkey's secret part
 only, with the primary stubbed, and stays protected by its passphrase:
 
@@ -63,11 +70,11 @@ only, with the primary stubbed, and stays protected by its passphrase:
 gpg --armor --export-secret-subkeys "$SUBKEY"'!' |
   gh secret set ZIGBOX_SIGNING_KEY --env release --repo Zigbox/zigbox
 gh secret set ZIGBOX_SIGNING_PASSPHRASE --env release --repo Zigbox/zigbox
-gh variable set ZIGBOX_SIGNING_FPR --env release --repo Zigbox/zigbox --body "$KEY"
 ```
 
-`ZIGBOX_SIGNING_FPR` is the primary key's fingerprint: users trust it, and the workflow fails
-unless every signature is by one of its subkeys. Publish the primary's public key
+The primary key's fingerprint is not a setting: it is written in `release.yml` (the `Sign` step),
+in reviewed code, and the workflow fails unless every signature is by one of its subkeys. A new
+primary key is a reviewed change to that file and to the fingerprint above. Publish the primary's public key
 (`gpg --armor --export "$KEY"`) wherever users look for it; each release's archive also carries
 the current public key as `zigbox-archive-keyring.asc` and `.gpg`.
 
@@ -95,7 +102,8 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
    removed on exit, also on failure). The passphrase is a 0600 file in that home, used with
    `--pinentry-mode loopback --passphrase-file`. Neither is printed, written to the workspace or
    passed as an argument, and there is no `set -x`.
-2. Checks the key's primary fingerprint is `ZIGBOX_SIGNING_FPR` and picks its one signing subkey.
+2. Checks the key's primary fingerprint is `ZIGBOX_SIGNING_FPR` (set by the workflow to the
+   pinned value), that the primary and the signing subkey are RSA 4096, and picks the one subkey.
 3. Round 1: `zig build packages` writes unsigned rpms and `zig-out/packages/to-sign/<rpm>.header`;
    each header gets a binary detached signature, `<rpm file>.header.sig`, in a fresh directory.
    Each is tied to the header it signs (its 16 digest bits and its issuer fingerprint), so a

@@ -10,9 +10,9 @@
 # Environment: EVENT (github.event_name), HEAD_REF (the PR's head branch), LABELS (the PR's
 # labels, space separated). See docs/decisions/2026-11-04-ci-affected-demos.md.
 #
-# The release workflow and its signing scripts select no demo. The rules err toward running. A path no rule below names runs every VM demo, but not the
-# packages demo: that one runs only for the package files, the VM guests, the build and the
-# workflow (docs/demos/m8.md).
+# The release workflow and its signing scripts select no demo. The rules err toward running.
+# A path no rule below names runs every VM demo, but not the packages demo: that one runs only
+# for the package files, the VM guests, the build and the workflow (docs/demos/m8.md).
 set -euo pipefail
 
 demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b)
