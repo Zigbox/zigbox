@@ -51,6 +51,9 @@ run:
                   or user (the network through pasta, as the user: apt install passt)
   --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
                   implies --net user)
+  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
+                  --net none only) and hand it to the caller with --listen-send
+  --listen-send <fd>  the inherited Unix socket the listener is sent over (SCM_RIGHTS)
   -e <name>[=<value>]  set a variable in the container, over the image's (repeatable): with
                   =<value> that value, without it zbx's own (an error if unset there).
                   A value is never stored or printed; zbx ps and a bundle show the name

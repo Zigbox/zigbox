@@ -171,6 +171,24 @@ fn random_extra_mounts(
 }
 
 /// The state volumes, the other mounts and the user read back as they were written.
+/// Version 10: a listener only with the network off; then the record says version 10.
+fn random_listen(random: std.Random, network: spec_mod.Network) ?spec_mod.Listen {
+    if (network != .none) return null;
+    if (random.boolean()) return null;
+    return .{ .port = random.intRangeAtMost(u16, 1, 65535) };
+}
+
+/// The record version a view is written at: plain unless it has a listener.
+fn version_of(view: *const records.View) u32 {
+    if (view.listen != null) return constants.record_version;
+    return constants.record_version_plain;
+}
+
+fn check_listen_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.version == version_of(view));
+    assert(std.meta.eql(parsed.listen, view.listen));
+}
+
 fn check_mounts_back(view: *const records.View, parsed: *const records.Parsed) void {
     assert(parsed.state_count == view.state.len);
     for (view.state, 0..) |mount, index| {
@@ -232,12 +250,13 @@ fn check_round_trip(random: std.Random) void {
             1 => .{ .uid = random.int(u32), .gid = random.int(u32) },
             else => .{ .uid = 0, .gid = 0 },
         },
+        .listen = random_listen(random, reach.network),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     records.parse(text, &parsed) catch unreachable; // A rendered record always reads back.
-    assert(parsed.version == constants.record_version);
+    check_listen_back(&view, &parsed);
     assert(std.mem.eql(u8, parsed.name_slice(), view.name));
     assert(std.mem.eql(u8, parsed.rootfs_slice(), view.rootfs));
     assert(parsed.started == view.started);
@@ -310,6 +329,7 @@ fn rerender(parsed: *const records.Parsed) void {
         .state = mounts[0..parsed.state_count],
         .mounts = extra[0..parsed.mounts_count],
         .user = parsed.user,
+        .listen = parsed.listen,
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
@@ -337,7 +357,8 @@ fn check_reach_accepted(parsed: *const records.Parsed) void {
 fn check_versions(random: std.Random, text: []const u8) void {
     var buffer: [text_bytes_max + 32]u8 = undefined;
     var parsed: records.Parsed = undefined;
-    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{constants.record_version});
+    const plain = constants.record_version_plain;
+    const marker = std.fmt.comptimePrint("    .version = {d},\n", .{plain});
     const at = std.mem.indexOf(u8, text, marker).?;
     // Newer: refused as such. Absent: version 0, still read.
     const newer = random.intRangeAtMost(u32, constants.record_version + 1, 1 << 30);

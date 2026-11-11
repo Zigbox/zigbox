@@ -249,6 +249,8 @@ pub const Handle = struct {
     /// The host's ports forwarded to the container's (`--publish`), for the exit report.
     publish: [constants.publish_count_max]spec_mod.Publish,
     publish_count: u32,
+    /// The listener `--listen` asked for, for the record and `zbx ps`; never a descriptor.
+    listen: ?spec_mod.Listen,
     /// For `--net user`: where pasta is, and the file its output goes to (empty: none).
     pasta_path: text_util.Bounded(constants.pasta_path_bytes_max),
     pasta_log: text_util.Bounded(constants.state_path_bytes_max + 80),
@@ -345,6 +347,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.limits = container.limits;
     handle.network = container.network;
     handle.publish_count = 0;
+    handle.listen = container.listen;
     handle.pasta_path = .{};
     handle.pasta_log = .{};
     handle.end_reason = .none;
@@ -378,6 +381,7 @@ pub fn start(
     try check_command(container, diag);
     try check_root(host, container, options, handle, diag);
     try check_limits(container.limits, diag);
+    try check_listen(container, diag);
     try check_network(host, container, handle, diag);
     try resolve_mounts(host, container, handle, diag);
 
@@ -463,6 +467,7 @@ fn build_plan(
         .user = container.user,
         .overlay = if (handle.has_image) handle.image.overlay() else null,
         .network = container.network,
+        .listen = if (container.listen) |listen| listen.port else null,
         .host_resolv = host_resolv,
         .pasta = if (container.network == .user) .{
             .path = handle.pasta_path.slice(),
@@ -543,6 +548,7 @@ pub fn wait(handle: *Handle) ExitReason {
     // The container is gone (or zbx lost it, and `abandon` below ends it): pasta goes now, and
     // the host's ports with it, before anything else is done.
     handle.session.release_pasta();
+    handle.session.release_listener();
     handle.status = .stopped;
     const status = result catch |err| {
         const failure: diagnose.Failure = .{
@@ -642,6 +648,22 @@ pub fn signal(handle: *Handle, number: u8) host_mod.Error!void {
     assert(handle.status == .running);
     assert(number > 0);
     try handle.session.send(number, false);
+}
+
+/// Ends the container at once with SIGKILL, whatever PID 1 handles (a run whose listener could
+/// not be handed on, M8b). The caller still waits for it.
+pub fn stop(handle: *Handle) host_mod.Error!void {
+    assert(handle.status == .running);
+    assert(constants.signal_kill == 9);
+    try handle.session.kill();
+}
+
+/// The listener was never handed out (the send failed): the run's final record does not say
+/// it listens. Call it before `wait`, which writes that record.
+pub fn forget_listener(handle: *Handle) void {
+    assert(handle.status == .running);
+    assert(handle.listen != null);
+    handle.listen = null;
 }
 
 /// The exit reason of a run that did not start, from the diagnostic that said why.
@@ -791,6 +813,29 @@ fn check_rootfs(host: Host, rootfs: []const u8, handle: *Handle, diag: *Diag) Er
     }
     @memcpy(handle.rootfs[0..rootfs.len], rootfs);
     handle.rootfs_len = @intCast(rootfs.len);
+}
+
+/// A run with `--listen`: it needs `--net none`, and no forwards (which imply `--net user`). The
+/// command line checks the descriptor it is given; a library caller hands the listener on itself.
+fn check_listen(container: *const Spec, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const listen = container.listen orelse return;
+    assert(listen.port > 0);
+    if (spec_mod.listen_options_problem(container.network, true)) |problem| {
+        diagnose.listen_options_invalid(diag, problem, null);
+        return error.StartFailed;
+    }
+    assert(container.publish.len == 0); // Forwards imply `--net user`, refused above.
+}
+
+/// The listener the container made, owned by the caller from here (close it with the host). Null
+/// when the run had no `--listen`, or the listener was taken already. Call it once the run
+/// has started.
+pub fn take_listener(handle: *Handle) ?host_mod.Handle {
+    assert(handle.status == .running);
+    if (handle.listen) |listen| assert(listen.port > 0);
+    if (handle.listen == null) return null;
+    return handle.session.take_listener();
 }
 
 /// A run with `--net user`: the forwards are a list pasta can make, pasta is there and new
@@ -1300,6 +1345,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .upper = if (writable_layers) handle.image.upper.text() else "",
         .network = handle.network,
         .publish = handle.publish_slice(),
+        .listen = handle.listen,
         .env_names = handle.env_names,
         .zbx_version = build_options.version,
         .state = handle.volumes.mount_slice(),

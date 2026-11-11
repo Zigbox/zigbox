@@ -248,6 +248,17 @@ pub const plan_steps_max: u32 = 224;
 
 /// `--publish` given at most this many times.
 pub const publish_count_max: u32 = 16;
+// The listener handoff (M8b, docs/briefs/M8b-listen.md).
+
+/// A container has at most one listener handed out (`--listen`).
+pub const listen_count_max: u32 = 1;
+/// The backlog of that listener: connections the kernel queues for an accept the holder has not
+/// made yet. The workload is one process on the loopback, so a short queue is enough.
+pub const listen_backlog: u32 = 16;
+/// The listener's address is IPv4 loopback, in text, as `--listen` takes it ("127.0.0.1:65535").
+pub const listen_text_bytes_max: u32 = 15;
+/// The simulator's room for listeners made in one world.
+pub const sim_listeners_max: u32 = 4;
 /// The address a `--net user` container's /etc/resolv.conf names. pasta's `--dns-forward` maps
 /// DNS sent to it to the host's own first resolver, from the host's side, which is how a
 /// container reaches systemd-resolved's stub at 127.0.0.53. Link-local, like Podman's choice,
@@ -406,7 +417,10 @@ pub const limit_text_bytes_max: u32 = 24;
 /// Records kept; the oldest is deleted when a run would make it more.
 pub const runs_max: u32 = 32;
 /// The version `zbx` writes. A record with a higher one is skipped, not misread.
-pub const record_version: u32 = 9;
+pub const record_version: u32 = 10;
+/// What a record without a listener is written as: a run that never asked for `--listen` leaves
+/// the same bytes it did before version 10 (which only added `.listen`).
+pub const record_version_plain: u32 = 9;
 /// One record. The command is cut to `record_command_bytes_max` and says so.
 pub const record_bytes_max: u32 = 64 * 1024;
 // Every reader of a record reads a file of at most `file_bytes_max`, so a record is never larger.
@@ -1291,6 +1305,10 @@ comptime {
     assert(sim_written_bytes_max > 1024);
 
     assert(publish_count_max > 0);
+    assert(listen_count_max == 1);
+    assert(listen_backlog > 0);
+    assert(listen_text_bytes_max == "127.0.0.1:65535".len);
+    assert(sim_listeners_max > listen_count_max);
     assert(run_env_count_max > 0);
     assert(run_env_count_max <= env_vars_count_max / 2); // Room for the image's own variables.
     assert(2 * run_env_count_max + 16 <= args_count_max);
@@ -1319,6 +1337,7 @@ comptime {
     assert(container_name_bytes_max + record_suffix.len <= dir_name_bytes_max);
     assert(state_path_bytes_max > "/zbx/runs/".len + dir_name_bytes_max + 64);
     assert(record_version >= 1);
+    assert(record_version_plain + 1 == record_version);
     assert(bundle_stage_bytes_max + 16 * 1024 <= bundle_gz_bytes_max);
     assert(bundle_gz_bytes_max <= write_bytes_max);
     assert(bundle_file_bytes_max * 2 < bundle_stage_bytes_max);

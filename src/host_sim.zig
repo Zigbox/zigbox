@@ -355,7 +355,8 @@ pub const HostSim = struct {
         // it was that process's and is not among this process's ends.
         const input_held = sim.world.input_is_held_by_first();
         const pipes = sim.world.open_pipe_ends() - @intFromBool(input_held);
-        return count + pipes + sim.world.bus.open_count() + store_open + namespaces;
+        const world = sim.world.open_listeners() + sim.world.bus.open_count();
+        return count + pipes + world + store_open + namespaces;
     }
 
     const vtable: host.VTable = .{
@@ -374,6 +375,11 @@ pub const HostSim = struct {
         .probe = probe,
         .probe_idmap = probe_idmap,
         .pipe = pipe,
+        .channel = channel,
+        .listen_loopback = listen_loopback,
+        .send_handle = send_handle,
+        .receive_handle = receive_handle,
+        .is_unix_stream = is_unix_stream,
         .write_handle = write_handle,
         .spawn = spawn,
         .start_keeper = start_keeper,
@@ -595,6 +601,7 @@ pub const HostSim = struct {
 
     fn close(context: *anyopaque, handle: host.Handle) void {
         const sim = from_context(context);
+        if (handle >= sim_world.listener_handle_base) return sim.world.close_listener(handle);
         if (handle >= sim_world.namespace_handle_base) return sim.world.close_namespace(handle);
         if (handle >= sim_world.bus_handle_base) {
             return sim.world.bus.close(handle - sim_world.bus_handle_base);
@@ -800,6 +807,45 @@ pub const HostSim = struct {
         const sim = from_context(context);
         try sim.begin_call();
         return sim.world.make_pipe() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn channel(context: *anyopaque) host.Error!host.Pipe {
+        const sim = from_context(context);
+        try sim.begin_call();
+        return sim.world.make_pipe() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn listen_loopback(context: *anyopaque, port: u16) host.Error!host.Handle {
+        const sim = from_context(context);
+        assert(port > 0);
+        try sim.begin_call();
+        return sim.world.make_listener() orelse sim.model_error(sim_world.errno_nomem);
+    }
+
+    fn send_handle(
+        context: *anyopaque,
+        channel_end: host.Handle,
+        handle: host.Handle,
+    ) host.Error!void {
+        const sim = from_context(context);
+        assert(handle >= sim_world.listener_handle_base);
+        try sim.begin_call();
+        // A descriptor that is no pipe end of the model is no Unix socket (ENOTSOCK).
+        if (channel_end < sim_world.pipe_handle_base) return sim.model_error(88);
+        if (sim.world.send_listener(channel_end, handle)) |errno| return sim.model_error(errno);
+    }
+
+    /// A pipe end the current process holds stands for a Unix socket; nothing else is one.
+    fn is_unix_stream(context: *anyopaque, handle: host.Handle) bool {
+        const sim = from_context(context);
+        return sim.world.holds_channel_end(handle);
+    }
+
+    fn receive_handle(context: *anyopaque, channel_end: host.Handle) host.Error!host.Handle {
+        const sim = from_context(context);
+        assert(channel_end >= sim_world.pipe_handle_base);
+        try sim.begin_call();
+        return sim.world.receive_listener(channel_end) orelse sim.model_error(sim_world.errno_pipe);
     }
 
     fn write_handle(context: *anyopaque, handle: host.Handle, bytes: []const u8) host.Error!u32 {
