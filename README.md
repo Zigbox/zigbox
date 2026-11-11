@@ -2,6 +2,8 @@
 
 A rootless, daemonless Linux container runtime, image store and builder, written in Zig, designed as if Docker were being invented today. Every milestone ends in a demo a person can watch work in under five minutes.
 
+- **Try it (public beta):** [the user guide](docs/guide/index.md): on a [Mac](docs/guide/try-mac.md), on [Linux](docs/guide/try-linux.md), in [Claude Code](docs/guide/try-claude-code.md); the [tour](docs/guide/tour.md) and the [known limits](docs/guide/known-limits.md).
+
 - **Design:** [docs/SPEC.md](docs/SPEC.md), a snapshot of the [live design doc](https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w).
 - **How the code is written and tested:** [docs/STYLE.md](docs/STYLE.md) (TigerBeetle's TigerStyle, adapted).
 - **Rules for contributors and agents:** [AGENTS.md](AGENTS.md).
