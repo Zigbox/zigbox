@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-zig
       - uses: ./.github/actions/zig-cache
         with:
@@ -61,6 +63,9 @@ jobs:
           tar -tzf "$RUNNER_TEMP/out/zigbox-repos.tar.gz" | tee /dev/stderr > "$RUNNER_TEMP/list"
           grep -q '^apt/dists/stable/InRelease$' "$RUNNER_TEMP/list"
           grep -q '^zigbox-archive-keyring.gpg$' "$RUNNER_TEMP/list"
+          # Only apt/, rpm/ and the two keyring files (packaging.md, step 7), no dot files.
+          ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list"
+          ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list"
           ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list"
 
   sign:
@@ -78,7 +83,6 @@ jobs:
       cancel-in-progress: false
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       # Before the checkout and before anything reads a secret. The tag comes in through the
       # environment, never spliced into the script.
@@ -95,12 +99,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          # Nothing here pushes; the token must not sit in .git/config for the build to read.
+          persist-credentials: false
       - uses: ./.github/actions/setup-zig
       - name: Install rpm
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q rpm
       - name: The release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null || {
             echo "release: no GitHub release for $TAG; create it, then re-run from the tag" >&2
@@ -112,9 +120,13 @@ jobs:
         env:
           ZIGBOX_SIGNING_KEY: ${{ secrets.ZIGBOX_SIGNING_KEY }}
           ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
-          ZIGBOX_SIGNING_FPR: ${{ vars.ZIGBOX_SIGNING_FPR }}
+          # Pinned here, in reviewed code, not read from the environment: users trust this
+          # fingerprint (docs/releases/packaging.md, "The release key").
+          ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
         run: .github/release-sign.sh "$RUNNER_TEMP/out"
       - name: Attach the archive to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" "$RUNNER_TEMP/out/zigbox-repos.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
       # The deploy of zigbox.org (Zigbox/zigbox.github.io) picks the asset up on its own
       # schedule, every six hours. A `repository_dispatch` of type `site` would need a token
