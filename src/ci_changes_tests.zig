@@ -11,8 +11,8 @@ const max_paths = 8;
 
 /// Every output the script writes: `code`, the eleven demos and the packages demo.
 const all_outputs = [_][]const u8{
-    "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-    "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+    "code",             "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+    "demo_m5",          "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
     "demo_m8_packages",
 };
 
