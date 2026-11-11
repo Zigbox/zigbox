@@ -166,7 +166,8 @@ pub fn examine(
 /// Whether the line fails only because the image record gives no result to compare it with.
 fn cannot_derive(said: statement.Binding, subject: Subject) bool {
     if (subject.derived != null) assert(subject.derives);
-    if (said == .manifest) assert(subject.binding != .none);
+    // A bare tree (no manifest, no result) is a subject too: a manifest-bound line is simply
+    // some other binding there, and the answer below is false for it.
     if (subject.derived != null or !subject.derives) return false;
     return said == .result and subject.binding == .manifest;
 }

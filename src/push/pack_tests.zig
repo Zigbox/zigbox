@@ -234,6 +234,40 @@ test "an export writes the layout, and refuses a directory that holds something"
     try export_mod.export_layout(&store, &made, "/empty", &buffer, &out, &failure);
 }
 
+test "an export to a name with trailing slashes builds beside it, never inside it" {
+    // Goal: `store export --oci img out/` (tab completion adds the slash) works like `out`.
+    // Method: export to an empty directory and to an absent one, both spelled with slashes;
+    // the layout lands in the name, and nothing else is left in the parent.
+    start(9, 0);
+    const imported = try import_source(false);
+    const made = try pack_tree(imported.digest, constants.pack_io_bytes);
+    var failure: export_mod.Failure = undefined;
+    var out: export_mod.Exported = undefined;
+    var buffer: [4096]u8 = undefined;
+    files.put_dir("/slash", 0o755);
+    try export_mod.export_layout(&store, &made, "/slash/", &buffer, &out, &failure);
+    try export_mod.export_layout(&store, &made, "/fresh//", &buffer, &out, &failure);
+    var text: [constants.pack_manifest_bytes_max]u8 = undefined;
+    try testing.expectEqualStrings(
+        "{\"imageLayoutVersion\":\"1.0.0\"}",
+        try read_back("/slash/oci-layout", &text),
+    );
+    try testing.expectEqualStrings(
+        "{\"imageLayoutVersion\":\"1.0.0\"}",
+        try read_back("/fresh/oci-layout", &text),
+    );
+    var counter: struct {
+        names: u32 = 0,
+        fn call(context: *anyopaque, name: []const u8) void {
+            _ = name;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.names += 1;
+        }
+    } = .{};
+    try store.fs.read_dir("/slash", .{ .context = &counter, .call = @TypeOf(counter).call });
+    try testing.expectEqual(@as(u32, 3), counter.names); // oci-layout, index.json, blobs.
+}
+
 test "a failed export leaves nothing under the name, and a damaged blob is dropped" {
     // Goal: the export is all or nothing, and never copies bytes that are not their digest.
     // Method: export below a missing parent (a write failure naming ENOENT), then overwrite the

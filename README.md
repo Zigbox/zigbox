@@ -25,7 +25,7 @@ A rootless, daemonless Linux container runtime, image store and builder, written
 | M6b · Dev loop | Writable mounts inside the project, `zbx logs`, `zbx exec`, `--user`: one service, edited live (more than one service is Zigcube's) | **Brief written** ([M6b-dev-loop.md](docs/briefs/M6b-dev-loop.md)): six slices, pull in the library among them, the sixth (`logs` and `exec` on the Mac) for the session on the owner's Mac. Slice 1 (`--mount` only inside the project, symlinks resolved; written as the container's root, a non-root image refused; `--user`; doctor's id-mapped-mount note) green in CI ([run 87](https://github.com/Zigbox/zigbox/actions/runs/40998123677)); slice 2 (`zbx logs`: every run's output kept, 5 MiB in two rotated files of whole records, `--tail`, `--follow`, `--stream`, JSON; a terminal stays the container's) green in CI ([run 88](https://github.com/Zigbox/zigbox/actions/runs/41022846550)); slice 3 (`zbx exec`: joins the container's namespaces, cgroup, capabilities and seccomp and gains nothing, a pseudo-terminal at a terminal, the exit code passed through; and the fix of an older bug: a non-root container's PID 1 now dies with zbx) merged with slices 1 and 2 (PR #21); slice 4 (pull in the library: the `zigbox` module fetches, verifies and stores an image for any caller, with caller-owned memory, mirrors passed in, and the same diagnostics; `zbx pull` a thin caller with unchanged output) green in CI ([run](https://github.com/Zigbox/zigbox/actions/runs/41065703920)); slice 5 (`demo-m6b`: the spec's five steps, the acceptance checks, the agent test by JSON, the upgrade test against M6; slices 1–3's VM checks moved out of `demo-m6`; an `exec` race fixed by reading PF_EXITING) merged (PR #24), `demo-m6b` green in CI on `main` with `demo-m0` to `demo-m6` ([run 95](https://github.com/Zigbox/zigbox/actions/runs/41104767772)); slice 6 (`logs` and `exec` forwarded on the Mac with the terminal and signals; `demo-mac` runs the five steps from macOS) merged (PR #27), green on the self-hosted Mac runner ([run 24](https://github.com/Zigbox/zigbox/actions/runs/41143740466)) and `demo-m6b` green on `main` ([run 104](https://github.com/Zigbox/zigbox/actions/runs/41143740654)). **Demonstrated** |
 | M6c · Private pull: ECR | Pull from a private Amazon ECR repository with the host's AWS credentials (SigV4; environment, web identity, IMDSv2); M8's ECR push builds on it | **Brief written** ([M6c-ecr.md](docs/briefs/M6c-ecr.md)): three slices; slice 1 (SigV4 and the credential sources) built and reviewed ([PR #84](https://github.com/Zigbox/zigbox/pull/84)); slice 2 (the ECR client: pull and run) built and reviewed ([PR #85](https://github.com/Zigbox/zigbox/pull/85)); slice 3 (the live demo) waits on the owner's AWS setup. Its CI demo needs the owner's AWS setup (one account, two ECR repositories, an OIDC role) |
 | M7 · Build | Hermetic, reproducible builds from a step DAG | **Demonstrated**: `demo-m7` passed in two clean Ubuntu 24.04 VMs with KVM ([PR #38 run](https://github.com/Zigbox/zigbox/actions/runs/41752087570)), with `demo-m0` to `demo-m6b` green in the same run: the Go hello-world builds with three misses, rebuilds with three hits, ignores a change to a file no step reads, rebuilds only `compile` and `image` after an edit, and builds the same digest (`b3:55077a8f…df62`) in a second clean VM; a step without network fails with E0805 and says how to grant it. Also in the run: an upgrade test from 0.2.0, and an agent driving `zbx build` by JSON. [Brief](docs/briefs/M7-build.md), [demo](docs/demos/m7.md). Four slices merged: the build file and graph; keys and one step (PR #32); the scheduler, the build result, network steps, streaming and the library export (PRs #33, #34, #36, #37); `demo-m7` and two build fixes (PR #38). Slice 5 (the demo on the Mac) is cut (owner, 2026-11-02) |
-| M8 · Trust | Signatures, provenance and a run policy | In progress |
+| M8 · Trust | Signatures, provenance and a run policy | **Demonstrated**: `demo-m8` passed in an Ubuntu 24.04 VM with KVM on `main` at 8fc8f7d ([run](https://github.com/Zigbox/zigbox/actions/runs/42959822443)); all 14 slices built and reviewed, in release 0.4.0 |
 | S1–S5 | Stretch: microVMs, lazy start, egress grants, Dockerfile import, WASM | Not started |
 
 ### M0 in detail
@@ -44,7 +44,7 @@ M0 was built in five slices. Each is reviewed adversarially before it is pushed.
 
 ### M8 in detail
 
-M8 has three parts: trust (keys, signatures, provenance, policy and verify), packages (the `zigbox` deb and rpm and their repositories) and push (`zbx push` and `zbx store export --oci`). Its brief is [docs/briefs/M8-trust.md](docs/briefs/M8-trust.md). M8 is not demonstrated: `demo-m8` does not exist yet.
+M8 has three parts: trust (keys, signatures, provenance, policy and verify), packages (the `zigbox` deb and rpm and their repositories) and push (`zbx push` and `zbx store export --oci`). Its brief is [docs/briefs/M8-trust.md](docs/briefs/M8-trust.md). All 14 slices are built and reviewed and M8 is in release as 0.4.0 ([notes](docs/releases/0.4.0.md)). M8 is demonstrated: `demo-m8` passed on `main` at 8fc8f7d ([run](https://github.com/Zigbox/zigbox/actions/runs/42959822443), `demo-m8: PASSED in 139 s`). The demo's cuts are in [docs/decisions/2026-11-11-m8-demo-cuts.md](docs/decisions/2026-11-11-m8-demo-cuts.md).
 
 | Slice | Contents | Status |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 | 5 · Verify | `zbx verify`, `trust export`, `import` and `prune`, [PR #82](https://github.com/Zigbox/zigbox/pull/82) | **Built and reviewed.** |
 | 6 · Packages | deb and rpm packages, apt and dnf repositories, [PR #66](https://github.com/Zigbox/zigbox/pull/66) | **Built and reviewed.** |
 | 7 · Guests | The rpm and Debian guests, [PR #68](https://github.com/Zigbox/zigbox/pull/68); its VM check `demo-m8-packages` passed in the [vm.yml run](https://github.com/Zigbox/zigbox/actions/runs/42509763127) | **Built and reviewed.** |
-| 8 · Demo | The demo, CI, the agent test, the Pages asset step | Not started. |
+| 8 · Demo | The demo, CI, the agent test, the Pages asset step, [PR #90](https://github.com/Zigbox/zigbox/pull/90) | **Built and reviewed.** Not yet demonstrated (see above). |
 | 9 · Mac | The Mac forwards key, sign, verify, trust and policy, [PR #88](https://github.com/Zigbox/zigbox/pull/88) | **Built and reviewed.** Not yet run on a real Mac: the virtiofs checks are listed in `docs/demos/m8.md`. |
 | 10 · Pack | Pack, `zbx store export --oci` and `zbx push --dry-run`, [PR #72](https://github.com/Zigbox/zigbox/pull/72) | **Built and reviewed.** |
 | 11 · Upload | The upload protocol, the test registry, `zbx push`, [PR #75](https://github.com/Zigbox/zigbox/pull/75) | **Built and reviewed.** |
@@ -69,7 +69,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 Packages are built by `zig build packages` (runbook: [docs/releases/packaging.md](docs/releases/packaging.md)). Once a release is published at the project's package host, the commands are, for apt:
 
 ```sh
-curl -fsSL https://zigbox.org/apt/zigbox.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
+curl -fsSL https://zigbox.org/zigbox-archive-keyring.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
 echo "deb [signed-by=/usr/share/keyrings/zigbox.gpg] https://zigbox.org/apt stable main" | sudo tee /etc/apt/sources.list.d/zigbox.list
 sudo apt update && sudo apt install zigbox
 ```
@@ -82,7 +82,7 @@ name=Zigbox
 baseurl=https://zigbox.org/rpm/$basearch
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://zigbox.org/zigbox.asc
+gpgkey=https://zigbox.org/zigbox-archive-keyring.asc
 ```
 
 ```sh
