@@ -1738,9 +1738,9 @@ fn take_env(
 fn check_run_args(diag: *Diag, run_args: *const RunArgs, digest: ?[]const u8) ParseError!void {
     assert(diag.code == null);
     try check_network_args(diag, run_args);
-    if (run_args.rootfs == null and digest == null) {
-        return missing_argument(diag, .run, .rootfs);
-    }
+    // An empty operand names nothing: it is no root, the same as none (`ran_of` needs a name).
+    const unnamed = digest == null or digest.?.len == 0;
+    if (run_args.rootfs == null and unnamed) return missing_argument(diag, .run, .rootfs);
     if (run_args.rootfs != null and digest != null) return both_roots(diag, digest.?);
     // An image named by a tag has a command of its own, so the words after `--` are optional;
     // a rootfs and a tree digest have none, unless the full digest names a build result, which
@@ -4978,6 +4978,8 @@ test "parse: every way a run command line is wrong has its code" {
         .{ .args = &.{ "run", "--rootfs", "r", "--", "x" }, .code = null },
         .{ .args = &.{ "run", "--", "x" }, .code = .E0006 },
         .{ .args = &.{"run"}, .code = .E0006 },
+        // Fuzz `cli` seed 1655084: an empty operand named no image and tripped `ran_of`.
+        .{ .args = &.{ "run", "", "--", "x" }, .code = .E0006 },
         .{ .args = &.{ "run", "--rootfs", "r" }, .code = .E0006 },
         .{ .args = &.{ "run", "--rootfs", "r", "--" }, .code = .E0006 },
         .{ .args = &.{ "run", "--rootfs", "r", "--", "" }, .code = .E0006 },

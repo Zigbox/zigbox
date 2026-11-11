@@ -924,9 +924,14 @@ fn check_doctor_cli(
     assert(!render.contains_raw_error(sim.stderr()));
     assert(!render.contains_raw_error(sim.stdout()));
     assert(std.mem.indexOfScalar(u8, sim.stderr(), 0x1b) == null);
-    if (sim.hard_errors_injected > gather_hard_errors) {
+    if (sim.hard_errors_injected > gather_hard_errors or
+        doctor_output_cut_by_interrupts(&sim, report, json))
+    {
         // The one-shot fault landed after the gather, on a write: stdout or one block did not
         // reach its stream, and the exit code is the environment's whatever else happened.
+        // Or more than `eintr_retries_max` interrupts in a row made `write_all` give up, which
+        // injects no hard error: a seed in some 400,000 does this (seed 23333462, 100000
+        // iterations, was found by the soak).
         assert(code == constants.exit_environment);
         if (json) {
             // Written in pieces: whatever reached stdout is the start of the document.
@@ -959,6 +964,23 @@ fn check_doctor_cli(
     assert(index == blocks.count);
     if (blocks.count == 0) assert(sim.stderr().len == 0);
     if (json) assert(every_line_is_json(sim.stderr()));
+}
+
+/// True if the interrupts the simulator injected could have made a write give up
+/// (`Host.write_all` stops after `eintr_retries_max` in a row) and what reached the streams
+/// is less than the report says. A run with fewer interrupts than that has no such excuse.
+fn doctor_output_cut_by_interrupts(
+    sim: *const HostSim,
+    report: *const doctor.Report,
+    json: bool,
+) bool {
+    if (sim.interrupts_injected <= constants.eintr_retries_max) return false;
+    var failed: u32 = 0;
+    for (&report.checks) |*check| failed += @intFromBool(check.status == .fail);
+    if (diag_fuzz.find_diagnostics(sim.stderr()).count < failed) return true;
+    if (json) return !std.mem.endsWith(u8, sim.stdout(), "]}\n");
+    var buffer: [constants.output_bytes_max]u8 = undefined;
+    return !std.mem.eql(u8, sim.stdout(), doctor.render(report, false, &buffer));
 }
 
 /// The `zbx.doctor/1` document says what the report says: every check with its status and
@@ -1166,6 +1188,16 @@ test "every fuzzer survives a fixed seed for a few hundred iterations" {
         var splitmix = std.Random.SplitMix64.init(12345);
         for (0..500) |_| fuzzer.run_iteration(splitmix.next());
     }
+}
+
+test "doctor: interrupts that make a write give up are not a missing diagnostic" {
+    // Goal: a regression found by the soak (`doctor`, seed 23333462, iteration 86255): the
+    // faulted run interrupted `write_all` more than `eintr_retries_max` times in a row, so
+    // the last diagnostic block never reached stderr, with no hard error injected. Method:
+    // that iteration's seed.
+    var splitmix = std.Random.SplitMix64.init(23333462);
+    for (0..86254) |_| _ = splitmix.next();
+    fuzz_doctor(splitmix.next());
 }
 
 test "a run word after an over-long --output value is not seen: collection stops there" {
