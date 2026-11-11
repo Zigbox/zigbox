@@ -27,6 +27,9 @@ pub const Context = struct {
     ready: host_mod.Pipe,
     /// The child writes records; the parent reads them to the end.
     report: host_mod.Pipe,
+    /// In a plan with a listener: the channel it is handed over (`Host.channel`): `read` is the
+    /// parent's end, `write` the child's. Unused (and not made) otherwise.
+    channel: host_mod.Pipe,
 };
 
 const Error = host_mod.Error || error{
@@ -41,6 +44,8 @@ const State = struct {
     /// The generated /etc files whose steps failed (bit n for `netfiles.File` n): the rest of
     /// that file's steps are skipped, and the one note says what went wrong.
     failed_etc: u8,
+    /// The listener `make_listener` made, until `send_listener` has sent it and closed it.
+    listener: ?host_mod.Handle,
 };
 
 pub const go_ahead: u8 = 1;
@@ -55,7 +60,8 @@ pub fn entry(context: *anyopaque) u8 {
     // The parent's ends of the pipes are closed here so that end of file reaches both sides.
     host.close(child.ready.write);
     host.close(child.report.read);
-    var state: State = .{ .errno_override = 0, .failed_etc = 0 };
+    if (child.plan.has_listener) host.close(child.channel.read);
+    var state: State = .{ .errno_override = 0, .failed_etc = 0, .listener = null };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
         if (skipped(step, &state)) continue;
@@ -82,7 +88,8 @@ pub fn entry(context: *anyopaque) u8 {
     }
     host.begin_step(host_mod.step_none);
     // Only the simulator gets here: the real host's `exec` never returns.
-    assert(child.plan.steps[child.plan.count - 3].kind == .exec);
+    assert(child.plan.steps[child.plan.count - child.plan.tail_count() - 1].kind == .exec);
+    assert(state.listener == null); // `send_listener` closed it: the command never holds it.
     return constants.exit_ok;
 }
 
@@ -141,6 +148,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .make_sys_dir => try host.make_directory(target, true),
         .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
         .bring_up_loopback => try host.bring_up_loopback(),
+        .make_listener => state.listener = try host.listen_loopback(plan.listen_port),
+        .send_listener => try send_listener(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
         .make_etc_dir => try host.make_directory(target, true),
         .create_etc_file => try host.create_file(target, true),
@@ -170,6 +179,7 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => unreachable,
         .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
+        .receive_listener => unreachable, // The parent's step.
     }
 }
 
@@ -304,6 +314,23 @@ fn rearm_death_signal(child: *const Context) Error!void {
     assert(child.report.write != child.ready.read);
     try child.host.die_with_parent();
     if (!child.host.pipe_has_reader(child.report.write)) return error.ParentGone;
+}
+
+/// Sends the listener to the parent and closes both of the child's copies, the listener and its
+/// end of the channel, whether the send worked or not: the command must never hold either.
+fn send_listener(child: *const Context, state: *State) host_mod.Error!void {
+    assert(child.plan.has_listener);
+    const listener = state.listener.?;
+    const sent = child.host.send_handle(child.channel.write, listener);
+    // The send's errno is the one to report, not a close's.
+    const errno = child.host.last_errno();
+    child.host.close(listener);
+    state.listener = null;
+    child.host.close(child.channel.write);
+    sent catch |err| {
+        state.errno_override = errno;
+        return err;
+    };
 }
 
 /// Waits for the go-ahead. No byte, only end of file, means the parent will not continue.

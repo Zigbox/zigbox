@@ -845,7 +845,7 @@ fn preload(sim: *HostSim, scenario: *const Scenario) void {
     sim.world.add_node(sim_run.runs_path, .dir);
     const damaged = sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage");
     assert(damaged == null);
-    const future_text = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future_text = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future_text) == null);
     if (scenario.preloaded == .few_unreadable) return;
     for (0..constants.runs_max - 1) |number| {
@@ -1462,7 +1462,7 @@ fn check_record_v2(
     verdict: *const Verdict,
     parsed: *const records.Parsed,
 ) void {
-    assert(parsed.version == constants.record_version);
+    assert(parsed.version == constants.record_version_plain);
     const reason: records.EndReason = switch (verdict.*) {
         .refused => .none,
         .started => |status| if (scenario.counts_as_oom())

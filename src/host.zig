@@ -458,6 +458,23 @@ pub const VTable = struct {
     /// Brings the loopback interface `lo` up in the caller's network namespace: one ioctl on a
     /// throwaway socket. In a namespace of the container's own, `lo` is down until this runs.
     bring_up_loopback: *const fn (context: *anyopaque) Error!void,
+    /// A channel for handing one descriptor from the container's setup child to its parent: a
+    /// connected pair of Unix stream sockets, both close-on-exec. `Pipe.read` is the parent's end
+    /// (it receives), `Pipe.write` the child's (it sends); each side closes the end it does not
+    /// use.
+    channel: *const fn (context: *anyopaque) Error!Pipe,
+    /// Makes a TCP listener on `127.0.0.1:port` in the caller's network namespace: `socket`
+    /// (close-on-exec), `bind`, `listen`. A failure carries the failing call's errno.
+    listen_loopback: *const fn (context: *anyopaque, port: u16) Error!Handle,
+    /// Sends `handle` over the channel end `channel` (`SCM_RIGHTS`, one byte of data).
+    send_handle: *const fn (context: *anyopaque, channel: Handle, handle: Handle) Error!void,
+    /// Whether `handle` is an open descriptor of this process that is a Unix stream socket
+    /// (`getsockopt` `SO_DOMAIN` and `SO_TYPE`). A descriptor that is closed, or not a socket,
+    /// is not one; so is a number past what a descriptor can be.
+    is_unix_stream: *const fn (context: *anyopaque, handle: Handle) bool,
+    /// Receives one descriptor over the channel end `channel` (close-on-exec in this process).
+    /// End of file with nothing sent is `error.IoFailed` with errno `EPIPE`.
+    receive_handle: *const fn (context: *anyopaque, channel: Handle) Error!Handle,
     symlink: *const fn (context: *anyopaque, target: [:0]const u8, link: [:0]const u8) Error!void,
     set_hostname: *const fn (context: *anyopaque, name: []const u8) Error!void,
     /// Sets the calling process's file mode creation mask (`umask`); it cannot fail.
@@ -996,6 +1013,39 @@ pub const Host = struct {
         assert(path[path.len] == 0);
         try host.vtable.create_file(host.context, path, exist_ok);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    /// Creates the channel a listener is handed over (`channel` in the vtable).
+    pub fn channel(host: Host) Error!Pipe {
+        const result = try host.vtable.channel(host.context);
+        assert(result.read != result.write);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
+    }
+
+    /// Makes a TCP listener on the loopback of this process's network namespace.
+    pub fn listen_loopback(host: Host, port: u16) Error!Handle {
+        assert(port > 0);
+        const result = try host.vtable.listen_loopback(host.context, port);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
+    }
+
+    pub fn send_handle(host: Host, channel_end: Handle, handle: Handle) Error!void {
+        assert(channel_end != handle);
+        try host.vtable.send_handle(host.context, channel_end, handle);
+        assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn is_unix_stream(host: Host, handle: Handle) bool {
+        return host.vtable.is_unix_stream(host.context, handle);
+    }
+
+    pub fn receive_handle(host: Host, channel_end: Handle) Error!Handle {
+        const result = try host.vtable.receive_handle(host.context, channel_end);
+        assert(result != channel_end);
+        assert(host.vtable.last_errno(host.context) == 0);
+        return result;
     }
 
     /// Brings `lo` up in this process's network namespace.

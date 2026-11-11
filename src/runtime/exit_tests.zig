@@ -516,14 +516,14 @@ test "a version 2 record round-trips, and the version after this one is newer" {
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     try records.parse(text, &parsed);
-    try testing.expectEqual(constants.record_version, parsed.version);
+    try testing.expectEqual(constants.record_version_plain, parsed.version);
     try testing.expectEqual(records.EndReason.pid_limit, parsed.reason);
     try testing.expectEqual(view.limits, parsed.limits);
     try testing.expectEqualStrings("zbx-web-1.scope", parsed.scope_slice());
     try testing.expect(parsed.detached);
     try testing.expect(parsed.timed_out);
     const gpa = testing.allocator;
-    const now = std.fmt.comptimePrint(".version = {d},", .{constants.record_version});
+    const now = std.fmt.comptimePrint(".version = {d},", .{constants.record_version_plain});
     const next = std.fmt.comptimePrint(".version = {d},", .{constants.record_version + 1});
     const newer = try std.mem.replaceOwned(u8, gpa, text, now, next);
     defer testing.allocator.free(newer);

@@ -110,6 +110,9 @@ pub const Kind = enum {
     await_pasta,
     release_child,
     await_report,
+    /// In a plan with a listener (`--listen`): receives the listener the child made and sent
+    /// (`send_listener`). After `await_report`, so the child's own failure is read first.
+    receive_listener,
     reap,
     // The child.
     die_with_parent,
@@ -142,6 +145,12 @@ pub const Kind = enum {
     /// In a plan with a network namespace of its own: brings `lo` up. Before the capabilities
     /// are restricted, since changing an interface needs CAP_NET_ADMIN.
     bring_up_loopback,
+    /// In a plan with a listener, right after: makes the TCP listener on the loopback
+    /// (`Host.listen_loopback`), then sends it to the parent over the channel and closes the
+    /// child's copies. After this the workload could never hold it: the child never `exec`s
+    /// with it open, and it is close-on-exec besides.
+    make_listener,
+    send_listener,
     /// ... and there a sysfs of the container's own replaces the three /sys steps above but
     /// the first. A sysfs shows the devices of the network namespace it is mounted in.
     mount_sysfs,
@@ -220,7 +229,7 @@ pub fn side_of(kind: Kind) Side {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
         .start_pasta, .await_pasta => .parent,
-        .release_child, .await_report, .reap => .parent,
+        .release_child, .await_report, .receive_listener, .reap => .parent,
         else => .child,
     };
     // The kinds are declared parent first, so the order of the enum says which side a kind is.
@@ -254,6 +263,9 @@ pub const links = [constants.container_links_count]Link{
 /// own has one /sys step fewer and the loopback.
 pub const child_steps_count: u32 = 37 + 2 * constants.container_devices_count +
     constants.container_links_count;
+
+/// The steps a listener adds: making it and sending it in the child, receiving it in the parent.
+pub const listener_steps_count: u32 = 3;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
@@ -369,6 +381,9 @@ pub const Input = struct {
     hostname: ?[]const u8 = null,
     /// The file mode creation mask the command starts with; null leaves the caller's.
     umask: ?u16 = null,
+    /// The port of the TCP listener on the container's loopback that is handed to the caller
+    /// (`--listen`, M8b); only with `network` `none`.
+    listen: ?u16 = null,
 
     fn hostname_text(input: *const Input) []const u8 {
         const result = input.hostname orelse input.name;
@@ -475,6 +490,9 @@ pub const Plan = struct {
     pasta_log: Text,
     publish: [constants.publish_count_max]spec.Publish,
     publish_count: u32,
+    /// A plan with a listener: its port (zero: none).
+    has_listener: bool,
+    listen_port: u16,
     /// The state volumes: how many, how many of them read-only, and each one's name and target.
     state_count: u32,
     state_read_only_count: u32,
@@ -510,6 +528,10 @@ pub const Plan = struct {
         plan.read_only = input.read_only;
         plan.overlay = input.overlay != null;
         plan.network = input.network;
+        plan.has_listener = input.listen != null;
+        plan.listen_port = input.listen orelse 0;
+        if (plan.has_listener) assert(input.network == .none);
+        if (plan.has_listener) assert(plan.listen_port > 0);
         plan.has_workdir = input.workdir.len > 0;
         plan.has_umask = input.umask != null;
         plan.umask = input.umask orelse 0;
@@ -535,6 +557,7 @@ pub const Plan = struct {
         assert(plan.count == plan.first_child());
         plan.push_child_steps(input);
         plan.push(.await_report, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.receive_listener, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
         assert(plan.count == plan.steps_expected());
         plan.check();
@@ -547,17 +570,19 @@ pub const Plan = struct {
         assert(plan.steps[0].kind == .make_pipes);
         assert(plan.steps[1].kind == .spawn);
         assert(plan.steps[plan.count - 1].kind == .reap);
-        assert(plan.steps[plan.count - 2].kind == .await_report);
+        const tail = plan.tail_count();
+        assert(plan.steps[plan.count - tail].kind == .await_report);
+        assert((plan.steps[plan.count - 2].kind == .receive_listener) == plan.has_listener);
         // The child's steps are one contiguous run, between `release_child` and `await_report`.
         const child_start = plan.first_child();
         assert(plan.steps[child_start - 1].kind == .release_child);
         assert((plan.steps[child_start - 2].kind == .start_scope) == plan.scoped);
         assert((plan.steps[child_start - 3].kind == .spawn_keeper) == plan.scoped);
         for (plan.steps[0..child_start]) |step| assert(side_of(step.kind) == .parent);
-        for (plan.steps[child_start .. plan.count - 2]) |step| {
+        for (plan.steps[child_start .. plan.count - tail]) |step| {
             assert(side_of(step.kind) == .child);
         }
-        assert(plan.steps[plan.count - 3].kind == .exec);
+        assert(plan.steps[plan.count - tail - 1].kind == .exec);
         // The exec image points into the plan itself: a copy of the plan would break it.
         const first_argument = plan.argv[0].?;
         assert(@intFromPtr(first_argument) >= @intFromPtr(&plan.strings[0]));
@@ -572,6 +597,11 @@ pub const Plan = struct {
         if (!plan.has_pasta) assert(plan.publish_count == 0);
     }
 
+    /// The parent's steps after the child's: `await_report` and `reap`, and the listener's.
+    pub fn tail_count(plan: *const Plan) u32 {
+        return 2 + @as(u32, @intFromBool(plan.has_listener));
+    }
+
     pub fn steps_expected(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
@@ -581,8 +611,9 @@ pub const Plan = struct {
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
+        const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
         return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
-            state + plan.mount_steps;
+            state + plan.mount_steps + listener;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -841,6 +872,8 @@ pub const Plan = struct {
         if (plan.has_umask) plan.push(.set_umask, empty_text, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
         if (plan.isolated()) plan.push(.bring_up_loopback, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.make_listener, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.send_listener, empty_text, empty_text, 0);
         if (overlay) |layers| {
             plan.push_etc_mount_points(layers.net);
             plan.push(.mount_overlay, rootfs, plan.overlay_options(layers), 0);
@@ -877,7 +910,8 @@ pub const Plan = struct {
         plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
-        assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+        // The parent's tail remains.
+        assert(plan.count == plan.steps_expected() - plan.tail_count());
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound
@@ -1231,6 +1265,7 @@ fn parent_phrase(kind: Kind) []const u8 {
         .start_pasta => "starting pasta for the container's network",
         .await_pasta => "waiting for pasta to configure the container's network",
         .release_child => "letting the container continue",
+        .receive_listener => "receiving the listener the container made",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
         else => unreachable, // The child's steps; asserted above.
@@ -1291,6 +1326,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
         .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
         .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
+        .receive_listener => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
@@ -1309,6 +1345,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .make_sys_dir => "creating /sys in the rootfs",
         .bind_sys => "binding the host's /sys",
         .bring_up_loopback => "bringing up the loopback interface",
+        .make_listener => "making the listener on the container's loopback",
+        .send_listener => "handing the listener to zbx",
         .mount_sysfs => "mounting a sysfs of the container's own",
         .make_etc_dir => "creating the mount point directory for the generated /etc files",
         .create_etc_file => "creating the mount point /etc/",

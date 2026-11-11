@@ -47,6 +47,7 @@ jobs:
       demo_m7: ${{ steps.pick.outputs.demo_m7 }}
       demo_m8: ${{ steps.pick.outputs.demo_m8 }}
       demo_m8_packages: ${{ steps.pick.outputs.demo_m8_packages }}
+      demo_m8b: ${{ steps.pick.outputs.demo_m8b }}
     steps:
       # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
       # base, so HEAD^1..HEAD is exactly what the pull request changes.
@@ -597,3 +598,37 @@ jobs:
           key: vm-guests-${{ hashFiles('src/testing/vm/lib/guests.zon') }}
       - name: Run the M8 packages demo
         run: zig build demo-m8-packages -Daccel=kvm
+
+  # The M8b demo (docs/demos/m8b.md): `--listen` hands a listener made inside the container's
+  # network namespace to the harness over a Unix socket (hello, hostile, refusals, closed). The
+  # container runs from the pinned Alpine minirootfs, so nothing is pulled from a registry.
+  demo-m8b:
+    name: demo-m8b (Ubuntu 24.04 VM, KVM, listener handoff)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m8b == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Cache the Alpine rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/alpine-*.tar.gz
+          key: vm-alpine-${{ hashFiles('src/testing/vm/alpine.zon') }}
+      - name: Run the M8b demo
+        run: zig build demo-m8b -Daccel=kvm

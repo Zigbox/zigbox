@@ -496,3 +496,15 @@ pub fn connection_lost(diag: *Diag, what: []const u8) void {
     });
     assert(diag.fixes.count == 2);
 }
+
+/// ZBX-E0606 on a Mac: `--listen` hands a listener over a Unix socket that this process was
+/// started with, and a descriptor cannot cross into the virtual machine.
+pub fn listen_unavailable(diag: *Diag) void {
+    assert(diag.code == null);
+    diag.raise(.E0606);
+    diag.while_("checking --listen", .{});
+    diag.cause("--listen is not available on macOS: zbx runs the container in a virtual " ++
+        "machine, and a socket cannot be handed across to this process", .{});
+    diag.fix(.{ .sentence = "run the container on a Linux machine, where --listen works" });
+    assert(diag.fixes.count == 1);
+}

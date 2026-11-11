@@ -3,7 +3,7 @@
 # `name=true|false` lines (to $GITHUB_OUTPUT, or stdout when that is unset):
 #
 #   code      the build, tidy, test, errors-site, fuzz and dbus-live jobs
-#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8
+#   demo_<d>  one VM demo, <d> in m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b
 #   demo_m8_packages  the four-guest packages demo (demo-m8-packages): the package sources, the
 #             packaging files and the packages harness (not the m8 demo's own rules)
 #
@@ -15,7 +15,7 @@
 # workflow (docs/demos/m8.md).
 set -euo pipefail
 
-demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8)
+demos=(m0 m1 m2 m3 m4 m5 m6 m6b m7 m8 m8b)
 declare -A want=()
 want_packages=0
 
@@ -63,7 +63,7 @@ classify() {
     # and the site, and tests of the code (they never reach the zbx binary a demo runs).
     docs/demos/m*.md)
       suffix=${p#docs/demos/}; suffix=${suffix%.md}
-      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8) want_one "$suffix" ;; esac
+      case "$suffix" in m0 | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m8b) want_one "$suffix" ;; esac
       return ;;
     # The packages demo: the package sources, the packaging files and their harness. They set
     # no demo but demo-m8-packages.
@@ -76,6 +76,7 @@ classify() {
       src/size_check.zig | src/testdata/* | src/*/fixtures/*) return ;;
     # A harness file named for a demo (checks_m3.zig, upgrade_m6b.zig, m7_project/): that demo and
     # every later one, which repeat its parts. The files named for no demo are shared.
+    src/testing/vm/m8b/* | src/testing/vm/*_m8b.zig) want_one m8b; return ;;
     src/testing/vm/*_m8.zig | src/testing/vm/m8_*) want_one m8; return ;;
     src/testing/vm/m7_* | src/testing/vm/*_m7.zig) want_from m7; return ;;
     src/testing/vm/*_m6b.zig) want_from m6b; return ;;

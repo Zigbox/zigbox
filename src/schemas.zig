@@ -170,6 +170,7 @@ const ps_schema =
     \\"description":"M6b: each --mount, by its resolved host path",
     \\"items":{"type":"object","required":["host","target"],
     \\"properties":{"host":{"type":"string"},"target":{"type":"string"}}}},
+    \\"listen":{"type":"string","description":"M8b: --listen (127.0.0.1:PORT)"},
     \\"user":{"type":["object","null"],"description":"M6b: the user the command ran as",
     \\"properties":{"uid":{"type":"integer"},"gid":{"type":"integer"}}}}}}}}
 ;

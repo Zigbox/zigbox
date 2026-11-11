@@ -11,6 +11,7 @@ const host_mod = @import("host.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const records = @import("runtime/records.zig");
+const spec_mod = @import("runtime/spec.zig");
 const run = @import("runtime/run.zig");
 const schemas = @import("schemas.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -160,6 +161,10 @@ fn ps_row(entry: *const lifecycle.Entry, line: *[constants.output_bytes_max]u8) 
         if (words > 0) writer.writeByte(' ') catch unreachable; // Same bound as above.
         writer.writeAll(record.command_word(words)) catch unreachable; // Same.
     }
+    if (record.listen) |listen| {
+        var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
+        writer.print("  (listens on {s})", .{listen.text(&storage)}) catch unreachable; // Same.
+    }
     writer.writeByte('\n') catch unreachable; // Same.
     return writer.buffered();
 }
@@ -247,6 +252,10 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
     try optional_number(writer, record.limits.cpu_millis);
     try writer.writeAll("}");
     try network_json(writer, record);
+    if (record.listen) |listen| {
+        var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
+        try writer.print(",\"listen\":\"{s}\"", .{listen.text(&storage)});
+    }
     try writer.writeAll("}");
 }
 

@@ -226,6 +226,8 @@ pub const Process = struct {
     exec_envp: [text_bytes_max]u8,
     exec_envp_len: u16,
     holds: [constants.sim_pipe_ends_max]bool,
+    /// The listener sockets this process holds (`World.make_listener`).
+    listener_holds: [constants.sim_listeners_max]bool,
     /// A scope's keeper (`World.start_keeper`): alive in the `command` state until the pipe it
     /// holds has no writer left, or it is killed.
     keeper: bool,
@@ -274,6 +276,8 @@ const pipe_bytes_max: u32 =
 
 const SimPipe = struct {
     used: bool,
+    /// A listener sent over this pipe (as a channel) and not yet received.
+    listener: ?u8 = null,
     data: [pipe_bytes_max]u8,
     written: u32,
     consumed: u32,
@@ -281,6 +285,9 @@ const SimPipe = struct {
 
 /// Pipe ends are numbered from here, so a pipe handle is never mistaken for a file handle.
 pub const pipe_handle_base: u32 = 1000;
+
+/// Listener sockets (`--listen`) are numbered from here.
+pub const listener_handle_base: u32 = 4000;
 
 /// Bus connections are numbered from here.
 pub const bus_handle_base: u32 = 2000;
@@ -356,6 +363,12 @@ pub const World = struct {
     /// The kernel refuses overlay mounts (no module, a policy).
     overlay_refused: bool,
     broken_pipe_ignored: bool,
+    /// Listener `i` is on its way through a channel: made, sent, not yet received.
+    listener_in_flight: [constants.sim_listeners_max]bool,
+    /// A process went through `exec` still holding a listener: the setup child forgot to close
+    /// it, so the workload would inherit it (the model closes it, the kernel's close-on-exec
+    /// would hide the mistake).
+    listener_leaked: bool,
     /// What `ensure_pipe_capacity` finds a pipe to hold; a test lowers it to model a user over
     /// the kernel's pipe-memory limits.
     pipe_capacity_bytes: u32,
@@ -486,6 +499,8 @@ pub const World = struct {
         world.devpts_refused = false;
         world.overlay_refused = false;
         world.broken_pipe_ignored = false;
+        world.listener_in_flight = @splat(false);
+        world.listener_leaked = false;
         world.pipe_capacity_bytes = pipe_bytes_max;
         world.next_pid = 500;
         world.step = host.step_none;
@@ -716,6 +731,13 @@ pub const World = struct {
         return count;
     }
 
+    /// Whether `handle` is a pipe or channel end the current process holds.
+    pub fn holds_channel_end(world: *const World, handle: host.Handle) bool {
+        if (handle < pipe_handle_base) return false;
+        if (handle - pipe_handle_base >= constants.sim_pipe_ends_max) return false;
+        return world.processes[world.current].holds[end_index(handle)];
+    }
+
     /// Whether standard input exists and the first process holds its read end.
     pub fn input_is_held_by_first(world: *const World) bool {
         const handle = world.input_handle orelse return false;
@@ -735,6 +757,75 @@ pub const World = struct {
             };
         }
         return null;
+    }
+
+    // ---- Listeners ----
+
+    fn listener_used(world: *const World, slot: usize) bool {
+        if (world.listener_in_flight[slot]) return true;
+        for (&world.processes) |*process| {
+            if (process.listener_holds[slot]) return true;
+        }
+        return false;
+    }
+
+    /// Listener sockets the host's own process holds.
+    pub fn open_listeners(world: *const World) u32 {
+        var count: u32 = 0;
+        for (world.processes[0].listener_holds) |held| count += @intFromBool(held);
+        return count;
+    }
+
+    /// A listener on the current process's loopback, held by it. Null when no slot is free.
+    pub fn make_listener(world: *World) ?host.Handle {
+        for (0..constants.sim_listeners_max) |slot| {
+            if (world.listener_used(slot)) continue;
+            world.processes[world.current].listener_holds[slot] = true;
+            return listener_handle_base + @as(u32, @intCast(slot));
+        }
+        return null;
+    }
+
+    fn listener_slot(handle: host.Handle) usize {
+        assert(handle >= listener_handle_base);
+        const slot = handle - listener_handle_base;
+        assert(slot < constants.sim_listeners_max);
+        return slot;
+    }
+
+    pub fn close_listener(world: *World, handle: host.Handle) void {
+        const held = &world.processes[world.current].listener_holds[listener_slot(handle)];
+        assert(held.*); // Closing a listener the process does not hold is a programmer error.
+        held.* = false;
+    }
+
+    /// Queues a listener the current process holds on the channel's write end. The peer must
+    /// still hold the read end; the listener stays held by the sender until it closes it.
+    pub fn send_listener(world: *World, channel: host.Handle, handle: host.Handle) ?u16 {
+        const index = end_index(channel);
+        assert(index % 2 == 1); // The child's end.
+        assert(world.processes[world.current].holds[index]);
+        const slot = listener_slot(handle);
+        assert(world.processes[world.current].listener_holds[slot]);
+        const pipe = &world.pipes[index / 2];
+        if (!world.reader_exists(index / 2)) return errno_pipe;
+        if (pipe.listener != null) return errno_nomem; // One at a time.
+        pipe.listener = @intCast(slot);
+        world.listener_in_flight[slot] = true;
+        return null;
+    }
+
+    /// Takes the queued listener off the channel's read end. Null when none was sent.
+    pub fn receive_listener(world: *World, channel: host.Handle) ?host.Handle {
+        const index = end_index(channel);
+        assert(index % 2 == 0); // The parent's end.
+        assert(world.processes[world.current].holds[index]);
+        const pipe = &world.pipes[index / 2];
+        const slot = pipe.listener orelse return null;
+        pipe.listener = null;
+        world.listener_in_flight[slot] = false;
+        world.processes[world.current].listener_holds[slot] = true;
+        return listener_handle_base + slot;
     }
 
     fn end_index(handle: host.Handle) u32 {
@@ -901,6 +992,7 @@ pub const World = struct {
         child.root = parent.root;
         child.old_root_attached = parent.old_root_attached;
         child.holds = parent.holds;
+        child.listener_holds = parent.listener_holds;
         child.table = parent.table;
         child.uts = parent.uts;
         child.stdin_null = flags.stdin_null;
@@ -945,6 +1037,7 @@ pub const World = struct {
         world.step = previous_step;
         assert(child.state == .running);
         child.holds = @splat(false);
+        child.listener_holds = @splat(false);
         const writes_more = world.out_at < world.out_script.len;
         if (child.execd and (world.script_len > 0 or world.command_runs_ms > 0 or writes_more)) {
             // Still running: the scripted signals, the output and the clock decide how it ends.
@@ -1292,6 +1385,7 @@ pub const World = struct {
         world.namespace_gone(pid);
         if (world.find_process(pid)) |process| {
             process.holds = @splat(false); // Its descriptors close with it: pipes see the end.
+            process.listener_holds = @splat(false);
             // The status file of a process that ended and is not reaped says so.
             if (process.execd) world.put_status_file(pid, true);
         }
@@ -2273,6 +2367,10 @@ pub const World = struct {
         process.execd = true;
         process.ends_at_ms = world.now_ms + world.command_runs_ms;
         process.holds = @splat(false);
+        for (process.listener_holds) |held| {
+            if (held) world.listener_leaked = true;
+        }
+        process.listener_holds = @splat(false);
         world.put_status_file(process.pid, false);
         world.put_environ_file(process.pid, request.envp);
         return null;
@@ -2341,6 +2439,7 @@ fn unused_process() Process {
         .exec_envp = undefined,
         .exec_envp_len = 0,
         .holds = @splat(false),
+        .listener_holds = @splat(false),
         .keeper = false,
         .pasta = false,
         .pasta_target = 0,
