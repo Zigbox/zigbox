@@ -1,5 +1,10 @@
 # Try Zigbox in Claude Code
 
+> **Not yet verified for this release.** The `uidmap`, `passt`, `useradd` and `usermod` lines were
+> run in a cloud session with zbx 0.4.0 built from source. The apt lines were not run (the
+> repository is not live yet), nor the block as an environment setup script. The CLAUDE.md
+> suggestion was written for this guide and not tested with an agent.
+
 A Claude Code cloud session is a container itself, and Docker's daemon does not run in it: the
 `docker` command is there, but finds no daemon to talk to. `zbx` needs no daemon and no root, so
 Claude Code can pull and run containers in the session with it: start a database for its tests,
@@ -90,7 +95,7 @@ $ echo $?
 The agent reads `fixes[0].command`, runs it, and tries again. `zbx doctor --output json` prints a
 `zbx.doctor/1` document with one entry per check and, for a failed one, the same diagnostic.
 
-Every change to `zbx` is tested this way: a scripted agent drives the pull, network, state,
+The demos are checked this way: a scripted agent drives the pull, network, state,
 dev-loop and build demos using only `--output json`, `zbx schema` and `zbx explain`, and records
 what it still had to guess. Two that remain:
 

@@ -1,5 +1,11 @@
 # Try Zigbox on a Mac
 
+> **Not yet verified for this release.** No command on this page was run for this guide, and none
+> on a Mac with 0.5.0: the commands and output come from earlier recorded Mac runs. **Homebrew
+> still installs 0.3.1** until the tap is bumped to the 0.5.0 Mac build; that version has no `key`,
+> `sign`, `verify`, `trust` or `policy` commands, so those steps fail with it. Whether `zbx run`
+> pulls an image by itself on a Mac is unchecked (on Linux it does not: E0522).
+
 You need a Mac with Apple Silicon (M1 or later). Intel Macs are not supported. Nothing here
 needs `sudo`.
 
