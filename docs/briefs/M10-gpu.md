@@ -1,6 +1,7 @@
-# Brief: M10 · GPU access (draft)
+# Brief: M10 · GPU access
 
-*Draft, 2026-11-11. The owner's answers to "Owner decisions" below turn it into a brief.*
+*2026-11-11. The owner accepted the four recommendations below
+(`docs/decisions/2026-11-11-m10-gpu-decisions.md`). It starts after 0.5.0.*
 
 Read these first:
 - `AGENTS.md`, `REVIEW.md`, `docs/STYLE.md` and `DIAGNOSTICS.md`.
@@ -161,7 +162,7 @@ user is in `render`.
 7. `zbx run` without devices: the run record and the JSON output equal `demo-m2`'s goldens.
 
 **The real GPU** (slice 3, recorded in `docs/demos/m10.md`, not part of `demo-m10`): on a cloud
-machine with an NVIDIA GPU (see the owner decisions), with the driver and `nvidia-ctk` installed
+AWS `g4dn.xlarge` (see the owner decisions), with the driver and `nvidia-ctk` installed
 and the spec generated as JSON, as an ordinary user:
 `zbx run --gpu all docker.io/nvidia/cuda:12.6.3-base-ubuntu24.04 -- nvidia-smi` prints the GPU,
 and a CUDA sample (vector add, from the `devel` image's samples or a checked-in `.cu` built in a
@@ -190,16 +191,15 @@ Record any cut in `docs/demos/m10.md`.
 Not cuttable: rootless access by file permissions with no device cgroup, supplementary groups
 kept, JSON CDI, the built-in `ldconfig` step, and the real NVIDIA run.
 
-## Owner decisions
+## Owner decisions (settled 2026-11-11)
 
-1. **A real GPU to test on.** An AWS `g4dn.xlarge` (one T4, about $0.53/hour on demand in
-   us-east-1) under the account being set up for M6c, started by hand for slice 3 and stopped
-   after. It may need a vCPU quota increase for G instances. Or the owner's own machine. Which?
-2. **NVIDIA first, AMD and Intel by render nodes only.** Recommended; ROCm-specific work (e.g.
+1. **A real GPU to test on:** an AWS `g4dn.xlarge` (one T4, about $0.53/hour on demand in
+   us-east-1) under the account set up for M6c, started by hand for slice 3 and stopped after.
+   G instances may need a vCPU quota increase; the supervisor asks the owner before slice 3.
+2. **NVIDIA first; AMD and Intel by render nodes only.** ROCm-specific work (e.g.
    `HSA_OVERRIDE_*`) is left out.
-3. **Keeping supplementary groups by default** for a run with devices (recommended), or only with
-   a flag, as podman does.
-4. **The milestone number.** This draft calls it M10, after M9, with no dependency between them.
+3. **Supplementary groups are kept by default** for a run with devices, with no flag.
+4. **The milestone is M10**, after M9, with no dependency between them.
 
 ## Spec notes (flagged, not changed)
 
