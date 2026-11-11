@@ -180,7 +180,7 @@ pub fn network_failed(diag: *Diag, err: net.Error, target: Target, errno: u16) v
         => {
             unusable_wire(diag, err, host);
         },
-        error.ConnectFailed, error.ProxyFailed, error.TimedOut => {
+        error.ConnectFailed, error.ProxyFailed, error.TimedOut, error.Stalled => {
             cannot_connect(diag, err, host, target.port);
         },
     }
@@ -211,6 +211,16 @@ fn cannot_connect(diag: *Diag, err: net.Error, host: []const u8, port: u16) void
             port,
             constants.net_idle_timeout_ms / 1000,
         }),
+        error.Stalled => diag.cause(
+            "{s}:{d} connected, then the request stopped: nothing moved for {d} seconds, or it " ++
+                "ran past its {d} seconds limit",
+            .{
+                host,
+                port,
+                constants.net_idle_timeout_ms / 1000,
+                constants.net_request_timeout_ms / 1000,
+            },
+        ),
         error.ProxyFailed => diag.cause(
             "the proxy refused to open a tunnel to {s}:{d}, or is not a proxy",
             .{ host, port },
@@ -512,4 +522,19 @@ pub fn digest_mismatch(diag: *Diag, what: []const u8, expected: Sha256, actual: 
     diag.context("expect", "{s}", .{&expected.text()});
     diag.context("actual", "{s}", .{&actual.text()});
     diag.fix(.{ .sentence = "run the command again; if it repeats, do not trust this source" });
+}
+
+test "a stall's cause does not claim silence: the total deadline can end a moving transfer" {
+    // Goal: E0503 for Stalled is true for both timeouts. Method: the cause names the idle wait and
+    // the total limit as alternatives, and never says nothing was sent.
+    var diag: Diag = undefined;
+    diag.reset();
+    const target: Target = .{ .host = "registry.test", .port = 443, .scheme = .https };
+    network_failed(&diag, error.Stalled, target, 0);
+    try std.testing.expectEqual(.E0503, diag.code.?);
+    const cause = diag.causes.slice()[0].slice();
+    try std.testing.expect(std.mem.indexOf(u8, cause, "registry.test:443 connected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cause, "nothing moved for 30 seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cause, "ran past its 120 seconds limit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cause, "sent nothing") == null);
 }

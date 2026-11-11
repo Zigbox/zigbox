@@ -636,14 +636,22 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
         else
             "signed provenance (require_provenance)";
         diag.cause("{s} requires {s} and a directory has no tree to sign", .{ path, asks });
-    } else if (what.report.count == 0) {
-        diag.cause("{s} requires a signature (require_signature), and nothing has signed {s}", .{
-            path,
-            digest,
-        });
     } else {
-        diag.cause("{s} requires a signature (require_signature), and none of the {d} on {s} " ++
-            "counts", .{ path, what.report.count, digest });
+        // The one-line form shows only the last cause, so a build step's name is in the cause.
+        var echo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        var lead_storage: [constants.arg_echo_bytes_max + 32]u8 = undefined;
+        const lead = if (what.step.len > 0) std.fmt.bufPrint(
+            &lead_storage,
+            "the base of step '{s}': ",
+            .{echo_of(&echo_storage, what.step)},
+        ) catch unreachable else ""; // the buffer holds the echo and the words around it
+        if (what.report.count == 0) {
+            diag.cause("{s}{s} requires a signature (require_signature), and nothing has " ++
+                "signed {s}", .{ lead, path, digest });
+        } else {
+            diag.cause("{s}{s} requires a signature (require_signature), and none of the {d} " ++
+                "on {s} counts", .{ lead, path, what.report.count, digest });
+        }
     }
     const shown = @min(what.report.count, signatures_named_max);
     for (what.report.lines[0..shown]) |line| {
