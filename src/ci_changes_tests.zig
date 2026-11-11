@@ -57,8 +57,8 @@ const rows = [_]Row{
     .{
         .paths = &.{".github/workflows/ci.yml"},
         .true_outputs = &.{
-            "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+            "code",             "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
+            "demo_m5",          "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
             "demo_m8_packages",
         },
     },
