@@ -783,6 +783,9 @@ pub const VerifyCause = enum {
     no_record,
     /// Link 2: no signer is trusted. Detail: the signers' ids, or "none".
     no_trusted_signer,
+    /// Link 2: a trusted signer signed this tree, but for another result or manifest than the
+    /// one named, so `zbx run` would refuse it too.
+    signer_other_binding,
     /// Link 3: part of the tree is missing, damaged, unreadable or too large.
     tree_missing,
     tree_damaged,
@@ -823,6 +826,11 @@ fn verify_fix(diag: *Diag, cause: VerifyCause, operand: []const u8, policy: bool
             .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
                 "or --public <text>",
         }),
+        .signer_other_binding => diag.fix_with(
+            "sign what is named, not another build or image of the same tree:",
+            "zbx sign {s}",
+            .{operand},
+        ),
         .tree_missing, .tree_damaged, .tree_too_large, .input_damaged => diag.fix(.{
             .sentence = "run 'zbx store verify', remove what is damaged, then pull or build again",
         }),
@@ -865,6 +873,10 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
             "no signer is trusted (signers: {s}), and no policy file, --key or --public " ++
                 "names one that counts",
             .{detail},
+        ),
+        .signer_other_binding => diag.cause(
+            "a trusted key signed this tree, but for another result or image than the one named",
+            .{},
         ),
         .tree_missing => diag.cause("part of the tree is missing from the store", .{}),
         .tree_damaged => diag.cause("a file of the tree in the store is damaged", .{}),
