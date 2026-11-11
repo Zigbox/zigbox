@@ -31,6 +31,10 @@ const files_max: u32 = 10_000;
 const shell_allowlist = [_][]const u8{
     // CI's path classification runs in the `changes` job, before Zig is installed.
     ".github/ci-changes.sh",
+    // The release workflow's signing glue around `gpg` and `rpm`, which no Zig code can replace
+    // (docs/STYLE.md, "The Linux package release"); its test script runs the same file.
+    ".github/release-sign.sh",
+    ".github/release-sign-test.sh",
 };
 
 /// The files that make up the shipped `zbx` binary. Their functions must average at least
