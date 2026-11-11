@@ -23,9 +23,20 @@ from": the tag): the `release` environment only deploys tags, and the run refuse
 that is not the ref it started from, or is not `vX.Y.Z`. The run fails before signing when the
 GitHub release does not exist yet; create it and re-run.
 
+## The release key
+
+Users verify the keyring against the primary key's fingerprint (RSA 4096, certify-only primary;
+the signing subkey expires after a year and is renewed):
+
+```
+09991DC39816D3C914E2A22C5AB00BC328B7DBB7
+```
+
 ## One-off key setup
 
-Use a machine you trust; `$KEY` is the primary key's fingerprint.
+Use a machine you trust; `$KEY` is the primary key's fingerprint. Quote the subkey as
+`"$SUBKEY"'!'`: a `!` inside double quotes is history expansion in zsh. The key already exists;
+these commands are the record of how it was made and how to renew it.
 
 ```sh
 # A certify-only RSA 4096 primary key, no expiry: it only certifies subkeys.
@@ -49,7 +60,7 @@ tag-only deployment policy, already exists). The subkey export contains the subk
 only, with the primary stubbed, and stays protected by its passphrase:
 
 ```sh
-gpg --armor --export-secret-subkeys "${SUBKEY}!" |
+gpg --armor --export-secret-subkeys "$SUBKEY"'!' |
   gh secret set ZIGBOX_SIGNING_KEY --env release --repo Zigbox/zigbox
 gh secret set ZIGBOX_SIGNING_PASSPHRASE --env release --repo Zigbox/zigbox
 gh variable set ZIGBOX_SIGNING_FPR --env release --repo Zigbox/zigbox --body "$KEY"
@@ -67,7 +78,7 @@ The subkey expires after one year, and a signature made after that is refused by
 
 ```sh
 gpg --quick-set-expire "$KEY" 1y "$SUBKEY"     # extend, or add a new subkey as above
-gpg --armor --export-secret-subkeys "${NEWSUBKEY:-$SUBKEY}!" |
+gpg --armor --export-secret-subkeys "${NEWSUBKEY:-$SUBKEY}"'!' |
   gh secret set ZIGBOX_SIGNING_KEY --env release --repo Zigbox/zigbox
 ```
 
