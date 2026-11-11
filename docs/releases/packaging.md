@@ -93,8 +93,25 @@ rpm -Kv $T/rpm/aarch64/zigbox-X.Y.Z-1.aarch64.rpm
 Each `gpg --verify` must say `Good signature` from the release key, and each `rpm -Kv` must show
 the header signature as OK. Then publish exactly `apt/` and `rpm/` from the last `packages` run, and
 nothing else: not `to-sign/`, and not the test key files. Publish the release public key (armored)
-beside them, and as `.gpg` for apt's `signed-by=`. Check a client with `apt update` and
-`dnf makecache`.
+beside them, and as `.gpg` for apt's `signed-by=`.
+
+Publishing is one release asset, `zigbox-repos.tar.gz`, uploaded to the GitHub release
+([decision](../decisions/2026-11-10-packages-on-zigbox-org.md)). Put the key beside the trees
+under the names zigbox.org serves, then pack and upload:
+
+```bash
+gpg --export -a $KEY > zig-out/packages/zigbox-archive-keyring.asc
+gpg --export $KEY > zig-out/packages/zigbox-archive-keyring.gpg
+tar -czf zigbox-repos.tar.gz -C zig-out/packages apt rpm zigbox-archive-keyring.gpg zigbox-archive-keyring.asc
+gh release upload vX.Y.Z zigbox-repos.tar.gz
+```
+
+The site's deploy (`.github/workflows/deploy.yml` in `Zigbox/website`, every six hours or on
+`workflow_dispatch`) copies the newest release's asset to `https://zigbox.org/apt`, `/rpm` and the
+two keyring files byte for byte. It refuses an asset that holds anything else (links, dot files,
+`.html`, `to-sign/`, the test key) or lacks `InRelease`, `Release.gpg` or a `repomd.xml.asc`, and
+after deploying it fetches every file back and fails unless zigbox.org serves the same bytes.
+Then check a client with `apt update` and `dnf makecache` against zigbox.org.
 
 The `Release` file has a fixed `Date` and no `Valid-Until`, and `repomd.xml` a fixed `revision`
 (reproducibility): a client cannot tell an old signed `InRelease` from a new one, so there is no

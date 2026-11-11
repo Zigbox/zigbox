@@ -3681,6 +3681,11 @@ pub const registry = [_]Entry{
         \\bytes. A file that group or others can read is refused (chmod 600 it), and
         \\so is an empty passphrase. A path that is a symbolic link (a secrets
         \\volume mounts files that way) is refused too: name the file it points to.
+        \\
+        \\On a Mac, zbx key and zbx sign run in the virtual machine with no terminal,
+        \\so a sealed key always needs --passphrase-file, with a file under your home
+        \\(the only directory the machine shares), or a key made with --no-passphrase:
+        \\    zbx sign web --key release --passphrase-file ~/.config/zbx/release.pass
         \\A wrong passphrase is refused after the same work
         \\as a right one, so the refusal tells an attacker nothing about how close the
         \\guess was.

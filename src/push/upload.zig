@@ -674,6 +674,12 @@ fn push_blob(state: *Push, digest: Sha256, size: u64, diag: *Diag) Error!Outcome
     try exchange(state, registry_call(state, .head, target), diag);
     switch (state.ws.head.status) {
         200 => return .exists,
+        // A registry that keeps blobs in object storage answers HEAD of a blob it holds with a
+        // redirect to the storage (registry:2 with `redirect` on). A redirect is only ever given
+        // for a blob that is there, so it means "exists"; following it would take the request,
+        // and the credential policy of the push, to another origin for nothing. The manifest
+        // `PUT` still has the registry check every blob it names.
+        301, 302, 303, 307, 308 => return .exists,
         404 => {},
         else => return refuse_blob(state, diag, digest, "checking for the blob", ""),
     }
@@ -734,6 +740,11 @@ fn session_location(
         &ws.location_target,
     ) orelse return refuse_blob(state, diag, digest, step, "the Location is not one zbx follows");
     assert(next.target.len > 0);
+    // The closing request adds the digest to this address, and a request target is bounded
+    // (`registry_url_bytes_max`), so a longer address is refused here, before any byte is sent.
+    if (next.target.len + digest_param_bytes > constants.registry_url_bytes_max) {
+        return refuse_blob(state, diag, digest, step, "the Location is too long for zbx to close");
+    }
     return .{ .origin = next.origin, .target = next.target };
 }
 

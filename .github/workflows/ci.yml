@@ -45,6 +45,8 @@ jobs:
       demo_m6: ${{ steps.pick.outputs.demo_m6 }}
       demo_m6b: ${{ steps.pick.outputs.demo_m6b }}
       demo_m7: ${{ steps.pick.outputs.demo_m7 }}
+      demo_m8: ${{ steps.pick.outputs.demo_m8 }}
+      demo_m8_packages: ${{ steps.pick.outputs.demo_m8_packages }}
       demo_m8b: ${{ steps.pick.outputs.demo_m8b }}
     steps:
       # Two commits: on a pull request the checkout is the merge commit, whose first parent is the
@@ -522,6 +524,80 @@ jobs:
           key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
       - name: Run the M7 demo
         run: zig build demo-m7 -Daccel=kvm
+
+  # The M8 demo: the upgrade test (upgrade_m8.zig) reads what the v0.3.1 binary leaves, then the
+  # demo's own steps run. docker.io is reached through mirror.gcr.io, as for demo-m7.
+  demo-m8:
+    name: demo-m8 (Ubuntu 24.04 VM, KVM, upgrade from v0.3.1)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m8 == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+    steps:
+      # The whole history: the upgrade test builds the v0.3.1 tag in a git worktree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Run the M8 demo
+        run: zig build demo-m8 -Daccel=kvm
+
+  # The M8 packages demo (main_m8_packages.zig): the packages `zig build packages` writes, installed
+  # in four guests (Ubuntu 24.04 and Debian 12 with apt, Fedora and Rocky 9 with dnf). The other
+  # guest images are cached as vm.yml caches them.
+  demo-m8-packages:
+    name: demo-m8-packages (four guests, KVM)
+    needs: changes
+    if: ${{ needs.changes.outputs.demo_m8_packages == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ZBX_REGISTRY_MIRRORS: mirror.gcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-zig
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache the VM base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache/zbx-vm/ubuntu-24.04-server-cloudimg-amd64.img
+          key: vm-image-${{ hashFiles('src/testing/vm/lib/image.zon') }}
+      - name: Cache the other guest images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .zig-cache/zbx-vm-guests/debian-*.qcow2
+            .zig-cache/zbx-vm-guests/Fedora-*.qcow2
+            .zig-cache/zbx-vm-guests/Rocky-*.qcow2
+          key: vm-guests-${{ hashFiles('src/testing/vm/lib/guests.zon') }}
+      - name: Run the M8 packages demo
+        run: zig build demo-m8-packages -Daccel=kvm
 
   # The M8b demo (docs/demos/m8b.md): `--listen` hands a listener made inside the container's
   # network namespace to the harness over a Unix socket (hello, hostile, refusals, closed). The

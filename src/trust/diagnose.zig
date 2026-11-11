@@ -192,6 +192,23 @@ pub const PassphraseProblem = enum {
     cancelled,
 };
 
+/// The variable the machine's `zbx guest serve` sets for a command forwarded from a Mac, so the
+/// refusal names the Mac's real cause (see `forwarded_from_mac`).
+pub const forwarded_variable = "ZBX_FORWARDED";
+pub const forwarded_mac = "mac";
+
+/// True if this command was forwarded from the Mac's zbx, which gives key and sign no terminal.
+pub fn forwarded_from_mac(host: host_mod.Host) bool {
+    const value = host.environment(forwarded_variable, 16) orelse return false;
+    return std.mem.eql(u8, value, forwarded_mac);
+}
+
+/// The command that needed the passphrase, for the fix, and whether it was forwarded from a Mac.
+pub const PassphraseWhere = struct {
+    command: enum { key_new, sign },
+    mac: bool,
+};
+
 /// ZBX-E0911: the passphrase is missing, unusable or wrong. `path` is the passphrase file, for
 /// the problems that are about it. The passphrase itself is never an argument.
 pub fn passphrase(
@@ -199,6 +216,7 @@ pub fn passphrase(
     name: []const u8,
     path: []const u8,
     problem: PassphraseProblem,
+    where: PassphraseWhere,
 ) void {
     assert(diag.code == null);
     var name_storage: [constants.arg_echo_bytes_max]u8 = undefined;
@@ -208,7 +226,11 @@ pub fn passphrase(
     diag.raise(.E0911);
     diag.while_("getting the passphrase for the key '{s}'", .{name_echo});
     switch (problem) {
-        .unavailable => diag.cause(
+        .unavailable => if (where.mac) diag.cause(
+            "the key needs a passphrase, and zbx on a Mac does not ask for one on the " ++
+                "terminal; give it with --passphrase-file",
+            .{},
+        ) else diag.cause(
             "the key needs a passphrase, and there is no terminal to ask on and no " ++
                 "--passphrase-file",
             .{},
@@ -234,19 +256,30 @@ pub fn passphrase(
     }
     diag.context("key", "{s}", .{name_echo});
     if (path.len > 0) diag.context("path", "{s}", .{path_echo});
-    fix_passphrase(diag, path_echo, problem);
+    fix_passphrase(diag, path_echo, problem, where);
     assert(diag.code.? == .E0911);
 }
 
-fn fix_passphrase(diag: *Diag, path: []const u8, problem: PassphraseProblem) void {
+fn fix_passphrase(
+    diag: *Diag,
+    path: []const u8,
+    problem: PassphraseProblem,
+    where: PassphraseWhere,
+) void {
     switch (problem) {
         .file_too_open => diag.fix_with("make it private to you:", "chmod 600 {s}", .{path}),
         .wrong => diag.fix(.{
             .sentence = "try again; a forgotten passphrase is a lost key, and there is no recovery",
         }),
         else => diag.fix(.{
-            .sentence = "give the passphrase in a file only you can read:",
-            .command = "zbx key new <name> --passphrase-file <file>",
+            .sentence = if (where.mac)
+                "give the passphrase in a file only you can read, under your home:"
+            else
+                "give the passphrase in a file only you can read:",
+            .command = switch (where.command) {
+                .key_new => "zbx key new <name> --passphrase-file <file>",
+                .sign => "zbx sign <what> --key <name> --passphrase-file <file>",
+            },
             .template = true,
         }),
     }
@@ -603,14 +636,22 @@ pub fn unsigned(diag: *Diag, what: *const Unsigned) void {
         else
             "signed provenance (require_provenance)";
         diag.cause("{s} requires {s} and a directory has no tree to sign", .{ path, asks });
-    } else if (what.report.count == 0) {
-        diag.cause("{s} requires a signature (require_signature), and nothing has signed {s}", .{
-            path,
-            digest,
-        });
     } else {
-        diag.cause("{s} requires a signature (require_signature), and none of the {d} on {s} " ++
-            "counts", .{ path, what.report.count, digest });
+        // The one-line form shows only the last cause, so a build step's name is in the cause.
+        var echo_storage: [constants.arg_echo_bytes_max]u8 = undefined;
+        var lead_storage: [constants.arg_echo_bytes_max + 32]u8 = undefined;
+        const lead = if (what.step.len > 0) std.fmt.bufPrint(
+            &lead_storage,
+            "the base of step '{s}': ",
+            .{echo_of(&echo_storage, what.step)},
+        ) catch unreachable else ""; // the buffer holds the echo and the words around it
+        if (what.report.count == 0) {
+            diag.cause("{s}{s} requires a signature (require_signature), and nothing has " ++
+                "signed {s}", .{ lead, path, digest });
+        } else {
+            diag.cause("{s}{s} requires a signature (require_signature), and none of the {d} " ++
+                "on {s} counts", .{ lead, path, what.report.count, digest });
+        }
     }
     const shown = @min(what.report.count, signatures_named_max);
     for (what.report.lines[0..shown]) |line| {
@@ -742,6 +783,9 @@ pub const VerifyCause = enum {
     no_record,
     /// Link 2: no signer is trusted. Detail: the signers' ids, or "none".
     no_trusted_signer,
+    /// Link 2: a trusted signer signed this tree, but for another result or manifest than the
+    /// one named, so `zbx run` would refuse it too.
+    signer_other_binding,
     /// Link 3: part of the tree is missing, damaged, unreadable or too large.
     tree_missing,
     tree_damaged,
@@ -782,6 +826,11 @@ fn verify_fix(diag: *Diag, cause: VerifyCause, operand: []const u8, policy: bool
             .sentence = "trust a signer: list its key in a policy file, or pass --key <name> " ++
                 "or --public <text>",
         }),
+        .signer_other_binding => diag.fix_with(
+            "sign what is named, not another build or image of the same tree:",
+            "zbx sign {s}",
+            .{operand},
+        ),
         .tree_missing, .tree_damaged, .tree_too_large, .input_damaged => diag.fix(.{
             .sentence = "run 'zbx store verify', remove what is damaged, then pull or build again",
         }),
@@ -824,6 +873,10 @@ pub fn verify_broken(diag: *Diag, what: *const VerifyBroken) void {
             "no signer is trusted (signers: {s}), and no policy file, --key or --public " ++
                 "names one that counts",
             .{detail},
+        ),
+        .signer_other_binding => diag.cause(
+            "a trusted key signed this tree, but for another result or image than the one named",
+            .{},
         ),
         .tree_missing => diag.cause("part of the tree is missing from the store", .{}),
         .tree_damaged => diag.cause("a file of the tree in the store is damaged", .{}),
@@ -948,4 +1001,34 @@ pub fn prune_kept_damaged(diag: *Diag, path: []const u8) void {
         .sentence = "import the tree's bundle again or sign it again; upgrade zbx if newer",
     });
     assert(diag.code.? == .W0902);
+}
+
+test "E0911 names the Mac's cause and the command that was run" {
+    // Goal: on a Mac the refusal must not claim there is no terminal, and the fix for sign must
+    // be a sign, not a new key. Method: raise each variant and read its cause and fix.
+    const cases = [_]struct { where: PassphraseWhere, cause: []const u8, command: []const u8 }{
+        .{
+            .where = .{ .command = .key_new, .mac = false },
+            .cause = "no terminal to ask on",
+            .command = "zbx key new <name> --passphrase-file <file>",
+        },
+        .{
+            .where = .{ .command = .sign, .mac = false },
+            .cause = "no terminal to ask on",
+            .command = "zbx sign <what> --key <name> --passphrase-file <file>",
+        },
+        .{
+            .where = .{ .command = .sign, .mac = true },
+            .cause = "zbx on a Mac does not ask",
+            .command = "zbx sign <what> --key <name> --passphrase-file <file>",
+        },
+    };
+    for (cases) |case| {
+        var diag: Diag = undefined;
+        diag.reset();
+        passphrase(&diag, "ci", "", .unavailable, case.where);
+        try std.testing.expect(std.mem.indexOf(u8, diag.last_cause().?, case.cause) != null);
+        const fix = diag.fixes.items[diag.fixes.count - 1];
+        try std.testing.expectEqualStrings(case.command, fix.command.slice());
+    }
 }

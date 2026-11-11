@@ -920,4 +920,7 @@ test "a step whose base no policy trusts is refused before it starts, naming the
     try testing.expect(std.mem.indexOf(u8, text, "base of step 'compile'") != null);
     const sign = "registry.test/fixture/open@sha256:";
     try testing.expect(std.mem.indexOf(u8, text, sign) != null);
+    // The one-line form shows only the last cause, so that names the step too.
+    const cause = diag.causes.slice()[diag.causes.count - 1].slice();
+    try testing.expect(std.mem.indexOf(u8, cause, "the base of step 'compile'") != null);
 }

@@ -38,6 +38,7 @@ const images = @import("../store/images.zig");
 const diagnose = @import("diagnose.zig");
 const dsse = @import("dsse.zig");
 const gate = @import("gate.zig");
+const verdict = @import("verdict.zig");
 const key = @import("key.zig");
 const key_store = @import("key_store.zig");
 const provenance = @import("provenance.zig");
@@ -161,6 +162,9 @@ const Job = struct {
     /// What the operand named: the tree, and the result when it named one.
     tree: Digest,
     result: ?Digest,
+    /// The manifest the operand named, for an image, and the result its record derives.
+    manifest: ?Digest,
+    derived: ?Digest,
 };
 
 const Child = struct {
@@ -213,6 +217,8 @@ pub fn run(host: Host, ws: *Workspace, args: Args, output: Output, diag: *Diag) 
         .explicit = .{ .keys = undefined, .count = 0 },
         .tree = undefined,
         .result = null,
+        .manifest = null,
+        .derived = null,
     };
     ws.report.clear();
     if (!job.store.locate(host)) {
@@ -328,7 +334,10 @@ fn resolve_image(job: *Job) Error!void {
             return error.Failed;
         },
     };
-    job.tree = job.ws.image.tree;
+    const image = &job.ws.image;
+    job.tree = image.tree;
+    job.manifest = .{ .bytes = manifest.bytes };
+    job.derived = result.derive(image.tree, &image.settings, &image.labels);
 }
 
 fn unreadable(job: *const Job, step: []const u8, errno: u16) Error {
@@ -428,16 +437,57 @@ fn add_signer(report: *Report, public: [constants.key_public_bytes]u8) void {
 
 // ---- Link 2: a trusted signer ----
 
+/// The subject `zbx run` would judge for the same operand: a result, a manifest (with the
+/// result its record derives) or a bare tree.
+fn subject_of(job: *const Job) verdict.Subject {
+    if (job.result) |named| {
+        return .{ .tree = job.tree.bytes, .binding = .{ .result = named.bytes } };
+    }
+    const manifest = job.manifest orelse return .{ .tree = job.tree.bytes, .binding = .none };
+    return .{
+        .tree = job.tree.bytes,
+        .binding = .{ .manifest = manifest.bytes },
+        .derived = if (job.derived) |found| found.bytes else null,
+    };
+}
+
+/// Whether the line was signed by `public` about this subject: its tree and its binding fit,
+/// as the run gate judges them.
+fn line_binds(
+    job: *Job,
+    public: *const [constants.key_public_bytes]u8,
+    subject: verdict.Subject,
+) bool {
+    const ws = job.ws;
+    var index: u32 = 0;
+    while (index < ws.record.count) : (index += 1) {
+        const envelope = dsse.parse(&ws.dsse, ws.record.line(index)) catch continue;
+        if (!std.mem.eql(u8, &envelope.public, public)) continue;
+        const found = statement.parse(envelope.payload) catch continue;
+        if (!std.mem.eql(u8, &found.tree, &subject.tree)) continue;
+        if (verdict.binding_fits(found.binding, subject.binding)) return true;
+        if (verdict.derived_fits(found.binding, subject.derived)) return true;
+    }
+    return false;
+}
+
 fn link_signer(job: *Job) Error!void {
     const report = &job.ws.report;
     assert(report.signer_count >= 1);
+    const subject = subject_of(job);
+    var unbound = false;
     for (report.signers[0..report.signer_count]) |public| {
         if (!trusted(job, &public)) continue;
+        if (!line_binds(job, &public, subject)) {
+            unbound = true;
+            continue;
+        }
         report.trusted = public;
         report.has_trusted = true;
         report.set(.signer, .ok);
         return;
     }
+    if (unbound) return broken(job, .signer, .signer_other_binding, "", 0);
     var text: [constants.arg_echo_bytes_max]u8 = undefined;
     var writer = std.Io.Writer.fixed(&text);
     for (report.signers[0..report.signer_count], 0..) |public, at| {

@@ -226,6 +226,8 @@ test {
     _ = @import("runtime/pasta.zig");
     _ = @import("runtime/net_tests.zig");
     _ = @import("runtime/listen_tests.zig");
+    // CI path selection (`.github/ci-changes.sh`).
+    _ = @import("ci_changes_tests.zig");
 }
 
 test {
@@ -273,6 +275,8 @@ test {
     _ = @import("mac/vm_golden.zig");
     _ = @import("vm_protocol.zig");
     _ = @import("forward_protocol.zig");
+    _ = @import("forward_commands.zig");
+    _ = @import("forward_commands_tests.zig");
     _ = @import("vm_dhcp.zig");
     _ = @import("vm_guest_storage.zig");
     _ = @import("vm_ports.zig");

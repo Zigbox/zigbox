@@ -405,6 +405,31 @@ test "verify walks links 4 to 6 of a signed build, and says what it checked" {
     try testing.expectEqual(@as(u32, 0), requests());
 }
 
+test "verify refuses a trusted signature that is bound to another result of the tree" {
+    // Goal: verify judges the binding as `zbx run` does, so it never says ok where run refuses
+    // with E0905. Method: sign result one of the sample tree; verify it (ok), then verify a second
+    // result of the same tree that nobody signed (the key is trusted, the binding is not).
+    try start();
+    defer finish();
+    try make_project();
+    const operand = try sign_built("one", tree, "zbx.build.zon");
+    try testing.expectEqual(@as(u8, 0), verify_built(operand, &.{ "--key", "ci" }));
+    var saved: result.Record = undefined;
+    saved.config.clear();
+    _ = saved.config.add_label("label", "two").?;
+    saved.tree = tree;
+    var failed: result.Failure = undefined;
+    const second = try result.save(&store, &saved, &result_bytes, &failed);
+    const text = second.text();
+    var named: [constants.store_digest_text_bytes:0]u8 = undefined;
+    @memcpy(named[0..text.len], &text);
+    named[text.len] = 0;
+    try testing.expectEqual(@as(u8, 1), verify_built(&named, &.{ "--key", "ci" }));
+    try testing.expect(has(sim.stdout(), "2 signer: FAILED"));
+    try testing.expect(has(sim.stderr(), "ZBX-E0908"));
+    try testing.expect(has(sim.stderr(), "another result or image"));
+}
+
 test "an absent input is W0903 and exit 0, and E0908 under --strict" {
     // Goal: the absent-input rule. Method: a base tree the store does not hold.
     try start();
@@ -566,7 +591,8 @@ test "a policy file decides trust: --key and --public do not add to it" {
 
 test "provenance of another result of the same tree is skipped, and refused only when required" {
     // Goal: link 4 is "provenance for this result". Method: two results of one tree, only the
-    // first signed with provenance; the second verifies with link 4 skipped.
+    // first signed with provenance. The second is refused at link 2 (the key signed the first
+    // result, not it); once the tree itself is signed, link 2 holds and link 4 is skipped.
     try start();
     defer finish();
     try make_project();
@@ -583,6 +609,9 @@ test "provenance of another result of the same tree is skipped, and refused only
     var second_text: [constants.store_digest_text_bytes:0]u8 = undefined;
     @memcpy(second_text[0..constants.store_digest_text_bytes], &second.text());
     second_text[constants.store_digest_text_bytes] = 0;
+    try testing.expectEqual(@as(u8, 1), verify_built(&second_text, &.{ "--key", "ci" }));
+    try testing.expect(has(sim.stdout(), "2 signer: FAILED"));
+    try sign_tree();
     try testing.expectEqual(@as(u8, 0), verify_built(&second_text, &.{ "--key", "ci" }));
     try testing.expect(has(sim.stdout(), "4 provenance: skipped"));
     try testing.expectEqual(@as(u8, 1), verify_built(&second_text, &.{

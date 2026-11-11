@@ -298,7 +298,10 @@ fn open_key(job: *Job, secret: *Secret) Error!void {
         var problem: diagnose.PassphraseProblem = undefined;
         const file = job.args.passphrase_file;
         passphrase_mod.acquire(job.host, file, name, false, &phrase, &problem) catch {
-            diagnose.passphrase(job.diag, name, file orelse "", problem);
+            diagnose.passphrase(job.diag, name, file orelse "", problem, .{
+                .command = .sign,
+                .mac = diagnose.forwarded_from_mac(job.host),
+            });
             return error.Failed;
         };
     }
@@ -308,7 +311,10 @@ fn open_key(job: *Job, secret: *Secret) Error!void {
             const cause: key_store.Failure = .{ .problem = .unreadable, .errno = 12 };
             diagnose.unusable(job.diag, name, "memory for the key's passphrase hash", cause);
         } else {
-            diagnose.passphrase(job.diag, name, "", .wrong);
+            diagnose.passphrase(job.diag, name, "", .wrong, .{
+                .command = .sign,
+                .mac = diagnose.forwarded_from_mac(job.host),
+            });
         }
         return error.Failed;
     };

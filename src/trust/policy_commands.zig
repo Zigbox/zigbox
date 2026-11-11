@@ -38,7 +38,14 @@ const Judged = enum {
     /// The file asks nothing of a run.
     asks_nothing,
     met,
+    /// No trusted signature covers the subject: `run` says ZBX-E0905.
     refused,
+    /// A trusted key signed it, but for another result than this run's: still ZBX-E0905, and
+    /// signing the tree again does not help.
+    refused_binding,
+    /// A trusted signature covers it, but `require_provenance` finds no signed provenance:
+    /// `run` says ZBX-E0906.
+    refused_provenance,
 };
 
 /// Reads the policy files and judges `subject` (null: only describe the files) against each.
@@ -62,16 +69,21 @@ pub fn run(
         };
     }
     var allowed = true;
+    // What the first refusing file said: the gate stops at the first, so the code is its.
+    var first_refusal: Judged = .met;
     var out: Printer = .{ .host = host, .output = output, .diag = diag };
     try out.begin(subject, memory);
     for (memory.files[0..memory.count], 0..) |*loaded, index| {
         var report: verdict.Report = undefined;
         report.clear();
         const judged = judge_one(loaded, record, work, subject, &report);
-        if (judged == .refused) allowed = false;
+        if (judged != .asks_nothing and judged != .met) {
+            if (allowed) first_refusal = judged;
+            allowed = false;
+        }
         try out.file(loaded, judged, &report, index > 0);
     }
-    try out.end(memory, subject, allowed);
+    try out.end(memory, subject, first_refusal);
     return if (allowed) constants.exit_ok else 1;
 }
 
@@ -90,8 +102,21 @@ fn judge_one(
         .binding = asked.binding,
         .derived = asked.derived,
     };
-    const met = verdict.judge(&work.envelope, &loaded.policy, record, have, report);
-    return if (met) .met else .refused;
+    // The gate's own rule: a signature is not enough when the policy asks for provenance too.
+    if (!verdict.judge(&work.envelope, &loaded.policy, record, have, report)) {
+        return unsigned_kind(report);
+    }
+    if (!verdict.provenance_met(&loaded.policy, report)) return .refused_provenance;
+    return .met;
+}
+
+/// Why no signature counts: a trusted key signed another result (`run` still says E0905, but
+/// signing the tree again cannot help), or nothing trusted covers it.
+fn unsigned_kind(report: *const verdict.Report) Judged {
+    for (report.lines[0..report.count]) |line| {
+        if (line.reason == .other_binding) return .refused_binding;
+    }
+    return .refused;
 }
 
 const Printer = struct {
@@ -148,14 +173,16 @@ const Printer = struct {
         printer: *const Printer,
         memory: *const gate.Memory,
         subject: ?gate.Subject,
-        allowed: bool,
+        refusal: Judged,
     ) Error!void {
+        assert(refusal != .asks_nothing);
+        const allowed = refusal == .met;
         var buffer: [constants.output_bytes_max]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         if (printer.output.json) {
             writer.print("],\"allowed\":{}}}\n", .{allowed}) catch unreachable; // Fits.
         } else {
-            write_end_text(&writer, memory, printer.host, subject, allowed);
+            write_end_text(&writer, memory, printer.host, subject, refusal);
         }
         try printer.put(writer.buffered());
     }
@@ -210,7 +237,22 @@ fn write_file_json(
     switch (judged) {
         .asks_nothing => writer.writeAll("null") catch unreachable, // Fits.
         .met => writer.writeAll("true") catch unreachable, // Fits.
-        .refused => writer.writeAll("false") catch unreachable, // Fits.
+        .refused, .refused_binding, .refused_provenance => {
+            writer.writeAll("false") catch unreachable; // Fits.
+        },
+    }
+    // Why not, when not: the code `run` would give, and the rule behind it.
+    switch (judged) {
+        .refused => writer.writeAll(",\"code\":\"ZBX-E0905\",\"refusal\":\"unsigned\"") catch
+            unreachable, // Fits.
+        .refused_binding => writer.writeAll(
+            ",\"code\":\"ZBX-E0905\",\"refusal\":\"other_binding\"",
+        ) catch unreachable, // Fits.
+        .refused_provenance => writer.writeAll(
+            ",\"code\":\"ZBX-E0906\",\"refusal\":\"provenance\"",
+        ) catch unreachable, // Fits.
+        .asks_nothing, .met => writer.writeAll(",\"code\":null,\"refusal\":null") catch
+            unreachable, // Fits.
     }
     writer.writeAll(",\"signatures\":[") catch unreachable; // Fits.
     for (report.lines[0..report.count], 0..) |line, index| {
@@ -258,7 +300,11 @@ fn write_file_text(
     const word = switch (judged) {
         .asks_nothing => "asks nothing of a run",
         .met => "met",
-        .refused => "not met",
+        .refused => "not met: no trusted signature covers it (ZBX-E0905)",
+        .refused_binding => "not met: signed by a trusted key, but for another result " ++
+            "(ZBX-E0905)",
+        .refused_provenance => "not met: signed, but no trusted signed provenance covers it " ++
+            "(ZBX-E0906)",
     };
     writer.print("  verdict: {s}\n", .{word}) catch unreachable; // Fits.
 }
@@ -268,8 +314,9 @@ fn write_end_text(
     memory: *const gate.Memory,
     host: Host,
     subject: ?gate.Subject,
-    allowed: bool,
+    refusal: Judged,
 ) void {
+    const allowed = refusal == .met;
     if (memory.count == 0) {
         var user: fs_mod.PathBuf = undefined;
         const looked = if (gate.user_path(host, &user)) user.text() else "(no home)";
@@ -278,7 +325,10 @@ fn write_end_text(
         }) catch unreachable; // Fits.
     }
     const asked = subject orelse return;
-    const verb = if (allowed) "would start" else "would be refused (ZBX-E0905)";
+    const verb = if (allowed) "would start" else if (refusal == .refused_provenance)
+        "would be refused (ZBX-E0906)"
+    else
+        "would be refused (ZBX-E0905)";
     const what = if (asked.text.len > 0) asked.text else "a directory";
     writer.print("run of {s}: {s}\n", .{ what, verb }) catch unreachable; // Fits.
     if (allowed and memory.count > 0) {
@@ -297,4 +347,16 @@ comptime {
         constants.key_public_text_bytes + 32) +
         constants.signatures_per_tree_max * (constants.key_public_text_bytes + 96) + 512;
     assert(file_bytes < constants.output_bytes_max);
+}
+
+test "a signature bound to another result is refused_binding, not unsigned" {
+    // Goal: the preview's `refusal` says what is wrong. Method: a report with one line each.
+    var report: verdict.Report = undefined;
+    report.clear();
+    try std.testing.expectEqual(Judged.refused, unsigned_kind(&report));
+    report.count = 1;
+    report.lines[0] = .{ .public = @splat(0), .reason = .untrusted_key, .provenance = false };
+    try std.testing.expectEqual(Judged.refused, unsigned_kind(&report));
+    report.lines[0].reason = .other_binding;
+    try std.testing.expectEqual(Judged.refused_binding, unsigned_kind(&report));
 }

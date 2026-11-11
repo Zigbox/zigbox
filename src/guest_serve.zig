@@ -291,6 +291,9 @@ fn prepare_exec(command: *Command, start: *const protocol.Start, identity: *cons
         // sets no XDG path (the guest ignores any it forwards), so these decide.
         "XDG_DATA_HOME=" ++ constants.vm_disk_mount ++ "/data",
         "XDG_STATE_HOME=" ++ constants.vm_disk_mount ++ "/state",
+        // Every command here comes from the Mac's zbx; `key` and `sign` get no terminal there,
+        // and the trust diagnostics say so (trust/diagnose.zig `forwarded_from_mac`).
+        "ZBX_FORWARDED=mac",
     };
     for (extras) |entry| {
         command.envp[envc] = copy_string(&command.text, &used, entry) orelse return null;

@@ -283,6 +283,67 @@ fn range_from_one(served: *net_sim.Served) void {
     if (served.status == 202) served.range = "1-63";
 }
 
+fn head_redirects(served: *net_sim.Served) void {
+    if (served.status == 200 or served.status == 404) {
+        served.* = .{ .status = 307, .location = "https://storage.example/blob" };
+    }
+}
+
+test "a registry that redirects HEAD of a blob it holds is read as holding it" {
+    // Goal: a repeat push to registry:2 with S3 or GCS redirects must not fail. Method: push
+    // once; then every blob HEAD answers 307; the push succeeds, sends no blob byte, and follows
+    // no redirect.
+    const rig = try Rig.create(9);
+    defer rig.destroy();
+    try rig.push("push/ok", .{});
+    var rewrite: Rewrite = .{
+        .inner = rig.registry.responder(),
+        .when = .head,
+        .change = head_redirects,
+    };
+    rig.wire.init(9, rewrite.responder());
+    rig.wire.received = &rig.registry.drained;
+    try rig.push("push/ok", .{});
+    try testing.expectEqual(@as(u64, 0), rig.report.bytes_sent);
+    try testing.expectEqual(upload.Outcome.exists, rig.report.layer.outcome);
+    try testing.expectEqual(upload.Outcome.exists, rig.report.config.outcome);
+    var index: u32 = 0;
+    while (index < rig.wire.requests) : (index += 1) {
+        const entry = rig.wire.logged(index).?;
+        try testing.expect(std.mem.eql(u8, entry.host_text(), push_registry.registry_host));
+        try testing.expect(entry.method != net.Method.patch);
+    }
+}
+
+var long_location: [constants.registry_url_bytes_max - 40]u8 = undefined;
+
+fn long_upload_location(served: *net_sim.Served) void {
+    if (served.status != 202) return;
+    @memset(&long_location, 'a');
+    const prefix = "/v2/push/ok/blobs/uploads/";
+    @memcpy(long_location[0..prefix.len], prefix);
+    served.location = &long_location;
+}
+
+test "an upload Location too long to take the digest is refused, not a crash" {
+    // Goal: the closing PUT adds `?digest=sha256:<64 hex>` to the Location, and a request target
+    // is bounded. Method: the registry answers the upload POST with a Location 40 bytes under the
+    // bound, so the closing target would be over it; the push must refuse with E0555 up front.
+    const rig = try Rig.create(10);
+    defer rig.destroy();
+    var rewrite: Rewrite = .{
+        .inner = rig.registry.responder(),
+        .when = .post,
+        .change = long_upload_location,
+    };
+    rig.wire.init(10, rewrite.responder());
+    rig.wire.received = &rig.registry.drained;
+    try testing.expectError(error.Failed, rig.push("push/ok", .{}));
+    try expect_code(rig, .E0555);
+    const cause = rig.diag.last_cause().?;
+    try testing.expect(std.mem.indexOf(u8, cause, "too long") != null);
+}
+
 test "a Range that does not start at 0 stops the upload at the piece" {
     // Goal: check_range reads the start. Method: the registry answers a piece with "1-63" after
     // 64 bytes were sent; the refusal names the piece, not the closing request.
