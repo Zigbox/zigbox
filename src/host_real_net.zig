@@ -370,16 +370,18 @@ fn resolve(
     return count;
 }
 
-/// A non-blocking stream socket connecting to `address:port`; its descriptor, once connected.
-fn connect_one(
-    memory: *Memory,
-    address: Address,
-    port: u16,
-    idle_ms: u32,
-    deadline_ms: u64,
-) error{Connect}!i32 {
+/// How a started connection stands.
+const Started = union(enum) {
+    /// Connected at once (a loopback peer can be).
+    done: i32,
+    /// Waiting for the handshake on this descriptor.
+    pending: i32,
+    failed,
+};
+
+/// A non-blocking stream socket started towards `address:port`; the errno of a failure is kept.
+fn connect_start(memory: *Memory, address: Address, port: u16) Started {
     assert(port != 0);
-    assert(idle_ms > 0);
     const family: u32 = switch (address) {
         .ip4 => linux.AF.INET,
         .ip6 => linux.AF.INET6,
@@ -388,41 +390,142 @@ fn connect_one(
     const created = linux.socket(family, kind, 0);
     if (linux.errno(created) != .SUCCESS) {
         memory.state.errno_last = @backingInt(linux.errno(created));
-        return error.Connect;
+        return .failed;
     }
     const fd: i32 = @intCast(created);
-    errdefer _ = linux.close(fd);
+    assert(fd >= 0);
     var storage: linux.sockaddr.storage = undefined;
     const length = fill_address(&storage, address, port);
     const rc = linux.connect(fd, @ptrCast(&storage), length);
     switch (linux.errno(rc)) {
-        .SUCCESS => {
-            assert(fd >= 0);
-            return fd;
-        },
-        .INPROGRESS, .INTR => {},
+        .SUCCESS => return .{ .done = fd },
+        .INPROGRESS, .INTR => return .{ .pending = fd },
         else => |code| {
             memory.state.errno_last = @backingInt(code);
-            return error.Connect;
+            _ = linux.close(fd);
+            return .failed;
         },
     }
-    var waiter: Socket = undefined;
-    init_socket(memory, &waiter, fd, idle_ms, deadline_ms);
-    waiter.wait(linux.POLL.OUT) catch |err| {
-        if (err == error.TimedOut) memory.state.errno_last = @backingInt(linux.E.TIMEDOUT);
-        return error.Connect;
-    };
+}
+
+/// The pending error of a socket whose connect has finished: zero when it is connected.
+fn connect_result(fd: i32) i32 {
+    assert(fd >= 0);
     var pending: i32 = 0;
     var size: linux.socklen_t = @sizeOf(i32);
     const got = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&pending), &size);
-    if (linux.errno(got) != .SUCCESS) return error.Connect;
-    if (pending != 0) {
-        memory.state.errno_last = @intCast(pending);
-        return error.Connect;
-    }
-    assert(fd >= 0);
+    if (linux.errno(got) != .SUCCESS) return @backingInt(linux.errno(got));
     assert(size == @sizeOf(i32));
-    return fd;
+    assert(pending >= 0);
+    return pending;
+}
+
+fn close_all(fds: []const i32) void {
+    assert(fds.len <= 64);
+    for (fds) |fd| {
+        assert(fd >= 0);
+        _ = linux.close(fd);
+    }
+}
+
+/// Waits for the first of `fds` (all pending) to connect; returns its descriptor and closes the
+/// rest. On failure every descriptor is closed and `errno_last` says why: the last refusal, or
+/// TIMEDOUT when none answered within the idle timeout (counted once, from the start) or the
+/// call's deadline.
+fn connect_wait(memory: *Memory, fds: []i32, idle_ms: u32, deadline_ms: u64) error{Connect}!i32 {
+    assert(fds.len > 0);
+    assert(fds.len <= constants.net_addresses_max);
+    assert(idle_ms > 0);
+    var live: u32 = @intCast(fds.len);
+    const limit = monotonic_ms() + idle_ms;
+    const end = if (deadline_ms == 0) limit else @min(limit, deadline_ms);
+    while (live > 0) {
+        const now = monotonic_ms();
+        if (now >= end) break;
+        var entries: [constants.net_addresses_max]linux.pollfd = undefined;
+        for (fds[0..live], 0..) |fd, index| {
+            entries[index] = .{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 };
+        }
+        const rc = linux.poll(&entries, live, @intCast(end - now));
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc == 0) break,
+            .INTR => continue,
+            else => |code| {
+                memory.state.errno_last = @backingInt(code);
+                close_all(fds[0..live]);
+                return error.Connect;
+            },
+        }
+        var index: u32 = 0;
+        while (index < live) {
+            if (entries[index].revents == 0) {
+                index += 1;
+                continue;
+            }
+            const pending = connect_result(fds[index]);
+            if (pending == 0) {
+                const won = fds[index];
+                fds[index] = fds[live - 1];
+                close_all(fds[0 .. live - 1]);
+                return won;
+            }
+            memory.state.errno_last = @intCast(pending);
+            _ = linux.close(fds[index]);
+            live -= 1;
+            // The descriptor moved into this slot brings its own poll result with it.
+            fds[index] = fds[live];
+            entries[index] = entries[live];
+        }
+        if (live == 0) return error.Connect;
+    }
+    memory.state.errno_last = @backingInt(linux.E.TIMEDOUT);
+    close_all(fds[0..live]);
+    return error.Connect;
+}
+
+/// Connects to the first address of `host` that answers. Every address is started at once (IPv4
+/// ones first) and the first to complete wins (curl does the same), so a family that does not
+/// answer costs nothing while the other does; the connect has the idle timeout as a whole, not
+/// once per address. A forwarder such as pasta can accept on `::1` and then stall, so a peer that
+/// completes on both families is taken on IPv4.
+fn connect_host(
+    memory: *Memory,
+    host: []const u8,
+    port: u16,
+    idle_ms: u32,
+    deadline_ms: u64,
+) net.Error!i32 {
+    assert(host.len > 0);
+    assert(port != 0);
+    var addresses: [constants.net_addresses_max]Address = undefined;
+    const count = try resolve(memory, host, &addresses);
+    assert(count >= 1);
+    assert(count <= addresses.len);
+    var fds: [constants.net_addresses_max]i32 = undefined;
+    var pending: u32 = 0;
+    // IPv4 first: a peer that completes at once on both families (a forwarder) is taken on the
+    // first one started, and a forwarder can accept on `::1` and then say nothing.
+    for ([2]bool{ true, false }) |want_ip4| {
+        for (addresses[0..count]) |address| {
+            if ((address == .ip4) != want_ip4) continue;
+            switch (connect_start(memory, address, port)) {
+                .done => |fd| {
+                    close_all(fds[0..pending]);
+                    return fd;
+                },
+                .pending => |fd| {
+                    fds[pending] = fd;
+                    pending += 1;
+                },
+                .failed => {},
+            }
+        }
+    }
+    if (pending > 0) {
+        if (connect_wait(memory, fds[0..pending], idle_ms, deadline_ms)) |fd| return fd else |_| {}
+    }
+    if (memory.state.errno_last == @backingInt(linux.E.TIMEDOUT)) return error.TimedOut;
+    return error.ConnectFailed;
 }
 
 fn fill_address(storage: *linux.sockaddr.storage, address: Address, port: u16) linux.socklen_t {
@@ -445,27 +548,6 @@ fn fill_address(storage: *linux.sockaddr.storage, address: Address, port: u16) l
             return @sizeOf(linux.sockaddr.in6);
         },
     }
-}
-
-/// Connects to the first address of `host` that answers.
-fn connect_host(
-    memory: *Memory,
-    host: []const u8,
-    port: u16,
-    idle_ms: u32,
-    deadline_ms: u64,
-) net.Error!i32 {
-    assert(host.len > 0);
-    assert(port != 0);
-    var addresses: [constants.net_addresses_max]Address = undefined;
-    const count = try resolve(memory, host, &addresses);
-    assert(count >= 1);
-    assert(count <= addresses.len);
-    for (addresses[0..count]) |address| {
-        if (connect_one(memory, address, port, idle_ms, deadline_ms)) |fd| return fd else |_| {}
-    }
-    if (memory.state.errno_last == @backingInt(linux.E.TIMEDOUT)) return error.TimedOut;
-    return error.ConnectFailed;
 }
 
 // ---- The proxy -----------------------------------------------------------------------------
@@ -536,7 +618,7 @@ fn socket_error(socket: *const Socket) net.Error {
     assert(@backingInt(socket.failure) <= @backingInt(Failure.io));
     assert(socket.idle_ms > 0);
     return switch (socket.failure) {
-        .timed_out => error.TimedOut,
+        .timed_out => error.Stalled,
         .eof => error.Truncated,
         .io, .none => error.IoFailed,
     };
@@ -573,7 +655,7 @@ fn tls_error(err: tls.Client.InitError, socket: *const Socket) net.Error {
     assert(socket.idle_ms > 0);
     return switch (err) {
         error.ReadFailed, error.WriteFailed => switch (socket.failure) {
-            .timed_out => error.TimedOut,
+            .timed_out => error.Stalled,
             .eof => error.TlsFailed,
             .io, .none => error.ConnectFailed,
         },
@@ -1036,22 +1118,114 @@ test "a call that carried a credential leaves no byte in the socket buffers, on 
     request.bearer = "secret-token-marker";
     real = test_real();
     @memset(std.mem.asBytes(&test_memory.buffers), 0xAA);
-    try testing.expectError(error.TimedOut, interface(&real).get(&request, &head, sink.sink()));
+    try testing.expectError(error.Stalled, interface(&real).get(&request, &head, sink.sink()));
     try testing.expect(buffers_are_zero(&test_memory.buffers));
 }
 
 test "a peer that never answers is a timeout, idle or total, and quickly" {
-    // Goal: both deadlines end a stalled call within a fraction of the default, with TimedOut.
+    // Goal: both deadlines end a stalled call within a fraction of the default, with Stalled.
     var loopback: Loopback = undefined;
     try loopback.start(.stall);
     defer loopback.stop();
     var storage: [4096]u8 = undefined;
     const started = monotonic_ms();
     const idle = probe_request(loopback.server.port, 200, 0);
-    try testing.expectError(error.TimedOut, probe(&loopback, &idle, &storage));
+    try testing.expectError(error.Stalled, probe(&loopback, &idle, &storage));
     const total = probe_request(loopback.server.port, 10_000, 300);
-    try testing.expectError(error.TimedOut, probe(&loopback, &total, &storage));
+    try testing.expectError(error.Stalled, probe(&loopback, &total, &storage));
     try testing.expect(monotonic_ms() - started < 3000);
+}
+
+/// A listening loopback socket on a free port; with `full` its accept queue is filled, so a further
+/// connect gets no answer, which is what a forwarder that takes a SYN and stalls looks like.
+fn listen_loopback(full: bool, held: *[3]i32) !struct { fd: i32, port: u16 } {
+    held.* = .{ -1, -1, -1 };
+    const kind = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
+    const made = linux.socket(linux.AF.INET, kind, 0);
+    try testing.expect(linux.errno(made) == .SUCCESS);
+    const fd: i32 = @intCast(made);
+    var local: linux.sockaddr.in = .{ .port = 0, .addr = @bitCast([4]u8{ 127, 0, 0, 1 }) };
+    const bound = linux.bind(fd, @ptrCast(&local), @sizeOf(@TypeOf(local)));
+    try testing.expect(linux.errno(bound) == .SUCCESS);
+    try testing.expect(linux.errno(linux.listen(fd, 0)) == .SUCCESS);
+    var size: linux.socklen_t = @sizeOf(@TypeOf(local));
+    try testing.expect(linux.errno(linux.getsockname(fd, @ptrCast(&local), &size)) == .SUCCESS);
+    const port = std.mem.bigToNative(u16, local.port);
+    if (full) {
+        // Backlog 0 holds one connection; the next ones wait for a SYN retransmission.
+        for (held) |*slot| {
+            switch (connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, port)) {
+                .done, .pending => |fd_held| {
+                    try testing.expect(fd_held >= 0);
+                    slot.* = fd_held;
+                },
+                .failed => {},
+            }
+        }
+    }
+    return .{ .fd = fd, .port = port };
+}
+
+test "a connect races the addresses: one that stalls does not delay the one that answers" {
+    // Goal: the first address to complete wins, at once, though an earlier one never answers; and
+    // when none answers the wait is the idle timeout once, as TIMEDOUT, not once per address.
+    var stalled_held: [3]i32 = undefined;
+    const stalled = try listen_loopback(true, &stalled_held);
+    defer close_held(stalled.fd, &stalled_held);
+    var open_held: [3]i32 = undefined;
+    const open = try listen_loopback(false, &open_held);
+    defer close_held(open.fd, &open_held);
+    var fds: [2]i32 = undefined;
+    const first = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, stalled.port);
+    const second = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, open.port);
+    try testing.expect(first == .pending);
+    fds[0] = first.pending;
+    fds[1] = switch (second) {
+        .pending, .done => |fd| fd,
+        .failed => return error.TestUnexpectedResult,
+    };
+    const started = monotonic_ms();
+    const won = try connect_wait(&test_memory, &fds, 5000, 0);
+    defer _ = linux.close(won);
+    try testing.expectEqual(@as(i32, 0), connect_result(won));
+    try testing.expect(monotonic_ms() - started < 1000);
+    // Only the stalled one: the idle timeout ends it, as TIMEDOUT.
+    const start = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, stalled.port);
+    var alone = [1]i32{start.pending};
+    const waited = monotonic_ms();
+    try testing.expectError(error.Connect, connect_wait(&test_memory, &alone, 300, 0));
+    try testing.expectEqual(@as(u16, @backingInt(linux.E.TIMEDOUT)), test_memory.state.errno_last);
+    try testing.expect(monotonic_ms() - waited < 2000);
+}
+
+test "a refused address does not make the one that moves into its slot a winner" {
+    // Goal: when an address is refused, the descriptor that takes its slot is judged by its own
+    // poll result. Method: a refused address first, then one that never answers; the call must
+    // end as TIMEDOUT, not return the unconnected descriptor.
+    var stalled_held: [3]i32 = undefined;
+    const stalled = try listen_loopback(true, &stalled_held);
+    defer close_held(stalled.fd, &stalled_held);
+    var closed_held: [3]i32 = undefined;
+    const closed = try listen_loopback(false, &closed_held);
+    _ = linux.close(closed.fd); // the port now refuses
+    const refused = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, closed.port);
+    const waiting = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, stalled.port);
+    try testing.expect(waiting == .pending);
+    var fds: [2]i32 = undefined;
+    switch (refused) {
+        .pending => |fd| fds[0] = fd,
+        .done, .failed => return error.SkipZigTest, // the kernel decided at once: no race to test
+    }
+    fds[1] = waiting.pending;
+    try testing.expectError(error.Connect, connect_wait(&test_memory, &fds, 300, 0));
+    try testing.expectEqual(@as(u16, @backingInt(linux.E.TIMEDOUT)), test_memory.state.errno_last);
+}
+
+fn close_held(listener: i32, held: *const [3]i32) void {
+    for (held) |fd| if (fd >= 0) {
+        _ = linux.close(fd);
+    };
+    _ = linux.close(listener);
 }
 
 test "a closed port is a refused connection, with the errno" {
