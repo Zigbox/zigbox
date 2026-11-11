@@ -9,10 +9,11 @@ const testing = std.testing;
 const script = ".github/ci-changes.sh";
 const max_paths = 8;
 
-/// Every output the script writes: `code`, the ten demos and the packages demo.
+/// Every output the script writes: `code`, the eleven demos and the packages demo.
 const all_outputs = [_][]const u8{
     "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-    "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8_packages",
+    "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
+    "demo_m8_packages",
 };
 
 const Row = struct {
@@ -48,8 +49,13 @@ const rows = [_]Row{
         .paths = &.{"src/cli.zig"},
         .true_outputs = &.{
             "code",    "demo_m0", "demo_m1",  "demo_m2", "demo_m3", "demo_m4",
-            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8",
+            "demo_m5", "demo_m6", "demo_m6b", "demo_m7", "demo_m8", "demo_m8b",
         },
+    },
+    // The M8b demo: its harness files select demo_m8b alone.
+    .{
+        .paths = &.{"src/testing/vm/checks_m8b.zig"},
+        .true_outputs = &.{ "code", "demo_m8b" },
     },
     // The M8 demo: its harness files and its source area select demo_m8 and not the packages.
     .{
