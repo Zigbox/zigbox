@@ -792,9 +792,10 @@ pub fn check_prune_one_removed(arena: Allocator, e: Evidence) Error!void {
     if (doc.orphans != 1) return error.PruneWrong;
 }
 
-/// A refused build whose base image is unsigned: `E0905`, the base named, no errno.
-pub fn check_base_refused(e: Evidence, base_name: []const u8) Error!void {
-    if (e.rc == 0 or std.mem.indexOf(u8, e.err, "errno") != null) return error.RefusalWrong;
+/// A refused build whose base image is unsigned: exit 1 (a `build` refusal is the standard scope's
+/// user code; 125 is `run`'s), `E0905`, the step and the base named, no errno.
+pub fn check_base_refused(e: Evidence, step: []const u8, base_name: []const u8) Error!void {
+    if (e.rc != 1 or std.mem.indexOf(u8, e.err, "errno") != null) return error.RefusalWrong;
     if (!std.mem.startsWith(u8, e.err, "error[ZBX-E0905]: ")) return error.RefusalWrong;
     var buffer: [128]u8 = undefined;
     // The buffer holds any base name the demo uses.
@@ -803,9 +804,16 @@ pub fn check_base_refused(e: Evidence, base_name: []const u8) Error!void {
         "nothing has signed {s}@",
         .{base_name},
     ) catch unreachable; // the buffer fits any demo base name
+    var step_buffer: [128]u8 = undefined;
+    const named = std.fmt.bufPrint(
+        &step_buffer,
+        "the base of step '{s}'",
+        .{step},
+    ) catch unreachable; // the buffer fits any demo step name
     var flat_buffer: [8192]u8 = undefined;
     const flat = flatten(&flat_buffer, e.err);
     if (std.mem.indexOf(u8, flat, want) == null) return error.RefusalWrong;
+    if (std.mem.indexOf(u8, flat, named) == null) return error.RefusalWrong;
 }
 
 /// A malformed policy: `E0904`, with the line and the column.
@@ -913,7 +921,7 @@ pub fn check_a3(arena: Allocator, output: []const u8) Error!void {
 /// `E0904` with its line and column.
 pub fn check_a4(arena: Allocator, output: []const u8) Error!void {
     _ = arena;
-    try check_base_refused(try evidence(output, "bld"), "alpine");
+    try check_base_refused(try evidence(output, "bld"), "probe", "alpine");
     try check_malformed_policy(try evidence(output, "run5"));
 }
 
@@ -936,7 +944,7 @@ pub fn check_stalled_push(
 ) Error!void {
     if (stalled.rc == 0) return error.PushWrong;
     if (std.mem.indexOf(u8, stalled.err, "ZBX-E0503") == null) return error.RefusalWrong;
-    if (std.mem.indexOf(u8, stalled.err, "sent nothing for") == null) return error.RefusalWrong;
+    if (std.mem.indexOf(u8, stalled.err, "nothing moved for") == null) return error.RefusalWrong;
     try push_pair(arena, retry, second, false);
 }
 
@@ -1131,7 +1139,7 @@ test "a stalled first push is retried once, and only for the E0503 stall" {
     const end = "\",\"schema\":\"zbx.push/1\"}\n";
     const there: Evidence = .{ .rc = 0, .out = head ++ "exists" ++ tail ++ m ++ end, .err = "" };
     const err = "{\"code\":\"ZBX-E0503\",\"causes\":[\"localhost:5000 connected, " ++
-        "then sent nothing for 30 seconds\"]}";
+        "then the request stopped: nothing moved for 30 seconds\"]}";
     const stalled: Evidence = .{ .rc = 2, .out = "", .err = err };
     try check_stalled_push(arena, stalled, there, there);
     const other: Evidence = .{ .rc = 2, .out = "", .err = "{\"code\":\"ZBX-E0001\"}" };
@@ -1150,15 +1158,19 @@ test "a signature bound to another result names its signer" {
     try std.testing.expectError(error.RefusalWrong, check_bound_refusal(unsigned, 125, "ci"));
 }
 
-test "an unsigned base names its image; a malformed policy names its line" {
+test "an unsigned base names its step and its image; a malformed policy names its line" {
     const text = "error[ZBX-E0905]: refused\n" ++
-        "  cause  /p requires a signature, and nothing has signed\n" ++
+        "  cause  the base of step 'probe': /p requires a signature, and nothing has signed\n" ++
         "         alpine@sha256:1\n";
-    const refused: Evidence = .{ .rc = 125, .out = "", .err = text };
-    try check_base_refused(refused, "alpine");
-    try std.testing.expectError(error.RefusalWrong, check_base_refused(refused, "other"));
+    const refused: Evidence = .{ .rc = 1, .out = "", .err = text };
+    try check_base_refused(refused, "probe", "alpine");
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(refused, "probe", "other"));
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(refused, "other", "alpine"));
     const built: Evidence = .{ .rc = 0, .out = "", .err = text };
-    try std.testing.expectError(error.RefusalWrong, check_base_refused(built, "alpine"));
+    try std.testing.expectError(error.RefusalWrong, check_base_refused(built, "probe", "alpine"));
+    const run_code: Evidence = .{ .rc = 125, .out = "", .err = text };
+    const wrong = error.RefusalWrong;
+    try std.testing.expectError(wrong, check_base_refused(run_code, "probe", "alpine"));
     const bad: Evidence = .{
         .rc = 125,
         .out = "",

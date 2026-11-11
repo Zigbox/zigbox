@@ -472,7 +472,9 @@ fn connect_wait(memory: *Memory, fds: []i32, idle_ms: u32, deadline_ms: u64) err
             memory.state.errno_last = @intCast(pending);
             _ = linux.close(fds[index]);
             live -= 1;
+            // The descriptor moved into this slot brings its own poll result with it.
             fds[index] = fds[live];
+            entries[index] = entries[live];
         }
         if (live == 0) return error.Connect;
     }
@@ -1136,7 +1138,8 @@ test "a peer that never answers is a timeout, idle or total, and quickly" {
 
 /// A listening loopback socket on a free port; with `full` its accept queue is filled, so a further
 /// connect gets no answer, which is what a forwarder that takes a SYN and stalls looks like.
-fn listen_loopback(full: bool) !struct { fd: i32, port: u16 } {
+fn listen_loopback(full: bool, held: *[3]i32) !struct { fd: i32, port: u16 } {
+    held.* = .{ -1, -1, -1 };
     const kind = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
     const made = linux.socket(linux.AF.INET, kind, 0);
     try testing.expect(linux.errno(made) == .SUCCESS);
@@ -1150,9 +1153,12 @@ fn listen_loopback(full: bool) !struct { fd: i32, port: u16 } {
     const port = std.mem.bigToNative(u16, local.port);
     if (full) {
         // Backlog 0 holds one connection; the next ones wait for a SYN retransmission.
-        for (0..3) |_| {
+        for (held) |*slot| {
             switch (connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, port)) {
-                .done, .pending => |held| try testing.expect(held >= 0),
+                .done, .pending => |fd_held| {
+                    try testing.expect(fd_held >= 0);
+                    slot.* = fd_held;
+                },
                 .failed => {},
             }
         }
@@ -1163,10 +1169,12 @@ fn listen_loopback(full: bool) !struct { fd: i32, port: u16 } {
 test "a connect races the addresses: one that stalls does not delay the one that answers" {
     // Goal: the first address to complete wins, at once, though an earlier one never answers; and
     // when none answers the wait is the idle timeout once, as TIMEDOUT, not once per address.
-    const stalled = try listen_loopback(true);
-    defer _ = linux.close(stalled.fd);
-    const open = try listen_loopback(false);
-    defer _ = linux.close(open.fd);
+    var stalled_held: [3]i32 = undefined;
+    const stalled = try listen_loopback(true, &stalled_held);
+    defer close_held(stalled.fd, &stalled_held);
+    var open_held: [3]i32 = undefined;
+    const open = try listen_loopback(false, &open_held);
+    defer close_held(open.fd, &open_held);
     var fds: [2]i32 = undefined;
     const first = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, stalled.port);
     const second = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, open.port);
@@ -1188,6 +1196,36 @@ test "a connect races the addresses: one that stalls does not delay the one that
     try testing.expectError(error.Connect, connect_wait(&test_memory, &alone, 300, 0));
     try testing.expectEqual(@as(u16, @backingInt(linux.E.TIMEDOUT)), test_memory.state.errno_last);
     try testing.expect(monotonic_ms() - waited < 2000);
+}
+
+test "a refused address does not make the one that moves into its slot a winner" {
+    // Goal: when an address is refused, the descriptor that takes its slot is judged by its own
+    // poll result. Method: a refused address first, then one that never answers; the call must
+    // end as TIMEDOUT, not return the unconnected descriptor.
+    var stalled_held: [3]i32 = undefined;
+    const stalled = try listen_loopback(true, &stalled_held);
+    defer close_held(stalled.fd, &stalled_held);
+    var closed_held: [3]i32 = undefined;
+    const closed = try listen_loopback(false, &closed_held);
+    _ = linux.close(closed.fd); // the port now refuses
+    const refused = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, closed.port);
+    const waiting = connect_start(&test_memory, .{ .ip4 = .{ 127, 0, 0, 1 } }, stalled.port);
+    try testing.expect(waiting == .pending);
+    var fds: [2]i32 = undefined;
+    switch (refused) {
+        .pending => |fd| fds[0] = fd,
+        .done, .failed => return error.SkipZigTest, // the kernel decided at once: no race to test
+    }
+    fds[1] = waiting.pending;
+    try testing.expectError(error.Connect, connect_wait(&test_memory, &fds, 300, 0));
+    try testing.expectEqual(@as(u16, @backingInt(linux.E.TIMEDOUT)), test_memory.state.errno_last);
+}
+
+fn close_held(listener: i32, held: *const [3]i32) void {
+    for (held) |fd| if (fd >= 0) {
+        _ = linux.close(fd);
+    };
+    _ = linux.close(listener);
 }
 
 test "a closed port is a refused connection, with the errno" {

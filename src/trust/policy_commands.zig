@@ -40,6 +40,9 @@ const Judged = enum {
     met,
     /// No trusted signature covers the subject: `run` says ZBX-E0905.
     refused,
+    /// A trusted key signed it, but for another result than this run's: still ZBX-E0905, and
+    /// signing the tree again does not help.
+    refused_binding,
     /// A trusted signature covers it, but `require_provenance` finds no signed provenance:
     /// `run` says ZBX-E0906.
     refused_provenance,
@@ -74,7 +77,7 @@ pub fn run(
         var report: verdict.Report = undefined;
         report.clear();
         const judged = judge_one(loaded, record, work, subject, &report);
-        if (judged == .refused or judged == .refused_provenance) {
+        if (judged != .asks_nothing and judged != .met) {
             if (allowed) first_refusal = judged;
             allowed = false;
         }
@@ -100,9 +103,20 @@ fn judge_one(
         .derived = asked.derived,
     };
     // The gate's own rule: a signature is not enough when the policy asks for provenance too.
-    if (!verdict.judge(&work.envelope, &loaded.policy, record, have, report)) return .refused;
+    if (!verdict.judge(&work.envelope, &loaded.policy, record, have, report)) {
+        return unsigned_kind(report);
+    }
     if (!verdict.provenance_met(&loaded.policy, report)) return .refused_provenance;
     return .met;
+}
+
+/// Why no signature counts: a trusted key signed another result (`run` still says E0905, but
+/// signing the tree again cannot help), or nothing trusted covers it.
+fn unsigned_kind(report: *const verdict.Report) Judged {
+    for (report.lines[0..report.count]) |line| {
+        if (line.reason == .other_binding) return .refused_binding;
+    }
+    return .refused;
 }
 
 const Printer = struct {
@@ -223,12 +237,17 @@ fn write_file_json(
     switch (judged) {
         .asks_nothing => writer.writeAll("null") catch unreachable, // Fits.
         .met => writer.writeAll("true") catch unreachable, // Fits.
-        .refused, .refused_provenance => writer.writeAll("false") catch unreachable, // Fits.
+        .refused, .refused_binding, .refused_provenance => {
+            writer.writeAll("false") catch unreachable; // Fits.
+        },
     }
     // Why not, when not: the code `run` would give, and the rule behind it.
     switch (judged) {
         .refused => writer.writeAll(",\"code\":\"ZBX-E0905\",\"refusal\":\"unsigned\"") catch
             unreachable, // Fits.
+        .refused_binding => writer.writeAll(
+            ",\"code\":\"ZBX-E0905\",\"refusal\":\"other_binding\"",
+        ) catch unreachable, // Fits.
         .refused_provenance => writer.writeAll(
             ",\"code\":\"ZBX-E0906\",\"refusal\":\"provenance\"",
         ) catch unreachable, // Fits.
@@ -282,6 +301,8 @@ fn write_file_text(
         .asks_nothing => "asks nothing of a run",
         .met => "met",
         .refused => "not met: no trusted signature covers it (ZBX-E0905)",
+        .refused_binding => "not met: signed by a trusted key, but for another result " ++
+            "(ZBX-E0905)",
         .refused_provenance => "not met: signed, but no trusted signed provenance covers it " ++
             "(ZBX-E0906)",
     };
@@ -326,4 +347,16 @@ comptime {
         constants.key_public_text_bytes + 32) +
         constants.signatures_per_tree_max * (constants.key_public_text_bytes + 96) + 512;
     assert(file_bytes < constants.output_bytes_max);
+}
+
+test "a signature bound to another result is refused_binding, not unsigned" {
+    // Goal: the preview's `refusal` says what is wrong. Method: a report with one line each.
+    var report: verdict.Report = undefined;
+    report.clear();
+    try std.testing.expectEqual(Judged.refused, unsigned_kind(&report));
+    report.count = 1;
+    report.lines[0] = .{ .public = @splat(0), .reason = .untrusted_key, .provenance = false };
+    try std.testing.expectEqual(Judged.refused, unsigned_kind(&report));
+    report.lines[0].reason = .other_binding;
+    try std.testing.expectEqual(Judged.refused_binding, unsigned_kind(&report));
 }
