@@ -64,7 +64,9 @@ release file. `zbx run` never pulls by itself: an image you have not pulled is r
 [E0522](https://zigbox.org/errors/box/E0522), whose fix is the `zbx pull` to run.
 
 <!-- verify on a Mac before 0.5.1: docs/demos/m4b.md says "the first run boots the machine and
-pulls the image"; on Linux 0.4.0, run without a pull is E0522. Check which the Mac does. --> Run it again: it takes about a second, because the machine and the image
+pulls the image"; on Linux 0.4.0, run without a pull is E0522. Check which the Mac does. -->
+
+Run it again: it takes about a second, because the machine and the image
 are warm.
 
 ## 4. Keep data, publish a port
