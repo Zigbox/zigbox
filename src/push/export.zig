@@ -5,8 +5,9 @@
 //!
 //! The directory must not exist, or be an empty directory: export never mixes into what is
 //! there (ZBX-E0557). The layout is written to a sibling directory first, synced, and renamed
-//! onto the name, so a failed or killed export leaves nothing under it, and a retry works. Every
-//! blob is hashed as it is copied: a cached blob that no longer matches its digest is dropped
+//! onto the name, so a failed or killed export leaves nothing under it, and a retry works. A
+//! killed run's work directory has a random name and stays; it is a sibling, never inside `dir`.
+//! Every blob is hashed as it is copied: a cached blob that no longer matches its digest is dropped
 //! (ZBX-E0550) rather than exported under a name it does not match.
 
 const std = @import("std");
@@ -100,18 +101,36 @@ pub fn check_target(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
     }
 }
 
-/// The sibling the layout is built in: `<dir>.zbx-tmp-` and 8 digits of the manifest's.
-fn work_path(dir: []const u8, made: *const pack.Packed, path: *PathBuf) Error!void {
-    const hex = made.manifest.hex();
-    path.set(&.{ dir, ".zbx-tmp-", hex[0..8] }) catch return error.Stopped;
+/// `dir` without trailing slashes (`out/` is `out`), so the work directory is a sibling of it and
+/// never inside it. A path of slashes only stays one slash.
+fn trimmed(dir: []const u8) []const u8 {
+    assert(dir.len > 0);
+    var end = dir.len;
+    while (end > 1 and dir[end - 1] == '/') end -= 1;
+    assert(end >= 1);
+    return dir[0..end];
+}
+
+/// The sibling the layout is built in: `<dir>.zbx-tmp-` and 8 hex digits of fresh randomness. The
+/// name is not guessable, and `make_directories` creates it exclusively, so in a directory other
+/// users can write (`/tmp`) nobody can plant it first.
+fn work_path(store: *const Store, dir: []const u8, path: *PathBuf) Error!void {
+    var random: [4]u8 = undefined;
+    // Without randomness the name is fixed, and the exclusive mkdir still refuses a planted one.
+    store.host.random_bytes(&random) catch @memset(&random, 0);
+    const hex = std.fmt.bytesToHex(random, .lower);
+    path.set(&.{ trimmed(dir), ".zbx-tmp-", &hex }) catch return error.Stopped;
 }
 
 fn make_directories(fs: Fs, dir: []const u8, failure: *Failure) Error!void {
     const parts = [_][]const u8{ "", "/blobs", "/blobs/sha256" };
-    for (parts) |part| {
+    for (parts, 0..) |part, at| {
         var path: PathBuf = undefined;
         path.set(&.{ dir, part }) catch return stopped(failure, .write, 0);
-        fs.make_directory(path.text(), true) catch |err| return io_stopped(fs, failure, err);
+        // The work directory itself must be new (exclusive): an existing one, or a symlink, is
+        // somebody else's and is never built in.
+        const exist_ok = at != 0;
+        fs.make_directory(path.text(), exist_ok) catch |err| return io_stopped(fs, failure, err);
     }
 }
 
@@ -278,15 +297,17 @@ pub fn export_layout(
     assert(dir.len > 0);
     assert(buffer.len >= 1024);
     const fs = store.fs;
-    try check_target(fs, dir, failure);
+    const target = trimmed(dir);
+    try check_target(fs, target, failure);
     var work: PathBuf = undefined;
-    work_path(dir, made, &work) catch return stopped(failure, .write, 0);
-    discard(fs, work.text(), made); // A killed run's leftovers.
+    work_path(store, target, &work) catch return stopped(failure, .write, 0);
+    // No `discard` before the build: the name is new, and a discard through a name another user
+    // planted would delete their files for them.
     build(store, made, work.text(), buffer, failure) catch |err| {
         discard(fs, work.text(), made);
         return err;
     };
-    install(fs, work.text(), dir, failure) catch |err| {
+    install(fs, work.text(), target, failure) catch |err| {
         discard(fs, work.text(), made);
         return err;
     };

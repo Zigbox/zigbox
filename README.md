@@ -69,7 +69,7 @@ M8 has three parts: trust (keys, signatures, provenance, policy and verify), pac
 Packages are built by `zig build packages` (runbook: [docs/releases/packaging.md](docs/releases/packaging.md)). Once a release is published at the project's package host, the commands are, for apt:
 
 ```sh
-curl -fsSL https://zigbox.org/apt/zigbox.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
+curl -fsSL https://zigbox.org/zigbox-archive-keyring.gpg | sudo tee /usr/share/keyrings/zigbox.gpg >/dev/null
 echo "deb [signed-by=/usr/share/keyrings/zigbox.gpg] https://zigbox.org/apt stable main" | sudo tee /etc/apt/sources.list.d/zigbox.list
 sudo apt update && sudo apt install zigbox
 ```
@@ -82,7 +82,7 @@ name=Zigbox
 baseurl=https://zigbox.org/rpm/$basearch
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://zigbox.org/zigbox.asc
+gpgkey=https://zigbox.org/zigbox-archive-keyring.asc
 ```
 
 ```sh

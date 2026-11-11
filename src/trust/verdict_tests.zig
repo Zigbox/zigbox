@@ -171,6 +171,21 @@ test "a result-bound line for a pulled image with no derived result says why" {
     try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
 }
 
+test "a manifest-bound line judged for a bare tree is another binding, not a crash" {
+    // Goal: `zbx run b3:<tree>`, `policy check <tree>` and exec on a 0.3.1 container judge a
+    // subject with no binding. Method: a manifest-bound line against `.none`, with and without
+    // a derived result; it must refuse as `other_binding` (E0905), never assert.
+    const tree = digest_of(7);
+    trust(&.{1});
+    record_of(&.{sign(0, statement.Statement.for_manifest(tree, "x", digest_of(4), 5), 1)});
+    try testing.expect(!run(.{ .tree = tree, .binding = .none }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+    try testing.expect(!run(.{ .tree = tree, .binding = .none, .derived = digest_of(2) }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+    try testing.expect(!run(.{ .tree = tree, .binding = .none, .derives = false }));
+    try testing.expectEqual(verdict.Reason.other_binding, report.lines[0].reason);
+}
+
 test "one counting line is enough, and a policy that asks for nothing is met" {
     // Goal: the rule is "at least one", and an empty rule set passes. Method: a record of a bad
     // line and a good one; then a policy with no rule against an empty record.
