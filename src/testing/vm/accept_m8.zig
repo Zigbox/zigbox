@@ -183,7 +183,10 @@ const b1 =
     \\done
     \\cd /home/demo/hello
     \\x push1 m --output json push "$d" localhost:5000/m8/hello:demo
-    \\[ "$xr" = 0 ] || { x reglog m logs m8reg; x sockets ss -tan; }
+    \\[ "$xr" = 0 ] || {
+    \\  x reglog m logs m8reg
+    \\  x push1r m --output json push "$d" localhost:5000/m8/hello:demo
+    \\}
     \\x push2 m --output json push "$d" localhost:5000/m8/hello:demo
 ;
 

@@ -835,6 +835,10 @@ fn parse_push(arena: Allocator, e: Evidence) Error!Push {
 /// Two pushes of the same result: the same manifest digest and destination, the first sent
 /// something, and the second found every blob already there.
 pub fn check_push_pair(arena: Allocator, first: Evidence, second: Evidence) Error!void {
+    return push_pair(arena, first, second, true);
+}
+
+fn push_pair(arena: Allocator, first: Evidence, second: Evidence, need_upload: bool) Error!void {
     const one = try parse_push(arena, first);
     const two = try parse_push(arena, second);
     if (!std.mem.eql(u8, one.manifest, two.manifest)) return error.PushWrong;
@@ -843,7 +847,7 @@ pub fn check_push_pair(arena: Allocator, first: Evidence, second: Evidence) Erro
     for (one.blobs) |blob| {
         if (std.mem.eql(u8, blob.outcome, "uploaded")) sent += 1;
     }
-    if (sent == 0) return error.PushWrong;
+    if (need_upload and sent == 0) return error.PushWrong;
     for (two.blobs) |blob| {
         if (!std.mem.eql(u8, blob.outcome, "exists")) return error.PushWrong;
     }
@@ -915,7 +919,25 @@ pub fn check_a4(arena: Allocator, output: []const u8) Error!void {
 
 /// Script 5: the registry takes the push twice; the second finds every blob.
 pub fn check_b1(arena: Allocator, output: []const u8) Error!void {
-    try check_push_pair(arena, try evidence(output, "push1"), try evidence(output, "push2"));
+    const first = try evidence(output, "push1");
+    const second = try evidence(output, "push2");
+    if (first.rc == 0) return check_push_pair(arena, first, second);
+    return check_stalled_push(arena, first, try evidence(output, "push1r"), second);
+}
+
+/// The VM's port forwarder can hold the tail of an upload until the client gives up: the first
+/// push is then the one `E0503` refusal (the host answered and went quiet) and the push is run
+/// again; the stalled one had already stored what it sent, so the retry may find every blob.
+pub fn check_stalled_push(
+    arena: Allocator,
+    stalled: Evidence,
+    retry: Evidence,
+    second: Evidence,
+) Error!void {
+    if (stalled.rc == 0) return error.PushWrong;
+    if (std.mem.indexOf(u8, stalled.err, "ZBX-E0503") == null) return error.RefusalWrong;
+    if (std.mem.indexOf(u8, stalled.err, "sent nothing for") == null) return error.RefusalWrong;
+    try push_pair(arena, retry, second, false);
 }
 
 /// Script 6: a second result with the same tree and another entrypoint is pushed, and the
@@ -1097,6 +1119,24 @@ test "a push pair has one manifest, and the second finds every blob" {
     try std.testing.expectError(error.PushWrong, check_push_pair(arena, up, moved));
     const failed: Evidence = .{ .rc = 1, .out = there.out, .err = "" };
     try std.testing.expectError(error.RefusalWrong, check_push_pair(arena, up, failed));
+}
+
+test "a stalled first push is retried once, and only for the E0503 stall" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const m = "sha256:" ++ rep("1", 64);
+    const head = "{\"blobs\":[{\"digest\":\"sha256:" ++ rep("2", 64) ++ "\",\"outcome\":\"";
+    const tail = "\",\"size\":5}],\"destination\":\"localhost:5000/m8/hello:demo\",\"manifest\":\"";
+    const end = "\",\"schema\":\"zbx.push/1\"}\n";
+    const there: Evidence = .{ .rc = 0, .out = head ++ "exists" ++ tail ++ m ++ end, .err = "" };
+    const err = "{\"code\":\"ZBX-E0503\",\"causes\":[\"localhost:5000 connected, " ++
+        "then sent nothing for 30 seconds\"]}";
+    const stalled: Evidence = .{ .rc = 2, .out = "", .err = err };
+    try check_stalled_push(arena, stalled, there, there);
+    const other: Evidence = .{ .rc = 2, .out = "", .err = "{\"code\":\"ZBX-E0001\"}" };
+    try std.testing.expectError(error.RefusalWrong, check_stalled_push(arena, other, there, there));
+    try std.testing.expectError(error.PushWrong, check_stalled_push(arena, there, there, there));
 }
 
 test "a signature bound to another result names its signer" {

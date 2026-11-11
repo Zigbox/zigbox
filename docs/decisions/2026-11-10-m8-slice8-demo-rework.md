@@ -11,7 +11,15 @@ connection is made is a new `registry.net.Stalled` (E0503 says the host answered
 only the connect phase gives `TimedOut`. Run 245 still stalled once ("connected, then sent nothing
 for 30 seconds"): a forwarder can complete the connect on both families at once and say nothing on
 `::1`, so a race alone does not help. The IPv4 addresses are now started first, and a peer that
-completes at once is taken on the first one started. No new code and no changed bound: E0503 keeps its number,
+completes at once is taken on the first one started. Run 249's registry log shows what the stall is: the second blob's PUT reached `registry:2` at
+once, and its 201 came 30.04 s later, when the client gave up. The client had written and flushed
+the whole body (`exchange` in `src/host_real_net.zig`); pasta, which publishes the guest's port,
+held the tail of the upload until the connection closed. The product is not at fault, and half
+closing the socket would make Go's server treat the client as gone, so the product is unchanged
+beyond the connect fix above. The demo's first push is retried once when, and only when, it is
+that E0503 stall (`check_stalled_push`); the retry may find every blob, since the stalled push
+had stored them. The report says so, and the demo's recorded output shows the stall when it
+happens. No new code and no changed bound: E0503 keeps its number,
 and the idle timeout is unchanged.
 
 ## `policy check` for a missing provenance (E0906)
