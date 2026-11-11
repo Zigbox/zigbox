@@ -28,12 +28,10 @@ pub fn check_example_page(streams: Streams, status: u8) Error!void {
 /// listing, `checks_m5.check_listener`, does name it). The peer address column ("0.0.0.0:*")
 /// never ends in ":PORT ".
 pub fn check_listener_listed(text: []const u8, port: u16) Error!void {
-    var needle: [16]u8 = undefined;
-    const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
-        if (contains(line, local)) return;
+        if (checks_m5.local_port_is(line, port)) return;
     }
     return error.ListenerWrong;
 }
@@ -41,12 +39,10 @@ pub fn check_listener_listed(text: []const u8, port: u16) Error!void {
 /// The same with `-e`, as the demo user: the listener on `port` is owned by uid 1000. The owner
 /// comes from the socket, so it shows without the process.
 pub fn check_listener_owned(text: []const u8, port: u16) Error!void {
-    var needle: [16]u8 = undefined;
-    const local = std.fmt.bufPrint(&needle, ":{d} ", .{port}) catch return error.ListenerWrong;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "LISTEN")) continue;
-        if (!contains(line, local)) continue;
+        if (!checks_m5.local_port_is(line, port)) continue;
         if (contains(line, " uid:1000 ")) return;
     }
     return error.ListenerWrong;
@@ -133,6 +129,10 @@ test "the listener ss shows the demo user is on the port, and owns it" {
     try testing.expectError(error.ListenerWrong, check_listener_listed(listed, 808));
     try testing.expectError(error.ListenerWrong, check_listener_listed(listed, 9090));
     try testing.expectError(error.ListenerWrong, check_listener_listed("", 8080));
+    // An inode that spells the port is not a listener on it.
+    const inode = "LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* uid:991 ino:8080 sk:7 <->\n";
+    try testing.expectError(error.ListenerWrong, check_listener_listed(inode, 8080));
+    try testing.expectError(error.ListenerWrong, check_listener_owned(inode, 8080));
     const owned = "LISTEN 0      128          0.0.0.0:8080      0.0.0.0:*    " ++
         "uid:1000 ino:16798 sk:1001 cgroup:/user.slice/user-0.slice/session-2.scope <->\n";
     try check_listener_owned(owned, 8080);
