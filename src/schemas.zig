@@ -311,7 +311,7 @@ const store_ls_schema =
     \\"files":{"type":"integer"},
     \\"bytes":{"type":"integer","description":"the files' lengths, each counted once per name"},
     \\"size_unique":{"type":["integer","null"],
-    \\"description":"bytes of the distinct files, each once however many names it has; null if unreadable"},
+    \\"description":"bytes of the distinct files, each once however many names; null if unreadable"},
     \\"source":{"type":"string"},"parent":{"type":["string","null"]}}}},
     \\"images":{"type":"array","description":"pulled images, with every tag they were pulled as",
     \\"items":{"type":"object","required":["reference","tags","manifest","platform","tree","time"],

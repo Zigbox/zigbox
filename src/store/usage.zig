@@ -204,9 +204,12 @@ pub fn tree_stored(
     digest: Digest,
     failure: *Failure,
 ) Error!u64 {
+    assert(memory.objects.len > 0);
+    assert(memory.tree_buffer.len >= constants.store_tree_bytes_max);
     var objects = sets.DigestMap.init(memory.objects);
     var usage: TreeUsage = undefined;
     try count_tree(store, memory, digest, &usage, &objects, failure);
+    assert(usage.objects <= usage.files);
     return usage.stored_bytes;
 }
 
