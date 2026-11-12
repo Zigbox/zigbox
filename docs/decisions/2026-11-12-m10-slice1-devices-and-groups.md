@@ -1,7 +1,6 @@
 # M10 slice 1: devices and groups
 
-Date: 2026-11-12. Slice: M10 slice 1 (`docs/briefs/M10-gpu.md`). Owner of the decision: the slice
-implementer, within the brief; the items marked "bound" are for the supervisor to confirm.
+*Decided 2026-11-12, by the M10 slice 1 implementer, within `docs/briefs/M10-gpu.md`; the items marked "bound" are for the supervisor to confirm.*
 
 ## Decisions
 
