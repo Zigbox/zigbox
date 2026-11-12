@@ -23,6 +23,7 @@ pub const File = struct {
     content: []const u8,
     mode: u32 = 0o100644,
     uid: u32 = 0,
+    gid: u32 = 0,
     /// The raw `security.capability` xattr, if the file has one.
     capability: ?[]const u8 = null,
     /// False models a file that exists but cannot be opened (EACCES).
@@ -270,6 +271,10 @@ pub const HostSim = struct {
     world: sim_world.World,
     /// The group id of the simulated process; its user id is `uid_value`.
     gid_value: u32,
+    /// The supplementary groups of the simulated process (`device_node` says whether the caller
+    /// is a member of a node's group by them).
+    groups: [constants.sim_groups_max]u32,
+    groups_count: u32,
     environment_variables: []const EnvironmentVariable,
     step_fault_fired: bool,
     /// What the next `wait_any` reaps; null: the simulator has no children and it fails with
@@ -315,6 +320,7 @@ pub const HostSim = struct {
         sim.stderr_len = 0;
         sim.world.init();
         sim.gid_value = 1000;
+        sim.groups_count = 0;
         sim.environment_variables = &.{};
         sim.step_fault_fired = false;
         sim.reaped_next = null;
@@ -366,6 +372,7 @@ pub const HostSim = struct {
         .write = write,
         .uname = uname,
         .stat = stat,
+        .device_node = device_node,
         .read_capability = read_capability,
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
@@ -669,6 +676,25 @@ pub const HostSim = struct {
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         const file = sim.find(path) orelse return sim.natural(error.NotFound);
         return .{ .mode = file.mode, .uid = file.uid };
+    }
+
+    fn device_node(context: *anyopaque, path: [:0]const u8) host.Error!host.DeviceNode {
+        const sim = from_context(context);
+        assert(path.len > 0);
+        try sim.begin_call();
+        if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
+        const file = sim.find(path) orelse return sim.natural(error.NotFound);
+        assert(sim.groups_count <= sim.groups.len);
+        const member = file.gid == sim.gid_value or
+            std.mem.indexOfScalar(u32, sim.groups[0..sim.groups_count], file.gid) != null;
+        const allowed = host.mode_allows_read_write(file.mode, file.uid, sim.uid_value, member);
+        return .{
+            .mode = file.mode,
+            .uid = file.uid,
+            .gid = file.gid,
+            .can_open = file.readable and allowed,
+            .member = member,
+        };
     }
 
     fn read_capability(
@@ -1049,10 +1075,16 @@ pub const HostSim = struct {
         sim.world.no_new_privs();
     }
 
-    fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+    fn set_user(
+        context: *anyopaque,
+        user_id: u32,
+        group_id: u32,
+        keep_groups: bool,
+    ) host.Error!void {
         const sim = from_context(context);
         try sim.begin_call();
-        if (sim.world.set_user(user_id, group_id)) |errno| return sim.model_error(errno);
+        const failed = sim.world.set_user(user_id, group_id, keep_groups);
+        if (failed) |errno| return sim.model_error(errno);
     }
 
     fn install_seccomp(context: *anyopaque, program: []const bpf.Insn) host.Error!void {

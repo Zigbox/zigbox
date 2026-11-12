@@ -11,6 +11,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const volume = @import("../state/volume.zig");
 const mounts_mod = @import("mounts.zig");
+const devices_mod = @import("devices.zig");
 const constants = @import("../constants.zig");
 
 /// A key and a value kept in the run record, for whoever started the container to find it by.
@@ -330,6 +331,10 @@ pub const Spec = struct {
     /// The other mounts (`--tmpfs`, `--bind`, `--secret`), in the order given. Their targets are
     /// apart from each other's and from the state volumes' (`mounts.list_problem`).
     mounts: []const mounts_mod.Mount = &.{},
+    /// Host devices bound into the container's /dev (`--device`, M10), looked at by
+    /// `devices.resolve` before the container is made. A run with any keeps the user's
+    /// supplementary groups (ZBX-W0209).
+    devices: []const devices_mod.Device = &.{},
     /// The directory a `--mount` (kind `mount`, writable) must be in or below, absolute. Empty:
     /// the nearest `zbx.lock` up from the working directory, else the working directory. A
     /// `--mount` source may be relative to the working directory; the run holds it to the

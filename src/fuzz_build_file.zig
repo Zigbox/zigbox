@@ -73,7 +73,11 @@ const inputs = [_][]const u8{ "go.mod", "main.go", "src", "src/a.c", "VERSION", 
 
 const targets = [_][]const u8{ "/", "/usr/local/bin", "/out", "/etc/hello", "/a/b/c" };
 
-const users = [_][]const u8{ "0:0", "1000:1000", "65534:65534", "4294967295:0" };
+const users = [_][]const u8{
+    "0:0", "1000:1000", "65534:65534", "4294967295:0", "app", "app:app", "0", "nobody:65534",
+};
+
+const excludes = [_][]const u8{ ".git", "*.log", "**/*_test.go", "!keep.log", "a/**/b", "[ab]?" };
 
 const label_keys = [_][]const u8{
     "org.opencontainers.image.source", "a", "x/y", "b-c_d", "org.opencontainers.image.version",
@@ -176,13 +180,14 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
     var order: [7]StepField = std.enums.values(StepField)[0..7].*;
     gen.random.shuffle(StepField, &order);
     gen.put(".{");
+    gen_builder_fields(gen, shape, index);
     for (order, 0..) |which, at| {
         gen.field(switch (which) {
             inline else => |tag| "." ++ @tagName(tag),
         });
         switch (which) {
             .name => gen.string(step_names[index]),
-            .base => gen.string(references[gen.random.uintLessThan(usize, references.len)]),
+            .base => gen_step_base(gen, index),
             .inputs => gen.list(&inputs, gen.random.uintAtMost(u32, list_generated_max)),
             .needs => gen_needs(gen, shape, index),
             .env => gen.distinct_list(&env_entries, gen.random.uintAtMost(u32, list_generated_max)),
@@ -198,6 +203,54 @@ fn gen_step(gen: *Gen, shape: *const Shape, index: u32) void {
         gen.comma(@intCast(at), order.len);
     }
     gen.put(" }");
+}
+
+/// An image, or sometimes an earlier step, so a base never closes a round.
+fn gen_step_base(gen: *Gen, index: u32) void {
+    assert(index < step_names.len);
+    if (index > 0 and gen.random.uintLessThan(u8, 4) == 0) {
+        gen.put("\"step:");
+        gen.put(step_names[gen.random.uintLessThan(u32, index)]);
+        gen.put("\"");
+        return;
+    }
+    gen.string(references[gen.random.uintLessThan(usize, references.len)]);
+}
+
+/// The builder's additions, each written or not at random, before a step's other fields. Each is
+/// followed by a comma. The mounts stay within the bound: needs, caches and binds together are
+/// at most `mounts_max - 2`, so a cache or a bind is written only when the needs leave room.
+fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
+    assert(index < shape.steps);
+    assert(shape.needs[index] <= constants.build_step_needs_max);
+    if (gen.random.boolean()) {
+        gen.field(".user");
+        gen.string(users[gen.random.uintLessThan(usize, users.len)]);
+        gen.put(",");
+    }
+    if (gen.random.boolean()) {
+        gen.field(".workdir");
+        gen.string(targets[1 + gen.random.uintLessThan(usize, targets.len - 1)]);
+        gen.put(",");
+    }
+    if (gen.random.boolean()) {
+        gen.field(".exclude");
+        gen.list(&excludes, gen.random.uintAtMost(u32, 3));
+        gen.put(",");
+    }
+    const room = constants.mounts_max - 2 - shape.needs[index];
+    var cached: u32 = 0;
+    if (room >= 1 and gen.random.boolean()) {
+        cached = 1;
+        gen.field(".caches");
+        gen.put(".{ .{ .id = \"cache-a\", .path = \"/cache/a\", .mode = \"0755\" } },");
+    }
+    if (index > 0 and room >= cached + 1 and gen.random.boolean()) {
+        gen.field(".binds");
+        gen.put(".{ .{ .from = \"step:");
+        gen.put(step_names[gen.random.uintLessThan(u32, index)]);
+        gen.put("\", .source = \"/usr/bin\", .to = \"/bound\" } },");
+    }
 }
 
 /// The needs of step `index`: distinct earlier steps, and the last step for the first step

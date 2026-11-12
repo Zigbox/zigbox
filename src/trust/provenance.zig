@@ -200,7 +200,7 @@ pub const Record = struct {
 comptime {
     assert(constants.provenance_bytes_max <= constants.statement_bytes_max);
     assert(constants.provenance_build_type.len > constants.type_uri_base.len);
-    assert(constants.provenance_steps_max <= 255); // A step's index is one byte in the build.
+    assert(constants.provenance_steps_max <= 256); // A step's index is one byte in the build.
 }
 
 // ---- Render ----

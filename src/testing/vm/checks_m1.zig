@@ -22,6 +22,9 @@ pub const Error = error{
     BundleMissing,
     NoteMissing,
     TooSlow,
+    /// M10 slice 1: a device a member could open was not opened, or one a non-member could not
+    /// open was.
+    DeviceAccessWrong,
 };
 
 fn has_line(text: []const u8, wanted: []const u8) bool {
@@ -210,6 +213,28 @@ pub fn check_missing_rootfs(streams: Streams, status: u8) Error!void {
     if (status != 125) return error.ExitCodeWrong;
 }
 
+/// M10 slice 1, a member of the node's group: `--device` binds a 0660 root:render node, the
+/// workload opens it for reading and writing, and the note about the groups (ZBX-W0209) is on
+/// stderr. The step prints `OPENED-READ` and `OPENED-WRITE` for what worked.
+pub fn check_device_opened(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (!has_line(streams.stdout, "OPENED-READ")) return error.DeviceAccessWrong;
+    if (!has_line(streams.stdout, "OPENED-WRITE")) return error.DeviceAccessWrong;
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-W0209") == null) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
+}
+
+/// A node the user is not in the group of: refused before anything starts, in one line naming
+/// the group, with E0225 and exit 125.
+pub fn check_device_refused(streams: Streams, status: u8) Error!void {
+    const header = "error[ZBX-E0225]: ";
+    if (!std.mem.startsWith(u8, streams.stderr, header)) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "group") == null) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "errno") != null) return error.NoteMissing;
+    if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
+    if (status != 125) return error.ExitCodeWrong;
+}
+
 /// The bundle step prints `BUNDLE:<path>`, the `tar -tzf` listing, `LISTED-END`, then
 /// `LEAKS:<n>` (planted secrets found in the extracted bundle) and `REDACTED:<n>` (markers).
 pub fn check_bundle_has_no_secret(output: []const u8) Error!void {
@@ -393,4 +418,26 @@ test "host invisibility, missing rootfs, bundle" {
     defer testing.allocator.free(vacuous_text);
     try testing.expectError(error.BundleMissing, check_bundle_has_no_secret(vacuous_text));
     try testing.expectError(error.BundleMissing, check_bundle_has_no_secret("ran\n"));
+}
+
+test "devices: opened for a member, refused to anyone else" {
+    // Goal: the check passes only when the node was opened both ways, and the refusal only for a
+    // one-line E0225 with exit 125; a check that cannot fail proves nothing.
+    const opened = Streams{
+        .stdout = "OPENED-READ\nOPENED-WRITE\n",
+        .stderr = "warning[ZBX-W0209]: groups show as nogroup inside the container\n",
+    };
+    try check_device_opened(opened, 0);
+    try testing.expectError(error.ExitCodeWrong, check_device_opened(opened, 1));
+    const half = Streams{ .stdout = "OPENED-READ\n", .stderr = opened.stderr };
+    try testing.expectError(error.DeviceAccessWrong, check_device_opened(half, 0));
+    const silent = Streams{ .stdout = opened.stdout, .stderr = "" };
+    try testing.expectError(error.NoteMissing, check_device_opened(silent, 0));
+    const refused = "error[ZBX-E0225]: can't bind that device\n  cause  you cannot open " ++
+        "/dev/x: mode 0660, owner 0, group 1 (you are not in that group)\n";
+    try check_device_refused(.{ .stdout = "", .stderr = refused }, 125);
+    const quiet = Streams{ .stdout = "", .stderr = refused };
+    try testing.expectError(error.ExitCodeWrong, check_device_refused(quiet, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_device_refused(bare, 125));
 }

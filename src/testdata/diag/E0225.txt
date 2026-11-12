@@ -1,0 +1,5 @@
+error[ZBX-E0225]: can't bind that device into the container
+  cause  /dev/dri/renderD128 is not on this host
+  fix    list the nodes the host has, and give one of them:   ls -l /dev/dri
+  more   zbx explain E0225 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0225.html

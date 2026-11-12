@@ -249,6 +249,7 @@ New commands: `key new|list|show`, `sign`, `verify`, `trust export|import|prune`
 - the canonical JSON writer and reader, DSSE PAE, the envelope and the in-toto statement, `sign` and `verify`;
 - the key file (sealing and opening with a caller-supplied passphrase; the terminal read stays in the CLI) and the public-key text;
 - the policy parser and the verdict function;
+- `zigbox.trust`, the export of the pure parts for a caller that judges a signed tree (policy, verdict, DSSE, statements, key text, the signature record's type): caller-supplied storage (`dsse.Work` 873,894 bytes, `signature_record.Record` 2,800,336, `verdict.Report` 284), compiled for `wasm32-freestanding` by `zig build trust-wasm`, part of `check` ([decision](../decisions/2026-11-12-zigbox-trust-export.md));
 - the signature record (an in-toto bundle) and the provenance statement;
 - the tamper check over a store.
 

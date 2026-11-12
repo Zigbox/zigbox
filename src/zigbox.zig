@@ -170,6 +170,11 @@ pub const push = struct {
     pub const ecr = @import("push/ecr.zig");
 };
 
+/// The pure trust surface (M8): policy, verdict, DSSE, statements, keys' public text and the
+/// signature record's type, with caller-supplied storage and no host or store. It compiles for
+/// `wasm32-freestanding` (`zig build trust-wasm`). `trust_export.zig` has the rest.
+pub const trust = @import("trust_export.zig");
+
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
@@ -183,6 +188,7 @@ pub const state = @import("state/state.zig");
 pub const build = struct {
     pub const file = @import("build/file.zig");
     pub const graph = @import("build/graph.zig");
+    pub const glob = @import("build/glob.zig");
     pub const key = @import("build/key.zig");
     pub const step = @import("build/step.zig");
     pub const schedule = @import("build/schedule.zig");
@@ -215,6 +221,10 @@ test "the module's surface is what the contract names" {
     _ = push.UploadWorkspace;
     _ = exec_signal;
     _ = ExecHandle;
+    _ = trust.verdict.judge;
+    _ = trust.policy.parse;
+    _ = trust.dsse.parse;
+    _ = trust.statement.parse;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
 }
@@ -250,4 +260,46 @@ test "the module's surface for a second product's diagnostics" {
         .exit_text = "1",
     };
     try std.testing.expect(explain.render_entry(entry, &out).len > 0);
+}
+
+test "the pure trust surface imports only std and its own pure files" {
+    // Goal: `trust` stays callable from `wasm32-freestanding` (`zig build trust-wasm`). Method:
+    // the compile check cannot see an import of a host file that nothing calls, so read every
+    // import of each exported file and allow only `std`, `constants.zig`, the lexer and the
+    // exported trust files. A new import fails here by name until someone lists it on purpose.
+    const sources = [_][]const u8{
+        @embedFile("trust/policy.zig"),
+        @embedFile("trust/verdict.zig"),
+        @embedFile("trust/dsse.zig"),
+        @embedFile("trust/statement.zig"),
+        @embedFile("trust/key.zig"),
+        @embedFile("trust/json.zig"),
+        @embedFile("trust/signature_record.zig"),
+        @embedFile("build/lexer.zig"),
+        @embedFile("trust_export.zig"),
+    };
+    const allowed = [_][]const u8{
+        "std",                "constants.zig",              "../constants.zig",
+        "../build/lexer.zig", "policy.zig",                 "verdict.zig",
+        "dsse.zig",           "statement.zig",              "key.zig",
+        "json.zig",           "signature_record.zig",       "trust/policy.zig",
+        "trust/verdict.zig",  "trust/dsse.zig",             "trust/statement.zig",
+        "trust/key.zig",      "trust/signature_record.zig",
+    };
+    for (sources) |source| {
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "//")) continue;
+            const open = "@import(\"";
+            var rest = line;
+            while (std.mem.indexOf(u8, rest, open)) |at| {
+                rest = rest[at + open.len ..];
+                const end = std.mem.indexOfScalar(u8, rest, '"').?;
+                var found = false;
+                for (allowed) |name| found = found or std.mem.eql(u8, rest[0..end], name);
+                if (!found) std.debug.print("trust imports {s}\n", .{rest[0..end]});
+                try std.testing.expect(found);
+            }
+        }
+    }
 }

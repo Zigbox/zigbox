@@ -246,6 +246,8 @@ test {
     _ = @import("runtime/mounts.zig");
     _ = @import("runtime/mounts_diagnose.zig");
     _ = @import("runtime/mount_tests.zig");
+    _ = @import("runtime/devices_tests.zig");
+    _ = @import("runtime/devices.zig");
     _ = @import("runtime/project.zig");
     _ = @import("runtime/writable_tests.zig");
     _ = @import("runtime/logfile.zig");
@@ -352,4 +354,10 @@ test {
     _ = @import("fuzz_trust.zig");
     _ = @import("fuzz_provenance.zig");
     _ = @import("fuzz_verified.zig");
+}
+
+test {
+    // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
+    _ = @import("build/glob.zig");
+    _ = @import("fuzz_dockerignore.zig");
 }

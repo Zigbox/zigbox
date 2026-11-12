@@ -13,6 +13,8 @@ const records = @import("runtime/records.zig");
 const spec_mod = @import("runtime/spec.zig");
 const volume = @import("state/volume.zig");
 const mounts_mod = @import("runtime/mounts.zig");
+const devices_mod = @import("runtime/devices.zig");
+const repeat = @import("test_util.zig").repeat;
 
 const text_bytes_max = constants.record_bytes_max;
 
@@ -178,9 +180,53 @@ fn random_listen(random: std.Random, network: spec_mod.Network) ?spec_mod.Listen
     return .{ .port = random.intRangeAtMost(u16, 1, 65535) };
 }
 
-/// The record version a view is written at: plain unless it has a listener.
+const long_device = "/dev/" ++ repeat('x', constants.device_path_bytes_max - 5);
+const device_pool = [_][]const u8{
+    "/dev/dri/renderD128",
+    "/dev/dri/card0",
+    "/dev/nvidiactl",
+    "/dev/nvidia0",
+    "/dev/kfd",
+    "/dev/fuse",
+    "/dev/kvm",
+    "/dev/net/tun",
+    "/dev/bus/usb/001/002",
+    "/dev/nvidia-caps/nvidia-cap1",
+    long_device,
+};
+
+/// Version 10: up to `run_devices_max` distinct paths `--device` takes, taken from a pool.
+fn random_devices(
+    random: std.Random,
+    out: *[constants.run_devices_max]devices_mod.Device,
+) []const devices_mod.Device {
+    if (random.boolean()) return &.{};
+    var count: usize = 0;
+    for (device_pool) |path| {
+        if (random.boolean()) {
+            out[count] = .{ .path = path };
+            count += 1;
+        }
+    }
+    random.shuffle(devices_mod.Device, out[0..count]);
+    return out[0..count];
+}
+
+fn check_run_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.started == view.started);
+    assert(parsed.ended == view.ended);
+    assert(same_exit(parsed.exit, view.exit));
+    assert(parsed.ids.? == view.ids);
+}
+
+fn check_devices_back(view: *const records.View, parsed: *const records.Parsed) void {
+    var buffer: [devices_mod.text_bytes_max]u8 = undefined;
+    assert(std.mem.eql(u8, parsed.devices_text(), devices_mod.text(view.devices, &buffer)));
+}
+
+/// The record version a view is written at: plain unless it has a listener or devices.
 fn version_of(view: *const records.View) u32 {
-    if (view.listen != null) return constants.record_version;
+    if (view.listen != null or view.devices.len > 0) return constants.record_version;
     return constants.record_version_plain;
 }
 
@@ -220,6 +266,7 @@ fn check_round_trip(random: std.Random) void {
     random_reach(random, &reach);
     var mounts: [constants.state_volumes_max]volume.Mount = undefined;
     var extra: [constants.mounts_max]mounts_mod.Mount = undefined;
+    var devices: [constants.run_devices_max]devices_mod.Device = undefined;
     const view: records.View = .{
         .name = names[random.uintLessThan(usize, names.len)],
         .rootfs = rootfs,
@@ -251,18 +298,17 @@ fn check_round_trip(random: std.Random) void {
             else => .{ .uid = 0, .gid = 0 },
         },
         .listen = random_listen(random, reach.network),
+        .devices = random_devices(random, &devices),
     };
     var buffer: [text_bytes_max]u8 = undefined;
     const text = records.render(&view, &buffer);
     var parsed: records.Parsed = undefined;
     records.parse(text, &parsed) catch unreachable; // A rendered record always reads back.
     check_listen_back(&view, &parsed);
+    check_devices_back(&view, &parsed);
     assert(std.mem.eql(u8, parsed.name_slice(), view.name));
     assert(std.mem.eql(u8, parsed.rootfs_slice(), view.rootfs));
-    assert(parsed.started == view.started);
-    assert(parsed.ended == view.ended);
-    assert(same_exit(parsed.exit, view.exit));
-    assert(parsed.ids.? == view.ids);
+    check_run_back(&view, &parsed);
     const reason = if (view.reason == .none) records.reason_of(view.exit) else view.reason;
     assert(parsed.reason == reason);
     assert(std.meta.eql(parsed.limits, view.limits));
@@ -310,6 +356,14 @@ fn rerender(parsed: *const records.Parsed) void {
     for (extra[0..parsed.mounts_count], 0..) |*mount, index| {
         mount.* = parsed.mount_at(@intCast(index));
     }
+    var devices: [constants.run_devices_max]devices_mod.Device = undefined;
+    var devices_count: usize = 0;
+    if (parsed.devices_text().len > 0) {
+        var parts = std.mem.splitScalar(u8, parsed.devices_text(), ' ');
+        while (parts.next()) |path| : (devices_count += 1) {
+            devices[devices_count] = .{ .path = path };
+        }
+    }
     var words: [constants.run_env_count_max][]const u8 = undefined;
     for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));
     const view: records.View = .{
@@ -330,12 +384,14 @@ fn rerender(parsed: *const records.Parsed) void {
         .mounts = extra[0..parsed.mounts_count],
         .user = parsed.user,
         .listen = parsed.listen,
+        .devices = devices[0..devices_count],
     };
     var buffer: [text_bytes_max]u8 = undefined;
     var again: records.Parsed = undefined;
     records.parse(records.render(&view, &buffer), &again) catch unreachable; // Written: reads.
     assert(again.state_count == parsed.state_count);
     assert(again.mounts_count == parsed.mounts_count);
+    assert(std.mem.eql(u8, again.devices_text(), parsed.devices_text()));
     // A record that did not say its user is written with root's, and reads as root's.
     const kept = parsed.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
     assert(std.meta.eql(again.user.?, kept));

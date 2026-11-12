@@ -63,6 +63,8 @@ const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 const volumes_mod = @import("volumes.zig");
 const mounts_mod = @import("mounts.zig");
+const devices_mod = @import("devices.zig");
+const devices_diagnose = @import("devices_diagnose.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -194,6 +196,8 @@ pub const StartOptions = struct {
     mirror: bool = false,
     /// The container's standard input is /dev/null (a build step), not this process's.
     stdin_null: bool = false,
+    /// The run is a build step, which has fixed limits and no limit flags (it words E0307).
+    build_step: bool = false,
     /// Also write that output, line by line with this prefix on each line, to this process's
     /// standard error as it comes (`zbx build --verbose`, the prefix `<step> | `). Unlike
     /// `mirror`, the container's streams are always pipes, even when they would be a
@@ -264,6 +268,10 @@ pub const Handle = struct {
     /// of each.
     mounts: []const mounts_mod.Mount,
     resolution: mounts_mod.Resolution,
+    /// The `--device`s (they point into the `Spec`), once the host has shown each.
+    devices: []const devices_mod.Device,
+    /// The devices' paths as the plan takes them.
+    device_paths: [constants.run_devices_max][]const u8,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
     /// What the tree is bound to, for the record.
@@ -354,6 +362,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.name_len = 0; // Set by `choose_name`; a caller can tell whether it ever was.
     handle.volumes.count = 0;
     handle.mounts = &.{};
+    handle.devices = &.{};
     handle.user = container.user;
     handle.binding = container.binding;
     reset_log(handle, options);
@@ -384,11 +393,12 @@ pub fn start(
     try check_listen(container, diag);
     try check_network(host, container, handle, diag);
     try resolve_mounts(host, container, handle, diag);
+    try resolve_devices(host, container, handle, diag);
 
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
-    const scope_input = try prepare_scope(handle, container.limits, diag);
+    const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
     // The volumes last, so that nothing above can fail with them held; from here every way out
     // of `start` that is not a running container lets them go.
@@ -439,6 +449,30 @@ fn resolve_mounts(host: Host, container: *const Spec, handle: *Handle, diag: *Di
     handle.mounts = resolution.mounts[0..container.mounts.len];
 }
 
+/// Looks at each `--device` on the host (`devices.resolve`) and refuses the first that cannot be
+/// bound (E0225). A run with devices keeps the user's groups, which a note says once (W0209).
+fn resolve_devices(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) Error!void {
+    assert(handle.devices.len == 0);
+    assert(handle.notes_count < handle.notes.len);
+    if (container.devices.len == 0) return;
+    if (devices_mod.list_problem(container.devices)) |problem| {
+        const at = problem.index() orelse 0; // Too many: the first is as good as any.
+        devices_diagnose.bad_path(diag, container.devices[at].path, problem);
+        return error.StartFailed;
+    }
+    if (devices_mod.resolve(host, container.devices)) |refusal| {
+        const path = container.devices[refusal.index].path;
+        devices_diagnose.refused(diag, path, refusal.problem);
+        return error.StartFailed;
+    }
+    handle.devices = container.devices;
+    var note: Diag = undefined;
+    note.reset();
+    devices_diagnose.groups_note(&note);
+    handle.report(&note);
+    assert(handle.devices.len <= constants.run_devices_max);
+}
+
 /// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
 /// when the container shares the host's network: the child formats and reads nothing.
 fn build_plan(
@@ -476,6 +510,7 @@ fn build_plan(
         } else null,
         .state = handle.volumes.input_slice(),
         .mounts = handle.resolution.inputs[0..handle.mounts.len],
+        .devices = devices_mod.plan_input(handle.devices, &handle.device_paths),
         .hostname = container.hostname,
         .umask = container.umask,
     };
@@ -935,7 +970,12 @@ fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
 /// Decides whether this run has a scope. It has one if the user's systemd manager answers; if
 /// it does not, a run with a limit is refused (a limit nobody enforces is worse than none) and
 /// a run without goes on, warning once, as M1 did.
-fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?plan_mod.ScopeInput {
+fn prepare_scope(
+    handle: *Handle,
+    limits: spec_mod.Limits,
+    build_step: bool,
+    diag: *Diag,
+) Error!?plan_mod.ScopeInput {
     assert(diag.code == null);
     var found: scope_mod.Probe = undefined;
     var problem: scope_mod.Problem = undefined;
@@ -950,7 +990,8 @@ fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?p
         return .{ .version = found.version, .limits = limits };
     }
     if (limits.any()) {
-        diagnose.limit_without_cgroup(diag, &problem, limits);
+        const asker: diagnose.LimitAsker = if (build_step) .build_step else .run;
+        diagnose.limit_without_cgroup(diag, &problem, limits, asker);
         return error.StartFailed;
     }
     var warning: Diag = undefined;
@@ -1350,6 +1391,7 @@ fn save_record(handle: *Handle, exit: records.Exit, ended: ?u64, why: ?*const Di
         .zbx_version = build_options.version,
         .state = handle.volumes.mount_slice(),
         .mounts = handle.mounts,
+        .devices = handle.devices,
         .user = handle.user,
         .binding = handle.binding,
         .diagnostic = if (why) |found| diagnostic_json(found, &json) else "",

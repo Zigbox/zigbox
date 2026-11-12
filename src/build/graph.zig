@@ -5,19 +5,25 @@
 //! order a build would start them in on one core. A cycle is named, as the steps in it in need
 //! order (`a -> b -> a`: a needs b, b needs a), starting at the smallest name in it.
 //!
-//! Steps are indexes into the file's steps (`u8`: at most `build_steps_max`). The work is
-//! quadratic in the steps, which is at most 64.
+//! A step comes after every step it needs and every step a `step:<name>` of its own names: its
+//! `base`, and the `from` of each of its copies and binds. `image.base` may name a step too. A
+//! cycle through any of these is a cycle.
+//!
+//! Steps are indexes into the file's steps (`u8` indexes; counts are `u16`: at most
+//! `build_steps_max`). The work is quadratic in the steps, which is at most 256.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const file_mod = @import("file.zig");
+const glob_mod = @import("glob.zig");
 
 const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
 
 comptime {
-    assert(constants.build_steps_max <= std.math.maxInt(u8));
+    // Indexes fit a byte; counts do not.
+    assert(constants.build_steps_max <= std.math.maxInt(u8) + 1);
 }
 
 pub const ProblemKind = enum {
@@ -31,6 +37,12 @@ pub const ProblemKind = enum {
     unknown_add,
     /// The steps in `cycle` need each other round.
     cycle,
+    /// A step's `base` is `step:<name>` of a name that no step has (`at` is the base).
+    unknown_base,
+    /// A copy's or a bind's `from` is `step:<name>` of a name that no step has.
+    unknown_from,
+    /// `image.base` is `step:<name>` of a name that no step has.
+    unknown_image_base,
 };
 
 pub const Problem = struct {
@@ -42,7 +54,7 @@ pub const Problem = struct {
     at: Text,
     /// For `cycle`: the steps in it, in need order, without the first repeated at the end.
     cycle: [constants.build_steps_max]u8,
-    cycle_len: u8,
+    cycle_len: u16,
 
     pub fn cycle_slice(problem: *const Problem) []const u8 {
         assert(problem.kind == .cycle);
@@ -52,11 +64,19 @@ pub const Problem = struct {
 };
 
 pub const Graph = struct {
-    /// Each step's needs, as step indexes, in the file's order.
+    /// Each step's needs, as step indexes, in the file's order: the steps mounted at /in.
     needs: [constants.build_steps_max][constants.build_step_needs_max]u8,
+    /// Every step each step comes after: its needs, then its base, copies and binds when they
+    /// name steps. A step may be listed twice here (a need that is also a base).
+    after: [constants.build_steps_max][constants.build_step_edges_max]u8,
+    after_count: [constants.build_steps_max]u16,
+    /// Each step's base, when it is `step:<name>`.
+    base_step: [constants.build_steps_max]?u8,
+    /// The step `image.base` names, if it is `step:<name>`.
+    image_base: ?u8,
     /// The steps in topological order.
     order: [constants.build_steps_max]u8,
-    count: u8,
+    count: u16,
     /// Each add's step.
     adds: [constants.build_image_adds_max]u8,
     adds_count: u8,
@@ -70,6 +90,12 @@ pub const Graph = struct {
         assert(step < file.steps_count);
         return graph.needs[step][0..file.steps[step].needs.count];
     }
+
+    /// The steps `step` comes after, for ordering and for the scheduler.
+    pub fn after_slice(graph: *const Graph, step: u8) []const u8 {
+        assert(graph.after_count[step] <= constants.build_step_edges_max);
+        return graph.after[step][0..graph.after_count[step]];
+    }
 };
 
 pub const Result = enum { ordered, refused };
@@ -81,8 +107,10 @@ pub fn order(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
     assert(file.version == file_mod.version);
     graph.count = 0;
     graph.adds_count = 0;
+    graph.image_base = null;
     if (check_names(file, problem) == .refused) return .refused;
     if (resolve_needs(file, graph, problem) == .refused) return .refused;
+    if (resolve_edges(file, graph, problem) == .refused) return .refused;
     if (resolve_adds(file, graph, problem) == .refused) return .refused;
     var done: [constants.build_steps_max]bool = @splat(false);
     while (graph.count < file.steps_count) {
@@ -99,6 +127,43 @@ pub fn order(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
 }
 
 /// The step named `name`, or null.
+/// A builder addition that parses but that this build cannot run yet (the runtime lands in a
+/// later slice of M9): what it is, and the step it is in (null for the file or the image).
+pub const Unrunnable = struct {
+    step: ?u8,
+    field: []const u8,
+};
+
+/// The first part of `file` that `zbx build` cannot run yet, if any, so that a build never
+/// quietly ignores a field. `--graph` shows every field and does not ask.
+pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
+    assert(graph.count == file.steps_count);
+    if (file.exclude.given) return .{ .step = null, .field = ".exclude" };
+    if (graph.image_base != null) return .{ .step = null, .field = ".image .base = \"step:\"" };
+    if (file.image.config.user) |user| {
+        if (!file_mod.is_numeric_user(file.text(user))) {
+            return .{ .step = null, .field = ".image .config .user as a name" };
+        }
+    }
+    for (file.steps_slice(), 0..) |*step, index| {
+        const at: u8 = @intCast(index);
+        if (step.output == .root) return .{ .step = at, .field = ".output = .root" };
+        if (step.user != null) return .{ .step = at, .field = ".user" };
+        if (step.workdir != null) return .{ .step = at, .field = ".workdir" };
+        if (step.copy.given) return .{ .step = at, .field = ".copy" };
+        if (step.caches.given) return .{ .step = at, .field = ".caches" };
+        if (step.binds.given) return .{ .step = at, .field = ".binds" };
+        if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
+        if (graph.base_step[index] != null) return .{ .step = at, .field = ".base = \"step:\"" };
+        for (step.inputs.slice()) |input| {
+            if (glob_mod.is_glob(file.text(input))) {
+                return .{ .step = at, .field = "an input glob" };
+            }
+        }
+    }
+    return null;
+}
+
 pub fn step_named(file: *const BuildFile, name: []const u8) ?u8 {
     assert(file.steps_count <= constants.build_steps_max);
     for (file.steps_slice(), 0..) |*step, index| {
@@ -137,8 +202,66 @@ fn resolve_needs(file: *const BuildFile, graph: *Graph, problem: *Problem) Resul
             }
             graph.needs[index][need_index] = target;
         }
+        @memcpy(graph.after[index][0..needs.len], graph.needs[index][0..needs.len]);
+        graph.after_count[index] = @intCast(needs.len);
+        graph.base_step[index] = null;
     }
     return .ordered;
+}
+
+/// The step `text` names as `step:<name>`: null if it is not written so (an image reference or a
+/// project path), an error if no step has the name.
+fn step_of(file: *const BuildFile, text: Text) error{Unknown}!?u8 {
+    const name = file_mod.step_ref(file.text(text)) orelse return null;
+    return step_named(file, name) orelse error.Unknown;
+}
+
+/// Adds the edges that a `step:<name>` makes: base, copies, binds, and `image.base`.
+fn resolve_edges(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
+    for (file.steps_slice(), 0..) |*step, index_usize| {
+        const index: u8 = @intCast(index_usize);
+        const base = step_of(file, step.base) catch {
+            refuse(problem, .unknown_base, index, 0, step.base);
+            return .refused;
+        };
+        if (base) |target| {
+            graph.base_step[index] = target;
+            add_edge(graph, index, target);
+        }
+        for (file.copy_entries(step)) |entry| {
+            const from = entry.from orelse continue;
+            const target = step_of(file, from) catch {
+                refuse(problem, .unknown_from, index, 0, from);
+                return .refused;
+            };
+            if (target) |found| add_edge(graph, index, found);
+        }
+        for (file.step_binds(step)) |bind| {
+            const from = bind.from orelse continue;
+            const target = step_of(file, from) catch {
+                refuse(problem, .unknown_from, index, 0, from);
+                return .refused;
+            };
+            if (target) |found| add_edge(graph, index, found);
+        }
+    }
+    const image_base = file.image.base orelse return .ordered;
+    graph.image_base = step_of(file, image_base) catch {
+        refuse(problem, .unknown_image_base, 0, 0, image_base);
+        return .refused;
+    };
+    return .ordered;
+}
+
+fn add_edge(graph: *Graph, step: u8, target: u8) void {
+    const count = graph.after_count[step];
+    // A step that is a need and a base, or the `from` of two copies, is one edge.
+    for (graph.after[step][0..count]) |seen| {
+        if (seen == target) return;
+    }
+    assert(count < constants.build_step_edges_max); // The edges' bound counts every source.
+    graph.after[step][count] = target;
+    graph.after_count[step] = count + 1;
 }
 
 fn resolve_adds(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
@@ -174,7 +297,7 @@ fn smallest_ready(file: *const BuildFile, graph: *const Graph, done: []const boo
     for (0..file.steps_count) |index_usize| {
         const index: u8 = @intCast(index_usize);
         if (done[index]) continue;
-        const ready = for (graph.needs_slice(file, index)) |need| {
+        const ready = for (graph.after_slice(index)) |need| {
             if (!done[need]) break false;
         } else true;
         if (!ready) continue;
@@ -198,8 +321,8 @@ fn name_cycle(
     problem: *Problem,
 ) void {
     var walk: [constants.build_steps_max]u8 = undefined;
-    var position: [constants.build_steps_max]?u8 = @splat(null);
-    var length: u8 = 0;
+    var position: [constants.build_steps_max]?u16 = @splat(null);
+    var length: u16 = 0;
     var current = smallest_not_done(file, done);
     while (position[current] == null) {
         position[current] = length;
@@ -243,7 +366,7 @@ fn smallest_unmet_need(
     step: u8,
 ) u8 {
     var best: ?u8 = null;
-    for (graph.needs_slice(file, step)) |need| {
+    for (graph.after_slice(step)) |need| {
         if (done[need]) continue;
         if (best == null or name_less(file, need, best.?)) best = need;
     }
@@ -251,12 +374,27 @@ fn smallest_unmet_need(
     return best.?;
 }
 
-/// The entry of `step`'s needs that names `need`.
+/// The text in `step` that makes it come after `need`: a need's name, or a `step:` of its base,
+/// a copy's or a bind's `from`.
 fn need_text(file: *const BuildFile, graph: *const Graph, step: u8, need: u8) Text {
+    const found = file.steps[step];
     for (graph.needs_slice(file, step), 0..) |target, index| {
-        if (target == need) return file.steps[step].needs.items[index];
+        if (target == need) return found.needs.items[index];
     }
-    unreachable; // `need` was taken from `step`'s needs.
+    if (graph.base_step[step] == need) return found.base;
+    for (file.copy_entries(&found)) |entry| {
+        const from = entry.from orelse continue;
+        if (step_of(file, from) catch null) |target| {
+            if (target == need) return from;
+        }
+    }
+    for (file.step_binds(&found)) |bind| {
+        const from = bind.from orelse continue;
+        if (step_of(file, from) catch null) |target| {
+            if (target == need) return from;
+        }
+    }
+    unreachable; // `need` was taken from `step`'s edges.
 }
 
 const testing = std.testing;
@@ -348,4 +486,95 @@ test "a graph is refused for a duplicate step, an unknown need or add, a need tw
     try testing.expectEqual(Result.refused, order(&test_file, &test_graph, &problem));
     try testing.expectEqual(ProblemKind.unknown_add, problem.kind);
     try testing.expectEqualStrings("nope", test_file.text(problem.at));
+}
+
+fn order_text(text: []const u8, problem: *Problem) !Result {
+    var parse_problem: file_mod.Problem = undefined;
+    try testing.expectEqual(
+        file_mod.ParseResult.parsed,
+        file_mod.parse(text, &test_file, &parse_problem),
+    );
+    return order(&test_file, &test_graph, problem);
+}
+
+const step_head = ".{ .version = 1, .image = .{";
+
+test "a step base, a copy and a bind come after the step they name" {
+    // Goal: `step:<name>` is an edge wherever it is written. Method: a chain through a base, a
+    // copy `from` and a bind `from`, written backwards; the image's base is a step too.
+    var problem: Problem = undefined;
+    const text = step_head ++ " .base = \"step:c\" }, .steps = .{\n" ++
+        ".{ .name = \"c\", .base = \"step:b\", .run = .{\"x\"},\n" ++
+        "   .binds = .{ .{ .from = \"step:a\", .source = \"/s\", .to = \"/t\" } } },\n" ++
+        ".{ .name = \"b\", .base = \"x\",\n" ++
+        "   .copy = .{ .{ .from = \"step:a\", .src = .{\"p\"}, .to = \"/q\" } } },\n" ++
+        ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+    const names = [_][]const u8{ "a", "b", "c" };
+    for (names, test_graph.order_slice()) |name, step| {
+        try testing.expectEqualStrings(name, test_file.text(test_file.steps[step].name));
+    }
+    try testing.expectEqual(@as(?u8, 0), test_graph.image_base); // `c` is the first step.
+    const c = test_graph.order_slice()[2];
+    try testing.expectEqual(@as(usize, 2), test_graph.after_slice(c).len); // b, and a once.
+    try testing.expectEqual(@as(usize, 0), test_graph.needs_slice(&test_file, c).len);
+}
+
+test "a step that is a need, a base and a copy source of another is one edge" {
+    // Goal: `--graph` lists an edge once. Method: `b` takes `a` three ways.
+    var problem: Problem = undefined;
+    const text = step_head ++ " }, .steps = .{\n" ++
+        ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"} },\n" ++
+        ".{ .name = \"b\", .base = \"step:a\", .needs = .{\"a\"},\n" ++
+        "   .copy = .{ .{ .from = \"step:a\", .src = .{\"p\"}, .to = \"/q\" } } } } }";
+    try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+    const b = test_graph.order_slice()[1];
+    try testing.expectEqual(@as(usize, 1), test_graph.after_slice(b).len);
+}
+
+test "a cycle through a base is refused, and an unknown step in a base, from or image is" {
+    // Goal: the negative space of the `step:` edges. Method: one file per refusal.
+    var problem: Problem = undefined;
+    var text: []const u8 = step_head ++ "}, .steps = .{\n" ++
+        ".{ .name = \"a\", .base = \"step:b\", .run = .{\"x\"} },\n" ++
+        ".{ .name = \"b\", .base = \"x\", .run = .{\"x\"}, .needs = .{\"a\"} } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.cycle, problem.kind);
+    try testing.expectEqual(@as(u32, 2), problem.cycle_len);
+    text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"step:nope\"," ++
+        " .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_base, problem.kind);
+    text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .copy = .{ .{" ++
+        " .from = \"step:nope\", .src = .{\"p\"}, .to = \"/q\" } } } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_from, problem.kind);
+    text = step_head ++ " .base = \"step:nope\" }, .steps = .{} }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_image_base, problem.kind);
+}
+
+test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
+    // Goal: no M9 field is quietly ignored by `zbx build`. Method: one file per field.
+    var problem: Problem = undefined;
+    const plain = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
+    const fields = [_][]const u8{
+        ".output = .root",         ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
+        ".inputs = .{ \"*.go\" }", ".caches = .{}",   ".binds = .{}",
+    };
+    inline for (fields) |field| {
+        const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+            ".run = .{\"x\"}, " ++ field ++ " } } }";
+        try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+        const found = unrunnable(&test_file, &test_graph).?;
+        try testing.expectEqual(@as(?u8, 0), found.step);
+    }
+    const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} }, " ++
+        ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(base, &problem));
+    try testing.expectEqual(@as(?u8, 1), unrunnable(&test_file, &test_graph).?.step);
 }

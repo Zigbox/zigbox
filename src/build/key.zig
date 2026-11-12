@@ -48,6 +48,32 @@ pub const Spec = struct {
     network: bool,
     /// The step's name: the step sees it as `ZBX_BUILD_STEP`.
     name: []const u8,
+    // M9 additions (docs/briefs/M9-dockerfile-import.md, "Builder additions"). Each is encoded
+    // after everything above and only when set, so a step without them has the key it had
+    // before. Cache mounts are not here: a cache is never part of what a step's output is
+    // defined by. Excluded files are not here either: `input_tree`, `binds` and `copies` hold
+    // the trees of what the globs and excludes kept, so an excluded file changes nothing.
+    /// The step's output is its whole root (`.output = .root`).
+    root_output: bool = false,
+    user: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+    binds: []const Bind = &.{},
+    copies: []const Copy = &.{},
+};
+
+/// A read-only mount of a source tree at `to`, in the file's order.
+pub const Bind = struct {
+    to: []const u8,
+    source: Digest,
+};
+
+/// A copy entry: the tree of the files its sources and excludes kept, where it lands, and the
+/// ownership and mode it asks for (as written; the file's own text decides the effect).
+pub const Copy = struct {
+    source: Digest,
+    to: []const u8,
+    chown: ?[]const u8 = null,
+    chmod: ?[]const u8 = null,
 };
 
 const Tag = enum(u8) {
@@ -62,6 +88,12 @@ const Tag = enum(u8) {
     fixed_env = 9,
     image_adds = 10,
     image_config = 11,
+    // M9 tagged extensions, written after the M7 fields and only when set.
+    output_root = 12,
+    user = 13,
+    workdir = 14,
+    binds = 15,
+    copies = 16,
 };
 
 /// The fixed environment a step sees after the image's and the build file's, as `KEY=VALUE`.
@@ -126,6 +158,12 @@ const Encoder = struct {
         for (items) |item| try encoder.string(item);
     }
 
+    /// A flag byte, then the string when there is one.
+    fn optional(encoder: *Encoder, text: ?[]const u8) Error!void {
+        try encoder.bytes(&.{@intFromBool(text != null)});
+        if (text) |value| try encoder.string(value);
+    }
+
     fn digest(encoder: *Encoder, value: Digest) Error!void {
         try encoder.bytes(&value.bytes);
     }
@@ -136,8 +174,10 @@ const Encoder = struct {
 pub fn compute(spec: *const Spec, key: *Key) Error!void {
     assert(spec.name.len > 0);
     assert(spec.name.len <= constants.build_step_name_bytes_max);
-    assert(spec.argv.len > 0);
+    assert(spec.argv.len + spec.copies.len > 0); // A step runs a command or copies.
     if (spec.needs.len > constants.build_step_needs_max) return error.TooLong;
+    if (spec.binds.len > constants.build_step_binds_max) return error.TooLong;
+    if (spec.copies.len > constants.build_copy_entries_max) return error.TooLong;
     var encoder: Encoder = .{ .out = &key.bytes, .len = 0 };
     try encoder.bytes(magic);
     try encoder.int(constants.build_step_format_version);
@@ -162,9 +202,43 @@ pub fn compute(spec: *const Spec, key: *Key) Error!void {
     try encoder.int(@intCast(step_variable.len + spec.name.len));
     try encoder.bytes(step_variable);
     try encoder.bytes(spec.name);
+    try encode_more(&encoder, spec);
     key.len = encoder.len;
     key.digest = Digest.of(key.preimage());
     assert(key.len > magic.len);
+}
+
+/// The M9 fields, each only when set, in the tag order.
+fn encode_more(encoder: *Encoder, spec: *const Spec) Error!void {
+    assert(spec.binds.len <= constants.build_step_binds_max);
+    assert(spec.copies.len <= constants.build_copy_entries_max);
+    if (spec.root_output) try encoder.tag(.output_root);
+    if (spec.user) |user| {
+        try encoder.tag(.user);
+        try encoder.string(user);
+    }
+    if (spec.workdir) |workdir| {
+        try encoder.tag(.workdir);
+        try encoder.string(workdir);
+    }
+    if (spec.binds.len > 0) {
+        try encoder.tag(.binds);
+        try encoder.int(@intCast(spec.binds.len));
+        for (spec.binds) |bind| {
+            try encoder.string(bind.to);
+            try encoder.digest(bind.source);
+        }
+    }
+    if (spec.copies.len > 0) {
+        try encoder.tag(.copies);
+        try encoder.int(@intCast(spec.copies.len));
+        for (spec.copies) |copy| {
+            try encoder.digest(copy.source);
+            try encoder.string(copy.to);
+            try encoder.optional(copy.chown);
+            try encoder.optional(copy.chmod);
+        }
+    }
 }
 
 /// What the image step sees: the base's tree (the zero digest for no base), each `image.add`
@@ -235,6 +309,7 @@ comptime {
 // ---- Tests ------------------------------------------------------------------------------------
 
 const testing = std.testing;
+const glob = @import("glob.zig");
 
 fn sample_digest(byte: u8) Digest {
     var digest: Digest = undefined;
@@ -391,4 +466,92 @@ test "key: the image key changes with the base, each add, its order and the conf
 fn image_key_of(spec: *const ImageSpec, slot: u1) !Digest {
     try compute_image(spec, &key_storage[slot]);
     return key_storage[slot].digest;
+}
+
+test "key: an M7 step keeps its key; each M9 field changes it; an excluded file does not" {
+    // Goal: the three promises of the key's M9 extension. Method: the sample spec's golden key
+    // with the new fields at their defaults, then one field set at a time, then a toy tree
+    // digest over the files `glob.excluded` keeps, with an excluded file added.
+    const base = sample(&.{});
+    const plain = try key_of(&base, 0);
+    const plain_hex = plain.hex();
+    try testing.expectEqualStrings(golden_key_hex, &plain_hex);
+    var seen: [8]Digest = undefined;
+    var count: usize = 0;
+    const variants = [_]Spec{
+        with_more(base, .{ .root_output = true }),
+        with_more(base, .{ .user = "app" }),
+        with_more(base, .{ .user = "0:0" }),
+        with_more(base, .{ .workdir = "/app" }),
+        with_more(base, .{ .binds = &.{.{ .to = "/b", .source = sample_digest(5) }} }),
+        with_more(base, .{ .binds = &.{.{ .to = "/b", .source = sample_digest(6) }} }),
+        with_more(base, .{ .copies = &.{.{ .source = sample_digest(7), .to = "/c" }} }),
+        with_more(base, .{ .copies = &.{.{
+            .source = sample_digest(7),
+            .to = "/c",
+            .chmod = "0755",
+        }} }),
+    };
+    for (variants) |variant| {
+        const changed = try key_of(&variant, 1);
+        try testing.expect(!changed.eql(plain));
+        for (seen[0..count]) |earlier| try testing.expect(!changed.eql(earlier));
+        seen[count] = changed;
+        count += 1;
+    }
+    try testing.expectEqual(variants.len, count);
+}
+
+fn with_more(spec: Spec, more: struct {
+    root_output: bool = false,
+    user: ?[]const u8 = null,
+    workdir: ?[]const u8 = null,
+    binds: []const Bind = &.{},
+    copies: []const Copy = &.{},
+}) Spec {
+    var result = spec;
+    result.root_output = more.root_output;
+    result.user = more.user;
+    result.workdir = more.workdir;
+    result.binds = more.binds;
+    result.copies = more.copies;
+    return result;
+}
+
+/// A toy tree digest: the files `lines` keep, each as its path and content.
+fn toy_tree(lines: []const []const u8, files: []const [2][]const u8) Digest {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    for (files) |file| {
+        if (glob.excluded(lines, file[0])) continue;
+        hasher.update(file[0]);
+        hasher.update(file[1]);
+    }
+    var digest: Digest = undefined;
+    hasher.final(&digest.bytes);
+    return digest;
+}
+
+test "key: a file an exclude leaves out never changes the key; one it keeps does" {
+    // Goal: excludes act through the matched set only. Method: the same copy with and without
+    // a `*.log` file under `*.log` and `!keep.log`, and with a kept file added.
+    const lines = [_][]const u8{"*.log"};
+    const base_files = [_][2][]const u8{ .{ "a.txt", "a" }, .{ "b.txt", "b" } };
+    const with_log = base_files ++ [_][2][]const u8{.{ "x.log", "noise" }};
+    const with_kept = base_files ++ [_][2][]const u8{.{ "c.txt", "c" }};
+    const spec = struct {
+        fn of(tree: Digest, storage: *[1]Copy) Spec {
+            storage[0] = .{ .source = tree, .to = "/c" };
+            var result = sample(&sample_needs);
+            result.copies = storage;
+            return result;
+        }
+    };
+    var one: [1]Copy = undefined;
+    var two: [1]Copy = undefined;
+    var three: [1]Copy = undefined;
+    const plain = try key_of(&spec.of(toy_tree(&lines, &base_files), &one), 0);
+    const logged = try key_of(&spec.of(toy_tree(&lines, &with_log), &two), 1);
+    try testing.expect(plain.eql(logged));
+    const kept = try key_of(&spec.of(toy_tree(&lines, &with_kept), &three), 1);
+    try testing.expect(!plain.eql(kept));
 }

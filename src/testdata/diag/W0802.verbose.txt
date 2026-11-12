@@ -1,0 +1,8 @@
+warning[ZBX-W0802]: the build has steps with cache mounts
+  while  planning the build
+  cause  their output can depend on what a cache held, not only on the inputs
+  cause  steps with cache mounts: "compile", "test"
+  steps  2
+  fix    keep each cache to what the command verifies or rebuilds, and do not let its output depend on what was in it
+  more   zbx explain W0802
+  docs   https://zigbox.github.io/zigbox/errors/W0802.html
