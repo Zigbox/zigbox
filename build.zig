@@ -276,6 +276,9 @@ fn add_test_step(
             .optimize = optimize,
             // macOS needs libSystem; the Linux roots never link a libc.
             .link_libc = if (for_macos) null else false,
+            // The tests' static workspaces together pass 2 GiB (M9 grew the build file), which the
+            // small code model cannot address on x86-64; the release binary stays small.
+            .code_model = if (target.result.cpu.arch == .x86_64) .medium else .default,
             .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
         });
         // Only the top-20 harness reads it; the policy is a data file, so an import costs nothing.

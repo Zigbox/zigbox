@@ -22,6 +22,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const lexer_mod = @import("lexer.zig");
 const reference_mod = @import("../registry/reference.zig");
+const glob = @import("glob.zig");
 
 const Lexer = lexer_mod.Lexer;
 const Token = lexer_mod.Token;
@@ -56,6 +57,56 @@ pub fn List(comptime capacity: u32) type {
     };
 }
 
+/// A run of entries in one of the file's shared arrays (`list_texts`, `copies`, `caches`,
+/// `binds`): the file holds them all, so a step carries three numbers, not an array. `given`
+/// tells an empty list written from none, as `List`'s does.
+pub const Span = struct {
+    begin: u32,
+    count: u32,
+    given: bool,
+
+    pub const none: Span = .{ .begin = 0, .count = 0, .given = false };
+};
+
+/// What a step keeps: M7's `/out`, or (M9) its whole root.
+pub const Output = enum { out, root };
+
+/// One entry of a `copy` step.
+pub const CopyEntry = struct {
+    /// Absent: the project. Otherwise `step:<name>` or a locked image reference.
+    from: ?Text,
+    /// Paths or globs, in `list_texts`.
+    src: Span,
+    to: Text,
+    chown: ?Text,
+    chmod: ?Text,
+    exclude: Span,
+    line: u32,
+    column: u32,
+};
+
+/// A cache directory of a step (M9 `.caches`).
+pub const Cache = struct {
+    id: Text,
+    path: Text,
+    ro: bool,
+    mode: ?Text,
+    uid: ?u32,
+    gid: ?u32,
+    line: u32,
+    column: u32,
+};
+
+/// A read-only mount of a step (M9 `.binds`).
+pub const Bind = struct {
+    /// Absent: the project. Otherwise `step:<name>` or a locked image reference.
+    from: ?Text,
+    source: Text,
+    to: Text,
+    line: u32,
+    column: u32,
+};
+
 pub const Step = struct {
     name: Text,
     base: Text,
@@ -64,6 +115,14 @@ pub const Step = struct {
     env: List(constants.build_step_env_max),
     run: List(constants.build_step_argv_max),
     network: bool,
+    output: Output,
+    user: ?Text,
+    workdir: ?Text,
+    /// A step with `copy` given has no `run` (`copy.given`), and the other way round.
+    copy: Span,
+    caches: Span,
+    binds: Span,
+    exclude: Span,
     /// Where the step's `.{` is.
     line: u32,
     column: u32,
@@ -109,6 +168,16 @@ pub const BuildFile = struct {
     steps: [constants.build_steps_max]Step,
     steps_count: u32,
     image: Image,
+    /// The file's `.exclude`, in `list_texts`.
+    exclude: Span,
+    list_texts: [constants.build_file_list_texts_max]Text,
+    list_texts_count: u32,
+    copies: [constants.build_file_copies_max]CopyEntry,
+    copies_count: u32,
+    caches: [constants.build_file_caches_max]Cache,
+    caches_count: u32,
+    binds: [constants.build_file_binds_max]Bind,
+    binds_count: u32,
     pool: [constants.build_pool_bytes]u8,
     pool_len: u32,
 
@@ -121,6 +190,30 @@ pub const BuildFile = struct {
     pub fn steps_slice(file: *const BuildFile) []const Step {
         assert(file.steps_count <= constants.build_steps_max);
         return file.steps[0..file.steps_count];
+    }
+
+    pub fn texts(file: *const BuildFile, span: Span) []const Text {
+        assert(span.begin + span.count <= file.list_texts_count);
+        assert(file.list_texts_count <= constants.build_file_list_texts_max);
+        return file.list_texts[span.begin..][0..span.count];
+    }
+
+    pub fn copy_entries(file: *const BuildFile, step: *const Step) []const CopyEntry {
+        assert(step.copy.begin + step.copy.count <= file.copies_count);
+        assert(file.copies_count <= constants.build_file_copies_max);
+        return file.copies[step.copy.begin..][0..step.copy.count];
+    }
+
+    pub fn step_caches(file: *const BuildFile, step: *const Step) []const Cache {
+        assert(step.caches.begin + step.caches.count <= file.caches_count);
+        assert(file.caches_count <= constants.build_file_caches_max);
+        return file.caches[step.caches.begin..][0..step.caches.count];
+    }
+
+    pub fn step_binds(file: *const BuildFile, step: *const Step) []const Bind {
+        assert(step.binds.begin + step.binds.count <= file.binds_count);
+        assert(file.binds_count <= constants.build_file_binds_max);
+        return file.binds[step.binds.begin..][0..step.binds.count];
     }
 
     pub fn adds_slice(file: *const BuildFile) []const Add {
@@ -157,6 +250,22 @@ pub const Field = enum {
     workdir,
     user,
     labels,
+    // M9.
+    output,
+    copy,
+    caches,
+    binds,
+    exclude,
+    src,
+    chown,
+    chmod,
+    id,
+    path,
+    source,
+    ro,
+    mode,
+    uid,
+    gid,
 };
 
 /// Where in the schema a problem is.
@@ -167,16 +276,25 @@ pub const Level = enum {
     add,
     config,
     label,
+    copy,
+    cache,
+    bind,
 
     /// The fields this level takes, in the order the canonical printer writes them.
     pub fn allowed(level: Level) []const Field {
         return switch (level) {
-            .file => &.{ .version, .steps, .image },
-            .step => &.{ .name, .base, .inputs, .needs, .env, .run, .network },
+            .file => &.{ .version, .exclude, .steps, .image },
+            .step => &.{
+                .name,   .base, .inputs,  .needs, .env,    .run,   .network,
+                .output, .user, .workdir, .copy,  .caches, .binds, .exclude,
+            },
             .image => &.{ .base, .add, .config },
             .add => &.{ .from, .to },
             .config => &.{ .entrypoint, .cmd, .env, .workdir, .user, .labels },
             .label => &.{},
+            .copy => &.{ .from, .src, .to, .chown, .chmod, .exclude },
+            .cache => &.{ .id, .path, .ro, .mode, .uid, .gid },
+            .bind => &.{ .from, .source, .to },
         };
     }
 };
@@ -193,6 +311,13 @@ pub const Expected = enum {
     step_list,
     add_list,
     label_list,
+    copy_list,
+    cache_list,
+    bind_list,
+    copy_or_close,
+    cache_or_close,
+    bind_or_close,
+    output_value,
     step_or_close,
     add_or_close,
     label_or_close,
@@ -227,6 +352,8 @@ pub const ProblemKind = enum {
     bad_version,
     /// `.version` is newer than this zbx reads.
     newer_version,
+    /// A list holds more than the file's shared arrays have room for in all (`field` says which).
+    file_too_big,
     /// A step name that is empty, too long, or not `[a-z0-9-]`.
     bad_step_name,
     /// The step name `image`, which names the result in the report and the graph.
@@ -243,9 +370,35 @@ pub const ProblemKind = enum {
     env_fixed,
     /// `add.to` is not an absolute path written plainly (no `.`, `..` or empty parts).
     bad_target,
+    /// `.output` is not `.out` or `.root`.
+    bad_output,
+    /// A step with both `run` and `copy`, or with neither.
+    run_or_copy,
+    /// `.user` (a step's or a copy's `.chown`) is not `uid`, `uid:gid`, `name` or `name:group`.
+    bad_user,
+    /// `.workdir`, a cache's `.path` or a bind's `.to` is not an absolute path written plainly.
+    bad_path,
+    /// A copy's `.to`: absolute, plain, and it may end in `/`.
+    bad_copy_to,
+    /// `.chmod` or a cache's `.mode` is not 3 or 4 octal digits.
+    bad_mode,
+    /// A `.src` or `.exclude` entry is not a pattern (`word` is the entry).
+    bad_pattern,
+    /// A copy's or a bind's `.from` is not `step:<name>` or an image reference.
+    bad_from,
+    /// A bind's `.source` is not a path inside what it comes from.
+    bad_source,
+    /// A cache's `.id` is empty, too long, or has a byte outside `[A-Za-z0-9._/-]`.
+    bad_cache_id,
+    /// A cache's `.uid` or `.gid` is not a number that fits 32 bits.
+    bad_number,
+    /// Two caches or binds of one step mount at one path (`word` is it).
+    mount_twice,
     // E0802: the graph.
     /// More `needs` than a step can mount.
     too_many_needs,
+    /// `needs` and `binds` (and `/src` and `/out`) come to more mounts than a run holds.
+    too_many_mounts,
     // E0807: `image.config`.
     config_workdir,
     config_user,
@@ -347,10 +500,10 @@ const Parser = struct {
 const Fields = struct {
     level: Level,
     after_value: bool = false,
-    seen: u32 = 0,
+    seen: u64 = 0,
 
     fn next(fields: *Fields, parser: *Parser) !?Field {
-        comptime assert(@typeInfo(Field).@"enum".field_names.len <= 32);
+        comptime assert(@typeInfo(Field).@"enum".field_names.len <= 64);
         var token = parser.lexer.next();
         if (fields.after_value) {
             if (token.tag == .close) return null;
@@ -365,7 +518,7 @@ const Fields = struct {
             parser.problem.set_word(name);
             return result;
         };
-        const bit = @as(u32, 1) << @intCast(@backingInt(field));
+        const bit = @as(u64, 1) << @intCast(@backingInt(field));
         if (fields.seen & bit != 0) {
             return parser.fail(.duplicate_field, token, fields.level, field);
         }
@@ -376,7 +529,7 @@ const Fields = struct {
     }
 
     fn has(fields: *const Fields, field: Field) bool {
-        return fields.seen & (@as(u32, 1) << @intCast(@backingInt(field))) != 0;
+        return fields.seen & (@as(u64, 1) << @intCast(@backingInt(field))) != 0;
     }
 };
 
@@ -438,6 +591,11 @@ fn clear(file: *BuildFile) void {
     file.image.adds_count = 0;
     file.image.line = 0;
     file.image.column = 0;
+    file.exclude = Span.none;
+    file.list_texts_count = 0;
+    file.copies_count = 0;
+    file.caches_count = 0;
+    file.binds_count = 0;
     clear_config(&file.image.config);
 }
 
@@ -463,6 +621,7 @@ fn parse_file(parser: *Parser) Refused!void {
             .version => try parse_version(parser),
             .steps => try parse_steps(parser),
             .image => try parse_image(parser),
+            .exclude => try parse_exclude(parser, .file, &parser.file.exclude),
             else => unreachable, // `Fields.next` returns only the fields of the level.
         }
     }
@@ -515,6 +674,13 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
     step.needs = .{ .items = undefined, .count = 0, .given = false };
     step.env = .{ .items = undefined, .count = 0, .given = false };
     step.run = .{ .items = undefined, .count = 0, .given = false };
+    step.output = .out;
+    step.user = null;
+    step.workdir = null;
+    step.copy = Span.none;
+    step.caches = Span.none;
+    step.binds = Span.none;
+    step.exclude = Span.none;
     var fields: Fields = .{ .level = .step };
     while (try fields.next(parser)) |field| {
         switch (field) {
@@ -522,7 +688,7 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
                 step.name = try parse_string(parser, .step, field);
                 try check_step_name(parser, step.name);
             },
-            .base => step.base = try parse_reference(parser, .step),
+            .base => step.base = try parse_base(parser, .step),
             .inputs => try parse_list(parser, .step, field, &step.inputs, .list_too_long),
             .needs => try parse_list(parser, .step, field, &step.needs, .too_many_needs),
             .env => {
@@ -534,13 +700,325 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
                 try check_run(parser, step);
             },
             .network => step.network = try parse_boolean(parser, .step),
-            else => unreachable, // `Fields.next` returns only the fields of the level.
+            else => try parse_step_more(parser, step, field),
         }
     }
-    const required = [_]Field{ .name, .base, .run };
+    const required = [_]Field{ .name, .base };
     for (required) |field| {
         if (!fields.has(field)) return parser.fail(.missing_field, open, .step, field);
     }
+    if (fields.has(.run) == fields.has(.copy)) return parser.fail(.run_or_copy, open, .step, null);
+    try check_mounts(parser, step, open);
+}
+
+/// The fields M9 added to a step.
+fn parse_step_more(parser: *Parser, step: *Step, field: Field) Refused!void {
+    switch (field) {
+        .output => step.output = try parse_output(parser),
+        .user => {
+            const user = try parse_string(parser, .step, field);
+            if (!is_user_text(parser.file.text(user))) {
+                return parser.fail_value(.bad_user, user, .step, field);
+            }
+            step.user = user;
+        },
+        .workdir => {
+            const workdir = try parse_string(parser, .step, field);
+            if (!is_absolute_plain(parser.file.text(workdir))) {
+                return parser.fail_value(.bad_path, workdir, .step, field);
+            }
+            step.workdir = workdir;
+        },
+        .copy => try parse_copies(parser, step),
+        .caches => try parse_caches(parser, step),
+        .binds => try parse_binds(parser, step),
+        .exclude => try parse_exclude(parser, .step, &step.exclude),
+        else => unreachable, // `Fields.next` returns only the fields of the level.
+    }
+}
+
+/// `.output = .root` or `.out`: an enum literal, which the lexer reads as a field name.
+fn parse_output(parser: *Parser) Refused!Output {
+    const token = parser.lexer.next();
+    if (token.tag != .field) return parser.syntax(token, .step, .output_value);
+    const name = parser.lexer.text[token.start + 1 .. token.end];
+    if (std.mem.eql(u8, name, "root")) return .root;
+    if (std.mem.eql(u8, name, "out")) return .out;
+    const result = parser.fail(.bad_output, token, .step, .output);
+    parser.problem.set_word(name);
+    return result;
+}
+
+/// `needs` and `binds` take a mount each, and `/src` and `/out` take two unless the step keeps
+/// its root: all of them in the run's `mounts_max` (the brief leaves caches out of the count).
+fn check_mounts(parser: *Parser, step: *const Step, open: Token) Refused!void {
+    assert(step.needs.count <= constants.build_step_needs_max);
+    assert(step.binds.count <= constants.build_step_binds_max);
+    const fixed: u32 = if (step.output == .root) 0 else 2;
+    const total = step.needs.count + step.binds.count + fixed;
+    if (total > constants.mounts_max) return parser.fail(.too_many_mounts, open, .step, .binds);
+}
+
+/// A list of exclude lines (`.dockerignore` syntax), into the file's `list_texts`.
+fn parse_exclude(parser: *Parser, level: Level, span: *Span) Refused!void {
+    try parse_texts(parser, level, .exclude, span, constants.build_exclude_lines_max);
+    for (parser.file.texts(span.*)) |line| {
+        if (glob.line_fault(parser.file.text(line)) != null) {
+            return parser.fail_value(.bad_pattern, line, level, .exclude);
+        }
+    }
+}
+
+/// A list of strings appended to the file's `list_texts`, at most `max` of them.
+fn parse_texts(
+    parser: *Parser,
+    level: Level,
+    field: Field,
+    span: *Span,
+    max: u32,
+) Refused!void {
+    _ = try parser.expect(.open, level, .string_list);
+    const file = parser.file;
+    span.* = .{ .begin = file.list_texts_count, .count = 0, .given = true };
+    var items: Items = .{ .level = level };
+    while (try items.next(parser)) |token| {
+        if (token.tag != .string) return parser.syntax(token, level, .string_or_close);
+        if (span.count == max) return parser.fail(.list_too_long, token, level, field);
+        if (file.list_texts_count == constants.build_file_list_texts_max) {
+            return parser.fail(.file_too_big, token, level, field);
+        }
+        file.list_texts[file.list_texts_count] = try decode(parser, token, level, field);
+        file.list_texts_count += 1;
+        span.count += 1;
+    }
+    assert(span.count == items.count);
+}
+
+fn parse_copies(parser: *Parser, step: *Step) Refused!void {
+    _ = try parser.expect(.open, .step, .copy_list);
+    const file = parser.file;
+    step.copy = .{ .begin = file.copies_count, .count = 0, .given = true };
+    var items: Items = .{ .level = .copy };
+    while (try items.next(parser)) |open| {
+        if (open.tag != .open) return parser.syntax(open, .copy, .copy_or_close);
+        if (step.copy.count == constants.build_copy_entries_max) {
+            return parser.fail(.list_too_long, open, .step, .copy);
+        }
+        if (file.copies_count == constants.build_file_copies_max) {
+            return parser.fail(.file_too_big, open, .step, .copy);
+        }
+        try parse_copy(parser, &file.copies[file.copies_count], open);
+        file.copies_count += 1;
+        step.copy.count += 1;
+    }
+}
+
+fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
+    entry.* = .{
+        .from = null,
+        .src = Span.none,
+        .to = undefined,
+        .chown = null,
+        .chmod = null,
+        .exclude = Span.none,
+        .line = open.line,
+        .column = open.column,
+    };
+    var fields: Fields = .{ .level = .copy };
+    while (try fields.next(parser)) |field| {
+        switch (field) {
+            .from => entry.from = try parse_from(parser, .copy),
+            .src => try parse_texts(parser, .copy, field, &entry.src, constants.build_copy_sources_max),
+            .to => {
+                entry.to = try parse_string(parser, .copy, field);
+                if (!is_copy_to(parser.file.text(entry.to))) {
+                    return parser.fail_value(.bad_copy_to, entry.to, .copy, field);
+                }
+            },
+            .chown => {
+                const user = try parse_string(parser, .copy, field);
+                if (!is_user_text(parser.file.text(user))) {
+                    return parser.fail_value(.bad_user, user, .copy, field);
+                }
+                entry.chown = user;
+            },
+            .chmod => entry.chmod = try parse_mode(parser, .copy, field),
+            .exclude => try parse_exclude(parser, .copy, &entry.exclude),
+            else => unreachable, // `Fields.next` returns only the fields of the level.
+        }
+    }
+    if (!fields.has(.src)) return parser.fail(.missing_field, open, .copy, .src);
+    if (!fields.has(.to)) return parser.fail(.missing_field, open, .copy, .to);
+    try check_sources(parser, entry);
+}
+
+/// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree.
+fn check_sources(parser: *Parser, entry: *const CopyEntry) Refused!void {
+    assert(entry.src.given);
+    for (parser.file.texts(entry.src)) |source| {
+        const text = parser.file.text(source);
+        const rooted = text.len > 0 and text[0] == '/';
+        const bad = glob.valid(text) != null or has_parent_part(text) or
+            (rooted and entry.from == null);
+        if (bad) return parser.fail_value(.bad_pattern, source, .copy, .src);
+    }
+}
+
+fn parse_caches(parser: *Parser, step: *Step) Refused!void {
+    _ = try parser.expect(.open, .step, .cache_list);
+    const file = parser.file;
+    step.caches = .{ .begin = file.caches_count, .count = 0, .given = true };
+    var items: Items = .{ .level = .cache };
+    while (try items.next(parser)) |open| {
+        if (open.tag != .open) return parser.syntax(open, .cache, .cache_or_close);
+        if (step.caches.count == constants.build_step_caches_max) {
+            return parser.fail(.list_too_long, open, .step, .caches);
+        }
+        if (file.caches_count == constants.build_file_caches_max) {
+            return parser.fail(.file_too_big, open, .step, .caches);
+        }
+        try parse_cache(parser, &file.caches[file.caches_count], open);
+        file.caches_count += 1;
+        step.caches.count += 1;
+    }
+    try check_mount_paths(parser, step);
+}
+
+fn parse_cache(parser: *Parser, entry: *Cache, open: Token) Refused!void {
+    entry.* = .{
+        .id = undefined,
+        .path = undefined,
+        .ro = false,
+        .mode = null,
+        .uid = null,
+        .gid = null,
+        .line = open.line,
+        .column = open.column,
+    };
+    var fields: Fields = .{ .level = .cache };
+    while (try fields.next(parser)) |field| {
+        switch (field) {
+            .id => {
+                entry.id = try parse_string(parser, .cache, field);
+                if (!is_cache_id(parser.file.text(entry.id))) {
+                    return parser.fail_value(.bad_cache_id, entry.id, .cache, field);
+                }
+            },
+            .path => {
+                entry.path = try parse_string(parser, .cache, field);
+                if (!is_absolute_plain(parser.file.text(entry.path))) {
+                    return parser.fail_value(.bad_path, entry.path, .cache, field);
+                }
+            },
+            .ro => entry.ro = try parse_boolean(parser, .cache),
+            .mode => entry.mode = try parse_mode(parser, .cache, field),
+            .uid => entry.uid = try parse_number(parser, .cache, field),
+            .gid => entry.gid = try parse_number(parser, .cache, field),
+            else => unreachable, // `Fields.next` returns only the fields of the level.
+        }
+    }
+    if (!fields.has(.id)) return parser.fail(.missing_field, open, .cache, .id);
+    if (!fields.has(.path)) return parser.fail(.missing_field, open, .cache, .path);
+}
+
+fn parse_binds(parser: *Parser, step: *Step) Refused!void {
+    _ = try parser.expect(.open, .step, .bind_list);
+    const file = parser.file;
+    step.binds = .{ .begin = file.binds_count, .count = 0, .given = true };
+    var items: Items = .{ .level = .bind };
+    while (try items.next(parser)) |open| {
+        if (open.tag != .open) return parser.syntax(open, .bind, .bind_or_close);
+        if (step.binds.count == constants.build_step_binds_max) {
+            return parser.fail(.list_too_long, open, .step, .binds);
+        }
+        if (file.binds_count == constants.build_file_binds_max) {
+            return parser.fail(.file_too_big, open, .step, .binds);
+        }
+        try parse_bind(parser, &file.binds[file.binds_count], open);
+        file.binds_count += 1;
+        step.binds.count += 1;
+    }
+    try check_mount_paths(parser, step);
+}
+
+fn parse_bind(parser: *Parser, entry: *Bind, open: Token) Refused!void {
+    entry.* = .{ .from = null, .source = undefined, .to = undefined, .line = open.line, .column = open.column };
+    var fields: Fields = .{ .level = .bind };
+    while (try fields.next(parser)) |field| {
+        switch (field) {
+            .from => entry.from = try parse_from(parser, .bind),
+            .source => entry.source = try parse_string(parser, .bind, field),
+            .to => {
+                entry.to = try parse_string(parser, .bind, field);
+                if (!is_absolute_plain(parser.file.text(entry.to))) {
+                    return parser.fail_value(.bad_path, entry.to, .bind, field);
+                }
+            },
+            else => unreachable, // `Fields.next` returns only the fields of the level.
+        }
+    }
+    if (!fields.has(.source)) return parser.fail(.missing_field, open, .bind, .source);
+    if (!fields.has(.to)) return parser.fail(.missing_field, open, .bind, .to);
+    const source = parser.file.text(entry.source);
+    const rooted = source.len > 0 and source[0] == '/';
+    // From a tree a source is absolute inside it; from the project it is relative.
+    const good = if (entry.from == null)
+        is_project_path(source)
+    else
+        rooted and is_absolute_plain(source);
+    if (!good) return parser.fail_value(.bad_source, entry.source, .bind, .source);
+}
+
+/// A step mounts each path once, caches and binds together.
+fn check_mount_paths(parser: *Parser, step: *const Step) Refused!void {
+    const file = parser.file;
+    const caches = file.step_caches(step);
+    const binds = file.step_binds(step);
+    for (caches, 0..) |cache, index| {
+        const text = file.text(cache.path);
+        for (caches[0..index]) |earlier| {
+            if (std.mem.eql(u8, file.text(earlier.path), text)) {
+                return parser.fail_value(.mount_twice, cache.path, .cache, .path);
+            }
+        }
+        for (binds) |bind| {
+            if (std.mem.eql(u8, file.text(bind.to), text)) {
+                return parser.fail_value(.mount_twice, cache.path, .cache, .path);
+            }
+        }
+    }
+    for (binds, 0..) |bind, index| {
+        const text = file.text(bind.to);
+        for (binds[0..index]) |earlier| {
+            if (std.mem.eql(u8, file.text(earlier.to), text)) {
+                return parser.fail_value(.mount_twice, bind.to, .bind, .to);
+            }
+        }
+    }
+}
+
+/// A `.from`: `step:<name>` or a locked image reference.
+fn parse_from(parser: *Parser, level: Level) Refused!Text {
+    const value = try parse_string(parser, level, .from);
+    return check_image_or_step(parser, value, .bad_from, level, .from);
+}
+
+/// An octal mode of three or four digits, as text.
+fn parse_mode(parser: *Parser, level: Level, field: Field) Refused!Text {
+    const value = try parse_string(parser, level, field);
+    if (!is_mode(parser.file.text(value))) return parser.fail_value(.bad_mode, value, level, field);
+    return value;
+}
+
+fn parse_number(parser: *Parser, level: Level, field: Field) Refused!u32 {
+    const token = try parser.expect(.integer, level, .integer);
+    const digits = parser.lexer.text[token.start..token.end];
+    const bad = digits.len > 10 or (digits.len > 1 and digits[0] == '0');
+    const value = if (bad) null else std.fmt.parseInt(u32, digits, 10) catch null;
+    if (value) |number| return number;
+    const result = parser.fail(.bad_number, token, level, field);
+    parser.problem.set_word(digits);
+    return result;
 }
 
 fn parse_image(parser: *Parser) Refused!void {
@@ -551,7 +1029,7 @@ fn parse_image(parser: *Parser) Refused!void {
     var fields: Fields = .{ .level = .image };
     while (try fields.next(parser)) |field| {
         switch (field) {
-            .base => image.base = try parse_reference(parser, .image),
+            .base => image.base = try parse_base(parser, .image),
             .add => try parse_adds(parser),
             .config => try parse_config(parser),
             else => unreachable, // `Fields.next` returns only the fields of the level.
@@ -614,7 +1092,7 @@ fn parse_config(parser: *Parser) Refused!void {
             },
             .user => {
                 const user = try parse_string(parser, .config, field);
-                if (!is_numeric_user(parser.file.text(user))) {
+                if (!is_user_text(parser.file.text(user))) {
                     return parser.fail_value(.config_user, user, .config, .user);
                 }
                 config.user = user;
@@ -688,16 +1166,32 @@ fn parse_boolean(parser: *Parser, level: Level) Refused!bool {
     return parser.syntax(token, level, .boolean);
 }
 
-fn parse_reference(parser: *Parser, level: Level) Refused!Text {
+/// A `.base`: an image reference, or `step:<name>` (a step's root output).
+fn parse_base(parser: *Parser, level: Level) Refused!Text {
     const value = try parse_string(parser, level, .base);
+    return check_image_or_step(parser, value, .bad_reference, level, .base);
+}
+
+/// `value` is `step:<valid name>` or an image reference; else `kind` refuses it.
+fn check_image_or_step(
+    parser: *Parser,
+    value: Text,
+    kind: ProblemKind,
+    level: Level,
+    field: Field,
+) Refused!Text {
     const text = parser.file.text(value);
+    if (step_ref(text)) |name| {
+        if (is_step_name(name)) return value;
+        return parser.fail_value(kind, value, level, field);
+    }
     var reference: reference_mod.Reference = undefined;
-    if (text.len == 0) return parser.fail_value(.bad_reference, value, level, .base);
+    if (text.len == 0) return parser.fail_value(kind, value, level, field);
     if (text.len > constants.reference_bytes_max) {
-        return parser.fail_value(.bad_reference, value, level, .base);
+        return parser.fail_value(kind, value, level, field);
     }
     reference_mod.parse(text, &reference) catch {
-        return parser.fail_value(.bad_reference, value, level, .base);
+        return parser.fail_value(kind, value, level, field);
     };
     return value;
 }
@@ -767,7 +1261,7 @@ pub fn takes_control_bytes(level: Level, field: Field) bool {
     return switch (level) {
         .step => field == .run or field == .env,
         .config => field == .entrypoint or field == .cmd or field == .env,
-        .file, .image, .add, .label => false,
+        .file, .image, .add, .label, .copy, .cache, .bind => false,
     };
 }
 
@@ -852,7 +1346,7 @@ fn check_env_list(
     assert(entries.len <= constants.build_config_env_max);
     assert(switch (level) {
         .step, .config => true,
-        .file, .image, .add, .label => false,
+        .file, .image, .add, .label, .copy, .cache, .bind => false,
     });
     for (entries, 0..) |entry, index| {
         const key = env_key(parser.file.text(entry)) orelse {
@@ -934,7 +1428,110 @@ pub fn is_absolute_plain(text: []const u8) bool {
     return true;
 }
 
-/// `uid:gid`, both decimal and within 32 bits: names are not resolved at build time.
+/// A user for `.user`, `.chown` and `config.user`: `uid`, `uid:gid`, `name` or `name:group`. A
+/// part of digits is a number that fits 32 bits; anything else is a name of `[A-Za-z0-9_.-]`,
+/// not starting with `-`, at most 32 bytes. Names are looked up in a tree later.
+pub fn is_user_text(text: []const u8) bool {
+    if (text.len == 0) return false;
+    var parts = std.mem.splitScalar(u8, text, ':');
+    var count: u32 = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (count > 2) return false;
+        if (!is_user_part(part)) return false;
+    }
+    assert(count >= 1);
+    return true;
+}
+
+fn is_user_part(part: []const u8) bool {
+    if (part.len == 0) return false;
+    if (part.len > 32) return false;
+    if (part[0] == '-') return false;
+    var digits = true;
+    for (part) |byte| {
+        const good = std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '.' or byte == '-';
+        if (!good) return false;
+        if (!std.ascii.isDigit(byte)) digits = false;
+    }
+    if (!digits) return true;
+    _ = std.fmt.parseInt(u32, part, 10) catch return false;
+    return true;
+}
+
+/// A copy's destination: an absolute path written plainly, which may end in one `/`.
+pub fn is_copy_to(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text.len == 1) return text[0] == '/';
+    if (text[text.len - 1] == '/') return is_absolute_plain(text[0 .. text.len - 1]);
+    return is_absolute_plain(text);
+}
+
+/// An octal mode: three or four digits of 0 to 7.
+pub fn is_mode(text: []const u8) bool {
+    if (text.len < 3 or text.len > 4) return false;
+    for (text) |byte| {
+        if (byte < '0' or byte > '7') return false;
+    }
+    return true;
+}
+
+/// A cache id: `[A-Za-z0-9._/-]`, not empty, at most `build_label_key_bytes_max` bytes.
+pub fn is_cache_id(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text.len > constants.build_label_key_bytes_max) return false;
+    for (text) |byte| {
+        const good = std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '_' or
+            byte == '/' or byte == '-';
+        if (!good) return false;
+    }
+    return true;
+}
+
+/// The name of `step:<name>`, or null if `text` is not written that way (it may be an image).
+pub fn step_ref(text: []const u8) ?[]const u8 {
+    const prefix = "step:";
+    if (!std.mem.startsWith(u8, text, prefix)) return null;
+    return text[prefix.len..];
+}
+
+/// A step name: 1 to `build_step_name_bytes_max` of `[a-z0-9-]`, and not `image`.
+pub fn is_step_name(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text.len > constants.build_step_name_bytes_max) return false;
+    for (text) |byte| {
+        const good = (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-';
+        if (!good) return false;
+    }
+    return !std.mem.eql(u8, text, "image");
+}
+
+/// A path in the project: relative, written plainly (`.` alone is the project's root).
+pub fn is_project_path(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text[0] == '/') return false;
+    if (std.mem.eql(u8, text, ".")) return true;
+    return !has_parent_part(text) and !has_dot_or_empty_part(text);
+}
+
+fn has_dot_or_empty_part(text: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, text, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) return true;
+    }
+    return false;
+}
+
+/// Whether some part of `text` is `..`.
+pub fn has_parent_part(text: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, text, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return true;
+    }
+    return false;
+}
+
+/// `uid:gid`, both decimal and within 32 bits.
 pub fn is_numeric_user(text: []const u8) bool {
     const colon = std.mem.indexOfScalar(u8, text, ':') orelse return false;
     const ids = [_][]const u8{ text[0..colon], text[colon + 1 ..] };

@@ -15,6 +15,7 @@ const constants = @import("../constants.zig");
 const file_mod = @import("file.zig");
 const project = @import("../runtime/project.zig");
 const fs_mod = @import("../store/fs.zig");
+const glob = @import("glob.zig");
 
 const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
@@ -119,6 +120,15 @@ pub fn check(fs: Fs, project_path: []const u8, file: *const BuildFile, problem: 
             const text = file.text(input);
             problem.step = @intCast(step_index);
             problem.input = input;
+            if (glob.is_glob(text)) {
+                // A glob is matched against the project when the build runs, not here: here it
+                // must only be a pattern written from the project down.
+                if (glob_fault(text)) {
+                    problem.kind = .not_plain;
+                    return .refused;
+                }
+                continue;
+            }
             const resolved = &problem.resolved;
             resolve_input(fs, project_path, text, resolved, &problem.file_kind) catch |err| {
                 problem.kind = kind_of(err);
@@ -155,6 +165,7 @@ fn overlap(
     assert(project.is_inside(project_path, resolved));
     const written = file.text(problem.input);
     for (earlier) |input| {
+        if (glob.is_glob(file.text(input))) continue; // Only a build's matches can overlap.
         // Overlap as written too: `a` and `a/b` are two writes of `b` into the input tree even
         // when `a/b` is a link that resolves elsewhere in the project.
         if (written_overlap(written, file.text(input))) return input;
@@ -165,6 +176,15 @@ fn overlap(
         if (project.is_inside(resolved, other.text())) return input;
     }
     return null;
+}
+
+/// Whether the glob `text` is not one an input can be: a pattern that `glob` refuses, one that
+/// starts at `/`, or one with a `..` part.
+fn glob_fault(text: []const u8) bool {
+    assert(text.len > 0);
+    if (glob.valid(text) != null) return true;
+    if (text[0] == '/') return true;
+    return file_mod.has_parent_part(text);
 }
 
 /// Two plain relative paths where the same, or one is a directory prefix of the other.

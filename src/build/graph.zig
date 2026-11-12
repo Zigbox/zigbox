@@ -5,8 +5,12 @@
 //! order a build would start them in on one core. A cycle is named, as the steps in it in need
 //! order (`a -> b -> a`: a needs b, b needs a), starting at the smallest name in it.
 //!
-//! Steps are indexes into the file's steps (`u8` indexes; counts are `u16`: at most `build_steps_max`). The work is
-//! quadratic in the steps, which is at most 64.
+//! A step comes after every step it needs and every step a `step:<name>` of its own names: its
+//! `base`, and the `from` of each of its copies and binds. `image.base` may name a step too. A
+//! cycle through any of these is a cycle.
+//!
+//! Steps are indexes into the file's steps (`u8` indexes; counts are `u16`: at most
+//! `build_steps_max`). The work is quadratic in the steps, which is at most 256.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,6 +35,12 @@ pub const ProblemKind = enum {
     unknown_add,
     /// The steps in `cycle` need each other round.
     cycle,
+    /// A step's `base` is `step:<name>` of a name that no step has (`at` is the base).
+    unknown_base,
+    /// A copy's or a bind's `from` is `step:<name>` of a name that no step has.
+    unknown_from,
+    /// `image.base` is `step:<name>` of a name that no step has.
+    unknown_image_base,
 };
 
 pub const Problem = struct {
@@ -52,8 +62,16 @@ pub const Problem = struct {
 };
 
 pub const Graph = struct {
-    /// Each step's needs, as step indexes, in the file's order.
+    /// Each step's needs, as step indexes, in the file's order: the steps mounted at /in.
     needs: [constants.build_steps_max][constants.build_step_needs_max]u8,
+    /// Every step each step comes after: its needs, then its base, copies and binds when they
+    /// name steps. A step may be listed twice here (a need that is also a base).
+    after: [constants.build_steps_max][constants.build_step_edges_max]u8,
+    after_count: [constants.build_steps_max]u16,
+    /// Each step's base, when it is `step:<name>`.
+    base_step: [constants.build_steps_max]?u8,
+    /// The step `image.base` names, if it is `step:<name>`.
+    image_base: ?u8,
     /// The steps in topological order.
     order: [constants.build_steps_max]u8,
     count: u16,
@@ -70,6 +88,12 @@ pub const Graph = struct {
         assert(step < file.steps_count);
         return graph.needs[step][0..file.steps[step].needs.count];
     }
+
+    /// The steps `step` comes after, for ordering and for the scheduler.
+    pub fn after_slice(graph: *const Graph, step: u8) []const u8 {
+        assert(graph.after_count[step] <= constants.build_step_edges_max);
+        return graph.after[step][0..graph.after_count[step]];
+    }
 };
 
 pub const Result = enum { ordered, refused };
@@ -81,8 +105,10 @@ pub fn order(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
     assert(file.version == file_mod.version);
     graph.count = 0;
     graph.adds_count = 0;
+    graph.image_base = null;
     if (check_names(file, problem) == .refused) return .refused;
     if (resolve_needs(file, graph, problem) == .refused) return .refused;
+    if (resolve_edges(file, graph, problem) == .refused) return .refused;
     if (resolve_adds(file, graph, problem) == .refused) return .refused;
     var done: [constants.build_steps_max]bool = @splat(false);
     while (graph.count < file.steps_count) {
@@ -137,8 +163,62 @@ fn resolve_needs(file: *const BuildFile, graph: *Graph, problem: *Problem) Resul
             }
             graph.needs[index][need_index] = target;
         }
+        @memcpy(graph.after[index][0..needs.len], graph.needs[index][0..needs.len]);
+        graph.after_count[index] = @intCast(needs.len);
+        graph.base_step[index] = null;
     }
     return .ordered;
+}
+
+/// The step `text` names as `step:<name>`: null if it is not written so (an image reference or a
+/// project path), an error if no step has the name.
+fn step_of(file: *const BuildFile, text: Text) error{Unknown}!?u8 {
+    const name = file_mod.step_ref(file.text(text)) orelse return null;
+    return step_named(file, name) orelse error.Unknown;
+}
+
+/// Adds the edges that a `step:<name>` makes: base, copies, binds, and `image.base`.
+fn resolve_edges(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
+    for (file.steps_slice(), 0..) |*step, index_usize| {
+        const index: u8 = @intCast(index_usize);
+        const base = step_of(file, step.base) catch {
+            refuse(problem, .unknown_base, index, 0, step.base);
+            return .refused;
+        };
+        if (base) |target| {
+            graph.base_step[index] = target;
+            add_edge(graph, index, target);
+        }
+        for (file.copy_entries(step)) |entry| {
+            const from = entry.from orelse continue;
+            const target = step_of(file, from) catch {
+                refuse(problem, .unknown_from, index, 0, from);
+                return .refused;
+            };
+            if (target) |found| add_edge(graph, index, found);
+        }
+        for (file.step_binds(step)) |bind| {
+            const from = bind.from orelse continue;
+            const target = step_of(file, from) catch {
+                refuse(problem, .unknown_from, index, 0, from);
+                return .refused;
+            };
+            if (target) |found| add_edge(graph, index, found);
+        }
+    }
+    const image_base = file.image.base orelse return .ordered;
+    graph.image_base = step_of(file, image_base) catch {
+        refuse(problem, .unknown_image_base, 0, 0, image_base);
+        return .refused;
+    };
+    return .ordered;
+}
+
+fn add_edge(graph: *Graph, step: u8, target: u8) void {
+    const count = graph.after_count[step];
+    assert(count < constants.build_step_edges_max); // The edges' bound counts every source.
+    graph.after[step][count] = target;
+    graph.after_count[step] = count + 1;
 }
 
 fn resolve_adds(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
@@ -174,7 +254,7 @@ fn smallest_ready(file: *const BuildFile, graph: *const Graph, done: []const boo
     for (0..file.steps_count) |index_usize| {
         const index: u8 = @intCast(index_usize);
         if (done[index]) continue;
-        const ready = for (graph.needs_slice(file, index)) |need| {
+        const ready = for (graph.after_slice(index)) |need| {
             if (!done[need]) break false;
         } else true;
         if (!ready) continue;
@@ -243,7 +323,7 @@ fn smallest_unmet_need(
     step: u8,
 ) u8 {
     var best: ?u8 = null;
-    for (graph.needs_slice(file, step)) |need| {
+    for (graph.after_slice(step)) |need| {
         if (done[need]) continue;
         if (best == null or name_less(file, need, best.?)) best = need;
     }
@@ -251,12 +331,27 @@ fn smallest_unmet_need(
     return best.?;
 }
 
-/// The entry of `step`'s needs that names `need`.
+/// The text in `step` that makes it come after `need`: a need's name, or a `step:` of its base,
+/// a copy's or a bind's `from`.
 fn need_text(file: *const BuildFile, graph: *const Graph, step: u8, need: u8) Text {
+    const found = file.steps[step];
     for (graph.needs_slice(file, step), 0..) |target, index| {
-        if (target == need) return file.steps[step].needs.items[index];
+        if (target == need) return found.needs.items[index];
     }
-    unreachable; // `need` was taken from `step`'s needs.
+    if (graph.base_step[step] == need) return found.base;
+    for (file.copy_entries(&found)) |entry| {
+        const from = entry.from orelse continue;
+        if (step_of(file, from) catch null) |target| {
+            if (target == need) return from;
+        }
+    }
+    for (file.step_binds(&found)) |bind| {
+        const from = bind.from orelse continue;
+        if (step_of(file, from) catch null) |target| {
+            if (target == need) return from;
+        }
+    }
+    unreachable; // `need` was taken from `step`'s edges.
 }
 
 const testing = std.testing;
