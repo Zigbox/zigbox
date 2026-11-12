@@ -63,6 +63,8 @@ const session_mod = @import("session.zig");
 const spec_mod = @import("spec.zig");
 const volumes_mod = @import("volumes.zig");
 const mounts_mod = @import("mounts.zig");
+const cdi_discover = @import("cdi_discover.zig");
+const cdi_mod = @import("cdi.zig");
 const devices_mod = @import("devices.zig");
 const devices_diagnose = @import("devices_diagnose.zig");
 
@@ -272,6 +274,10 @@ pub const Handle = struct {
     devices: []const devices_mod.Device,
     /// The devices' paths as the plan takes them.
     device_paths: [constants.run_devices_max][]const u8,
+    /// What the CDI devices among `devices` resolved to (null: none was asked), and where a
+    /// run that resolved them itself keeps it.
+    cdi: ?*const cdi_mod.Resolved,
+    cdi_resolved: cdi_mod.Resolved,
     /// The user the command runs as; null is root. Kept for the record and the exit report.
     user: ?spec_mod.User,
     /// What the tree is bound to, for the record.
@@ -363,6 +369,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.devices = &.{};
+    handle.cdi = null;
     handle.user = container.user;
     handle.binding = container.binding;
     reset_log(handle, options);
@@ -465,12 +472,36 @@ fn resolve_devices(host: Host, container: *const Spec, handle: *Handle, diag: *D
         devices_diagnose.refused(diag, path, refusal.problem);
         return error.StartFailed;
     }
+    if (!resolve_cdi(host, container, handle, diag)) return error.StartFailed;
     handle.devices = container.devices;
     var note: Diag = undefined;
     note.reset();
     devices_diagnose.groups_note(&note);
     handle.report(&note);
     assert(handle.devices.len <= constants.run_devices_max);
+}
+
+/// The CDI devices among the asked ones: the caller's resolution if it gave one, else the specs
+/// of this host. The scratch of the resolving is on this function's stack and gone after it.
+fn resolve_cdi(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) bool {
+    var asked: [constants.run_devices_max][]const u8 = undefined;
+    var count: usize = 0;
+    for (container.devices) |device| {
+        if (devices_mod.is_path(device.path)) continue;
+        asked[count] = device.path;
+        count += 1;
+    }
+    if (count == 0) return true;
+    if (container.cdi) |given| {
+        handle.cdi = given;
+        return true;
+    }
+    var scratch: cdi_discover.Scratch = undefined;
+    if (!cdi_discover.resolve(host, asked[0..count], &scratch, &handle.cdi_resolved, diag)) {
+        return false;
+    }
+    handle.cdi = &handle.cdi_resolved;
+    return true;
 }
 
 /// Builds the plan in place in the handle. The host's resolv.conf is read here, in the parent,
@@ -511,6 +542,8 @@ fn build_plan(
         .state = handle.volumes.input_slice(),
         .mounts = handle.resolution.inputs[0..handle.mounts.len],
         .devices = devices_mod.plan_input(handle.devices, &handle.device_paths),
+        .cdi = handle.cdi,
+        .keep_groups = handle.devices.len > 0,
         .hostname = container.hostname,
         .umask = container.umask,
     };

@@ -11,6 +11,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const volume = @import("../state/volume.zig");
 const mounts_mod = @import("mounts.zig");
+const cdi_mod = @import("cdi.zig");
 const devices_mod = @import("devices.zig");
 const constants = @import("../constants.zig");
 
@@ -335,6 +336,10 @@ pub const Spec = struct {
     /// `devices.resolve` before the container is made. A run with any keeps the user's
     /// supplementary groups (ZBX-W0209).
     devices: []const devices_mod.Device = &.{},
+    /// What the CDI devices among `devices` resolved to, when the caller has resolved them
+    /// (Zigcube's agent); null: the run discovers them through the host, so `zbx start` after
+    /// a reboot looks at the specs of that day. The caller keeps it alive until the run ends.
+    cdi: ?*const cdi_mod.Resolved = null,
     /// The directory a `--mount` (kind `mount`, writable) must be in or below, absolute. Empty:
     /// the nearest `zbx.lock` up from the working directory, else the working directory. A
     /// `--mount` source may be relative to the working directory; the run holds it to the

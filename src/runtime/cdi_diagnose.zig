@@ -55,6 +55,19 @@ pub fn host_lacks(diag: *Diag, problem: cdi.Problem, what: []const u8, device: [
     assert(diag.code.? == .E0226);
 }
 
+/// ZBX-E0226 for devices whose edits together are more than a run holds (`Resolved`).
+pub fn too_big(diag: *Diag, device: []const u8) void {
+    assert(diag.code == null);
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const named = echo_of(&storage, device);
+    diag.raise(.E0226);
+    diag.while_("resolving the CDI device {s}", .{named});
+    diag.cause("the devices ask for more nodes, mounts or variables than one run takes", .{});
+    diag.context("device", "{s}", .{named});
+    diag.fix(.{ .sentence = "ask for fewer devices, or trim the spec of the ones asked for" });
+    assert(diag.code.? == .E0226);
+}
+
 /// ZBX-E0227: an asked device whose spec has an edit Zigbox does not apply.
 pub fn unsupported(diag: *Diag, device: []const u8, edit: cdi.Unsupported, name: []const u8) void {
     assert(diag.code == null);
