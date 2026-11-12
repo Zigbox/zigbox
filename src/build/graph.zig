@@ -5,7 +5,7 @@
 //! order a build would start them in on one core. A cycle is named, as the steps in it in need
 //! order (`a -> b -> a`: a needs b, b needs a), starting at the smallest name in it.
 //!
-//! Steps are indexes into the file's steps (`u8`: at most `build_steps_max`). The work is
+//! Steps are indexes into the file's steps (`u8` indexes; counts are `u16`: at most `build_steps_max`). The work is
 //! quadratic in the steps, which is at most 64.
 
 const std = @import("std");
@@ -17,7 +17,7 @@ const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
 
 comptime {
-    assert(constants.build_steps_max <= std.math.maxInt(u8));
+    assert(constants.build_steps_max <= std.math.maxInt(u8) + 1); // Indexes fit a byte; counts do not.
 }
 
 pub const ProblemKind = enum {
@@ -42,7 +42,7 @@ pub const Problem = struct {
     at: Text,
     /// For `cycle`: the steps in it, in need order, without the first repeated at the end.
     cycle: [constants.build_steps_max]u8,
-    cycle_len: u8,
+    cycle_len: u16,
 
     pub fn cycle_slice(problem: *const Problem) []const u8 {
         assert(problem.kind == .cycle);
@@ -56,7 +56,7 @@ pub const Graph = struct {
     needs: [constants.build_steps_max][constants.build_step_needs_max]u8,
     /// The steps in topological order.
     order: [constants.build_steps_max]u8,
-    count: u8,
+    count: u16,
     /// Each add's step.
     adds: [constants.build_image_adds_max]u8,
     adds_count: u8,
@@ -198,8 +198,8 @@ fn name_cycle(
     problem: *Problem,
 ) void {
     var walk: [constants.build_steps_max]u8 = undefined;
-    var position: [constants.build_steps_max]?u8 = @splat(null);
-    var length: u8 = 0;
+    var position: [constants.build_steps_max]?u16 = @splat(null);
+    var length: u16 = 0;
     var current = smallest_not_done(file, done);
     while (position[current] == null) {
         position[current] = length;
