@@ -8,7 +8,7 @@ error[ZBX-E0309]: can't make the container's cgroup
   scope  zbx-web-1.scope
   name   web-1
   rootfs /srv/alpine
-  step   start_scope (6 of 68)
+  step   start_scope (6 of 67)
   fix    choose another name:                           zbx run --name <other-name> ...
          see who owns the delegated cgroup directory:   ls -ld $ZBX_CGROUP_ROOT
          in the macOS virtual machine, stop it:         zbx vm stop

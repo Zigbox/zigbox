@@ -256,12 +256,12 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// The child's steps: forty-two that happen once (four of them the hardening, three the /sys
-/// or the loopback and the sysfs, sixteen the /etc files), and two per device and one per link. A
+/// The child's steps: forty-one that happen once (four of them the hardening, three the /sys
+/// or the loopback and the sysfs, fifteen the /etc files), and two per device and one per link. A
 /// read-only plan has `read_only_steps_count` more, one with a working directory, two with a
 /// user (the user and the death signal asked for again). A plan with a network namespace of its
 /// own has one /sys step fewer and the loopback.
-pub const child_steps_count: u32 = 42 + 2 * constants.container_devices_count +
+pub const child_steps_count: u32 = 41 + 2 * constants.container_devices_count +
     constants.container_links_count;
 
 /// The steps a listener adds: making it and sending it in the child, receiving it in the parent.
@@ -1097,11 +1097,11 @@ pub const Plan = struct {
         }
     }
 
-    /// Writes each generated file to the container's /dev, binds it read-only over its mount
-    /// point in the rootfs and removes the staged name. The /dev is a fresh tmpfs by now.
+    /// Writes each generated file to the container's /dev, binds it over its mount point in
+    /// the rootfs (read-only, but for the hostname) and removes the staged name. The /dev is a fresh tmpfs by now.
     fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
-        defer assert(plan.count == start + 12);
+        defer assert(plan.count == start + 11);
         assert(rootfs.len > 0);
         assert(plan.etc_texts[0].offset != plan.etc_texts[1].offset);
         assert(plan.etc_texts[1].offset != plan.etc_texts[2].offset);
@@ -1111,7 +1111,9 @@ pub const Plan = struct {
             const inside = plan.add_text(&.{ rootfs, "/etc/", file.etc_name() });
             plan.push(.stage_etc_file, staged, plan.etc_texts[index], index);
             plan.push(.bind_etc_file, inside, staged, index);
-            plan.push(.remount_etc_file, inside, empty_text, index);
+            // The hostname stays writable, as in Docker: a program may rewrite it, and what it
+            // writes is the container's own copy.
+            if (file != .hostname) plan.push(.remount_etc_file, inside, empty_text, index);
             plan.push(.unstage_etc_file, staged, empty_text, index);
         }
     }
@@ -1433,7 +1435,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
-    try testing.expectEqual(@as(u32, 66), plan.count);
+    try testing.expectEqual(@as(u32, 65), plan.count);
     try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
     try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
@@ -1457,7 +1459,7 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
     try testing.expectEqual(steps_count_single, plan.count);
-    try testing.expectEqual(@as(u32, 67), plan.count);
+    try testing.expectEqual(@as(u32, 66), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
     var links_seen: u32 = 0;
@@ -1472,7 +1474,7 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     }
     // The devpts mount, the two /sys steps of a container with a sysfs of its own, and eleven
     // for the two generated files.
-    try testing.expectEqual(@as(u32, 19), tolerant);
+    try testing.expectEqual(@as(u32, 18), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
     // The mounts come in the order the kernel needs: private, bind, proc, dev, ... pivot, exec.
@@ -1883,9 +1885,12 @@ test "the generated /etc files are bound read-only over the image's, and the sta
         stages += 1;
         const name = etc_name(step.index);
         try testing.expectEqual(Kind.bind_etc_file, plan.steps[at + 1].kind);
-        try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
-        try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + 3].kind);
-        for (plan.steps[at .. at + 4]) |part| {
+        // The hostname is not remounted read-only: a program may write it (#113).
+        const writable = step.index == @backingInt(netfiles.File.hostname);
+        const parts: usize = if (writable) 3 else 4;
+        if (!writable) try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
+        try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + parts - 1].kind);
+        for (plan.steps[at .. at + parts]) |part| {
             try testing.expect(part.tolerant);
             try testing.expectEqual(step.index + 1, group_of(&part));
         }

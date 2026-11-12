@@ -497,7 +497,11 @@ fn network_mounts(
         const path = join(&buffer, root_path, name);
         if (!table.has(.bind_file, path)) return "a generated /etc file is not bound";
         const index = table.find(path).?; // `has` found it.
-        if (!table.mounts[index].read_only) return "a generated /etc file is writable";
+        // The hostname is the one generated file a program may write (#113).
+        const writable = std.mem.eql(u8, name, "/etc/hostname");
+        if (table.mounts[index].read_only == writable) {
+            return if (writable) "/etc/hostname is read-only" else "a generated /etc file is writable";
+        }
     }
     return null;
 }

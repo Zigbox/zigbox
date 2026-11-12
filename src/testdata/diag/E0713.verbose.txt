@@ -7,7 +7,7 @@ error[ZBX-E0713]: can't mount a state volume in the container
   target /var/lib/postgresql/data
   name   web-1
   rootfs /srv/alpine
-  step   make_state_data (57 of 74)
+  step   make_state_data (56 of 73)
   fix    see what this host allows:   zbx doctor
   more   zbx explain E0713
   docs   https://zigbox.github.io/zigbox/errors/E0713.html

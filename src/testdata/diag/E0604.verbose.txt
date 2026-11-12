@@ -8,7 +8,7 @@ error[ZBX-E0604]: a published host port is already in use
   log    /home/alice/.local/state/zbx/logs/web-1.pasta.log
   name   web-1
   rootfs /srv/alpine
-  step   await_pasta (6 of 70)
+  step   await_pasta (6 of 69)
   fix    see which program holds it:     ss -tlnp 'sport = :8080'
          or publish another host port:   zbx run --publish 8081:80 nginx
   more   zbx explain E0604
