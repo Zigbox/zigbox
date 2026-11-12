@@ -5,7 +5,7 @@ error[ZBX-E0608]: the listener could not be made inside the container
   listen 127.0.0.1:8080
   name   web-1
   rootfs /srv/alpine
-  step   make_listener (13 of 66)
+  step   make_listener (13 of 71)
   fix    see what this host allows:   zbx doctor
   more   zbx explain E0608
   docs   https://zigbox.github.io/zigbox/errors/E0608.html

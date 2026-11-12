@@ -965,6 +965,7 @@ test "a generated file that cannot be made is a note, and the run goes on" {
     const table = &sim.world.tables[sim.world.processes[1].table];
     try testing.expect(!table.has(.bind_file, rootfs ++ "/etc/hosts"));
     try testing.expect(table.has(.bind_file, rootfs ++ "/etc/resolv.conf"));
+    try testing.expect(table.has(.bind_file, rootfs ++ "/etc/hostname")); // #113: it is bound, too.
 }
 
 const value_marker = "value-marker-ZETA-42";

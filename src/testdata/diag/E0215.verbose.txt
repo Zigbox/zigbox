@@ -6,7 +6,7 @@ error[ZBX-E0215]: can't set up a --mount
   target /srv
   name   web-1
   rootfs /srv/alpine
-  step   bind_mount_dir (53 of 68)
+  step   bind_mount_dir (58 of 73)
   fix    see what this host allows:   zbx doctor
   more   zbx explain E0215
   docs   https://zigbox.github.io/zigbox/errors/E0215.html

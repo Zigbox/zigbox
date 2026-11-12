@@ -1,7 +1,7 @@
-//! The two files zbx generates for a container's `/etc` (docs/briefs/M5-network.md, "Inside the
-//! container"): `hosts` and `resolv.conf`. Pure: the plan holds their text, the child writes it
-//! and binds it, read-only, over the image's own files, which are never touched. They are not
-//! part of an image, so a commit never sees them.
+//! The three files zbx generates for a container's `/etc` (docs/briefs/M5-network.md, "Inside
+//! the container"): `hosts`, `resolv.conf` and `hostname`. Pure: the plan holds their text, the
+//! child writes it and binds it, read-only, over the image's own files, which are never
+//! touched. They are not part of an image, so a commit never sees them.
 //!
 //! `hosts` names `localhost` for 127.0.0.1 and ::1, and the container's own hostname. `resolv.conf`
 //! has no nameserver for a container with no network (a lookup then fails at once, as it should)
@@ -15,16 +15,18 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const spec = @import("spec.zig");
 
-/// The two files, in the order the plan handles them.
+/// The three files, in the order the plan handles them.
 pub const File = enum(u8) {
     hosts,
     resolv_conf,
+    hostname,
 
     /// The name in `/etc`.
     pub fn etc_name(file: File) []const u8 {
         const name: []const u8 = switch (file) {
             .hosts => "hosts",
             .resolv_conf => "resolv.conf",
+            .hostname => "hostname",
         };
         assert(name.len > 0);
         assert(std.mem.indexOfScalar(u8, name, '/') == null);
@@ -36,6 +38,7 @@ pub const File = enum(u8) {
         const name = switch (file) {
             .hosts => constants.etc_stage_hosts,
             .resolv_conf => constants.etc_stage_resolv,
+            .hostname => constants.etc_stage_hostname,
         };
         assert(name[0] == '.'); // Hidden, so a listing of /dev does not show it for long.
         assert(name.len < 32);
@@ -49,6 +52,17 @@ const no_network_note = "# zbx: this container has no network (--net none).\n";
 const user_file = "# zbx: DNS goes through pasta to the host's resolver (--net user).\n" ++
     "nameserver " ++ constants.pasta_dns_forward ++ "\n";
 const empty_host_note = "# zbx: the host's /etc/resolv.conf was empty or could not be read.\n";
+
+/// `/etc/hostname` of a container called `name`: the name and a newline, as `hostname(1)` and
+/// anything reading the file expect.
+pub fn hostname(buffer: *Buffer, name: []const u8) []const u8 {
+    assert(name.len > 0);
+    assert(name.len <= constants.container_name_bytes_max);
+    // Cannot fail: at most 63 bytes and a newline fit the buffer.
+    const text = std.fmt.bufPrint(buffer, "{s}\n", .{name}) catch unreachable;
+    assert(text.len == name.len + 1);
+    return text;
+}
 
 /// `/etc/hosts` of a container called `name` (a valid container name, so a short label).
 pub fn hosts(buffer: *Buffer, name: []const u8) []const u8 {

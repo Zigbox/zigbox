@@ -493,7 +493,7 @@ fn network_mounts(
         // A bind of the host's /sys is made read-only by the remount.
         return "/sys is writable";
     }
-    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |name| {
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |name| {
         const path = join(&buffer, root_path, name);
         if (!table.has(.bind_file, path)) return "a generated /etc file is not bound";
         const index = table.find(path).?; // `has` found it.
