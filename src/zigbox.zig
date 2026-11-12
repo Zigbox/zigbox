@@ -287,7 +287,7 @@ test "the pure trust surface imports nothing that touches the host or the store"
             var lines = std.mem.splitScalar(u8, source, '\n');
             while (lines.next()) |line| {
                 const is_import = std.mem.indexOf(u8, line, "@import(") != null;
-                const is_comment = std.mem.startsWith(u8, std.mem.trimLeft(u8, line, " "), "//");
+                const is_comment = std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "//");
                 if (is_import and !is_comment) {
                     try std.testing.expect(std.mem.indexOf(u8, line, name) == null);
                 }
