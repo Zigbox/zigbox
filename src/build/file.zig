@@ -1444,8 +1444,9 @@ pub fn is_absolute_plain(text: []const u8) bool {
 }
 
 /// A user for `.user`, `.chown` and `config.user`: `uid`, `uid:gid`, `name` or `name:group`. A
-/// part of digits is a number that fits 32 bits, written without leading zeros; anything else is a name of `[A-Za-z0-9_.-]`,
-/// not starting with `-`, at most 32 bytes. Names are looked up in a tree later.
+/// part of digits is a number that fits 32 bits, written without leading zeros; anything else
+/// is a name of `[A-Za-z0-9_.-]`, not starting with `-`, at most 32 bytes. Names are looked up
+/// in a tree later.
 pub fn is_user_text(text: []const u8) bool {
     if (text.len == 0) return false;
     var parts = std.mem.splitScalar(u8, text, ':');

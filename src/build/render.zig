@@ -460,7 +460,7 @@ test "equal tells files apart by each value" {
     // Goal: `equal` is not vacuous. Method: the example against itself with one value changed.
     var problem: file_mod.Problem = undefined;
     const changed = [_][]const u8{
-        "\"go.mod\"", "\"main.go\"", "\"0:0\"", "\"/usr/local/bin\"", "\"GREETING_STYLE=plain\"",
+        "\"go.mod\"", "\"main.go\"", "\"/usr/local/bin\"", "\"GREETING_STYLE=plain\"",
     };
     try testing.expectEqual(
         file_mod.ParseResult.parsed,
@@ -477,6 +477,12 @@ test "equal tells files apart by each value" {
         try testing.expectEqual(file_mod.ParseResult.parsed, result);
         try testing.expect(!equal(&first, &second));
     }
+    // A user's last byte changes in place: a `1` appended would be a leading zero, refused.
+    var user: [file_tests.example.len]u8 = undefined;
+    @memcpy(&user, file_tests.example);
+    user[std.mem.indexOf(u8, file_tests.example, "\"0:0\"").? + 3] = '1';
+    try testing.expectEqual(file_mod.ParseResult.parsed, file_mod.parse(&user, &second, &problem));
+    try testing.expect(!equal(&first, &second));
     try testing.expectEqual(
         file_mod.ParseResult.parsed,
         file_mod.parse(file_tests.example, &second, &problem),
