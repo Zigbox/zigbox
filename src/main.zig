@@ -247,6 +247,7 @@ test {
     _ = @import("runtime/mounts_diagnose.zig");
     _ = @import("runtime/mount_tests.zig");
     _ = @import("runtime/devices_tests.zig");
+    _ = @import("runtime/cdi_run_tests.zig");
     _ = @import("runtime/devices.zig");
     _ = @import("runtime/cdi.zig");
     _ = @import("runtime/cdi_tests.zig");
