@@ -48,6 +48,15 @@ pub fn is_etc(kind: Kind) bool {
 /// so that the target is read as the container reads it (a symlink in the image resolves inside
 /// the container, never on the host): the target is made with its parents, the volume is moved
 /// onto it, and the hidden directory removed.
+/// The steps that loop over the CDI devices' items (`cdi_steps.zig`).
+pub fn is_cdi(kind: Kind) bool {
+    assert(@backingInt(kind) <= @backingInt(Kind.exec));
+    return switch (kind) {
+        .bind_cdi_nodes, .stage_cdi_mounts, .move_cdi_mounts => true,
+        else => false,
+    };
+}
+
 pub fn is_state(kind: Kind) bool {
     assert(@backingInt(kind) <= @backingInt(Kind.exec));
     return switch (kind) {
@@ -549,6 +558,10 @@ pub const Plan = struct {
     /// The CDI devices' resolved items, or null: how many nodes, mounts and ldcache directories
     /// the steps loop over, and the rootfs the node and stage paths are below.
     cdi: ?*const cdi_mod.Resolved,
+    /// What it holds, kept apart: the steps are counted from these after `cdi` is not valid.
+    cdi_nodes: u32,
+    cdi_mounts: u32,
+    cdi_dirs: u32,
     cdi_rootfs: Text,
     /// `LD_LIBRARY_PATH=...` for an image whose library cache cannot be updated (empty: none),
     /// and whether it replaces an entry of the environment of that name.
@@ -672,10 +685,9 @@ pub const Plan = struct {
 
     /// The steps the CDI devices add: the nodes (one), the mounts (two), ldconfig (one).
     pub fn cdi_steps(plan: *const Plan) u32 {
-        const resolved = plan.cdi orelse return 0;
-        const nodes: u32 = @intFromBool(resolved.nodes_count > 0);
-        const mounts: u32 = 2 * @as(u32, @intFromBool(resolved.mounts_count > 0));
-        const ldconfig: u32 = @intFromBool(resolved.dirs_count > 0);
+        const nodes: u32 = @intFromBool(plan.cdi_nodes > 0);
+        const mounts: u32 = 2 * @as(u32, @intFromBool(plan.cdi_mounts > 0));
+        const ldconfig: u32 = @intFromBool(plan.cdi_dirs > 0);
         const total = nodes + mounts + ldconfig;
         assert(total <= cdi_steps_count_max);
         return total;
@@ -785,12 +797,18 @@ pub const Plan = struct {
     fn build_cdi(plan: *Plan, input: *const Input) void {
         plan.keep_groups = input.keep_groups or input.devices.len > 0;
         plan.cdi = null;
+        plan.cdi_nodes = 0;
+        plan.cdi_mounts = 0;
+        plan.cdi_dirs = 0;
         plan.cdi_rootfs = empty_text;
         plan.ld_library_path = empty_text;
         const resolved = input.cdi orelse return;
         if (resolved.is_empty()) return;
         plan.keep_groups = true;
         plan.cdi = resolved;
+        plan.cdi_nodes = resolved.nodes_count;
+        plan.cdi_mounts = resolved.mounts_count;
+        plan.cdi_dirs = resolved.dirs_count;
         plan.cdi_rootfs = plan.add_text(&.{input.rootfs});
         if (resolved.dirs_count == 0) return;
         var line: [constants.cdi_run_dirs_max * (constants.cdi_path_bytes_max + 1) + 64]u8 = undefined;
@@ -1035,24 +1053,21 @@ pub const Plan = struct {
 
     /// The CDI nodes bound below the rootfs's /dev, after the user's devices.
     fn push_cdi_nodes(plan: *Plan) void {
-        const resolved = plan.cdi orelse return;
-        if (resolved.nodes_count == 0) return;
+        if (plan.cdi_nodes == 0) return;
         plan.push(.bind_cdi_nodes, plan.cdi_rootfs, empty_text, 0);
     }
 
     /// The CDI mounts staged, before the new root is entered.
     fn push_cdi_stages(plan: *Plan) void {
-        const resolved = plan.cdi orelse return;
-        if (resolved.mounts_count == 0) return;
+        if (plan.cdi_mounts == 0) return;
         plan.push(.stage_cdi_mounts, plan.cdi_rootfs, empty_text, 0);
     }
 
     /// The CDI mounts moved to their paths in the new root, and then the library cache, which
     /// reads the directories the mounts brought.
     fn push_cdi_moves(plan: *Plan) void {
-        const resolved = plan.cdi orelse return;
-        if (resolved.mounts_count > 0) plan.push(.move_cdi_mounts, empty_text, empty_text, 0);
-        if (resolved.dirs_count > 0) plan.push(.run_ldconfig, empty_text, empty_text, 0);
+        if (plan.cdi_mounts > 0) plan.push(.move_cdi_mounts, empty_text, empty_text, 0);
+        if (plan.cdi_dirs > 0) plan.push(.run_ldconfig, empty_text, empty_text, 0);
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound

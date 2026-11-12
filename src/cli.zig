@@ -133,8 +133,10 @@ const help_text =
     \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
     \\                  <host> that does not exist is an error, never made (repeatable)
-    \\  --device /dev/<path>   bind a host device node into /dev, at the same path (repeatable,
-    \\                  up to 16). Your groups carry over, so a node your group can open works
+    \\  --device /dev/<path>|<vendor/class>=<name>   bind a host device node into /dev, at the
+    \\                  same path, or a CDI device from the specs in /etc/cdi, /var/run/cdi and
+    \\                  $XDG_CONFIG_HOME/cdi (repeatable, up to 16). Your groups carry over, so
+    \\                  a node your group can open works
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with every symbolic link followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or

@@ -190,7 +190,16 @@ fn prepare_records_unreadable(sim: *HostSim) void {
 }
 
 /// One container, started and left running, for the commands that look at containers.
-var golden_handle: run.Handle = undefined;
+var golden_handle_storage: ?*run.Handle = null;
+
+/// The handle lives on the heap: as a static it is 400 KiB of the test binary's bss, which is
+/// close to the 2 GiB link bound.
+fn golden_get() *run.Handle {
+    if (golden_handle_storage == null) {
+        golden_handle_storage = std.heap.page_allocator.create(run.Handle) catch @panic("out of memory");
+    }
+    return golden_handle_storage.?;
+}
 /// The container above is running and its scope's keeper still holds its pipe, which is the
 /// state of a running container; the case that looked at it ends it before the check for leaks.
 var golden_started = false;
@@ -205,7 +214,7 @@ fn prepare_running(sim: *HostSim) void {
         .name = "web-1",
         .command = &.{"/bin/sh"},
     };
-    run.start(sim.interface(), &container, .{ .detached = true }, &golden_handle, &diag) catch {
+    run.start(sim.interface(), &container, .{ .detached = true }, golden_get(), &diag) catch {
         unreachable; // The simulated host starts a container.
     };
     golden_started = true;
@@ -2349,8 +2358,8 @@ fn run_style(sim: *HostSim, case: *const Case, style: Style) !u8 {
     var iterator: SliceIterator = .{ .items = items[0..count] };
     const code = cli.run_from_iterator(sim.interface(), &iterator);
     if (golden_started) {
-        golden_handle.session.release_keeper();
-        golden_handle.session.release_output();
+        golden_get().session.release_keeper();
+        golden_get().session.release_output();
         golden_started = false;
     }
     if (golden_lock) |fd| {

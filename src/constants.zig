@@ -1454,8 +1454,8 @@ comptime {
     assert(state_walk_links_max > 0);
     assert(state_holders_max > 0);
     // A plan with every volume: each has seven steps, eight when read-only; and every other
-    // mount, at most six (plan.zig).
-    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max <= plan_steps_max);
+    // mount, at most six, and the CDI devices at most four (`plan.cdi_steps_count_max`).
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max + 4 <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);
