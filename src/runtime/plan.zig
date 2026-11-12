@@ -1124,7 +1124,9 @@ pub const Plan = struct {
             // The hostname stays writable, a program may rewrite it and what it writes is the
             // container's own copy, but `--read-only` covers it as Docker's does: the rootfs
             // remount is not recursive and does not reach this bind.
-            if (file != .hostname or plan.read_only) plan.push(.remount_etc_file, inside, empty_text, index);
+            if (file != .hostname or plan.read_only) {
+                plan.push(.remount_etc_file, inside, empty_text, index);
+            }
             plan.push(.unstage_etc_file, staged, empty_text, index);
         }
     }
@@ -1402,8 +1404,8 @@ comptime {
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
     // (and the death signal asked for again after it) and pasta.
     const longest = steps_count_single + scope_steps_count + read_only_steps_count +
-        read_only_hostname_steps_count + 3 + pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
-        constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
+        read_only_hostname_steps_count + 3 + pasta_steps_count +
+        (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
