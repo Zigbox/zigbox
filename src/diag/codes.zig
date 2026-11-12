@@ -218,6 +218,7 @@ pub const Code = enum(u8) {
     E0807,
     W0801,
     E0817,
+    E0818,
     W0802,
     E0901,
     E0902,
@@ -3454,6 +3455,24 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0818,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a glob matched more paths than a build can hold",
+        .explanation =
+        \\An input or a copy source written as a glob is matched against the project
+        \\when the build runs, and every path it matches is kept so that the step's
+        \\inputs enter its tree in order. One build holds at most 65536 matched
+        \\paths (and their names, at most 4 MiB of them) across all its steps. A
+        \\directory that a glob matches counts once, however many files it holds.
+        \\
+        \\The cause names the input and the bound. To fix it, match a directory
+        \\instead of the files in it, narrow the glob, or add the paths you do not
+        \\need to .exclude (an excluded path is never walked into when no line
+        \\re-includes anything).
+        ,
+    },
+    .{
         .code = .W0802,
         .severity = .warning,
         .blame = .user,
@@ -4285,7 +4304,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
-        .E0817, .W0802 => false,
+        .E0817, .E0818, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .W0207, .W0209 => false,

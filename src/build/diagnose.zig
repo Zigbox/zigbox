@@ -1116,6 +1116,28 @@ pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
     assert(diag.code.? == .E0817);
 }
 
+/// `E0818`: the paths the globs of a build matched are more than `build_glob_matches_max`, or
+/// their names more than `build_glob_pool_bytes_max`. `input` is the glob being matched.
+pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
+    assert(diag.code == null);
+    assert(input.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, input);
+    diag.raise(.E0818);
+    diag.while_("matching a glob against the project", .{});
+    diag.cause("\"{s}\" matched more than {d} paths in this build", .{
+        shown,
+        constants.build_glob_matches_max,
+    });
+    diag.context("input", "{s}", .{shown});
+    diag.context("limit", "{d} paths", .{constants.build_glob_matches_max});
+    diag.fix(.{
+        .sentence = "match a directory instead of the files in it, narrow the glob, or " ++
+            ".exclude what you do not need",
+    });
+    assert(diag.code.? == .E0818);
+}
+
 /// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
 /// already quoted and joined by `, `; `count` is how many there are.
 pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {

@@ -922,6 +922,11 @@ pub const build_file_list_texts_max: u32 = 8192;
 pub const build_pattern_bytes_max: u32 = 1024;
 /// The path a glob is matched against, and its parts (`a/b/c` is three).
 pub const build_glob_parts_max: u32 = 64;
+/// Paths that the globs of one build match, kept at once while a step's inputs are imported
+/// (supervisor decision, 2026-11-12), and the bytes of their names. Matching more is E0818. A
+/// matched directory counts once; the average path is at most 64 bytes.
+pub const build_glob_matches_max: u32 = 65536;
+pub const build_glob_pool_bytes_max: u32 = 4 * 1024 * 1024;
 /// Steps that run at once: fixed at 4 (a cut from the brief, which also bounds it by the online
 /// CPUs; nothing checks the CPUs yet, see docs/demos/m7.md).
 pub const build_parallel_max: u32 = 4;
@@ -1033,6 +1038,9 @@ comptime {
     assert(build_step_caches_max + 2 <= mounts_max);
     // A pattern is a string; a file's excludes are lines that fit the pool.
     assert(build_pattern_bytes_max <= build_string_bytes_max);
+    // One matched path fits the pool, and the pool holds an average path of 64 bytes each.
+    assert(path_bytes_max <= build_glob_pool_bytes_max);
+    assert(build_glob_pool_bytes_max / build_glob_matches_max >= 64);
     assert(build_exclude_lines_max * build_pattern_bytes_max <= build_pool_bytes);
     assert(build_glob_parts_max * 2 <= build_pattern_bytes_max);
     // Step indexes are `u16`.
