@@ -48,6 +48,13 @@ const Made = struct {
     text: []const u8,
     has: [names.len]bool,
     refused_edit: bool,
+
+    /// Whether asking `names[pick]` finds a device: `all` finds every device of a spec that has
+    /// none of that name.
+    fn finds(made: *const Made, pick: usize) bool {
+        const any = std.mem.indexOfScalar(bool, &made.has, true) != null;
+        return made.has[pick] or (std.mem.eql(u8, names[pick], "all") and any);
+    }
 };
 
 fn append(length: *usize, comptime format: []const u8, arguments: anytype) void {
@@ -92,12 +99,15 @@ fn generate(random: std.Random) Made {
     var length: usize = 0;
     var made: Made = .{ .text = "", .has = @splat(false), .refused_edit = false };
     append(&length, "{{\"cdiVersion\":\"0.6.0\",\"kind\":\"{s}\",\"devices\":[", .{kind});
+    for (&made.has) |*slot| slot.* = random.boolean();
+    if (std.mem.indexOfScalar(bool, &made.has, true) == null) {
+        made.has[random.uintLessThan(usize, names.len)] = true;
+    }
     var first = true;
     for (names, 0..) |name, index| {
-        if (random.boolean()) continue;
+        if (!made.has[index]) continue;
         if (!first) append(&length, ",", .{});
         first = false;
-        made.has[index] = true;
         append(&length, "{{\"name\":\"{s}\",\"containerEdits\":", .{name});
         append_edits(random, &length, &made.refused_edit);
         append(&length, "}}", .{});
@@ -198,10 +208,10 @@ fn check_valid(random: std.Random) []const u8 {
     const outcome = resolve(asked[0..count], made.text);
     assert(same(outcome, resolve(asked[0..count], made.text))); // Property 4.
     var all_there = true;
-    for (picks[0..count]) |pick| all_there = all_there and made.has[pick];
+    for (picks[0..count]) |pick| all_there = all_there and made.finds(pick);
     if (outcome.refusal) |refusal| {
         switch (refusal) {
-            .unknown => |index| assert(!made.has[picks[index]]),
+            .unknown => |index| assert(!made.finds(picks[index])),
             .unsupported => |found| assert(made.refused_edit and found.edit != .none),
             .too_big => assert(false), // The generator makes far less than the bounds.
         }
