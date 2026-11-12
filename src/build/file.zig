@@ -749,13 +749,14 @@ fn parse_output(parser: *Parser) Refused!Output {
     return result;
 }
 
-/// `needs` and `binds` take a mount each, and `/src` and `/out` take two unless the step keeps
-/// its root: all of them in the run's `mounts_max` (the brief leaves caches out of the count).
+/// `needs`, `binds` and `caches` take a mount each, and `/src` and `/out` take two unless the
+/// step keeps its root: all of them in the run's `mounts_max`.
 fn check_mounts(parser: *Parser, step: *const Step, open: Token) Refused!void {
     assert(step.needs.count <= constants.build_step_needs_max);
     assert(step.binds.count <= constants.build_step_binds_max);
+    assert(step.caches.count <= constants.build_step_caches_max);
     const fixed: u32 = if (step.output == .root) 0 else 2;
-    const total = step.needs.count + step.binds.count + fixed;
+    const total = step.needs.count + step.binds.count + step.caches.count + fixed;
     if (total > constants.mounts_max) return parser.fail(.too_many_mounts, open, .step, .binds);
 }
 

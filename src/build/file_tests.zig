@@ -217,6 +217,14 @@ test "the bounds hold at their limit and refuse one past it" {
     _ = try parse_ok(step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"} } } }");
     const needs = step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"} } } }";
     try refused_at(needs, .too_many_needs, "\"g");
+    // Needs, binds and caches share the run's mounts beside `/src` and `/out`.
+    comptime assert(constants.mounts_max == 8);
+    const four = step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\"}, ";
+    const bind = ".binds = .{ .{ .source = \"x\", .to = \"/b\" } }, ";
+    const caches = ".caches = .{ .{ .id = \"c1\", .path = \"/c1\" }";
+    _ = try parse_ok(four ++ bind ++ caches ++ " } } } } }");
+    const second = ", .{ .id = \"c2\", .path = \"/c2\" } } } } }";
+    try refused_at(four ++ bind ++ caches ++ second, .too_many_mounts, ".{ .name");
 }
 
 test "every string together is bounded by the pool" {
