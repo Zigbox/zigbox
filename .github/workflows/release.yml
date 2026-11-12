@@ -421,7 +421,6 @@ jobs:
     concurrency:
       group: release-mac-test-${{ github.ref }}
       cancel-in-progress: true
-    env:
     steps:
       # The runner context is not available in a job's `env:`, so the paths are set here.
       - name: Paths of the temporary keychain and its work directory
