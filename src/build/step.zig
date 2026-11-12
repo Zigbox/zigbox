@@ -251,6 +251,7 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
         .keep_log = true,
         .mirror = false,
         .stdin_null = true,
+        .build_step = true,
     };
     run.start(request.host, &container, options, &ws.handle, diag) catch {
         // A start that fails after the record began has saved a `start_failed` record; the
