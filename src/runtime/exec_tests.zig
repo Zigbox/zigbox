@@ -300,6 +300,7 @@ test "every step that fails is one coded diagnostic, and nothing is left behind"
         .namespaces = 0x3f,
         .terminal = true,
         .cgroup = true,
+        .keep_groups = false,
     };
     plan.build(&input);
     for (plan.steps[0..plan.count], 0..) |step, index| {

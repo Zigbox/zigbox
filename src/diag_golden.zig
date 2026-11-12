@@ -905,6 +905,7 @@ fn exec_step_of(kind: exec_plan.Kind, terminal: bool) u32 {
         .namespaces = 0x3f,
         .terminal = terminal,
         .cgroup = true,
+        .keep_groups = false,
     };
     plan.build(&input);
     for (plan.steps[0..plan.count], 0..) |step, index| {
