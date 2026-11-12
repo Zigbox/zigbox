@@ -20,7 +20,10 @@ fn sim_get() *HostSim {
 }
 
 fn setup(sim: *HostSim) void {
-    sim_run.start(sim, 3, &sim_run.files);
+    const files = sim_run.files ++ [_]host_sim.File{
+        .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
+    };
+    sim_run.start(sim, 3, &files);
     sim.world.add_node("/dev/fake0", .file);
     sim.world.add_node("/etc/cdi", .dir);
     std.debug.assert(sim.world.write_file("/etc/cdi/example.json", spec) == null);
@@ -36,7 +39,9 @@ test "a CDI name is kept in the record, and ps shows it as asked, without a node
         "zbx", "run", "--rootfs", sim_run.rootfs_path, "--name", "c-1",
         "--device", "vendor.example/gpu=0", "--", "/bin/sh",
     };
-    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &run));
+    const code = sim_run.run_cli(sim, &run);
+    if (code != 0) std.debug.print("{s}\n", .{sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
     const record = sim.world.read_written(sim_run.runs_path ++ "/c-1.zon").?;
     const line = ".devices = \"vendor.example/gpu=0\",";
     try testing.expect(std.mem.indexOf(u8, record, line) != null);
