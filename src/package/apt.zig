@@ -143,7 +143,8 @@ pub fn parse_date(text: []const u8) ?u64 {
     for (1..month) |each| {
         days += std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(each)));
     }
-    const seconds = (days + day - 1) * 86_400 + @as(u64, hour) * 3600 + @as(u64, minute) * 60 + second;
+    const clock = @as(u64, hour) * 3600 + @as(u64, minute) * 60 + second;
+    const seconds = (days + day - 1) * 86_400 + clock;
     // The weekday and day-of-month must agree: a round trip through `date_text` is the grammar.
     const again = date_text_buffered(seconds) orelse return null;
     if (!std.mem.eql(u8, again.slice(), text)) return null;
@@ -162,7 +163,8 @@ const DateBuffer = struct {
 fn date_text_buffered(epoch: u64) ?DateBuffer {
     const calendar = model.Calendar.from_epoch(epoch);
     var result: DateBuffer = .{ .bytes = undefined, .len = 0 };
-    const text = std.fmt.bufPrint(&result.bytes, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{
+    const format = "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} UTC";
+    const text = std.fmt.bufPrint(&result.bytes, format, .{
         model.weekday_names[calendar.weekday],
         calendar.day,
         model.month_names[calendar.month - 1],
@@ -220,7 +222,11 @@ pub fn write(
     release.writer.print(
         "Origin: Zigbox\nLabel: Zigbox\nSuite: {s}\nCodename: {s}\n{s}" ++
             "Architectures: {s}\nComponents: {s}\nDescription: Zigbox packages\nSHA256:\n{s}",
-        .{ suite, suite, try date_lines(memory, signed_at), names.items, component, sums.written() },
+        .{
+            suite,                             suite,
+            try date_lines(memory, signed_at), names.items,
+            component,                         sums.written(),
+        },
     ) catch return error.WriteFailed;
     const release_path = "dists/" ++ suite ++ "/Release";
     try files.append(memory, .{ .path = release_path, .bytes = try release.toOwnedSlice() });

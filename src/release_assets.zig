@@ -191,49 +191,9 @@ pub fn sums(memory: Allocator, assets: []Asset) Error![]u8 {
 /// dependencies. Every interpolated value passed `name_ok`, so none needs JSON escaping.
 pub fn sbom(memory: Allocator, inputs: *const Inputs) Error![]u8 {
     try validate(inputs);
-    const calendar = model.Calendar.from_epoch(inputs.source_date_epoch);
     var out: std.Io.Writer.Allocating = .init(memory);
     const writer = &out.writer;
-    writer.print(
-        \\{{
-        \\  "bomFormat": "CycloneDX",
-        \\  "specVersion": "1.5",
-        \\  "version": 1,
-        \\  "metadata": {{
-        \\    "timestamp": "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
-        \\    "tools": {{
-        \\      "components": [
-        \\        {{ "type": "application", "name": "zig", "version": "{s}", "supplier": {{ "name": "Zig Software Foundation", "url": ["https://ziglang.org"] }} }}
-        \\      ]
-        \\    }},
-        \\    "component": {{
-        \\      "type": "application",
-        \\      "bom-ref": "zbx",
-        \\      "name": "zbx",
-        \\      "version": "{s}",
-        \\      "description": "Rootless, daemonless Linux container runtime, image store and builder",
-        \\      "licenses": [ {{ "license": {{ "id": "{s}" }} }} ],
-        \\      "purl": "pkg:github/zigbox/zigbox@v{s}",
-        \\      "externalReferences": [ {{ "type": "website", "url": "https://zigbox.org" }}, {{ "type": "vcs", "url": "https://github.com/Zigbox/zigbox" }} ]
-        \\    }},
-        \\    "properties": [
-        \\      {{ "name": "zigbox:dependencies", "value": "none: standard library only, no libc, no third-party components" }}
-        \\    ]
-        \\  }},
-        \\  "components": [
-        \\
-    , .{
-        calendar.year,
-        calendar.month,
-        calendar.day,
-        calendar.seconds_of_day / 3600,
-        calendar.seconds_of_day % 3600 / 60,
-        calendar.seconds_of_day % 60,
-        inputs.zig_version,
-        inputs.version,
-        inputs.license_id,
-        inputs.version,
-    }) catch return error.WriteFailed;
+    sbom_head(writer, inputs) catch return error.WriteFailed;
     for (architectures, 0..) |architecture, index| {
         const separator: []const u8 = if (index + 1 < architectures.len) "," else "";
         writer.print(
@@ -254,21 +214,87 @@ pub fn sbom(memory: Allocator, inputs: *const Inputs) Error![]u8 {
             separator,
         }) catch return error.WriteFailed;
     }
-    writer.writeAll(
-        \\  ],
-        \\  "dependencies": [
-        \\    { "ref": "zbx", "dependsOn": [] },
-        \\    { "ref": "zbx-linux-x86_64", "dependsOn": [] },
-        \\    { "ref": "zbx-linux-aarch64", "dependsOn": [] }
-        \\  ],
-        \\  "compositions": [
-        \\    { "aggregate": "complete", "assemblies": ["zbx-linux-x86_64", "zbx-linux-aarch64"], "dependencies": ["zbx"] }
-        \\  ]
-        \\}
-        \\
-    ) catch return error.WriteFailed;
+    writer.writeAll(sbom_tail) catch return error.WriteFailed;
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
+
+/// The document up to the opening of `components`.
+fn sbom_head(writer: *std.Io.Writer, inputs: *const Inputs) std.Io.Writer.Error!void {
+    const calendar = model.Calendar.from_epoch(inputs.source_date_epoch);
+    assert(inputs.zbx.len == architectures.len);
+    try writer.print(
+        \\{{
+        \\  "bomFormat": "CycloneDX",
+        \\  "specVersion": "1.5",
+        \\  "version": 1,
+        \\  "metadata": {{
+        \\    "timestamp": "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        \\    "tools": {{
+        \\      "components": [
+        \\        {{
+        \\          "type": "application",
+        \\          "name": "zig",
+        \\          "version": "{s}",
+        \\          "supplier": {{
+        \\            "name": "Zig Software Foundation",
+        \\            "url": ["https://ziglang.org"]
+        \\          }}
+        \\        }}
+        \\      ]
+        \\    }},
+        \\    "component": {{
+        \\      "type": "application",
+        \\      "bom-ref": "zbx",
+        \\      "name": "zbx",
+        \\      "version": "{s}",
+        \\      "description": "Rootless, daemonless Linux container runtime and image builder",
+        \\      "licenses": [ {{ "license": {{ "id": "{s}" }} }} ],
+        \\      "purl": "pkg:github/Zigbox/zigbox@v{s}",
+        \\      "externalReferences": [
+        \\        {{ "type": "website", "url": "https://zigbox.org" }},
+        \\        {{ "type": "vcs", "url": "https://github.com/Zigbox/zigbox" }}
+        \\      ]
+        \\    }},
+        \\    "properties": [
+        \\      {{
+        \\        "name": "zigbox:dependencies",
+        \\        "value": "none: standard library only, no libc, no third-party components"
+        \\      }}
+        \\    ]
+        \\  }},
+        \\  "components": [
+        \\
+    , .{
+        calendar.year,
+        calendar.month,
+        calendar.day,
+        calendar.seconds_of_day / 3600,
+        calendar.seconds_of_day % 3600 / 60,
+        calendar.seconds_of_day % 60,
+        inputs.zig_version,
+        inputs.version,
+        inputs.license_id,
+        inputs.version,
+    });
+}
+
+const sbom_tail =
+    \\  ],
+    \\  "dependencies": [
+    \\    { "ref": "zbx", "dependsOn": [] },
+    \\    { "ref": "zbx-linux-x86_64", "dependsOn": [] },
+    \\    { "ref": "zbx-linux-aarch64", "dependsOn": [] }
+    \\  ],
+    \\  "compositions": [
+    \\    {
+    \\      "aggregate": "complete",
+    \\      "assemblies": ["zbx-linux-x86_64", "zbx-linux-aarch64"],
+    \\      "dependencies": ["zbx"]
+    \\    }
+    \\  ]
+    \\}
+    \\
+;
 
 const sample: Inputs = .{
     .version = "1.2.3",
@@ -334,12 +360,14 @@ test "the sbom is valid JSON that says what is in the build and that nothing els
     try std.testing.expectEqualStrings("CycloneDX", root.get("bomFormat").?.string);
     try std.testing.expectEqualStrings("1.5", root.get("specVersion").?.string);
     const main = root.get("metadata").?.object.get("component").?.object;
-    try std.testing.expectEqualStrings("pkg:github/zigbox/zigbox@v1.2.3", main.get("purl").?.string);
+    const purl = main.get("purl").?.string;
+    try std.testing.expectEqualStrings("pkg:github/Zigbox/zigbox@v1.2.3", purl);
     try std.testing.expectEqualStrings("1.2.3", main.get("version").?.string);
     const id = main.get("licenses").?.array.items[0].object.get("license").?.object.get("id");
     try std.testing.expectEqualStrings("MIT", id.?.string);
     const tools = root.get("metadata").?.object.get("tools").?.object.get("components").?;
-    try std.testing.expectEqualStrings("0.17.0", tools.array.items[0].object.get("version").?.string);
+    const zig = tools.array.items[0].object.get("version").?.string;
+    try std.testing.expectEqualStrings("0.17.0", zig);
     const components = root.get("components").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), components.len);
     for (components, 0..) |component, index| {
@@ -349,7 +377,8 @@ test "the sbom is valid JSON that says what is in the build and that nothing els
         try std.testing.expectEqualStrings(&want, hash.get("content").?.string);
     }
     for (root.get("dependencies").?.array.items) |dependency| {
-        try std.testing.expectEqual(@as(usize, 0), dependency.object.get("dependsOn").?.array.items.len);
+        const depends_on = dependency.object.get("dependsOn").?.array.items;
+        try std.testing.expectEqual(@as(usize, 0), depends_on.len);
     }
     try std.testing.expect(std.mem.indexOf(u8, text, "no third-party components") != null);
 }

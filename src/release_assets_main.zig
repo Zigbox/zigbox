@@ -121,7 +121,8 @@ pub fn main(init: std.process.Init) !u8 {
         .sums => run_sums(init.io, memory, &arguments, log),
     };
     done catch |err| {
-        if (err != error.Refused) log.print("release-assets: {s}\n", .{@errorName(err)}) catch {}; // Same.
+        // Same: nowhere else to report.
+        if (err != error.Refused) log.print("release-assets: {s}\n", .{@errorName(err)}) catch {};
         return constants.tool_exit_failed;
     };
     return constants.tool_exit_ok;
@@ -141,7 +142,14 @@ fn read_file(io: Io, memory: Allocator, log: *Io.Writer, path: []const u8, max: 
     return bytes;
 }
 
-fn write_file(io: Io, log: *Io.Writer, directory: []const u8, name: []const u8, bytes: []const u8, memory: Allocator) !void {
+fn write_file(
+    io: Io,
+    log: *Io.Writer,
+    directory: []const u8,
+    name: []const u8,
+    bytes: []const u8,
+    memory: Allocator,
+) !void {
     const path = try std.fmt.allocPrint(memory, "{s}/{s}", .{ directory, name });
     Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err|
         return refuse(log, "cannot write {s}: {s}", .{ path, @errorName(err) });
@@ -159,7 +167,8 @@ fn run_assets(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.W
     for (arguments.zbx, 0..) |path, index| {
         inputs.zbx[index] = try read_file(io, memory, log, path, constants.package_file_bytes_max);
     }
-    inputs.license = try read_file(io, memory, log, arguments.license, constants.package_description_bytes_max);
+    const license_max = constants.package_description_bytes_max;
+    inputs.license = try read_file(io, memory, log, arguments.license, license_max);
     const dir = Io.Dir.cwd();
     dir.deleteTree(io, arguments.out) catch |err|
         return refuse(log, "cannot clear {s}: {s}", .{ arguments.out, @errorName(err) });
@@ -205,27 +214,37 @@ fn copy_packages(
         };
         for (paths) |relative| {
             const from = try std.fmt.allocPrint(memory, "{s}/{s}", .{ tree, relative });
-            const bytes = Io.Dir.cwd().readFileAlloc(io, from, memory, .limited(constants.release_asset_bytes_max + 1)) catch
-                return refuse(log, "{s} is missing; run release-sign.sh first, or pass -Dno-packages", .{from});
+            const limit: Io.Limit = .limited(constants.release_asset_bytes_max + 1);
+            const bytes = Io.Dir.cwd().readFileAlloc(io, from, memory, limit) catch
+                return refuse(log, "{s} is missing: sign first, or -Dno-packages", .{from});
             try write_file(io, log, arguments.out, std.fs.path.basename(relative), bytes, memory);
         }
     }
 }
 
 /// `SHA256SUMS` over every regular file of `directory` except the sums files themselves.
-fn write_sums(io: Io, memory: Allocator, log: *Io.Writer, directory: []const u8, name: []const u8) !void {
+fn write_sums(
+    io: Io,
+    memory: Allocator,
+    log: *Io.Writer,
+    directory: []const u8,
+    name: []const u8,
+) !void {
     var opened = Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch |err|
         return refuse(log, "cannot open {s}: {s}", .{ directory, @errorName(err) });
     defer opened.close(io);
     var list: std.ArrayList(assets.Asset) = .empty;
     var iterator = opened.iterate();
-    while (iterator.next(io) catch |err| return refuse(log, "cannot read {s}: {s}", .{ directory, @errorName(err) })) |entry| {
+    while (iterator.next(io) catch |err| {
+        return refuse(log, "cannot read {s}: {s}", .{ directory, @errorName(err) });
+    }) |entry| {
         if (entry.kind != .file) {
             return refuse(log, "{s}/{s} is not a plain file", .{ directory, entry.name });
         }
         if (std.mem.startsWith(u8, entry.name, "SHA256SUMS")) continue;
         if (list.items.len == constants.release_assets_max) {
-            return refuse(log, "{s} holds more than {d} assets", .{ directory, constants.release_assets_max });
+            const more = "{s} holds more than {d} assets";
+            return refuse(log, more, .{ directory, constants.release_assets_max });
         }
         const path = try std.fmt.allocPrint(memory, "{s}/{s}", .{ directory, entry.name });
         const bytes = try read_file(io, memory, log, path, constants.release_asset_bytes_max);
@@ -239,7 +258,8 @@ fn write_sums(io: Io, memory: Allocator, log: *Io.Writer, directory: []const u8,
 
 fn run_sums(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.Writer) !void {
     const name = arguments.sums_name;
-    if (!std.mem.startsWith(u8, name, "SHA256SUMS") or std.mem.indexOfScalar(u8, name, '/') != null) {
+    const plain = std.mem.indexOfScalar(u8, name, '/') == null;
+    if (!std.mem.startsWith(u8, name, "SHA256SUMS") or !plain) {
         return refuse(log, "--name must be a file name starting with SHA256SUMS", .{});
     }
     try write_sums(io, memory, log, arguments.out, name);
@@ -260,9 +280,10 @@ test "arguments: a full assets line parses; each missing piece or conflict is re
     // Goal: the flags the build step passes are accepted; incomplete lines, both or neither of
     // --packages and --no-packages, and an unknown subcommand are usage errors.
     const full = [_][]const u8{
-        "assets",    "--version",     "1.2.3",        "--zbx-x86_64", "a",             "--zbx-aarch64", "b",
-        "--license", "L",             "--license-id", "MIT",          "--zig-version", "0.17.0",        "--out",
-        "out",       "--no-packages",
+        "assets",        "--version",     "1.2.3",     "--zbx-x86_64", "a",
+        "--zbx-aarch64", "b",             "--license", "L",            "--license-id",
+        "MIT",           "--zig-version", "0.17.0",    "--out",        "out",
+        "--no-packages",
     };
     var iterator: TestIterator = .{ .words = &full };
     const parsed = parse_arguments(&iterator).?;
@@ -275,7 +296,8 @@ test "arguments: a full assets line parses; each missing piece or conflict is re
     try std.testing.expect(parse_arguments(&conflict) == null);
     var unknown: TestIterator = .{ .words = &.{ "publish", "--out", "o" } };
     try std.testing.expect(parse_arguments(&unknown) == null);
-    var sums_line: TestIterator = .{ .words = &.{ "sums", "--dir", "d", "--name", "SHA256SUMS.macos" } };
+    const sums_words = [_][]const u8{ "sums", "--dir", "d", "--name", "SHA256SUMS.macos" };
+    var sums_line: TestIterator = .{ .words = &sums_words };
     const sums_parsed = parse_arguments(&sums_line).?;
     try std.testing.expectEqualStrings("SHA256SUMS.macos", sums_parsed.sums_name);
 }

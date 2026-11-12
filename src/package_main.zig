@@ -345,7 +345,8 @@ fn run_redate(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.W
         };
     }
     try log.print("packages: re-dated {s}; sign it again\n", .{path});
-    assert(!std.mem.eql(u8, old, new) or old.len > 0);
+    assert(old.len > 0);
+    assert(new.len > 0);
 }
 
 /// The files of a written tree, read from disk.
@@ -421,13 +422,15 @@ test "arguments: a full build line parses, and each missing piece is refused" {
 
 test "arguments: redate needs a signing time and refuses every other mode" {
     // Goal: `--redate` is its own mode: out and signed-at only, and a bad time is a usage error.
-    var ok: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "1800000000" } };
+    const ok_words = [_][]const u8{ "--redate", "--out", "o", "--signed-at", "1800000000" };
+    var ok: TestIterator = .{ .words = &ok_words };
     try std.testing.expectEqual(@as(?u64, 1_800_000_000), parse_arguments(&ok).?.signed_at);
     var missing: TestIterator = .{ .words = &.{ "--redate", "--out", "o" } };
     try std.testing.expect(parse_arguments(&missing) == null);
     var bad: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "soon" } };
     try std.testing.expect(parse_arguments(&bad) == null);
-    var mixed: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "1", "--check" } };
+    const mixed_words = [_][]const u8{ "--redate", "--out", "o", "--signed-at", "1", "--check" };
+    var mixed: TestIterator = .{ .words = &mixed_words };
     try std.testing.expect(parse_arguments(&mixed) == null);
 }
 

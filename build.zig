@@ -46,7 +46,8 @@ pub fn build(b: *std.Build) void {
     add_tidy_step(b);
     const fuzz = add_fuzz_step(b, options, target);
     add_release_step(b, options);
-    const packages_dir = b.option([]const u8, "packages-dir", "Package tree for packages-redate and release-assets");
+    const packages_help = "Package tree for packages-redate and release-assets";
+    const packages_dir = b.option([]const u8, "packages-dir", packages_help);
     add_packages_steps(b, options, packages_dir);
     add_release_assets_step(b, options, packages_dir);
     add_demo_step(b, options, vm_module);
@@ -144,14 +145,17 @@ fn add_redate_step(
     signed_at: ?[]const u8,
     directory: ?[]const u8,
 ) void {
-    const step = b.step("packages-redate", "Re-date an existing apt Release (-Dsigned-at, -Dpackages-dir)");
+    const redate_help = "Re-date an existing apt Release (-Dsigned-at, -Dpackages-dir)";
+    const step = b.step("packages-redate", redate_help);
     const run = b.addRunArtifact(tool);
     run.setCwd(b.path("."));
     run.addArg("--redate");
     run.addArgs(&.{ "--out", directory orelse "zig-out/packages" });
     run.addArgs(&.{ "--signed-at", signed_at orelse "0" });
     run.has_side_effects = true;
-    if (signed_at == null) step.dependOn(&b.addFail("packages-redate needs -Dsigned-at=SECONDS").step);
+    if (signed_at == null) {
+        step.dependOn(&b.addFail("packages-redate needs -Dsigned-at=SECONDS").step);
+    }
     step.dependOn(&run.step);
 }
 
@@ -164,8 +168,10 @@ fn add_release_assets_step(
     options: *std.Build.Step.Options,
     packages: ?[]const u8,
 ) void {
-    const no_packages = b.option(bool, "no-packages", "Write release assets without debs and rpms") orelse false;
-    const archive = b.option([]const u8, "repos-archive", "zigbox-repos.tar.gz to add to the assets");
+    const no_packages_help = "Write release assets without debs and rpms";
+    const no_packages = b.option(bool, "no-packages", no_packages_help) orelse false;
+    const archive_help = "zigbox-repos.tar.gz to add to the assets";
+    const archive = b.option([]const u8, "repos-archive", archive_help);
     const epoch = b.option([]const u8, "source-date-epoch", "Timestamp of tar entries and SBOM");
     const tool = b.addExecutable(.{
         .name = "release_assets_main",
@@ -181,22 +187,25 @@ fn add_release_assets_step(
     add_release_binaries(b, options, run);
     run.addArg("--license");
     run.addFileArg(b.path("LICENSE"));
-    run.addArgs(&.{ "--license-id", license_id, "--zig-version", @import("builtin").zig_version_string });
+    run.addArgs(&.{ "--license-id", license_id });
+    run.addArgs(&.{ "--zig-version", @import("builtin").zig_version_string });
     run.addArgs(&.{ "--out", "zig-out/release-assets" });
     if (epoch) |seconds| run.addArgs(&.{ "--source-date-epoch", seconds });
     if (packages) |directory| run.addArgs(&.{ "--packages", directory });
     if (no_packages) run.addArg("--no-packages");
     if (archive) |file| run.addArgs(&.{ "--extra", file });
     run.has_side_effects = true;
-    const help = "Write the release tarballs, the SBOM and SHA256SUMS (see docs/releases/packaging.md)";
+    const help = "Write the release tarballs, the SBOM and SHA256SUMS (docs/releases/packaging.md)";
     b.step("release-assets", help).dependOn(&run.step);
     const sums_dir = b.option([]const u8, "assets-dir", "Directory of assets for release-sums");
-    const sums_name = b.option([]const u8, "sums-name", "File release-sums writes") orelse "SHA256SUMS";
+    const name_help = "File release-sums writes";
+    const sums_name = b.option([]const u8, "sums-name", name_help) orelse "SHA256SUMS";
     const sums = b.addRunArtifact(tool);
     sums.setCwd(b.path("."));
-    sums.addArgs(&.{ "sums", "--dir", sums_dir orelse "zig-out/release-assets", "--name", sums_name });
+    const directory = sums_dir orelse "zig-out/release-assets";
+    sums.addArgs(&.{ "sums", "--dir", directory, "--name", sums_name });
     sums.has_side_effects = true;
-    const sums_help = "Write SHA256SUMS over a directory of assets again (-Dassets-dir, -Dsums-name)";
+    const sums_help = "Write SHA256SUMS over a directory again (-Dassets-dir, -Dsums-name)";
     b.step("release-sums", sums_help).dependOn(&sums.step);
 }
 
