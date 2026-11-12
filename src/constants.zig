@@ -164,7 +164,7 @@ pub const errors_page_bytes_max: u32 = 64 * 1024;
 /// One row of the index (link, summary, blame), and the stylesheet and head every page carries.
 /// `errors_site.zig` asserts at compile time that the registry's rows fit in a page, so the next
 /// milestone's codes fail the build there, not in the tool's run.
-/// The longest row today is 164 bytes; 256 stopped fitting at 233 codes (M10 slice 2 merged with M9).
+/// The longest row today is 164 bytes; 256 stopped fitting at 233 codes.
 pub const errors_index_row_bytes_max: u32 = 192;
 pub const errors_index_head_bytes_max: u32 = 6 * 1024;
 
