@@ -83,9 +83,9 @@ test "build --graph refuses a file that cannot be read, parsed, ordered or have 
         ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"}, .needs = .{\"b\"} }, " ++
         ".{ .name = \"b\", .base = \"x\", .run = .{\"x\"}, .needs = .{\"a\"} } } }");
     try expect_refused("ZBX-E0802", "the steps need each other round: a");
-    overwrite(build_path, ".{ .version = 1, .image = .{ .config = .{ .user = \"root\" } }, " ++
+    overwrite(build_path, ".{ .version = 1, .image = .{ .config = .{ .user = \"a b\" } }, " ++
         ".steps = .{} }");
-    try expect_refused("ZBX-E0807", "image.config .user \"root\"");
+    try expect_refused("ZBX-E0807", "image.config .user \"a b\"");
     files.put_file("/home/alice/secret", 0o600, "key\n");
     files.put_symlink(project ++ "/escape", "../secret");
     overwrite(build_path, ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", " ++

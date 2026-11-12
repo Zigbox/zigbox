@@ -150,7 +150,7 @@ test "each refusal names its kind, line and column" {
     try refused_at(add ++ ".to = \"/\" } } } }", .missing_field, ".{ .to");
     const config = head ++ ".config = .{ ";
     try refused_at(config ++ ".workdir = \"tmp\" } } }", .config_workdir, "\"");
-    try refused_at(config ++ ".user = \"root\" } } }", .config_user, "\"");
+    try refused_at(config ++ ".user = \"a b\" } } }", .config_user, "\"");
     try refused_at(config ++ ".user = \"0:99999999999\" } } }", .config_user, "\"");
     try refused_at(config ++ ".env = .{ \"A\", } } } }", .config_env, "\"");
     try refused_at(config ++ ".labels = .{ .{ \"A\", \"b\" } } } } }", .config_label_key, "\"");
@@ -172,7 +172,8 @@ test "each step refusal names its kind, line and column" {
     try refused_at(named ++ ".run = .{} } } }", .empty_run, ".{ .name");
     try refused_at(named ++ ".run = .{\"\"} } } }", .empty_run, "\"\"");
     try refused_at(named ++ ".env = .{\"=b\"} } } }", .bad_env, "\"=b");
-    try refused_at(named[0 .. named.len - 2] ++ " } } }", .missing_field, ".{ .name");
+    try refused_at(named[0 .. named.len - 2] ++ " } } }", .run_or_copy, ".{ .name");
+    try refused_at(head ++ ".base = \"a\", .run = .{\"x\"} } } }", .missing_field, ".{ .base");
     try refused_at(head ++ ".name = \"a\", .network = 1 } } }", .syntax, "1 }");
     try refused_at(".{ .steps = .{ 1 } }", .syntax, "1");
 }
@@ -205,7 +206,7 @@ test "the bounds hold at their limit and refuse one past it" {
     // Goal: every count and length bound is exact. Method: steps, a string, needs and the pool,
     // each at its limit and one more.
     _ = try parse_ok(write_steps(constants.build_steps_max));
-    try expect_refused(write_steps(constants.build_steps_max + 1), .list_too_long, 66, 1);
+    try expect_refused(write_steps(constants.build_steps_max + 1), .list_too_long, constants.build_steps_max + 2, 1);
     _ = try parse_ok(write_string(constants.build_string_bytes_max));
     const long = write_string(constants.build_string_bytes_max + 1);
     try refused_at(long, .string_too_long, "\"");
@@ -236,8 +237,8 @@ test "every string together is bounded by the pool" {
     writer.writeAll("} } } }") catch unreachable; // Fits.
     _ = try parse_ok(writer.buffered());
     writer.end = full;
-    writer.writeAll("\"a\" } } } }") catch unreachable; // Fits.
-    try expect_refused(writer.buffered(), .text_too_long, count + 2, 1);
+    writer.writeAll("}, .env = .{ \"A=b\" } } } }") catch unreachable; // Fits.
+    try expect_refused(writer.buffered(), .text_too_long, count + 2, 14);
 }
 
 test "a file cut short anywhere is refused at its end, inside a list too" {
