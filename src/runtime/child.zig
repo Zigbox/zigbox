@@ -13,6 +13,7 @@ const capabilities = @import("capabilities.zig");
 const plan_mod = @import("plan.zig");
 const seccomp = @import("seccomp.zig");
 const sync = @import("sync.zig");
+const cdi_steps = @import("cdi_steps.zig");
 
 const Host = host_mod.Host;
 const Plan = plan_mod.Plan;
@@ -46,6 +47,9 @@ const State = struct {
     failed_etc: u8,
     /// The listener `make_listener` made, until `send_listener` has sent it and closed it.
     listener: ?host_mod.Handle,
+    /// The image's `ldconfig` did not run for the CDI libraries: `exec` hands the command
+    /// `Plan.ld_library_path` instead.
+    ld_failed: bool,
 };
 
 pub const go_ahead: u8 = 1;
@@ -61,7 +65,7 @@ pub fn entry(context: *anyopaque) u8 {
     host.close(child.ready.write);
     host.close(child.report.read);
     if (child.plan.has_listener) host.close(child.channel.read);
-    var state: State = .{ .errno_override = 0, .failed_etc = 0, .listener = null };
+    var state: State = .{ .errno_override = 0, .failed_etc = 0, .listener = null, .ld_failed = false };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
         if (skipped(step, &state)) continue;
@@ -79,6 +83,7 @@ pub fn entry(context: *anyopaque) u8 {
             };
             write_record(child, record);
             if (step.tolerant) {
+                if (step.kind == .run_ldconfig) state.ld_failed = true;
                 const group = plan_mod.group_of(step);
                 if (group > 0) state.failed_etc |= @as(u8, 1) << @intCast(group - 1);
                 continue;
@@ -159,11 +164,15 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .unstage_etc_file => try unstage(host, target),
         .remount_sys => try mount(host, .remount_readonly_tree, target, null),
         .enter_workdir => try enter_workdir(host, target),
-        .set_user => try host.set_user(plan.user_uid, plan.user_gid, plan.device_count > 0),
+        .set_user => try host.set_user(plan.user_uid, plan.user_gid, plan.keep_groups),
         .rearm_death_signal => try rearm_death_signal(child),
         .create_device_file => try host.create_file(target, false),
         .create_user_device => try make_file_target(host, target),
         .bind_user_device => try mount(host, .bind_file, target, plan.text(step.source)),
+        .bind_cdi_nodes => try cdi_steps.bind_nodes(host, plan, &state.errno_override),
+        .stage_cdi_mounts => try cdi_steps.stage_mounts(host, plan, &state.errno_override),
+        .move_cdi_mounts => try cdi_steps.move_mounts(host, plan, &state.errno_override),
+        .run_ldconfig => try cdi_steps.run_ldconfig(host, plan, &state.errno_override),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
         .pivot_root => try host.pivot_root(target, plan.text(step.source)),
@@ -348,12 +357,32 @@ fn await_release(child: *const Context) Error!void {
 /// Tries each candidate path in turn, as a shell does for a name without a slash. A file that
 /// is missing moves on to the next candidate; a file that is there but cannot be run is
 /// reported over a missing one, since it is the more telling failure.
+/// The command's environment with `LD_LIBRARY_PATH` for the CDI directories, unless the
+/// environment has one already (the user's own wins). `plan.envp` has the room for it: the
+/// environment's bound leaves one entry free (`plan.build_exec_image` asserts it).
+fn library_path_env(plan: *const Plan) @TypeOf(plan.envp) {
+    var envp = plan.envp;
+    var count: usize = 0;
+    const key = "LD_LIBRARY_PATH=";
+    while (envp[count]) |variable| : (count += 1) {
+        if (std.mem.startsWith(u8, std.mem.span(variable), key)) return envp;
+    }
+    assert(count + 1 < envp.len);
+    envp[count] = plan.text(plan.ld_library_path).ptr;
+    envp[count + 1] = null;
+    return envp;
+}
+
 fn exec(child: *const Context, state: *State) Error!void {
     const plan = child.plan;
     assert(plan.candidates_count > 0);
     assert(plan.argv[0] != null);
     const argv: host_mod.CStrings = @ptrCast(&plan.argv);
-    const envp: host_mod.CStrings = @ptrCast(&plan.envp);
+    var with_library_path: @TypeOf(plan.envp) = undefined;
+    const envp: host_mod.CStrings = if (state.ld_failed and plan.ld_library_path.len > 0) blk: {
+        with_library_path = library_path_env(plan);
+        break :blk @ptrCast(&with_library_path);
+    } else @ptrCast(&plan.envp);
     var missing: ?Error = null;
     var missing_errno: u16 = 0;
     var denied: ?Error = null;

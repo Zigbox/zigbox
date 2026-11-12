@@ -13,6 +13,7 @@
 //! (the exec image), so it is built in place and never moved or copied.
 
 const std = @import("std");
+const cdi_mod = @import("cdi.zig");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const netfiles = @import("netfiles.zig");
@@ -134,6 +135,16 @@ pub const Kind = enum {
     /// directories above it that are missing) and bound at its own path, as M1's six are.
     create_user_device,
     bind_user_device,
+    /// The CDI devices (M10 slice 2), each one step that loops over the run's resolved items
+    /// (`Plan.cdi`): the nodes bound at their own path below `/dev` ...
+    bind_cdi_nodes,
+    /// ... the mounts staged in hidden names below the rootfs's `/dev`, read-only (before the
+    /// new root is entered), and moved to their container paths (after it) ...
+    stage_cdi_mounts,
+    move_cdi_mounts,
+    /// ... and, once they are in place, the image's own `ldconfig` over the directories the
+    /// spec's `update-ldcache` hook names. Tolerant: an image without one gets W0208.
+    run_ldconfig,
     make_shm_dir,
     mount_shm,
     make_pts_dir,
@@ -292,6 +303,12 @@ pub const state_read_only_steps_count: u32 = 1;
 /// `bind_user_device`).
 pub const user_device_steps_count: u32 = 2;
 
+/// The steps CDI devices add at most: the nodes, the stage and the move of the mounts, ldconfig.
+pub const cdi_steps_count_max: u32 = 4;
+
+/// The hidden name in /dev a CDI mount is staged at, followed by the mount's index in decimal.
+pub const cdi_stage_prefix = "/dev/.zbx-cdi-";
+
 /// The hidden name in the container's /dev a volume is bound at before it is moved to its target,
 /// followed by the volume's index.
 pub const state_stage_prefix = "/dev/.zbx-state-";
@@ -392,6 +409,11 @@ pub const Input = struct {
     /// The paths of the host devices bound at the same path in the container (`--device`),
     /// each already looked at (`devices.resolve`); at most `constants.run_devices_max`.
     devices: []const []const u8 = &.{},
+    /// What the CDI devices of the run resolved to (`cdi.Resolved`, owned by the caller, which
+    /// keeps it alive and in place until the run has ended: the child reads it after `fork`).
+    cdi: ?*const cdi_mod.Resolved = null,
+    /// The run asked for a device by path or by CDI name: the user's groups carry over.
+    keep_groups: bool = false,
     /// The hostname, when it is not the name (a build step's, M7).
     hostname: ?[]const u8 = null,
     /// The file mode creation mask the command starts with; null leaves the caller's.
@@ -522,6 +544,15 @@ pub const Plan = struct {
     /// The host devices of the run: how many, and each one's path.
     device_count: u32,
     device_paths: [constants.run_devices_max]Text,
+    /// Whether the command's user keeps the supplementary groups of zbx (any device asked for).
+    keep_groups: bool,
+    /// The CDI devices' resolved items, or null: how many nodes, mounts and ldcache directories
+    /// the steps loop over, and the rootfs the node and stage paths are below.
+    cdi: ?*const cdi_mod.Resolved,
+    cdi_rootfs: Text,
+    /// `LD_LIBRARY_PATH=...` for an image whose library cache cannot be updated (empty: none),
+    /// and whether it replaces an entry of the environment of that name.
+    ld_library_path: Text,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -532,7 +563,7 @@ pub const Plan = struct {
     strings: [constants.exec_strings_bytes_max]u8,
     strings_len: u32,
     argv: [constants.command_words_count_max + 1]?[*:0]const u8,
-    envp: [constants.environment_count_max + constants.env_vars_count_max + 1]?[*:0]const u8,
+    envp: [constants.environment_count_max + constants.env_vars_count_max + constants.cdi_run_env_max + 2]?[*:0]const u8,
 
     /// Builds the plan in place. The input must have passed the checks in `spec.zig`.
     pub fn build(plan: *Plan, input: *const Input) void {
@@ -571,6 +602,7 @@ pub const Plan = struct {
         plan.build_state(input);
         plan.build_mounts(input);
         plan.build_devices(input);
+        plan.build_cdi(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
@@ -634,8 +666,19 @@ pub const Plan = struct {
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
         const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
-        return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
+        return plan.cdi_steps() + base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
             state + plan.mount_steps + listener + user_device_steps_count * plan.device_count;
+    }
+
+    /// The steps the CDI devices add: the nodes (one), the mounts (two), ldconfig (one).
+    pub fn cdi_steps(plan: *const Plan) u32 {
+        const resolved = plan.cdi orelse return 0;
+        const nodes: u32 = @intFromBool(resolved.nodes_count > 0);
+        const mounts: u32 = 2 * @as(u32, @intFromBool(resolved.mounts_count > 0));
+        const ldconfig: u32 = @intFromBool(resolved.dirs_count > 0);
+        const total = nodes + mounts + ldconfig;
+        assert(total <= cdi_steps_count_max);
+        return total;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -737,6 +780,36 @@ pub const Plan = struct {
         }
     }
 
+    /// What the CDI steps loop over (null: no CDI device in the run), and what a tolerant
+    /// `run_ldconfig` leaves for the exec: the `LD_LIBRARY_PATH` entry.
+    fn build_cdi(plan: *Plan, input: *const Input) void {
+        plan.keep_groups = input.keep_groups or input.devices.len > 0;
+        plan.cdi = null;
+        plan.cdi_rootfs = empty_text;
+        plan.ld_library_path = empty_text;
+        const resolved = input.cdi orelse return;
+        if (resolved.is_empty()) return;
+        plan.keep_groups = true;
+        plan.cdi = resolved;
+        plan.cdi_rootfs = plan.add_text(&.{input.rootfs});
+        if (resolved.dirs_count == 0) return;
+        var line: [constants.cdi_run_dirs_max * (constants.cdi_path_bytes_max + 1) + 64]u8 = undefined;
+        var at: usize = 0;
+        const head = "LD_LIBRARY_PATH=";
+        @memcpy(line[0..head.len], head);
+        at += head.len;
+        for (resolved.dirs[0..resolved.dirs_count], 0..) |dir, index| {
+            if (index > 0) {
+                line[at] = ':';
+                at += 1;
+            }
+            const text_of_dir = resolved.text(dir);
+            @memcpy(line[at..][0..text_of_dir.len], text_of_dir);
+            at += text_of_dir.len;
+        }
+        plan.ld_library_path = plan.add_text(&.{line[0..at]});
+    }
+
     /// The host path of the device a device step acts on, for a diagnostic.
     pub fn device_of(plan: *const Plan, step: *const Step) []const u8 {
         const is_device_step = step.kind == .create_user_device or step.kind == .bind_user_device;
@@ -830,7 +903,7 @@ pub const Plan = struct {
             .target = target,
             .source = source,
             .index = index,
-            .tolerant = kind == .mount_pts or is_sys(kind) or is_etc(kind),
+            .tolerant = kind == .mount_pts or is_sys(kind) or is_etc(kind) or kind == .run_ldconfig,
         };
         plan.count += 1;
     }
@@ -929,12 +1002,14 @@ pub const Plan = struct {
         plan.push(.mount_dev, dev, empty_text, 0);
         plan.push_devices(rootfs_text);
         plan.push_user_devices(rootfs_text);
+        plan.push_cdi_nodes();
         plan.push_dev_mounts(rootfs_text);
         plan.push_links(rootfs_text);
         plan.push_etc_files(rootfs_text);
         plan.push_sys(rootfs_text);
         plan.push_state_stages(input.state, rootfs_text);
         plan.push_mount_stages(input.mounts, rootfs_text);
+        plan.push_cdi_stages();
         if (plan.read_only) plan.push_read_only(rootfs, rootfs_text);
         const here = plan.add_text(&.{"."});
         plan.push(.enter_rootfs, rootfs, empty_text, 0);
@@ -943,6 +1018,7 @@ pub const Plan = struct {
         plan.push(.enter_new_root, plan.add_text(&.{"/"}), empty_text, 0);
         plan.push_state_moves(input.state);
         plan.push_mount_moves(input.mounts);
+        plan.push_cdi_moves();
         if (plan.has_workdir) plan.push(.enter_workdir, plan.workdir, empty_text, 0);
         plan.push(.seal_descriptors, empty_text, empty_text, 0);
         plan.push(.restrict_capabilities, empty_text, empty_text, 0);
@@ -955,6 +1031,28 @@ pub const Plan = struct {
         assert(plan.steps[plan.count - 1].kind == .exec);
         // The parent's tail remains.
         assert(plan.count == plan.steps_expected() - plan.tail_count());
+    }
+
+    /// The CDI nodes bound below the rootfs's /dev, after the user's devices.
+    fn push_cdi_nodes(plan: *Plan) void {
+        const resolved = plan.cdi orelse return;
+        if (resolved.nodes_count == 0) return;
+        plan.push(.bind_cdi_nodes, plan.cdi_rootfs, empty_text, 0);
+    }
+
+    /// The CDI mounts staged, before the new root is entered.
+    fn push_cdi_stages(plan: *Plan) void {
+        const resolved = plan.cdi orelse return;
+        if (resolved.mounts_count == 0) return;
+        plan.push(.stage_cdi_mounts, plan.cdi_rootfs, empty_text, 0);
+    }
+
+    /// The CDI mounts moved to their paths in the new root, and then the library cache, which
+    /// reads the directories the mounts brought.
+    fn push_cdi_moves(plan: *Plan) void {
+        const resolved = plan.cdi orelse return;
+        if (resolved.mounts_count > 0) plan.push(.move_cdi_mounts, empty_text, empty_text, 0);
+        if (resolved.dirs_count > 0) plan.push(.run_ldconfig, empty_text, empty_text, 0);
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound
@@ -1254,9 +1352,37 @@ pub const Plan = struct {
             plan.envp[count] = plan.add_string(&.{ variable.key, "=", variable.value });
             count += 1;
         }
+        count = plan.add_cdi_env(count);
         plan.envp[count] = null;
-        assert(count <= constants.environment_count_max + constants.env_vars_count_max);
+        const bound = constants.environment_count_max + constants.env_vars_count_max;
+        assert(count <= bound + constants.cdi_run_env_max);
         plan.build_candidates(input.command[0], search_path_of(input.env));
+    }
+
+    /// The environment the CDI devices set, after the rest: a name already there (the default's,
+    /// or one the caller set) stays as it is, so the user's own choice wins.
+    fn add_cdi_env(plan: *Plan, start: usize) usize {
+        const resolved = plan.cdi orelse return start;
+        assert(resolved.env_count <= constants.cdi_run_env_max);
+        var count = start;
+        for (resolved.env[0..resolved.env_count]) |item| {
+            const entry = resolved.text(item);
+            const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            if (plan.env_has(count, entry[0 .. equals + 1])) continue;
+            plan.envp[count] = plan.add_string(&.{entry});
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Whether one of the first `count` entries of the environment starts with `key_equals`.
+    fn env_has(plan: *const Plan, count: usize, key_equals: []const u8) bool {
+        assert(key_equals.len > 1);
+        assert(key_equals[key_equals.len - 1] == '=');
+        for (plan.envp[0..count]) |entry| {
+            if (std.mem.startsWith(u8, std.mem.span(entry.?), key_equals)) return true;
+        }
+        return false;
     }
 
     /// The PATH a program is looked for in: the image's if the caller set one, else the default.
@@ -1433,6 +1559,10 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .bind_device => "bind-mounting /dev/",
         .create_user_device => "creating the mount point of a --device in /dev",
         .bind_user_device => "bind-mounting a --device into /dev",
+        .bind_cdi_nodes => "bind-mounting the device nodes of a CDI device into /dev",
+        .stage_cdi_mounts => "staging the mounts of a CDI device in /dev",
+        .move_cdi_mounts => "moving the mounts of a CDI device to their paths",
+        .run_ldconfig => "updating the library cache for a CDI device",
         .link_dev => "creating the link /dev/",
         .make_tmp_dir => "creating /tmp in the rootfs",
         .mount_tmp => "mounting a tmpfs on /tmp",
@@ -1456,7 +1586,7 @@ comptime {
         read_only_hostname_steps_count + 3 + pasta_steps_count +
         (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max +
         mount_steps_staged * constants.mounts_max +
-        user_device_steps_count * constants.run_devices_max;
+        user_device_steps_count * constants.run_devices_max + cdi_steps_count_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
