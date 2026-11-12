@@ -828,7 +828,10 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
     while (try fields.next(parser)) |field| {
         switch (field) {
             .from => entry.from = try parse_from(parser, .copy),
-            .src => try parse_texts(parser, .copy, field, &entry.src, constants.build_copy_sources_max),
+            .src => {
+                const bound = constants.build_copy_sources_max;
+                try parse_texts(parser, .copy, field, &entry.src, bound);
+            },
             .to => {
                 entry.to = try parse_string(parser, .copy, field);
                 if (!is_copy_to(parser.file.text(entry.to))) {
@@ -942,7 +945,13 @@ fn parse_binds(parser: *Parser, step: *Step) Refused!void {
 }
 
 fn parse_bind(parser: *Parser, entry: *Bind, open: Token) Refused!void {
-    entry.* = .{ .from = null, .source = undefined, .to = undefined, .line = open.line, .column = open.column };
+    entry.* = .{
+        .from = null,
+        .source = undefined,
+        .to = undefined,
+        .line = open.line,
+        .column = open.column,
+    };
     var fields: Fields = .{ .level = .bind };
     while (try fields.next(parser)) |field| {
         switch (field) {

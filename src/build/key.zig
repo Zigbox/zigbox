@@ -174,7 +174,7 @@ const Encoder = struct {
 pub fn compute(spec: *const Spec, key: *Key) Error!void {
     assert(spec.name.len > 0);
     assert(spec.name.len <= constants.build_step_name_bytes_max);
-    assert(spec.argv.len > 0 or spec.copies.len > 0); // A step runs a command or copies.
+    assert(spec.argv.len + spec.copies.len > 0); // A step runs a command or copies.
     if (spec.needs.len > constants.build_step_needs_max) return error.TooLong;
     if (spec.binds.len > constants.build_step_binds_max) return error.TooLong;
     if (spec.copies.len > constants.build_copy_entries_max) return error.TooLong;

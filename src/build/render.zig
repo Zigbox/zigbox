@@ -161,7 +161,12 @@ fn render_pair(
     try writer.writeAll(after);
 }
 
-fn render_inline_list(file: *const BuildFile, name: []const u8, items: []const Text, writer: *Writer) !void {
+fn render_inline_list(
+    file: *const BuildFile,
+    name: []const u8,
+    items: []const Text,
+    writer: *Writer,
+) !void {
     assert(name.len > 0);
     try writer.print(".{s} = .{{", .{name});
     for (items, 0..) |item, index| {
@@ -339,7 +344,12 @@ fn equal_mounts(
     return true;
 }
 
-fn same_span(a: *const BuildFile, b: *const BuildFile, span_a: file_mod.Span, span_b: file_mod.Span) bool {
+fn same_span(
+    a: *const BuildFile,
+    b: *const BuildFile,
+    span_a: file_mod.Span,
+    span_b: file_mod.Span,
+) bool {
     if (span_a.given != span_b.given) return false;
     return same_list(a, b, a.texts(span_a), b.texts(span_b));
 }
@@ -481,7 +491,8 @@ const m9_file =
     \\    .{ .name = "b", .base = "alpine:3.20", .run = .{ "true" }, .output = .root },
     \\    .{ .name = "a", .base = "step:b", .user = "app", .workdir = "/w", .exclude = .{},
     \\       .inputs = .{ "src/**/*.go" }, .run = .{ "true" },
-    \\       .caches = .{ .{ .id = "c", .path = "/c", .ro = true, .mode = "0755", .uid = 1, .gid = 2 } },
+    \\       .caches = .{ .{ .id = "c", .path = "/c", .ro = true, .mode = "0755",
+    \\                      .uid = 1, .gid = 2 } },
     \\       .binds = .{ .{ .from = "step:b", .source = "/usr/bin", .to = "/tools" } } },
     \\    .{ .name = "c", .base = "alpine:3.20",
     \\       .copy = .{ .{ .from = "step:a", .src = .{ "a*" }, .to = "/d/", .chown = "app",
@@ -495,10 +506,10 @@ test "every builder addition is printed, read back equal and printed the same" {
     // tripped, with each field's printed text looked for; then each value changed once.
     const canonical = try round_trip(m9_file);
     const printed = [_][]const u8{
-        ".output = .root,",     ".user = \"app\",",       ".workdir = \"/w\",",
-        ".exclude = .{},",      ".base = \"step:b\",",    ".ro = true",
-        ".mode = \"0755\"",     ".uid = 1, .gid = 2",     ".from = \"step:b\", .source",
-        ".chown = \"app\"",     ".chmod = \"644\"",       ".exclude = .{ \"*.o\" }",
+        ".output = .root,",       ".user = \"app\",",    ".workdir = \"/w\",",
+        ".exclude = .{},",        ".base = \"step:b\",", ".ro = true",
+        ".mode = \"0755\"",       ".uid = 1, .gid = 2",  ".from = \"step:b\", .source",
+        ".chown = \"app\"",       ".chmod = \"644\"",    ".exclude = .{ \"*.o\" }",
         ".exclude = .{ \".git\"", ".user = \"app:app\"",
     };
     for (printed) |needle| {
@@ -508,12 +519,12 @@ test "every builder addition is printed, read back equal and printed the same" {
         }
     }
     const changed = [_][2][]const u8{
-        .{ ".output = .root", ".output = .out" },    .{ "\"app\", .workdir", "\"bpp\", .workdir" },
-        .{ "\"/w\"", "\"/x\"" },                     .{ ".ro = true", ".ro = false" },
-        .{ ".uid = 1", ".uid = 3" },                 .{ "\"0755\"", "\"0700\"" },
-        .{ "\"/tools\"", "\"/tool\"" },              .{ "\"644\"", "\"640\"" },
-        .{ "\"*.o\"", "\"*.p\"" },                   .{ "\"!keep.log\"", "\"keep.log\"" },
-        .{ "\"app:app\"", "\"app:bpp\"" },           .{ "\"src/**/*.go\"", "\"src/*.go\"" },
+        .{ ".output = .root", ".output = .out" }, .{ "\"app\", .workdir", "\"bpp\", .workdir" },
+        .{ "\"/w\"", "\"/x\"" },                  .{ ".ro = true", ".ro = false" },
+        .{ ".uid = 1", ".uid = 3" },              .{ "\"0755\"", "\"0700\"" },
+        .{ "\"/tools\"", "\"/tool\"" },           .{ "\"644\"", "\"640\"" },
+        .{ "\"*.o\"", "\"*.p\"" },                .{ "\"!keep.log\"", "\"keep.log\"" },
+        .{ "\"app:app\"", "\"app:bpp\"" },        .{ "\"src/**/*.go\"", "\"src/*.go\"" },
         .{ ".exclude = .{},", "" },
     };
     var buffer: [m9_file.len + 16]u8 = undefined;

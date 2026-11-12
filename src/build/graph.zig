@@ -22,7 +22,8 @@ const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
 
 comptime {
-    assert(constants.build_steps_max <= std.math.maxInt(u8) + 1); // Indexes fit a byte; counts do not.
+    // Indexes fit a byte; counts do not.
+    assert(constants.build_steps_max <= std.math.maxInt(u8) + 1);
 }
 
 pub const ProblemKind = enum {
@@ -155,7 +156,9 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
         if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
         if (graph.base_step[index] != null) return .{ .step = at, .field = ".base = \"step:\"" };
         for (step.inputs.slice()) |input| {
-            if (glob_mod.is_glob(file.text(input))) return .{ .step = at, .field = "an input glob" };
+            if (glob_mod.is_glob(file.text(input))) {
+                return .{ .step = at, .field = "an input glob" };
+            }
         }
     }
     return null;
@@ -510,7 +513,7 @@ test "a step base, a copy and a bind come after the step they name" {
     try testing.expectEqual(@as(?u8, 0), test_graph.image_base); // `c` is the first step.
     const c = test_graph.order_slice()[2];
     try testing.expectEqual(@as(usize, 2), test_graph.after_slice(c).len); // b, and a once.
-    try testing.expectEqual(@as(usize, 0), test_graph.needs_slice(&test_file, c).len); // Mount needs only.
+    try testing.expectEqual(@as(usize, 0), test_graph.needs_slice(&test_file, c).len);
 }
 
 test "a cycle through a base is refused, and an unknown step in a base, from or image is" {
@@ -538,12 +541,13 @@ test "a cycle through a base is refused, and an unknown step in a base, from or 
 test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
     // Goal: no M9 field is quietly ignored by `zbx build`. Method: one file per field.
     var problem: Problem = undefined;
-    const plain = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .run = .{\"x\"} } } }";
+    const plain = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
     const fields = [_][]const u8{
-        ".output = .root", ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
-        ".inputs = .{ \"*.go\" }", ".caches = .{}", ".binds = .{}",
+        ".output = .root",         ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
+        ".inputs = .{ \"*.go\" }", ".caches = .{}",   ".binds = .{}",
     };
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
@@ -552,7 +556,8 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         const found = unrunnable(&test_file, &test_graph).?;
         try testing.expectEqual(@as(?u8, 0), found.step);
     }
-    const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .run = .{\"x\"} }, " ++
+    const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} }, " ++
         ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(base, &problem));
     try testing.expectEqual(@as(?u8, 1), unrunnable(&test_file, &test_graph).?.step);

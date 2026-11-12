@@ -79,7 +79,6 @@ const users = [_][]const u8{
 
 const excludes = [_][]const u8{ ".git", "*.log", "**/*_test.go", "!keep.log", "a/**/b", "[ab]?" };
 
-
 const label_keys = [_][]const u8{
     "org.opencontainers.image.source", "a", "x/y", "b-c_d", "org.opencontainers.image.version",
 };

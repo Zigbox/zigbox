@@ -3366,9 +3366,10 @@ pub const registry = [_]Entry{
         \\.image in the build file declares the result: a base, the step outputs
         \\added to it, and an optional .config saying how it runs. .config is
         \\refused when a field is not what it can be: .workdir must be an
-        \\absolute path, .user is uid:gid in numbers (names are not looked up at
-        \\build time), each .env entry is KEY=VALUE, and a label key is
-        \\[a-z0-9._/-] and given once. The cause names the field and why.
+        \\absolute path, .user is a name, a number, or user:group of those (a name
+        \\is looked up in the image when the build runs), each .env entry is
+        \\KEY=VALUE, and a label key is [a-z0-9._/-] and given once. The cause
+        \\names the field and why.
         ,
     },
     .{

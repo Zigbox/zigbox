@@ -442,7 +442,12 @@ fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Prob
     const at = text_util.sanitise(&at_echo, file.text(problem.at));
     switch (problem.kind) {
         .duplicate_step => diag.fix(.{ .sentence = "give each step a name of its own" }),
-        .unknown_need, .unknown_add, .unknown_base, .unknown_from, .unknown_image_base => diag.fix(.{
+        .unknown_need,
+        .unknown_add,
+        .unknown_base,
+        .unknown_from,
+        .unknown_image_base,
+        => diag.fix(.{
             .sentence = "name a step of the file, or add a step by that name",
         }),
         .need_twice => fix_sentence(diag, "list \"{s}\" once in step \"{s}\"'s .needs", .{

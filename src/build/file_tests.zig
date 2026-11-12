@@ -474,11 +474,15 @@ test "each M9 refusal names its kind" {
     try step_refused(copy ++ "\"x\" } }", .bad_copy_to);
     try step_refused(copy ++ "\"/x\", .chmod = \"9\" } }", .bad_mode);
     try step_refused(run ++ ".exclude = .{ \"[a\" }", .bad_pattern);
-    try step_refused(".copy = .{ .{ .from = \"Bad Ref\", .src = .{\"a\"}, .to = \"/x\" } }",
-        .bad_from);
+    try step_refused(
+        ".copy = .{ .{ .from = \"Bad Ref\", .src = .{\"a\"}, .to = \"/x\" } }",
+        .bad_from,
+    );
     const cache = ".caches = .{ .{ .id = ";
     try step_refused(run ++ cache ++ "\"a b\", .path = \"/c\" } }", .bad_cache_id);
-    try step_refused(run ++ cache ++ "\"a\", .path = \"/c\" }, .{ .id = \"b\", .path = \"/c\" } }",
-        .mount_twice);
+    try step_refused(
+        run ++ cache ++ "\"a\", .path = \"/c\" }, .{ .id = \"b\", .path = \"/c\" } }",
+        .mount_twice,
+    );
     try step_refused(run ++ ".binds = .{ .{ .source = \"../a\", .to = \"/b\" } }", .bad_source);
 }

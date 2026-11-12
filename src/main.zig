@@ -290,7 +290,6 @@ test {
     _ = @import("build/file_tests.zig");
     _ = @import("build/render.zig");
     _ = @import("build/graph.zig");
-    _ = @import("build/glob.zig");
     _ = @import("build/inputs.zig");
     _ = @import("build/key.zig");
     _ = @import("build/cache.zig");
@@ -353,4 +352,10 @@ test {
     _ = @import("fuzz_trust.zig");
     _ = @import("fuzz_provenance.zig");
     _ = @import("fuzz_verified.zig");
+}
+
+test {
+    // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
+    _ = @import("build/glob.zig");
+    _ = @import("fuzz_dockerignore.zig");
 }
