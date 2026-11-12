@@ -276,6 +276,10 @@ pub const pasta_steps_count: u32 = 2;
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
 
+/// The one step more a read-only plan has: the hostname's bind is not under the rootfs's
+/// non-recursive remount, so it is made read-only of its own (#117).
+pub const read_only_hostname_steps_count: u32 = 1;
+
 /// The steps each state volume adds, and the one more of a `:ro` volume (`is_state`).
 pub const state_steps_count: u32 = 6;
 pub const state_read_only_steps_count: u32 = 1;
@@ -605,7 +609,10 @@ pub const Plan = struct {
     pub fn steps_expected(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
-        const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
+        const read_only: u32 = if (plan.read_only)
+            read_only_steps_count + read_only_hostname_steps_count
+        else
+            0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) +
             2 * @as(u32, @intFromBool(plan.has_user)) + @as(u32, @intFromBool(plan.has_umask));
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
@@ -1098,11 +1105,13 @@ pub const Plan = struct {
     }
 
     /// Writes each generated file to the container's /dev, binds it over its mount point in
-    /// the rootfs (read-only, but for the hostname) and removes the staged name. The /dev is a
+    /// the rootfs (read-only, but for the hostname, unless the plan is read-only) and removes the
+    /// staged name. The /dev is a
     /// fresh tmpfs by now.
     fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
-        defer assert(plan.count == start + 11);
+        defer assert(plan.count == start + 11 + read_only_hostname_steps_count *
+            @intFromBool(plan.read_only));
         assert(rootfs.len > 0);
         assert(plan.etc_texts[0].offset != plan.etc_texts[1].offset);
         assert(plan.etc_texts[1].offset != plan.etc_texts[2].offset);
@@ -1112,9 +1121,10 @@ pub const Plan = struct {
             const inside = plan.add_text(&.{ rootfs, "/etc/", file.etc_name() });
             plan.push(.stage_etc_file, staged, plan.etc_texts[index], index);
             plan.push(.bind_etc_file, inside, staged, index);
-            // The hostname stays writable, as in Docker: a program may rewrite it, and what it
-            // writes is the container's own copy.
-            if (file != .hostname) plan.push(.remount_etc_file, inside, empty_text, index);
+            // The hostname stays writable, a program may rewrite it and what it writes is the
+            // container's own copy, but `--read-only` covers it as Docker's does: the rootfs
+            // remount is not recursive and does not reach this bind.
+            if (file != .hostname or plan.read_only) plan.push(.remount_etc_file, inside, empty_text, index);
             plan.push(.unstage_etc_file, staged, empty_text, index);
         }
     }
@@ -1391,8 +1401,8 @@ comptime {
     assert(steps_count_single <= constants.plan_steps_max);
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
     // (and the death signal asked for again after it) and pasta.
-    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 3 +
-        pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
+    const longest = steps_count_single + scope_steps_count + read_only_steps_count +
+        read_only_hostname_steps_count + 3 + pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
         constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
@@ -1473,8 +1483,8 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
         if (step.kind == .bind_device) devices_seen += 1;
         if (step.kind == .link_dev) links_seen += 1;
     }
-    // The devpts mount, the two /sys steps of a container with a sysfs of its own, and eleven
-    // for the two generated files.
+    // The devpts mount, the two /sys steps of a container with a sysfs of its own, and fifteen
+    // for the three generated files.
     try testing.expectEqual(@as(u32, 18), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
@@ -1872,6 +1882,26 @@ test "a container with a network of its own gets a sysfs of its own, and lo up f
     try testing.expectEqual(isolated_count, plan.count);
 }
 
+test "a read-only plan binds the hostname read-only too, and has one step more (#117)" {
+    // Goal: `--read-only` covers /etc/hostname, as it does the other generated files; the rootfs
+    // remount is not recursive and does not reach the bind. Method: build a read-only and a
+    // writable plan of the same run; only the first remounts the hostname, and the count says so.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    const writable_count = plan.count;
+    input.read_only = true;
+    plan.build(&input);
+    const hostname = @backingInt(netfiles.File.hostname);
+    var remounts: u32 = 0;
+    for (plan.steps[0..plan.count]) |step| {
+        if (step.kind == .remount_etc_file and step.index == hostname) remounts += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), remounts);
+    try testing.expectEqual(plan.steps_expected(), plan.count);
+    try testing.expect(plan.count > writable_count);
+}
+
 test "the generated /etc files are bound read-only over the image's, and the staged name goes" {
     // Goal: M5's hosts and resolv.conf. Method: for each file the mount point, the stage, the
     // bind, the read-only remount and the removal come in that order, the text is the file's,
@@ -1887,7 +1917,7 @@ test "the generated /etc files are bound read-only over the image's, and the sta
         const name = etc_name(step.index);
         try testing.expectEqual(Kind.bind_etc_file, plan.steps[at + 1].kind);
         // The hostname is not remounted read-only: a program may write it (#113).
-        const writable = step.index == @backingInt(netfiles.File.hostname);
+        const writable = step.index == @backingInt(netfiles.File.hostname) and !plan.read_only;
         const parts: usize = if (writable) 3 else 4;
         if (!writable) try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
         try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + parts - 1].kind);

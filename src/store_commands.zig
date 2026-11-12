@@ -486,7 +486,7 @@ fn unique_bytes(job: *Job, store: *const Store, root: *const roots.Root) ?u64 {
     var memory = usage_memory(job);
     var failure: usage.Failure = undefined;
     const stored = usage.tree_stored(store, &memory, root.digest, &failure) catch return null;
-    assert(stored <= root.bytes);
+    // `root.bytes` is read from disk and may be 0 or stale; it is not compared (#117).
     return stored;
 }
 

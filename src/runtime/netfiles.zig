@@ -1,7 +1,8 @@
 //! The three files zbx generates for a container's `/etc` (docs/briefs/M5-network.md, "Inside
 //! the container"): `hosts`, `resolv.conf` and `hostname`. Pure: the plan holds their text, the
-//! child writes it and binds it, read-only, over the image's own files, which are never
-//! touched. They are not part of an image, so a commit never sees them.
+//! child writes it and binds it over the image's own files, which are never
+//! touched. `hosts` and `resolv.conf` are bound read-only; `hostname` is writable unless the
+//! rootfs is read-only (#113, #117). They are not part of an image, so a commit never sees them.
 //!
 //! `hosts` names `localhost` for 127.0.0.1 and ::1, and the container's own hostname. `resolv.conf`
 //! has no nameserver for a container with no network (a lookup then fails at once, as it should)

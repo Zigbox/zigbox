@@ -192,6 +192,33 @@ test "ls counts a file linked under several names once in size_unique, and bytes
     try testing.expect(std.mem.indexOf(u8, sim.stdout(), "51 B") != null);
 }
 
+test "ls lists a root whose record has no bytes line, in text and in JSON (#117)" {
+    // Goal: a record that lacks `.bytes` (damaged, hand-edited, or written by a later zbx) is
+    // listed, not an assertion. Method: import, then replace the root's record with one that
+    // has only the required fields.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var path_buffer: [constants.sim_path_bytes_max]u8 = undefined;
+    var path: []const u8 = "";
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const found = files.alive_path(index) orelse continue;
+        if (std.mem.indexOf(u8, found, "/roots/") == null) continue;
+        @memcpy(path_buffer[0..found.len], found);
+        path = path_buffer[0..found.len];
+    }
+    try testing.expect(path.len > 0);
+    files.remove_path(path);
+    files.put_file(path, 0o644, ".{\n    .version = 1,\n    .kind = \"import\",\n}\n");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "ls" }));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stdout(), "import"));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const root = parsed.value.object.get("roots").?.array.items[0].object;
+    try testing.expectEqual(@as(i64, 0), root.get("bytes").?.integer);
+}
+
 test "ls of a store that does not exist is an empty list, and creates nothing" {
     // Goal: reading never creates. Method: ls on a host with a home and no store.
     start();

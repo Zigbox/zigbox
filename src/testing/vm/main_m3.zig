@@ -821,11 +821,12 @@ fn step_refusals(
 }
 
 /// What the container does in step 6: an addition, a rewrite, a mode change and two deletions,
-/// one of them the large file.
+/// one of them the large file, and a write to /etc/hostname, which no diff or commit may show.
 const ops_script =
     "set -e\n" ++
     "echo added > /added.txt\n" ++
     "echo changed >> /etc/motd\n" ++
+    "echo changed >> /etc/hostname\n" ++
     "chmod 600 /etc/passwd\n" ++
     "rm /etc/shadow /big.bin\n" ++
     "echo ops-done\n";
