@@ -574,7 +574,10 @@ jobs:
           set -euo pipefail
           latest=true
           if [ "$PRERELEASE" = true ]; then latest=false; fi
+          # tag_name is passed again: without it the draft publishes under its placeholder
+          # "untagged-..." name and no tag is made (found by draft-test).
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
+            -f tag_name="$TAG" -f target_commitish="$SHA" \
             -F prerelease="$PRERELEASE" -f make_latest="$latest" > /dev/null
           type=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)
           object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
@@ -922,6 +925,7 @@ jobs:
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -f name="draft check" \
             -F body=@"$RUNNER_TEMP/notes.md" -F prerelease=true > /dev/null
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
             -F prerelease=true -f make_latest=false > /dev/null
           object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
           [ "$object" = "$GITHUB_SHA" ] || { echo "draft-test: the tag is at $object" >&2; exit 1; }
@@ -930,4 +934,11 @@ jobs:
       - name: Delete the throwaway release and its tag
         if: ${{ always() }}
         run: |
-          "$GH" release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          # By id, not by tag: a draft has no tag to find it by. The name "draft check" is only
+          # ever made by this job, so a release it leaked in an earlier run goes too.
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg tag "$TAG" \
+            '.[] | select(.name == "draft check" and (.tag_name == $tag or (.tag_name | startswith("untagged-")))) | .id')
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" || true
