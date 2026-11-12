@@ -36,6 +36,7 @@ const fs_mod = @import("../store/fs.zig");
 const namespace = @import("../store/namespace.zig");
 const materialize = @import("../store/materialize.zig");
 const import_mod = @import("../store/import.zig");
+const image_user = @import("../image_user.zig");
 const remove = @import("../store/remove.zig");
 const open = @import("../store/open.zig");
 const store_diagnose = @import("../store/diagnose.zig");
@@ -114,6 +115,13 @@ pub const Workspace = struct {
     last_line: [constants.diag_field_bytes_max]u8,
     last_line_len: u32,
     import_result: import_mod.Result,
+    /// The `.user` resolved against the base tree (`resolve_identity`), and its home.
+    user_ws: image_user.Workspace,
+    user: ?spec_mod.User,
+    home: [image_user.home_bytes_max]u8,
+    home_len: u8,
+    /// How many of `mounts` the container has; a root step's commit leaves them out.
+    mount_count: u32,
 };
 
 const Paths = struct {
@@ -168,16 +176,26 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
     // keeps its own directory.
     try store_diagnose.hold(diag, &store, .shared, "build", "running a build step");
     defer lock.release(&store);
+    try resolve_identity(request, &store, ws, diag);
     try in_store(request, ws, .prepare, diag);
     defer cleanup(request, ws);
     const reason = try start_and_wait(request, ws, diag);
     copy_log(request, &store, ws);
+    const end = step_end(&ws.handle, reason);
+    // A root step's output is its upper layer, which `run.discard` removes: commit it first.
+    var committed = true;
+    if (end == null and request.spec.root_output) {
+        in_store(request, ws, .commit, diag) catch {
+            committed = false;
+        };
+    }
     run.discard(&ws.handle);
-    if (step_end(&ws.handle, reason)) |end| {
+    if (!committed) return error.Failed;
+    if (end) |end_reason| {
         const failure: diagnose.StepFailure = .{
             .step = request.spec.name,
             .file = request.file,
-            .end = end,
+            .end = end_reason,
             .network = request.spec.network,
             .last_line = ws.last_line[0..ws.last_line_len],
             .log = ws.paths.log_text(),
@@ -185,8 +203,39 @@ pub fn run_step(request: *const Request, ws: *Workspace, result: *Result, diag: 
         diagnose.step_failed(diag, &failure);
         return error.Failed;
     }
-    try in_store(request, ws, .import, diag);
+    if (!request.spec.root_output) try in_store(request, ws, .import, diag);
     result.* = .{ .output = ws.import_result.digest, .files = ws.import_result.files };
+}
+
+/// The step's `.user`, resolved against its base tree: the ids it runs as and its home. A name
+/// the base's files lack is E0817, mid-build, because a `step:` base exists only after the
+/// steps before it ran.
+fn resolve_identity(
+    request: *const Request,
+    store: *const Store,
+    ws: *Workspace,
+    diag: *Diag,
+) Error!void {
+    const spec = request.spec;
+    assert(diag.code == null);
+    ws.user = null;
+    ws.home_len = 0;
+    const text = spec.user orelse return;
+    assert(text.len > 0);
+    const found = image_user.resolve(store, &ws.user_ws, spec.base_tree, text, diag) catch {
+        // The image's own `User` is E0521; here the build file named it.
+        diag.reset();
+        var where: [constants.build_step_name_bytes_max + 8]u8 = undefined;
+        // The buffer holds the name at its bound plus `step ""`.
+        const named = std.fmt.bufPrint(&where, "step \"{s}\"", .{spec.name}) catch unreachable;
+        diagnose.user_not_found(diag, named, text);
+        return error.Failed;
+    };
+    ws.user = found.user;
+    const home = found.home_text();
+    @memcpy(ws.home[0..home.len], home);
+    ws.home_len = @intCast(home.len);
+    assert(ws.home_len > 0);
 }
 
 // ---- Names and paths ----------------------------------------------------------------------------
@@ -223,14 +272,17 @@ fn start_and_wait(request: *const Request, ws: *Workspace, diag: *Diag) Error!ru
     const spec = request.spec;
     const paths = &ws.paths;
     assert(spec.argv.len > 0);
-    const env_count = build_env(spec, &ws.env);
+    const env_count = build_env(spec, ws.home[0..ws.home_len], &ws.env);
     const mount_count = build_mounts(spec, ws);
+    ws.mount_count = mount_count;
     const container: spec_mod.Spec = .{
         .image = &paths.image,
         .name = paths.name_slice(),
         .command = spec.argv,
         .env = ws.env[0..env_count],
-        .workdir = "/src",
+        .workdir = spec.workdir orelse if (spec.root_output) "/" else "/src",
+        .user = ws.user,
+        .user_text = spec.user orelse "",
         .network = if (spec.network) .user else .none,
         .mounts = ws.mounts[0..mount_count],
         .project = paths.work_text(),
@@ -278,7 +330,7 @@ fn check_env(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     const spec = request.spec;
     assert(diag.code == null);
     if (spec_mod.command_problem(spec.argv) != null) return;
-    const count = build_env(spec, &ws.env);
+    const count = build_env(spec, "", &ws.env);
     const problem = spec_mod.env_problem(ws.env[0..count], spec.argv) orelse return;
     const key = if (problem < count) ws.env[problem].key else "";
     diagnose.step_env_refused(diag, spec.name, request.file, count, key);
@@ -287,13 +339,19 @@ fn check_env(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
 
 /// The base's environment, then the file's, then the fixed one: a later key replaces an
 /// earlier one in place, so each key is there once.
-fn build_env(spec: *const key_mod.Spec, out: *[env_count_max]spec_mod.Label) u32 {
+fn build_env(
+    spec: *const key_mod.Spec,
+    home: []const u8,
+    out: *[env_count_max]spec_mod.Label,
+) u32 {
     assert(spec.base_env.len <= constants.env_vars_count_max);
     assert(spec.env.len <= constants.build_step_env_max);
     var count: u32 = 0;
     for (spec.base_env) |entry| add_env(out, &count, entry);
     for (spec.env) |entry| add_env(out, &count, entry);
     for (key_mod.fixed_env) |entry| add_env(out, &count, entry);
+    // A step that names a user has that user's home, not root's.
+    if (home.len > 0) add_label(out, &count, .{ .key = "HOME", .value = home });
     const step_key = key_mod.step_variable[0 .. key_mod.step_variable.len - 1];
     add_label(out, &count, .{ .key = step_key, .value = spec.name });
     assert(count <= env_count_max);
@@ -325,15 +383,20 @@ fn build_mounts(spec: *const key_mod.Spec, ws: *Workspace) u32 {
     const paths = &ws.paths;
     assert(spec.needs.len <= constants.build_step_needs_max);
     var count: u32 = 0;
-    ws.mounts[count] = bind(.bind, paths.src.text(), "/src");
-    count += 1;
+    // A root step's output is its root: it has no `/src` and no `/out`.
+    if (!spec.root_output) {
+        ws.mounts[count] = bind(.bind, paths.src.text(), "/src");
+        count += 1;
+    }
     for (spec.needs, 0..) |need, index| {
         const target = ws.targets[index][0 .. 4 + need.name.len];
         ws.mounts[count] = bind(.bind, paths.needs[index].text(), target);
         count += 1;
     }
-    ws.mounts[count] = bind(.mount, paths.out_text(), "/out");
-    count += 1;
+    if (!spec.root_output) {
+        ws.mounts[count] = bind(.mount, paths.out_text(), "/out");
+        count += 1;
+    }
     assert(count <= mounts_count);
     return count;
 }
@@ -424,7 +487,7 @@ fn keep_last_line(ws: *Workspace, payload: []const u8) void {
 
 // ---- In the store's namespace -------------------------------------------------------------------
 
-const Action = enum { prepare, import, remove, sweep };
+const Action = enum { prepare, import, commit, remove, sweep };
 
 /// What the child gets. It has its own copy of memory, so what it learns comes back through
 /// `report`: a diagnostic on failure, the import's digest and file count on success.
@@ -433,6 +496,8 @@ const Job = struct {
     ws: *Workspace,
     action: Action,
     report: host_mod.Pipe,
+    /// Set by `job_call`: whether the namespace maps only the caller's own id (a commit's owners).
+    squash_owner: bool = true,
 };
 
 /// The import's answer on the pipe: the digest, then the file count, little-endian.
@@ -440,7 +505,7 @@ const answer_bytes = constants.store_digest_bytes + 8;
 
 comptime {
     assert(answer_bytes < constants.diag_carry_bytes_max);
-    assert(@typeInfo(Action).@"enum".field_names.len == 4);
+    assert(@typeInfo(Action).@"enum".field_names.len == 5);
 }
 
 fn in_store(request: *const Request, ws: *Workspace, action: Action, diag: *Diag) Error!void {
@@ -488,7 +553,7 @@ fn in_store(request: *const Request, ws: *Workspace, action: Action, diag: *Diag
 fn take_answer(ws: *Workspace, action: Action, answer: []const u8, diag: *Diag) Error!void {
     assert(diag.code == null);
     assert(answer.len <= constants.diag_carry_bytes_max);
-    if (action != .import) return;
+    if (action != .import and action != .commit) return;
     if (answer.len != answer_bytes) {
         store_diagnose.worker_ended(diag, .{ .step = .{
             .name = "importing the step's output",
@@ -504,8 +569,9 @@ fn take_answer(ws: *Workspace, action: Action, answer: []const u8, diag: *Diag) 
 }
 
 fn job_call(context: *anyopaque, squash_owner: bool) u8 {
-    _ = squash_owner; // The output is imported with owners 0:0 either way.
     const job: *Job = @ptrCast(@alignCast(context));
+    // An import squashes owners to 0:0 either way; a commit keeps the container's ids.
+    job.squash_owner = squash_owner;
     if (job.action != .sweep) assert(job.ws.paths.work.len > 0);
     var diag: Diag = undefined;
     diag.reset();
@@ -515,7 +581,7 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     if (!store.locate(job.request.host)) {
         store_diagnose.no_data_directory(&diag);
     } else if (execute(&store, job, &diag)) {
-        if (job.action == .import) {
+        if (job.action == .import or job.action == .commit) {
             const result = &job.ws.import_result;
             @memcpy(answer[0..constants.store_digest_bytes], &result.digest.bytes);
             const count = answer[constants.store_digest_bytes..][0..8];
@@ -548,6 +614,7 @@ fn execute(store: *Store, job: *Job, diag: *Diag) Error!void {
     switch (job.action) {
         .prepare => try prepare(store, job, diag),
         .import => try import_output(store, job, diag),
+        .commit => try commit_output(store, job, diag),
         .remove => try remove_work(store, job, job.ws.paths.work_text(), diag),
         .sweep => {
             // Under the exclusive lock the parent holds: nothing here may take the lock.
@@ -601,6 +668,20 @@ fn prepare(store: *Store, job: *Job, diag: *Diag) Error!void {
     fs.make_directory(job.ws.paths.out_text(), false) catch |err| {
         return made_nothing(store, diag, err);
     };
+    if (spec.user != null) {
+        // A step that runs as someone else must be able to write its `/out`; the import
+        // squashes the owners and the output's modes are what it makes of them.
+        const open_mode: fs_mod.PathAttributes = .{
+            .mode = 0o777,
+            .uid = 0,
+            .gid = 0,
+            .mtime = 0,
+            .set_owner = false,
+        };
+        fs.set_path_attributes(job.ws.paths.out_text(), open_mode) catch |err| {
+            return made_nothing(store, diag, err);
+        };
+    }
 }
 
 fn made_nothing(store: *const Store, diag: *Diag, err: fs_mod.Error) Error {
@@ -636,6 +717,36 @@ fn import_output(store: *Store, job: *Job, diag: *Diag) Error!void {
     const ws = job.ws;
     const out = ws.paths.out_text();
     import_mod.import(store, &ws.import, out, options, &ws.import_result, diag) catch
+        return error.Failed;
+}
+
+/// A root step's output: its upper layer committed onto the base tree, deletions applied and no
+/// whiteouts kept, owners in the container's ids. The mounts' targets are mount points zbx made,
+/// not changes.
+fn commit_output(store: *Store, job: *Job, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(job.action == .commit);
+    const ws = job.ws;
+    var refusal: Refusal = .{ .step = job.request.spec.name };
+    var label: [output_root_prefix.len + constants.build_step_name_bytes_max]u8 = undefined;
+    const labelled = std.fmt.bufPrint(&label, output_root_prefix ++ "{s}", .{
+        job.request.spec.name,
+    }) catch unreachable; // The buffer holds the prefix and the longest name.
+    var excluded: [constants.mounts_max][]const u8 = undefined;
+    assert(ws.mount_count <= excluded.len);
+    for (ws.mounts[0..ws.mount_count], 0..) |mount, at| excluded[at] = mount.target;
+    const options: import_mod.Options = .{
+        .squash_owner = job.squash_owner,
+        .warn = null,
+        .parent = job.request.spec.base_tree,
+        .exclude = excluded[0..ws.mount_count],
+        .refuse_special = .{ .context = &refusal, .call = Refusal.call },
+        .save_root = true,
+        .keep_existing_root = true,
+        .label = labelled,
+    };
+    const upper = ws.handle.image.upper.text();
+    import_mod.commit(store, &ws.import, upper, options, &ws.import_result, diag) catch
         return error.Failed;
 }
 
@@ -714,7 +825,7 @@ test "a step's environment: the base's, then the file's, then the fixed one, eac
     // Goal: a later layer replaces an earlier key in place, and the fixed variables always win.
     const spec = test_spec();
     var env: [env_count_max]spec_mod.Label = undefined;
-    const count = build_env(&spec, &env);
+    const count = build_env(&spec, "", &env);
     const labels = env[0..count];
     try testing.expectEqualStrings("/root", find_env(labels, "HOME").?);
     try testing.expectEqualStrings("cc", find_env(labels, "CC").?);

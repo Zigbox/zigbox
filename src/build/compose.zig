@@ -383,7 +383,7 @@ pub const Context = struct {
             .network = step.network,
             .name = name,
         };
-        try context.resolve_base(file.text(step.base), &spec);
+        try context.resolve_base(index, &spec);
         spec.input_tree = try context.import_inputs(index);
         ws.step_inputs[index] = spec.input_tree;
         fill_lists(file, step, ws, &spec);
@@ -404,7 +404,11 @@ pub const Context = struct {
             },
             .miss => {},
         }
-        try context.check_base(file.text(step.base), &spec);
+        // A `step:` base is a tree this build made: the gate judged the image the chain
+        // started from when that step ran, and a derived tree has no statement of its own.
+        if (loaded.graph.base_step[index] == null) {
+            try context.check_base(file.text(step.base), &spec);
+        }
         try context.fork_worker(index, &spec);
         return .running;
     }
@@ -564,12 +568,23 @@ pub const Context = struct {
         return .{ .index = slot.index, .ok = true };
     }
 
-    /// The base's image, from the lock: its platform, tree and environment.
-    fn resolve_base(context: *Context, reference: []const u8, spec: *key_mod.Spec) Error!void {
+    /// The base's platform, tree and environment. A locked image gives all three. A `step:` base
+    /// gives the tree (the output of that step, which ran before this one) and takes the
+    /// platform and environment from the image its chain started from: config is inherited
+    /// field by field from there, not from a step's output.
+    fn resolve_base(context: *Context, index: u8, spec: *key_mod.Spec) Error!void {
         const ws = context.ws;
-        const entry = try context.load_base(reference, spec.name);
+        const file = &context.loaded.file;
+        const graph = &context.loaded.graph;
+        var start = index;
+        var hops: u32 = 0;
+        while (graph.base_step[start]) |next| : (hops += 1) {
+            assert(hops < constants.build_steps_max); // The graph is acyclic.
+            start = next;
+        }
+        const entry = try context.load_base(file.text(file.steps[start].base), spec.name);
         spec.platform = entry.platform_text();
-        spec.base_tree = ws.image.tree;
+        spec.base_tree = if (graph.base_step[index]) |target| ws.outputs[target] else ws.image.tree;
         const count = ws.image.settings.count(.env);
         assert(count <= ws.base_env.len);
         for (0..count) |word| ws.base_env[word] = ws.image.settings.word(.env, @intCast(word));
