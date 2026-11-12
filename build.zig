@@ -190,6 +190,14 @@ fn add_release_assets_step(
     run.has_side_effects = true;
     const help = "Write the release tarballs, the SBOM and SHA256SUMS (see docs/releases/packaging.md)";
     b.step("release-assets", help).dependOn(&run.step);
+    const sums_dir = b.option([]const u8, "assets-dir", "Directory of assets for release-sums");
+    const sums_name = b.option([]const u8, "sums-name", "File release-sums writes") orelse "SHA256SUMS";
+    const sums = b.addRunArtifact(tool);
+    sums.setCwd(b.path("."));
+    sums.addArgs(&.{ "sums", "--dir", sums_dir orelse "zig-out/release-assets", "--name", sums_name });
+    sums.has_side_effects = true;
+    const sums_help = "Write SHA256SUMS over a directory of assets again (-Dassets-dir, -Dsums-name)";
+    b.step("release-sums", sums_help).dependOn(&sums.step);
 }
 
 const license_id = "MIT";

@@ -159,12 +159,10 @@ the signed packages. All of it is reproducible (fixed mtime, owner and order; gz
   without them. `-Dsource-date-epoch=N` sets the timestamps.
 - `SHA256SUMS`, in `sha256sum -c` format, over every asset the directory holds.
 
-The Mac zip is built later, in another job. Add it to the directory, then
-`zig build release-assets` is not rerun (it would clear the directory); run the small tool
-`release_assets_main sums --dir DIR` (build it with `zig build -Dtarget=native` and take it from
-the cache, or run `zig run src/release_assets_main.zig -- sums --dir DIR`) to regenerate `SHA256SUMS`
-over the whole directory, or `--name SHA256SUMS.macos` to write a separate file and leave the
-signed one alone.
+The Mac zip is built later, in another job. Put it in the directory and run
+`zig build release-sums -Dassets-dir=DIR` (not `release-assets`, which clears the directory) to
+write `SHA256SUMS` over everything the directory holds again, or add `-Dsums-name=SHA256SUMS.macos`
+to write a separate file and leave the signed one alone. Sign `SHA256SUMS` after this last step.
 
 `SHA256SUMS` is meant to be signed: a detached `SHA256SUMS.asc` by the release subkey, made after
 every asset is in the directory. In `release-sign.sh` that is one line beside the others:
