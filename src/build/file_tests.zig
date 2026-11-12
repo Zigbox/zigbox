@@ -206,7 +206,8 @@ test "the bounds hold at their limit and refuse one past it" {
     // Goal: every count and length bound is exact. Method: steps, a string, needs and the pool,
     // each at its limit and one more.
     _ = try parse_ok(write_steps(constants.build_steps_max));
-    try expect_refused(write_steps(constants.build_steps_max + 1), .list_too_long, constants.build_steps_max + 2, 1);
+    const over = write_steps(constants.build_steps_max + 1);
+    try expect_refused(over, .list_too_long, constants.build_steps_max + 2, 1);
     _ = try parse_ok(write_string(constants.build_string_bytes_max));
     const long = write_string(constants.build_string_bytes_max + 1);
     try refused_at(long, .string_too_long, "\"");
@@ -422,4 +423,62 @@ test "a step name holds at its bound and is refused one past it" {
     const named = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"";
     _ = try parse_ok(named ++ long_name[0..name_max] ++ tail);
     try refused_at(named ++ long_name ++ tail, .bad_step_name, "\"a");
+}
+
+fn kind_of(text: []const u8) ProblemKind {
+    var problem: Problem = undefined;
+    const result = file_mod.parse(text, &test_file, &problem);
+    if (result == .parsed) return .syntax; // Not refused: the callers expect another kind.
+    return problem.kind;
+}
+
+const m9_head = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"x\", ";
+
+test "the M9 fields are read whole and each is kept" {
+    // Goal: every builder addition parses and reads back. Method: one step with all of them,
+    // then one with copy and a step base.
+    const run = try parse_ok(
+        \\.{ .version = 1, .exclude = .{ ".git", "*.log" },
+        \\  .image = .{ .base = "step:b", .config = .{ .user = "app:app" } },
+        \\  .steps = .{
+        \\    .{ .name = "b", .base = "alpine:3.20", .run = .{ "true" }, .output = .root },
+        \\    .{ .name = "a", .base = "step:b", .user = "app", .workdir = "/w",
+        \\       .inputs = .{ "src/**/*.go", "go.mod" }, .exclude = .{ "**/*_test.go" },
+        \\       .caches = .{ .{ .id = "gomod", .path = "/go/pkg", .mode = "0755", .uid = 1000 } },
+        \\       .binds = .{ .{ .from = "step:b", .source = "/usr/bin", .to = "/tools" } },
+        \\       .run = .{ "true" } },
+        \\    .{ .name = "c", .base = "alpine:3.20",
+        \\       .copy = .{ .{ .src = .{ "a*" }, .to = "/d/", .chown = "1:1", .chmod = "644" } } },
+        \\  },
+        \\}
+    );
+    try testing.expectEqual(@as(u32, 3), run.steps_count);
+    try testing.expectEqual(file_mod.Output.root, run.steps[0].output);
+    try testing.expectEqual(@as(u32, 1), run.steps[2].copy.count);
+    try testing.expectEqual(@as(u32, 1), run.steps[1].caches.count);
+    try testing.expectEqual(@as(u32, 1), run.steps[1].binds.count);
+}
+
+fn step_refused(comptime fields: []const u8, kind: ProblemKind) !void {
+    try testing.expectEqual(kind, kind_of(m9_head ++ fields ++ " } } }"));
+}
+
+test "each M9 refusal names its kind" {
+    // Goal: the negative space of the builder additions. Method: one step per refusal.
+    const run = ".run = .{\"x\"}, ";
+    const copy = ".copy = .{ .{ .src = .{\"a\"}, .to = ";
+    try step_refused(run ++ ".output = .both", .bad_output);
+    try step_refused(run ++ copy ++ "\"/\" } }", .run_or_copy);
+    try step_refused(run ++ ".user = \"a b\"", .bad_user);
+    try step_refused(run ++ ".workdir = \"w\"", .bad_path);
+    try step_refused(copy ++ "\"x\" } }", .bad_copy_to);
+    try step_refused(copy ++ "\"/x\", .chmod = \"9\" } }", .bad_mode);
+    try step_refused(run ++ ".exclude = .{ \"[a\" }", .bad_pattern);
+    try step_refused(".copy = .{ .{ .from = \"Bad Ref\", .src = .{\"a\"}, .to = \"/x\" } }",
+        .bad_from);
+    const cache = ".caches = .{ .{ .id = ";
+    try step_refused(run ++ cache ++ "\"a b\", .path = \"/c\" } }", .bad_cache_id);
+    try step_refused(run ++ cache ++ "\"a\", .path = \"/c\" }, .{ .id = \"b\", .path = \"/c\" } }",
+        .mount_twice);
+    try step_refused(run ++ ".binds = .{ .{ .source = \"../a\", .to = \"/b\" } }", .bad_source);
 }

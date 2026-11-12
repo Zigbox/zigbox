@@ -151,6 +151,8 @@ fn graph_text(out: *Out, workspace: *const load_mod.Workspace) Error!void {
         try row.words(file, "inputs ", step.inputs.slice());
         try row.words(file, "needs ", step.needs.slice());
         if (step.network) try row.part("network");
+        if (step.output == .root) try row.part("output root");
+        if (step.copy.count > 0) try row.count_part("copies ", step.copy.count);
         try out.put("\n");
     }
     var row = try Row.start(out, image_name, base_of(file), name_width, base_width);
@@ -193,7 +195,16 @@ const Row = struct {
         try row.out.pad(if (row.parts == 0) row.base_pad else gap);
         try row.out.put(head);
         row.parts += 1;
-        assert(row.parts <= 4);
+        assert(row.parts <= 6);
+    }
+
+    /// A part that is a label and a number.
+    fn count_part(row: *Row, label: []const u8, count: u32) Error!void {
+        assert(count > 0);
+        try row.part(label);
+        var digits: [10]u8 = undefined;
+        const text = std.fmt.bufPrint(&digits, "{d}", .{count}) catch unreachable; // u32 fits.
+        try row.out.put(text);
     }
 
     fn words(
@@ -227,7 +238,10 @@ fn graph_json(out: *Out, workspace: *const load_mod.Workspace) Error!void {
         try out.put_json(file.text(step.base));
         try json_list(out, file, ",\"inputs\":", step.inputs.slice());
         try json_list(out, file, ",\"needs\":", step.needs.slice());
-        try out.put(if (step.network) ",\"network\":true}," else ",\"network\":false},");
+        try out.put(if (step.network) ",\"network\":true" else ",\"network\":false");
+        if (step.output == .root) try out.put(",\"output\":\"root\"");
+        if (step.copy.count > 0) try json_count(out, ",\"copies\":", step.copy.count);
+        try out.put("},");
     }
     try out.put("{\"name\":\"image\",\"kind\":\"image\",\"base\":");
     if (file.image.base) |base| try out.put_json(file.text(base)) else try out.put("null");
@@ -242,6 +256,14 @@ fn graph_json(out: *Out, workspace: *const load_mod.Workspace) Error!void {
     try out.put("]}],\"edges\":[");
     try json_edges(out, workspace);
     try out.put("]}\n");
+}
+
+fn json_count(out: *Out, key: []const u8, count: u32) Error!void {
+    assert(count > 0);
+    try out.put(key);
+    var digits: [10]u8 = undefined;
+    const text = std.fmt.bufPrint(&digits, "{d}", .{count}) catch unreachable; // u32 fits.
+    try out.put(text);
 }
 
 fn json_list(
@@ -268,21 +290,28 @@ fn json_edges(out: *Out, workspace: *const load_mod.Workspace) Error!void {
     var count: u32 = 0;
     for (graph.order_slice()) |index| {
         const step = &file.steps[index];
-        for (step.needs.slice()) |need| {
-            try edge(out, file.text(need), file.text(step.name), count);
+        for (graph.after_slice(index)) |before| {
+            try edge(out, file.text(file.steps[before].name), file.text(step.name), count);
             count += 1;
         }
+    }
+    if (graph.image_base) |before| {
+        try edge(out, file.text(file.steps[before].name), image_name, count);
+        count += 1;
     }
     for (file.adds_slice(), 0..) |*add, index| {
         const earlier = for (file.adds_slice()[0..index]) |*before| {
             if (std.mem.eql(u8, file.text(before.from), file.text(add.from))) break true;
         } else false;
         if (earlier) continue;
+        if (graph.image_base) |base| {
+            if (std.mem.eql(u8, file.text(file.steps[base].name), file.text(add.from))) continue;
+        }
         try edge(out, file.text(add.from), image_name, count);
         count += 1;
     }
-    assert(count <= constants.build_steps_max * constants.build_step_needs_max +
-        constants.build_image_adds_max);
+    assert(count <= constants.build_steps_max * constants.build_step_edges_max +
+        constants.build_image_adds_max + 1);
 }
 
 fn edge(out: *Out, from: []const u8, to: []const u8, count: u32) Error!void {

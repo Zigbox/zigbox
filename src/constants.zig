@@ -947,9 +947,9 @@ pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_
 /// canonical encoding. Its strings come from the build file's pool and the base image's
 /// settings; the rest (the magic, counts, digests, length prefixes) fits in the margin.
 pub const build_result_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max + 16 * 1024;
-/// The bytes of a result's labels (keys and values, together): the pool bound, since they come
-/// from the build file.
-pub const build_result_label_bytes_max: u32 = build_pool_bytes;
+/// The bytes of a result's labels (keys and values, together). A label's length is a `u16` in
+/// the record, so this stays at its M7 value (the pool's then) when the pool grew for M9.
+pub const build_result_label_bytes_max: u32 = 64 * 1024;
 /// The room `zbx inspect` gathers a result's config in: every byte of the settings and labels
 /// escaped to six, and the fixed text around them.
 pub const inspect_output_bytes_max: u32 =

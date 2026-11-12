@@ -444,3 +444,57 @@ test "a graph is refused for a duplicate step, an unknown need or add, a need tw
     try testing.expectEqual(ProblemKind.unknown_add, problem.kind);
     try testing.expectEqualStrings("nope", test_file.text(problem.at));
 }
+
+fn order_text(text: []const u8, problem: *Problem) !Result {
+    var parse_problem: file_mod.Problem = undefined;
+    try testing.expectEqual(
+        file_mod.ParseResult.parsed,
+        file_mod.parse(text, &test_file, &parse_problem),
+    );
+    return order(&test_file, &test_graph, problem);
+}
+
+const step_head = ".{ .version = 1, .image = .{";
+
+test "a step base, a copy and a bind come after the step they name" {
+    // Goal: `step:<name>` is an edge wherever it is written. Method: a chain through a base, a
+    // copy `from` and a bind `from`, written backwards; the image's base is a step too.
+    var problem: Problem = undefined;
+    const text = step_head ++ " .base = \"step:c\" }, .steps = .{\n" ++
+        ".{ .name = \"c\", .base = \"step:b\", .run = .{\"x\"},\n" ++
+        "   .binds = .{ .{ .from = \"step:a\", .source = \"/s\", .to = \"/t\" } } },\n" ++
+        ".{ .name = \"b\", .base = \"x\",\n" ++
+        "   .copy = .{ .{ .from = \"step:a\", .src = .{\"p\"}, .to = \"/q\" } } },\n" ++
+        ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+    const names = [_][]const u8{ "a", "b", "c" };
+    for (names, test_graph.order_slice()) |name, step| {
+        try testing.expectEqualStrings(name, test_file.text(test_file.steps[step].name));
+    }
+    try testing.expectEqual(@as(?u8, 0), test_graph.image_base); // `c` is the first step.
+    const c = test_graph.order_slice()[2];
+    try testing.expectEqual(@as(usize, 2), test_graph.after_slice(c).len); // b, and a once.
+    try testing.expectEqual(@as(usize, 0), test_graph.needs_slice(&test_file, c).len); // Mount needs only.
+}
+
+test "a cycle through a base is refused, and an unknown step in a base, from or image is" {
+    // Goal: the negative space of the `step:` edges. Method: one file per refusal.
+    var problem: Problem = undefined;
+    var text: []const u8 = step_head ++ "}, .steps = .{\n" ++
+        ".{ .name = \"a\", .base = \"step:b\", .run = .{\"x\"} },\n" ++
+        ".{ .name = \"b\", .base = \"x\", .run = .{\"x\"}, .needs = .{\"a\"} } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.cycle, problem.kind);
+    try testing.expectEqual(@as(u32, 2), problem.cycle_len);
+    text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"step:nope\"," ++
+        " .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_base, problem.kind);
+    text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .copy = .{ .{" ++
+        " .from = \"step:nope\", .src = .{\"p\"}, .to = \"/q\" } } } } }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_from, problem.kind);
+    text = step_head ++ " .base = \"step:nope\" }, .steps = .{} }";
+    try testing.expectEqual(Result.refused, try order_text(text, &problem));
+    try testing.expectEqual(ProblemKind.unknown_image_base, problem.kind);
+}
