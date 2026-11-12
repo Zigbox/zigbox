@@ -383,6 +383,9 @@ pub const Context = struct {
             .network = step.network,
             .name = name,
         };
+        spec.root_output = step.output == .root;
+        if (step.user) |user| spec.user = file.text(user);
+        if (step.workdir) |workdir| spec.workdir = file.text(workdir);
         try context.resolve_base(index, &spec);
         spec.input_tree = try context.import_inputs(index);
         ws.step_inputs[index] = spec.input_tree;

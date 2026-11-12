@@ -147,14 +147,10 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     }
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
-        if (step.output == .root) return .{ .step = at, .field = ".output = .root" };
-        if (step.user != null) return .{ .step = at, .field = ".user" };
-        if (step.workdir != null) return .{ .step = at, .field = ".workdir" };
         if (step.copy.given) return .{ .step = at, .field = ".copy" };
         if (step.caches.given) return .{ .step = at, .field = ".caches" };
         if (step.binds.given) return .{ .step = at, .field = ".binds" };
         if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
-        if (graph.base_step[index] != null) return .{ .step = at, .field = ".base = \"step:\"" };
         for (step.inputs.slice()) |input| {
             if (glob_mod.is_glob(file.text(input))) {
                 return .{ .step = at, .field = "an input glob" };
@@ -562,8 +558,7 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
     const fields = [_][]const u8{
-        ".output = .root",         ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
-        ".inputs = .{ \"*.go\" }", ".caches = .{}",   ".binds = .{}",
+        ".exclude = .{}", ".inputs = .{ \"*.go\" }", ".caches = .{}", ".binds = .{}",
     };
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
@@ -576,5 +571,5 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         ".run = .{\"x\"} }, " ++
         ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(base, &problem));
-    try testing.expectEqual(@as(?u8, 1), unrunnable(&test_file, &test_graph).?.step);
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
 }
