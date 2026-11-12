@@ -290,6 +290,7 @@ test {
     _ = @import("build/file_tests.zig");
     _ = @import("build/render.zig");
     _ = @import("build/graph.zig");
+    _ = @import("build/glob.zig");
     _ = @import("build/inputs.zig");
     _ = @import("build/key.zig");
     _ = @import("build/cache.zig");
