@@ -8,11 +8,19 @@
 //!   - `dsse.Work` (873,894 bytes, `@sizeOf(dsse.Work)`), reused between calls; the 6 MiB
 //!     `record.Work` is not needed, it belongs to reading a record from the store;
 //!   - a `signature_record.Record` (2,800,336 bytes:
-//!     `limits.signature_record_bytes_max` and two counters) holding the lines,
-//!     filled with `Record.add` from envelopes the caller read;
+//!     `limits.signature_record_bytes_max` and two counters) holding the lines. Never put it, or
+//!     a `dsse.Work`, on the stack: allocate it. Fill it in this order only: `Record.clear()`
+//!     once (a fresh record's counters are garbage), then `dsse.parse(work, line)` on each
+//!     envelope, then `Record.add(line)` for the ones it accepted. `add` checks its input with
+//!     `assert`s (not empty, at most `limits.envelope_bytes_max`, no newline), not errors; `parse`
+//!     refuses all three, so a line `parse` accepted is safe to add. Only `error.Full` (more than
+//!     `limits.signatures_per_tree_max` lines) is a returned error;
 //!   - a `policy.Policy`, filled by `policy.parse`; a `verdict.Report`.
 //! Envelopes are parsed with `dsse.parse` and statements with `statement.parse`. Keys are in
-//! `key` (public-key text, key ids). Not exported: `record.zig` (reads a record file through the
+//! `key` (public-key text, key ids). The supported entry points are `verdict.judge`,
+//! `verdict.provenance_met`, `policy.parse`, `dsse.parse/verify/sign/render`,
+//! `statement.parse/render`, the `key` functions and `Record.clear/add/has/line`; every other
+//! public name in these files is internal and may change. Not exported: `record.zig` (reads a record file through the
 //! store's layout), `provenance.zig`, the key store and every command.
 
 pub const policy = @import("trust/policy.zig");
@@ -31,5 +39,7 @@ pub const limits = struct {
     pub const signatures_per_tree_max = constants.signatures_per_tree_max;
     pub const signature_record_bytes_max = constants.signature_record_bytes_max;
     pub const statement_bytes_max = constants.statement_bytes_max;
+    pub const policy_bytes_max = constants.policy_bytes_max;
+    pub const key_file_bytes_max = constants.key_file_bytes_max;
     pub const policy_keys_max = constants.policy_keys_max;
 };

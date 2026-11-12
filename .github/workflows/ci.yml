@@ -85,6 +85,9 @@ jobs:
       # is 2 MiB or larger.
       - name: Release builds and size check
         run: zig build release
+      # The pure trust surface Zigcube links must compile for wasm32-freestanding.
+      - name: Trust surface for wasm32-freestanding
+        run: zig build trust-wasm
 
   tidy:
     name: tidy

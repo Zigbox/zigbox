@@ -261,12 +261,11 @@ test "the module's surface for a second product's diagnostics" {
     try std.testing.expect(explain.render_entry(entry, &out).len > 0);
 }
 
-test "the pure trust surface imports nothing that touches the host or the store" {
+test "the pure trust surface imports only std and its own pure files" {
     // Goal: `trust` stays callable from `wasm32-freestanding` (`zig build trust-wasm`). Method:
-    // the compile check cannot see an import of a host file that nothing calls, so read each
-    // exported file's imports and refuse the host, the store's files and the files that use them.
-    // The forbidden list is the whole of what the files may not name; `constants.zig` and the
-    // lexer are pure.
+    // the compile check cannot see an import of a host file that nothing calls, so read every
+    // import of each exported file and allow only `std`, `constants.zig`, the lexer and the
+    // exported trust files. A new import fails here by name until someone lists it on purpose.
     const sources = [_][]const u8{
         @embedFile("trust/policy.zig"),
         @embedFile("trust/verdict.zig"),
@@ -278,19 +277,27 @@ test "the pure trust surface imports nothing that touches the host or the store"
         @embedFile("build/lexer.zig"),
         @embedFile("trust_export.zig"),
     };
-    const forbidden = [_][]const u8{
-        "host.zig\")",    "host_real.zig", "store/", "provenance.zig", "trust/record.zig",
-        "\"record.zig\"", "diag/",
+    const allowed = [_][]const u8{
+        "std",                "constants.zig",              "../constants.zig",
+        "../build/lexer.zig", "policy.zig",                 "verdict.zig",
+        "dsse.zig",           "statement.zig",              "key.zig",
+        "json.zig",           "signature_record.zig",       "trust/policy.zig",
+        "trust/verdict.zig",  "trust/dsse.zig",             "trust/statement.zig",
+        "trust/key.zig",      "trust/signature_record.zig",
     };
     for (sources) |source| {
-        for (forbidden) |name| {
-            var lines = std.mem.splitScalar(u8, source, '\n');
-            while (lines.next()) |line| {
-                const is_import = std.mem.indexOf(u8, line, "@import(") != null;
-                const is_comment = std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "//");
-                if (is_import and !is_comment) {
-                    try std.testing.expect(std.mem.indexOf(u8, line, name) == null);
-                }
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "//")) continue;
+            const open = "@import(\"";
+            var rest = line;
+            while (std.mem.indexOf(u8, rest, open)) |at| {
+                rest = rest[at + open.len ..];
+                const end = std.mem.indexOfScalar(u8, rest, '"').?;
+                var found = false;
+                for (allowed) |name| found = found or std.mem.eql(u8, rest[0..end], name);
+                if (!found) std.debug.print("trust imports {s}\n", .{rest[0..end]});
+                try std.testing.expect(found);
             }
         }
     }

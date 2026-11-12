@@ -52,8 +52,9 @@ pub const Record = struct {
         return false;
     }
 
-    /// Appends `envelope` as a line unless it is there already. The caller made the envelope
-    /// itself, so it is well formed; this only enforces the bounds.
+    /// Appends `envelope` as a line unless it is there already. The envelope is well formed (the
+    /// caller made it, or `dsse.parse` accepted it, which also bounds it and refuses a newline);
+    /// the bounds are `assert`s here, so an unchecked outside line traps. `record` was `clear`ed.
     pub fn add(record: *Record, envelope: []const u8) AddError!Added {
         assert(envelope.len > 0);
         assert(envelope.len <= constants.envelope_bytes_max);
