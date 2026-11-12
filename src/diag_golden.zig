@@ -242,7 +242,9 @@ var golden_handle_storage: ?*run.Handle = null;
 /// close to the 2 GiB link bound.
 fn golden_get() *run.Handle {
     if (golden_handle_storage == null) {
-        golden_handle_storage = std.heap.page_allocator.create(run.Handle) catch @panic("out of memory");
+        golden_handle_storage = std.heap.page_allocator.create(run.Handle) catch {
+            @panic("out of memory");
+        };
     }
     return golden_handle_storage.?;
 }

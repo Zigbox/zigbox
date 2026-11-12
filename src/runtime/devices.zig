@@ -47,7 +47,8 @@ pub const Problem = enum {
                 "that is not printable ASCII",
             .dot_dot => "the path has a '..' part",
             .reserved => "every container has that one already",
-            .bad_name => "it is neither a path below /dev nor a CDI name like vendor.com/class=name",
+            .bad_name => "it is neither a path below /dev nor a CDI name like " ++
+                "vendor.com/class=name",
         };
     }
 };
@@ -120,7 +121,7 @@ pub const ListProblem = union(enum) {
 
 /// Whether a device is a host path (`/dev/...`), as against a CDI name (`vendor/class=name`).
 pub fn is_path(asked: []const u8) bool {
-    assert(asked.len <= constants.cdi_name_bytes_max or asked.len > 0);
+    assert(asked.len <= constants.arg_bytes_max);
     return std.mem.startsWith(u8, asked, "/dev/");
 }
 

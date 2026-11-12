@@ -36,8 +36,8 @@ test "a CDI name is kept in the record, and ps shows it as asked, without a node
     defer testing.allocator.destroy(sim);
     setup(sim);
     const run = [_][:0]const u8{
-        "zbx", "run", "--rootfs", sim_run.rootfs_path, "--name", "c-1",
-        "--device", "vendor.example/gpu=0", "--", "/bin/sh",
+        "zbx",      "run",                  "--rootfs", sim_run.rootfs_path, "--name", "c-1",
+        "--device", "vendor.example/gpu=0", "--",       "/bin/sh",
     };
     const code = sim_run.run_cli(sim, &run);
     if (code != 0) std.debug.print("{s}\n", .{sim.stderr()});

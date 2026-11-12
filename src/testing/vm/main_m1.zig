@@ -345,10 +345,12 @@ fn extra_devices(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
 /// M10 slice 2: a fake vendor spec in /etc/cdi names a node and a variable; `--device
 /// vendor.example/gpu=0` brings both into the run, and a name the spec lacks is E0230.
 fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
-    try out.print("\ndemo-m1: EXTRA: --device vendor.example/gpu=0, from a spec in /etc/cdi\n", .{});
+    try out.print("\ndemo-m1: EXTRA: --device vendor.example/gpu=0, from /etc/cdi\n", .{});
     const spec = "{\"cdiVersion\":\"0.6.0\",\"kind\":\"vendor.example/gpu\",\"devices\":[" ++
-        "{\"name\":\"0\",\"containerEdits\":{\"deviceNodes\":[{\"path\":\"/dev/zbx-render\"}]}}]," ++
-        "\"containerEdits\":{\"env\":[\"FAKE=all\"],\"hooks\":[{\"hookName\":\"createContainer\"," ++
+        "{\"name\":\"0\",\"containerEdits\":{\"deviceNodes\":" ++
+        "[{\"path\":\"/dev/zbx-render\"}]}}]," ++
+        "\"containerEdits\":{\"env\":[\"FAKE=all\"]," ++
+        "\"hooks\":[{\"hookName\":\"createContainer\"," ++
         "\"path\":\"/usr/bin/nvidia-cdi-hook\",\"args\":[\"nvidia-cdi-hook\",\"update-ldcache\"," ++
         "\"--folder\",\"/usr/lib\"]}]}}";
     const setup = "groupadd -f render && usermod -aG render demo && " ++

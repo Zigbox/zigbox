@@ -35,7 +35,8 @@ pub fn index_of(report: u16) u32 {
 /// Runs `action`, and when it fails notes which item it was for.
 fn fail_at(host: Host, err: Error, index: usize, override: *u16) Error {
     const errno = host.last_errno();
-    override.* = errno_with_index(if (errno != 0 and errno < 256) errno else constants.errno_io, index);
+    const code = if (errno != 0 and errno < 256) errno else constants.errno_io;
+    override.* = errno_with_index(code, index);
     return err;
 }
 

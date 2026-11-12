@@ -255,7 +255,11 @@ test "exec into a container with devices keeps the user's groups, and without de
         try run_lib.start(sim.interface(), &spec, .{}, handle, &diag);
         handle.session.release_output();
         try testing.expectEqual(@as(u32, 0), sim.world.setgroups_calls);
-        const exec_spec: exec.Spec = .{ .name = "web", .command = &.{"/bin/sh"}, .user = "1000:1000" };
+        const exec_spec: exec.Spec = .{
+            .name = "web",
+            .command = &.{"/bin/sh"},
+            .user = "1000:1000",
+        };
         try exec.start(sim.interface(), &exec_spec, .{}, exec_handle, &diag);
         const command = sim.world.find_process(exec_handle.pid.?).?;
         try testing.expectEqual(@as(?[2]u32, .{ 1000, 1000 }), command.user_set);

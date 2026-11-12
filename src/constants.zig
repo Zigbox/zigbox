@@ -1206,7 +1206,8 @@ comptime {
     assert(path_bytes_max > 0);
     assert(path_bytes_max < std.math.maxInt(u16));
     assert(file_bytes_max > 0);
-    assert(cdi_spec_bytes_max < file_bytes_max); // The reader takes one byte more, to see "too big".
+    // The reader takes one byte more than the bound, to see "too big".
+    assert(cdi_spec_bytes_max < file_bytes_max);
     assert(file_bytes_max <= std.math.maxInt(u32) / 2); // Offsets and lengths fit in u32.
     assert(read_calls_max > file_bytes_max);
     assert(write_calls_max > output_bytes_max);

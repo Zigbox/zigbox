@@ -351,6 +351,8 @@ pub fn inspect(handle: *const Handle) Status {
 /// Everything a run's handle holds before the first check: what the caller gave, and the state
 /// of a run that has not begun.
 fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
+    assert(container.devices.len <= constants.run_devices_max);
+    assert(handle.cdi == null);
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
@@ -501,6 +503,8 @@ fn resolve_cdi(
     storage: *cdi_mod.Resolved,
     diag: *Diag,
 ) bool {
+    assert(container.devices.len <= constants.run_devices_max);
+    assert(diag.code == null);
     var asked: [constants.run_devices_max][]const u8 = undefined;
     var count: usize = 0;
     for (container.devices) |device| {
@@ -594,6 +598,8 @@ fn host_resolv_conf(
 
 /// What the diagnostics say about this run.
 fn run_info(handle: *const Handle) diagnose.RunInfo {
+    assert(handle.name_len > 0);
+    assert(handle.name_len <= constants.container_name_bytes_max);
     return .{
         .name = handle.name_slice(),
         .rootfs = handle.rootfs_slice(),

@@ -41,7 +41,10 @@ pub fn spec_unusable(diag: *Diag, found: *const cdi.FileProblem) void {
 /// ZBX-E0226 for what a spec names and the host lacks: the thing, and the spec's device.
 pub fn host_lacks(diag: *Diag, problem: cdi.Problem, what: []const u8, device: []const u8) void {
     assert(diag.code == null);
-    assert(problem == .stale or problem == .node);
+    assert(switch (problem) {
+        .stale, .node => true,
+        else => false,
+    });
     var what_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     var device_storage: [constants.arg_echo_bytes_max]u8 = undefined;
     const echo = echo_of(&what_storage, what);

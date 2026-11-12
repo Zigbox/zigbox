@@ -105,7 +105,8 @@ test "parse: unsupported edits are kept, not refused" {
     try testing.expectEqual(@as(?cdi.Problem, null), cdi.parse(parsed, spec));
     const want = [_]cdi.Unsupported{ .hook, .intel_rdt, .additional_gids, .other, .none };
     for (want, 0..) |edit, at| try testing.expectEqual(edit, parsed.devices[at].edits.unsupported);
-    try testing.expectEqualStrings("cgroupsPath", parsed.slice(parsed.devices[3].edits.unsupported_name));
+    const unsupported_name = parsed.devices[3].edits.unsupported_name;
+    try testing.expectEqualStrings("cgroupsPath", parsed.slice(unsupported_name));
 }
 
 test "names: kinds, device names, paths and variables" {
@@ -189,7 +190,8 @@ test "resolve: a YAML file is a problem, not a refusal, when another file has th
     defer testing.allocator.destroy(out);
     var resolver: cdi.Resolver = undefined;
     resolver.init(&.{"vendor.example/gpu=0"}, parsed, out);
-    try testing.expectEqual(@as(?cdi.Refusal, null), resolver.add_file("a.yaml", "cdiVersion: 0.5"));
+    const yaml = resolver.add_file("a.yaml", "cdiVersion: 0.5");
+    try testing.expectEqual(@as(?cdi.Refusal, null), yaml);
     try testing.expectEqual(@as(u32, 1), resolver.problems_count);
     try testing.expectEqual(cdi.Problem.yaml, resolver.problem_slice()[0].problem);
     try testing.expectEqual(@as(?cdi.Refusal, null), resolver.add_file("b.json", fake_spec));

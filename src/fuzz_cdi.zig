@@ -212,10 +212,13 @@ fn check_valid(random: std.Random) []const u8 {
     if (outcome.refusal) |refusal| {
         switch (refusal) {
             .unknown => |index| assert(!made.finds(picks[index])),
-            .unsupported => |found| assert(made.refused_edit and found.edit != .none),
+            .unsupported => |found| {
+                assert(made.refused_edit);
+                assert(found.edit != .none);
+            },
             .too_big => assert(false), // The generator makes far less than the bounds.
         }
-        assert(!all_there or made.refused_edit);
+        if (all_there) assert(made.refused_edit);
     } else {
         assert(all_there);
     }
@@ -237,7 +240,8 @@ fn damage(random: std.Random, text: []const u8) []const u8 {
             1 => length = at, // A truncated file.
             else => {
                 if (length == damaged_buffer.len) continue;
-                std.mem.copyBackwards(u8, damaged_buffer[at + 1 .. length + 1], damaged_buffer[at..length]);
+                const tail = damaged_buffer[at..length];
+                std.mem.copyBackwards(u8, damaged_buffer[at + 1 .. length + 1], tail);
                 damaged_buffer[at] = "{}[]\",:\\/".*[random.uintLessThan(usize, 9)];
                 length += 1;
             },

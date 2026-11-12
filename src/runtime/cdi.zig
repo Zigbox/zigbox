@@ -40,7 +40,7 @@ pub const Unsupported = enum {
     mount_conflict,
 
     pub fn sentence(edit: Unsupported) []const u8 {
-        assert(@intFromEnum(edit) <= @intFromEnum(Unsupported.mount_conflict));
+        assert(@backingInt(edit) <= @backingInt(Unsupported.mount_conflict));
         return switch (edit) {
             .none => "none",
             .hook => "a hook other than nvidia-cdi-hook update-ldcache",
@@ -77,7 +77,7 @@ pub const Problem = enum {
     node,
 
     pub fn sentence(problem: Problem) []const u8 {
-        assert(@intFromEnum(problem) <= @intFromEnum(Problem.node));
+        assert(@backingInt(problem) <= @backingInt(Problem.node));
         return switch (problem) {
             .yaml => "YAML specs are not read",
             .too_big => "the file is over 256 KiB",
@@ -114,7 +114,7 @@ pub const Field = enum {
     hooks,
 
     pub fn text(field: Field) []const u8 {
-        assert(@intFromEnum(field) <= @intFromEnum(Field.hooks));
+        assert(@backingInt(field) <= @backingInt(Field.hooks));
         return switch (field) {
             .document => "the document",
             .cdi_version => "cdiVersion",
@@ -383,6 +383,7 @@ pub fn parse(parsed: *Parsed, input: []const u8) ?Problem {
 }
 
 fn parse_document(reader: *Reader) Refused!void {
+    assert(reader.parsed.devices_count <= constants.cdi_devices_max);
     const parsed = reader.parsed;
     var seen_version = false;
     try expect(reader, .object_begin, .document);
@@ -428,6 +429,7 @@ fn object_key(reader: *Reader, field: Field) Refused!?[]const u8 {
 }
 
 fn parse_devices(reader: *Reader) Refused!void {
+    assert(reader.parsed.devices_count <= constants.cdi_devices_max);
     const parsed = reader.parsed;
     try expect(reader, .array_begin, .devices);
     while (true) {
@@ -443,7 +445,8 @@ fn parse_devices(reader: *Reader) Refused!void {
         try parse_device(reader, &parsed.devices[at]);
         if (parsed.devices[at].name.len == 0) return reader.refuse(.missing, .device_name);
         for (parsed.devices[0..at]) |before| {
-            const same = std.mem.eql(u8, parsed.slice(before.name), parsed.slice(parsed.devices[at].name));
+            const named = parsed.slice(parsed.devices[at].name);
+            const same = std.mem.eql(u8, parsed.slice(before.name), named);
             if (same) return reader.refuse(.device_repeated, .device_name);
         }
         parsed.devices_count += 1;
@@ -521,6 +524,7 @@ fn note_unsupported(
 }
 
 fn parse_env(reader: *Reader) Refused!void {
+    assert(reader.parsed.strings_len <= constants.cdi_spec_bytes_max);
     const parsed = reader.parsed;
     try expect(reader, .array_begin, .env);
     while (true) {
@@ -539,6 +543,7 @@ fn parse_env(reader: *Reader) Refused!void {
 }
 
 fn parse_nodes(reader: *Reader, edits: *Edits) Refused!void {
+    assert(reader.parsed.strings_len <= constants.cdi_spec_bytes_max);
     const parsed = reader.parsed;
     try expect(reader, .array_begin, .device_nodes);
     while (true) {
@@ -573,6 +578,7 @@ fn parse_nodes(reader: *Reader, edits: *Edits) Refused!void {
 }
 
 fn parse_mounts(reader: *Reader, edits: *Edits) Refused!void {
+    assert(reader.parsed.strings_len <= constants.cdi_spec_bytes_max);
     const parsed = reader.parsed;
     try expect(reader, .array_begin, .mounts);
     while (true) {
@@ -833,8 +839,11 @@ pub const Resolver = struct {
     /// Reads one spec file. A file that cannot be used is noted (`problem_slice`) and skipped; a
     /// refusal comes only from a device the run asked for.
     pub fn add_file(resolver: *Resolver, name: []const u8, content: []const u8) ?Refusal {
+        assert(content.len <= constants.cdi_spec_bytes_max);
+        assert(name.len > 0);
         const parsed = resolver.parsed;
-        const lower_yaml = std.mem.endsWith(u8, name, ".yaml") or std.mem.endsWith(u8, name, ".yml");
+        const yaml = std.mem.endsWith(u8, name, ".yaml");
+        const lower_yaml = yaml or std.mem.endsWith(u8, name, ".yml");
         if (lower_yaml) {
             resolver.note_problem(name, .yaml, .document, 0);
             return null;
@@ -857,6 +866,8 @@ pub const Resolver = struct {
 
     /// After every file: the first asked device that no spec has.
     pub fn finish(resolver: *const Resolver) ?Refusal {
+        assert(resolver.asked.len <= constants.run_devices_max);
+        assert(resolver.problems_count <= constants.cdi_spec_files_max);
         for (resolver.asked, 0..) |_, index| {
             if (!resolver.found[index]) return .{ .unknown = @intCast(index) };
         }
@@ -879,6 +890,7 @@ pub const Resolver = struct {
     /// Takes the device `name` of the current spec for the asked device `index`: the device, or
     /// for `all` without a device of that name, every device of the spec.
     fn take(resolver: *Resolver, index: u32, name: []const u8, common_taken: *bool) ?Refusal {
+        assert(index < resolver.asked.len);
         const parsed = resolver.parsed;
         var matched: u32 = 0;
         for (parsed.devices[0..parsed.devices_count]) |*device| {
@@ -913,6 +925,7 @@ pub const Resolver = struct {
     /// Adds one block of edits to the run's, once each by node path and container path; the
     /// later value of a variable replaces the earlier.
     fn merge(resolver: *Resolver, index: u32, edits: *const Edits) ?Refusal {
+        assert(index < resolver.asked.len);
         const parsed = resolver.parsed;
         if (edits.unsupported != .none) return refusal_of(parsed, index, edits);
         for (parsed.nodes[edits.nodes_at..][0..edits.nodes_count]) |node| {
@@ -938,6 +951,8 @@ pub const Resolver = struct {
     }
 
     fn add_node(resolver: *Resolver, path: []const u8) bool {
+        assert(path_valid(path));
+        assert(resolver.out.nodes_count <= constants.cdi_run_nodes_max);
         const out = resolver.out;
         for (out.nodes[0..out.nodes_count]) |node| {
             if (std.mem.eql(u8, out.text(node), path)) return true;
@@ -951,6 +966,8 @@ pub const Resolver = struct {
     const Added = enum { added, same, conflict, full };
 
     fn add_mount(resolver: *Resolver, host: []const u8, container: []const u8) Added {
+        assert(path_valid(container));
+        assert(resolver.out.mounts_count <= constants.cdi_run_mounts_max);
         const out = resolver.out;
         for (out.mounts[0..out.mounts_count]) |mount| {
             if (!std.mem.eql(u8, out.text(mount.container), container)) continue;
@@ -966,6 +983,8 @@ pub const Resolver = struct {
     }
 
     fn add_env(resolver: *Resolver, entry: []const u8) bool {
+        assert(env_valid(entry));
+        assert(resolver.out.env_count <= constants.cdi_run_env_max);
         const out = resolver.out;
         const name = entry[0 .. std.mem.indexOfScalar(u8, entry, '=').? + 1];
         const kept = out.keep(entry) orelse return false;
@@ -981,6 +1000,8 @@ pub const Resolver = struct {
     }
 
     fn add_dir(resolver: *Resolver, path: []const u8) bool {
+        assert(path_valid(path));
+        assert(resolver.out.dirs_count <= constants.cdi_run_dirs_max);
         const out = resolver.out;
         for (out.dirs[0..out.dirs_count]) |dir| {
             if (std.mem.eql(u8, out.text(dir), path)) return true;

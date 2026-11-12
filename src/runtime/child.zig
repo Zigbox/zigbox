@@ -65,7 +65,12 @@ pub fn entry(context: *anyopaque) u8 {
     host.close(child.ready.write);
     host.close(child.report.read);
     if (child.plan.has_listener) host.close(child.channel.read);
-    var state: State = .{ .errno_override = 0, .failed_etc = 0, .listener = null, .ld_failed = false };
+    var state: State = .{
+        .errno_override = 0,
+        .failed_etc = 0,
+        .listener = null,
+        .ld_failed = false,
+    };
     for (child.plan.steps[0..child.plan.count], 0..) |*step, index| {
         if (plan_mod.side_of(step.kind) != .child) continue;
         if (skipped(step, &state)) continue;
@@ -139,9 +144,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .mount_shm => try mount(host, .shm_tmpfs, target, null),
         .mount_pts => try mount(host, .devpts, target, null),
         .bind_device => try mount(host, .bind_file, target, plan.text(step.source)),
-        .make_proc_dir, .make_dev_dir => try host.make_directory(target, true),
-        // The rootfs may already have them (Alpine has both): only a missing one is made.
-        .make_tmp_dir, .make_run_dir => try host.make_directory(target, true),
+        .make_proc_dir, .make_dev_dir, .make_tmp_dir => try make_dir(host, target),
+        .make_run_dir, .make_sys_dir, .make_etc_dir => try make_dir(host, target),
         .mount_tmp => try mount(host, .tmp_tmpfs, target, null),
         .mount_run => try mount(host, .run_tmpfs, target, null),
         .remount_readonly => try mount(host, .remount_readonly, target, null),
@@ -150,13 +154,11 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .set_no_new_privs => try host.no_new_privs(),
         .install_seccomp => try host.install_seccomp(&seccomp.program),
         .make_shm_dir, .make_pts_dir => try host.make_directory(target, false),
-        .make_sys_dir => try host.make_directory(target, true),
         .bind_sys => try mount(host, .bind_tree, target, plan.text(step.source)),
         .bring_up_loopback => try host.bring_up_loopback(),
         .make_listener => state.listener = try host.listen_loopback(plan.listen_port),
         .send_listener => try send_listener(child, state),
         .mount_sysfs => try mount(host, .sysfs, target, null),
-        .make_etc_dir => try host.make_directory(target, true),
         .create_etc_file => try host.create_file(target, true),
         .stage_etc_file => try host.write_file_mode(target, plan.text(step.source), 0o644),
         .bind_etc_file => try mount(host, .bind_file, target, plan.text(step.source)),
@@ -169,10 +171,8 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .create_device_file => try host.create_file(target, false),
         .create_user_device => try make_file_target(host, target),
         .bind_user_device => try mount(host, .bind_file, target, plan.text(step.source)),
-        .bind_cdi_nodes => try cdi_steps.bind_nodes(host, plan, &state.errno_override),
-        .stage_cdi_mounts => try cdi_steps.stage_mounts(host, plan, &state.errno_override),
-        .move_cdi_mounts => try cdi_steps.move_mounts(host, plan, &state.errno_override),
-        .run_ldconfig => try cdi_steps.run_ldconfig(host, plan, &state.errno_override),
+        .bind_cdi_nodes, .stage_cdi_mounts => try run_cdi_step(host, plan, step.kind, state),
+        .move_cdi_mounts, .run_ldconfig => try run_cdi_step(host, plan, step.kind, state),
         .link_dev => try host.symlink(plan.text(step.source), target),
         .enter_rootfs, .enter_new_root => try host.change_directory(target),
         .pivot_root => try host.pivot_root(target, plan.text(step.source)),
@@ -191,6 +191,26 @@ fn run_step(child: *const Context, step: *const Step, state: *State) Error!void 
         .start_pasta, .await_pasta => unreachable, // The parent's steps.
         .release_child, .await_report, .reap => unreachable, // The parent's steps.
         .receive_listener => unreachable, // The parent's step.
+    }
+}
+
+/// A directory the rootfs may already have (Alpine has /tmp and /run): only a missing one is made.
+fn make_dir(host: Host, target: [:0]const u8) Error!void {
+    assert(target.len > 0);
+    assert(target[0] == '/');
+    try host.make_directory(target, true);
+}
+
+/// One of a CDI device's steps; a failure inside a loop leaves its index in `errno_override`.
+fn run_cdi_step(host: Host, plan: *const Plan, kind: plan_mod.Kind, state: *State) Error!void {
+    assert(plan.cdi != null);
+    const override = &state.errno_override;
+    switch (kind) {
+        .bind_cdi_nodes => try cdi_steps.bind_nodes(host, plan, override),
+        .stage_cdi_mounts => try cdi_steps.stage_mounts(host, plan, override),
+        .move_cdi_mounts => try cdi_steps.move_mounts(host, plan, override),
+        .run_ldconfig => try cdi_steps.run_ldconfig(host, plan, override),
+        else => unreachable,
     }
 }
 
@@ -281,6 +301,8 @@ fn make_file_target(host: Host, target: [:0]const u8) host_mod.Error!void {
 
 /// Makes the directory and the ones above it that are missing, then goes there.
 fn enter_workdir(host: Host, path: [:0]const u8) host_mod.Error!void {
+    assert(path.len > 0);
+    assert(path[0] == '/');
     try make_parents(host, path);
     try host.change_directory(path);
 }

@@ -253,7 +253,8 @@ pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
 pub fn check_cdi_unknown(streams: Streams, status: u8) Error!void {
     const header = "error[ZBX-E0230]: ";
     if (!std.mem.startsWith(u8, streams.stderr, header)) return error.NoteMissing;
-    if (std.mem.indexOf(u8, streams.stderr, "vendor.example/gpu=0") == null) return error.NoteMissing;
+    const known = "vendor.example/gpu=0";
+    if (std.mem.indexOf(u8, streams.stderr, known) == null) return error.NoteMissing;
     if (std.mem.indexOf(u8, streams.stderr, "errno") != null) return error.NoteMissing;
     if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
     if (status != 125) return error.ExitCodeWrong;
@@ -481,6 +482,8 @@ test "cdi: a device applies its edits, and an unknown name is E0230 listing the 
     try testing.expectError(error.NoteMissing, check_cdi_applied(silent, 0));
     const unknown = "error[ZBX-E0230]: no such device\n  known  vendor.example/gpu=0\n";
     try check_cdi_unknown(.{ .stdout = "", .stderr = unknown }, 125);
-    try testing.expectError(error.ExitCodeWrong, check_cdi_unknown(.{ .stdout = "", .stderr = unknown }, 1));
-    try testing.expectError(error.NoteMissing, check_cdi_unknown(.{ .stdout = "", .stderr = "x" }, 125));
+    const quiet = Streams{ .stdout = "", .stderr = unknown };
+    try testing.expectError(error.ExitCodeWrong, check_cdi_unknown(quiet, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_cdi_unknown(bare, 125));
 }
