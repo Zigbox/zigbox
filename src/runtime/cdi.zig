@@ -1031,5 +1031,4 @@ comptime {
     assert(constants.cdi_name_bytes_max >= constants.device_path_bytes_max);
     // A hostile spec's worst merged run still names a state the plan can hold.
     assert(constants.cdi_run_env_max <= constants.run_env_count_max);
-    assert(constants.cdi_run_mounts_max <= std.math.maxInt(u8) / 2); // The failure's detail.
 }

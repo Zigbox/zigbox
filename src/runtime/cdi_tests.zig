@@ -71,8 +71,8 @@ test "parse: refusals are named" {
 }
 
 test "parse: depth and trailing text are refused" {
-    const open = "[" ** 40;
-    const close = "]" ** 40;
+    const open: [40]u8 = @splat('[');
+    const close: [40]u8 = @splat(']');
     const parsed = try make();
     defer testing.allocator.destroy(parsed);
     const nested = "{\"cdiVersion\":\"0.5.0\",\"x\":" ++ open ++ close ++ "}";
@@ -116,9 +116,9 @@ test "names: kinds, device names, paths and variables" {
     try testing.expect(cdi.device_name_valid("GPU-0a1b:2"));
     try testing.expect(!cdi.device_name_valid(""));
     try testing.expect(!cdi.device_name_valid("-x"));
-    const long = "x" ** (constants.cdi_device_name_bytes_max + 1);
+    const long: [constants.cdi_device_name_bytes_max + 1]u8 = @splat('x');
     try testing.expect(cdi.device_name_valid(long[0..constants.cdi_device_name_bytes_max]));
-    try testing.expect(!cdi.device_name_valid(long));
+    try testing.expect(!cdi.device_name_valid(&long));
     try testing.expect(cdi.path_valid("/usr/lib/x.so"));
     try testing.expect(!cdi.path_valid("usr"));
     try testing.expect(!cdi.path_valid("/a/../b"));
