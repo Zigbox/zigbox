@@ -6,7 +6,7 @@ error[ZBX-E0211]: can't set up a --tmpfs, --bind or --secret mount
   target /data
   name   web-1
   rootfs /srv/alpine
-  step   bind_mount_file (53 of 69)
+  step   bind_mount_file (57 of 73)
   fix    see what this host allows:   zbx doctor
   more   zbx explain E0211
   docs   https://zigbox.github.io/zigbox/errors/E0211.html

@@ -79,7 +79,7 @@ fn world_dirs(name: []const u8) void {
     const shell = std.fmt.bufPrint(&inner, "{s}/bin/sh", .{merged}) catch unreachable; // Short.
     sim.world.add_node(shell, .file);
     // The overlay shows the mount points of the generated files, which are in the net layer.
-    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |suffix| {
         const joined = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix });
         sim.world.add_node(joined catch unreachable, .file); // Short.
     }

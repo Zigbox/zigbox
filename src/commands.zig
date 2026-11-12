@@ -380,13 +380,16 @@ fn report_stop(
     diag: *Diag,
 ) Error!void {
     assert(options.name.len > 0);
-    assert(ref.pid > 0);
+    // A container that failed to start has no pid (0), and it is then never signalled.
+    if (ref.pid == 0) assert(result == .already_stopped);
     var ended: lifecycle.WaitResult = .timeout;
+    var never_started = false;
     var reason_name: []const u8 = "none";
     var code: ?u8 = null;
     lifecycle.wait_adopted(&ref, 0, &ended) catch {};
     switch (ended) {
         .ended => |*record| {
+            never_started = record.exit == .start_failed;
             const found = lifecycle.exit_reason_of(record);
             reason_name = @tagName(record.reason);
             if (record.reason == .none) reason_name = "none";
@@ -408,7 +411,10 @@ fn report_stop(
         writer.writeAll("}\n") catch unreachable; // Same.
     } else {
         const how: []const u8 = switch (result) {
-            .already_stopped => "was not running",
+            .already_stopped => if (never_started)
+                "never started, so there is nothing to stop"
+            else
+                "was not running",
             .graceful => "stopped",
             .killed => "stopped (killed)",
         };
