@@ -104,7 +104,6 @@ pub fn unknown(diag: *Diag, device: []const u8, resolver: *const cdi.Resolver) v
     const named = echo_of(&storage, device);
     diag.raise(.E0230);
     diag.while_("looking for the CDI device {s}", .{named});
-    diag.cause("no spec in {s} has it", .{directories});
     diag.context("device", "{s}", .{named});
     var list: [400]u8 = undefined;
     var at: usize = 0;
@@ -121,9 +120,11 @@ pub fn unknown(diag: *Diag, device: []const u8, resolver: *const cdi.Resolver) v
         at += known.len;
     }
     if (at > 0) {
-        diag.fix(.{ .sentence = "give one of the devices the specs have:" });
+        diag.cause("no spec in {s} has it; the specs have: {s}", .{ directories, list[0..at] });
         diag.context("known", "{s}", .{list[0..at]});
+        diag.fix(.{ .sentence = "give one of the devices the specs have" });
     } else {
+        diag.cause("no spec in {s} has it", .{directories});
         diag.fix(.{ .sentence = "write the host's CDI spec first:", .command = generate });
     }
     assert(diag.code.? == .E0230);
