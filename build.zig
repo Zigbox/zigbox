@@ -925,7 +925,7 @@ fn mac_release_binary(
         // A cross-built target gets no automatic SDK, so the frameworks and libobjc are not
         // found without these.
         const frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-        module.addSystemFrameworkPath(.{ .cwd_relative = frameworks });
+        module.addFrameworkPath(.{ .cwd_relative = frameworks });
         module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
     }
     return b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
