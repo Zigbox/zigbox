@@ -437,7 +437,10 @@ jobs:
       # Builds both slices, joins them with lipo, signs, notarizes, zips; checks the signature
       # and that the archive's code is the signed code.
       - name: Sign and notarize
-        run: zig build mac-release -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
+        # --sysroot: an explicit -target gets no automatic SDK, so the frameworks are not found.
+        run: |
+          zig build mac-release --sysroot "$(/usr/bin/xcrun --show-sdk-path)" \
+            -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         run: |
           cd zig-out/mac-release
@@ -856,7 +859,9 @@ jobs:
             exit 1
           fi
       - name: Build the universal zip and sign it with it (no notarization, no upload)
-        run: zig build mac-release -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
+        run: |
+          zig build mac-release --sysroot "$(/usr/bin/xcrun --show-sdk-path)" \
+            -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         id: zip
         run: |

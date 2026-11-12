@@ -170,7 +170,8 @@ Zigbox/zigbox.github.io`.
 
 For the Mac zip, on a Mac with the Developer ID certificate in the login keychain and a notary
 profile there (`xcrun notarytool store-credentials zbx-notary`), from a logged-in graphical
-session: `zig build mac-release -Dnotarize` (no `-Dkeychain`: it uses the login keychain; it builds both
+session: `zig build mac-release --sysroot "$(xcrun --show-sdk-path)" -Dnotarize` (the sysroot,
+because both architectures are cross-built and a cross-built target finds no SDK by itself; no `-Dkeychain`: it uses the login keychain; it builds both
 architectures and joins them with `lipo`). Attach
 `zig-out/mac-release/zbx-<v>-macos-universal.zip` to the release and commit `zig-out/mac-release/zigbox.rb`
 to `Formula/zigbox.rb` of `Zigbox/homebrew-tap` by hand. `-Dkeychain=FILE` points `codesign` and
