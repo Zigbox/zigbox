@@ -825,7 +825,7 @@ fn step_refusals(
 const ops_script =
     "set -e\n" ++
     "echo added > /added.txt\n" ++
-    "echo changed >> /etc/hostname\n" ++
+    "echo changed >> /etc/motd\n" ++
     "chmod 600 /etc/passwd\n" ++
     "rm /etc/shadow /big.bin\n" ++
     "echo ops-done\n";
@@ -834,7 +834,7 @@ const ops_script =
 const ops_diff =
     "A /added.txt\n" ++
     "D /big.bin\n" ++
-    "M /etc/hostname  content\n" ++
+    "M /etc/motd  content\n" ++
     "M /etc/passwd  mode\n" ++
     "D /etc/shadow\n";
 
