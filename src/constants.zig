@@ -268,6 +268,9 @@ pub const cdi_scratch_bytes_max: u32 = 32 * 1024;
 pub const cdi_kind_bytes_max: u32 = 48;
 pub const cdi_device_name_bytes_max: u32 = 63;
 pub const cdi_name_bytes_max: u32 = 128;
+/// All the devices of one run, as the run record keeps them: names and paths with a space after
+/// each. Smaller than `run_devices_max * (cdi_name_bytes_max + 1)`: the record has no room for it.
+pub const run_devices_text_bytes_max: u32 = 896;
 /// A path in a spec: where a mount lands in the container, or where it comes from.
 pub const cdi_path_bytes_max: u32 = 256;
 /// What one run takes from the specs, merged: nodes, mounts, variables, library directories, and

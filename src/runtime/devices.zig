@@ -18,6 +18,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const plan_mod = @import("plan.zig");
+const cdi = @import("cdi.zig");
 
 const Host = host_mod.Host;
 
@@ -34,6 +35,8 @@ pub const Problem = enum {
     dot_dot,
     /// One of M1's six, or a name the container's `/dev` has for another purpose.
     reserved,
+    /// Not a path and not a CDI name `vendor/class=name` either.
+    bad_name,
 
     pub fn sentence(problem: Problem) []const u8 {
         assert(@tagName(problem).len > 0);
@@ -44,6 +47,7 @@ pub const Problem = enum {
                 "that is not printable ASCII",
             .dot_dot => "the path has a '..' part",
             .reserved => "every container has that one already",
+            .bad_name => "it is neither a path below /dev nor a CDI name like vendor.com/class=name",
         };
     }
 };
@@ -90,31 +94,50 @@ pub const ListProblem = union(enum) {
     path: struct { index: u32, problem: Problem },
     too_many,
     repeated: u32,
+    /// All the devices together are longer than the run record keeps.
+    too_long,
 
     /// The device at fault, or null when the list as a whole is.
     pub fn index(problem: ListProblem) ?u32 {
         return switch (problem) {
             .path => |found| found.index,
             .repeated => |at| at,
-            .too_many => null,
+            .too_many, .too_long => null,
         };
     }
 
     pub fn sentence(problem: ListProblem) []const u8 {
-        assert(@backingInt(std.meta.activeTag(problem)) <= 2);
+        assert(@backingInt(std.meta.activeTag(problem)) <= 3);
         assert(constants.run_devices_max == 16); // The text below says 16.
         return switch (problem) {
             .path => |found| found.problem.sentence(),
             .too_many => "a run takes at most 16 devices",
             .repeated => "it was given twice",
+            .too_long => "the devices together are longer than 896 bytes",
         };
     }
 };
 
+/// Whether a device is a host path (`/dev/...`), as against a CDI name (`vendor/class=name`).
+pub fn is_path(asked: []const u8) bool {
+    assert(asked.len <= constants.cdi_name_bytes_max or asked.len > 0);
+    return std.mem.startsWith(u8, asked, "/dev/");
+}
+
+/// What is wrong with one device as asked, by its text alone.
+pub fn asked_problem(asked: []const u8) ?Problem {
+    if (is_path(asked)) return path_problem(asked);
+    if (std.mem.indexOfScalar(u8, asked, '=') == null) return path_problem(asked);
+    return if (cdi.split_qualified(asked) == null) .bad_name else null;
+}
+
 pub fn list_problem(devices: []const Device) ?ListProblem {
     if (devices.len > constants.run_devices_max) return .too_many;
+    var total: usize = 0;
     for (devices, 0..) |device, index| {
-        if (path_problem(device.path)) |problem| {
+        total += device.path.len + 1;
+        if (total > text_bytes_max + 1) return .too_long;
+        if (asked_problem(device.path)) |problem| {
             return .{ .path = .{ .index = @intCast(index), .problem = problem } };
         }
         for (devices[0..index]) |before| {
@@ -126,7 +149,8 @@ pub fn list_problem(devices: []const Device) ?ListProblem {
 }
 
 /// The longest text `text` writes: every path and a space after each.
-pub const text_bytes_max = constants.run_devices_max * (constants.device_path_bytes_max + 1);
+/// A CDI name is longer than a path, so the whole list is bounded as text, not by the product.
+pub const text_bytes_max = constants.run_devices_text_bytes_max;
 
 /// The paths as the run record keeps them: `/dev/a /dev/b`, one string.
 pub fn text(devices: []const Device, buffer: *[text_bytes_max]u8) []const u8 {
@@ -159,9 +183,14 @@ pub const NodeProblem = union(enum) {
 
 /// Looks at a device node with the kernel's own answer (`Host.device_node`). Nothing is made.
 pub fn look(host: Host, device: *const Device) ?NodeProblem {
-    assert(path_problem(device.path) == null);
-    assert(device.path.len <= constants.device_path_bytes_max);
-    const node = host.device_node(device.path) catch |err| {
+    return look_path(host, device.path);
+}
+
+/// `look` for a path as text, which is what a node of a CDI spec is.
+pub fn look_path(host: Host, path: []const u8) ?NodeProblem {
+    assert(path.len <= constants.cdi_path_bytes_max);
+    assert(path.len > 0);
+    const node = host.device_node(path) catch |err| {
         return if (err == error.NotFound) .missing else .unreadable;
     };
     if (node.kind() != .character) return .{ .not_character = node };
@@ -176,6 +205,7 @@ pub fn resolve(host: Host, devices: []const Device) ?Refusal {
     assert(list_problem(devices) == null);
     assert(devices.len <= constants.run_devices_max);
     for (devices, 0..) |*device, index| {
+        if (!is_path(device.path)) continue; // A CDI name: its nodes are looked at with the spec.
         if (look(host, device)) |problem| return .{ .index = @intCast(index), .problem = problem };
     }
     return null;
@@ -187,8 +217,13 @@ pub fn plan_input(
     out: *[constants.run_devices_max][]const u8,
 ) []const []const u8 {
     assert(list_problem(devices) == null);
-    for (devices, 0..) |device, index| out[index] = device.path;
-    return out[0..devices.len];
+    var count: usize = 0;
+    for (devices) |device| {
+        if (!is_path(device.path)) continue; // A CDI name becomes nodes with its spec.
+        out[count] = device.path;
+        count += 1;
+    }
+    return out[0..count];
 }
 
 const testing = std.testing;
@@ -236,4 +271,30 @@ test "list: bound, repeats, and the record text" {
     const both = text(&.{ one, two }, &buffer);
     try testing.expectEqualStrings("/dev/dri/card0 /dev/dri/renderD128", both);
     try testing.expectEqualStrings("", text(&.{}, &buffer));
+}
+
+test "list: CDI names are taken, the total text is bounded" {
+    // Goal: a qualified name passes by its text, a bad one is named, and the sum is bounded.
+    const gpu: Device = .{ .path = "vendor.com/gpu=0" };
+    try testing.expectEqual(@as(?ListProblem, null), list_problem(&.{gpu}));
+    const bad: Device = .{ .path = "vendor.com/gpu=" };
+    try testing.expectEqual(Problem.bad_name, list_problem(&.{bad}).?.path.problem);
+    const odd: Device = .{ .path = "not-a-device" };
+    try testing.expectEqual(Problem.not_under_dev, list_problem(&.{odd}).?.path.problem);
+    try testing.expect(!is_path(gpu.path));
+    var out: [constants.run_devices_max][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), plan_input(&.{gpu}, &out).len);
+    // A list that fills the text exactly is taken; one byte more is not.
+    var names: [14][64]u8 = undefined;
+    var many: [14]Device = undefined;
+    for (&many, &names, 0..) |*device, *buf, at| {
+        const head = "vendor.com/gpu=";
+        @memcpy(buf[0..head.len], head);
+        @memset(buf[head.len..], 'a');
+        buf[62] = @as(u8, 'a') + @as(u8, @intCast(at)); // 63 bytes each, all different.
+        device.* = .{ .path = buf[0..63] };
+    }
+    try testing.expectEqual(@as(?ListProblem, null), list_problem(&many)); // 14 * 64 = 896.
+    var buffer: [text_bytes_max]u8 = undefined;
+    try testing.expectEqual(@as(usize, 14 * 64 - 1), text(&many, &buffer).len);
 }
