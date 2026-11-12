@@ -352,7 +352,7 @@ pub fn inspect(handle: *const Handle) Status {
 /// of a run that has not begun.
 fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle: *Handle) void {
     assert(container.devices.len <= constants.run_devices_max);
-    assert(handle.cdi == null);
+    assert(@intFromPtr(handle) != 0);
     handle.host = host;
     handle.status = .starting;
     handle.warn = options.warn;
