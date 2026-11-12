@@ -365,8 +365,7 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const applied = try H.run_split(session, asked);
     try H.show_split(out, asked, applied);
     checks_m1.check_cdi_applied(applied.streams, applied.status) catch |err| {
-        return fail_step(out, "EXTRA cdi", "the device brings its node and variable, and " ++
-            "W0208 is on stderr", err);
+        return fail_step(out, "EXTRA cdi", "the device brings its node and variable", err);
     };
     const lacking = run_prefix ++ " --name cdi2 --device vendor.example/gpu=9 -- sh -c 'echo ran'";
     const refused = try H.run_split(session, lacking);

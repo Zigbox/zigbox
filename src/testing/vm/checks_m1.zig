@@ -239,13 +239,12 @@ pub fn check_device_refused(streams: Streams, status: u8) Error!void {
 
 /// M10 slice 2: a CDI device (`vendor.example/gpu=0`) from a spec in /etc/cdi brings its node and
 /// its variable into a run of a member of the node's group: the step prints `OPENED-READ` and
-/// `FAKE=all`. The spec's cache hook has nothing to run in the image, so W0208 is on stderr, as
-/// is the groups note.
+/// `FAKE=all`, and nothing on stderr is an error. W0208 is not required: Alpine ships an `ldconfig`
+/// stub that succeeds, so the library cache step passes (CI run of the first VM check).
 pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (!has_line(streams.stdout, "OPENED-READ")) return error.CdiEditWrong;
     if (!has_line(streams.stdout, "FAKE=all")) return error.CdiEditWrong;
-    if (std.mem.indexOf(u8, streams.stderr, "ZBX-W0208") == null) return error.NoteMissing;
     if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
 }
 
@@ -468,18 +467,18 @@ test "devices: opened for a member, refused to anyone else" {
 }
 
 test "cdi: a device applies its edits, and an unknown name is E0230 listing the known" {
-    // Goal: the check passes only when the node opened, the variable is set and W0208 was said;
+    // Goal: the check passes only when the node opened, the variable is set and no error was said;
     // the refusal only for a one-line E0230 that lists the names.
     const applied = Streams{
         .stdout = "OPENED-READ\nFAKE=all\n",
-        .stderr = "warning[ZBX-W0208]: no ldconfig\nwarning[ZBX-W0209]: groups\n",
+        .stderr = "warning[ZBX-W0209]: groups\n",
     };
     try check_cdi_applied(applied, 0);
     try testing.expectError(error.ExitCodeWrong, check_cdi_applied(applied, 1));
     const no_env = Streams{ .stdout = "OPENED-READ\n", .stderr = applied.stderr };
     try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_env, 0));
-    const silent = Streams{ .stdout = applied.stdout, .stderr = "" };
-    try testing.expectError(error.NoteMissing, check_cdi_applied(silent, 0));
+    const failed = Streams{ .stdout = applied.stdout, .stderr = "error[ZBX-E0226]: x\n" };
+    try testing.expectError(error.NoteMissing, check_cdi_applied(failed, 0));
     const unknown = "error[ZBX-E0230]: no such device\n  known  vendor.example/gpu=0\n";
     try check_cdi_unknown(.{ .stdout = "", .stderr = unknown }, 125);
     const quiet = Streams{ .stdout = "", .stderr = unknown };
