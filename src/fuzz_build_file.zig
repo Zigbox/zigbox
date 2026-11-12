@@ -218,7 +218,8 @@ fn gen_step_base(gen: *Gen, index: u32) void {
 }
 
 /// The builder's additions, each written or not at random, before a step's other fields. Each is
-/// followed by a comma. The mounts stay within the bound: a bind only when the needs leave room.
+/// followed by a comma. The mounts stay within the bound: needs, caches and binds together are
+/// at most `mounts_max - 2`, so a cache or a bind is written only when the needs leave room.
 fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
     assert(index < shape.steps);
     assert(shape.needs[index] <= constants.build_step_needs_max);
@@ -237,11 +238,14 @@ fn gen_builder_fields(gen: *Gen, shape: *const Shape, index: u32) void {
         gen.list(&excludes, gen.random.uintAtMost(u32, 3));
         gen.put(",");
     }
-    if (gen.random.boolean()) {
+    const room = constants.mounts_max - 2 - shape.needs[index];
+    var cached: u32 = 0;
+    if (room >= 1 and gen.random.boolean()) {
+        cached = 1;
         gen.field(".caches");
         gen.put(".{ .{ .id = \"cache-a\", .path = \"/cache/a\", .mode = \"0755\" } },");
     }
-    if (index > 0 and shape.needs[index] <= 5 and gen.random.boolean()) {
+    if (index > 0 and room >= cached + 1 and gen.random.boolean()) {
         gen.field(".binds");
         gen.put(".{ .{ .from = \"step:");
         gen.put(step_names[gen.random.uintLessThan(u32, index)]);

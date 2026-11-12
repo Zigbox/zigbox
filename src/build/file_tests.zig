@@ -222,7 +222,7 @@ test "the bounds hold at their limit and refuse one past it" {
     const four = step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\"}, ";
     const bind = ".binds = .{ .{ .source = \"x\", .to = \"/b\" } }, ";
     const caches = ".caches = .{ .{ .id = \"c1\", .path = \"/c1\" }";
-    _ = try parse_ok(four ++ bind ++ caches ++ " } } } } }");
+    _ = try parse_ok(four ++ bind ++ caches ++ " } } } }");
     const second = ", .{ .id = \"c2\", .path = \"/c2\" } } } } }";
     try refused_at(four ++ bind ++ caches ++ second, .too_many_mounts, ".{ .name");
 }
