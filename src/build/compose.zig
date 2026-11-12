@@ -39,6 +39,7 @@ const input_tree = @import("input_tree.zig");
 const input_job = @import("input_job.zig");
 const inputs_mod = @import("inputs.zig");
 const diagnose = @import("diagnose.zig");
+const graph_mod = @import("graph.zig");
 const render = @import("../diag/render.zig");
 const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
@@ -605,6 +606,10 @@ pub const Context = struct {
         const ws = context.ws;
         const at = ws.locking.lock.find(reference) orelse {
             diagnose.base_not_locked(context.diag, name, reference, false);
+            const file = &context.loaded.file;
+            if (graph_mod.step_named(file, reference) != null) {
+                diagnose.step_name_hint(context.diag, reference);
+            }
             return error.Failed;
         };
         const entry = &ws.locking.lock.entries[at];

@@ -754,6 +754,18 @@ pub fn base_not_locked(diag: *Diag, step: ?[]const u8, reference: []const u8, lo
     assert(diag.code.? == .E0804);
 }
 
+/// A second fix on `E0804` when the unlocked base is the name of a step of the same file: a
+/// bare `build` is an image reference, and a step's output is written `step:build`.
+pub fn step_name_hint(diag: *Diag, name: []const u8) void {
+    assert(diag.code.? == .E0804);
+    assert(name.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, name);
+    const sentence = "to use the output of the step of that name, write .from like this";
+    diag.fix_with(sentence, ".from = \"step:{s}\"", .{shown});
+    assert(diag.code.? == .E0804);
+}
+
 /// `E0422` or `E0423`: a build result record that cannot be used: it does not hash to its name
 /// or does not parse (`newer` false: damaged), or a newer zbx wrote it (`newer` true).
 pub fn result_unusable(diag: *Diag, digest: Digest, newer: bool) void {
@@ -1234,4 +1246,16 @@ test "network_names joins the names and cuts what does not fit with an ellipsis"
     try std.testing.expectEqualStrings("abcd...", short_first);
     const same = network_names(&small, &.{ "abcde", "f" }); // kept == out.len - 3 == 5.
     try std.testing.expectEqualStrings("abcde...", same);
+}
+
+test "a bare step name as a base gets a second fix that writes step:<name>" {
+    // Goal: `.from = "build"` (an image reference) is refused with the way to spell the step.
+    // Method: raise E0804, add the hint, and read the fixes back: the pull first, the hint last.
+    var diag: Diag = undefined;
+    diag.reset();
+    base_not_locked(&diag, "pack", "build", false);
+    step_name_hint(&diag, "build");
+    try std.testing.expectEqual(@as(u32, 2), diag.fixes.count);
+    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.items[1].command.slice(), "step:build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.items[0].command.slice(), "zbx pull") != null);
 }
