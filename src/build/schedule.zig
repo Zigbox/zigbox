@@ -19,7 +19,7 @@ pub const Error = error{Failed};
 
 /// The graph as the scheduler needs it: `order` is a topological order of `count` steps.
 pub const Plan = struct {
-    count: u8,
+    count: u16,
     order: [constants.build_steps_max]u8,
     needs: [constants.build_steps_max][constants.build_step_needs_max]u8,
     needs_count: [constants.build_steps_max]u8,
@@ -67,8 +67,8 @@ pub const Outcome = struct {
     failed: ?u8,
     /// A wait failed and the running steps were aborted; no step is to blame.
     aborted: bool,
-    hits: u8,
-    built: u8,
+    hits: u16,
+    built: u16,
 };
 
 const State = enum(u8) { pending, running, done, failed };
@@ -80,7 +80,7 @@ pub fn run(plan: *const Plan, bound: u8, executor: Executor) Outcome {
     var state: [constants.build_steps_max]State = @splat(.pending);
     var outcome: Outcome = .{ .failed = null, .aborted = false, .hits = 0, .built = 0 };
     var running: u8 = 0;
-    var finished: u8 = 0;
+    var finished: u16 = 0;
     // Each pass either starts a step or waits for one, so the loop is bounded by twice the steps.
     for (0..2 * @as(usize, plan.count) + 2) |_| {
         var progress = true;
@@ -145,5 +145,5 @@ fn ready(plan: *const Plan, state: *const [constants.build_steps_max]State, step
 
 comptime {
     assert(constants.build_parallel_max >= 1);
-    assert(constants.build_steps_max <= std.math.maxInt(u8));
+    assert(constants.build_steps_max <= std.math.maxInt(u8) + 1); // Indexes fit a byte.
 }

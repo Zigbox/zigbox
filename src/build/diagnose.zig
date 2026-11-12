@@ -38,7 +38,7 @@ comptime {
 pub fn parse_code(kind: ProblemKind) codes.Code {
     assert(@tagName(kind).len > 0);
     const code: codes.Code = switch (kind) {
-        .too_many_needs => .E0802,
+        .too_many_needs, .too_many_mounts, .mount_twice => .E0802,
         .config_workdir, .config_user, .config_env, .config_label_key => .E0807,
         .config_label_twice => .E0807,
         else => .E0801,
@@ -162,7 +162,7 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
         .unknown_field => {
             var fields: [sentence_bytes_max]u8 = undefined;
             var writer = std.Io.Writer.fixed(&fields);
-            // The longest list, a step's, is seven short names: it fits.
+            // The longest list, a step's, is fourteen short names: it fits.
             write_fields(&writer, problem.level.allowed()) catch unreachable;
             fix_sentence(diag, "use a field that {s} takes: {s}", .{ level, writer.buffered() });
         },
@@ -170,6 +170,9 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             field, level,
         }),
         .missing_field => fix_sentence(diag, "add .{s} = ... to {s}", .{ field, level }),
+        .empty_list => fix_sentence(diag, "list at least one entry in .{s}, or remove it", .{
+            field,
+        }),
         .bad_escape => diag.fix(.{ .sentence = "write the escape as one of \\n \\r \\t " ++
             "\\\\ \\' \\\" or \\x and two hex digits" }),
         .bad_string => if (file_mod.takes_control_bytes(problem.level, problem.field.?))
@@ -222,11 +225,38 @@ fn value_fix(diag: *Diag, problem: *const file_mod.Problem) void {
         }),
         .config_workdir => diag.fix(.{ .sentence = "write .workdir as an absolute path, for " ++
             "example \"/app\"" }),
-        .config_user => diag.fix(.{ .sentence = "write .user as \"UID:GID\" in numbers, " ++
-            "for example \"0:0\"" }),
+        .config_user => diag.fix(.{ .sentence = "write .user as a name or a number, or " ++
+            "as \"user:group\", for example \"app:app\" or \"0:0\"" }),
         .config_label_key => diag.fix(.{ .sentence = "write the key with a-z, 0-9 and . _ / -, " ++
             "for example \"org.opencontainers.image.source\"" }),
         .config_label_twice => fix_sentence(diag, "give the label \"{s}\" once", .{word}),
+        .file_too_big => diag.fix(.{ .sentence = "list fewer copies, caches, binds and " ++
+            "patterns in all: the file's lists have a shared limit" }),
+        .bad_output => diag.fix(.{ .sentence = "write .output = .out, or .output = .root" }),
+        .run_or_copy => diag.fix(.{ .sentence = "give the step .run or .copy, not both " ++
+            "and not neither" }),
+        .bad_user => diag.fix(.{ .sentence = "write the user as a name, \"UID\", \"UID:GID\" " ++
+            "or \"name:group\", for example \"app:app\"" }),
+        .bad_path => diag.fix(.{ .sentence = "write the path as an absolute path with no " ++
+            "empty, . or .. part, for example \"/cache\"" }),
+        .bad_copy_to => diag.fix(.{ .sentence = "write .to as an absolute path written " ++
+            "plainly, ending in / for a directory, for example \"/app/\"" }),
+        .bad_mode => diag.fix(.{ .sentence = "write the mode as 3 or 4 octal digits, for " ++
+            "example \"0755\"" }),
+        .bad_pattern => diag.fix(.{ .sentence = "write a glob: * ? [a-z] and ** work, a \\ " ++
+            "quotes a byte, and no part is .." }),
+        .bad_from => diag.fix(.{ .sentence = "write .from as step:<name> of a step, or as " ++
+            "an image reference like alpine:3.20" }),
+        .bad_source => diag.fix(.{ .sentence = "write .source as a path in the project, or " ++
+            "an absolute path when .from names a step or an image" }),
+        .bad_cache_id => diag.fix(.{ .sentence = "write the id with A-Z, a-z, 0-9 and . _ / -, " ++
+            "for example \"go-build\"" }),
+        .bad_number => diag.fix(.{ .sentence = "write a whole number from 0 to 4294967295, " ++
+            "without leading zeros" }),
+        .mount_twice => diag.fix(.{ .sentence = "mount each path once in a step: give the " ++
+            "caches and binds different paths" }),
+        .too_many_mounts => diag.fix(.{ .sentence = "need, bind and cache fewer things in " ++
+            "the step, or gather them in one step first" }),
         // `parse_fix` writes the others.
         else => unreachable,
     }
@@ -257,6 +287,9 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .unknown_field => try writer.print("{s} has no field .{s}", .{ level, word }),
         .duplicate_field => try writer.print(".{s} is given twice in {s}", .{ field, level }),
         .missing_field => try writer.print("{s} has no .{s}, which it needs", .{ level, field }),
+        .empty_list => try writer.print(".{s} in {s} has no entries, so it would copy nothing", .{
+            field, level,
+        }),
         .bad_escape => try writer.writeAll("a string has an escape zbx does not read; " ++
             "the escapes are \\n \\r \\t \\\\ \\' \\\" and \\xNN"),
         .bad_string => try writer.print("a string in .{s} holds bytes that are not UTF-8, or " ++
@@ -305,8 +338,31 @@ fn describe_value(writer: *std.Io.Writer, kind: ProblemKind, word: []const u8) !
             "that can be mounted at /in", .{constants.build_step_needs_max}),
         .config_workdir => try writer.print("image.config .workdir \"{s}\" is not an " ++
             "absolute path written plainly", .{word}),
-        .config_user => try writer.print("image.config .user \"{s}\" is not UID:GID in " ++
-            "numbers; names are not looked up in a build", .{word}),
+        .config_user => try writer.print("image.config .user \"{s}\" is not a name, a " ++
+            "number, or user:group of those", .{word}),
+        .file_too_big => try writer.writeAll("the file's copies, caches, binds and " ++
+            "patterns come to more than the file's lists hold"),
+        .bad_output => try writer.writeAll(".output is not .out or .root"),
+        .run_or_copy => try writer.writeAll("a step has both .run and .copy, or neither"),
+        .bad_user => try writer.print("the user \"{s}\" is not a name, a number, or " ++
+            "user:group of those", .{word}),
+        .bad_path => try writer.print("the path \"{s}\" is not an absolute path written " ++
+            "plainly (no empty, . or .. part)", .{word}),
+        .bad_copy_to => try writer.print(".to \"{s}\" is not an absolute path written " ++
+            "plainly, which may end in /", .{word}),
+        .bad_mode => try writer.print("the mode \"{s}\" is not 3 or 4 octal digits", .{word}),
+        .bad_pattern => try writer.print("the pattern \"{s}\" is not a valid glob", .{word}),
+        .bad_from => try writer.print(".from \"{s}\" is not step:<name> or an image " ++
+            "reference", .{word}),
+        .bad_source => try writer.print(".source \"{s}\" is not a path inside what it " ++
+            "comes from", .{word}),
+        .bad_cache_id => try writer.print("the cache id \"{s}\" is not 1 to {d} of A-Z, " ++
+            "a-z, 0-9 and . _ / -", .{ word, constants.build_label_key_bytes_max }),
+        .bad_number => try writer.print("\"{s}\" is not a whole number from 0 to " ++
+            "4294967295 without leading zeros", .{word}),
+        .mount_twice => try writer.print("the step mounts \"{s}\" twice", .{word}),
+        .too_many_mounts => try writer.print("a step needs, binds and caches more than " ++
+            "the {d} mounts a run holds", .{constants.mounts_max}),
         .config_env => try writer.print("image.config .env entry \"{s}\" is not NAME=VALUE " ++
             "with a plain NAME", .{word}),
         .config_label_key => try writer.print("the label key \"{s}\" is not 1 to {d} of " ++
@@ -352,7 +408,7 @@ fn describe_graph(
     var at_echo: Echo = undefined;
     var step_echo: Echo = undefined;
     const at = text_util.sanitise(&at_echo, file.text(problem.at));
-    const step = if (problem.kind == .unknown_add)
+    const step = if (problem.kind == .unknown_add or problem.kind == .unknown_image_base)
         ""
     else
         step_text(&step_echo, file, problem.step);
@@ -369,6 +425,12 @@ fn describe_graph(
         ),
         .unknown_add => try writer.print("image.add takes from \"{s}\", and no step is named " ++
             "that", .{at}),
+        .unknown_base => try writer.print("step \"{s}\" has base \"{s}\", and no step is " ++
+            "named that", .{ step, at }),
+        .unknown_from => try writer.print("step \"{s}\" takes from \"{s}\", and no step is " ++
+            "named that", .{ step, at }),
+        .unknown_image_base => try writer.print("image.base is \"{s}\", and no step is " ++
+            "named that", .{at}),
         .cycle => {
             try writer.writeAll("the steps need each other round: ");
             for (problem.cycle_slice()) |index| {
@@ -386,7 +448,12 @@ fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Prob
     const at = text_util.sanitise(&at_echo, file.text(problem.at));
     switch (problem.kind) {
         .duplicate_step => diag.fix(.{ .sentence = "give each step a name of its own" }),
-        .unknown_need, .unknown_add => diag.fix(.{
+        .unknown_need,
+        .unknown_add,
+        .unknown_base,
+        .unknown_from,
+        .unknown_image_base,
+        => diag.fix(.{
             .sentence = "name a step of the file, or add a step by that name",
         }),
         .need_twice => fix_sentence(diag, "list \"{s}\" once in step \"{s}\"'s .needs", .{
@@ -395,6 +462,33 @@ fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Prob
         .cycle => fix_sentence(diag, "remove a need that closes the round, such as \"{s}\" " ++
             "from step \"{s}\"'s .needs", .{ at, step_text(&step_echo, file, problem.step) }),
     }
+}
+
+/// `E0802` for a part of the file that parses but that `zbx build` cannot run yet.
+pub fn unrunnable(
+    diag: *Diag,
+    shown: []const u8,
+    file: *const BuildFile,
+    found: graph_mod.Unrunnable,
+) void {
+    assert(diag.code == null);
+    assert(found.field.len > 0);
+    var shown_echo: Echo = undefined;
+    var step_echo: Echo = undefined;
+    const path = text_util.sanitise(&shown_echo, shown);
+    diag.raise(.E0802);
+    diag.while_("starting the build of '{s}'", .{path});
+    if (found.step) |step| {
+        diag.cause("'{s}': step \"{s}\" uses {s}, which this zbx reads but cannot build yet", .{
+            path, step_text(&step_echo, file, step), found.field,
+        });
+    } else {
+        diag.cause("'{s}': {s} is read but cannot be built yet", .{ path, found.field });
+    }
+    diag.context("path", "{s}", .{path});
+    diag.fix(.{ .sentence = "remove it, or use a zbx that builds it; `zbx build --graph` " ++
+        "still shows the file" });
+    assert(diag.code.? == .E0802);
 }
 
 /// `E0803` for an input that the disk refused. `project` is the resolved project directory.
@@ -528,6 +622,11 @@ fn list_max(level: Level, field: ?Field) u32 {
         .add => constants.build_image_adds_max,
         .entrypoint, .cmd => constants.build_config_argv_max,
         .labels => constants.build_config_labels_max,
+        .copy => constants.build_copy_entries_max,
+        .caches => constants.build_step_caches_max,
+        .binds => constants.build_step_binds_max,
+        .exclude => constants.build_exclude_lines_max,
+        .src => constants.build_copy_sources_max,
         else => 0,
     };
     assert(result <= constants.build_strings_max);
@@ -543,6 +642,9 @@ fn level_name(level: Level) []const u8 {
         .add => "an image.add entry",
         .config => "image.config",
         .label => "a label",
+        .copy => "a copy entry",
+        .cache => "a cache entry",
+        .bind => "a bind entry",
     };
     assert(name.len > 0);
     return name;
@@ -564,6 +666,13 @@ fn expected_name(expected: file_mod.Expected) []const u8 {
         .step_or_close => ".{ for a step, or }",
         .add_or_close => ".{ for an add, or }",
         .label_or_close => ".{ for a label, or }",
+        .copy_list => ".{ for the list of copies",
+        .cache_list => ".{ for the list of caches",
+        .bind_list => ".{ for the list of binds",
+        .copy_or_close => ".{ for a copy, or }",
+        .cache_or_close => ".{ for a cache, or }",
+        .bind_or_close => ".{ for a bind, or }",
+        .output_value => ".out or .root",
         .integer => "a number",
         .boolean => "true or false",
         .end => "the end of the file",
@@ -974,6 +1083,43 @@ pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
         .sentence = "pin what they fetch, or fetch it once outside the build as an input",
     });
     assert(diag.code.? == .W0801);
+}
+
+/// `E0817`: a `.user` or `.group` name is not in the `/etc/passwd` or `/etc/group` the step (or
+/// `.image.config`) is looked up in. `where` is what named it, already written, such as
+/// `step "a"`; `name` is the name as written.
+pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
+    assert(diag.code == null);
+    assert(where.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, name);
+    diag.raise(.E0817);
+    diag.while_("planning the build", .{});
+    diag.cause("{s} .user \"{s}\" is not in /etc/passwd of its base", .{ where, shown });
+    diag.context("name", "{s}", .{shown});
+    diag.fix(.{
+        .sentence = "add the user in an earlier step and base this step on it with " ++
+            ".base = \"step:NAME\", or write the id as a number",
+    });
+    assert(diag.code.? == .E0817);
+}
+
+/// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
+/// already quoted and joined by `, `; `count` is how many there are.
+pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    assert(names.len > 0);
+    diag.raise(.W0802);
+    diag.while_("planning the build", .{});
+    diag.cause("their output can depend on what a cache held, not only on the inputs", .{});
+    diag.cause("steps with cache mounts: {s}", .{names});
+    diag.context("steps", "{d}", .{count});
+    diag.fix(.{
+        .sentence = "keep each cache to what the command verifies or rebuilds, and do not " ++
+            "let its output depend on what was in it",
+    });
+    assert(diag.code.? == .W0802);
 }
 
 /// The names of the network steps, joined by `, ` into `out`; when they do not fit, the ones

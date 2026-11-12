@@ -35,9 +35,9 @@ const Fake = struct {
     over_bound: bool,
     under_used: bool,
     begin_order: [steps_max]u8,
-    begin_count: u8,
-    ended_ok: u8,
-    hits_began: u8,
+    begin_count: u16,
+    ended_ok: u16,
+    hits_began: u16,
     /// The wait call (counted from 0) that fails; null: none does.
     wait_fails_at: ?u32,
     waits: u32,
@@ -151,7 +151,7 @@ fn random_plan(random: std.Random, plan: *schedule.Plan) void {
     for (0..plan.count) |step| plan.order[step] = @intCast(step);
     // Swap neighbours that do not depend on each other: still topological.
     for (0..4 * @as(usize, plan.count)) |_| {
-        const at = random.uintLessThan(u8, plan.count);
+        const at = random.uintLessThan(u16, plan.count);
         if (at + 1 >= plan.count) continue;
         const first = plan.order[at];
         const second = plan.order[at + 1];
@@ -337,7 +337,7 @@ test "the biggest graphs: 64 steps, wide and as a chain, at the bound" {
         var fake = fake_for(&plan, prng.random(), @intCast(bound));
         const result = schedule.run(&plan, @intCast(bound), executor(&fake));
         try expect_guarantees(&fake, result);
-        try testing.expectEqual(@as(u8, steps_max), result.built);
+        try testing.expectEqual(@as(u16, steps_max), result.built);
     }
     for (1..steps_max) |step| {
         plan.needs[step][0] = @intCast(step - 1);
@@ -346,7 +346,7 @@ test "the biggest graphs: 64 steps, wide and as a chain, at the bound" {
     var chain = fake_for(&plan, prng.random(), constants.build_parallel_max);
     const result = schedule.run(&plan, constants.build_parallel_max, executor(&chain));
     try expect_guarantees(&chain, result);
-    try testing.expectEqual(@as(u8, steps_max), result.built);
+    try testing.expectEqual(@as(u16, steps_max), result.built);
 }
 
 /// One number for a finished build: its steps' outputs in index order.

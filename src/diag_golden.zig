@@ -788,7 +788,7 @@ fn prepare_build_config(sim: *HostSim) void {
         \\.{
         \\    .version = 1,
         \\    .steps = .{},
-        \\    .image = .{ .config = .{ .user = "root" } },
+        \\    .image = .{ .config = .{ .user = "a b" } },
         \\}
         \\
     );
@@ -805,6 +805,8 @@ const build_cases = [_]Case{
     .{ .code = .E0806, .args = &.{}, .direct = build_output_refused, .exit = 1 },
     .{ .code = .E0807, .args = &build_graph_args, .prepare = prepare_build_config, .exit = 1 },
     .{ .code = .W0801, .args = &.{}, .direct = build_network_steps, .warning = true, .exit = 0 },
+    .{ .code = .E0817, .args = &.{}, .direct = build_user_not_found, .exit = 1 },
+    .{ .code = .W0802, .args = &.{}, .direct = build_cache_steps, .warning = true, .exit = 0 },
 };
 
 const key_directory = "/home/alice/.config/zbx/keys";
@@ -2556,6 +2558,14 @@ fn build_step_failed(diag: *Diag) void {
 
 fn build_network_steps(diag: *Diag) void {
     build_diagnose.network_steps(diag, "fetch, vendor", 2);
+}
+
+fn build_user_not_found(diag: *Diag) void {
+    build_diagnose.user_not_found(diag, "step \"a\"", "nobody2");
+}
+
+fn build_cache_steps(diag: *Diag) void {
+    build_diagnose.cache_steps(diag, "\"compile\", \"test\"", 2);
 }
 
 fn build_output_refused(diag: *Diag) void {

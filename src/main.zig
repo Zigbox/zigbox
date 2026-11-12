@@ -363,3 +363,9 @@ test {
     _ = @import("runtime/cdi_run_tests.zig");
     _ = @import("fuzz_cdi.zig");
 }
+
+test {
+    // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
+    _ = @import("build/glob.zig");
+    _ = @import("fuzz_dockerignore.zig");
+}

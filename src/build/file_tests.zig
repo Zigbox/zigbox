@@ -150,7 +150,10 @@ test "each refusal names its kind, line and column" {
     try refused_at(add ++ ".to = \"/\" } } } }", .missing_field, ".{ .to");
     const config = head ++ ".config = .{ ";
     try refused_at(config ++ ".workdir = \"tmp\" } } }", .config_workdir, "\"");
-    try refused_at(config ++ ".user = \"root\" } } }", .config_user, "\"");
+    try refused_at(config ++ ".user = \"a b\" } } }", .config_user, "\"");
+    // M7 took `uid:gid` with leading zeros in `config.user`; it still parses.
+    const old = "01000:01000";
+    try testing.expect(file_mod.is_numeric_user(old) and !file_mod.is_user_text(old));
     try refused_at(config ++ ".user = \"0:99999999999\" } } }", .config_user, "\"");
     try refused_at(config ++ ".env = .{ \"A\", } } } }", .config_env, "\"");
     try refused_at(config ++ ".labels = .{ .{ \"A\", \"b\" } } } } }", .config_label_key, "\"");
@@ -172,7 +175,8 @@ test "each step refusal names its kind, line and column" {
     try refused_at(named ++ ".run = .{} } } }", .empty_run, ".{ .name");
     try refused_at(named ++ ".run = .{\"\"} } } }", .empty_run, "\"\"");
     try refused_at(named ++ ".env = .{\"=b\"} } } }", .bad_env, "\"=b");
-    try refused_at(named[0 .. named.len - 2] ++ " } } }", .missing_field, ".{ .name");
+    try refused_at(named[0 .. named.len - 2] ++ " } } }", .run_or_copy, ".{ .name");
+    try refused_at(head ++ ".base = \"a\", .run = .{\"x\"} } } }", .missing_field, ".{ .base");
     try refused_at(head ++ ".name = \"a\", .network = 1 } } }", .syntax, "1 }");
     try refused_at(".{ .steps = .{ 1 } }", .syntax, "1");
 }
@@ -205,7 +209,8 @@ test "the bounds hold at their limit and refuse one past it" {
     // Goal: every count and length bound is exact. Method: steps, a string, needs and the pool,
     // each at its limit and one more.
     _ = try parse_ok(write_steps(constants.build_steps_max));
-    try expect_refused(write_steps(constants.build_steps_max + 1), .list_too_long, 66, 1);
+    const over = write_steps(constants.build_steps_max + 1);
+    try expect_refused(over, .list_too_long, constants.build_steps_max + 2, 1);
     _ = try parse_ok(write_string(constants.build_string_bytes_max));
     const long = write_string(constants.build_string_bytes_max + 1);
     try refused_at(long, .string_too_long, "\"");
@@ -215,6 +220,14 @@ test "the bounds hold at their limit and refuse one past it" {
     _ = try parse_ok(step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\",\"e\",\"f\"} } } }");
     const needs = step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"} } } }";
     try refused_at(needs, .too_many_needs, "\"g");
+    // Needs, binds and caches share the run's mounts beside `/src` and `/out`.
+    comptime assert(constants.mounts_max == 8);
+    const four = step ++ ".needs = .{\"a\",\"b\",\"c\",\"d\"}, ";
+    const bind = ".binds = .{ .{ .source = \"x\", .to = \"/b\" } }, ";
+    const caches = ".caches = .{ .{ .id = \"c1\", .path = \"/c1\" }";
+    _ = try parse_ok(four ++ bind ++ caches ++ " } } } }");
+    const second = ", .{ .id = \"c2\", .path = \"/c2\" } } } } }";
+    try refused_at(four ++ bind ++ caches ++ second, .too_many_mounts, ".{ .name");
 }
 
 test "every string together is bounded by the pool" {
@@ -236,8 +249,8 @@ test "every string together is bounded by the pool" {
     writer.writeAll("} } } }") catch unreachable; // Fits.
     _ = try parse_ok(writer.buffered());
     writer.end = full;
-    writer.writeAll("\"a\" } } } }") catch unreachable; // Fits.
-    try expect_refused(writer.buffered(), .text_too_long, count + 2, 1);
+    writer.writeAll("}, .env = .{ \"A=b\" } } } }") catch unreachable; // Fits.
+    try expect_refused(writer.buffered(), .text_too_long, count + 2, 14);
 }
 
 test "a file cut short anywhere is refused at its end, inside a list too" {
@@ -421,4 +434,70 @@ test "a step name holds at its bound and is refused one past it" {
     const named = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"";
     _ = try parse_ok(named ++ long_name[0..name_max] ++ tail);
     try refused_at(named ++ long_name ++ tail, .bad_step_name, "\"a");
+}
+
+fn kind_of(text: []const u8) ProblemKind {
+    var problem: Problem = undefined;
+    const result = file_mod.parse(text, &test_file, &problem);
+    if (result == .parsed) return .syntax; // Not refused: the callers expect another kind.
+    return problem.kind;
+}
+
+const m9_head = ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"a\", .base = \"x\", ";
+
+test "the M9 fields are read whole and each is kept" {
+    // Goal: every builder addition parses and reads back. Method: one step with all of them,
+    // then one with copy and a step base.
+    const run = try parse_ok(
+        \\.{ .version = 1, .exclude = .{ ".git", "*.log" },
+        \\  .image = .{ .base = "step:b", .config = .{ .user = "app:app" } },
+        \\  .steps = .{
+        \\    .{ .name = "b", .base = "alpine:3.20", .run = .{ "true" }, .output = .root },
+        \\    .{ .name = "a", .base = "step:b", .user = "app", .workdir = "/w",
+        \\       .inputs = .{ "src/**/*.go", "go.mod" }, .exclude = .{ "**/*_test.go" },
+        \\       .caches = .{ .{ .id = "gomod", .path = "/go/pkg", .mode = "0755", .uid = 1000 } },
+        \\       .binds = .{ .{ .from = "step:b", .source = "/usr/bin", .to = "/tools" } },
+        \\       .run = .{ "true" } },
+        \\    .{ .name = "c", .base = "alpine:3.20",
+        \\       .copy = .{ .{ .src = .{ "a*" }, .to = "/d/", .chown = "1:1", .chmod = "644" } } },
+        \\  },
+        \\}
+    );
+    try testing.expectEqual(@as(u32, 3), run.steps_count);
+    try testing.expectEqual(file_mod.Output.root, run.steps[0].output);
+    try testing.expectEqual(@as(u32, 1), run.steps[2].copy.count);
+    try testing.expectEqual(@as(u32, 1), run.steps[1].caches.count);
+    try testing.expectEqual(@as(u32, 1), run.steps[1].binds.count);
+}
+
+fn step_refused(comptime fields: []const u8, kind: ProblemKind) !void {
+    try testing.expectEqual(kind, kind_of(m9_head ++ fields ++ " } } }"));
+}
+
+test "each M9 refusal names its kind" {
+    // Goal: the negative space of the builder additions. Method: one step per refusal.
+    const run = ".run = .{\"x\"}, ";
+    const copy = ".copy = .{ .{ .src = .{\"a\"}, .to = ";
+    try step_refused(run ++ ".output = .both", .bad_output);
+    try step_refused(run ++ copy ++ "\"/\" } }", .run_or_copy);
+    try step_refused(run ++ ".user = \"a b\"", .bad_user);
+    try step_refused(run ++ ".user = \"007\"", .bad_user); // One id, two spellings.
+    try step_refused(run ++ ".user = \"1:08\"", .bad_user);
+    try step_refused(".copy = .{}", .empty_list); // Copies nothing.
+    try step_refused(".copy = .{ .{ .src = .{}, .to = \"/x\" } }", .empty_list);
+    try step_refused(run ++ ".workdir = \"w\"", .bad_path);
+    try step_refused(copy ++ "\"x\" } }", .bad_copy_to);
+    try step_refused(copy ++ "\"/x\", .chmod = \"9\" } }", .bad_mode);
+    try step_refused(run ++ ".exclude = .{ \"[a\" }", .bad_pattern);
+    try step_refused(
+        ".copy = .{ .{ .from = \"Bad Ref\", .src = .{\"a\"}, .to = \"/x\" } }",
+        .bad_from,
+    );
+    const cache = ".caches = .{ .{ .id = ";
+    try step_refused(run ++ cache ++ "\"a b\", .path = \"/c\" } }", .bad_cache_id);
+    try step_refused(
+        run ++ cache ++ "\"a\", .path = \"/c\" }, .{ .id = \"b\", .path = \"/c\" } }",
+        .mount_twice,
+    );
+    try step_refused(run ++ ".binds = .{ .{ .source = \"../a\", .to = \"/b\" } }", .bad_source);
 }

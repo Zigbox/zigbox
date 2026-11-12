@@ -1,9 +1,9 @@
 error[ZBX-E0807]: the image can't be made as declared
   while  reading the build file 'zbx.build.zon'
-  cause  'zbx.build.zon' line 4, column 38: image.config .user "root" is not
-         UID:GID in numbers; names are not looked up in a build
+  cause  'zbx.build.zon' line 4, column 38: image.config .user "a b" is not a
+         name, a number, or user:group of those
   path   zbx.build.zon
   at     line 4, column 38
-  fix    write .user as "UID:GID" in numbers, for example "0:0"
+  fix    write .user as a name or a number, or as "user:group", for example "app:app" or "0:0"
   more   zbx explain E0807
   docs   https://zigbox.github.io/zigbox/errors/E0807.html
