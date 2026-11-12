@@ -204,7 +204,9 @@ fn make_plan(loaded: *const load_mod.Workspace, plan: *schedule.Plan) void {
     plan.count = graph.count;
     for (graph.order_slice(), 0..) |index, at| plan.order[at] = index;
     for (0..graph.count) |index| {
-        const needs = graph.needs_slice(&loaded.file, @intCast(index));
+        // The scheduler waits for everything the step reads, not only for its `needs`: a base
+        // or a copy source is a step too (`after_slice`).
+        const needs = graph.after_slice(@intCast(index));
         for (needs, 0..) |need, at| plan.needs[index][at] = need;
         plan.needs_count[index] = @intCast(needs.len);
     }
@@ -368,15 +370,19 @@ pub const Context = struct {
         assert(index < file.steps_count);
         const step = &file.steps[index];
         const name = file.text(step.name);
-        var spec: key_mod.Spec = undefined;
-        spec.name = name;
-        spec.network = step.network;
-        // `undefined` applies no field defaults, so the M9 fields are set here.
-        spec.root_output = false;
-        spec.user = null;
-        spec.workdir = null;
-        spec.binds = &.{};
-        spec.copies = &.{};
+        // A literal naming only the fields without defaults: the M9 fields then take theirs by
+        // construction, and a field added to the spec later cannot be left holding stack bytes.
+        var spec: key_mod.Spec = .{
+            .platform = undefined,
+            .base_tree = undefined,
+            .base_env = undefined,
+            .input_tree = undefined,
+            .needs = undefined,
+            .argv = undefined,
+            .env = undefined,
+            .network = step.network,
+            .name = name,
+        };
         try context.resolve_base(file.text(step.base), &spec);
         spec.input_tree = try context.import_inputs(index);
         ws.step_inputs[index] = spec.input_tree;

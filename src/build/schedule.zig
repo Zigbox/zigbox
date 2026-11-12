@@ -17,12 +17,14 @@ const constants = @import("../constants.zig");
 
 pub const Error = error{Failed};
 
-/// The graph as the scheduler needs it: `order` is a topological order of `count` steps.
+/// The graph as the scheduler needs it: `order` is a topological order of `count` steps. A
+/// step's `needs` here are every step it must come after (`graph.after_slice`): its needs, its
+/// base, and the steps its copies and binds read.
 pub const Plan = struct {
     count: u16,
     order: [constants.build_steps_max]u8,
-    needs: [constants.build_steps_max][constants.build_step_needs_max]u8,
-    needs_count: [constants.build_steps_max]u8,
+    needs: [constants.build_steps_max][constants.build_step_edges_max]u8,
+    needs_count: [constants.build_steps_max]u16,
 
     pub fn needs_of(plan: *const Plan, step: u8) []const u8 {
         assert(step < plan.count);

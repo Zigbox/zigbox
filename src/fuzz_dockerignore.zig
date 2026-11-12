@@ -348,16 +348,23 @@ fn check_excluded(random: std.Random) void {
 fn check_refused(random: std.Random) void {
     var text: [8]u8 = undefined;
     const item = alphabet[random.uintLessThan(usize, alphabet.len)];
-    const which = random.uintLessThan(u8, 6);
+    const which = random.uintLessThan(u8, 9);
     const written = switch (which) {
         0 => std.fmt.bufPrint(&text, "{c}**", .{item}),
         1 => std.fmt.bufPrint(&text, "**{c}", .{item}),
         2 => std.fmt.bufPrint(&text, "{c}**{c}", .{ item, item }),
         3 => std.fmt.bufPrint(&text, "[^{c}]", .{item}),
         4 => std.fmt.bufPrint(&text, "[!{c}]", .{item}),
-        else => std.fmt.bufPrint(&text, "x/**{c}", .{item}),
+        5 => std.fmt.bufPrint(&text, "x/**{c}", .{item}),
+        6 => std.fmt.bufPrint(&text, "\\{c}", .{item}), // Go reads `\a` as a letter class.
+        7 => std.fmt.bufPrint(&text, "[[:{c}:]]", .{item}), // A POSIX class in Go.
+        else => std.fmt.bufPrint(&text, "[c-{c}]", .{'a'}), // A reversed range: Go refuses it.
     } catch unreachable; // Every form fits eight bytes.
-    const want: glob.Fault = if (which == 3 or which == 4) .bad_class else .bad_deep;
+    const want: glob.Fault = switch (which) {
+        3, 4, 7, 8 => .bad_class,
+        6 => .bad_escape,
+        else => .bad_deep,
+    };
     assert(glob.valid(written) == want);
 }
 
@@ -367,9 +374,11 @@ fn check_noise(random: std.Random, plain: bool) void {
     const length = random.uintAtMost(usize, bytes.len);
     random.bytes(bytes[0..length]);
     // Bias toward the bytes that mean something, so classes and escapes are met.
+    const meaningful = "*?[]\\^!-/.#ab";
+    const plain_set = "*?[]\\^-ab";
     for (bytes[0..length]) |*byte| {
-        if (random.boolean()) byte.* = "*?[]\\^!-/.#ab"[random.uintLessThan(usize, 13)];
-        if (plain) byte.* = "*?[]\\^-ab"[random.uintLessThan(usize, 10)];
+        if (random.boolean()) byte.* = meaningful[random.uintLessThan(usize, meaningful.len)];
+        if (plain) byte.* = plain_set[random.uintLessThan(usize, plain_set.len)];
     }
     const text = bytes[0..length];
     const fault = glob.valid(text);
