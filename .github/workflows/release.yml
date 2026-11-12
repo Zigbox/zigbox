@@ -156,11 +156,27 @@ jobs:
   # the notary key reach a temporary keychain under $RUNNER_TEMP that is never on the search list
   # and is deleted in the last step, whatever happened: the runner is a person's Mac. No secret is
   # printed or passed as a command-line argument; the only passwords on argv are random values
-  # made in the job. No runner (MAC_RUNNER_LABEL unset): skipped, and `publish` then fails.
+  # made in the job. No release runner (MAC_RELEASE_RUNNER_LABEL unset): `mac-runner` fails and `publish` does not run.
+  # Fails closed: the release runner has a label of its own (MAC_RELEASE_RUNNER_LABEL), never
+  # MAC_RUNNER_LABEL, which pull request jobs use. With it unset, `mac` does not run at all.
+  mac-runner:
+    name: the release runner is configured
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      RELEASE_LABEL: ${{ vars.MAC_RELEASE_RUNNER_LABEL }}
+    steps:
+      - name: Refuse without MAC_RELEASE_RUNNER_LABEL
+        run: |
+          [ -n "$RELEASE_LABEL" ] || { echo "release: the repository variable MAC_RELEASE_RUNNER_LABEL is not set, so the Mac job will not run (docs/releases/automation.md, step 0)" >&2; exit 1; }
+
   mac:
     name: sign and notarize (macOS)
-    if: ${{ github.ref_type == 'tag' && vars.MAC_RUNNER_LABEL != '' }}
-    runs-on: ${{ vars.MAC_RUNNER_LABEL }}
+    needs: mac-runner
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ${{ vars.MAC_RELEASE_RUNNER_LABEL }}
     timeout-minutes: 60
     environment: release
     defaults:
@@ -200,6 +216,18 @@ jobs:
           persist-credentials: false
       # No toolchain cache: the toolchain runs while the key is unlocked (as on Linux).
       - uses: ./.github/actions/setup-zig-macos
+      # The GitHub CLI is not taken from PATH (Homebrew): it is downloaded, checked against the
+      # published SHA-256 (gh 2.74.0, gh_2.74.0_checksums.txt) and run by absolute path.
+      - name: GitHub CLI, pinned
+        env:
+          GH_ZIP_SHA256: 4fd32fe65b46966882d7d94466d0b971f10ac69eb8bd7b58242ef489eda119e4
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/gh"
+          /usr/bin/curl -fsSL --retry 3 -o "$RUNNER_TEMP/gh/gh.zip" https://github.com/cli/cli/releases/download/v2.74.0/gh_2.74.0_macOS_arm64.zip
+          echo "$GH_ZIP_SHA256  $RUNNER_TEMP/gh/gh.zip" | /usr/bin/shasum -a 256 -c -
+          /usr/bin/unzip -q "$RUNNER_TEMP/gh/gh.zip" -d "$RUNNER_TEMP/gh"
+          echo "GH=$RUNNER_TEMP/gh/gh_2.74.0_macOS_arm64/bin/gh" >> "$GITHUB_ENV"
       # Before the keychain exists: this step downloads, and the build needs the file.
       - name: The VM kernel
         run: test -f .zig-cache/zbx-vm/kernel/Image || zig build vm-kernel-fetch
@@ -207,8 +235,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          command -v gh > /dev/null || { echo "release: the Mac runner needs the GitHub CLI (brew install gh)" >&2; exit 1; }
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null || {
+          "$GH" release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null || {
             echo "release: no GitHub release for $TAG (tag.yml makes it)" >&2
             exit 1
           }
@@ -242,9 +269,9 @@ jobs:
           /usr/bin/openssl pkcs12 -in "$SECRETS_DIR/cert.p12" -passin env:MAC_CERT_PASSWORD -nodes |
             /usr/bin/openssl pkcs12 -export -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
           unset MAC_CERT_PASSWORD
-          rm -f "$SECRETS_DIR/cert.p12"
-          /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -T /usr/bin/codesign
-          rm -f "$SECRETS_DIR/wrapped.p12"
+          /bin/rm -f "$SECRETS_DIR/cert.p12"
+          /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
+          /bin/rm -f "$SECRETS_DIR/wrapped.p12"
           # Lets codesign use the key from a session with no GUI (else errSecInternalComponent).
           /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           # `find-identity` exits 0 with no valid identity (e.g. the Developer ID intermediate
@@ -263,7 +290,7 @@ jobs:
           unset MAC_NOTARY_KEY
           /usr/bin/xcrun --no-cache notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
             --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" > /dev/null
-          rm -f "$SECRETS_DIR/notary.p8"
+          /bin/rm -f "$SECRETS_DIR/notary.p8"
           listed=$(/usr/bin/security list-keychains -d user)
           if grep -q zbx-release <<< "$listed"; then
             echo "release: the temporary keychain is on the search list" >&2
@@ -279,7 +306,8 @@ jobs:
       - name: Attach the zip to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "zig-out/mac-release/zbx-${TAG#v}-macos-arm64.zip" --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          "$GH" release upload "$TAG" "zig-out/mac-release/zbx-${TAG#v}-macos-arm64.zip" --clobber --repo "$GITHUB_REPOSITORY"
       - name: Keep the formula for publish
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -292,7 +320,7 @@ jobs:
         if: ${{ always() }}
         run: |
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP/gh" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # The tap and the site, from the App's token (two repositories, Contents write; Actions read to
   # follow the deploy). `release-publish` admits tags only and has no reviewers: the approval

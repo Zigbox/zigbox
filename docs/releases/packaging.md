@@ -27,7 +27,7 @@ gates quoted); `.github/workflows/tag.yml` then tags the commit and creates the 
   `Zigbox/homebrew-tap` and runs the zigbox.org deploy, waiting for it;
 - `verify`, on the Mac runner, runs `brew install zigbox/tap/zigbox` and `zbx --version`.
 
-`publish` fails, rather than skipping, when `mac` did not run (`MAC_RUNNER_LABEL` unset or no
+`publish` fails, rather than skipping, when `mac` did not run (`MAC_RELEASE_RUNNER_LABEL` unset or no
 runner took the job), so a release never leaves the tap behind by accident. The Mac runner needs
 the Xcode command line tools, Homebrew and the GitHub CLI (`gh`), and must stay awake. If a
 `linux` or `mac` run fails after the tag exists, fix the cause and re-run the workflow from the

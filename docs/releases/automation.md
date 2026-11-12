@@ -56,8 +56,8 @@ release PR merged to main (supervisor; version in build.zig.zon, notes in docs/r
 
 - **`linux`:** today's `sign` job, renamed, unchanged in substance. It no longer refuses to run
   when the release is missing, because `tag.yml` made it; the check stays as an assertion.
-- **`mac` (new)**, `environment: release`, `runs-on: ${{ vars.MAC_RUNNER_LABEL }}`,
-  `if: vars.MAC_RUNNER_LABEL != ''` (no runner: the job is skipped and `publish` fails loudly,
+- **`mac` (new)**, `environment: release`, `runs-on: ${{ vars.MAC_RELEASE_RUNNER_LABEL }}`,
+  `needs: mac-runner` (fails when that variable is unset, and `publish` then does not run,
   so a release never ships the tap out of date by accident).
   1. Refuse anything but a release tag, as `linux` does, before any secret is read.
   2. Check out the tag with `persist-credentials: false`; setup-zig-macos with no cache (the
@@ -147,11 +147,11 @@ so one click covers both; if GitHub asks twice, that is recorded and accepted, n
 | 9 | `MAC_CERT_PASSWORD`: the `.p12` export password | secret | env `release` | owner | new |
 | 10 | `MAC_NOTARY_KEY`: App Store Connect API key, `.p8` contents (role Developer) | secret | env `release` | owner | new |
 | 11 | `MAC_NOTARY_KEY_ID`, `MAC_NOTARY_ISSUER_ID` | variables | env `release` | owner | new |
-| 12 | `MAC_RUNNER_LABEL` | variable | repository | owner | exists |
+| 12 | `MAC_RUNNER_LABEL` (pull request jobs, `verify`), `MAC_RELEASE_RUNNER_LABEL` (the `mac` job only) | variables | repository | owner | exists, new |
 | 13 | Self-hosted Mac runner, Apple Silicon, Xcode command line tools, Homebrew, awake during releases | machine | owner's Mac | owner | exists |
 | 14 | `actions/create-github-app-token`, pinned to a full SHA | action | `tag.yml`, `release.yml` | implementer | new |
 | 15 | `.github/workflows/tag.yml` | workflow | Zigbox/zigbox | implementer | new |
-| 16 | `release.yml`: `linux`, `mac`, `publish`, `verify`, `mac-test` | workflow | Zigbox/zigbox | implementer | changed |
+| 16 | `release.yml`: `linux`, `mac-runner`, `mac`, `publish`, `verify`, `mac-test` | workflow | Zigbox/zigbox | implementer | changed |
 | 17 | `--keychain` / `-Dkeychain` in `src/mac_release.zig`, `build.zig`, with a test | code | Zigbox/zigbox | implementer | new |
 | 18 | `packaging.md`, AGENTS.md line, decision | docs | Zigbox/zigbox | implementer, supervisor | changed |
 | 19 | Site `deploy.yml` accepting `repository_dispatch` type `site` | workflow | Zigbox/zigbox.github.io | — | exists |
@@ -169,10 +169,19 @@ The runner that runs pull request jobs (`mac.yml`, `mac-test`) therefore must no
 holds the secrets. Before adding `MAC_CERT_P12`, `MAC_CERT_PASSWORD` or `MAC_NOTARY_KEY`:
 
 - create a separate macOS user and run a second runner instance as that user, with its own
-  `PATH` without Homebrew and a label of its own (set `MAC_RUNNER_LABEL` for `release.yml` to it);
+  `PATH` without Homebrew and a label of its own; set the new repository variable
+  `MAC_RELEASE_RUNNER_LABEL` to it. The `mac` job uses only that variable and fails closed when
+  it is unset (`mac-runner` refuses with one line); `MAC_RUNNER_LABEL` stays the pull request
+  runner's, so a pull request job never lands on the release runner;
 - put that runner in a runner group limited to `release.yml` on `refs/tags/v*` (runner groups
   take selected workflows);
-- keep `mac.yml` and `mac-test` on the existing runner.
+- keep `mac.yml` and `mac-test` on the existing runner;
+- wipe the release user's `$RUNNER_TEMP` (the runner's `_work/_temp`) when that runner starts:
+  only a runner crash or power loss in the middle of the signing step leaves the mode-600 files
+  or the keychain behind, and nothing in the job can clean up after that.
+
+The `mac` job needs nothing from Homebrew: it calls system tools by absolute path and downloads
+the Zig toolchain and the GitHub CLI (pinned, SHA-256 checked) into `$RUNNER_TEMP`.
 
 The code may merge before this, because every secret-bearing step fails closed with no secrets.
 Without this step, adding them needs the owner's written acceptance of the risk in
@@ -267,7 +276,7 @@ the supervisor; the `v0.5.1-rc.1` dry run follows.
    quoted).
 2. `ci` and `mac` go green on `main`; `tag.yml` tags and creates the release.
 3. The owner approves `release` once (keep the Mac runner awake).
-4. `linux`, `mac`, `publish`, `verify` run; the supervisor reports the run link and updates
+4. `linux`, `mac-runner`, `mac`, `publish`, `verify` run; the supervisor reports the run link and updates
    README and site status.
 
 ## Slices
