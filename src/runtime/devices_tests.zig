@@ -177,7 +177,8 @@ test "a run with devices keeps its groups in both mapping modes, and one without
     // Goal: the rule the brief makes, and that it is not hard-coded either way. Method: start a
     // container through the library (the command line refuses `--user` for a directory) that
     // becomes a user, in the full-range map (1000:1000) and in the single-id map (the only user
-    // it can be is 0:0, for which no step becomes a user), each with and without devices; the simulator counts the child's
+    // it can be is 0:0, for which no step becomes a user), each with and without devices; the
+    // simulator counts the child's
     // setgroups calls. With devices there are none; without, exactly one in the full map and
     // none in the single-id map, where there is nothing to drop. The user is checked, so the
     // count is of a step that ran.

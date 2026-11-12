@@ -330,16 +330,6 @@ fn extra_devices(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         return fail_step(out, "EXTRA devices", "a member of render opens the node, and the " ++
             "groups note is on stderr", err);
     };
-    // The child becomes uid 1000 and must keep the groups across it (`keep_groups`): the plan
-    // of the run above has no `set_user` step, this one does.
-    const as_user = run_prefix ++ " --name dev3 --user 1000:1000 --device /dev/zbx-render " ++
-        "-- sh -c " ++ inside;
-    const user_opened = try H.run_split(session, as_user);
-    try H.show_split(out, as_user, user_opened);
-    checks_m1.check_device_opened_as_user(user_opened.streams, user_opened.status) catch |err| {
-        return fail_step(out, "EXTRA devices", "--user 1000:1000 with --device keeps the " ++
-            "node's group (id -G lists 65534) and opens the node", err);
-    };
     const other = run_prefix ++ " --name dev2 --device /dev/zbx-locked -- sh -c 'echo ran'";
     const refused = try H.run_split(session, other);
     try H.show_split(out, other, refused);

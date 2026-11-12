@@ -196,7 +196,10 @@ const device_pool = [_][]const u8{
 };
 
 /// Version 10: up to `run_devices_max` distinct paths `--device` takes, taken from a pool.
-fn random_devices(random: std.Random, out: *[constants.run_devices_max]devices_mod.Device) []const devices_mod.Device {
+fn random_devices(
+    random: std.Random,
+    out: *[constants.run_devices_max]devices_mod.Device,
+) []const devices_mod.Device {
     if (random.boolean()) return &.{};
     var count: usize = 0;
     for (device_pool) |path| {
@@ -207,6 +210,13 @@ fn random_devices(random: std.Random, out: *[constants.run_devices_max]devices_m
     }
     random.shuffle(devices_mod.Device, out[0..count]);
     return out[0..count];
+}
+
+fn check_run_back(view: *const records.View, parsed: *const records.Parsed) void {
+    assert(parsed.started == view.started);
+    assert(parsed.ended == view.ended);
+    assert(same_exit(parsed.exit, view.exit));
+    assert(parsed.ids.? == view.ids);
 }
 
 fn check_devices_back(view: *const records.View, parsed: *const records.Parsed) void {
@@ -298,10 +308,7 @@ fn check_round_trip(random: std.Random) void {
     check_devices_back(&view, &parsed);
     assert(std.mem.eql(u8, parsed.name_slice(), view.name));
     assert(std.mem.eql(u8, parsed.rootfs_slice(), view.rootfs));
-    assert(parsed.started == view.started);
-    assert(parsed.ended == view.ended);
-    assert(same_exit(parsed.exit, view.exit));
-    assert(parsed.ids.? == view.ids);
+    check_run_back(&view, &parsed);
     const reason = if (view.reason == .none) records.reason_of(view.exit) else view.reason;
     assert(parsed.reason == reason);
     assert(std.meta.eql(parsed.limits, view.limits));
@@ -353,7 +360,9 @@ fn rerender(parsed: *const records.Parsed) void {
     var devices_count: usize = 0;
     if (parsed.devices_text().len > 0) {
         var parts = std.mem.splitScalar(u8, parsed.devices_text(), ' ');
-        while (parts.next()) |path| : (devices_count += 1) devices[devices_count] = .{ .path = path };
+        while (parts.next()) |path| : (devices_count += 1) {
+            devices[devices_count] = .{ .path = path };
+        }
     }
     var words: [constants.run_env_count_max][]const u8 = undefined;
     for (0..parsed.env_names_count) |at| words[at] = parsed.env_name(@intCast(at));

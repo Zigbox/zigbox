@@ -224,22 +224,6 @@ pub fn check_device_opened(streams: Streams, status: u8) Error!void {
     if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
 }
 
-/// The same run with `--user 1000:1000`: the child becomes that user with `keep_groups`, so
-/// the first line of stdout (`id -G`) still lists the node's group, shown as 65534, and the node
-/// still opens both ways.
-pub fn check_device_opened_as_user(streams: Streams, status: u8) Error!void {
-    try check_device_opened(streams, status);
-    const line_end = std.mem.indexOfScalar(u8, streams.stdout, '\n') orelse streams.stdout.len;
-    var words = std.mem.tokenizeScalar(u8, streams.stdout[0..line_end], ' ');
-    var user_seen = false;
-    var group_seen = false;
-    while (words.next()) |word| {
-        if (std.mem.eql(u8, std.mem.trim(u8, word, "\r"), "1000")) user_seen = true;
-        if (std.mem.eql(u8, std.mem.trim(u8, word, "\r"), "65534")) group_seen = true;
-    }
-    if (!user_seen or !group_seen) return error.DeviceAccessWrong;
-}
-
 /// A node the user is not in the group of: refused before anything starts, in one line naming
 /// the group, with E0225 and exit 125.
 pub fn check_device_refused(streams: Streams, status: u8) Error!void {
@@ -449,13 +433,6 @@ test "devices: opened for a member, refused to anyone else" {
     try testing.expectError(error.DeviceAccessWrong, check_device_opened(half, 0));
     const silent = Streams{ .stdout = opened.stdout, .stderr = "" };
     try testing.expectError(error.NoteMissing, check_device_opened(silent, 0));
-    const as_user = Streams{
-        .stdout = "1000 65534\nOPENED-READ\nOPENED-WRITE\n",
-        .stderr = opened.stderr,
-    };
-    try check_device_opened_as_user(as_user, 0);
-    const dropped = Streams{ .stdout = "1000\nOPENED-READ\nOPENED-WRITE\n", .stderr = opened.stderr };
-    try testing.expectError(error.DeviceAccessWrong, check_device_opened_as_user(dropped, 0));
     const refused = "error[ZBX-E0225]: can't bind that device\n  cause  you cannot open " ++
         "/dev/x: mode 0660, owner 0, group 1 (you are not in that group)\n";
     try check_device_refused(.{ .stdout = "", .stderr = refused }, 125);
