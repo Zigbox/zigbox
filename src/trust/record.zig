@@ -29,6 +29,7 @@ const layout = @import("../store/layout.zig");
 const provenance = @import("provenance.zig");
 const dsse = @import("dsse.zig");
 const statement = @import("statement.zig");
+const signature_record = @import("signature_record.zig");
 
 const Digest = digest_mod.Digest;
 const PathBuf = fs_mod.PathBuf;
@@ -44,12 +45,8 @@ pub const ParseError = error{
     Newer,
 };
 
-pub const AddError = error{
-    /// The record already has `signatures_per_tree_max` distinct lines.
-    Full,
-};
-
-pub const Added = enum { added, present };
+pub const AddError = signature_record.AddError;
+pub const Added = signature_record.Added;
 
 /// The memory parse needs, about 6 MiB: the caller makes one (static or heap) and reuses it.
 pub const Work = struct {
@@ -63,61 +60,7 @@ pub const Work = struct {
     file: [constants.signature_record_bytes_max + 1]u8,
 };
 
-pub const Record = struct {
-    bytes: [constants.signature_record_bytes_max]u8,
-    length: u32,
-    count: u32,
-
-    pub fn clear(record: *Record) void {
-        record.length = 0;
-        record.count = 0;
-    }
-
-    pub fn text(record: *const Record) []const u8 {
-        assert(record.length <= constants.signature_record_bytes_max);
-        return record.bytes[0..record.length];
-    }
-
-    /// Line `index` (0-based), without its newline.
-    pub fn line(record: *const Record, index: u32) []const u8 {
-        assert(index < record.count);
-        var start: usize = 0;
-        var at: u32 = 0;
-        const bytes = record.text();
-        while (true) {
-            const end = std.mem.indexOfScalarPos(u8, bytes, start, '\n').?;
-            if (at == index) return bytes[start..end];
-            start = end + 1;
-            at += 1;
-        }
-    }
-
-    /// True if `envelope` (one line's bytes, no newline) is already a line.
-    pub fn has(record: *const Record, envelope: []const u8) bool {
-        for (0..record.count) |index| {
-            if (std.mem.eql(u8, record.line(@intCast(index)), envelope)) return true;
-        }
-        return false;
-    }
-
-    /// Appends `envelope` as a line unless it is there already. The caller made the envelope
-    /// itself, so it is well formed; this only enforces the bounds.
-    pub fn add(record: *Record, envelope: []const u8) AddError!Added {
-        assert(envelope.len > 0);
-        assert(envelope.len <= constants.envelope_bytes_max);
-        assert(std.mem.indexOfScalar(u8, envelope, '\n') == null);
-        if (record.has(envelope)) return .present;
-        if (record.count == constants.signatures_per_tree_max) return error.Full;
-        const need = envelope.len + 1;
-        // Eight lines of the longest envelope fit by the constant's definition.
-        assert(record.length + need <= constants.signature_record_bytes_max);
-        @memcpy(record.bytes[record.length..][0..envelope.len], envelope);
-        record.bytes[record.length + envelope.len] = '\n';
-        record.length += @intCast(need);
-        record.count += 1;
-        return .added;
-    }
-};
+pub const Record = signature_record.Record;
 
 /// True when a line of `record` is a signature by `public` over the same subjects as `said`
 /// (`signedAt` aside). The lines were verified when the record was read, so one that does not

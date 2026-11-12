@@ -49,6 +49,7 @@ pub fn build(b: *std.Build) void {
     add_packages_steps(b, options);
     add_demo_step(b, options, vm_module);
     add_errors_site_steps(b);
+    add_trust_wasm_step(b);
     add_dbus_live_step(b, options);
     add_check_step(b, fuzz);
     add_vm_kernel_steps(b);
@@ -654,6 +655,22 @@ fn add_errors_site_steps(b: *std.Build) void {
     check_step.dependOn(&check.step);
 }
 
+/// `zig build trust-wasm`: compiles the pure trust surface (`zigbox.trust`) for
+/// `wasm32-freestanding`, so Zigcube's core can link it. A host or store import in it fails here.
+fn add_trust_wasm_step(b: *std.Build) void {
+    const object = b.addObject(.{
+        .name = "trust_wasm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/trust_wasm_check.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+            .optimize = .ReleaseSafe,
+            .link_libc = false,
+        }),
+    });
+    const step = b.step("trust-wasm", "Compile the pure trust surface for wasm32-freestanding");
+    step.dependOn(&object.step);
+}
+
 /// `zig build check`: every gate a slice must pass, in one command, ending in the one line a
 /// report quotes (`check: PASS <commit>`). Build, test, tidy, release and the error pages run
 /// first, as dependencies; then, as root, `zig build test` again as -Dcheck-user (default tester)
@@ -676,7 +693,7 @@ fn add_check_step(b: *std.Build, fuzz: *std.Build.Step.Compile) void {
     run.addArtifactArg(fuzz);
     run.has_side_effects = true;
     const gates = [_][]const u8{
-        "install", "test", "tidy", "release", "errors-site-check", "harness",
+        "install", "test", "tidy", "release", "errors-site-check", "harness", "trust-wasm",
     };
     for (gates) |name| {
         const gate = b.top_level_steps.get(name) orelse @panic(name);

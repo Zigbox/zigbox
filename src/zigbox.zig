@@ -170,6 +170,11 @@ pub const push = struct {
     pub const ecr = @import("push/ecr.zig");
 };
 
+/// The pure trust surface (M8): policy, verdict, DSSE, statements, keys' public text and the
+/// signature record's type, with caller-supplied storage and no host or store. It compiles for
+/// `wasm32-freestanding` (`zig build trust-wasm`). `trust_export.zig` has the rest.
+pub const trust = @import("trust_export.zig");
+
 /// State volumes (M6): their names, layout, records and locks (`state/state.zig`).
 pub const state = @import("state/state.zig");
 
@@ -215,6 +220,10 @@ test "the module's surface is what the contract names" {
     _ = push.UploadWorkspace;
     _ = exec_signal;
     _ = ExecHandle;
+    _ = trust.verdict.judge;
+    _ = trust.policy.parse;
+    _ = trust.dsse.parse;
+    _ = trust.statement.parse;
     try std.testing.expect(std.meta.fieldNames(ExecExit).len == 3);
     try std.testing.expect(std.meta.fieldNames(Status).len == 3);
 }
@@ -250,4 +259,39 @@ test "the module's surface for a second product's diagnostics" {
         .exit_text = "1",
     };
     try std.testing.expect(explain.render_entry(entry, &out).len > 0);
+}
+
+test "the pure trust surface imports nothing that touches the host or the store" {
+    // Goal: `trust` stays callable from `wasm32-freestanding` (`zig build trust-wasm`). Method:
+    // the compile check cannot see an import of a host file that nothing calls, so read each
+    // exported file's imports and refuse the host, the store's files and the files that use them.
+    // The forbidden list is the whole of what the files may not name; `constants.zig` and the
+    // lexer are pure.
+    const sources = [_][]const u8{
+        @embedFile("trust/policy.zig"),
+        @embedFile("trust/verdict.zig"),
+        @embedFile("trust/dsse.zig"),
+        @embedFile("trust/statement.zig"),
+        @embedFile("trust/key.zig"),
+        @embedFile("trust/json.zig"),
+        @embedFile("trust/signature_record.zig"),
+        @embedFile("build/lexer.zig"),
+        @embedFile("trust_export.zig"),
+    };
+    const forbidden = [_][]const u8{
+        "host.zig\")",    "host_real.zig", "store/", "provenance.zig", "trust/record.zig",
+        "\"record.zig\"", "diag/",
+    };
+    for (sources) |source| {
+        for (forbidden) |name| {
+            var lines = std.mem.splitScalar(u8, source, '\n');
+            while (lines.next()) |line| {
+                const is_import = std.mem.indexOf(u8, line, "@import(") != null;
+                const is_comment = std.mem.startsWith(u8, std.mem.trimLeft(u8, line, " "), "//");
+                if (is_import and !is_comment) {
+                    try std.testing.expect(std.mem.indexOf(u8, line, name) == null);
+                }
+            }
+        }
+    }
 }
