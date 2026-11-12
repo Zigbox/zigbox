@@ -258,11 +258,12 @@ fn same_code(
 fn profile_exists(io: Io, profile: []const u8, keychain: []const u8) bool {
     var words: [8][]const u8 = undefined;
     const tail = notary_arguments("history", "", profile, keychain, &words);
-    var argv: [9][]const u8 = undefined;
+    var argv: [10][]const u8 = undefined;
     argv[0] = "/usr/bin/xcrun";
-    @memcpy(argv[1 .. 1 + tail.len], tail);
+    argv[1] = "--no-cache"; // no per-user lookup cache that another process could have edited
+    @memcpy(argv[2 .. 2 + tail.len], tail);
     var child = std.process.spawn(io, .{
-        .argv = argv[0 .. 1 + tail.len],
+        .argv = argv[0 .. 2 + tail.len],
         .stdout = .ignore,
         .stderr = .ignore,
     }) catch return false;
@@ -337,10 +338,11 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
             arguments.keychain,
             &notary_words,
         );
-        var notary_argv: [9][]const u8 = undefined;
+        var notary_argv: [10][]const u8 = undefined;
         notary_argv[0] = "/usr/bin/xcrun";
-        @memcpy(notary_argv[1 .. 1 + notary.len], notary);
-        try exec(io, log, notary_argv[0 .. 1 + notary.len]);
+        notary_argv[1] = "--no-cache"; // see profile_exists
+        @memcpy(notary_argv[2 .. 2 + notary.len], notary);
+        try exec(io, log, notary_argv[0 .. 2 + notary.len]);
         // A Mach-O on its own cannot be stapled, and the archive is not a bundle either: the
         // ticket stays with Apple, and Gatekeeper asks for it the first time a quarantined copy
         // runs. Nothing is stapled.

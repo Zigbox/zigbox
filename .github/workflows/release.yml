@@ -163,6 +163,11 @@ jobs:
     runs-on: ${{ vars.MAC_RUNNER_LABEL }}
     timeout-minutes: 60
     environment: release
+    defaults:
+      run:
+        # By absolute path: a bare `bash` is found through PATH, and a program planted in a
+        # Homebrew directory by another job on this runner would get the step's environment.
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
     permissions:
       contents: write
     concurrency:
@@ -256,7 +261,7 @@ jobs:
           echo "SIGN_IDENTITY=$hash" >> "$GITHUB_ENV"
           printf '%s\n' "$MAC_NOTARY_KEY" > "$SECRETS_DIR/notary.p8"
           unset MAC_NOTARY_KEY
-          /usr/bin/xcrun notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
+          /usr/bin/xcrun --no-cache notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
             --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" > /dev/null
           rm -f "$SECRETS_DIR/notary.p8"
           listed=$(/usr/bin/security list-keychains -d user)
@@ -270,7 +275,7 @@ jobs:
         run: |
           set -euo pipefail
           cd zig-out/mac-release
-          shasum -a 256 -c "zbx-${TAG#v}-macos-arm64.zip.sha256"
+          /usr/bin/shasum -a 256 -c "zbx-${TAG#v}-macos-arm64.zip.sha256"
       - name: Attach the zip to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -440,6 +445,11 @@ jobs:
       || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ${{ vars.MAC_RUNNER_LABEL }}
     timeout-minutes: 45
+    defaults:
+      run:
+        # By absolute path: a bare `bash` is found through PATH, and a program planted in a
+        # Homebrew directory by another job on this runner would get the step's environment.
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
     concurrency:
       group: release-mac-test-${{ github.ref }}
       cancel-in-progress: true
@@ -502,7 +512,7 @@ jobs:
         run: |
           set -euo pipefail
           cd zig-out/mac-release
-          shasum -a 256 -c zbx-*-macos-arm64.zip.sha256
+          /usr/bin/shasum -a 256 -c zbx-*-macos-arm64.zip.sha256
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |

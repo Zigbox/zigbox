@@ -31,6 +31,16 @@ It adds to `2026-11-12-release-automation-before-0.5.1.md`.
   valid identity.
 - `tag.yml` tags only a commit that added `docs/releases/<version>.md`; a later green commit is
   never tagged as the release. Re-run the failed workflow on the release commit.
-- Open design point for the owner: while the job runs, the unlocked keychain is usable by any
-  process of the runner user. A runner or macOS user kept only for the `release` environment
-  would close that.
+- Every step of the `mac` and `mac-test` jobs runs under `/bin/bash --noprofile --norc -euo
+  pipefail {0}` (job `defaults.run.shell`), so no `bash` is found through `PATH`. `xcrun` is run
+  with `--no-cache` in the workflow and in `mac_release.zig`. `tag.yml` tags only a commit that
+  added the notes (`--diff-filter=A`), and its concurrency group is per commit. A fix after a
+  failed release needs a new version, or the owner's written go-ahead.
+- **Owner precondition, not fixable in code.** A process of the same macOS user can read the
+  Developer ID key, its password and the notary key (`ps -E` on the step's initial environment,
+  the mode-600 files while they exist, the keychain passwords on argv with a copy of the
+  keychain file), and can use the unlocked keychain for up to an hour. The first three are a
+  permanent compromise. Before any secret is added to the `release` environment the owner runs a
+  separate macOS user with its own runner instance, in a runner group limited to `release.yml`
+  on tags (steps in `docs/releases/automation.md`, step 0). The code may merge before that: with
+  no secrets every secret-bearing step fails closed.

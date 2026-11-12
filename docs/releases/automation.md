@@ -161,6 +161,23 @@ so one click covers both; if GitHub asks twice, that is recorded and accepted, n
 
 Every value goes in through `gh`'s standard input or a prompt, never on the command line.
 
+**0. Before any secret goes into `release` (precondition).** The Mac secrets must never be
+readable by code a pull request controls. A process of the same macOS user can read the
+environment of the signing step (`ps -E`), the mode-600 files while they exist, and the random
+keychain passwords on argv, so mode 600, `unset` and the temporary keychain do not protect them.
+The runner that runs pull request jobs (`mac.yml`, `mac-test`) therefore must not be the one that
+holds the secrets. Before adding `MAC_CERT_P12`, `MAC_CERT_PASSWORD` or `MAC_NOTARY_KEY`:
+
+- create a separate macOS user and run a second runner instance as that user, with its own
+  `PATH` without Homebrew and a label of its own (set `MAC_RUNNER_LABEL` for `release.yml` to it);
+- put that runner in a runner group limited to `release.yml` on `refs/tags/v*` (runner groups
+  take selected workflows);
+- keep `mac.yml` and `mac-test` on the existing runner.
+
+The code may merge before this, because every secret-bearing step fails closed with no secrets.
+Without this step, adding them needs the owner's written acceptance of the risk in
+`docs/decisions/`.
+
 **1. The GitHub App.** In the browser: Zigbox organisation → Settings → Developer settings →
 GitHub Apps → New GitHub App. Name `Zigbox Release`; no webhook (untick Active); repository
 permissions **Contents: Read and write**, **Actions: Read**, Metadata: Read; "Only on this
