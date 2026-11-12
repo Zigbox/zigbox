@@ -9,8 +9,9 @@
 //! keeps the user's supplementary groups (ZBX-W0209), and why a node the user cannot open is
 //! refused here, with its mode and group, instead of failing in the workload.
 //!
-//! A path holds no ':' , no space, no control byte and no '..': every part is a name, so that
-//! the run record can keep the paths in one string separated by spaces.
+//! A path holds no ':', quote, backslash, space, control or non-ASCII byte and no '..': every
+//! part is a name, so that the run record keeps the paths in one string separated by spaces, with
+//! nothing to escape.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -38,8 +39,8 @@ pub const Problem = enum {
         assert(@tagName(problem).len > 0);
         return switch (problem) {
             .not_under_dev => "only a device node below /dev can be given",
-            .too_long => "the path is longer than 128 bytes",
-            .unusable_byte => "the path has a ':', a space or a control character",
+            .too_long => "the path is longer than 48 bytes",
+            .unusable_byte => "the path has a quote, a backslash, a ':', a space, or a byte that is not printable ASCII",
             .dot_dot => "the path has a '..' part",
             .reserved => "every container has that one already",
         };
@@ -53,7 +54,7 @@ pub fn path_problem(path: []const u8) ?Problem {
     if (!std.mem.startsWith(u8, path, prefix)) return .not_under_dev;
     if (path.len == prefix.len) return .not_under_dev;
     for (path) |byte| {
-        if (byte == ':' or byte <= ' ' or byte == 0x7f) return .unusable_byte;
+        if (byte == ':' or byte == '"' or byte == '\\' or byte <= ' ' or byte >= 0x7f) return .unusable_byte;
     }
     var parts = std.mem.splitScalar(u8, path[prefix.len..], '/');
     while (parts.next()) |part| {
@@ -190,6 +191,9 @@ test "paths: the rules" {
     try testing.expectEqual(Problem.dot_dot, path_problem("/dev/../etc/passwd"));
     try testing.expectEqual(Problem.unusable_byte, path_problem("/dev/a b"));
     try testing.expectEqual(Problem.unusable_byte, path_problem("/dev/a:b"));
+    try testing.expectEqual(Problem.unusable_byte, path_problem("/dev/a\"b"));
+    try testing.expectEqual(Problem.unusable_byte, path_problem("/dev/a\\b"));
+    try testing.expectEqual(Problem.unusable_byte, path_problem("/dev/\xc3\xa9"));
     try testing.expectEqual(Problem.reserved, path_problem("/dev/null"));
     try testing.expectEqual(Problem.reserved, path_problem("/dev/shm/x"));
     try testing.expectEqual(Problem.reserved, path_problem("/dev/pts"));

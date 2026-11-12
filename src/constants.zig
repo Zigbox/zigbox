@@ -240,7 +240,7 @@ pub const groups_max: u32 = 256;
 pub const run_devices_max: u32 = 16;
 /// A device's path, as typed and as the record keeps it: `/dev/` and at most this many bytes
 /// in all (`/dev/dri/renderD128` is 18).
-pub const device_path_bytes_max: u32 = 128;
+pub const device_path_bytes_max: u32 = 48;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them

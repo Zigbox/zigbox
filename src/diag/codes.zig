@@ -72,6 +72,7 @@ pub const Code = enum(u8) {
     E0222,
     E0223,
     E0224,
+    E0225,
     W0201,
     W0202,
     W0203,
@@ -79,6 +80,7 @@ pub const Code = enum(u8) {
     W0205,
     W0206,
     W0207,
+    W0209,
     E0301,
     E0302,
     E0303,
@@ -1057,6 +1059,26 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0225,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "can't bind that device into the container",
+        .explanation =
+        \\--device /dev/<path> binds a device node of the host into the container's
+        \\/dev at the same path. zbx takes a character device below /dev that you can
+        \\open for reading and writing, given once; at most 16 per run, and never one
+        \\of the devices every container has (null, zero, full, random, urandom, tty).
+        \\
+        \\A rootless container has no device cgroup: the host's file permissions alone
+        \\decide who may open a node. zbx therefore looks at the node first, and
+        \\refuses one it cannot open, naming its mode and group, rather than letting
+        \\the workload fail later. It never changes a node's mode or group.
+        \\
+        \\A run with devices keeps your supplementary groups, so a node that is 0660
+        \\root:render opens for a member of "render".
+        ,
+    },
+    .{
         .code = .W0201,
         .severity = .warning,
         .blame = .environment,
@@ -1161,6 +1183,19 @@ pub const registry = [_]Entry{
         \\(<state>/zbx/logs/<name>.exec): the command and how it ended, never the
         \\environment, so that "zbx bundle" can show them. This exec's entry could not
         \\be written; the cause says why. The command itself ran as reported.
+        ,
+    },
+    .{
+        .code = .W0209,
+        .severity = .warning,
+        .blame = .environment,
+        .summary = "groups show as nogroup inside the container",
+        .explanation =
+        \\A run with --device keeps your supplementary groups, so that a device node
+        \\owned by a group you belong to can be opened. The container's user namespace
+        \\does not map those groups' ids, so inside it they show as "nogroup" (65534).
+        \\The groups still count: the host's file permissions decide, and ls -l inside
+        \\the container shows the group as nogroup. zbx says so once per run.
         ,
     },
     .{
@@ -4203,7 +4238,7 @@ pub fn can_end_run(code: Code) bool {
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
-        .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,
+        .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .W0207, .W0209 => false,
         else => true,
     };
 }

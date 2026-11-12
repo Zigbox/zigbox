@@ -42,6 +42,7 @@ const codes = @import("../diag/codes.zig");
 const spec_mod = @import("spec.zig");
 const volume = @import("../state/volume.zig");
 const mounts_mod = @import("mounts.zig");
+const devices_mod = @import("devices.zig");
 
 const Host = host_mod.Host;
 
@@ -124,6 +125,8 @@ pub const View = struct {
     binding: Binding = .none,
     /// Version 10: the listener the run asked for (`--listen`), never a descriptor.
     listen: ?spec_mod.Listen = null,
+    /// Version 10: the host devices the run asked for (`--device`), as it asked.
+    devices: []const devices_mod.Device = &.{},
 };
 
 pub const Binding = spec_mod.Binding;
@@ -173,7 +176,8 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     write_bytes(&writer, ".{\n");
     // A record without a listener stays at the plain version, byte for byte as before M8b.
     const plain = constants.record_version_plain;
-    const version = if (view.listen != null) constants.record_version else plain;
+    const has_new = view.listen != null or view.devices.len > 0;
+    const version = if (has_new) constants.record_version else plain;
     write_format(&writer, "    .version = {d},\n", .{version});
     write_bytes(&writer, "    .name = ");
     write_string(&writer, view.name);
@@ -257,6 +261,19 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     write_format(writer, "    .user = \"{d}:{d}\",\n", .{ user.uid, user.gid });
     write_binding(writer, view.binding);
     write_listen(writer, view.listen);
+    write_devices(writer, view.devices);
+}
+
+/// `.devices = "/dev/dri/renderD128 /dev/kfd",` for a run with devices; no line for one without,
+/// and then the record is version 10.
+fn write_devices(writer: *std.Io.Writer, devices: []const devices_mod.Device) void {
+    assert(writer.end <= writer.buffer.len);
+    assert(devices_mod.list_problem(devices) == null);
+    if (devices.len == 0) return;
+    var storage: [devices_mod.text_bytes_max]u8 = undefined;
+    write_bytes(writer, "    .devices = ");
+    write_string(writer, devices_mod.text(devices, &storage));
+    write_bytes(writer, ",\n");
 }
 
 /// `.listen = "127.0.0.1:8080",` for a run with a listener; no line for one without.
@@ -421,8 +438,10 @@ comptime {
     const binding = 96;
     // Version 10: `.listen = "127.0.0.1:65535",` with its newline.
     const listen = 48;
+    // `.devices = "...",`: the paths hold no byte that is escaped (`devices.path_problem`).
+    const devices = devices_mod.text_bytes_max + 32;
     const total = strings + command + labels + diagnostic + scope + store + network + state +
-        mounts + user + binding + listen + 512;
+        mounts + user + binding + listen + devices + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -490,6 +509,15 @@ pub const Parsed = struct {
     binding: ?Binding,
     /// Version 10: the listener the run asked for; null for an older record or none.
     listen: ?spec_mod.Listen,
+    /// Version 10: the paths of the run's `--device`s, space-separated; empty for none.
+    devices: [devices_mod.text_bytes_max]u8,
+    devices_len: u16,
+
+    /// The `--device` paths the run asked for, as one string.
+    pub fn devices_text(parsed: *const Parsed) []const u8 {
+        assert(parsed.devices_len <= devices_mod.text_bytes_max);
+        return parsed.devices[0..parsed.devices_len];
+    }
 
     /// The `index`th other mount the run made; its strings point into this record.
     pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
@@ -696,6 +724,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.user = null;
     out.binding = null;
     out.listen = null;
+    out.devices_len = 0;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -854,6 +883,7 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "user")) return parse_user(value, out);
     if (std.mem.eql(u8, key, "binding")) return parse_binding(value, out);
     if (std.mem.eql(u8, key, "listen")) return parse_listen_field(value, out);
+    if (std.mem.eql(u8, key, "devices")) return parse_devices(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
     return parse_limit_field(key, value, out);
@@ -967,6 +997,27 @@ fn parse_listen_field(value: []const u8, out: *Parsed) bool {
         },
         .problem => return false,
     }
+}
+
+/// `"/dev/a /dev/b"`: the paths `write_devices` writes. A list that `--device` would refuse is
+/// not a record this version wrote.
+fn parse_devices(value: []const u8, out: *Parsed) bool {
+    assert(value.len <= constants.record_bytes_max);
+    out.devices_len = 0; // A repeated field: the later one wins.
+    var text: [devices_mod.text_bytes_max]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    if (length == 0) return true;
+    var list: [constants.run_devices_max]devices_mod.Device = undefined;
+    var count: u32 = 0;
+    var parts = std.mem.splitScalar(u8, text[0..length], ' ');
+    while (parts.next()) |part| : (count += 1) {
+        if (count == constants.run_devices_max) return false;
+        list[count] = .{ .path = part };
+    }
+    if (devices_mod.list_problem(list[0..count]) != null) return false;
+    @memcpy(out.devices[0..length], text[0..length]);
+    out.devices_len = @intCast(length);
+    return true;
 }
 
 /// `"none"`, `"result:<64 hex>"` or `"manifest:<64 hex>"`, as `write_binding` writes it.
