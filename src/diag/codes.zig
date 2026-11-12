@@ -215,6 +215,8 @@ pub const Code = enum(u8) {
     E0806,
     E0807,
     W0801,
+    E0817,
+    W0802,
     E0901,
     E0902,
     E0903,
@@ -3388,6 +3390,41 @@ pub const registry = [_]Entry{
         ,
     },
     .{
+        .code = .E0817,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a user or group name is not in the image",
+        .explanation =
+        \\A step's .user, a copy's .chown, or the image's .config .user names a user or
+        \\group, and zbx looks the name up in /etc/passwd and /etc/group of the tree the
+        \\step runs on (the step's base, with its needs mounted). A name that is not
+        \\there is refused before anything runs, so a build does not silently run as the
+        \\wrong id.
+        \\
+        \\The cause names where the name was written (the step or .image.config) and
+        \\the name. To fix it, add the user or group in an earlier step (for example a
+        \\step that runs adduser) and base this step on it with .base = "step:NAME", or
+        \\write the id as a number.
+        ,
+    },
+    .{
+        .code = .W0802,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the build has steps with cache mounts",
+        .explanation =
+        \\A step with .caches mounts a directory that lives outside the build's result
+        \\and persists between builds, so what the step produces can depend on what the
+        \\cache held, not only on the build's inputs. zbx never puts a cache in a step's
+        \\key, so a rebuild that hits the step cache is unchanged, but a step that does
+        \\run on another machine, or after --clear-caches, can produce different bytes.
+        \\
+        \\The cause names the steps. To make the build reproducible, keep the cache to
+        \\things the command verifies or rebuilds (a download cache), and do not let the
+        \\command's output depend on what was in it.
+        ,
+    },
+    .{
         .code = .E0901,
         .severity = .@"error",
         .blame = .user,
@@ -4201,6 +4238,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
+        .E0817, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .W0207 => false,

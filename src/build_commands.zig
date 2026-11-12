@@ -12,6 +12,8 @@ const host_mod = @import("host.zig");
 const text_util = @import("text.zig");
 const file_mod = @import("build/file.zig");
 const load_mod = @import("build/load.zig");
+const graph_mod = @import("build/graph.zig");
+const diagnose = @import("build/diagnose.zig");
 const compose = @import("build/compose.zig");
 const doctor = @import("doctor.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -110,6 +112,10 @@ pub fn run(
     if (args.graph) return print_graph(host, &workspace.loaded, json, diag);
     const composed = &workspace.composed;
     const loaded = &workspace.loaded;
+    if (graph_mod.unrunnable(&loaded.file, &loaded.graph)) |found| {
+        diagnose.unrunnable(diag, loaded.shown(), &loaded.file, found);
+        return error.Failed;
+    }
     compose.run_steps(host, facts, loaded, composed, options, diag) catch |err| {
         return if (err == error.OutputFailed) error.OutputFailed else error.Failed;
     };

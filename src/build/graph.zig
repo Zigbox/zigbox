@@ -16,6 +16,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const file_mod = @import("file.zig");
+const glob_mod = @import("glob.zig");
 
 const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
@@ -125,6 +126,41 @@ pub fn order(file: *const BuildFile, graph: *Graph, problem: *Problem) Result {
 }
 
 /// The step named `name`, or null.
+/// A builder addition that parses but that this build cannot run yet (the runtime lands in a
+/// later slice of M9): what it is, and the step it is in (null for the file or the image).
+pub const Unrunnable = struct {
+    step: ?u8,
+    field: []const u8,
+};
+
+/// The first part of `file` that `zbx build` cannot run yet, if any, so that a build never
+/// quietly ignores a field. `--graph` shows every field and does not ask.
+pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
+    assert(graph.count == file.steps_count);
+    if (file.exclude.given) return .{ .step = null, .field = ".exclude" };
+    if (graph.image_base != null) return .{ .step = null, .field = ".image .base = \"step:\"" };
+    if (file.image.config.user) |user| {
+        if (!file_mod.is_numeric_user(file.text(user))) {
+            return .{ .step = null, .field = ".image .config .user as a name" };
+        }
+    }
+    for (file.steps_slice(), 0..) |*step, index| {
+        const at: u8 = @intCast(index);
+        if (step.output == .root) return .{ .step = at, .field = ".output = .root" };
+        if (step.user != null) return .{ .step = at, .field = ".user" };
+        if (step.workdir != null) return .{ .step = at, .field = ".workdir" };
+        if (step.copy.given) return .{ .step = at, .field = ".copy" };
+        if (step.caches.given) return .{ .step = at, .field = ".caches" };
+        if (step.binds.given) return .{ .step = at, .field = ".binds" };
+        if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
+        if (graph.base_step[index] != null) return .{ .step = at, .field = ".base = \"step:\"" };
+        for (step.inputs.slice()) |input| {
+            if (glob_mod.is_glob(file.text(input))) return .{ .step = at, .field = "an input glob" };
+        }
+    }
+    return null;
+}
+
 pub fn step_named(file: *const BuildFile, name: []const u8) ?u8 {
     assert(file.steps_count <= constants.build_steps_max);
     for (file.steps_slice(), 0..) |*step, index| {
@@ -497,4 +533,27 @@ test "a cycle through a base is refused, and an unknown step in a base, from or 
     text = step_head ++ " .base = \"step:nope\" }, .steps = .{} }";
     try testing.expectEqual(Result.refused, try order_text(text, &problem));
     try testing.expectEqual(ProblemKind.unknown_image_base, problem.kind);
+}
+
+test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
+    // Goal: no M9 field is quietly ignored by `zbx build`. Method: one file per field.
+    var problem: Problem = undefined;
+    const plain = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
+    const fields = [_][]const u8{
+        ".output = .root", ".user = \"app\"", ".workdir = \"/w\"", ".exclude = .{}",
+        ".inputs = .{ \"*.go\" }", ".caches = .{}", ".binds = .{}",
+    };
+    inline for (fields) |field| {
+        const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+            ".run = .{\"x\"}, " ++ field ++ " } } }";
+        try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+        const found = unrunnable(&test_file, &test_graph).?;
+        try testing.expectEqual(@as(?u8, 0), found.step);
+    }
+    const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", .run = .{\"x\"} }, " ++
+        ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(base, &problem));
+    try testing.expectEqual(@as(?u8, 1), unrunnable(&test_file, &test_graph).?.step);
 }

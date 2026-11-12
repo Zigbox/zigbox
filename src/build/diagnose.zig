@@ -453,6 +453,33 @@ fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Prob
     }
 }
 
+/// `E0802` for a part of the file that parses but that `zbx build` cannot run yet.
+pub fn unrunnable(
+    diag: *Diag,
+    shown: []const u8,
+    file: *const BuildFile,
+    found: graph_mod.Unrunnable,
+) void {
+    assert(diag.code == null);
+    assert(found.field.len > 0);
+    var shown_echo: Echo = undefined;
+    var step_echo: Echo = undefined;
+    const path = text_util.sanitise(&shown_echo, shown);
+    diag.raise(.E0802);
+    diag.while_("starting the build of '{s}'", .{path});
+    if (found.step) |step| {
+        diag.cause("'{s}': step \"{s}\" uses {s}, which this zbx reads but cannot build yet", .{
+            path, step_text(&step_echo, file, step), found.field,
+        });
+    } else {
+        diag.cause("'{s}': {s} is read but cannot be built yet", .{ path, found.field });
+    }
+    diag.context("path", "{s}", .{path});
+    diag.fix(.{ .sentence = "remove it, or use a zbx that builds it; `zbx build --graph` " ++
+        "still shows the file" });
+    assert(diag.code.? == .E0802);
+}
+
 /// `E0803` for an input that the disk refused. `project` is the resolved project directory.
 pub fn input_problem(
     diag: *Diag,
@@ -1045,6 +1072,43 @@ pub fn network_steps(diag: *Diag, names: []const u8, count: u32) void {
         .sentence = "pin what they fetch, or fetch it once outside the build as an input",
     });
     assert(diag.code.? == .W0801);
+}
+
+/// `E0817`: a `.user` or `.group` name is not in the `/etc/passwd` or `/etc/group` the step (or
+/// `.image.config`) is looked up in. `where` is what named it, already written, such as
+/// `step "a"`; `name` is the name as written.
+pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
+    assert(diag.code == null);
+    assert(where.len > 0);
+    var echo: Echo = undefined;
+    const shown = text_util.sanitise(&echo, name);
+    diag.raise(.E0817);
+    diag.while_("planning the build", .{});
+    diag.cause("{s} .user \"{s}\" is not in /etc/passwd of its base", .{ where, shown });
+    diag.context("name", "{s}", .{shown});
+    diag.fix(.{
+        .sentence = "add the user in an earlier step and base this step on it with " ++
+            ".base = \"step:NAME\", or write the id as a number",
+    });
+    assert(diag.code.? == .E0817);
+}
+
+/// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
+/// already quoted and joined by `, `; `count` is how many there are.
+pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
+    assert(diag.code == null);
+    assert(count > 0);
+    assert(names.len > 0);
+    diag.raise(.W0802);
+    diag.while_("planning the build", .{});
+    diag.cause("their output can depend on what a cache held, not only on the inputs", .{});
+    diag.cause("steps with cache mounts: {s}", .{names});
+    diag.context("steps", "{d}", .{count});
+    diag.fix(.{
+        .sentence = "keep each cache to what the command verifies or rebuilds, and do not " ++
+            "let its output depend on what was in it",
+    });
+    assert(diag.code.? == .W0802);
 }
 
 /// The names of the network steps, joined by `, ` into `out`; when they do not fit, the ones

@@ -473,3 +473,68 @@ test "equal tells files apart by each value" {
     );
     try testing.expect(equal(&first, &second));
 }
+
+const m9_file =
+    \\.{ .version = 1, .exclude = .{ ".git", "!keep.log" },
+    \\  .image = .{ .base = "step:b", .config = .{ .user = "app:app" } },
+    \\  .steps = .{
+    \\    .{ .name = "b", .base = "alpine:3.20", .run = .{ "true" }, .output = .root },
+    \\    .{ .name = "a", .base = "step:b", .user = "app", .workdir = "/w", .exclude = .{},
+    \\       .inputs = .{ "src/**/*.go" }, .run = .{ "true" },
+    \\       .caches = .{ .{ .id = "c", .path = "/c", .ro = true, .mode = "0755", .uid = 1, .gid = 2 } },
+    \\       .binds = .{ .{ .from = "step:b", .source = "/usr/bin", .to = "/tools" } } },
+    \\    .{ .name = "c", .base = "alpine:3.20",
+    \\       .copy = .{ .{ .from = "step:a", .src = .{ "a*" }, .to = "/d/", .chown = "app",
+    \\                     .chmod = "644", .exclude = .{ "*.o" } } } },
+    \\  },
+    \\}
+;
+
+test "every builder addition is printed, read back equal and printed the same" {
+    // Goal: the canonical form carries the M9 fields. Method: one file with all of them, round
+    // tripped, with each field's printed text looked for; then each value changed once.
+    const canonical = try round_trip(m9_file);
+    const printed = [_][]const u8{
+        ".output = .root,",     ".user = \"app\",",       ".workdir = \"/w\",",
+        ".exclude = .{},",      ".base = \"step:b\",",    ".ro = true",
+        ".mode = \"0755\"",     ".uid = 1, .gid = 2",     ".from = \"step:b\", .source",
+        ".chown = \"app\"",     ".chmod = \"644\"",       ".exclude = .{ \"*.o\" }",
+        ".exclude = .{ \".git\"", ".user = \"app:app\"",
+    };
+    for (printed) |needle| {
+        if (std.mem.indexOf(u8, canonical, needle) == null) {
+            std.debug.print("not printed: {s}\n{s}\n", .{ needle, canonical });
+            return error.TestUnexpectedResult;
+        }
+    }
+    const changed = [_][2][]const u8{
+        .{ ".output = .root", ".output = .out" },    .{ "\"app\", .workdir", "\"bpp\", .workdir" },
+        .{ "\"/w\"", "\"/x\"" },                     .{ ".ro = true", ".ro = false" },
+        .{ ".uid = 1", ".uid = 3" },                 .{ "\"0755\"", "\"0700\"" },
+        .{ "\"/tools\"", "\"/tool\"" },              .{ "\"644\"", "\"640\"" },
+        .{ "\"*.o\"", "\"*.p\"" },                   .{ "\"!keep.log\"", "\"keep.log\"" },
+        .{ "\"app:app\"", "\"app:bpp\"" },           .{ "\"src/**/*.go\"", "\"src/*.go\"" },
+        .{ ".exclude = .{},", "" },
+    };
+    var buffer: [m9_file.len + 16]u8 = undefined;
+    for (changed) |pair| {
+        const at = std.mem.indexOf(u8, m9_file, pair[0]).?;
+        const head = at;
+        const tail = m9_file[at + pair[0].len ..];
+        @memcpy(buffer[0..head], m9_file[0..head]);
+        @memcpy(buffer[head..][0..pair[1].len], pair[1]);
+        @memcpy(buffer[head + pair[1].len ..][0..tail.len], tail);
+        const length = head + pair[1].len + tail.len;
+        var problem: file_mod.Problem = undefined;
+        try testing.expectEqual(
+            file_mod.ParseResult.parsed,
+            file_mod.parse(m9_file, &first, &problem),
+        );
+        const result = file_mod.parse(buffer[0..length], &second, &problem);
+        try testing.expectEqual(file_mod.ParseResult.parsed, result);
+        if (equal(&first, &second)) {
+            std.debug.print("equal after: {s} -> {s}\n", .{ pair[0], pair[1] });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

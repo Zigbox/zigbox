@@ -345,3 +345,18 @@ test "a nested input through a link is an overlap as written" {
     try testing.expect(written_overlap("src", "src/a"));
     try testing.expect(written_overlap("a/b", "a/b"));
 }
+
+test "an input with a glob byte is a pattern, checked for form and not read from the disk" {
+    // Goal: globs are accepted without a file behind them, and a bad one is refused by name.
+    // Method: patterns that match nothing here, an unclosed class, a `..` part, a trailing `\`.
+    tree();
+    var problem: Problem = undefined;
+    try testing.expectEqual(Result.ok, try check_inputs("\"nothing/**/*.go\", \"a?\"", &problem));
+    try testing.expectEqual(Result.ok, try check_inputs("\"go.mod\", \"[ab]*\"", &problem));
+    const bad = [_][]const u8{ "\"src/[a\"", "\"../*\"", "\"a/\\\\\"" };
+    inline for (bad) |input| {
+        try testing.expectEqual(Result.refused, try check_inputs(input, &problem));
+        try testing.expectEqual(ProblemKind.not_plain, problem.kind);
+        try testing.expectEqual(@as(u8, 1), problem.step);
+    }
+}
