@@ -157,18 +157,19 @@ const Marker = struct {
     }
 };
 
-/// Counts the tree `digest` and how much of it other roots share.
-pub fn tree_usage(
+/// Walks the tree `digest` into `usage` (all but `shared_bytes`) and `objects`, its distinct
+/// objects.
+fn count_tree(
     store: *const Store,
     memory: *Memory,
     digest: Digest,
     usage: *TreeUsage,
+    objects: *sets.DigestMap,
     failure: *Failure,
 ) Error!void {
     assert(memory.tree_buffer.len >= constants.store_tree_bytes_max);
     usage.* = std.mem.zeroes(TreeUsage);
-    var objects = sets.DigestMap.init(memory.objects);
-    var counter: Counter = .{ .usage = usage, .objects = &objects, .full = false };
+    var counter: Counter = .{ .usage = usage, .objects = objects, .full = false };
     var walk_failure: walk.Failure = undefined;
     walk.walk(
         store,
@@ -191,6 +192,34 @@ pub fn tree_usage(
         usage.objects += 1;
         usage.stored_bytes += slot.value;
     }
+    assert(usage.stored_bytes <= usage.logical_bytes);
+}
+
+/// The bytes of the distinct objects the tree `digest` references: a file linked under several
+/// names, or the same bytes and attributes twice, counts once. `store ls` shows it as
+/// `size_unique`. It uses the tables of `memory` but not `root_list`.
+pub fn tree_stored(
+    store: *const Store,
+    memory: *Memory,
+    digest: Digest,
+    failure: *Failure,
+) Error!u64 {
+    var objects = sets.DigestMap.init(memory.objects);
+    var usage: TreeUsage = undefined;
+    try count_tree(store, memory, digest, &usage, &objects, failure);
+    return usage.stored_bytes;
+}
+
+/// Counts the tree `digest` and how much of it other roots share.
+pub fn tree_usage(
+    store: *const Store,
+    memory: *Memory,
+    digest: Digest,
+    usage: *TreeUsage,
+    failure: *Failure,
+) Error!void {
+    var objects = sets.DigestMap.init(memory.objects);
+    try count_tree(store, memory, digest, usage, &objects, failure);
     try mark_shared(store, memory, digest, &objects, failure);
     for (objects.slots) |slot| {
         if (slot.used and slot.mark) usage.shared_bytes += slot.value;

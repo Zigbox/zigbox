@@ -42,12 +42,19 @@ problems we know about. If you hit something not listed here, please
 - **Linux packages** are built for the Debian and Fedora families (apt and dnf). Other
   distributions are not packaged yet.
 
+## What `zbx store ls` counts
+
+`zbx store ls` shows two sizes for a tree. In text, the SIZE column is the **unique** size: each
+distinct file counted once, however many names it has (hard links, or the same bytes and
+attributes twice), the space the tree needs. In JSON (`zbx.store.ls/1`), `bytes` is the sum of
+the files' lengths with a file counted once per name, as it always was, and `size_unique` is the
+unique size (`null` if the tree cannot be read; the text shows `?`). `size_unique` is new in
+0.5.1; `bytes` did not change.
+
 ## Known problems
 
 Found while writing this guide, with `zbx 0.4.0`:
 
-- **`zbx store ls`** can show an image as much larger than it is (busybox as 394.6 MiB over 420
-  files): files linked under several names seem to be counted once per name.
 - **Pushing through a published port** to a registry in another container can stall and fail with
   [E0503](https://zigbox.org/errors/box/E0503) after 30 seconds; trying again works. Seen in CI,
   where the registry runs behind `pasta`; a direct connection does not stall.

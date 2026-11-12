@@ -171,6 +171,27 @@ test "ls lists the roots newest first, in text and in JSON" {
     try testing.expect(roots.items[1].object.get("parent").? == .null);
 }
 
+test "ls counts a file linked under several names once in size_unique, and bytes per name (#112)" {
+    // Goal: `bytes` keeps its meaning (a file per name) and `size_unique` counts each file once,
+    // in JSON and in the SIZE column of the text. Method: import the sample plus a 10-byte file
+    // under three names.
+    start();
+    files.put_file("/src/etc/one", 0o644, "0123456789");
+    try files.interface().link("/src/etc/one", "/src/etc/two");
+    try files.interface().link("/src/etc/one", "/src/etc/three");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const root = parsed.value.object.get("roots").?.array.items[0].object;
+    const bytes = root.get("bytes").?.integer;
+    const unique = root.get("size_unique").?.integer;
+    try testing.expectEqual(@as(i64, 20), bytes - unique); // Two names too many, 10 bytes each.
+    try testing.expectEqual(@as(i64, 51), unique);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "51 B") != null);
+}
+
 test "ls of a store that does not exist is an empty list, and creates nothing" {
     // Goal: reading never creates. Method: ls on a host with a home and no store.
     start();
