@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">the image can't be made as declared</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>.image in the build file declares the result: a base, the step outputs added to it, and an optional .config saying how it runs. .config is refused when a field is not what it can be: .workdir must be an absolute path, .user is uid:gid in numbers (names are not looked up at build time), each .env entry is KEY=VALUE, and a label key is [a-z0-9._/-] and given once. The cause names the field and why.</p>
+<p>.image in the build file declares the result: a base, the step outputs added to it, and an optional .config saying how it runs. .config is refused when a field is not what it can be: .workdir must be an absolute path, .user is a name, a number, or user:group of those (a name is looked up in the image when the build runs), each .env entry is KEY=VALUE, and a label key is [a-z0-9._/-] and given once. The cause names the field and why.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain E0807</pre>

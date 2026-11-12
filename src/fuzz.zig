@@ -38,6 +38,7 @@ const layer_fuzz = @import("fuzz_layer.zig");
 const pack_fuzz = @import("fuzz_pack.zig");
 const lock_fuzz = @import("fuzz_lock.zig");
 const build_file_fuzz = @import("fuzz_build_file.zig");
+const dockerignore_fuzz = @import("fuzz_dockerignore.zig");
 const pull_report_fuzz = @import("fuzz_pull_report.zig");
 const key_fuzz = @import("fuzz_key.zig");
 const openpgp_fuzz = @import("fuzz_openpgp.zig");
@@ -91,6 +92,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "pack", .run_iteration = pack_fuzz.fuzz_pack },
     .{ .name = "lock", .run_iteration = lock_fuzz.fuzz_lock },
     .{ .name = "build_file", .run_iteration = build_file_fuzz.fuzz_build_file },
+    .{ .name = "dockerignore", .run_iteration = dockerignore_fuzz.fuzz_dockerignore },
     .{ .name = "pull_report", .run_iteration = pull_report_fuzz.fuzz_pull_report },
     .{ .name = "key", .run_iteration = key_fuzz.fuzz_key },
     .{ .name = "openpgp", .run_iteration = openpgp_fuzz.fuzz_openpgp },

@@ -361,7 +361,7 @@ pub const Context = struct {
     }
 
     /// Resolves the step's key; a cached output is a hit, anything else starts a worker.
-    fn begin(context: *Context, index: u8) Error!schedule.Begin {
+    pub fn begin(context: *Context, index: u8) Error!schedule.Begin {
         const loaded = context.loaded;
         const ws = context.ws;
         const file = &loaded.file;
@@ -371,6 +371,12 @@ pub const Context = struct {
         var spec: key_mod.Spec = undefined;
         spec.name = name;
         spec.network = step.network;
+        // `undefined` applies no field defaults, so the M9 fields are set here.
+        spec.root_output = false;
+        spec.user = null;
+        spec.workdir = null;
+        spec.binds = &.{};
+        spec.copies = &.{};
         try context.resolve_base(file.text(step.base), &spec);
         spec.input_tree = try context.import_inputs(index);
         ws.step_inputs[index] = spec.input_tree;

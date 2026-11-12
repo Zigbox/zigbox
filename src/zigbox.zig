@@ -188,6 +188,7 @@ pub const state = @import("state/state.zig");
 pub const build = struct {
     pub const file = @import("build/file.zig");
     pub const graph = @import("build/graph.zig");
+    pub const glob = @import("build/glob.zig");
     pub const key = @import("build/key.zig");
     pub const step = @import("build/step.zig");
     pub const schedule = @import("build/schedule.zig");

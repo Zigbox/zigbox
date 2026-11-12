@@ -874,12 +874,13 @@ pub const net_addresses_max: u32 = 8;
 // file past one with its line and column.
 /// The largest build file read. Its canonical rendering can be longer (indentation), so the
 /// parser itself accepts up to `build_render_bytes_max`.
-pub const build_file_bytes_max: u32 = 64 * 1024;
+pub const build_file_bytes_max: u32 = 256 * 1024;
 /// The decoded bytes of every string in one file together.
-pub const build_pool_bytes: u32 = 64 * 1024;
+pub const build_pool_bytes: u32 = 256 * 1024;
 /// One string: an argv entry, an env entry, a path, a reference.
 pub const build_string_bytes_max: u32 = 4096;
-pub const build_steps_max: u32 = 64;
+/// Raised from 64 for M9: the survey's largest translated stage set needs 131 steps.
+pub const build_steps_max: u32 = 256;
 /// A step's name: `[a-z0-9-]`, as a directory name under `/in` and in the report's column.
 pub const build_step_name_bytes_max: u32 = 32;
 /// The longest `--verbose` prefix: a step's name and ` | `.
@@ -894,8 +895,33 @@ pub const build_step_inputs_max: u32 = 64;
 /// Each needed step is a read-only mount at `/in/<name>`; with `/src` and `/out` that is two
 /// fewer than a run's mounts (`mounts_max`).
 pub const build_step_needs_max: u32 = 6;
+/// The steps one step can come after: its needs, its base, and the `from` of each copy and bind.
+pub const build_step_edges_max: u32 = build_step_needs_max + 1 + build_copy_entries_max +
+    build_step_binds_max;
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
+/// M9 additions to a step (docs/briefs/M9-dockerfile-import.md, "Builder additions"): cache
+/// mounts, bind mounts and copy entries a step may have. A step's needs, binds and caches share
+/// the run's mounts: needs + binds + caches + 2 <= 8, so an importer keeps them to 6 or refuses.
+pub const build_step_caches_max: u32 = 4;
+pub const build_step_binds_max: u32 = 4;
+pub const build_copy_entries_max: u32 = 64;
+/// The lines of one `.exclude` list (`.dockerignore` syntax).
+pub const build_exclude_lines_max: u32 = 256;
+/// The sources of one copy entry.
+pub const build_copy_sources_max: u32 = build_step_inputs_max;
+/// What one whole file holds of the M9 lists, so that no step carries an array of its own. A
+/// step's own bound above still holds; these are the totals the file's arrays are sized to
+/// (one copy step per instruction needs about one entry a step, and a few lists each).
+pub const build_file_caches_max: u32 = 256;
+pub const build_file_binds_max: u32 = 256;
+pub const build_file_copies_max: u32 = 512;
+/// Strings in every copy `src`, `exclude` and step or file `exclude` list of one file together.
+pub const build_file_list_texts_max: u32 = 8192;
+/// A glob or an exclude line: one string.
+pub const build_pattern_bytes_max: u32 = 1024;
+/// The path a glob is matched against, and its parts (`a/b/c` is three).
+pub const build_glob_parts_max: u32 = 64;
 /// Steps that run at once: fixed at 4 (a cut from the brief, which also bounds it by the online
 /// CPUs; nothing checks the CPUs yet, see docs/demos/m7.md).
 pub const build_parallel_max: u32 = 4;
@@ -933,9 +959,9 @@ pub const build_key_preimage_bytes_max: u32 = build_pool_bytes + image_settings_
 /// canonical encoding. Its strings come from the build file's pool and the base image's
 /// settings; the rest (the magic, counts, digests, length prefixes) fits in the margin.
 pub const build_result_bytes_max: u32 = build_pool_bytes + image_settings_bytes_max + 16 * 1024;
-/// The bytes of a result's labels (keys and values, together): the pool bound, since they come
-/// from the build file.
-pub const build_result_label_bytes_max: u32 = build_pool_bytes;
+/// The bytes of a result's labels (keys and values, together). A label's length is a `u16` in
+/// the record, so this stays at its M7 value (the pool's then) when the pool grew for M9.
+pub const build_result_label_bytes_max: u32 = 64 * 1024;
 /// The room `zbx inspect` gathers a result's config in: every byte of the settings and labels
 /// escaped to six, and the fixed text around them.
 pub const inspect_output_bytes_max: u32 =
@@ -955,13 +981,15 @@ pub const build_cache_entry_bytes_max: u32 = 64 + build_key_preimage_bytes_max;
 pub const build_cache_entries_max: u32 = 8192;
 /// The strings one file can hold, from the bounds above.
 pub const build_strings_max: u32 = 2 + build_steps_max *
-    (2 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
+    (4 + build_step_inputs_max + build_step_needs_max + build_step_argv_max +
         build_step_env_max) + 2 * build_image_adds_max + 2 * build_config_argv_max +
-    build_config_env_max + 2 * build_config_labels_max + 2;
+    build_config_env_max + 2 * build_config_labels_max + 2 + 3 * build_file_caches_max +
+    3 * build_file_binds_max + 5 * build_file_copies_max + build_file_list_texts_max;
 /// The canonical rendering of the largest file the parser accepts: every string escaped four
 /// bytes a byte with its quotes and separator, and the fixed text of every field and step.
 pub const build_render_bytes_max: u32 = 4 * build_pool_bytes + 8 * build_strings_max +
-    build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 + 1024;
+    build_steps_max * 256 + build_image_adds_max * 64 + build_config_labels_max * 32 +
+    build_file_caches_max * 96 + build_file_binds_max * 96 + build_file_copies_max * 128 + 1024;
 
 comptime {
     assert(build_result_bytes_max < store_tree_bytes_max);
@@ -991,6 +1019,24 @@ comptime {
     assert(build_render_bytes_max < std.math.maxInt(u32));
     assert(build_problem_word_bytes_max <= std.math.maxInt(u8));
     assert(build_problem_word_bytes_max > build_step_name_bytes_max);
+    // M9: a step's own lists fit the file's arrays, and a step's mounts fit a run's.
+    assert(build_step_caches_max <= build_file_caches_max);
+    assert(build_step_binds_max <= build_file_binds_max);
+    assert(build_copy_entries_max <= build_file_copies_max);
+    assert(build_file_caches_max >= build_steps_max);
+    assert(build_file_binds_max >= build_steps_max);
+    assert(build_file_copies_max >= build_steps_max);
+    assert(build_exclude_lines_max <= build_file_list_texts_max);
+    assert(build_copy_sources_max <= build_file_list_texts_max);
+    // Needs and binds together are mounts beside `/src` and `/out`; the parser holds the sum.
+    assert(build_step_binds_max + 2 <= mounts_max);
+    assert(build_step_caches_max + 2 <= mounts_max);
+    // A pattern is a string; a file's excludes are lines that fit the pool.
+    assert(build_pattern_bytes_max <= build_string_bytes_max);
+    assert(build_exclude_lines_max * build_pattern_bytes_max <= build_pool_bytes);
+    assert(build_glob_parts_max * 2 <= build_pattern_bytes_max);
+    // Step indexes are `u16`.
+    assert(build_steps_max <= std.math.maxInt(u16));
 }
 
 // Fuzz runner.
@@ -1680,8 +1726,9 @@ pub const provenance_build_type = type_uri_base ++ "/build/v1";
 pub const provenance_builder_id = type_uri_base ++ "/zbx";
 /// Most steps a provenance record lists: every step of a build file.
 pub const provenance_steps_max: u32 = build_steps_max;
-/// Most distinct bases a record lists: one per step and the image's.
-pub const provenance_bases_max: u32 = provenance_steps_max + 1;
+/// Most distinct bases a record lists. Each is a locked image, so the lock's size bounds them
+/// (a `step:` base is not one: it is another step's output).
+pub const provenance_bases_max: u32 = lock_entries_max;
 /// The release a record names as its builder (`build_options.version`), at most this long.
 pub const provenance_version_bytes_max: u32 = 64;
 /// One step's JSON at its longest: fixed text and a key, a base index and four digests (about
@@ -1723,7 +1770,7 @@ comptime {
     assert(statement_bytes_max >= provenance_bytes_max); // Rounded up, never down.
     assert(statement_bytes_max < provenance_bytes_max + 64 * 1024);
     assert(provenance_steps_max == build_steps_max);
-    assert(provenance_bases_max >= provenance_steps_max + 1);
+    assert(provenance_bases_max >= 64); // As many as before the build file grew.
     assert(provenance_bases_max <= lock_entries_max);
     assert(signatures_per_tree_max >= 1);
     assert(trust_records_max >= signatures_per_tree_max);
@@ -1731,7 +1778,7 @@ comptime {
     assert(payload_base64_bytes_max % 4 == 0);
     assert(envelope_bytes_max > payload_base64_bytes_max + envelope_overhead_bytes - 1);
     assert(signature_record_bytes_max >= envelope_bytes_max);
-    assert(signature_record_bytes_max <= 4 * 1024 * 1024);
+    assert(signature_record_bytes_max <= 16 * 1024 * 1024); // Was 4 MiB before 256 steps.
     assert(signed_at_text_bytes == "2026-11-08T10:00:00Z".len);
     assert(key_sealed_bytes == 48);
     assert(key_public_text_bytes == 76);

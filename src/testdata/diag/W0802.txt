@@ -1,0 +1,5 @@
+warning[ZBX-W0802]: the build has steps with cache mounts
+  cause  steps with cache mounts: "compile", "test"
+  fix    keep each cache to what the command verifies or rebuilds, and do not let its output depend on what was in it
+  more   zbx explain W0802 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0802.html

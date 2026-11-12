@@ -115,7 +115,11 @@ fn worst(into: *Record) void {
         @memset(&name, 'a' + @as(u8, @intCast(at % 26)));
         digits(name[0..4], at);
         digits(reference[0..4], at);
-        const base = into.add_base(&reference, filled(@intCast(at)), filled(0x10));
+        // The image's base takes the last of the bases; later steps share the first.
+        const base = if (at + 1 < constants.provenance_bases_max)
+            into.add_base(&reference, filled(@intCast(at)), filled(0x10))
+        else
+            0;
         const step = into.add_step(&name);
         step.base = base;
         step.key = filled(0xf0);

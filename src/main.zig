@@ -355,3 +355,9 @@ test {
     _ = @import("fuzz_provenance.zig");
     _ = @import("fuzz_verified.zig");
 }
+
+test {
+    // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
+    _ = @import("build/glob.zig");
+    _ = @import("fuzz_dockerignore.zig");
+}

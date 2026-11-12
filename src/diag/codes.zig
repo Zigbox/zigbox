@@ -217,6 +217,8 @@ pub const Code = enum(u8) {
     E0806,
     E0807,
     W0801,
+    E0817,
+    W0802,
     E0901,
     E0902,
     E0903,
@@ -3315,8 +3317,17 @@ pub const registry = [_]Entry{
         \\needs, whose outputs it sees under /in/<name>, and .image.add takes
         \\outputs from steps. The graph is refused when two steps have the same
         \\name, a need or an add names no step, a step lists a need twice or more
-        \\than 6, or steps need each other round. A cycle is named in need order:
-        \\a -> b -> a means a needs b and b needs a.
+        \\than 6, or steps need each other round. A step is also refused when its
+        \\needs, binds and caches, plus /src and /out (not counted with .output =
+        \\.root), are more than the 8 mounts a run holds. A cycle is named in
+        \\need order: a -> b -> a means a needs b and b needs a.
+        \\
+        \\The same code refuses a file that parses but uses something this zbx
+        \\reads and cannot build yet: a copy, a cache, a bind, an exclude, a
+        \\.user or .workdir on a step, a named .user in .image.config,
+        \\.output = .root, a step: base, or an input
+        \\with a pattern in it. The cause names the field; zbx build --graph still
+        \\shows the whole file.
         \\
         \\Nothing runs before the whole graph is valid. zbx build --graph prints
         \\it, in the order a build starts the steps.
@@ -3399,9 +3410,10 @@ pub const registry = [_]Entry{
         \\.image in the build file declares the result: a base, the step outputs
         \\added to it, and an optional .config saying how it runs. .config is
         \\refused when a field is not what it can be: .workdir must be an
-        \\absolute path, .user is uid:gid in numbers (names are not looked up at
-        \\build time), each .env entry is KEY=VALUE, and a label key is
-        \\[a-z0-9._/-] and given once. The cause names the field and why.
+        \\absolute path, .user is a name, a number, or user:group of those (a name
+        \\is looked up in the image when the build runs), each .env entry is
+        \\KEY=VALUE, and a label key is [a-z0-9._/-] and given once. The cause
+        \\names the field and why.
         ,
     },
     .{
@@ -3420,6 +3432,43 @@ pub const registry = [_]Entry{
         \\The cause names the steps. To make the build reproducible, pin what the
         \\step fetches (a version, or a checksum the command verifies), or fetch it
         \\once, outside the build, and list the file as an input.
+        ,
+    },
+    .{
+        .code = .E0817,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "a user or group name is not in the image",
+        .explanation =
+        \\A step's .user, a copy's .chown, or the image's .config .user names a user
+        \\or group, and zbx looks the name up in /etc/passwd and /etc/group of the
+        \\tree the step's base holds. A name that is not there is refused when the
+        \\step is about to start, so a build does not silently run as the wrong id.
+        \\A base of the form step:NAME exists only once that step has run, so the
+        \\refusal can come after earlier steps have.
+        \\
+        \\The cause names where the name was written (the step or .image.config) and
+        \\the name. To fix it, add the user or group in an earlier step (for example a
+        \\step that runs adduser) and base this step on it with .base = "step:NAME",
+        \\or write the id as a number.
+        ,
+    },
+    .{
+        .code = .W0802,
+        .severity = .warning,
+        .blame = .user,
+        .summary = "the build has steps with cache mounts",
+        .explanation =
+        \\A step with .caches mounts a directory that lives outside the build's result
+        \\and persists between builds, so what the step produces can depend on what
+        \\the cache held, not only on the build's inputs. zbx never puts a cache in a
+        \\step's key, so a rebuild that hits the step cache is unchanged, but a step
+        \\that does run on another machine, or after --clear-caches, can produce
+        \\different bytes.
+        \\
+        \\The cause names the steps. To make the build reproducible, keep the cache to
+        \\things the command verifies or rebuilds (a download cache), and do not let
+        \\the command's output depend on what was in it.
         ,
     },
     .{
@@ -4236,6 +4285,7 @@ pub fn can_end_run(code: Code) bool {
         .E0515, .E0516, .E0517, .W0501, .W0502, .E0526, .W0551, .W0552 => false,
         .E0527, .E0528, .E0529, .E0530, .E0531, .E0532, .E0533, .E0534, .E0535 => false,
         .E0801, .E0802, .E0803, .E0804, .E0805, .E0806, .E0807, .W0801 => false,
+        .E0817, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
         .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .W0207, .W0209 => false,
