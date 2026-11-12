@@ -71,12 +71,11 @@ test "parse: refusals are named" {
 }
 
 test "parse: depth and trailing text are refused" {
-    var deep: [64]u8 = undefined;
-    @memset(deep[0..32], '[');
-    @memset(deep[32..], ']');
+    const open = "[" ** 40;
+    const close = "]" ** 40;
     const parsed = try make();
     defer testing.allocator.destroy(parsed);
-    const nested = "{\"cdiVersion\":\"0.5.0\",\"x\":" ++ ("[" ** 40) ++ ("]" ** 40) ++ "}";
+    const nested = "{\"cdiVersion\":\"0.5.0\",\"x\":" ++ open ++ close ++ "}";
     try testing.expect(cdi.parse(parsed, nested) != null);
     try testing.expect(cdi.parse(parsed, fake_spec ++ " x") != null);
 }
