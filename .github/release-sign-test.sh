@@ -21,9 +21,22 @@ gpg_home --quick-add-key "$primary" rsa4096 sign 1d
 subkey=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons |
   awk -F: '$1 == "sub" { s = 1; next } $1 == "fpr" && s { print $10; exit }')
 
-ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-subkeys "${subkey}!")
 ZIGBOX_SIGNING_PASSPHRASE=$passphrase
 ZIGBOX_SIGNING_FPR=$primary
 export ZIGBOX_SIGNING_KEY ZIGBOX_SIGNING_PASSPHRASE ZIGBOX_SIGNING_FPR
+
+# An export that still holds the secret primary key must be refused, with the reason.
+ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-keys "$primary")
+if refusal=$("$(dirname "$0")/release-sign.sh" "$output/refused" 2>&1); then
+  echo "release-sign-test: a key holding the secret primary was accepted" >&2
+  exit 1
+fi
+grep -q 'holds the secret primary key' <<< "$refusal" || {
+  echo "release-sign-test: wrong refusal for a full secret export: $refusal" >&2
+  exit 1
+}
+
+ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-subkeys "${subkey}!")
+export ZIGBOX_SIGNING_KEY
 # The same file the release runs.
 "$(dirname "$0")/release-sign.sh" "$output"

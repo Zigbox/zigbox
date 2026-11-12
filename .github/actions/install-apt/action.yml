@@ -16,6 +16,12 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Runner image
+      id: image
+      shell: bash
+      # ImageOS and ImageVersion are variables of the runner process, not of the `env`
+      # context, so the key reads them here.
+      run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
     - name: Restore the .deb cache
       id: cache
       # Keyed on the package list and the runner image, so a new image (new
@@ -23,7 +29,7 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/zbx-debs
-        key: debs-${{ runner.os }}-${{ env.ImageVersion }}-${{ inputs.packages }}
+        key: debs-${{ runner.os }}-${{ steps.image.outputs.id }}-${{ inputs.packages }}
     - name: Install
       shell: bash
       env:
