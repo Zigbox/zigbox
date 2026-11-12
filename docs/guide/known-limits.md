@@ -46,18 +46,8 @@ problems we know about. If you hit something not listed here, please
 
 Found while writing this guide, with `zbx 0.4.0`:
 
-- **`zbx stop` on a container that failed to start** reports a bug,
-  `bug[ZBX-B0001]` "reached unreachable code", and exits 70. Such a container (state
-  `start_failed` in `zbx ps --all`) never ran, so there is nothing to stop; the message is wrong,
-  not harmful.
-  <!-- owner: seen in a cloud session with a --publish run refused by E0603. Check 0.5.1. -->
-- **`zbx push --dry-run <name>@sha256:<digest>`** is refused with
-  [E0550](https://zigbox.org/errors/box/E0550), although `zbx sign` accepts the same name. Push by
-  tag (`alpine:3.20`) or by store tree (`b3:...`) instead.
 - **`zbx store ls`** can show an image as much larger than it is (busybox as 394.6 MiB over 420
   files): files linked under several names seem to be counted once per name.
-- **`zbx exec <name> -- cat /etc/hostname`** prints `localhost`, while the container's hostname
-  is its name.
 - **Pushing through a published port** to a registry in another container can stall and fail with
   [E0503](https://zigbox.org/errors/box/E0503) after 30 seconds; trying again works. Seen in CI,
   where the registry runs behind `pasta`; a direct connection does not stall.
