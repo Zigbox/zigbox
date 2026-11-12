@@ -231,3 +231,70 @@ test "resolve: a mount conflict and the per-run node bound" {
     const refusal = resolver.add_file("s.json", conflict).?;
     try testing.expectEqual(cdi.Unsupported.mount_conflict, refusal.unsupported.edit);
 }
+
+const Edit = enum { nodes, mounts, env, dirs };
+
+/// A one-device spec with `count` edits of one kind, each different.
+fn edit_spec(buffer: []u8, comptime edit: Edit, count: u32) []const u8 {
+    var length: usize = 0;
+    const head = "{\"cdiVersion\":\"0.5.0\",\"kind\":\"a.b/c\",\"devices\":[{\"name\":\"x\"," ++
+        "\"containerEdits\":{";
+    @memcpy(buffer[0..head.len], head);
+    length += head.len;
+    const key = switch (edit) {
+        .nodes => "\"deviceNodes\":[",
+        .mounts => "\"mounts\":[",
+        .env => "\"env\":[",
+        .dirs => "\"hooks\":[{\"hookName\":\"createContainer\",\"path\":" ++
+            "\"/usr/bin/nvidia-cdi-hook\",\"args\":[\"nvidia-cdi-hook\",\"update-ldcache\"",
+    };
+    @memcpy(buffer[length..][0..key.len], key);
+    length += key.len;
+    for (0..count) |index| {
+        const comma: []const u8 = if (index > 0 and edit != .dirs) "," else "";
+        const piece = switch (edit) {
+            .nodes => "{s}{{\"path\":\"/dev/n{d}\"}}",
+            .mounts => "{s}{{\"hostPath\":\"/h/m{d}\",\"containerPath\":\"/c/m{d}\"}}",
+            .env => "{s}\"V{d}=x\"",
+            .dirs => ",\"--folder\",\"/usr/lib/d{d}\"{s}",
+        };
+        const written = switch (edit) {
+            .mounts => std.fmt.bufPrint(buffer[length..], piece, .{ comma, index, index }),
+            .dirs => std.fmt.bufPrint(buffer[length..], piece, .{ index, "" }),
+            else => std.fmt.bufPrint(buffer[length..], piece, .{ comma, index }),
+        } catch unreachable; // The buffer holds the largest spec.
+        length += written.len;
+    }
+    const tail = if (edit == .dirs) "]}]}}]}" else "]}}]}";
+    @memcpy(buffer[length..][0..tail.len], tail);
+    return buffer[0 .. length + tail.len];
+}
+
+fn resolve_edits(comptime edit: Edit, count: u32) !?cdi.Refusal {
+    const parsed = try make();
+    defer testing.allocator.destroy(parsed);
+    const out = try resolved();
+    defer testing.allocator.destroy(out);
+    const buffer = try testing.allocator.alloc(u8, 32 * 1024);
+    defer testing.allocator.free(buffer);
+    var resolver: cdi.Resolver = undefined;
+    resolver.init(&.{"a.b/c=x"}, parsed, out);
+    const refusal = resolver.add_file("s.json", edit_spec(buffer, edit, count));
+    try testing.expectEqual(@as(u32, 0), resolver.problems_count);
+    return refusal orelse resolver.finish();
+}
+
+test "resolve: the per-run bounds, at and one past" {
+    // Goal: what one run applies is bounded, and the first edit over is `too_big`, not a crash.
+    const cases = [_]struct { comptime edit: Edit, max: u32 }{
+        .{ .edit = .nodes, .max = constants.cdi_run_nodes_max },
+        .{ .edit = .mounts, .max = constants.cdi_run_mounts_max },
+        .{ .edit = .env, .max = constants.cdi_run_env_max },
+        .{ .edit = .dirs, .max = constants.cdi_run_dirs_max },
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(@as(?cdi.Refusal, null), try resolve_edits(case.edit, case.max));
+        const over = (try resolve_edits(case.edit, case.max + 1)).?;
+        try testing.expectEqual(@as(u32, 0), over.too_big);
+    }
+}

@@ -105,7 +105,7 @@ It is refused (`E0228`) when there is neither, and `zbx doctor`'s GPU section is
 
 ## Diagnostics (`02xx`, runtime; each with cause, fix, goldens and an error page)
 
-To be registered by the supervisor with this brief.
+E0226, E0227, E0230 and W0208 are registered (slice 2).
 
 - `E0225` a host device is refused: missing, not a character device, outside `/dev`, or the user
   cannot open it (with the node's mode and group, and whether the user is in that group).
@@ -132,6 +132,8 @@ To be registered by the supervisor with this brief.
    directories, device names and `=all`, edits, the `ldconfig` step and `W0208`,
    `E0226`/`E0227`/`E0230`, and the resolution function with its second-caller test.
    VM check: a fake vendor spec (below).
+   *Status: built; the spec size bound is 65535 bytes (the host read limit), not 256 KiB, and the
+   codes are registered. Notes: `docs/decisions/2026-11-12-m10-slice2-cdi.md`, `docs/demos/m10.md`.*
 3. **`--gpu`, doctor and the real GPU.** `--gpu all|dri`, `E0228`, `E0229` on the Mac, doctor's
    GPU section (text, JSON, goldens over fixture hosts), and the real-hardware run (below).
 4. **VM, CI, docs.** `zig build demo-m10` as below, `checks_m10.zig`, the CI job and its path
