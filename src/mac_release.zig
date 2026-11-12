@@ -148,7 +148,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer log.flush() catch {};
     const arguments = parse_arguments(init) orelse {
         try log.print("mac_release: usage: --binary F --entitlements F --formula F --out DIR " ++
-            "--version V [--identity NAME|-] [--profile NAME] [--keychain FILE] [--notarize]\n", .{});
+            "--version V [--identity NAME|-] [--profile NAME] [--keychain FILE] " ++
+            "[--notarize]\n", .{});
         return 2;
     };
     run(init, &arguments, log) catch |err| {
