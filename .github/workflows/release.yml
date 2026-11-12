@@ -463,13 +463,17 @@ jobs:
           security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security find-identity -p codesigning "$KEYCHAIN"
+          # codesign finds an untrusted self-signed identity by its certificate hash, not by name.
+          # The hash is public certificate data, not a secret.
+          fingerprint=$(/usr/bin/openssl x509 -in "$SECRETS_DIR/cert.pem" -noout -fingerprint -sha1)
+          echo "TEST_IDENTITY=$(echo "${fingerprint#*=}" | tr -d ':')" >> "$GITHUB_ENV"
           rm -rf "$SECRETS_DIR"
           if security list-keychains -d user | grep -q zbx-release; then
             echo "release: the temporary keychain is on the search list" >&2
             exit 1
           fi
       - name: Sign with it (no notarization, no upload)
-        run: zig build mac-release -Dsign-identity=zbx-release-test -Dkeychain="$KEYCHAIN"
+        run: zig build mac-release -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         run: |
           set -euo pipefail
