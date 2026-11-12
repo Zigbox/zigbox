@@ -170,9 +170,12 @@ jobs:
       cancel-in-progress: false
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      KEYCHAIN: ${{ runner.temp }}/zbx-release.keychain-db
-      SECRETS_DIR: ${{ runner.temp }}/zbx-release-secrets
     steps:
+      # The runner context is not available in a job's `env:`, so the paths are set here.
+      - name: Paths of the temporary keychain and its work directory
+        run: |
+          echo "KEYCHAIN=$RUNNER_TEMP/zbx-release.keychain-db" >> "$GITHUB_ENV"
+          echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-secrets" >> "$GITHUB_ENV"
       - name: Refuse anything but a release tag
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -419,9 +422,12 @@ jobs:
       group: release-mac-test-${{ github.ref }}
       cancel-in-progress: true
     env:
-      KEYCHAIN: ${{ runner.temp }}/zbx-release-test.keychain-db
-      SECRETS_DIR: ${{ runner.temp }}/zbx-release-test-secrets
     steps:
+      # The runner context is not available in a job's `env:`, so the paths are set here.
+      - name: Paths of the temporary keychain and its work directory
+        run: |
+          echo "KEYCHAIN=$RUNNER_TEMP/zbx-release-test.keychain-db" >> "$GITHUB_ENV"
+          echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-test-secrets" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
