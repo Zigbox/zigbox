@@ -741,7 +741,9 @@ pub fn limit_without_cgroup(
     }
     scope_text.problem_causes(diag, problem);
     diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
-    if (asker == .run) diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    if (asker == .run) {
+        diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    }
     assert(diag.code.? == .E0307);
 }
 

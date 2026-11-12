@@ -957,7 +957,8 @@ fn prepare_scope(
         return .{ .version = found.version, .limits = limits };
     }
     if (limits.any()) {
-        diagnose.limit_without_cgroup(diag, &problem, limits, if (build_step) .build_step else .run);
+        const asker: diagnose.LimitAsker = if (build_step) .build_step else .run;
+        diagnose.limit_without_cgroup(diag, &problem, limits, asker);
         return error.StartFailed;
     }
     var warning: Diag = undefined;

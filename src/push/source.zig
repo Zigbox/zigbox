@@ -58,7 +58,9 @@ pub fn resolve(store: *const Store, ws: *Workspace, operand: []const u8, out: *S
         return;
     }
     // `name@sha256:...` names one manifest, as `zbx sign` reads it, and is never a tag.
-    if (std.mem.indexOfScalar(u8, operand, '@') != null) return resolve_manifest(store, ws, operand, out);
+    if (std.mem.indexOfScalar(u8, operand, '@') != null) {
+        return resolve_manifest(store, ws, operand, out);
+    }
     var by: image_find.ByReference = .{ .text = operand };
     image_find.scan(store, &ws.memory, &ws.image, &by) catch return error.Unusable;
     if (!by.found) return error.NotFound;
@@ -68,7 +70,12 @@ pub fn resolve(store: *const Store, ws: *Workspace, operand: []const u8, out: *S
 
 /// `name@sha256:...`: the image record of that manifest. A name that is no reference, or has no
 /// digest, or whose manifest the store does not hold, is `NotFound`.
-fn resolve_manifest(store: *const Store, ws: *Workspace, operand: []const u8, out: *Source) Error!void {
+fn resolve_manifest(
+    store: *const Store,
+    ws: *Workspace,
+    operand: []const u8,
+    out: *Source,
+) Error!void {
     assert(std.mem.indexOfScalar(u8, operand, '@') != null);
     var reference: reference_mod.Reference = undefined;
     reference_mod.parse(operand, &reference) catch return error.NotFound;

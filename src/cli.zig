@@ -5405,7 +5405,8 @@ test "stop on a container that failed to start says it never ran, in text and JS
     const rendered = @import("runtime/records.zig").render(&view, &text);
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/never-1.zon", rendered) == null);
     try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "stop", "never-1" }));
-    try testing.expectEqualStrings("never-1 never started, so there is nothing to stop\n", sim.stdout());
+    const said = "never-1 never started, so there is nothing to stop\n";
+    try testing.expectEqualStrings(said, sim.stdout());
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
     sim.stdout_len = 0;
     const json = [_][]const u8{ "stop", "never-1", "--output", "json" };
