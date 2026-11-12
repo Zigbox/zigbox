@@ -41,6 +41,9 @@ pub const Options = struct {
     signatures: Signatures = .{},
     /// Sign everything with the fixed test key instead (CI; the key vouches for nothing).
     test_key: bool = false,
+    /// The signing time (seconds since the epoch) written as `Release`'s `Date`, with
+    /// `Valid-Until` 21 days later. Null: the fixed build date and no `Valid-Until`.
+    signed_at: ?u64 = null,
 };
 
 pub const apt_release_path = "apt/dists/" ++ apt.suite ++ "/Release";
@@ -116,6 +119,19 @@ pub fn rpm_file_name(memory: Allocator, inputs: *const Inputs, index: usize) Err
     return rpm.file_name(memory, try describe(memory, inputs, index, .rpm));
 }
 
+/// The path of each architecture's deb and rpm under the output directory, the files a release
+/// attaches beside the archive.
+pub fn deb_tree_path(memory: Allocator, inputs: *const Inputs, index: usize) Error![]u8 {
+    const pool = try apt.pool_path(memory, try describe(memory, inputs, index, .deb));
+    return std.fmt.allocPrint(memory, "apt/{s}", .{pool}) catch return error.OutOfMemory;
+}
+
+pub fn rpm_tree_path(memory: Allocator, inputs: *const Inputs, index: usize) Error![]u8 {
+    return std.fmt.allocPrint(memory, "rpm/{s}/{s}", .{
+        architectures[index].rpm_name(), try rpm_file_name(memory, inputs, index),
+    }) catch return error.OutOfMemory;
+}
+
 fn add(
     memory: Allocator,
     files: *std.ArrayList(model.TreeFile),
@@ -166,7 +182,7 @@ pub fn build(memory: Allocator, inputs: *const Inputs, options: Options) Error![
         debs[index] = .{ .package = deb_package, .bytes = try deb.write(memory, deb_package) };
         rpms[index] = .{ .package = rpm_package, .bytes = rpm_bytes };
     }
-    try add_tree(memory, &files, "apt/", try apt.write(memory, &debs));
+    try add_tree(memory, &files, "apt/", try apt.write(memory, &debs, options.signed_at));
     for (architectures, 0..) |architecture, index| {
         const prefix = try std.fmt.allocPrint(memory, "rpm/{s}/", .{architecture.rpm_name()});
         const tree = try dnf.write(memory, architecture, rpms[index..][0..1]);

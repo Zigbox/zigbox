@@ -1624,6 +1624,18 @@ pub const armor_line_bytes: u32 = 64;
 /// `SOURCE_DATE_EPOCH` for every package: the same instant as a build step's, so the package of a
 /// commit and the store it was built beside agree.
 pub const package_source_date_epoch: u64 = build_source_date_epoch;
+/// The apt `Release` of a signed release carries `Date` = the signing time and `Valid-Until` =
+/// `Date` plus this: a client refuses metadata after it, so a replayed or frozen `InRelease` is
+/// detected. The refresh job re-signs weekly (docs/releases/packaging.md), three times over.
+pub const apt_valid_seconds: u64 = 21 * 24 * 60 * 60;
+/// A signing time outside these (2020-01-01 to 2100-01-01, UTC) is a mistaken argument.
+pub const apt_signed_at_min: u64 = 1_577_836_800;
+pub const apt_signed_at_max: u64 = 4_102_444_800;
+/// The most files a release's asset directory holds (tarballs, packages, archive, SBOM, sums).
+pub const release_assets_max: u32 = 64;
+/// The largest release asset `SHA256SUMS` hashes: a tarball, a package, the repository archive or
+/// the Mac zip.
+pub const release_asset_bytes_max: u32 = 128 * 1024 * 1024;
 /// The `Maintainer` of the `zigbox` packages. A supervisor assumption the owner may change
 /// (docs/decisions/2026-11-08-package-bounds.md).
 pub const package_maintainer = "Zigbox project <packages@zigbox.org>";
@@ -1641,6 +1653,8 @@ comptime {
     assert(package_files_max <= rpm_header_entries_max);
     assert(package_recommends_max < rpm_header_entries_max);
     assert(repo_packages_max * 2 <= repo_files_max);
+    assert(apt_signed_at_min > package_source_date_epoch);
+    assert(apt_signed_at_max + apt_valid_seconds < (1 << 40));
 }
 
 // ---- Keys (M8 trust) ----

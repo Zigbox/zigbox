@@ -3,7 +3,12 @@
 //! never runs `gpg` (STYLE.md): it prints the commands the owner runs, in two rounds.
 //!
 //!   package_main --version V --zbx-x86_64 PATH --zbx-aarch64 PATH --license PATH --out DIR
-//!                [--signatures DIR | --test-key] [--check]
+//!                [--signatures DIR | --test-key] [--signed-at SECONDS] [--check]
+//!   package_main --redate --out DIR --signed-at SECONDS
+//!
+//! `--redate` rewrites only the `Date` and `Valid-Until` lines of DIR/apt/dists/stable/Release
+//! and deletes the `InRelease` and `Release.gpg` beside it, which no longer match: the refresh
+//! job signs the new `Release` again (docs/releases/packaging.md).
 
 const std = @import("std");
 const Io = std.Io;
@@ -11,6 +16,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
 const model = @import("package.zig").model;
+const apt = @import("package.zig").apt;
 const release = @import("package_release.zig");
 const check_tree = @import("package_check.zig");
 
@@ -22,11 +28,14 @@ const Arguments = struct {
     signatures: ?[]const u8 = null,
     test_key: bool = false,
     check: bool = false,
+    signed_at: ?u64 = null,
+    redate: bool = false,
 };
 
 const usage_text =
     "usage: package_main --version V --zbx-x86_64 PATH --zbx-aarch64 PATH --license PATH " ++
-    "--out DIR [--signatures DIR | --test-key] [--check]\n";
+    "--out DIR [--signatures DIR | --test-key] [--signed-at SECONDS] [--check]\n" ++
+    "       package_main --redate --out DIR --signed-at SECONDS\n";
 
 /// A value follows each of these flags; the rest take none.
 fn parse_arguments(iterator: anytype) ?Arguments {
@@ -36,6 +45,8 @@ fn parse_arguments(iterator: anytype) ?Arguments {
             arguments.test_key = true;
         } else if (std.mem.eql(u8, flag, "--check")) {
             arguments.check = true;
+        } else if (std.mem.eql(u8, flag, "--redate")) {
+            arguments.redate = true;
         } else {
             const value = iterator.next() orelse return null;
             if (!set_value(&arguments, flag, value)) return null;
@@ -43,6 +54,11 @@ fn parse_arguments(iterator: anytype) ?Arguments {
     }
     if (arguments.out.len == 0) return null;
     if (arguments.test_key and arguments.signatures != null) return null;
+    if (arguments.redate) {
+        if (arguments.check or arguments.test_key or arguments.signatures != null) return null;
+        if (arguments.signed_at == null) return null;
+        return arguments;
+    }
     if (arguments.check) return arguments;
     if (arguments.version.len == 0 or arguments.license.len == 0) return null;
     for (arguments.zbx) |path| {
@@ -64,6 +80,8 @@ fn set_value(arguments: *Arguments, flag: []const u8, value: []const u8) bool {
         arguments.out = value;
     } else if (std.mem.eql(u8, flag, "--signatures")) {
         arguments.signatures = value;
+    } else if (std.mem.eql(u8, flag, "--signed-at")) {
+        arguments.signed_at = std.fmt.parseInt(u64, value, 10) catch return false;
     } else {
         return false;
     }
@@ -83,7 +101,9 @@ pub fn main(init: std.process.Init) !u8 {
         return constants.tool_exit_usage;
     };
     const memory = init.arena.allocator();
-    const done = if (arguments.check)
+    const done = if (arguments.redate)
+        run_redate(init.io, memory, &arguments, log)
+    else if (arguments.check)
         run_check(init.io, memory, &arguments, log)
     else
         run_build(init.io, memory, &arguments, log);
@@ -191,7 +211,10 @@ fn run_build(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.Wr
         arguments.license,
         constants.package_description_bytes_max,
     );
-    var options: release.Options = .{ .test_key = arguments.test_key };
+    var options: release.Options = .{
+        .test_key = arguments.test_key,
+        .signed_at = arguments.signed_at,
+    };
     if (arguments.signatures) |directory| {
         options.signatures = try load_signatures(io, memory, log, directory, &inputs);
     }
@@ -298,6 +321,33 @@ fn print_round_two(log: *Io.Writer, files: []const model.TreeFile, out: []const 
     try log.writeAll("packages: then run again with -Dsignatures=$SIGNATURES\n");
 }
 
+/// Re-dates `Release` in a tree on disk and removes the two signatures of the old one. The
+/// packages, the `Packages` files and the rpm side are not touched: `Release` names them by sum,
+/// and only its two date lines change.
+fn run_redate(io: Io, memory: Allocator, arguments: *const Arguments, log: *Io.Writer) !void {
+    const signed_at = arguments.signed_at.?;
+    const path = try std.fmt.allocPrint(memory, "{s}/{s}", .{
+        arguments.out, release.apt_release_path,
+    });
+    const old = try read_input(io, memory, log, path, constants.repo_metadata_bytes_max);
+    const new = apt.redate(memory, old, signed_at) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return refuse(log, "{s}: {s}", .{ path, model.describe(err) }),
+    };
+    const dir = Io.Dir.cwd();
+    dir.writeFile(io, .{ .sub_path = path, .data = new }) catch |err|
+        return refuse(log, "cannot write {s}: {s}", .{ path, @errorName(err) });
+    for ([_][]const u8{ release.apt_in_release_path, release.apt_release_gpg_path }) |stale| {
+        const stale_path = try std.fmt.allocPrint(memory, "{s}/{s}", .{ arguments.out, stale });
+        dir.deleteFile(io, stale_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return refuse(log, "cannot remove {s}: {s}", .{ stale_path, @errorName(err) }),
+        };
+    }
+    try log.print("packages: re-dated {s}; sign it again\n", .{path});
+    assert(!std.mem.eql(u8, old, new) or old.len > 0);
+}
+
 /// The files of a written tree, read from disk.
 const DiskSource = struct {
     io: Io,
@@ -367,6 +417,18 @@ test "arguments: a full build line parses, and each missing piece is refused" {
     const unknown = [_][]const u8{ "--out", "o", "--nope", "x" };
     var bad: TestIterator = .{ .words = &unknown };
     try std.testing.expect(parse_arguments(&bad) == null);
+}
+
+test "arguments: redate needs a signing time and refuses every other mode" {
+    // Goal: `--redate` is its own mode: out and signed-at only, and a bad time is a usage error.
+    var ok: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "1800000000" } };
+    try std.testing.expectEqual(@as(?u64, 1_800_000_000), parse_arguments(&ok).?.signed_at);
+    var missing: TestIterator = .{ .words = &.{ "--redate", "--out", "o" } };
+    try std.testing.expect(parse_arguments(&missing) == null);
+    var bad: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "soon" } };
+    try std.testing.expect(parse_arguments(&bad) == null);
+    var mixed: TestIterator = .{ .words = &.{ "--redate", "--out", "o", "--signed-at", "1", "--check" } };
+    try std.testing.expect(parse_arguments(&mixed) == null);
 }
 
 test "a header signature is accepted at the bound and refused one byte past it" {

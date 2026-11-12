@@ -12,6 +12,7 @@ const constants = @import("constants.zig");
 const package = @import("package.zig");
 const model = package.model;
 const rpm = package.rpm;
+const apt = package.apt;
 const openpgp = package.openpgp;
 const release = @import("package_release.zig");
 
@@ -84,14 +85,38 @@ fn check_apt(checker: *Checker) Error!void {
     const text = checker.read(release.apt_release_path) orelse return;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var in_sums = false;
+    var date: ?[]const u8 = null;
+    var valid_until: ?[]const u8 = null;
     while (lines.next()) |line| {
         if (std.mem.eql(u8, line, "SHA256:")) {
             in_sums = true;
+        } else if (field(line, "Date: ")) |value| {
+            date = value;
+        } else if (field(line, "Valid-Until: ")) |value| {
+            valid_until = value;
         } else if (in_sums and line.len > 0 and line[0] == ' ') {
             try check_release_line(checker, line);
         }
     }
     if (!in_sums) checker.fail("{s} has no SHA256 section", .{release.apt_release_path});
+    check_validity(checker, date, valid_until);
+}
+
+/// A `Release` with `Valid-Until` has a `Date`, both in the one form the writer uses, and the
+/// second is exactly `apt_valid_seconds` after the first. Without `Valid-Until` (the test key,
+/// a build with no `-Dsigned-at`) apt takes the metadata as valid for ever; the release scripts
+/// always pass `-Dsigned-at`, and the refresh job checks the served file's `Valid-Until`.
+fn check_validity(checker: *Checker, date: ?[]const u8, valid_until: ?[]const u8) void {
+    const until_text = valid_until orelse return;
+    const date_text = date orelse
+        return checker.fail("{s} has Valid-Until but no Date", .{release.apt_release_path});
+    const start = apt.parse_date(date_text) orelse
+        return checker.fail("the Release Date is not a date the writer makes", .{});
+    const end = apt.parse_date(until_text) orelse
+        return checker.fail("the Release Valid-Until is not a date the writer makes", .{});
+    if (end != start + constants.apt_valid_seconds) {
+        checker.fail("the Release Valid-Until is not 21 days after its Date", .{});
+    }
 }
 
 fn check_release_line(checker: *Checker, line: []const u8) Error!void {

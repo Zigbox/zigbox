@@ -140,14 +140,77 @@ anything else (links, dot files, `.html`, `to-sign/`, the test key) or lacks `In
 `Release.gpg` or a `repomd.xml.asc`, and after deploying it fetches every file back and fails
 unless zigbox.org serves the same bytes.
 
-This workflow does not yet send it `repository_dispatch` of type `site`, because this repository
-holds no token that can write to `Zigbox/zigbox.github.io` (`GITHUB_TOKEN` cannot). Until the
-owner adds one, run the deploy by hand after a release, or wait up to six hours. Then check a
-client with `apt update` and `dnf makecache` against zigbox.org.
+The refresh workflow sends it `repository_dispatch` of type `site` with the release App's token
+(`GITHUB_TOKEN` cannot write to `Zigbox/zigbox.github.io`). Check a client with `apt update` and
+`dnf makecache` against zigbox.org.
 
-The `Release` file has a fixed `Date` and no `Valid-Until`, and `repomd.xml` a fixed `revision`
-(reproducibility): a client cannot tell an old signed `InRelease` from a new one, so there is no
-replay or freeze protection.
+## Release assets
+
+`zig build release-assets` writes, under `zig-out/release-assets/`, what a release carries besides
+the signed packages. All of it is reproducible (fixed mtime, owner and order; gzip with no time):
+
+- `zbx-<v>-linux-x86_64.tar.gz` and `zbx-<v>-linux-aarch64.tar.gz`: the static ReleaseSafe `zbx`,
+  `LICENSE` and a short `README.txt`.
+- `zbx-<v>.cdx.json`: a CycloneDX 1.5 SBOM (version, licence, purl `pkg:github/Zigbox/zigbox@v<v>`,
+  the SHA-256 of each binary, the Zig toolchain version, and the statement that there are no
+  third-party components).
+- With `-Dpackages-dir=zig-out/packages` (the tree `release-sign.sh` signed), the debs and rpms,
+  and with `-Drepos-archive=FILE` the `zigbox-repos.tar.gz`; `-Dno-packages` writes the rest
+  without them. `-Dsource-date-epoch=N` sets the timestamps.
+- `SHA256SUMS`, in `sha256sum -c` format, over every asset the directory holds.
+
+The Mac zip is built later, in another job. Add it to the directory, then
+`zig build release-assets` is not rerun (it would clear the directory); run the small tool
+`release_assets_main sums --dir DIR` (build it with `zig build -Dtarget=native` and take it from
+the cache, or run `zig run src/release_assets_main.zig -- sums --dir DIR`) to regenerate `SHA256SUMS`
+over the whole directory, or `--name SHA256SUMS.macos` to write a separate file and leave the
+signed one alone.
+
+`SHA256SUMS` is meant to be signed: a detached `SHA256SUMS.asc` by the release subkey, made after
+every asset is in the directory. In `release-sign.sh` that is one line beside the others:
+`sign_with -ab -o "$output/SHA256SUMS.asc" "$output/SHA256SUMS"`, checked with `check_gpg`.
+`package-refresh.sh` re-signs `SHA256SUMS` itself because the archive's line changes.
+
+## Keeping apt fresh
+
+`Release` carries `Date` = the signing time and `Valid-Until` = Date + 21 days when the build is
+given `-Dsigned-at=<unix seconds>`; `release-sign.sh` must pass the same value to all three of its
+`zig build packages` runs, or the files it signs are not the files it places. Without the option
+(the test key, demos) `Date` is fixed and there is no `Valid-Until`. rpm `repomd.xml` is not
+changed: dnf has no expiry to set.
+
+`zig build packages-redate -Dsigned-at=N -Dpackages-dir=DIR` rewrites only `Release`'s two lines in
+an existing tree and deletes the `InRelease` and `Release.gpg` that no longer match.
+`packages-check` fails when `Valid-Until` is not Date + 21 days.
+
+`.github/workflows/package-refresh.yml` runs `.github/package-refresh.sh` weekly (Monday 05:17 UTC)
+and on dispatch, in the environment `package-refresh`
+([decision](../decisions/2026-11-12-apt-valid-until-and-refresh.md)): it takes the newest release's
+`zigbox-repos.tar.gz`, checks its old signature is by a subkey of the pinned primary and its file
+sums are right, re-dates, signs `InRelease` and `Release.gpg`, verifies them, and uploads the new
+archive (and `SHA256SUMS` and its signature when the release has them) with `--clobber`. It then
+dispatches the zigbox.org deploy, waits for it, and fails unless the served `InRelease` is valid
+for at least ten more days. Any failure fails the run; GitHub's notification of a failed
+scheduled run is the alarm, and a failed week leaves 14 days before expiry.
+
+Owner setup, once: create the environment `package-refresh` on `Zigbox/zigbox` with no required
+reviewer, a deployment branch policy of `main` only, and the secrets `ZIGBOX_SIGNING_KEY`,
+`ZIGBOX_SIGNING_PASSPHRASE` and `RELEASE_APP_PRIVATE_KEY` plus the variable `RELEASE_APP_ID` (the
+same subkey export and App as `release`):
+
+```sh
+gh api -X PUT repos/Zigbox/zigbox/environments/package-refresh \
+  -F deployment_branch_policy[protected_branches]=false -F deployment_branch_policy[custom_branch_policies]=true
+gh api -X POST repos/Zigbox/zigbox/environments/package-refresh/deployment-branch-policies -f name=main
+gpg --armor --export-secret-subkeys "$SUBKEY"'!' |
+  gh secret set ZIGBOX_SIGNING_KEY --env package-refresh --repo Zigbox/zigbox
+gh secret set ZIGBOX_SIGNING_PASSPHRASE --env package-refresh --repo Zigbox/zigbox
+gh secret set RELEASE_APP_PRIVATE_KEY --env package-refresh --repo Zigbox/zigbox
+gh variable set RELEASE_APP_ID --env package-refresh --repo Zigbox/zigbox
+```
+
+Renew the subkey in this environment too (the yearly renewal section): an expired subkey makes the
+refresh fail, loudly. Until the environment exists the workflow fails at the key import.
 
 ## Doing it by hand
 
