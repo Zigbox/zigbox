@@ -1,8 +1,13 @@
 # A tour of zbx
 
+> **Not yet verified for this release.** The commands were run with zbx 0.4.0 on 2026-11-11 in a
+> cloud container, except: the **Build** section was not run to the end (its build file was refused
+> with E0307 there), and the **Ports** output and the build cache behaviour come from recorded CI
+> demos, not from a run for this guide. Nothing was run with 0.5.0.
+
 One short example per command. Start from a host where `zbx doctor` passes
-([Mac](try-mac.md), [Linux](try-linux.md)). Every command and output below was run with
-`zbx 0.4.0` as an ordinary user on Linux, unless it says it comes from a recorded CI run.
+([Mac](try-mac.md), [Linux](try-linux.md)). The commands and output below were run with
+`zbx 0.4.0` as an ordinary user on Linux, except where the note above or the text says otherwise.
 
 <!-- owner: run on 2026-11-11 in a cloud container (cgroup v1, so every `zbx run` there also
 printed warning W0301; it is left out below). Ports and build could not run there; those
@@ -14,7 +19,7 @@ sections cite CI. Re-run the page with 0.5.1. -->
 zbx doctor
 ```
 
-Seven checks, one line each; a failure ends with a code and the command that fixes it. See
+Seven checks, one line each; a failure ends with a code and, where there is one, the command that fixes it. See
 [Try on Linux](try-linux.md#2-check-the-host). `zbx doctor --output json` prints the same as JSON.
 
 ## Pull and run

@@ -1,8 +1,13 @@
 # Zigbox guide
 
+> **Not yet verified for this release.** The examples in this guide were run with zbx 0.4.0, or
+> are taken from recorded CI or Mac runs of earlier versions. They have not been re-run with 0.5.0.
+> Each page says at its top which steps were not run. The apt and dnf repositories and the Homebrew
+> formula do not yet carry 0.5.0 (see the pages for Linux and Mac).
+
 Zigbox runs Linux containers without a daemon and without root. One static binary, `zbx`,
 pulls images, runs them, keeps their data, builds new images and signs them. Every container
-starts with no network unless you grant one. Every error is one line with a code, a cause and a
+starts with no network unless you grant one. Every error is one line with a code and a cause, and usually a
 command that fixes it. On a Mac, `zbx` runs the same containers in a small Linux virtual machine
 that starts and stops by itself.
 

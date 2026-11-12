@@ -1,5 +1,10 @@
 # Try Zigbox on Linux
 
+> **Not yet verified for this release.** The apt and dnf commands below have not been run against
+> zigbox.org, which returns 404 for `/apt`, `/rpm` and the keyring until the first release that
+> carries the package archive (0.5.0) is deployed. They are the README's, and the ones `demo-m8-packages`
+> runs against a local copy of the tree. The output shown is from zbx 0.4.0.
+
 You need Linux on x86_64 or arm64 (aarch64), kernel 5.15 or newer. `zbx` runs as your own user;
 you need `sudo` only to install the package and change a few host settings, once.
 
@@ -54,7 +59,7 @@ zbx doctor
 ```
 
 `zbx doctor` checks seven things and prints one line for each. On a ready host every line says
-`ok`. When one says `FAIL`, it ends with a code, and a diagnostic below says why and prints the
+`ok`. When one says `FAIL`, it ends with a code, and a diagnostic below says why and, where there is one, prints the
 command that fixes it. Here is a real run on a host with two problems:
 
 ```
