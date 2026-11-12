@@ -11,6 +11,9 @@
 //!      profile, or one the keychain does not have, is refused before anything is submitted;
 //!   6. write `<archive>.sha256` and the Homebrew formula with the version, URL and hash filled.
 //!
+//! `--keychain FILE` makes `codesign` and `notarytool` use that keychain file (the release
+//! workflow's temporary one) instead of the login keychain.
+//!
 //! The identity `-` signs ad hoc (no timestamp, no certificate: for trying the script). Nothing
 //! secret is read, printed or logged: the keychain holds the certificate and the notary profile,
 //! and this tool passes only their names.
@@ -31,6 +34,9 @@ const Arguments = struct {
     version: []const u8 = "",
     identity: []const u8 = default_identity,
     profile: []const u8 = default_profile,
+    /// A keychain file to sign and notarize with instead of the login keychain; empty is the
+    /// login keychain.
+    keychain: []const u8 = "",
     notarize: bool = false,
 };
 
@@ -50,6 +56,7 @@ pub fn sign_arguments(
     identity: []const u8,
     entitlements: []const u8,
     binary: []const u8,
+    keychain: []const u8,
     out: *[12][]const u8,
 ) []const []const u8 {
     assert(identity.len > 0);
@@ -59,7 +66,48 @@ pub fn sign_arguments(
         "--sign",  identity,    binary,
     };
     @memcpy(out[0..words.len], &words);
-    return out[0..words.len];
+    if (keychain.len == 0) return out[0..words.len];
+    out[words.len] = "--keychain";
+    out[words.len + 1] = keychain;
+    assert(words.len + 2 <= out.len);
+    return out[0 .. words.len + 2];
+}
+
+/// The words `notarytool` is run with, after the program name, for a submission or the profile
+/// check: `verb` is `submit` (with the archive and `--wait`) or `history`.
+pub fn notary_arguments(
+    verb: []const u8,
+    archive: []const u8,
+    profile: []const u8,
+    keychain: []const u8,
+    out: *[8][]const u8,
+) []const []const u8 {
+    assert(profile.len > 0);
+    const submit = std.mem.eql(u8, verb, "submit");
+    if (!submit) assert(std.mem.eql(u8, verb, "history"));
+    var count: usize = 0;
+    out[count] = "notarytool";
+    out[count + 1] = verb;
+    count += 2;
+    if (submit) {
+        assert(archive.len > 0);
+        out[count] = archive;
+        count += 1;
+    }
+    out[count] = "--keychain-profile";
+    out[count + 1] = profile;
+    count += 2;
+    if (keychain.len > 0) {
+        out[count] = "--keychain";
+        out[count + 1] = keychain;
+        count += 2;
+    }
+    if (submit) {
+        out[count] = "--wait";
+        count += 1;
+    }
+    assert(count <= out.len);
+    return out[0..count];
 }
 
 /// The `CDHash=` line of `codesign -dvvv` output: the identity of the signed code.
@@ -100,7 +148,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer log.flush() catch {};
     const arguments = parse_arguments(init) orelse {
         try log.print("mac_release: usage: --binary F --entitlements F --formula F --out DIR " ++
-            "--version V [--identity NAME|-] [--profile NAME] [--notarize]\n", .{});
+            "--version V [--identity NAME|-] [--profile NAME] [--keychain FILE] [--notarize]\n", .{});
         return 2;
     };
     run(init, &arguments, log) catch |err| {
@@ -127,6 +175,7 @@ fn parse_arguments(init: std.process.Init) ?Arguments {
         if (std.mem.eql(u8, name, "--version")) result.version = value;
         if (std.mem.eql(u8, name, "--identity")) result.identity = value;
         if (std.mem.eql(u8, name, "--profile")) result.profile = value;
+        if (std.mem.eql(u8, name, "--keychain")) result.keychain = value;
     }
     if (result.binary.len == 0 or result.out.len == 0 or result.version.len == 0) return null;
     if (result.entitlements.len == 0 or result.formula.len == 0) return null;
@@ -199,13 +248,14 @@ fn same_code(
 }
 
 /// Whether the keychain has a notary profile of this name: `notarytool history` exits 0 with one.
-fn profile_exists(io: Io, profile: []const u8) bool {
-    const argv = [_][]const u8{
-        "/usr/bin/xcrun",     "notarytool", "history",
-        "--keychain-profile", profile,
-    };
+fn profile_exists(io: Io, profile: []const u8, keychain: []const u8) bool {
+    var words: [8][]const u8 = undefined;
+    const tail = notary_arguments("history", "", profile, keychain, &words);
+    var argv: [9][]const u8 = undefined;
+    argv[0] = "/usr/bin/xcrun";
+    @memcpy(argv[1 .. 1 + tail.len], tail);
     var child = std.process.spawn(io, .{
-        .argv = &argv,
+        .argv = argv[0 .. 1 + tail.len],
         .stdout = .ignore,
         .stderr = .ignore,
     }) catch return false;
@@ -228,7 +278,7 @@ fn check_notarization(io: Io, arguments: *const Arguments, log: *Io.Writer) !voi
             "an ad-hoc signature cannot be notarized\n", .{default_profile});
         return error.NotarizationRefused;
     }
-    if (!profile_exists(io, arguments.profile)) {
+    if (!profile_exists(io, arguments.profile, arguments.keychain)) {
         try log.print("mac_release: the keychain has no notary profile '{s}'. Store one " ++
             "with: xcrun notarytool store-credentials {s} (it asks for the Apple ID and " ++
             "an app-specific password, or an API key, and keeps them in the keychain)\n", .{
@@ -252,7 +302,13 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
     const signed = try std.fmt.allocPrint(arena, "{s}/zbx", .{stage});
     try Io.Dir.copyFile(dir, arguments.binary, dir, signed, io, .{});
     var words: [12][]const u8 = undefined;
-    const tail = sign_arguments(arguments.identity, arguments.entitlements, signed, &words);
+    const tail = sign_arguments(
+        arguments.identity,
+        arguments.entitlements,
+        signed,
+        arguments.keychain,
+        &words,
+    );
     var argv: [14][]const u8 = undefined;
     argv[0] = "/usr/bin/codesign";
     @memcpy(argv[1 .. 1 + tail.len], tail);
@@ -266,10 +322,18 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
     try exec(io, log, &.{ "/usr/bin/ditto", "-c", "-k", "--norsrc", stage, archive });
     try same_code(io, arena, log, signed, archive, arguments.out);
     if (arguments.notarize) {
-        try exec(io, log, &.{
-            "/usr/bin/xcrun",     "notarytool",      "submit", archive,
-            "--keychain-profile", arguments.profile, "--wait",
-        });
+        var notary_words: [8][]const u8 = undefined;
+        const notary = notary_arguments(
+            "submit",
+            archive,
+            arguments.profile,
+            arguments.keychain,
+            &notary_words,
+        );
+        var notary_argv: [9][]const u8 = undefined;
+        notary_argv[0] = "/usr/bin/xcrun";
+        @memcpy(notary_argv[1 .. 1 + notary.len], notary);
+        try exec(io, log, notary_argv[0 .. 1 + notary.len]);
         // A Mach-O on its own cannot be stapled, and the archive is not a bundle either: the
         // ticket stays with Apple, and Gatekeeper asks for it the first time a quarantined copy
         // runs. Nothing is stapled.
@@ -312,15 +376,42 @@ test "the archive is named for the version and the ad-hoc identity has no timest
     var buffer: [96]u8 = undefined;
     try std.testing.expectEqualStrings("zbx-0.1.0-macos-arm64.zip", archive_name(&buffer, "0.1.0"));
     var words: [12][]const u8 = undefined;
-    const ad_hoc = sign_arguments("-", "e.plist", "zbx", &words);
+    const ad_hoc = sign_arguments("-", "e.plist", "zbx", "", &words);
     try std.testing.expectEqualStrings("--timestamp=none", ad_hoc[3]);
-    const real = sign_arguments(default_identity, "e.plist", "zbx", &words);
+    const real = sign_arguments(default_identity, "e.plist", "zbx", "", &words);
     try std.testing.expectEqualStrings("--options", real[1]);
     try std.testing.expectEqualStrings("runtime", real[2]);
     try std.testing.expectEqualStrings("--timestamp", real[3]);
     try std.testing.expectEqualStrings(default_identity, real[7]);
     try std.testing.expect(is_ad_hoc("-"));
     try std.testing.expect(!is_ad_hoc(default_identity));
+}
+
+test "--keychain is passed to codesign and notarytool, and only when given" {
+    // Goal: the keychain reaches both tools when set and neither when unset, so the owner's
+    // login-keychain path is unchanged. Method: the words built with and without a keychain.
+    var words: [12][]const u8 = undefined;
+    const plain = sign_arguments("id", "e.plist", "zbx", "", &words);
+    try std.testing.expectEqual(@as(usize, 9), plain.len);
+    try std.testing.expectEqualStrings("zbx", plain[plain.len - 1]);
+    const keyed = sign_arguments("id", "e.plist", "zbx", "/tmp/k.keychain-db", &words);
+    try std.testing.expectEqual(@as(usize, 11), keyed.len);
+    try std.testing.expectEqualStrings("--keychain", keyed[9]);
+    try std.testing.expectEqualStrings("/tmp/k.keychain-db", keyed[10]);
+
+    var notary_words: [8][]const u8 = undefined;
+    const submit = notary_arguments("submit", "a.zip", "prof", "", &notary_words);
+    try std.testing.expectEqual(@as(usize, 6), submit.len);
+    try std.testing.expectEqualStrings("--wait", submit[submit.len - 1]);
+    const submit_keyed = notary_arguments("submit", "a.zip", "prof", "/k", &notary_words);
+    try std.testing.expectEqual(@as(usize, 8), submit_keyed.len);
+    try std.testing.expectEqualStrings("--keychain", submit_keyed[5]);
+    try std.testing.expectEqualStrings("/k", submit_keyed[6]);
+    try std.testing.expectEqualStrings("--wait", submit_keyed[7]);
+    const history = notary_arguments("history", "", "prof", "/k", &notary_words);
+    try std.testing.expectEqual(@as(usize, 6), history.len);
+    try std.testing.expectEqualStrings("history", history[1]);
+    try std.testing.expectEqualStrings("/k", history[5]);
 }
 
 test "the CDHash is read from codesign's output, and the keychain message is one line" {

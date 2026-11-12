@@ -901,6 +901,9 @@ fn add_mac_release(
         release.default_profile;
     const profile = b.option([]const u8, "notary-profile", profile_help) orelse
         release.default_profile;
+    const keychain_help = "mac-release: the keychain file codesign and notarytool use; " ++
+        "default the login keychain";
+    const keychain = b.option([]const u8, "keychain", keychain_help) orelse "";
     const notarize_help = "mac-release: submit the archive to Apple's notary service";
     const notarize = b.option(bool, "notarize", notarize_help) orelse false;
     const image = add_vm_image(b, options);
@@ -929,6 +932,7 @@ fn add_mac_release(
     run.addArgs(&.{ "--out", "zig-out/mac-release" });
     run.addArgs(&.{ "--version", @import("build.zig.zon").version });
     run.addArgs(&.{ "--identity", identity, "--profile", profile });
+    if (keychain.len > 0) run.addArgs(&.{ "--keychain", keychain });
     if (notarize) run.addArg("--notarize");
     const step = b.step("mac-release", "Sign, zip and optionally notarize the macOS zbx");
     step.dependOn(&run.step);

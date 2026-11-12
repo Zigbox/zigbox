@@ -53,9 +53,9 @@ is_docs() {
 classify() {
   local p=$1 suffix
   case "$p" in
-    # The release workflow and its signing script run only on a tag (and its own test job on a
-    # throwaway key); no demo runs them, so they select none.
-    .github/workflows/release.yml | .github/release-sign.sh | .github/release-sign-test.sh) return ;;
+    # The release workflow, tag.yml and the signing scripts run only on a tag or after a push to
+    # main (and the release test jobs on a throwaway key); no demo runs them, so they select none.
+    .github/workflows/release.yml | .github/workflows/tag.yml | .github/release-sign.sh | .github/release-sign-test.sh) return ;;
   esac
   case "$p" in
     # What the harness, the build or CI itself is made of: every demo.
