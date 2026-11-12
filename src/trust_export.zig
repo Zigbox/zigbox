@@ -8,7 +8,8 @@
 //!   - `dsse.Work` (873,894 bytes, `@sizeOf(dsse.Work)`), reused between calls; the 6 MiB
 //!     `record.Work` is not needed, it belongs to reading a record from the store;
 //!   - a `signature_record.Record` (2,800,336 bytes:
-//!     `limits.signature_record_bytes_max` and two counters) holding the lines, filled with `Record.add` from envelopes the caller read;
+//!     `limits.signature_record_bytes_max` and two counters) holding the lines,
+//!     filled with `Record.add` from envelopes the caller read;
 //!   - a `policy.Policy`, filled by `policy.parse`; a `verdict.Report`.
 //! Envelopes are parsed with `dsse.parse` and statements with `statement.parse`. Keys are in
 //! `key` (public-key text, key ids). Not exported: `record.zig` (reads a record file through the
