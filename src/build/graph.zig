@@ -255,6 +255,10 @@ fn resolve_edges(file: *const BuildFile, graph: *Graph, problem: *Problem) Resul
 
 fn add_edge(graph: *Graph, step: u8, target: u8) void {
     const count = graph.after_count[step];
+    // A step that is a need and a base, or the `from` of two copies, is one edge.
+    for (graph.after[step][0..count]) |seen| {
+        if (seen == target) return;
+    }
     assert(count < constants.build_step_edges_max); // The edges' bound counts every source.
     graph.after[step][count] = target;
     graph.after_count[step] = count + 1;
@@ -514,6 +518,18 @@ test "a step base, a copy and a bind come after the step they name" {
     const c = test_graph.order_slice()[2];
     try testing.expectEqual(@as(usize, 2), test_graph.after_slice(c).len); // b, and a once.
     try testing.expectEqual(@as(usize, 0), test_graph.needs_slice(&test_file, c).len);
+}
+
+test "a step that is a need, a base and a copy source of another is one edge" {
+    // Goal: `--graph` lists an edge once. Method: `b` takes `a` three ways.
+    var problem: Problem = undefined;
+    const text = step_head ++ " }, .steps = .{\n" ++
+        ".{ .name = \"a\", .base = \"x\", .run = .{\"x\"} },\n" ++
+        ".{ .name = \"b\", .base = \"step:a\", .needs = .{\"a\"},\n" ++
+        "   .copy = .{ .{ .from = \"step:a\", .src = .{\"p\"}, .to = \"/q\" } } } } }";
+    try testing.expectEqual(Result.ordered, try order_text(text, &problem));
+    const b = test_graph.order_slice()[1];
+    try testing.expectEqual(@as(usize, 1), test_graph.after_slice(b).len);
 }
 
 test "a cycle through a base is refused, and an unknown step in a base, from or image is" {

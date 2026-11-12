@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">a user or group name is not in the image</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>A step's .user, a copy's .chown, or the image's .config .user names a user or group, and zbx looks the name up in /etc/passwd and /etc/group of the tree the step runs on (the step's base, with its needs mounted). A name that is not there is refused before anything runs, so a build does not silently run as the wrong id.</p>
+<p>A step's .user, a copy's .chown, or the image's .config .user names a user or group, and zbx looks the name up in /etc/passwd and /etc/group of the tree the step's base holds. A name that is not there is refused when the step is about to start, so a build does not silently run as the wrong id. A base of the form step:NAME exists only once that step has run, so the refusal can come after earlier steps have.</p>
 <p>The cause names where the name was written (the step or .image.config) and the name. To fix it, add the user or group in an earlier step (for example a step that runs adduser) and base this step on it with .base = &quot;step:NAME&quot;, or write the id as a number.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

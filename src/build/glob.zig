@@ -2,11 +2,15 @@
 //! "Input globs and excludes"). No I/O and no allocation: a pattern is read into a fixed token
 //! table and matched against a path with a set of states, one pass over the path.
 //!
-//! The language is Docker's (moby's `patternmatcher`): `*` is any run of bytes but `/`, `?` is
-//! one byte but `/`, `[a-z]` and `[^a-z]` (or `[!a-z]`) are classes that never take `/`, `\x`
-//! is the byte `x`, `**` followed by `/` is any number of leading directories (including none)
-//! and any other `**` is any run of bytes, `/` too. A path is relative, written with `/`, with
-//! no `.` or `..` part and no trailing `/`.
+//! The language is the part of Docker's (moby's `patternmatcher`) that zbx and Docker agree on:
+//! `*` is any run of bytes but `/`, `?` is one byte but `/`, `[a-z]` is a class that never takes
+//! `/`, `\x` is the byte `x`, `**/` is any number of leading directories (including none), and
+//! a `**` that ends the pattern is any run of bytes, `/` too. A path is relative, written with
+//! `/`, with no `.` or `..` part and no trailing `/`.
+//!
+//! Two forms mean something else in Docker than they would here, so they are refused
+//! (`bad_deep`, `bad_class`) rather than read: a `**` that is not a whole segment (`a**b`,
+//! `**.log`), and a negated class (`[!a]`, `[^a]`). Write `**/*.log` and list the bytes.
 //!
 //! An exclude list is `.dockerignore`'s: a line is a pattern, a `#` line or a blank one is
 //! skipped, `!` re-includes, and the last line that matches a path or one of its parent
@@ -33,7 +37,7 @@ const Tokens = struct {
 };
 
 /// Why a pattern is not one.
-pub const Fault = enum { empty, too_long, bad_class, bad_escape, parent_part };
+pub const Fault = enum { empty, too_long, bad_class, bad_deep, bad_escape, parent_part };
 
 /// Reads `pattern` into `tokens`, or says what is wrong with it.
 fn tokenise(pattern: []const u8, tokens: *Tokens) ?Fault {
@@ -50,7 +54,12 @@ fn tokenise(pattern: []const u8, tokens: *Tokens) ?Fault {
             '*' => {
                 token.kind = .run;
                 if (index < pattern.len and pattern[index] == '*') {
+                    // A `**` is a whole segment: after a `/` or the start, before a `/` or the end.
+                    const first = index - 1;
+                    if (first > 0 and pattern[first - 1] != '/') return .bad_deep;
                     index += 1;
+                    const at_end = index == pattern.len;
+                    if (!at_end and pattern[index] != '/') return .bad_deep;
                     token.kind = .deep;
                     if (index < pattern.len and pattern[index] == '/') {
                         index += 1;
@@ -83,9 +92,9 @@ fn read_class(pattern: []const u8, index: *u32, token: *Token) ?Fault {
     assert(pattern[index.* - 1] == '[');
     token.kind = .class;
     token.byte = 0;
+    // Docker reads `[!a]` as a set holding `!`, and `[^a]` as a set that takes `/`: refused.
     if (index.* < pattern.len and (pattern[index.*] == '^' or pattern[index.*] == '!')) {
-        token.byte = 1;
-        index.* += 1;
+        return .bad_class;
     }
     token.begin = @intCast(index.*);
     while (index.* < pattern.len) {
@@ -332,8 +341,6 @@ test "star, question mark and class stay within a component" {
     try expect_match("a?c", "abc", true);
     try expect_match("a?c", "a/c", false);
     try expect_match("[a-c]x", "bx", true);
-    try expect_match("[^a-c]x", "bx", false);
-    try expect_match("[!a-c]x", "dx", true);
     try expect_match("[a-c]x", "/x", false);
     try expect_match("a\\*b", "a*b", true);
     try expect_match("a\\*b", "axb", false);
@@ -358,6 +365,16 @@ test "a bad pattern matches nothing and is named" {
     try testing.expectEqual(Fault.bad_escape, valid("a\\").?);
     try testing.expectEqual(Fault.empty, valid("").?);
     try testing.expect(valid("a/[b-d]*/**/e") == null);
+    // Forms Docker reads another way are refused, not guessed.
+    try testing.expectEqual(Fault.bad_deep, valid("**.log").?);
+    try testing.expectEqual(Fault.bad_deep, valid("a**b").?);
+    try testing.expectEqual(Fault.bad_deep, valid("a/**b").?);
+    try testing.expectEqual(Fault.bad_deep, valid("***").?);
+    try testing.expectEqual(Fault.bad_class, valid("[!a]").?);
+    try testing.expectEqual(Fault.bad_class, valid("[^a-c]x").?);
+    try testing.expect(valid("**") == null);
+    try testing.expect(valid("a/**") == null);
+    try testing.expect(valid("**/a") == null);
     try expect_match("[a", "[a", false);
 }
 

@@ -8,8 +8,13 @@
 //!   1. `glob.matches` agrees with the reference on every pattern and path.
 //!   2. `glob.excluded` agrees with the reference on a list of lines (comments, blanks, `!`, a
 //!      leading `/`): the last line that matches the path or a parent directory decides.
-//!   3. Noise (any bytes as a pattern or a line) never crashes the reader, and a pattern it
-//!      accepts as valid has a line reading that agrees.
+//!   3. Noise (any bytes as a pattern or a line) never crashes the reader, and a plain pattern
+//!      (no `# ! / .` bytes, nothing a line reading cleans) that is valid reads as the same
+//!      line, not negated.
+//!   4. A `**` inside a segment and a negated class are refused with their own faults.
+//!   5. `glob.matches` agrees with `moby_matches`, a backtracking matcher over the pattern text
+//!      that is written the way moby builds its expression (`**/` is `(.*/)?`, a trailing `**`
+//!      is `.*`, `*` is `[^/]*`) and shares nothing with the reader's token table.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -29,7 +34,6 @@ const Range = struct { low: u8, high: u8 };
 const Token = struct {
     kind: Kind,
     byte: u8 = 0,
-    negated: bool = false,
     ranges: [2]Range = undefined,
     ranges_count: u8 = 0,
 };
@@ -88,10 +92,6 @@ fn gen_class(random: std.Random, pattern: *Pattern) void {
     assert(pattern.count < tokens_max);
     var token: Token = .{ .kind = .class };
     pattern.put("[");
-    if (random.boolean()) {
-        token.negated = true;
-        pattern.put(if (random.boolean()) "^" else "!");
-    }
     token.ranges_count = 1 + random.uintLessThan(u8, 2);
     for (0..token.ranges_count) |index| {
         const low = alphabet[random.uintLessThan(usize, alphabet.len)];
@@ -141,7 +141,7 @@ fn class_takes(token: Token, byte: u8) bool {
     for (token.ranges[0..token.ranges_count]) |range| {
         if (byte >= range.low and byte <= range.high) inside = true;
     }
-    return inside != token.negated;
+    return inside;
 }
 
 /// The reference: `table[t][i]` is whether tokens `t..` match `path[i..]` exactly. Slow on
@@ -216,12 +216,64 @@ fn check_matches(random: std.Random, pattern: *const Pattern) void {
     for (0..16) |_| {
         const path = gen_path(random, &storage);
         const expected = reference(pattern, path);
+        if (moby_matches(text, path) != expected) {
+            std.debug.print("pattern \"{s}\" path \"{s}\": moby {}\n", .{ text, path, !expected });
+            unreachable; // The table and the text matcher must agree.
+        }
         if (glob.matches(text, path) != expected) {
             std.debug.print("pattern \"{s}\" path \"{s}\": reference {}\n", .{
                 text, path, expected,
             });
             unreachable; // The reader and the reference must agree.
         }
+    }
+}
+
+/// Whether `pattern` matches all of `path`, read as moby builds its expression. Backtracks; the
+/// patterns and paths are short.
+fn moby_matches(pattern: []const u8, path: []const u8) bool {
+    if (pattern.len == 0) return path.len == 0;
+    if (std.mem.startsWith(u8, pattern, "**/")) {
+        // `(.*/)?`: no directories, or any bytes up to and including a `/`.
+        if (moby_matches(pattern[3..], path)) return true;
+        for (path, 0..) |byte, index| {
+            if (byte == '/' and moby_matches(pattern[3..], path[index + 1 ..])) return true;
+        }
+        return false;
+    }
+    if (std.mem.eql(u8, pattern, "**")) return true; // `.*`
+    switch (pattern[0]) {
+        '*' => {
+            // `[^/]*`
+            for (0..path.len + 1) |taken| {
+                if (taken > 0 and path[taken - 1] == '/') break;
+                if (moby_matches(pattern[1..], path[taken..])) return true;
+            }
+            return false;
+        },
+        '?' => return path.len > 0 and path[0] != '/' and moby_matches(pattern[1..], path[1..]),
+        '\\' => {
+            return pattern.len > 1 and path.len > 0 and path[0] == pattern[1] and
+                moby_matches(pattern[2..], path[1..]);
+        },
+        '[' => {
+            const close = std.mem.indexOfScalar(u8, pattern, ']').?;
+            const body = pattern[1..close];
+            if (path.len == 0 or path[0] == '/') return false;
+            var inside = false;
+            var at: usize = 0;
+            while (at < body.len) {
+                const range = at + 2 < body.len and body[at + 1] == '-';
+                const high = if (range) body[at + 2] else body[at];
+                if (path[0] >= body[at] and path[0] <= high) inside = true;
+                at += if (range) 3 else 1;
+            }
+            return inside and moby_matches(pattern[close + 1 ..], path[1..]);
+        },
+        else => {
+            return path.len > 0 and path[0] == pattern[0] and
+                moby_matches(pattern[1..], path[1..]);
+        },
     }
 }
 
@@ -292,14 +344,32 @@ fn check_excluded(random: std.Random) void {
     }
 }
 
+/// Property 4: a refused form, written among plain items.
+fn check_refused(random: std.Random) void {
+    var text: [8]u8 = undefined;
+    const item = alphabet[random.uintLessThan(usize, alphabet.len)];
+    const which = random.uintLessThan(u8, 6);
+    const written = switch (which) {
+        0 => std.fmt.bufPrint(&text, "{c}**", .{item}),
+        1 => std.fmt.bufPrint(&text, "**{c}", .{item}),
+        2 => std.fmt.bufPrint(&text, "{c}**{c}", .{ item, item }),
+        3 => std.fmt.bufPrint(&text, "[^{c}]", .{item}),
+        4 => std.fmt.bufPrint(&text, "[!{c}]", .{item}),
+        else => std.fmt.bufPrint(&text, "x/**{c}", .{item}),
+    } catch unreachable; // Every form fits eight bytes.
+    const want: glob.Fault = if (which == 3 or which == 4) .bad_class else .bad_deep;
+    assert(glob.valid(written) == want);
+}
+
 /// Property 3.
-fn check_noise(random: std.Random) void {
+fn check_noise(random: std.Random, plain: bool) void {
     var bytes: [48]u8 = undefined;
     const length = random.uintAtMost(usize, bytes.len);
     random.bytes(bytes[0..length]);
     // Bias toward the bytes that mean something, so classes and escapes are met.
     for (bytes[0..length]) |*byte| {
         if (random.boolean()) byte.* = "*?[]\\^!-/.#ab"[random.uintLessThan(usize, 13)];
+        if (plain) byte.* = "*?[]\\^-ab"[random.uintLessThan(usize, 10)];
     }
     const text = bytes[0..length];
     const fault = glob.valid(text);
@@ -307,11 +377,14 @@ fn check_noise(random: std.Random) void {
     _ = glob.is_glob(text);
     _ = glob.line_fault(text);
     _ = glob.matches(text, "a/b");
-    if (fault == null and length > 0) {
-        // A pattern that is valid on its own is valid as a line, unless the line reading drops
-        // or refuses part of it (a `..` part, a leading `!` or `#`, blanks).
+    if (plain and fault == null and length > 0) {
+        // Nothing here is cleaned by the line reading, so it reads as the same pattern.
         switch (glob.read_line(text, &out)) {
-            .line, .nothing, .fault => {},
+            .line => |line| {
+                assert(!line.negated);
+                assert(std.mem.eql(u8, line.pattern, text));
+            },
+            .nothing, .fault => unreachable, // A valid plain pattern is a line.
         }
     }
     assert(length <= bytes.len);
@@ -325,5 +398,7 @@ pub fn fuzz_dockerignore(seed: u64) void {
         check_matches(random, &pattern);
     }
     check_excluded(random);
-    check_noise(random);
+    check_refused(random);
+    check_noise(random, false);
+    check_noise(random, true);
 }

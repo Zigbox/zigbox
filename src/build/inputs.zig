@@ -353,6 +353,10 @@ test "an input with a glob byte is a pattern, checked for form and not read from
     var problem: Problem = undefined;
     try testing.expectEqual(Result.ok, try check_inputs("\"nothing/**/*.go\", \"a?\"", &problem));
     try testing.expectEqual(Result.ok, try check_inputs("\"go.mod\", \"[ab]*\"", &problem));
+    // M7 took `data[1].csv` for the file of that name; it is now the pattern for `data1.csv`.
+    // A plain path to a missing file is `Missing`, so `ok` shows it is not read as one. The
+    // build refuses it as unrunnable until patterns are matched (docs/decisions/, M9 slice 1).
+    try testing.expectEqual(Result.ok, try check_inputs("\"data[1].csv\"", &problem));
     const bad = [_][]const u8{ "\"src/[a\"", "\"../*\"", "\"a/\\\\\"" };
     inline for (bad) |input| {
         try testing.expectEqual(Result.refused, try check_inputs(input, &problem));

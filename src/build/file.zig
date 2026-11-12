@@ -708,6 +708,10 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
         if (!fields.has(field)) return parser.fail(.missing_field, open, .step, field);
     }
     if (fields.has(.run) == fields.has(.copy)) return parser.fail(.run_or_copy, open, .step, null);
+    // A copy step that copies nothing would be its base under another name.
+    if (fields.has(.copy) and step.copy.count == 0) {
+        return parser.fail(.run_or_copy, open, .step, .copy);
+    }
     try check_mounts(parser, step, open);
 }
 
@@ -853,12 +857,13 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
     }
     if (!fields.has(.src)) return parser.fail(.missing_field, open, .copy, .src);
     if (!fields.has(.to)) return parser.fail(.missing_field, open, .copy, .to);
-    try check_sources(parser, entry);
+    try check_sources(parser, entry, open);
 }
 
 /// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree.
-fn check_sources(parser: *Parser, entry: *const CopyEntry) Refused!void {
+fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!void {
     assert(entry.src.given);
+    if (entry.src.count == 0) return parser.fail(.missing_field, open, .copy, .src);
     for (parser.file.texts(entry.src)) |source| {
         const text = parser.file.text(source);
         const rooted = text.len > 0 and text[0] == '/';
@@ -1439,7 +1444,7 @@ pub fn is_absolute_plain(text: []const u8) bool {
 }
 
 /// A user for `.user`, `.chown` and `config.user`: `uid`, `uid:gid`, `name` or `name:group`. A
-/// part of digits is a number that fits 32 bits; anything else is a name of `[A-Za-z0-9_.-]`,
+/// part of digits is a number that fits 32 bits, written without leading zeros; anything else is a name of `[A-Za-z0-9_.-]`,
 /// not starting with `-`, at most 32 bytes. Names are looked up in a tree later.
 pub fn is_user_text(text: []const u8) bool {
     if (text.len == 0) return false;
@@ -1465,6 +1470,8 @@ fn is_user_part(part: []const u8) bool {
         if (!std.ascii.isDigit(byte)) digits = false;
     }
     if (!digits) return true;
+    // `007` and `7` are one id but two spellings, and a spelling is part of a key.
+    if (part.len > 1 and part[0] == '0') return false;
     _ = std.fmt.parseInt(u32, part, 10) catch return false;
     return true;
 }

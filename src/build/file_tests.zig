@@ -478,6 +478,10 @@ test "each M9 refusal names its kind" {
     try step_refused(run ++ ".output = .both", .bad_output);
     try step_refused(run ++ copy ++ "\"/\" } }", .run_or_copy);
     try step_refused(run ++ ".user = \"a b\"", .bad_user);
+    try step_refused(run ++ ".user = \"007\"", .bad_user); // One id, two spellings.
+    try step_refused(run ++ ".user = \"1:08\"", .bad_user);
+    try step_refused(".copy = .{}", .run_or_copy); // Copies nothing.
+    try step_refused(".copy = .{ .{ .src = .{}, .to = \"/x\" } }", .missing_field);
     try step_refused(run ++ ".workdir = \"w\"", .bad_path);
     try step_refused(copy ++ "\"x\" } }", .bad_copy_to);
     try step_refused(copy ++ "\"/x\", .chmod = \"9\" } }", .bad_mode);

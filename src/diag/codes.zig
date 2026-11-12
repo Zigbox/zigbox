@@ -3282,8 +3282,16 @@ pub const registry = [_]Entry{
         \\needs, whose outputs it sees under /in/<name>, and .image.add takes
         \\outputs from steps. The graph is refused when two steps have the same
         \\name, a need or an add names no step, a step lists a need twice or more
-        \\than 6, or steps need each other round. A cycle is named in need order:
-        \\a -> b -> a means a needs b and b needs a.
+        \\than 6, or steps need each other round. A step is also refused when its
+        \\needs, binds and caches, plus /src and /out (not counted with .output =
+        \\.root), are more than the 8 mounts a run holds. A cycle is named in
+        \\need order: a -> b -> a means a needs b and b needs a.
+        \\
+        \\The same code refuses a file that parses but uses something this zbx
+        \\reads and cannot build yet: a copy, a cache, a bind, an exclude, a
+        \\.user or .workdir on a step, .output = .root, a step: base, or an input
+        \\with a pattern in it. The cause names the field; zbx build --graph still
+        \\shows the whole file.
         \\
         \\Nothing runs before the whole graph is valid. zbx build --graph prints
         \\it, in the order a build starts the steps.
@@ -3398,9 +3406,10 @@ pub const registry = [_]Entry{
         .explanation =
         \\A step's .user, a copy's .chown, or the image's .config .user names a user
         \\or group, and zbx looks the name up in /etc/passwd and /etc/group of the
-        \\tree the step runs on (the step's base, with its needs mounted). A name that
-        \\is not there is refused before anything runs, so a build does not silently
-        \\run as the wrong id.
+        \\tree the step's base holds. A name that is not there is refused when the
+        \\step is about to start, so a build does not silently run as the wrong id.
+        \\A base of the form step:NAME exists only once that step has run, so the
+        \\refusal can come after earlier steps have.
         \\
         \\The cause names where the name was written (the step or .image.config) and
         \\the name. To fix it, add the user or group in an earlier step (for example a
