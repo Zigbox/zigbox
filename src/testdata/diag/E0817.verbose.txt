@@ -1,0 +1,7 @@
+error[ZBX-E0817]: a user or group name is not in the image
+  while  planning the build
+  cause  step "a" .user "nobody2" is not in /etc/passwd of its base
+  name   nobody2
+  fix    add the user in an earlier step and base this step on it with .base = "step:NAME", or write the id as a number
+  more   zbx explain E0817
+  docs   https://zigbox.github.io/zigbox/errors/E0817.html
