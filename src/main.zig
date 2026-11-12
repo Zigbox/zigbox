@@ -248,6 +248,8 @@ test {
     _ = @import("runtime/mount_tests.zig");
     _ = @import("runtime/devices_tests.zig");
     _ = @import("runtime/devices.zig");
+    _ = @import("runtime/cdi.zig");
+    _ = @import("runtime/cdi_tests.zig");
     _ = @import("runtime/project.zig");
     _ = @import("runtime/writable_tests.zig");
     _ = @import("runtime/logfile.zig");

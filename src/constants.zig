@@ -241,6 +241,44 @@ pub const run_devices_max: u32 = 16;
 /// A device's path, as typed and as the record keeps it: `/dev/` and at most this many bytes
 /// in all (`/dev/dri/renderD128` is 18).
 pub const device_path_bytes_max: u32 = 48;
+/// CDI specs (M10 slice 2, docs/briefs/M10-gpu.md). A spec file is read whole, up to this many
+/// bytes (`nvidia-ctk cdi generate` writes about 10 KB per GPU); a bigger one is refused.
+pub const cdi_spec_bytes_max: u32 = 256 * 1024;
+/// Spec files read from the three directories together, and entries looked at in one directory.
+pub const cdi_spec_files_max: u32 = 16;
+pub const cdi_dir_entries_max: u32 = 64;
+/// What one parsed spec holds: devices, and over all its edits the nodes, mounts, variables and
+/// library directories. A spec with more is refused (E0226), not cut.
+pub const cdi_devices_max: u32 = 64;
+pub const cdi_nodes_max: u32 = 128;
+pub const cdi_mounts_max: u32 = 256;
+pub const cdi_env_max: u32 = 128;
+pub const cdi_ldcache_dirs_max: u32 = 32;
+/// The text of one parsed spec (names, paths, variables), and one string of it.
+pub const cdi_strings_bytes_max: u32 = 96 * 1024;
+pub const cdi_string_bytes_max: u32 = 1024;
+/// Nesting of JSON arrays and objects; a spec is five deep, the bound leaves room for what is
+/// skipped.
+pub const cdi_depth_max: u32 = 12;
+/// Memory for the JSON scanner's nesting stack and any escaped strings.
+pub const cdi_scratch_bytes_max: u32 = 32 * 1024;
+/// A qualified name as asked and as the record keeps it, `vendor.tld/class=name`: the kind (at
+/// most `cdi_kind_bytes_max`), `=`, and a device name (at most `cdi_device_name_bytes_max`).
+/// NVIDIA's `nvidia.com/gpu=GPU-<uuid>` is 55 bytes.
+pub const cdi_kind_bytes_max: u32 = 48;
+pub const cdi_device_name_bytes_max: u32 = 63;
+pub const cdi_name_bytes_max: u32 = 128;
+/// A path in a spec: where a mount lands in the container, or where it comes from.
+pub const cdi_path_bytes_max: u32 = 256;
+/// What one run takes from the specs, merged: nodes, mounts, variables, library directories, and
+/// the text they are kept in. Over any of these the run is refused (E0226).
+pub const cdi_run_nodes_max: u32 = 32;
+pub const cdi_run_mounts_max: u32 = 128;
+pub const cdi_run_env_max: u32 = 16;
+pub const cdi_run_dirs_max: u32 = 16;
+pub const cdi_run_strings_bytes_max: u32 = 48 * 1024;
+/// The device names E0230 lists.
+pub const cdi_names_listed_max: u32 = 16;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them
@@ -253,7 +291,7 @@ pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
 pub const etc_stage_hostname = ".zbx-hostname";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
-pub const plan_steps_max: u32 = 224;
+pub const plan_steps_max: u32 = 232;
 
 // User-mode networking through pasta (M5 slice 3; docs/demos/m5.md settles each fact below
 // against the pasta that Ubuntu 24.04 ships, 0.0~git20240220.1e6f92b).
