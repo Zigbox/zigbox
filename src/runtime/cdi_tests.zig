@@ -286,15 +286,15 @@ fn resolve_edits(comptime edit: Edit, count: u32) !?cdi.Refusal {
 
 test "resolve: the per-run bounds, at and one past" {
     // Goal: what one run applies is bounded, and the first edit over is `too_big`, not a crash.
-    const cases = [_]struct { comptime edit: Edit, max: u32 }{
-        .{ .edit = .nodes, .max = constants.cdi_run_nodes_max },
-        .{ .edit = .mounts, .max = constants.cdi_run_mounts_max },
-        .{ .edit = .env, .max = constants.cdi_run_env_max },
-        .{ .edit = .dirs, .max = constants.cdi_run_dirs_max },
-    };
-    inline for (cases) |case| {
-        try testing.expectEqual(@as(?cdi.Refusal, null), try resolve_edits(case.edit, case.max));
-        const over = (try resolve_edits(case.edit, case.max + 1)).?;
+    inline for (comptime std.enums.values(Edit)) |edit| {
+        const max = switch (edit) {
+            .nodes => constants.cdi_run_nodes_max,
+            .mounts => constants.cdi_run_mounts_max,
+            .env => constants.cdi_run_env_max,
+            .dirs => constants.cdi_run_dirs_max,
+        };
+        try testing.expectEqual(@as(?cdi.Refusal, null), try resolve_edits(edit, max));
+        const over = (try resolve_edits(edit, max + 1)).?;
         try testing.expectEqual(@as(u32, 0), over.too_big);
     }
 }
