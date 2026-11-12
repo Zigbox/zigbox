@@ -675,6 +675,28 @@ test "a locked base the store lacks is pulled by its manifest digest, and said s
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "pulling registry.test/fixture/open@"));
 }
 
+test "begin computes the key of an M7 step: the M9 fields are defaults, not garbage" {
+    // Goal: `begin` fills every field of the key's spec. `var spec: Spec = undefined` applies no
+    // defaults, so a missed M9 field is 0xAA and `compute` refuses it as too long (E0805 with an
+    // empty variable name, which broke every M7 build). Method: begin a step with a run and one
+    // input on a pulled base; it passes the key, misses the cache and starts a worker.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    const text = std.fmt.allocPrint(testing.allocator,
+        ".{{ .version = 1, .image = .{{}}, .steps = .{{ .{{ .name = \"compile\", .base = \"{s}\", .inputs = .{{\"a.txt\"}}, .run = .{{\"true\"}} }} }} }}\n",
+        .{locked_reference}) catch unreachable;
+    defer testing.allocator.free(text);
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    const began = try context.begin(0);
+    try testing.expect(began == .running);
+    try testing.expect(diag.code == null);
+}
+
 test "a lock holding an index digest is E0804 naming both manifests, never an assertion" {
     // Goal: external input (zbx.lock) cannot panic a ReleaseSafe build. Method: the lock names
     // the fixture's index; the registry answers the pull with the platform's manifest, which
@@ -904,6 +926,8 @@ test "a step whose base no policy trusts is refused before it starts, naming the
     _ = try context.load_base(locked_reference, "compile");
     var spec: key_mod.Spec = undefined;
     spec.name = "compile";
+    spec.binds = &.{};
+    spec.copies = &.{};
     spec.base_tree = composed.image.tree;
     try context.check_base(locked_reference, &spec);
     files.put_dir("/cfg", 0o755);

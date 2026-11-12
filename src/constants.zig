@@ -889,8 +889,8 @@ pub const build_step_edges_max: u32 = build_step_needs_max + 1 + build_copy_entr
 pub const build_step_argv_max: u32 = 64;
 pub const build_step_env_max: u32 = 32;
 /// M9 additions to a step (docs/briefs/M9-dockerfile-import.md, "Builder additions"): cache
-/// mounts, bind mounts and copy entries a step may have. `build_step_binds_max` and `needs` share
-/// the run's mounts.
+/// mounts, bind mounts and copy entries a step may have. A step's needs, binds and caches share
+/// the run's mounts: needs + binds + caches + 2 <= 8, so an importer keeps them to 6 or refuses.
 pub const build_step_caches_max: u32 = 4;
 pub const build_step_binds_max: u32 = 4;
 pub const build_copy_entries_max: u32 = 64;

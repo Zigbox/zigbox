@@ -80,3 +80,11 @@ earlier steps ran. The cause text ("of its base") is already right.
 `compose.zig` builds the scheduler plan from `needs` only. Feed it from `graph.after_slice`
 (needs, then base, copy froms, bind froms), widen `schedule.Plan` to `build_step_edges_max`, and
 delete `graph.unrunnable` and `diagnose.unrunnable` when each field runs.
+
+## Review fixes (second pass)
+
+- `config.user` keeps M7's numeric form: `uid:gid` with leading zeros still parses there. The no-leading-zeros rule applies to the new `.user` and `.chown` fields only, where the spelling is part of a key.
+- A class in a glob is refused (`bad_class`) when it holds an unescaped `*` or `?`, a `/`, or a range across `/`, because Docker rewrites or widens those. With `[!`, `[^` and a `**` that is not a whole segment, the matcher now reads only what Docker reads the same way.
+- An empty `.copy` or `.src` list is its own refusal (`empty_list`), not `run_or_copy` or `missing_field`.
+- For slice 3: the importer keeps needs + binds + caches at 6 or fewer per step, or refuses the Dockerfile line.
+- `compose.zig`'s `begin` left the M9 key fields undefined (`= undefined` applies no defaults), which broke every M7 build with E0805. `begin` now sets them; a compose test drives `begin` on an M7 step.

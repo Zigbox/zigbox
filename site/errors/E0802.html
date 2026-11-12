@@ -77,7 +77,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
 <p>The steps of a build file form a graph: each step can name steps it needs, whose outputs it sees under /in/&lt;name&gt;, and .image.add takes outputs from steps. The graph is refused when two steps have the same name, a need or an add names no step, a step lists a need twice or more than 6, or steps need each other round. A step is also refused when its needs, binds and caches, plus /src and /out (not counted with .output = .root), are more than the 8 mounts a run holds. A cycle is named in need order: a -&gt; b -&gt; a means a needs b and b needs a.</p>
-<p>The same code refuses a file that parses but uses something this zbx reads and cannot build yet: a copy, a cache, a bind, an exclude, a .user or .workdir on a step, .output = .root, a step: base, or an input with a pattern in it. The cause names the field; zbx build --graph still shows the whole file.</p>
+<p>The same code refuses a file that parses but uses something this zbx reads and cannot build yet: a copy, a cache, a bind, an exclude, a .user or .workdir on a step, a named .user in .image.config, .output = .root, a step: base, or an input with a pattern in it. The cause names the field; zbx build --graph still shows the whole file.</p>
 <p>Nothing runs before the whole graph is valid. zbx build --graph prints it, in the order a build starts the steps.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

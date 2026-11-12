@@ -3289,7 +3289,8 @@ pub const registry = [_]Entry{
         \\
         \\The same code refuses a file that parses but uses something this zbx
         \\reads and cannot build yet: a copy, a cache, a bind, an exclude, a
-        \\.user or .workdir on a step, .output = .root, a step: base, or an input
+        \\.user or .workdir on a step, a named .user in .image.config,
+        \\.output = .root, a step: base, or an input
         \\with a pattern in it. The cause names the field; zbx build --graph still
         \\shows the whole file.
         \\

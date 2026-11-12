@@ -10,7 +10,8 @@
 //!
 //! Two forms mean something else in Docker than they would here, so they are refused
 //! (`bad_deep`, `bad_class`) rather than read: a `**` that is not a whole segment (`a**b`,
-//! `**.log`), and a negated class (`[!a]`, `[^a]`). Write `**/*.log` and list the bytes.
+//! `**.log`), a negated class (`[!a]`, `[^a]`), and a class holding `*`, `?` or `/`, or a range
+//! across `/` (`[*?]`, `[+-0]`). Write `**/*.log` and list the bytes.
 //!
 //! An exclude list is `.dockerignore`'s: a line is a pattern, a `#` line or a blank one is
 //! skipped, `!` re-includes, and the last line that matches a path or one of its parent
@@ -102,6 +103,7 @@ fn read_class(pattern: []const u8, index: *u32, token: *Token) ?Fault {
         if (byte == ']') {
             if (index.* == token.begin) return .bad_class; // `[]` takes nothing.
             token.end = @intCast(index.*);
+            if (!class_plain(pattern[token.begin..token.end])) return .bad_class;
             index.* += 1;
             return null;
         }
@@ -111,8 +113,37 @@ fn read_class(pattern: []const u8, index: *u32, token: *Token) ?Fault {
     return .bad_class;
 }
 
-/// Whether the class `body` (the bytes between `[` and `]`, negation aside) takes `byte`.
-fn class_takes(body: []const u8, negated: bool, byte: u8) bool {
+/// Whether the class `body` (the bytes between `[` and `]`) reads the same in Docker. Docker
+/// rewrites an unescaped `*` and `?` inside a class to `[^/]*` and `[^/]`, and a class that
+/// holds `/`, or a range across it, takes the separator; all of those are refused.
+fn class_plain(body: []const u8) bool {
+    var index: usize = 0;
+    while (index < body.len) {
+        var low = body[index];
+        index += 1;
+        var escaped = false;
+        if (low == '\\' and index < body.len) {
+            low = body[index];
+            index += 1;
+            escaped = true;
+        }
+        var high = low;
+        if (index + 1 < body.len and body[index] == '-') {
+            high = body[index + 1];
+            index += 2;
+            if (high == '\\' and index < body.len) {
+                high = body[index];
+                index += 1;
+            }
+        }
+        if (!escaped and (low == '*' or low == '?')) return false;
+        if (low <= '/' and '/' <= high) return false;
+    }
+    return true;
+}
+
+/// Whether the class `body` (the bytes between `[` and `]`) takes `byte`.
+fn class_takes(body: []const u8, byte: u8) bool {
     assert(body.len >= 1);
     if (byte == '/') return false; // No class takes a separator.
     var taken = false;
@@ -135,7 +166,7 @@ fn class_takes(body: []const u8, negated: bool, byte: u8) bool {
         }
         if (byte >= low and byte <= high) taken = true;
     }
-    return taken != negated;
+    return taken;
 }
 
 /// The states are the token positions `0..count`, and `count` is the end of the pattern. A
@@ -209,7 +240,7 @@ fn step(
         },
         .class => {
             const body = pattern[token.begin..token.end];
-            if (!class_takes(body, token.byte == 1, byte)) return false;
+            if (!class_takes(body, byte)) return false;
             enter(next, tokens, position + 1);
         },
         .run => {
@@ -371,6 +402,10 @@ test "a bad pattern matches nothing and is named" {
     try testing.expectEqual(Fault.bad_deep, valid("a/**b").?);
     try testing.expectEqual(Fault.bad_deep, valid("***").?);
     try testing.expectEqual(Fault.bad_class, valid("[!a]").?);
+    try testing.expectEqual(Fault.bad_class, valid("log[*?]").?);
+    try testing.expectEqual(Fault.bad_class, valid("[+-0]x").?);
+    try testing.expectEqual(Fault.bad_class, valid("[a/b]").?);
+    try testing.expectEqual(@as(?Fault, null), valid("[a-c\\*]x"));
     try testing.expectEqual(Fault.bad_class, valid("[^a-c]x").?);
     try testing.expect(valid("**") == null);
     try testing.expect(valid("a/**") == null);

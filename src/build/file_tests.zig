@@ -151,6 +151,9 @@ test "each refusal names its kind, line and column" {
     const config = head ++ ".config = .{ ";
     try refused_at(config ++ ".workdir = \"tmp\" } } }", .config_workdir, "\"");
     try refused_at(config ++ ".user = \"a b\" } } }", .config_user, "\"");
+    // M7 took `uid:gid` with leading zeros in `config.user`; it still parses.
+    const old = "01000:01000";
+    try testing.expect(file_mod.is_numeric_user(old) and !file_mod.is_user_text(old));
     try refused_at(config ++ ".user = \"0:99999999999\" } } }", .config_user, "\"");
     try refused_at(config ++ ".env = .{ \"A\", } } } }", .config_env, "\"");
     try refused_at(config ++ ".labels = .{ .{ \"A\", \"b\" } } } } }", .config_label_key, "\"");
@@ -480,8 +483,8 @@ test "each M9 refusal names its kind" {
     try step_refused(run ++ ".user = \"a b\"", .bad_user);
     try step_refused(run ++ ".user = \"007\"", .bad_user); // One id, two spellings.
     try step_refused(run ++ ".user = \"1:08\"", .bad_user);
-    try step_refused(".copy = .{}", .run_or_copy); // Copies nothing.
-    try step_refused(".copy = .{ .{ .src = .{}, .to = \"/x\" } }", .missing_field);
+    try step_refused(".copy = .{}", .empty_list); // Copies nothing.
+    try step_refused(".copy = .{ .{ .src = .{}, .to = \"/x\" } }", .empty_list);
     try step_refused(run ++ ".workdir = \"w\"", .bad_path);
     try step_refused(copy ++ "\"x\" } }", .bad_copy_to);
     try step_refused(copy ++ "\"/x\", .chmod = \"9\" } }", .bad_mode);

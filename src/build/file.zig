@@ -374,6 +374,8 @@ pub const ProblemKind = enum {
     bad_output,
     /// A step with both `run` and `copy`, or with neither.
     run_or_copy,
+    /// `.copy` or a copy's `.src` is given with no entries.
+    empty_list,
     /// `.user` (a step's or a copy's `.chown`) is not `uid`, `uid:gid`, `name` or `name:group`.
     bad_user,
     /// `.workdir`, a cache's `.path` or a bind's `.to` is not an absolute path written plainly.
@@ -710,7 +712,7 @@ fn parse_step(parser: *Parser, step: *Step, open: Token) Refused!void {
     if (fields.has(.run) == fields.has(.copy)) return parser.fail(.run_or_copy, open, .step, null);
     // A copy step that copies nothing would be its base under another name.
     if (fields.has(.copy) and step.copy.count == 0) {
-        return parser.fail(.run_or_copy, open, .step, .copy);
+        return parser.fail(.empty_list, open, .step, .copy);
     }
     try check_mounts(parser, step, open);
 }
@@ -863,7 +865,7 @@ fn parse_copy(parser: *Parser, entry: *CopyEntry, open: Token) Refused!void {
 /// Each `.src` entry is a pattern with no `..` part, and rooted (`/`) only for a tree.
 fn check_sources(parser: *Parser, entry: *const CopyEntry, open: Token) Refused!void {
     assert(entry.src.given);
-    if (entry.src.count == 0) return parser.fail(.missing_field, open, .copy, .src);
+    if (entry.src.count == 0) return parser.fail(.empty_list, open, .copy, .src);
     for (parser.file.texts(entry.src)) |source| {
         const text = parser.file.text(source);
         const rooted = text.len > 0 and text[0] == '/';
@@ -1107,7 +1109,9 @@ fn parse_config(parser: *Parser) Refused!void {
             },
             .user => {
                 const user = try parse_string(parser, .config, field);
-                if (!is_user_text(parser.file.text(user))) {
+                // M7 read `uid:gid` with leading zeros; it still does.
+                const text = parser.file.text(user);
+                if (!is_user_text(text) and !is_numeric_user(text)) {
                     return parser.fail_value(.config_user, user, .config, .user);
                 }
                 config.user = user;

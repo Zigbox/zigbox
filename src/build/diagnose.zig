@@ -170,6 +170,9 @@ fn parse_fix(diag: *Diag, problem: *const file_mod.Problem) void {
             field, level,
         }),
         .missing_field => fix_sentence(diag, "add .{s} = ... to {s}", .{ field, level }),
+        .empty_list => fix_sentence(diag, "list at least one entry in .{s}, or remove it", .{
+            field,
+        }),
         .bad_escape => diag.fix(.{ .sentence = "write the escape as one of \\n \\r \\t " ++
             "\\\\ \\' \\\" or \\x and two hex digits" }),
         .bad_string => if (file_mod.takes_control_bytes(problem.level, problem.field.?))
@@ -284,6 +287,9 @@ fn describe(writer: *std.Io.Writer, problem: *const file_mod.Problem) std.Io.Wri
         .unknown_field => try writer.print("{s} has no field .{s}", .{ level, word }),
         .duplicate_field => try writer.print(".{s} is given twice in {s}", .{ field, level }),
         .missing_field => try writer.print("{s} has no .{s}, which it needs", .{ level, field }),
+        .empty_list => try writer.print(".{s} in {s} has no entries, so it would copy nothing", .{
+            field, level,
+        }),
         .bad_escape => try writer.writeAll("a string has an escape zbx does not read; " ++
             "the escapes are \\n \\r \\t \\\\ \\' \\\" and \\xNN"),
         .bad_string => try writer.print("a string in .{s} holds bytes that are not UTF-8, or " ++
