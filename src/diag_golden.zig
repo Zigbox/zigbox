@@ -715,7 +715,7 @@ fn prepare_build_config(sim: *HostSim) void {
         \\.{
         \\    .version = 1,
         \\    .steps = .{},
-        \\    .image = .{ .config = .{ .user = "root" } },
+        \\    .image = .{ .config = .{ .user = "a b" } },
         \\}
         \\
     );
