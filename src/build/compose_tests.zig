@@ -681,10 +681,12 @@ test "begin computes the key of an M7 step: the M9 fields are defaults, not garb
     // empty variable name, which broke every M7 build). Method: begin a step with a run and one
     // input on a pulled base; it passes the key, misses the cache and starts a worker.
     registry_started(&registry.fixture.oci.amd64.digest);
-    const text = std.fmt.allocPrint(testing.allocator,
-        ".{{ .version = 1, .image = .{{}}, .steps = .{{ .{{ .name = \"compile\", .base = \"{s}\", .inputs = .{{\"a.txt\"}}, .run = .{{\"true\"}} }} }} }}\n",
-        .{locked_reference}) catch unreachable;
-    defer testing.allocator.free(text);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"} } } }\n",
+    });
     var problem: file_mod.Problem = undefined;
     const parsed = file_mod.parse(text, &loaded.file, &problem);
     try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
