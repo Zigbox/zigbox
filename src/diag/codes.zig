@@ -3395,16 +3395,16 @@ pub const registry = [_]Entry{
         .blame = .user,
         .summary = "a user or group name is not in the image",
         .explanation =
-        \\A step's .user, a copy's .chown, or the image's .config .user names a user or
-        \\group, and zbx looks the name up in /etc/passwd and /etc/group of the tree the
-        \\step runs on (the step's base, with its needs mounted). A name that is not
-        \\there is refused before anything runs, so a build does not silently run as the
-        \\wrong id.
+        \\A step's .user, a copy's .chown, or the image's .config .user names a user
+        \\or group, and zbx looks the name up in /etc/passwd and /etc/group of the
+        \\tree the step runs on (the step's base, with its needs mounted). A name that
+        \\is not there is refused before anything runs, so a build does not silently
+        \\run as the wrong id.
         \\
         \\The cause names where the name was written (the step or .image.config) and
         \\the name. To fix it, add the user or group in an earlier step (for example a
-        \\step that runs adduser) and base this step on it with .base = "step:NAME", or
-        \\write the id as a number.
+        \\step that runs adduser) and base this step on it with .base = "step:NAME",
+        \\or write the id as a number.
         ,
     },
     .{
@@ -3414,14 +3414,15 @@ pub const registry = [_]Entry{
         .summary = "the build has steps with cache mounts",
         .explanation =
         \\A step with .caches mounts a directory that lives outside the build's result
-        \\and persists between builds, so what the step produces can depend on what the
-        \\cache held, not only on the build's inputs. zbx never puts a cache in a step's
-        \\key, so a rebuild that hits the step cache is unchanged, but a step that does
-        \\run on another machine, or after --clear-caches, can produce different bytes.
+        \\and persists between builds, so what the step produces can depend on what
+        \\the cache held, not only on the build's inputs. zbx never puts a cache in a
+        \\step's key, so a rebuild that hits the step cache is unchanged, but a step
+        \\that does run on another machine, or after --clear-caches, can produce
+        \\different bytes.
         \\
         \\The cause names the steps. To make the build reproducible, keep the cache to
-        \\things the command verifies or rebuilds (a download cache), and do not let the
-        \\command's output depend on what was in it.
+        \\things the command verifies or rebuilds (a download cache), and do not let
+        \\the command's output depend on what was in it.
         ,
     },
     .{
