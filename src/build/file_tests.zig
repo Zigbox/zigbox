@@ -154,7 +154,7 @@ test "each refusal names its kind, line and column" {
     // M7 took `uid:gid` with leading zeros in `config.user`; it still parses.
     // The whole file goes through the parser, so dropping `parse_config`'s numeric arm fails it.
     const old = try parse_ok(config ++ ".user = \"01000:01000\" } } }");
-    try testing.expectEqualStrings("01000:01000", old.text(old.image.config.user));
+    try testing.expectEqualStrings("01000:01000", old.text(old.image.config.user.?));
     try refused_at(config ++ ".user = \"0:99999999999\" } } }", .config_user, "\"");
     try refused_at(config ++ ".env = .{ \"A\", } } } }", .config_env, "\"");
     try refused_at(config ++ ".labels = .{ .{ \"A\", \"b\" } } } } }", .config_label_key, "\"");
