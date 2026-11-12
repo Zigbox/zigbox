@@ -40,7 +40,7 @@ Ground rules for the implementer:
 
 *Figure: milestone map · 9 milestones, 3 tracks (diagram in the live doc, node 24eb2c38-a0d5; not reproduced here).*
 
-M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox.
+M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which unlocks networking and state (M5, M6) and hermetic builds and signing (M7, M8). M7 steps also reuse the M2 sandbox. M9 (Dockerfile import) extends M7's builder; M10 (devices) extends M1's `/dev`; neither depends on the other (owner, 2026-11-11: `docs/decisions/2026-11-11-docker-parity-scope.md`).
 
 ## Milestones
 
@@ -66,7 +66,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** run a shell inside an unpacked root filesystem, with no root privileges, isolated from the host.
 
-**Scope:** `clone3` with user, mount, PID, UTS and IPC namespaces; UID/GID maps (single-UID mapping first, then a full subuid range via `newuidmap`); bind-mounted rootfs, `pivot_root`, fresh `/proc`, minimal `/dev`; exit-code propagation and signal forwarding. Input is a plain directory (an Alpine minirootfs tarball unpacked by hand). Deferred: images, limits, networking.
+**Scope:** `clone3` with user, mount, PID, UTS and IPC namespaces; UID/GID maps (single-UID mapping first, then a full subuid range via `newuidmap`); bind-mounted rootfs, `pivot_root`, fresh `/proc`, minimal `/dev` (plus the devices the user asks for, M10); exit-code propagation and signal forwarding. Input is a plain directory (an Alpine minirootfs tarball unpacked by hand). Deferred: images, limits, networking.
 
 **Demo script:**
 
@@ -251,7 +251,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Goal:** build images from a declared DAG of steps, so the same inputs always produce the same digest.
 
-**Scope:** a build file (format is an open question below) declaring steps, each with a base tree, input files or prior step outputs, a command, and an optional `network: true`. Each step runs as an M2-hardened container with network off by default; its output tree goes into the store; its cache key is the hash of its inputs plus command. Timestamps normalized; independent steps run in parallel. Deferred: Dockerfile import (stretch).
+**Scope:** a build file (format is an open question below) declaring steps, each with a base tree, input files or prior step outputs, a command, and an optional `network: true`. Each step runs as an M2-hardened container with network off by default; its output tree goes into the store; its cache key is the hash of its inputs plus command. Timestamps normalized; independent steps run in parallel. Deferred: Dockerfile import (M9).
 
 **Demo script:**
 
@@ -286,14 +286,46 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 - [ ] Signatures are over tree digests, so they survive re-pulls and re-materialization.
 - [ ] Policy refusals happen before any process starts.
 
+### M9 · Import: a Dockerfile becomes a build file
+
+*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; not merged on `main` as of this sync. Targets 0.6.0. Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
+
+**Goal:** `zbx import` reads a Dockerfile and writes a `zbx.build.zon` that a person reads, commits and builds with `zbx build`. A Dockerfile is translated, never executed.
+
+**Scope:** deterministic translation (same Dockerfile, build arguments, `.dockerignore` and `zbx.lock`, same bytes), each step commented with its Dockerfile line, every non-hermetic step (network, cache mounts) flagged, whatever cannot be translated faithfully refused by name with its line and a fix. Builder additions in M7's file, usable by hand: `.base = "step:<name>"`, `.output = .root`, `.user`, `.workdir`, `copy` steps, input globs and `.exclude`, `.caches`, `.binds`, `image.base = "step:<name>"`, `config.user` by name. Each new field enters a step's key only when set, so `demo-m7`'s golden digest does not change. Pull of base images through `zbx pull`'s resolver, pinned in `zbx.lock`. Not in scope: executing a Dockerfile, `docker build` flags or output, keeping a Dockerfile and its build file in sync. Compose-style multi-container files are Zigcube's, not M9's.
+
+**CLI:** `zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]... [--network detect|all|none] [--hermetic] [-o <file>] [--force]`. Output `zbx.build.zon` in the context, refused if it exists (`E0816`) unless `--force`. `--hermetic` refuses (`E0814`) when any step would have the network or a cache, and writes nothing. Report on stderr; `--output json`, schema `zbx.import/1`. Library: `zigbox.dockerfile.translate`, a pure function.
+
+**Limits (supervisor decision):** `build_steps_max` 64 to 256; `build_file_bytes_max` and `build_pool_bytes` 64 KiB to 256 KiB; new `build_step_caches_max` 4, `build_step_binds_max` 4, `build_copy_entries_max` 64, `build_exclude_lines_max` 256. (On `main` the build bounds are still 64 and 64 KiB.)
+
+**Diagnostics:** `E0810` cannot read or parse; `E0811` unsupported instruction, flag or form; `E0812` variable without a value; `E0813` stage problem or step-name collision; `E0814` `--hermetic` refusal; `E0815` over a builder bound; `E0816` output exists; `E0817` user or group name not in the tree; `W0802` cache-mount steps; `W0810` non-hermetic steps; `W0811` parts that did not carry over. A refused import exits 1 and writes nothing. The per-option disposition is in `docs/briefs/M9-dockerfile-flags.md`.
+
+**Demo:** import a two-stage Go project, build it, run it, rebuild with every step a hit, get the same import bytes and result digest on a second clean VM, and show a network target flagged on import and refused under `--hermetic`. Details in the brief.
+
+### M10 · Devices: host devices and GPUs for one container
+
+*Status: brief `docs/briefs/M10-gpu.md` (settled by `docs/decisions/2026-11-11-m10-gpu-decisions.md`). Slice 1 (`--device /dev/<path>` and kept supplementary groups) is merged (#125); slices 2 to 4 are not. Started before the 0.5.0 tag (owner, 2026-11-12, `docs/decisions/2026-11-12-m10-starts-before-the-0.5.0-tag.md`).*
+
+**Goal:** `zbx run --gpu all <image> -- nvidia-smi` works rootless on a Linux host with an NVIDIA GPU and its driver, given the one admin step the host needs anyway (generating a CDI spec). AMD and Intel work through render nodes. A run without `--gpu` or `--device` changes by no byte.
+
+**Scope:** three device sources. (1) CDI devices (`--device nvidia.com/gpu=0`), read from `/etc/cdi`, `/var/run/cdi`, `$XDG_CONFIG_HOME/cdi`, JSON only; of a device's edits Zigbox applies `deviceNodes`, read-only `mounts`, `env` and the NVIDIA `update-ldcache` hook (a built-in `ldconfig` step); anything else is refused by name; Zigbox never runs a host program from a spec. (2) Render nodes (`--gpu dri`): `/dev/dri/renderD*` and `/dev/kfd`. (3) A host device (`--device /dev/<path>`): a character device the user can open, bound at the same path. `--gpu all` is every `nvidia.com/gpu` CDI device, else `--gpu dri`. Nodes are bind-mounted into the container's `/dev` (never `mknod`); there is no device cgroup, so the host's file permissions decide access. A run with devices keeps the user's supplementary groups, with no flag, in both id-mapping modes; no step calls `setgroups`. `zbx doctor` gains a GPU section (text and `--output json`). Not in scope: GPUs in `zbx build` steps, GPU memory or compute limits, the Mac (`E0229`), hooks other than `ldconfig`, YAML specs, `--gpus` syntax beyond `all`, block devices, `--device-cgroup-rule`, `--privileged`.
+
+**Merged in slice 1 (`main`):** `--device /dev/<path>`, repeatable. A path is `/dev/` plus names: no `..`, empty or `.` part, no space, quote, backslash, `:`, control or non-ASCII byte, no name starting with `.`, and none of M1's own devices. By-id and by-path names (symlinks, or containing `:`) are not supported; give the node they point to (`docs/decisions/2026-11-12-device-path-limit.md`). `zbx exec` into a container started with devices still drops the process's supplementary groups until slice 2 or later.
+
+**Limits:** `run_devices_max` 16; `device_path_bytes_max` 48 (`/dev/dri/renderD*`, `/dev/nvidia*`, `/dev/fuse`, `/dev/kvm`, `/dev/net/tun`, `/dev/bus/usb/NNN/NNN` fit; raising it or allowing `:` is a new decision); `plan_paths_bytes_max` 96 to 104 KiB; `sim_mounts_max` 32 to 64; `sim_nodes_max` 160 to 192. A run record is version 10 only for a run with a listener or devices; otherwise version 9, byte for byte.
+
+**Diagnostics:** registered on `main`: `E0225` a host device is refused (missing, not a character device, outside `/dev`, or the user cannot open it, with the node's mode and group); `W0209` groups show as `nogroup` inside (once per run, after the node checks pass). Planned: `E0226` unusable CDI spec; `E0227` CDI edit not applied; `E0228` `--gpu` found nothing; `E0229` devices unavailable on this platform; `E0230` unknown CDI device name; `W0208` image has no `ldconfig`.
+
+**Demo:** `zig build demo-m10` proves the plumbing with a fake vendor device, driver directory and CDI spec made in the guest (no GPU on CI). The real-GPU run (an AWS `g4dn.xlarge`, NVIDIA T4) is recorded in `docs/demos/m10.md`, not part of the demo. Details in the brief.
+
 ### Stretch milestones
 
-Each keeps the same demo-first contract; none blocks M0 to M8.
+Each keeps the same demo-first contract; none blocks M0 to M10.
 
 - **S1 · MicroVM isolation:** the same image runs under a Firecracker or Cloud Hypervisor backend with `--isolation vm`; demo shows a kernel exploit test passing in namespace mode and contained in VM mode.
 - **S2 · Lazy start:** start a large image before its files are local, fetching chunks on first read; demo starts a multi-GB image in seconds.
 - **S3 · Container networks and egress grants:** `--allow db:5432`, `--egress api.example.com:443`; demo shows an allowed call succeed and a disallowed one refused.
-- **S4 · Dockerfile import:** translate a common Dockerfile into the M7 build format, flagging non-hermetic steps.
+- **S4 · Dockerfile import:** promoted to M9 (owner, 2026-11-11).
 - **S5 · WASM workloads:** run a WASI component through the same CLI, store and policy.
 
 ## Diagnostics: designed from the first commit
@@ -360,15 +392,16 @@ From M2 on, every new command meets the two cheap rules now: its results have a 
 
 ## Non-goals
 
-These are out of scope for M0 to M8. Raise a change to this doc before building any of them.
+These are out of scope for M0 to M10. Raise a change to this doc before building any of them.
 
 - **Native non-Linux runtimes.** Containers run only on a Linux kernel. On macOS, zbx runs a small Linux VM for the user, invisibly (milestone M4b); there is no native macOS runtime, and no Windows support.
 - **Rootful mode.** There is no `sudo zbx`. If something only works as root, it is not supported.
 - **Docker API or CLI compatibility.** Commands may resemble Docker's, but no socket API and no drop-in flag parity.
 - **Orchestration.** No Compose equivalent, no clustering, no scheduler, no restart policies beyond what a systemd user unit gives. zbx runs one container at a time; more than one service, even on one laptop, is Zigcube's job: zcube-server with its SQLite store and one agent on the same machine.
 - **Private registries.** Pull only from public registries, except authenticated pull from Amazon ECR (M6c, brought forward 2026-10-30). Push to registries, with credentials, is in M8 (owner, 2026-11-08); pull with those credentials is not.
-- **Dockerfile execution.** Dockerfiles are not run directly (import is stretch S4).
-- **Live migration, checkpoint/restore, GPU passthrough.**
+- **Dockerfile execution.** Dockerfiles are not run directly (`zbx import`, M9, translates one into a build file that `zbx build` builds; the Dockerfile itself is never executed).
+- **Live migration, checkpoint/restore.**
+- **GPU scheduling, sharing and limits.** Access to a GPU or other host device for one Zigbox container is M10; allocation, MIG, MPS, time slicing and gang scheduling are Zigcube's CS4. No Windows, no Intel Macs, no Docker socket API or drop-in flag parity (owner, 2026-11-11).
 
 ## Technical notes, risks and open questions
 
