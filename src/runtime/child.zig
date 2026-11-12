@@ -99,7 +99,7 @@ pub fn entry(context: *anyopaque) u8 {
 fn skipped(step: *const Step, state: *const State) bool {
     assert(plan_mod.side_of(step.kind) == .child);
     const group = plan_mod.group_of(step);
-    assert(group <= 2);
+    assert(group <= 3);
     if (group == 0) return false;
     if (step.kind == .unstage_etc_file) return false;
     return state.failed_etc & (@as(u8, 1) << @intCast(group - 1)) != 0;

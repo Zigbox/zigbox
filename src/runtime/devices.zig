@@ -84,12 +84,21 @@ fn is_reserved(path: []const u8) bool {
 }
 
 /// What is wrong with the devices of a run as a list, or null: at most `run_devices_max`, each
-/// path fit, and none given twice or inside another (a node is never a directory, so a path that
-/// is a prefix of another cannot be a device).
+/// path fit, and none given twice. The text does not see a path inside another (`/dev/dri` and
+/// `/dev/dri/card0`): `resolve` refuses it, since a directory is not a character device.
 pub const ListProblem = union(enum) {
     path: struct { index: u32, problem: Problem },
     too_many,
     repeated: u32,
+
+    /// The device at fault, or null when the list as a whole is.
+    pub fn index(problem: ListProblem) ?u32 {
+        return switch (problem) {
+            .path => |found| found.index,
+            .repeated => |at| at,
+            .too_many => null,
+        };
+    }
 
     pub fn sentence(problem: ListProblem) []const u8 {
         assert(@backingInt(std.meta.activeTag(problem)) <= 2);
@@ -207,6 +216,11 @@ test "paths: the rules" {
     try testing.expectEqual(Problem.reserved, path_problem("/dev/.zbx-mount-0"));
     const long = "/dev/" ++ repeat('x', constants.device_path_bytes_max);
     try testing.expectEqual(Problem.too_long, path_problem(long));
+    // At the bound: exactly `device_path_bytes_max` bytes is taken, one more is not.
+    const exact = "/dev/" ++ repeat('x', constants.device_path_bytes_max - "/dev/".len);
+    try testing.expectEqual(constants.device_path_bytes_max, exact.len);
+    try testing.expectEqual(@as(?Problem, null), path_problem(exact));
+    try testing.expectEqual(Problem.too_long, path_problem(exact ++ "x"));
 }
 
 test "list: bound, repeats, and the record text" {

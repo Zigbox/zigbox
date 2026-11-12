@@ -87,6 +87,8 @@ const help_text =
     \\                  (see below)
     \\  lock show       print the project's zbx.lock: each image, its manifest and tree
     \\  pull <ref>      pull an image from a registry into the store (see below)
+    \\  push <source> <ref>   pack a build result, an image or a tree and put it in a registry
+    \\                  (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
     \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
@@ -5438,6 +5440,30 @@ test "stop ends a running container, says so in text and JSON, and is a no-op th
     try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "stop", "web-1" }));
     try testing.expectEqualStrings("web-1 was not running, exit code 137\n", sim.stdout());
     try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+}
+
+test "stop on a container that failed to start says it never ran, in text and JSON (#110)" {
+    // Goal: a record whose run was refused (`start_failed`, no pid) is a no-op for `stop`, with
+    // one line saying it never ran; it used to trip an assertion and exit 70. Method: write the
+    // record a refused `--publish` run leaves (E0603) and stop it.
+    var sim: HostSim = undefined;
+    sim_run.init(&sim, 9);
+    sim.world.add_node(sim_run.runs_path, .dir);
+    var view = sim_run.sample_view("never-1", 1_760_000_000);
+    view.exit = .{ .start_failed = .E0603 };
+    var text: [constants.record_bytes_max]u8 = undefined;
+    const rendered = @import("runtime/records.zig").render(&view, &text);
+    try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/never-1.zon", rendered) == null);
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &.{ "stop", "never-1" }));
+    const said = "never-1 never started, so there is nothing to stop\n";
+    try testing.expectEqualStrings(said, sim.stdout());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    sim.stdout_len = 0;
+    const json = [_][]const u8{ "stop", "never-1", "--output", "json" };
+    try testing.expectEqual(@as(u8, 0), command_line(&sim, &json));
+    const parsed = try parse_json(sim.stdout());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("already_stopped", parsed.value.object.get("result").?.string);
 }
 
 test "stop and ps refuse what they cannot do with one line and a code" {

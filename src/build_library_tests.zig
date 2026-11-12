@@ -257,7 +257,7 @@ const StepCaller = struct {
         for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin", "/src", "/out", "/in" }) |tail| {
             sim.world.add_node(text_of(&inner, "{s}{s}", .{ merged, tail }), .dir);
         }
-        for ([_][]const u8{ "/bin/sh", "/etc/hosts", "/etc/resolv.conf" }) |tail| {
+        for ([_][]const u8{ "/bin/sh", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |tail| {
             sim.world.add_node(text_of(&inner, "{s}{s}", .{ merged, tail }), .file);
         }
         var farm: zigbox.store.fs.PathBuf = undefined;

@@ -718,11 +718,16 @@ fn scope_step_failed(diag: *Diag, unit: []const u8, problem: ?*const scope_mod.P
     assert(diag.code.? == code);
 }
 
+/// Who asked for the limit of E0307: the flags of `zbx run`, or the fixed limits every build step
+/// runs with (a build has no limit flags to leave out).
+pub const LimitAsker = enum { run, build_step };
+
 /// ZBX-E0307: a limit was asked for and no scope can be made, found before anything was created.
 pub fn limit_without_cgroup(
     diag: *Diag,
     problem: *const scope_mod.Problem,
     limits: spec.Limits,
+    asker: LimitAsker,
 ) void {
     assert(diag.code == null);
     assert(limits.any());
@@ -731,11 +736,18 @@ pub fn limit_without_cgroup(
     if (limits.memory_bytes) |bytes| diag.context("memory", "{d} bytes", .{bytes});
     if (limits.pids) |pids| diag.context("pids", "{d}", .{pids});
     if (limits.cpu_millis) |millis| diag.context("cpus", "{d} thousandths", .{millis});
-    diag.cause("--memory, --pids and --cpus are enforced by a cgroup scope from the user's " ++
-        "systemd manager, and one cannot be made", .{});
+    switch (asker) {
+        .run => diag.cause("--memory, --pids and --cpus are enforced by a cgroup scope from the " ++
+            "user's systemd manager, and one cannot be made", .{}),
+        .build_step => diag.cause("every build step runs with memory and process limits, " ++
+            "enforced by a cgroup scope from the user's systemd manager, and one cannot be " ++
+            "made", .{}),
+    }
     scope_text.problem_causes(diag, problem);
     diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
-    diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    if (asker == .run) {
+        diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    }
     assert(diag.code.? == .E0307);
 }
 

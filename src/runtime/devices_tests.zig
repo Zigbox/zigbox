@@ -9,6 +9,9 @@ const host_sim = @import("../host_sim.zig");
 const host_mod = @import("../host.zig");
 const plan_mod = @import("plan.zig");
 const records = @import("records.zig");
+const run_lib = @import("run.zig");
+const Diag = @import("../diag/diag.zig").Diag;
+const SimFs = @import("../store/fs_sim.zig").SimFs;
 const sim_run = @import("sim_run.zig");
 
 const HostSim = host_sim.HostSim;
@@ -170,24 +173,51 @@ test "the plan of a run without devices has no device step, and one with has two
     try testing.expectEqual(base.count + 2 * plan_mod.user_device_steps_count, more.count);
 }
 
-test "a run with devices keeps its groups in both mapping modes" {
-    // Goal: the rule the brief makes. Method: a run as a non-root user, the one step that
-    // dropped groups, in the full-range map and in the single-id map; the simulator counts
-    // setgroups calls. With devices there are none; without, the drop is as it was.
+test "a run with devices keeps its groups in both mapping modes, and one without drops them" {
+    // Goal: the rule the brief makes, and that it is not hard-coded either way. Method: start a
+    // container through the library (the command line refuses `--user` for a directory) that
+    // becomes a user, in the full-range map (1000:1000) and in the single-id map (the only user
+    // it can be is 0:0, for which no step becomes a user), each with and without devices; the simulator counts the child's
+    // setgroups calls. With devices there are none; without, exactly one in the full map and
+    // none in the single-id map, where there is nothing to drop. The user is checked, so the
+    // count is of a step that ran.
     const full = with_files(&sim_run.files);
     const single = with_files(&sim_run.files_single);
-    const cases = [_]struct { files: []const host_sim.File, groups_kept: bool }{
-        .{ .files = &full, .groups_kept = true },
-        .{ .files = &single, .groups_kept = true },
+    const cases = [_]struct { files: []const host_sim.File, uid: u32 }{
+        .{ .files = &full, .uid = 1000 },
+        .{ .files = &single, .uid = 0 },
     };
+    // On the heap: the simulator's tables already fill the test binary's static data.
+    const disk = try std.heap.page_allocator.create(SimFs);
+    defer std.heap.page_allocator.destroy(disk);
+    const handle = try std.heap.page_allocator.create(run_lib.Handle);
+    defer std.heap.page_allocator.destroy(handle);
     var sim: HostSim = undefined;
     for (cases) |case| {
-        setup(&sim, 5, case.files);
-        const line = [_][:0]const u8{
-            "run",  "--rootfs", rootfs,    "--name", "g-1", "--user", "1000:1000", "--device",
-            render, "--",       "/bin/sh",
-        };
-        _ = run(&sim, &line);
-        try testing.expectEqual(@as(u32, 0), sim.world.setgroups_calls);
+        for ([_]bool{ true, false }) |with_devices| {
+            setup(&sim, 5, case.files);
+            disk.init(5);
+            disk.put_dir("/home", 0o755);
+            disk.put_dir("/home/alice", 0o755);
+            sim.log_fs = disk;
+            var diag: Diag = undefined;
+            diag.reset();
+            const spec: run_lib.Spec = .{
+                .rootfs = rootfs,
+                .name = "g-1",
+                .command = &.{"/bin/sh"},
+                .user = .{ .uid = case.uid, .gid = case.uid },
+                .devices = if (with_devices) &.{.{ .path = render }} else &.{},
+            };
+            try run_lib.start(sim.interface(), &spec, .{}, handle, &diag);
+            handle.session.release_output();
+            const child = sim.world.find_process(handle.pid).?;
+            // The single-id map has only root, and root is not a step: no user is set, no
+            // groups are dropped, with or without devices. Only the full map can fail here.
+            const user: ?[2]u32 = if (case.uid == 0) null else .{ case.uid, case.uid };
+            try testing.expectEqual(user, child.user_set);
+            const expected: u32 = if (with_devices or case.uid == 0) 0 else 1;
+            try testing.expectEqual(expected, sim.world.setgroups_calls);
+        }
     }
 }

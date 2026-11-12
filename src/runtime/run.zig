@@ -196,6 +196,8 @@ pub const StartOptions = struct {
     mirror: bool = false,
     /// The container's standard input is /dev/null (a build step), not this process's.
     stdin_null: bool = false,
+    /// The run is a build step, which has fixed limits and no limit flags (it words E0307).
+    build_step: bool = false,
     /// Also write that output, line by line with this prefix on each line, to this process's
     /// standard error as it comes (`zbx build --verbose`, the prefix `<step> | `). Unlike
     /// `mirror`, the container's streams are always pipes, even when they would be a
@@ -396,7 +398,7 @@ pub fn start(
     const choice = try choose_ids(host, container, handle, diag);
     // After the checks that need nothing from the host, and before anything is created: a run
     // with a limit and no way to enforce it is refused here, with nothing to clean up.
-    const scope_input = try prepare_scope(handle, container.limits, diag);
+    const scope_input = try prepare_scope(handle, container.limits, options.build_step, diag);
     if (container.image) |image| try prepare_image(handle, container, image, options, diag);
     // The volumes last, so that nothing above can fail with them held; from here every way out
     // of `start` that is not a running container lets them go.
@@ -454,7 +456,8 @@ fn resolve_devices(host: Host, container: *const Spec, handle: *Handle, diag: *D
     assert(handle.notes_count < handle.notes.len);
     if (container.devices.len == 0) return;
     if (devices_mod.list_problem(container.devices)) |problem| {
-        devices_diagnose.bad_path(diag, container.devices[0].path, problem);
+        const at = problem.index() orelse 0; // Too many: the first is as good as any.
+        devices_diagnose.bad_path(diag, container.devices[at].path, problem);
         return error.StartFailed;
     }
     if (devices_mod.resolve(host, container.devices)) |refusal| {
@@ -967,7 +970,12 @@ fn check_limits(limits: spec_mod.Limits, diag: *Diag) Error!void {
 /// Decides whether this run has a scope. It has one if the user's systemd manager answers; if
 /// it does not, a run with a limit is refused (a limit nobody enforces is worse than none) and
 /// a run without goes on, warning once, as M1 did.
-fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?plan_mod.ScopeInput {
+fn prepare_scope(
+    handle: *Handle,
+    limits: spec_mod.Limits,
+    build_step: bool,
+    diag: *Diag,
+) Error!?plan_mod.ScopeInput {
     assert(diag.code == null);
     var found: scope_mod.Probe = undefined;
     var problem: scope_mod.Problem = undefined;
@@ -982,7 +990,8 @@ fn prepare_scope(handle: *Handle, limits: spec_mod.Limits, diag: *Diag) Error!?p
         return .{ .version = found.version, .limits = limits };
     }
     if (limits.any()) {
-        diagnose.limit_without_cgroup(diag, &problem, limits);
+        const asker: diagnose.LimitAsker = if (build_step) .build_step else .run;
+        diagnose.limit_without_cgroup(diag, &problem, limits, asker);
         return error.StartFailed;
     }
     var warning: Diag = undefined;

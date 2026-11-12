@@ -23,6 +23,8 @@ commands:
                   (see below)
   lock show       print the project's zbx.lock: each image, its manifest and tree
   pull <ref>      pull an image from a registry into the store (see below)
+  push <source> <ref>   pack a build result, an image or a tree and put it in a registry
+                  (see below)
   build --graph   check the project's zbx.build.zon and print its steps in order (see below)
   inspect <id>    print a build result: its tree and the config it runs with
   schema <cmd>    print the JSON schema of a command's output

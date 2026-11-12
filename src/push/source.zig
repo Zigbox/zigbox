@@ -12,6 +12,7 @@ const digest_mod = @import("../store/digest.zig");
 const image_find = @import("../store/image_find.zig");
 const images = @import("../store/images.zig");
 const layout = @import("../store/layout.zig");
+const reference_mod = @import("../registry/reference.zig");
 
 const Digest = digest_mod.Digest;
 const Store = layout.Store;
@@ -56,11 +57,35 @@ pub fn resolve(store: *const Store, ws: *Workspace, operand: []const u8, out: *S
         assert(out.settings.used == 0); // Cleared above: a bare tree has no settings.
         return;
     }
+    // `name@sha256:...` names one manifest, as `zbx sign` reads it, and is never a tag.
+    if (std.mem.indexOfScalar(u8, operand, '@') != null) {
+        return resolve_manifest(store, ws, operand, out);
+    }
     var by: image_find.ByReference = .{ .text = operand };
     image_find.scan(store, &ws.memory, &ws.image, &by) catch return error.Unusable;
     if (!by.found) return error.NotFound;
     out.tree = by.tree;
     try take_settings(store, ws, by.manifest, out);
+}
+
+/// `name@sha256:...`: the image record of that manifest. A name that is no reference, or has no
+/// digest, or whose manifest the store does not hold, is `NotFound`.
+fn resolve_manifest(
+    store: *const Store,
+    ws: *Workspace,
+    operand: []const u8,
+    out: *Source,
+) Error!void {
+    assert(std.mem.indexOfScalar(u8, operand, '@') != null);
+    var reference: reference_mod.Reference = undefined;
+    reference_mod.parse(operand, &reference) catch return error.NotFound;
+    const manifest = reference.digest orelse return error.NotFound;
+    var errno: u16 = 0;
+    images.load(store, manifest, &ws.image, &errno) catch |err| {
+        return if (err == error.NotFound) error.NotFound else error.Unusable;
+    };
+    out.tree = ws.image.tree;
+    out.settings = ws.image.settings;
 }
 
 fn take_settings(store: *const Store, ws: *Workspace, manifest: anytype, out: *Source) Error!void {
