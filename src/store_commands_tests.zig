@@ -976,6 +976,28 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
 }
 
+test "push --dry-run takes name@sha256:<digest>, as sign does (#111)" {
+    // Goal: a digest reference names one image of the store, so a dry run of it packs that image
+    // and prints the same manifest digest; it used to be refused as E0550 because the lookup
+    // read `@` references as tags. Method: a dry run records the image, then name it by digest;
+    // a digest the store does not hold, and a name with no digest, are still E0550.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    var operand: [128]u8 = undefined;
+    const named = try std.fmt.bufPrintSentinel(&operand, "alpine@{s}", .{&expected}, 0);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", named }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const absent = "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", absent }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
 var push_wire: net_sim.SimNet = undefined;
 var upload_registry: push_registry.PushRegistry = undefined;
 

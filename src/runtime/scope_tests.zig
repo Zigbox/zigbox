@@ -6,6 +6,8 @@
 const std = @import("std");
 const host_sim = @import("../host_sim.zig");
 const sim_run = @import("sim_run.zig");
+const diagnose = @import("diagnose.zig");
+const Diag = @import("../diag/diag.zig").Diag;
 
 const HostSim = host_sim.HostSim;
 const testing = std.testing;
@@ -174,6 +176,23 @@ test "without a user bus a run with a limit is refused, E0307, and creates nothi
     try testing.expect(sim.world.processes[1].state == .unused);
     try testing.expectEqual(@as(u32, 0), sim.world.written_count); // No record.
     try expect_leak_free(&sim, &before);
+}
+
+test "E0307 for a build step does not tell the user to leave out limit flags (#114)" {
+    // Goal: a build step has fixed limits and no flags, so E0307's fixes must not offer
+    // "run without the limit flags" there; `zbx run` still does. Method: raise the diagnostic
+    // for each asker and read its fixes.
+    const limits: @import("spec.zig").Limits = .{ .memory_bytes = 1 << 30, .pids = 256 };
+    var diag: Diag = undefined;
+    diag.reset();
+    diagnose.limit_without_cgroup(&diag, &.no_cgroup2, limits, .build_step);
+    try testing.expectEqual(@as(usize, 1), diag.fixes.slice().len);
+    try testing.expect(std.mem.indexOf(u8, diag.causes.slice()[0].slice(), "build step") != null);
+    diag.reset();
+    diagnose.limit_without_cgroup(&diag, &.no_cgroup2, limits, .run);
+    try testing.expectEqual(@as(usize, 2), diag.fixes.slice().len);
+    const last = diag.fixes.slice()[1].sentence.slice();
+    try testing.expect(std.mem.indexOf(u8, last, "limit flags") != null);
 }
 
 test "on a cgroup v1 or hybrid host with no user bus, the missing cgroup v2 is the cause" {
