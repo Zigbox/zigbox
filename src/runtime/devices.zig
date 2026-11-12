@@ -40,7 +40,8 @@ pub const Problem = enum {
         return switch (problem) {
             .not_under_dev => "only a device node below /dev can be given",
             .too_long => "the path is longer than 48 bytes",
-            .unusable_byte => "the path has a quote, a backslash, a ':', a space, or a byte that is not printable ASCII",
+            .unusable_byte => "the path has a quote, a backslash, a ':', a space, or a byte " ++
+                "that is not printable ASCII",
             .dot_dot => "the path has a '..' part",
             .reserved => "every container has that one already",
         };
@@ -54,7 +55,8 @@ pub fn path_problem(path: []const u8) ?Problem {
     if (!std.mem.startsWith(u8, path, prefix)) return .not_under_dev;
     if (path.len == prefix.len) return .not_under_dev;
     for (path) |byte| {
-        if (byte == ':' or byte == '"' or byte == '\\' or byte <= ' ' or byte >= 0x7f) return .unusable_byte;
+        const escaped = byte == '"' or byte == '\\';
+        if (escaped or byte == ':' or byte <= ' ' or byte >= 0x7f) return .unusable_byte;
     }
     var parts = std.mem.splitScalar(u8, path[prefix.len..], '/');
     while (parts.next()) |part| {
@@ -90,6 +92,8 @@ pub const ListProblem = union(enum) {
     repeated: u32,
 
     pub fn sentence(problem: ListProblem) []const u8 {
+        assert(@backingInt(std.meta.activeTag(problem)) <= 2);
+        assert(constants.run_devices_max == 16); // The text below says 16.
         return switch (problem) {
             .path => |found| found.problem.sentence(),
             .too_many => "a run takes at most 16 devices",
@@ -147,6 +151,7 @@ pub const NodeProblem = union(enum) {
 /// Looks at a device node with the kernel's own answer (`Host.device_node`). Nothing is made.
 pub fn look(host: Host, device: *const Device) ?NodeProblem {
     assert(path_problem(device.path) == null);
+    assert(device.path.len <= constants.device_path_bytes_max);
     const node = host.device_node(device.path) catch |err| {
         return if (err == error.NotFound) .missing else .unreadable;
     };
@@ -160,6 +165,7 @@ pub const Refusal = struct { index: u32, problem: NodeProblem };
 
 pub fn resolve(host: Host, devices: []const Device) ?Refusal {
     assert(list_problem(devices) == null);
+    assert(devices.len <= constants.run_devices_max);
     for (devices, 0..) |*device, index| {
         if (look(host, device)) |problem| return .{ .index = @intCast(index), .problem = problem };
     }

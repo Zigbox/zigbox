@@ -732,7 +732,8 @@ pub const Plan = struct {
 
     /// The host path of the device a device step acts on, for a diagnostic.
     pub fn device_of(plan: *const Plan, step: *const Step) []const u8 {
-        assert(step.kind == .create_user_device or step.kind == .bind_user_device);
+        const is_device_step = step.kind == .create_user_device or step.kind == .bind_user_device;
+        assert(is_device_step);
         assert(step.index < plan.device_count);
         return plan.text(plan.device_paths[step.index]);
     }
@@ -1106,6 +1107,7 @@ pub const Plan = struct {
     /// Each `--device`, after M1's six: below the rootfs's /dev, at the host's own path.
     fn push_user_devices(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
+        assert(plan.device_count <= constants.run_devices_max);
         defer assert(plan.count == start + user_device_steps_count * plan.device_count);
         for (0..plan.device_count) |index| {
             const outside = plan.device_paths[index];

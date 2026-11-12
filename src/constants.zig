@@ -174,7 +174,7 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 /// The simulator's container model: paths, nodes (directories, files, links), mounts per
 /// namespace, processes, and pipe ends. Simulated paths are short; a longer one is refused.
 pub const sim_path_bytes_max: u32 = 256;
-pub const sim_nodes_max: u32 = 256;
+pub const sim_nodes_max: u32 = 192;
 pub const sim_mounts_max: u32 = 64;
 /// The supplementary groups the simulated caller can hold.
 pub const sim_groups_max: u32 = 8;

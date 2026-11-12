@@ -684,6 +684,7 @@ pub const HostSim = struct {
         try sim.begin_call();
         if (sim.roll(sim.faults.open_error_per_mille)) return sim.inject(sim.random_error());
         const file = sim.find(path) orelse return sim.natural(error.NotFound);
+        assert(sim.groups_count <= sim.groups.len);
         const member = file.gid == sim.gid_value or
             std.mem.indexOfScalar(u32, sim.groups[0..sim.groups_count], file.gid) != null;
         const allowed = host.mode_allows_read_write(file.mode, file.uid, sim.uid_value, member);

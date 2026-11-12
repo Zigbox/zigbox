@@ -1988,6 +1988,8 @@ fn take_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!vo
         return error.BadOptionValue;
     }
     run_args.devices_count = count + 1;
+    assert(run_args.devices_count <= constants.run_devices_max);
+    assert(diag.code == null);
 }
 
 /// Why `value` is not `USER[:GROUP]`, or null: each part is a name or a number, not empty, and
@@ -3504,6 +3506,37 @@ fn prepare_image(
     };
 }
 
+/// What the operand of `run` names, resolved into `prepared`: an image, or a tree; true when
+/// the tree is a build result and runs with its config.
+fn prepare_operand(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    prepared: *run_image.Prepared,
+    diag: *Diag,
+) RunError!bool {
+    assert(invocation.command == .run);
+    assert(diag.code == null);
+    const operand = invocation.operand orelse return false;
+    if (operand.len == 0) return false;
+    if (!is_tree_operand(operand)) {
+        try prepare_image(host, invocation, storage, operand, prepared, diag);
+        return false;
+    }
+    // A full digest may name a build result: its tree runs with its config.
+    const command = invocation.run.command;
+    const ws = &storage.run_image;
+    const found = run_image.prepare_result(host, ws, operand, command, prepared, diag);
+    const from_result = found catch return error.StartFailed;
+    if (!from_result and command.len == 0) {
+        // A tree that is not a build result has no command of its own.
+        const raised = missing_argument(diag, .run, .command);
+        assert(raised == error.MissingArgument);
+        return error.StartFailed;
+    }
+    return from_result;
+}
+
 fn run_container(
     host: Host,
     invocation: *const Invocation,
@@ -3526,24 +3559,7 @@ fn run_container(
         .workdir = "",
         .user = null,
     };
-    var from_result = false;
-    if (invocation.operand) |operand| {
-        if (operand.len > 0 and !is_tree_operand(operand)) {
-            try prepare_image(host, invocation, storage, operand, &prepared, diag);
-        } else if (operand.len > 0) {
-            // A full digest may name a build result: its tree runs with its config.
-            const ws = &storage.run_image;
-            const command = given.command;
-            const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
-            from_result = found catch return error.StartFailed;
-            if (!from_result and command.len == 0) {
-                // A tree that is not a build result has no command of its own.
-                const raised = missing_argument(diag, .run, .command);
-                assert(raised == error.MissingArgument);
-                return error.StartFailed;
-            }
-        }
-    }
+    const from_result = try prepare_operand(host, invocation, storage, &prepared, diag);
     var digest_text: [constants.store_digest_text_bytes]u8 = undefined;
     try resolve_tree_prefix(host, storage, &prepared, &digest_text, diag);
     var name_buffer: reference_mod.Formatted = undefined;

@@ -104,6 +104,22 @@ fn prepare_no_tmp(sim: *HostSim) void {
     prepare_step_refused(sim, sim_run.step_index_read_only(.make_tmp_dir), 13);
 }
 
+const device_args = [_][:0]const u8{
+    "run", "--rootfs", "/srv/alpine", "--device", "/dev/dri/renderD128", "--", "sh",
+};
+
+/// A host with a render node that group 44 opens, and a caller in that group.
+const render_files = sim_run.files ++ [_]@import("host_sim.zig").File{
+    .{ .path = "/dev/dri/renderD128", .content = "", .mode = 0o020660, .gid = 44 },
+};
+
+fn prepare_device_groups(sim: *HostSim) void {
+    sim_run.start(sim, 1, &render_files);
+    sim.world.add_node("/dev/dri/renderD128", .file);
+    sim.groups[0] = 44;
+    sim.groups_count = 1;
+}
+
 fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
@@ -957,6 +973,19 @@ const exec_cases = [_]Case{
         .args = &.{ "exec", "web-1", "--", "/bin/sh" },
         .prepare = prepare_exec_no_terminal,
         .exit = 125,
+    },
+    .{
+        .code = .E0225,
+        .args = &device_args,
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .W0209,
+        .args = &device_args,
+        .prepare = prepare_device_groups,
+        .warning = true,
+        .exit = 0,
     },
     .{
         .code = .W0207,

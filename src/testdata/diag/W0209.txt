@@ -1,0 +1,7 @@
+warning[ZBX-W0209]: groups show as nogroup inside the container
+  cause  a run with devices keeps your groups; inside the container they show as
+         'nogroup', and the host's file permissions still decide who may open
+         each device
+  fix    nothing to do; the groups work, only their names are not shown
+  more   zbx explain W0209 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/W0209.html

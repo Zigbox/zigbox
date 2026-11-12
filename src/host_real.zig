@@ -261,7 +261,8 @@ pub const HostReal = struct {
         const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true, .GID = true };
         var buffer: linux.Statx = undefined;
         try check(linux.statx(linux.AT.FDCWD, path.ptr, 0, mask, &buffer));
-        assert(buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID and buffer.mask.GID);
+        const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID;
+        assert(complete);
         // The kernel's own answer, for the ids and the groups the process holds (zbx is never
         // setuid, so its real and effective ids are the same).
         const access = linux.access(path.ptr, linux.R_OK | linux.W_OK);

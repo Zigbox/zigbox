@@ -30,6 +30,8 @@ fn setup(sim: *HostSim, seed: u64, files: []const host_sim.File) void {
     sim_run.start(sim, seed, files);
     sim.groups[0] = 44;
     sim.groups_count = 1;
+    // The bind's source is looked up in the world's tree, as the host's own files are.
+    for (device_files) |file| sim.world.add_node(file.path, .file);
 }
 
 fn run(sim: *HostSim, words: []const [:0]const u8) u8 {
@@ -47,8 +49,8 @@ fn record_of(sim: *const HostSim, name: []const u8) ?[]const u8 {
 }
 
 const two = [_][:0]const u8{
-    "run", "--rootfs", rootfs, "--name", "d-1", "--device", render, "--device",
-    "/dev/dri/card0", "--", "/bin/sh",
+    "run",            "--rootfs", rootfs,    "--name", "d-1", "--device", render, "--device",
+    "/dev/dri/card0", "--",       "/bin/sh",
 };
 
 const none = [_][:0]const u8{ "run", "--rootfs", rootfs, "--name", "n-1", "--", "/bin/sh" };
@@ -81,8 +83,8 @@ test "a device the host does not show, cannot open or is not a character device 
         .{ .path = "/dev/sda", .words = "not a character device" },
         .{ .path = "/dev/locked", .words = "you cannot open" },
     };
+    var sim: HostSim = undefined;
     for (cases) |case| {
-        var sim: HostSim = undefined;
         setup(&sim, 2, &files);
         const line = [_][:0]const u8{
             "run", "--rootfs", rootfs, "--name", "x-1", "--device", case.path, "--", "/bin/sh",
@@ -90,7 +92,10 @@ test "a device the host does not show, cannot open or is not a character device 
         try testing.expectEqual(@as(u8, 125), run(&sim, &line));
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), case.words) != null);
-        try testing.expect(sim.world.find_node(rootfs ++ case.path) == null);
+        var target: [128]u8 = undefined;
+        const format = rootfs ++ "{s}";
+        const made = std.fmt.bufPrint(&target, format, .{case.path}) catch unreachable; // Short.
+        try testing.expect(sim.world.find_node(made) == null);
     }
 }
 
@@ -99,14 +104,13 @@ test "a path --device does not take is E0225 at the command line" {
     // while the command line is read.
     const files = with_files(&sim_run.files);
     const bad = [_][:0]const u8{ "/etc/passwd", "/dev/null", "/dev/../etc/x", "/dev/a:b" };
+    var sim: HostSim = undefined;
     for (bad) |path| {
-        var sim: HostSim = undefined;
         setup(&sim, 3, &files);
         const line = [_][:0]const u8{ "run", "--rootfs", rootfs, "--device", path, "--", "sh" };
         try testing.expectEqual(@as(u8, 125), run(&sim, &line));
         try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
     }
-    var sim: HostSim = undefined;
     setup(&sim, 3, &files);
     const twice = [_][:0]const u8{
         "run", "--rootfs", rootfs, "--device", render, "--device", render, "--", "sh",
@@ -176,12 +180,12 @@ test "a run with devices keeps its groups in both mapping modes" {
         .{ .files = &full, .groups_kept = true },
         .{ .files = &single, .groups_kept = true },
     };
+    var sim: HostSim = undefined;
     for (cases) |case| {
-        var sim: HostSim = undefined;
         setup(&sim, 5, case.files);
         const line = [_][:0]const u8{
-            "run", "--rootfs", rootfs, "--name", "g-1", "--user", "1000:1000", "--device",
-            render, "--", "/bin/sh",
+            "run",  "--rootfs", rootfs,    "--name", "g-1", "--user", "1000:1000", "--device",
+            render, "--",       "/bin/sh",
         };
         _ = run(&sim, &line);
         try testing.expectEqual(@as(u32, 0), sim.world.setgroups_calls);

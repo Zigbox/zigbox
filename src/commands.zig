@@ -265,6 +265,7 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
 /// container; they are the same until a later slice resolves a name to a node.
 fn devices_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Writer.Error!void {
     assert(record.devices_len <= record.devices.len);
+    assert(record.devices_len <= constants.record_bytes_max);
     if (record.devices_len == 0) return;
     try writer.writeAll(",\"devices\":[");
     var parts = std.mem.splitScalar(u8, record.devices_text(), ' ');

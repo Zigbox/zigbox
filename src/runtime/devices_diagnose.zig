@@ -13,6 +13,7 @@ const example = "zbx run --device /dev/dri/renderD128 <image>";
 
 fn echo_of(storage: *[constants.arg_echo_bytes_max]u8, text: []const u8) []const u8 {
     assert(text.len <= constants.arg_bytes_max);
+    assert(storage.len == constants.arg_echo_bytes_max);
     return text_util.sanitise(storage, text);
 }
 
