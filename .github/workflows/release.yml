@@ -437,11 +437,11 @@ jobs:
       # Builds both slices, joins them with lipo, signs, notarizes, zips; checks the signature
       # and that the archive's code is the signed code.
       - name: Sign and notarize
-        # The SDK is passed twice: an explicit -target gets none by itself (--sysroot for the
-        # linker, -Dsdk for the framework and library paths).
+        # An explicit -target gets no SDK by itself: --sysroot names it, -Dsdk searches it for the
+        # frameworks and libobjc.
         run: |
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
-          zig build mac-release --sysroot "$SDK" -Dsdk="$SDK" \
+          zig build mac-release --sysroot "$SDK" -Dsdk \
             -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         run: |
@@ -863,7 +863,7 @@ jobs:
       - name: Build the universal zip and sign it with it (no notarization, no upload)
         run: |
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
-          zig build mac-release --sysroot "$SDK" -Dsdk="$SDK" \
+          zig build mac-release --sysroot "$SDK" -Dsdk \
             -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         id: zip
