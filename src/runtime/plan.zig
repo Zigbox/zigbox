@@ -1405,7 +1405,8 @@ comptime {
     // (and the death signal asked for again after it) and pasta.
     const longest = steps_count_single + scope_steps_count + read_only_steps_count +
         read_only_hostname_steps_count + 3 + pasta_steps_count +
-        (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
+        (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max +
+        mount_steps_staged * constants.mounts_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
