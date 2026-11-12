@@ -21,7 +21,8 @@
 //! `verdict.provenance_met`, `policy.parse`, `dsse.parse/verify/sign/render`,
 //! `statement.parse/render`, the `key` functions and `Record.clear/add/has/line`; every other
 //! public name in these files is internal and may change.
-//! Not exported: `record.zig` (reads a record file through the store's layout), `provenance.zig`, the key store and every command.
+//! Not exported: `record.zig` (reads a record file through the store's layout),
+//! `provenance.zig`, the key store and every command.
 
 pub const policy = @import("trust/policy.zig");
 pub const verdict = @import("trust/verdict.zig");
