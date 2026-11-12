@@ -910,6 +910,7 @@ fn mac_release_binary(
     options: *std.Build.Step.Options,
     image: VmImage,
     architecture: []const u8,
+    sdk: []const u8,
 ) *std.Build.Step.Compile {
     const query = b.fmt("{s}-macos", .{architecture});
     const module = b.createModule(.{
@@ -920,6 +921,13 @@ fn mac_release_binary(
         .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
     });
     link_macos(module, image);
+    if (sdk.len > 0) {
+        // A cross-built target gets no automatic SDK, so the frameworks and libobjc are not
+        // found without these.
+        const frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+        module.addSystemFrameworkPath(.{ .cwd_relative = frameworks });
+        module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+    }
     return b.addExecutable(.{ .name = "zbx", .root_module = module, .use_llvm = true });
 }
 
@@ -942,11 +950,14 @@ fn add_mac_release(b: *std.Build, options: *std.Build.Step.Options) void {
     const keychain = b.option([]const u8, "keychain", keychain_help) orelse "";
     const notarize_help = "mac-release: submit the archive to Apple's notary service";
     const notarize = b.option(bool, "notarize", notarize_help) orelse false;
+    const sdk_help = "mac-release: the macOS SDK path (xcrun --show-sdk-path); needed because " ++
+        "a cross-built target finds none by itself";
+    const sdk = b.option([]const u8, "sdk", sdk_help) orelse "";
     const image = add_vm_image(b, options);
     // One binary per architecture, each cross-built whatever the host is, then combined by
     // `lipo` in the tool: the release is universal. The VM image inside is the same for both.
-    const arm64 = mac_release_binary(b, options, image, "aarch64");
-    const x86_64 = mac_release_binary(b, options, image, "x86_64");
+    const arm64 = mac_release_binary(b, options, image, "aarch64", sdk);
+    const x86_64 = mac_release_binary(b, options, image, "x86_64", sdk);
     const tool = b.addExecutable(.{
         .name = "mac_release",
         .root_module = b.createModule(.{
