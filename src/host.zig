@@ -105,6 +105,37 @@ pub const Stat = struct {
     uid: u32,
 };
 
+/// What `Host.device_node` reports of a node (`--device`, M10). `mode` holds the file type bits.
+/// `can_open` is the kernel's answer for the caller's effective ids and groups (read and write);
+/// `member` says whether the caller is in the node's group, for the diagnostic.
+pub const DeviceNode = struct {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    can_open: bool,
+    member: bool,
+
+    pub const Kind = enum { character, block, other };
+
+    pub fn kind(node: DeviceNode) Kind {
+        return switch (node.mode & 0o170000) {
+            0o020000 => .character,
+            0o060000 => .block,
+            else => .other,
+        };
+    }
+};
+
+/// Whether the permission bits of `mode` let a caller with these ids open the node for reading
+/// and writing, as the kernel decides it (owner, then group, then others; root is not special
+/// here, the simulator's caller is never root). The simulator uses it.
+pub fn mode_allows_read_write(mode: u32, owner: u32, uid: u32, in_group: bool) bool {
+    assert(mode <= std.math.maxInt(u16));
+    assert(uid != std.math.maxInt(u32));
+    const shift: u5 = if (uid == owner) 6 else if (in_group) 3 else 0;
+    return (mode >> shift) & 0o6 == 0o6;
+}
+
 /// Probes run in a forked child so a failed probe cannot damage the caller. The child runs as
 /// an unprivileged user even when the caller is root, so the answer is about ordinary users.
 pub const ProbeKind = enum {
@@ -499,9 +530,13 @@ pub const VTable = struct {
     clear_ambient: *const fn (context: *anyopaque) Error!void,
     /// Sets `no_new_privs` (`PR_SET_NO_NEW_PRIVS`), which stays for the process and its children.
     no_new_privs: *const fn (context: *anyopaque) Error!void,
-    /// Becomes the user and group: no supplementary groups, then the group, then the user (all
-    /// three ids of each), so that nothing of root is left. Needs CAP_SETUID and CAP_SETGID.
-    set_user: *const fn (context: *anyopaque, uid: u32, gid: u32) Error!void,
+    /// Becomes the user and group: no supplementary groups (unless `keep_groups`: a run with
+    /// devices keeps them, M10), then the group, then the user (all three ids of each), so that
+    /// nothing of root is left. Needs CAP_SETUID and CAP_SETGID.
+    set_user: *const fn (context: *anyopaque, uid: u32, gid: u32, keep_groups: bool) Error!void,
+    /// Looks at a device node on the host for `--device` (M10): what it is, who owns it, and
+    /// whether the caller may open it for reading and writing, and is in its group.
+    device_node: *const fn (context: *anyopaque, path: [:0]const u8) Error!DeviceNode,
     /// Installs a seccomp filter (`seccomp(SECCOMP_SET_MODE_FILTER)`). Needs `no_new_privs` first.
     install_seccomp: *const fn (context: *anyopaque, program: []const bpf.Insn) Error!void,
     /// Replaces the process. Returns only on failure in the real host; the simulator returns
@@ -1113,11 +1148,20 @@ pub const Host = struct {
         assert(host.vtable.last_errno(host.context) == 0);
     }
 
-    pub fn set_user(host: Host, user_id: u32, group_id: u32) Error!void {
+    pub fn set_user(host: Host, user_id: u32, group_id: u32, keep_groups: bool) Error!void {
         assert(user_id != std.math.maxInt(u32)); // (uid_t)-1 means "no change", never a real id.
         assert(group_id != std.math.maxInt(u32));
-        try host.vtable.set_user(host.context, user_id, group_id);
+        try host.vtable.set_user(host.context, user_id, group_id, keep_groups);
         assert(host.vtable.last_errno(host.context) == 0);
+    }
+
+    pub fn device_node(host: Host, path: []const u8) Error!DeviceNode {
+        var path_z: PathZ = undefined;
+        const path_sentinel = try path_z.init(path);
+        assert(path_sentinel.len == path.len);
+        const result = try host.vtable.device_node(host.context, path_sentinel);
+        assert(result.mode <= std.math.maxInt(u16));
+        return result;
     }
 
     pub fn no_new_privs(host: Host) Error!void {

@@ -473,6 +473,9 @@ pub const World = struct {
     parent_gone_after_user: bool,
     /// How often a child asked to die with its parent (`die_with_parent`), by the last child.
     death_signal_requests: u32,
+    /// How many times a step dropped the supplementary groups (`set_user` without keeping
+    /// them). Writing `deny` to setgroups for a map is not one. M10: a run with devices has none.
+    setgroups_calls: u32,
     /// The pseudo-terminal (`open_terminal`): a pipe whose read end is the master and whose write
     /// end is the peer, and what was written to the master (the keys sent to the command).
     terminal_master: ?host.Handle,
@@ -572,6 +575,7 @@ pub const World = struct {
         world.input_terminal = false;
         world.parent_gone_after_user = false;
         world.death_signal_requests = 0;
+        world.setgroups_calls = 0;
         world.terminal_master = null;
         world.terminal_typed_len = 0;
         world.terminals_opened = 0;
@@ -2314,9 +2318,10 @@ pub const World = struct {
     }
 
     /// Becoming a user needs the ids to be mapped: the single map has only root.
-    pub fn set_user(world: *World, uid: u32, gid: u32) ?u16 {
+    pub fn set_user(world: *World, uid: u32, gid: u32, keep_groups: bool) ?u16 {
         assert(uid != std.math.maxInt(u32));
         assert(world.current < world.processes.len);
+        if (!keep_groups) world.setgroups_calls += 1;
         const process = &world.processes[world.current];
         process.user_set = .{ uid, gid };
         // The kernel clears the parent-death signal when the credentials change.

@@ -93,6 +93,7 @@ pub const HostReal = struct {
         .write = write,
         .uname = uname,
         .stat = stat,
+        .device_node = device_node,
         .read_capability = read_capability,
         .seccomp_mode = seccomp_mode,
         .is_terminal = is_terminal,
@@ -252,6 +253,25 @@ pub const HostReal = struct {
         assert(buffer.mask.MODE);
         assert(buffer.mask.UID);
         return .{ .mode = buffer.mode, .uid = buffer.uid };
+    }
+
+    fn device_node(context: *anyopaque, path: [:0]const u8) host.Error!host.DeviceNode {
+        _ = from_context(context);
+        assert(path.len > 0);
+        const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .UID = true, .GID = true };
+        var buffer: linux.Statx = undefined;
+        try check(linux.statx(linux.AT.FDCWD, path.ptr, 0, mask, &buffer));
+        assert(buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID and buffer.mask.GID);
+        // The kernel's own answer, for the ids and the groups the process holds (zbx is never
+        // setuid, so its real and effective ids are the same).
+        const access = linux.access(path.ptr, linux.R_OK | linux.W_OK);
+        return .{
+            .mode = buffer.mode,
+            .uid = buffer.uid,
+            .gid = buffer.gid,
+            .can_open = linux.errno(access) == .SUCCESS,
+            .member = in_group(buffer.gid),
+        };
     }
 
     fn read_capability(
@@ -859,13 +879,19 @@ pub const HostReal = struct {
         try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
     }
 
-    fn set_user(context: *anyopaque, user_id: u32, group_id: u32) host.Error!void {
+    fn set_user(
+        context: *anyopaque,
+        user_id: u32,
+        group_id: u32,
+        keep_groups: bool,
+    ) host.Error!void {
         assert(user_id != std.math.maxInt(u32));
         assert(group_id != std.math.maxInt(u32));
         _ = from_context(context);
-        // No supplementary groups, then the group before the user: a process that has become
+        // No supplementary groups (a run with devices keeps them: they are what opens a node
+        // that is 0660 root:render), then the group before the user: a process that has become
         // the user may no longer set its group.
-        try check(linux.syscall2(.setgroups, 0, 0));
+        if (!keep_groups) try check(linux.syscall2(.setgroups, 0, 0));
         try check(linux.setresgid(group_id, group_id, group_id));
         try check(linux.setresuid(user_id, user_id, user_id));
     }
@@ -2149,6 +2175,16 @@ fn refusal_exit(code: linux.E, refusal: u8) u8 {
     };
     assert(result != child_exit_ok); // A refusal is never reported as success.
     return result;
+}
+
+/// Whether the process's effective group or one of its supplementary groups is `gid`.
+fn in_group(gid: u32) bool {
+    if (linux.getegid() == gid) return true;
+    var groups: [constants.groups_max]linux.gid_t = undefined;
+    const count = linux.getgroups(groups.len, &groups);
+    if (linux.errno(count) != .SUCCESS) return false;
+    assert(count <= groups.len);
+    return std.mem.indexOfScalar(linux.gid_t, groups[0..count], gid) != null;
 }
 
 fn drop_to_nobody() bool {

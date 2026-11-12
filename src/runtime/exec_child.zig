@@ -127,7 +127,7 @@ fn command_step(child: *const Context, step: Step, errno_override: *u16) Error!v
         .seal_descriptors => try host.seal_descriptors(),
         .restrict_capabilities => try host.restrict_capabilities(capabilities.keep_mask),
         .clear_ambient => try host.clear_ambient(),
-        .set_user => try host.set_user(plan.user_uid, plan.user_gid),
+        .set_user => try host.set_user(plan.user_uid, plan.user_gid, false),
         .set_no_new_privs => try host.no_new_privs(),
         .install_seccomp => try host.install_seccomp(&seccomp.program),
         .exec => try exec(child, errno_override),

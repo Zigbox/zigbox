@@ -174,8 +174,10 @@ pub const sim_output_bytes_max: u32 = 64 * 1024;
 /// The simulator's container model: paths, nodes (directories, files, links), mounts per
 /// namespace, processes, and pipe ends. Simulated paths are short; a longer one is refused.
 pub const sim_path_bytes_max: u32 = 256;
-pub const sim_nodes_max: u32 = 160;
-pub const sim_mounts_max: u32 = 32;
+pub const sim_nodes_max: u32 = 256;
+pub const sim_mounts_max: u32 = 64;
+/// The supplementary groups the simulated caller can hold.
+pub const sim_groups_max: u32 = 8;
 pub const sim_processes_max: u32 = 8;
 pub const sim_pipe_ends_max: u32 = 24;
 /// Files the simulated programs write (run records), and the most one can hold: a bigger write
@@ -230,6 +232,15 @@ pub const container_path_dirs_count: u32 = 6;
 pub const candidates_max: u32 = 16;
 /// The devices bind-mounted from the host into the container's `/dev`.
 pub const container_devices_count: u32 = 6;
+/// The supplementary groups `Host.device_node` looks through for the caller's own (the kernel's
+/// limit, NGROUPS_MAX, is 65536; a user with more than this many is told they are not a member).
+pub const groups_max: u32 = 256;
+/// `--device` (M10): the most host devices one run binds into its `/dev`, beside M1's six. Each
+/// adds two steps to the plan and one mount, so the plan and the mount table are sized for it.
+pub const run_devices_max: u32 = 16;
+/// A device's path, as typed and as the record keeps it: `/dev/` and at most this many bytes
+/// in all (`/dev/dri/renderD128` is 18).
+pub const device_path_bytes_max: u32 = 128;
 /// The symlinks in the container's `/dev`: fd, stdin, stdout, stderr and ptmx.
 pub const container_links_count: u32 = 5;
 /// The generated `/etc/hosts` and `/etc/resolv.conf` of a container (M5): the most one of them
@@ -302,7 +313,7 @@ pub const events_poll_ms_max: u32 = 1000;
 
 pub const tmpfs_bytes_max: u32 = 64 * 1024 * 1024;
 /// Bytes of path text in a plan (rootfs-derived paths, exec candidates, map lines).
-pub const plan_paths_bytes_max: u32 = 96 * 1024;
+pub const plan_paths_bytes_max: u32 = 104 * 1024;
 /// One id map line, "0 4294967295 1\n", with room to spare.
 pub const id_map_line_bytes_max: u32 = 32;
 /// A record the child writes to the failure pipe: kind, step, and a two-byte errno.
@@ -1285,7 +1296,9 @@ comptime {
     // the rootfs and one below /dev, each with its NUL.
     const state_paths = state_volumes_max * (state_name_bytes_max + 2 * state_target_bytes_max +
         state_volume_path_bytes_max + rootfs_bytes_max + 2 * 20 + 6);
-    assert(paths_needed + state_paths <= plan_paths_bytes_max);
+    // Each device: its path below the rootfs and its host path, with their NULs.
+    const device_paths = run_devices_max * (rootfs_bytes_max + 2 * device_path_bytes_max + 8);
+    assert(paths_needed + state_paths + device_paths <= plan_paths_bytes_max);
     assert(plan_steps_max <= std.math.maxInt(u8)); // The failure record names a step in a byte.
     assert(id_map_line_bytes_max >= "0 4294967295 1\n".len);
     assert(sync_record_bytes == 4);
@@ -1299,6 +1312,15 @@ comptime {
     assert(sim_path_bytes_max >= 64);
     assert(sim_nodes_max >= 64);
     assert(sim_mounts_max >= container_devices_count + 8);
+    // The worst run's mounts: the root, /proc, /dev, M1's devices, /dev/shm and /dev/pts, /sys,
+    // /tmp and /run, two /etc files and twice the staging of a state volume or other mount, and
+    // `--device`s. The simulator's table holds them all.
+    assert(sim_mounts_max >= 24 + container_devices_count + state_volumes_max + mounts_max +
+        run_devices_max);
+    assert(sim_nodes_max >= 160 + 2 * run_devices_max);
+    assert(run_devices_max == 16);
+    assert(device_path_bytes_max < mount_path_bytes_max);
+    assert(device_path_bytes_max > "/dev/".len);
     assert(sim_processes_max >= 6); // zbx, a container, its keeper, pasta, exec's two.
     assert(sim_pipe_ends_max >= 4);
     assert(sim_written_files_max > runs_max + 4); // Every record, a temporary one, and slack.
@@ -1391,7 +1413,7 @@ comptime {
     assert(state_holders_max > 0);
     // A plan with every volume: each has seven steps, eight when read-only; and every other
     // mount, at most six (plan.zig).
-    assert(80 + state_volumes_max * 8 + mounts_max * 6 <= plan_steps_max);
+    assert(80 + state_volumes_max * 8 + mounts_max * 6 + 2 * run_devices_max <= plan_steps_max);
     assert(plan_steps_max <= std.math.maxInt(u8));
     // The stage names end in one digit; a mount's value and options fit their buffers.
     assert(mounts_max <= 10);
