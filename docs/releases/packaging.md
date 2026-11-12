@@ -168,8 +168,9 @@ replay or freeze protection.
 The fallback, when the automation is down or to debug a release. For the Linux packages, with the
 subkey in your own keyring, `.github/release-sign.sh` is the same procedure; `zig build packages`
 prints the `gpg` command for each file it needs signed (rounds 1 and 2 above). `gpg --batch -o`
-will not overwrite a file, so use an empty signatures directory every time. Create the tag and
-release with `gh release create` from the gated commit, run `release.yml` from the tag (or
+will not overwrite a file, so use an empty signatures directory every time. The tag is made by
+`tag.yml`, never by hand; only with the owner's written go-ahead in `docs/decisions/` create the tag
+and release with `gh release create` from the gated commit, run `release.yml` from the tag (or
 `workflow_dispatch`), and start the site deploy with `gh workflow run deploy.yml --repo
 Zigbox/zigbox.github.io`.
 

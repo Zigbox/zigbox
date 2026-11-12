@@ -50,6 +50,10 @@ const rows = [_]Row{
         .true_outputs = &.{"code"},
     },
     .{
+        .paths = &.{".github/workflows/tag.yml"},
+        .true_outputs = &.{"code"},
+    },
+    .{
         .paths = &.{".github/release-sign-test.sh"},
         .true_outputs = &.{"code"},
     },

@@ -61,16 +61,22 @@ pub fn sign_arguments(
 ) []const []const u8 {
     assert(identity.len > 0);
     const timestamp: []const u8 = if (is_ad_hoc(identity)) "--timestamp=none" else "--timestamp";
+    // Options first, the binary last: `codesign` takes what follows the options as paths.
     const words = [_][]const u8{
         "--force", "--options", "runtime", timestamp, "--entitlements", entitlements,
-        "--sign",  identity,    binary,
+        "--sign",  identity,
     };
     @memcpy(out[0..words.len], &words);
-    if (keychain.len == 0) return out[0..words.len];
-    out[words.len] = "--keychain";
-    out[words.len + 1] = keychain;
-    assert(words.len + 2 <= out.len);
-    return out[0 .. words.len + 2];
+    var count: usize = words.len;
+    if (keychain.len > 0) {
+        out[count] = "--keychain";
+        out[count + 1] = keychain;
+        count += 2;
+    }
+    out[count] = binary;
+    count += 1;
+    assert(count <= out.len);
+    return out[0..count];
 }
 
 /// The words `notarytool` is run with, after the program name, for a submission or the profile
@@ -384,6 +390,8 @@ test "the archive is named for the version and the ad-hoc identity has no timest
     try std.testing.expectEqualStrings("runtime", real[2]);
     try std.testing.expectEqualStrings("--timestamp", real[3]);
     try std.testing.expectEqualStrings(default_identity, real[7]);
+    try std.testing.expectEqualStrings("zbx", real[8]);
+    try std.testing.expectEqual(@as(usize, 9), real.len);
     try std.testing.expect(is_ad_hoc("-"));
     try std.testing.expect(!is_ad_hoc(default_identity));
 }
@@ -397,8 +405,9 @@ test "--keychain is passed to codesign and notarytool, and only when given" {
     try std.testing.expectEqualStrings("zbx", plain[plain.len - 1]);
     const keyed = sign_arguments("id", "e.plist", "zbx", "/tmp/k.keychain-db", &words);
     try std.testing.expectEqual(@as(usize, 11), keyed.len);
-    try std.testing.expectEqualStrings("--keychain", keyed[9]);
-    try std.testing.expectEqualStrings("/tmp/k.keychain-db", keyed[10]);
+    try std.testing.expectEqualStrings("--keychain", keyed[8]);
+    try std.testing.expectEqualStrings("/tmp/k.keychain-db", keyed[9]);
+    try std.testing.expectEqualStrings("zbx", keyed[10]);
 
     var notary_words: [8][]const u8 = undefined;
     const submit = notary_arguments("submit", "a.zip", "prof", "", &notary_words);

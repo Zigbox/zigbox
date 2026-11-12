@@ -46,6 +46,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Is this a release commit that is not yet tagged
         id: version
@@ -61,10 +62,23 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2>&1; then
+          # The release commit is the one that added the notes: a later commit of main that finds
+          # the same state (the release's own run failed) must not be tagged as the release.
+          if ! git diff --name-only HEAD^ HEAD | grep -qxF "docs/releases/$version.md"; then
+            echo "::notice::tag: $HEAD_SHA did not add docs/releases/$version.md, so it is not the release commit of $version; re-run the failed ci or mac on the release commit itself"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          status=0
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2> "$RUNNER_TEMP/tagcheck" || status=$?
+          if [ "$status" = 0 ]; then
             echo "::notice::tag: v$version exists already"
             echo "go=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if ! grep -q 'HTTP 404' "$RUNNER_TEMP/tagcheck"; then
+            echo "::error::tag: could not look up v$version: $(head -c 200 "$RUNNER_TEMP/tagcheck")"
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "go=true" >> "$GITHUB_OUTPUT"

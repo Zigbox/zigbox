@@ -176,6 +176,9 @@ jobs:
         run: |
           echo "KEYCHAIN=$RUNNER_TEMP/zbx-release.keychain-db" >> "$GITHUB_ENV"
           echo "SECRETS_DIR=$RUNNER_TEMP/zbx-release-secrets" >> "$GITHUB_ENV"
+          # Not the runner user's shared Zig cache: a pull request job on this runner writes
+          # there, and what it leaves must never be linked into the binary that gets signed.
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
       - name: Refuse anything but a release tag
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -219,32 +222,50 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          # Only system tools, by a PATH nobody else can write: a program found through a
+          # Homebrew directory would receive the secrets in this step's environment.
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           mkdir "$SECRETS_DIR"
           KEYCHAIN_PASSWORD=$(/usr/bin/openssl rand -hex 24)
           WRAP_PASSWORD=$(/usr/bin/openssl rand -hex 24)
           export WRAP_PASSWORD
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -t 3600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          /usr/bin/security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          /usr/bin/security set-keychain-settings -t 3600 "$KEYCHAIN"
+          /usr/bin/security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           printf '%s' "$MAC_CERT_P12" | /usr/bin/openssl base64 -d -A -out "$SECRETS_DIR/cert.p12"
+          unset MAC_CERT_P12
           /usr/bin/openssl pkcs12 -in "$SECRETS_DIR/cert.p12" -passin env:MAC_CERT_PASSWORD -nodes |
             /usr/bin/openssl pkcs12 -export -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          unset MAC_CERT_PASSWORD
           rm -f "$SECRETS_DIR/cert.p12"
-          security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -T /usr/bin/codesign
+          /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -T /usr/bin/codesign
           rm -f "$SECRETS_DIR/wrapped.p12"
           # Lets codesign use the key from a session with no GUI (else errSecInternalComponent).
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security find-identity -v -p codesigning "$KEYCHAIN"
+          /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # `find-identity` exits 0 with no valid identity (e.g. the Developer ID intermediate
+          # is missing), so the count is checked. Signing is by this hash, not by name.
+          found=$(/usr/bin/security find-identity -v -p codesigning "$KEYCHAIN")
+          valid=$(printf '%s\n' "$found" | sed -n 's/^ *\([0-9]*\) valid identities found$/\1/p')
+          if [ "$valid" != "1" ]; then
+            echo "::error::mac: the release keychain has '$valid' valid signing identities, not 1 (is the Developer ID intermediate certificate in the .p12?)"
+            exit 1
+          fi
+          # The hash is public certificate data, not a secret.
+          hash=$(printf '%s\n' "$found" | sed -n 's/^ *1) \([0-9A-F]\{40\}\) .*/\1/p')
+          [ -n "$hash" ] || { echo "::error::mac: no certificate hash in the find-identity output"; exit 1; }
+          echo "SIGN_IDENTITY=$hash" >> "$GITHUB_ENV"
           printf '%s\n' "$MAC_NOTARY_KEY" > "$SECRETS_DIR/notary.p8"
-          xcrun notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
+          unset MAC_NOTARY_KEY
+          /usr/bin/xcrun notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
             --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" > /dev/null
           rm -f "$SECRETS_DIR/notary.p8"
-          if security list-keychains -d user | grep -q zbx-release; then
+          listed=$(/usr/bin/security list-keychains -d user)
+          if grep -q zbx-release <<< "$listed"; then
             echo "release: the temporary keychain is on the search list" >&2
             exit 1
           fi
       - name: Sign and notarize
-        run: zig build mac-release -Dnotarize -Dkeychain="$KEYCHAIN"
+        run: zig build mac-release -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
       - name: The zip is the one that was hashed
         run: |
           set -euo pipefail
@@ -265,8 +286,8 @@ jobs:
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |
-          security delete-keychain "$KEYCHAIN" || true
-          rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-*
+          /usr/bin/security delete-keychain "$KEYCHAIN" || true
+          rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # The tap and the site, from the App's token (two repositories, Contents write; Actions read to
   # follow the deploy). `release-publish` admits tags only and has no reviewers: the approval
@@ -340,7 +361,8 @@ jobs:
             echo "tap: Formula/zigbox.rb is already at $version"
             exit 0
           fi
-          if git diff -U0 | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' | grep -Evq '^[+-] *(url|version|sha256) "'; then
+          changed=$(git diff -U0 | { grep -E '^[+-]' || true; } | { grep -Ev '^(\+\+\+|---)' || true; })
+          if [ -n "$(grep -Ev '^[+-] *(url|version|sha256) "' <<< "$changed" || true)" ]; then
             echo "release: the formula differs from the tap's in more than url, version and sha256:" >&2
             git diff -U0 >&2
             exit 1
@@ -457,6 +479,7 @@ jobs:
             -keyout "$SECRETS_DIR/key.pem" -out "$SECRETS_DIR/cert.pem"
           /usr/bin/openssl pkcs12 -export -inkey "$SECRETS_DIR/key.pem" -in "$SECRETS_DIR/cert.pem" \
             -passout env:WRAP_PASSWORD -out "$SECRETS_DIR/wrapped.p12"
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -t 3600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -468,7 +491,8 @@ jobs:
           fingerprint=$(/usr/bin/openssl x509 -in "$SECRETS_DIR/cert.pem" -noout -fingerprint -sha1)
           echo "TEST_IDENTITY=$(echo "${fingerprint#*=}" | tr -d ':')" >> "$GITHUB_ENV"
           rm -rf "$SECRETS_DIR"
-          if security list-keychains -d user | grep -q zbx-release; then
+          listed=$(security list-keychains -d user)
+          if grep -q zbx-release <<< "$listed"; then
             echo "release: the temporary keychain is on the search list" >&2
             exit 1
           fi
@@ -482,5 +506,5 @@ jobs:
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |
-          security delete-keychain "$KEYCHAIN" || true
-          rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-*
+          /usr/bin/security delete-keychain "$KEYCHAIN" || true
+          rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
