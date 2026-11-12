@@ -448,8 +448,8 @@ fn graph_fix(diag: *Diag, file: *const BuildFile, problem: *const graph_mod.Prob
         .need_twice => fix_sentence(diag, "list \"{s}\" once in step \"{s}\"'s .needs", .{
             at, step_text(&step_echo, file, problem.step),
         }),
-        .cycle => fix_sentence(diag, "remove what closes the round, such as \"{s}\" in " ++
-            "step \"{s}\"", .{ at, step_text(&step_echo, file, problem.step) }),
+        .cycle => fix_sentence(diag, "remove a need that closes the round, such as \"{s}\" " ++
+            "from step \"{s}\"'s .needs", .{ at, step_text(&step_echo, file, problem.step) }),
     }
 }
 

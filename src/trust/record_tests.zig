@@ -84,13 +84,17 @@ test "a record holds eight lines, and a ninth distinct one is Full" {
     try testing.expectError(error.Malformed, record.parse(&work, tree, nine[0..length], &two));
 }
 
+var oversized: [constants.signature_record_bytes_max + 1]u8 = undefined;
+
 test "a file one byte over the byte bound is damaged" {
     // Goal: the byte bound, one past. Method: a valid record plus padding to one byte over the
     // bound is refused by parse, and a file of that size on disk loads as Damaged.
     const tree = tree_of(7);
     text_of(tree, 1, &one);
-    var big: [constants.signature_record_bytes_max + 1]u8 = @splat('x');
-    try testing.expectError(error.Malformed, record.parse(&work, tree, &big, &two));
+    // A record at its bound is about 10 MB (256 steps), more than the simulated disk holds, so
+    // the size is checked on the bytes here and `load` is tested with a file it can hold.
+    @memset(&oversized, 'x');
+    try testing.expectError(error.Malformed, record.parse(&work, tree, &oversized, &two));
     start();
     var path: [128]u8 = undefined;
     const hex = tree.hex();
@@ -98,7 +102,7 @@ test "a file one byte over the byte bound is damaged" {
         unreachable; // Short.
     files.put_dir(root_path ++ "/trust", 0o755);
     files.put_dir(root_path ++ "/trust/signatures", 0o755);
-    files.put_file(name, 0o644, &big);
+    files.put_file(name, 0o644, "not a record\n");
     var errno: u16 = 0;
     try testing.expectError(error.Damaged, record.load(&store, &work, tree, &two, &errno));
     // And the largest legal file is not refused for its size.

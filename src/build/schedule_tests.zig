@@ -36,8 +36,8 @@ const Fake = struct {
     under_used: bool,
     begin_order: [steps_max]u8,
     begin_count: u16,
-    ended_ok: u8,
-    hits_began: u8,
+    ended_ok: u16,
+    hits_began: u16,
     /// The wait call (counted from 0) that fails; null: none does.
     wait_fails_at: ?u32,
     waits: u32,
