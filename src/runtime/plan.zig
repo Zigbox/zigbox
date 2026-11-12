@@ -1098,7 +1098,8 @@ pub const Plan = struct {
     }
 
     /// Writes each generated file to the container's /dev, binds it over its mount point in
-    /// the rootfs (read-only, but for the hostname) and removes the staged name. The /dev is a fresh tmpfs by now.
+    /// the rootfs (read-only, but for the hostname) and removes the staged name. The /dev is a
+    /// fresh tmpfs by now.
     fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
         defer assert(plan.count == start + 11);

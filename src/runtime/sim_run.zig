@@ -500,7 +500,8 @@ fn network_mounts(
         // The hostname is the one generated file a program may write (#113).
         const writable = std.mem.eql(u8, name, "/etc/hostname");
         if (table.mounts[index].read_only == writable) {
-            return if (writable) "/etc/hostname is read-only" else "a generated /etc file is writable";
+            if (writable) return "/etc/hostname is read-only";
+            return "a generated /etc file is writable";
         }
     }
     return null;
