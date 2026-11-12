@@ -224,7 +224,7 @@ footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 <script>
 // ===== Site data: update STATUS and the milestone entries as work lands. =====
 const SITE = {
-  updated: "2026-11-04",
+  updated: "2026-11-12",
   sisterUrl: "../zigcube/", // Zigcube site
   stage: "Pre-alpha · 0.5.0 released",
   stageStatus: "done",
@@ -282,6 +282,10 @@ const MILESTONES = [
   {id:"M8b", name:"Listener handoff", status:"done", slices:{green:1, total:1, note:"demo-m8b passed with KVM on main (20773e2); released in 0.5.0"}, goal:"Let a network-less container serve loopback while the host program holds the listening socket (--listen).",
    recorded:{url:"https://github.com/Zigbox/zigbox/actions/runs/43099904380", date:"2026-11-11"},
    demo:[["$","/home/demo/m8b_hello.py"],["","HELLO-DESCRIPTORS: 1"],["","HELLO-RC: 0"],["","HELLO-OUT: hello from outside"],["$","/home/demo/m8b_refuse.py"],["","REFUSED remote rc=125 error[ZBX-E0607]: --listen takes 127.0.0.1 and a port from 1 to 65535"],["","REFUSED gone rc=125 error[ZBX-E0609]: the listener could not be handed on to --listen-send"],["","demo-m8b: PASSED in 83 s"]]},
+  {id:"M9", name:"Dockerfile import", status:"wip", slices:{green:0, total:5, note:"slice 1 in review (#122)"}, goal:"Translate a Dockerfile into a build file that zbx build runs; the Dockerfile is never executed.",
+   demo:[]},
+  {id:"M10", name:"Devices and GPUs", status:"wip", slices:{green:1, total:4, note:"slice 1 merged (#125); slices 2 to 4 not merged; slice 2 in progress"}, goal:"Give one container a host device or GPU, with its supplementary groups kept.",
+   demo:[]},
 ];
 const DOCS = [
   {t:"Install", m:"M0", d:"Build one static binary, run zbx doctor, fix whatever it names.", href:"https://github.com/Zigbox/zigbox/blob/main/docs/demos/m0.md#by-hand-on-your-own-ubuntu-2404-machine"},
