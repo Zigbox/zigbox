@@ -1,0 +1,11 @@
+error[ZBX-E0608]: the listener could not be made inside the container
+  while  starting container web-1
+  cause  making the listener on the container's loopback failed: the kernel
+         returned EADDRINUSE
+  listen 127.0.0.1:8080
+  name   web-1
+  rootfs /srv/alpine
+  step   make_listener (13 of 70)
+  fix    see what this host allows:   zbx doctor
+  more   zbx explain E0608
+  docs   https://zigbox.github.io/zigbox/errors/E0608.html

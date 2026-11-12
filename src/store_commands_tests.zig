@@ -171,6 +171,54 @@ test "ls lists the roots newest first, in text and in JSON" {
     try testing.expect(roots.items[1].object.get("parent").? == .null);
 }
 
+test "ls counts a file linked under several names once in size_unique, and bytes per name (#112)" {
+    // Goal: `bytes` keeps its meaning (a file per name) and `size_unique` counts each file once,
+    // in JSON and in the SIZE column of the text. Method: import the sample plus a 10-byte file
+    // under three names.
+    start();
+    files.put_file("/src/etc/one", 0o644, "0123456789");
+    try files.interface().link("/src/etc/one", "/src/etc/two");
+    try files.interface().link("/src/etc/one", "/src/etc/three");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const root = parsed.value.object.get("roots").?.array.items[0].object;
+    const bytes = root.get("bytes").?.integer;
+    const unique = root.get("size_unique").?.integer;
+    try testing.expectEqual(@as(i64, 20), bytes - unique); // Two names too many, 10 bytes each.
+    try testing.expectEqual(@as(i64, 51), unique);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "ls" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), "51 B") != null);
+}
+
+test "ls lists a root whose record has no bytes line, in text and in JSON (#117)" {
+    // Goal: a record that lacks `.bytes` (damaged, hand-edited, or written by a later zbx) is
+    // listed, not an assertion. Method: import, then replace the root's record with one that
+    // has only the required fields.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var path_buffer: [constants.sim_path_bytes_max]u8 = undefined;
+    var path: []const u8 = "";
+    var index: u32 = 0;
+    while (index < files.count) : (index += 1) {
+        const found = files.alive_path(index) orelse continue;
+        if (std.mem.indexOf(u8, found, "/roots/") == null) continue;
+        @memcpy(path_buffer[0..found.len], found);
+        path = path_buffer[0..found.len];
+    }
+    try testing.expect(path.len > 0);
+    files.remove_path(path);
+    files.put_file(path, 0o644, ".{\n    .version = 1,\n    .kind = \"import\",\n}\n");
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "ls" }));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stdout(), "import"));
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "--output", "json", "store", "ls" }));
+    const parsed = try parse_stdout();
+    defer parsed.deinit();
+    const root = parsed.value.object.get("roots").?.array.items[0].object;
+    try testing.expectEqual(@as(i64, 0), root.get("bytes").?.integer);
+}
+
 test "ls of a store that does not exist is an empty list, and creates nothing" {
     // Goal: reading never creates. Method: ls on a host with a home and no store.
     start();
@@ -973,6 +1021,28 @@ test "push --dry-run prints the digest an export prints, and refuses without --d
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "needs the build result") != null);
     try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", "nope" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
+}
+
+test "push --dry-run takes name@sha256:<digest>, as sign does (#111)" {
+    // Goal: a digest reference names one image of the store, so a dry run of it packs that image
+    // and prints the same manifest digest; it used to be refused as E0550 because the lookup
+    // read `@` references as tags. Method: a dry run records the image, then name it by digest;
+    // a digest the store does not hold, and a name with no digest, are still E0550.
+    start();
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "store", "import", "/src" }));
+    var buffer: [80]u8 = undefined;
+    const tree = term(&buffer, try printed_digest());
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", tree }));
+    var expected: [constants.oci_digest_text_bytes]u8 = undefined;
+    @memcpy(&expected, try printed_oci_digest());
+    var operand: [128]u8 = undefined;
+    const named = try std.fmt.bufPrintSentinel(&operand, "alpine@{s}", .{&expected}, 0);
+    try testing.expectEqual(@as(u8, 0), try command(&.{ "push", "--dry-run", named }));
+    try testing.expectEqualStrings(&expected, try printed_oci_digest());
+    try testing.expectEqual(@as(usize, 0), sim.stderr().len);
+    const absent = "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    try testing.expectEqual(@as(u8, 1), try command(&.{ "push", "--dry-run", absent }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0550") != null);
 }
 

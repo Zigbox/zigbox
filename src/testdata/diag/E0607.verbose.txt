@@ -1,0 +1,7 @@
+error[ZBX-E0607]: --listen takes 127.0.0.1 and a port from 1 to 65535
+  while  checking --listen
+  cause  --listen '10.0.0.1:8080': the address is not 127.0.0.1, the only
+         address a listener may have
+  fix    give the loopback address and a port:   zbx run --listen 127.0.0.1:8080 --listen-send 3 alpine -- sh
+  more   zbx explain E0607
+  docs   https://zigbox.github.io/zigbox/errors/E0607.html

@@ -181,7 +181,6 @@ pub fn step_failed(
 ) void {
     assert(diag.code == null);
     assert(failure.step < plan.count);
-    const helper = details.helper;
     const step = &plan.steps[failure.step];
     var buffer: [160]u8 = undefined;
     const operation = plan_mod.describe(step, &buffer);
@@ -206,6 +205,28 @@ pub fn step_failed(
         step_context(diag, plan, failure.step);
         return;
     }
+    step_kind_failed(host, diag, plan, step, info, failure, details);
+    starting(diag, info);
+    step_context(diag, plan, failure.step);
+    assert(diag.code != null);
+    assert(diag.causes.count > 0);
+}
+
+/// The diagnostic of a failed step that is neither a state mount nor a bind mount, by its kind.
+fn step_kind_failed(
+    host: Host,
+    diag: *Diag,
+    plan: *const Plan,
+    step: *const plan_mod.Step,
+    info: RunInfo,
+    failure: Failure,
+    details: Details,
+) void {
+    assert(diag.code == null);
+    assert(failure.step < plan.count);
+    const helper = details.helper;
+    var buffer: [160]u8 = undefined;
+    const operation = plan_mod.describe(step, &buffer);
     switch (step.kind) {
         .spawn => namespaces_failed(host, details.facts, diag, failure),
         .deny_setgroups, .write_gid_map, .write_uid_map => map_failed(diag, operation, failure),
@@ -221,6 +242,9 @@ pub fn step_failed(
         .start_pasta => pasta_not_started(diag, plan, operation, failure),
         .await_pasta => pasta_not_ready(host, diag, plan, operation, failure, details.pasta),
         .exec => command_failed(diag, plan, info, failure),
+        .make_listener, .send_listener, .receive_listener => {
+            listener_failed(diag, operation, plan.listen_port, failure);
+        },
         .mount_overlay => overlay_failed(diag, operation, failure),
         .restrict_capabilities,
         .clear_ambient,
@@ -236,10 +260,6 @@ pub fn step_failed(
         => read_only_failed(diag, step, operation, failure, info),
         else => setup_failed(diag, step, operation, failure, info),
     }
-    starting(diag, info);
-    step_context(diag, plan, failure.step);
-    assert(diag.code != null);
-    assert(diag.causes.count > 0);
 }
 
 fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {
@@ -694,11 +714,16 @@ fn scope_step_failed(diag: *Diag, unit: []const u8, problem: ?*const scope_mod.P
     assert(diag.code.? == code);
 }
 
+/// Who asked for the limit of E0307: the flags of `zbx run`, or the fixed limits every build step
+/// runs with (a build has no limit flags to leave out).
+pub const LimitAsker = enum { run, build_step };
+
 /// ZBX-E0307: a limit was asked for and no scope can be made, found before anything was created.
 pub fn limit_without_cgroup(
     diag: *Diag,
     problem: *const scope_mod.Problem,
     limits: spec.Limits,
+    asker: LimitAsker,
 ) void {
     assert(diag.code == null);
     assert(limits.any());
@@ -707,11 +732,18 @@ pub fn limit_without_cgroup(
     if (limits.memory_bytes) |bytes| diag.context("memory", "{d} bytes", .{bytes});
     if (limits.pids) |pids| diag.context("pids", "{d}", .{pids});
     if (limits.cpu_millis) |millis| diag.context("cpus", "{d} thousandths", .{millis});
-    diag.cause("--memory, --pids and --cpus are enforced by a cgroup scope from the user's " ++
-        "systemd manager, and one cannot be made", .{});
+    switch (asker) {
+        .run => diag.cause("--memory, --pids and --cpus are enforced by a cgroup scope from the " ++
+            "user's systemd manager, and one cannot be made", .{}),
+        .build_step => diag.cause("every build step runs with memory and process limits, " ++
+            "enforced by a cgroup scope from the user's systemd manager, and one cannot be " ++
+            "made", .{}),
+    }
     scope_text.problem_causes(diag, problem);
     diag.fix(.{ .sentence = "check this host (ZBX-E0103):", .command = "zbx doctor" });
-    diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    if (asker == .run) {
+        diag.fix(.{ .sentence = "or run without the limit flags, which needs no scope" });
+    }
     assert(diag.code.? == .E0307);
 }
 
@@ -1178,6 +1210,93 @@ pub fn pasta_too_old(diag: *Diag, path: []const u8, version: []const u8) void {
         .command = "sudo " ++ pasta_install,
     });
     assert(diag.code.? == .E0602);
+}
+
+/// ZBX-E0608: the listener `--listen` asked for could not be made inside the container (the
+/// socket, the bind or the listen), or taken out of it.
+fn listener_failed(diag: *Diag, operation: []const u8, port: u16, failure: Failure) void {
+    assert(diag.code == null);
+    assert(port > 0);
+    diag.raise(.E0608);
+    errors.cause_host_error(diag, operation, failure.err, failure.errno);
+    diag.context("listen", "127.0.0.1:{d}", .{port});
+    diag.fix(.{ .sentence = "see what this host allows:", .command = "zbx doctor" });
+    assert(diag.code.? == .E0608);
+}
+
+/// ZBX-E0606: `--listen` with a network other than `none`, or without `--listen-send`.
+pub fn listen_options_invalid(
+    diag: *Diag,
+    problem: spec.ListenOptionsProblem,
+    send: ?[]const u8,
+) void {
+    assert(diag.code == null);
+    diag.raise(.E0606);
+    diag.while_("checking --listen", .{});
+    switch (problem) {
+        .network_not_none => diag.cause("--listen is for a container with no network of its own " ++
+            "(--net none); a container with a network reaches the host without it", .{}),
+        .no_listen_send => diag.cause("--listen has nowhere to hand the listener: " ++
+            "--listen-send FD is missing", .{}),
+        .send_without_listen => diag.cause("--listen-send names where to hand a listener, " ++
+            "and there is no --listen to make one", .{}),
+        .detached => diag.cause("--listen hands the listener to this process, which a " ++
+            "detached run (-d) does not wait for", .{}),
+        .send_not_a_descriptor, .send_not_a_socket => {
+            var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+            const echo = @import("../text.zig").sanitise(&storage, send.?);
+            if (problem == .send_not_a_descriptor) {
+                diag.cause("--listen-send '{s}' is not a descriptor number (0 to 2147483647)", .{
+                    echo,
+                });
+            } else {
+                diag.cause("--listen-send {s} is not an open Unix stream socket of this " ++
+                    "process; nothing was started", .{echo});
+            }
+        },
+    }
+    diag.fix(.{
+        .sentence = "hand the listener to the Unix socket you pass down as descriptor 3:",
+        .command = "zbx run --listen 127.0.0.1:8080 --listen-send 3 alpine -- sh",
+        .template = true,
+    });
+    assert(diag.code.? == .E0606);
+}
+
+/// ZBX-E0607: a `--listen` value that is not an IPv4 loopback address and a port.
+pub fn listen_value_invalid(diag: *Diag, value: []const u8, problem: spec.ListenProblem) void {
+    assert(diag.code == null);
+    assert(value.len <= constants.arg_bytes_max);
+    diag.raise(.E0607);
+    diag.while_("checking --listen", .{});
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, value);
+    diag.cause("--listen '{s}': {s}", .{ echo, problem.sentence() });
+    diag.fix(.{
+        .sentence = "give the loopback address and a port:",
+        .command = "zbx run --listen 127.0.0.1:8080 --listen-send 3 alpine -- sh",
+        .template = true,
+    });
+    assert(diag.code.? == .E0607);
+}
+
+/// ZBX-E0609: the send of the listener failed (the peer is gone, say), and the container was
+/// stopped. The send's own failure is the cause shown; that the container was stopped is
+/// context.
+pub fn listen_send_failed(diag: *Diag, descriptor: []const u8, failure: Failure) void {
+    assert(diag.code == null);
+    assert(descriptor.len <= constants.arg_bytes_max);
+    diag.raise(.E0609);
+    diag.while_("handing the listener to --listen-send", .{});
+    var storage: [constants.arg_echo_bytes_max]u8 = undefined;
+    const echo = @import("../text.zig").sanitise(&storage, descriptor);
+    errors.cause_host_error(diag, "sending the listener", failure.err, failure.errno);
+    diag.context("fd", "{s}", .{echo});
+    diag.context("result", "the container was stopped", .{});
+    diag.fix(.{
+        .sentence = "keep the other end of the socket open until zbx has sent the listener",
+    });
+    assert(diag.code.? == .E0609);
 }
 
 /// ZBX-E0605: a host port below `net.ipv4.ip_unprivileged_port_start`, refused before anything

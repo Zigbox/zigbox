@@ -122,6 +122,8 @@ pub const View = struct {
     user: ?spec_mod.User = null,
     /// Version 9: what the tree is bound to, for the policy gate at `zbx exec`.
     binding: Binding = .none,
+    /// Version 10: the listener the run asked for (`--listen`), never a descriptor.
+    listen: ?spec_mod.Listen = null,
 };
 
 pub const Binding = spec_mod.Binding;
@@ -169,7 +171,10 @@ pub fn render(view: *const View, buffer: *[constants.record_bytes_max]u8) []cons
     assert(view.command.len > 0);
     var writer = std.Io.Writer.fixed(buffer);
     write_bytes(&writer, ".{\n");
-    write_format(&writer, "    .version = {d},\n", .{constants.record_version});
+    // A record without a listener stays at the plain version, byte for byte as before M8b.
+    const plain = constants.record_version_plain;
+    const version = if (view.listen != null) constants.record_version else plain;
+    write_format(&writer, "    .version = {d},\n", .{version});
     write_bytes(&writer, "    .name = ");
     write_string(&writer, view.name);
     write_bytes(&writer, ",\n    .rootfs = ");
@@ -251,6 +256,16 @@ fn write_network_fields(writer: *std.Io.Writer, view: *const View) void {
     const user = view.user orelse spec_mod.User{ .uid = 0, .gid = 0 };
     write_format(writer, "    .user = \"{d}:{d}\",\n", .{ user.uid, user.gid });
     write_binding(writer, view.binding);
+    write_listen(writer, view.listen);
+}
+
+/// `.listen = "127.0.0.1:8080",` for a run with a listener; no line for one without.
+fn write_listen(writer: *std.Io.Writer, listen: ?spec_mod.Listen) void {
+    assert(writer.end <= writer.buffer.len);
+    // Only a run with a listener writes the line, and then the record is version 10.
+    const found = listen orelse return;
+    var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
+    write_format(writer, "    .listen = \"{s}\",\n", .{found.text(&storage)});
 }
 
 fn write_binding(writer: *std.Io.Writer, binding: Binding) void {
@@ -404,8 +419,10 @@ comptime {
     const user = 48;
     // Version 9: `.binding = "manifest:<64 hex>",` with its newline.
     const binding = 96;
+    // Version 10: `.listen = "127.0.0.1:65535",` with its newline.
+    const listen = 48;
     const total = strings + command + labels + diagnostic + scope + store + network + state +
-        mounts + user + binding + 512;
+        mounts + user + binding + listen + 512;
     assert(total <= constants.record_bytes_max);
 }
 
@@ -471,6 +488,8 @@ pub const Parsed = struct {
     /// Version 9: null for an older record, which did not say; the gate then trusts only a
     /// statement of the tree alone (it fails closed).
     binding: ?Binding,
+    /// Version 10: the listener the run asked for; null for an older record or none.
+    listen: ?spec_mod.Listen,
 
     /// The `index`th other mount the run made; its strings point into this record.
     pub fn mount_at(parsed: *const Parsed, index: u32) mounts_mod.Mount {
@@ -676,6 +695,7 @@ pub fn parse(text: []const u8, out: *Parsed) ParseError!void {
     out.mounts_count = 0;
     out.user = null;
     out.binding = null;
+    out.listen = null;
     var has_reason = false;
     var have_start = false;
     var opened = false;
@@ -833,8 +853,16 @@ fn parse_scope_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
     if (std.mem.eql(u8, key, "mounts")) return parse_mounts(value, out);
     if (std.mem.eql(u8, key, "user")) return parse_user(value, out);
     if (std.mem.eql(u8, key, "binding")) return parse_binding(value, out);
+    if (std.mem.eql(u8, key, "listen")) return parse_listen_field(value, out);
     if (std.mem.eql(u8, key, "command")) return parse_command(value, out);
     if (std.mem.eql(u8, key, "labels")) return parse_labels(value, out);
+    return parse_limit_field(key, value, out);
+}
+
+/// The limit fields: null if `key` is not one, else whether the value was good.
+fn parse_limit_field(key: []const u8, value: []const u8, out: *Parsed) ?bool {
+    assert(key.len > 0);
+    assert(value.len > 0);
     if (std.mem.eql(u8, key, "limit_memory")) {
         out.limits.memory_bytes = parse_limit(u64, value) orelse return false;
         return true;
@@ -920,6 +948,25 @@ fn parse_env_names(value: []const u8, out: *Parsed) bool {
         out.env_names_count += 1;
     }
     return true;
+}
+
+/// `"127.0.0.1:8080"`, or an empty string for no listener, as `write_listen` writes it.
+fn parse_listen_field(value: []const u8, out: *Parsed) bool {
+    assert(value.len <= constants.record_bytes_max);
+    var text: [spec_mod.listen_text_bytes_max + 1]u8 = undefined;
+    const length = parse_string(value, &text) orelse return false;
+    out.listen = null;
+    if (length == 0) return true;
+    switch (spec_mod.parse_listen(text[0..length])) {
+        .ok => |found| {
+            var again: [spec_mod.listen_text_bytes_max]u8 = undefined;
+            // Only what render writes: the same text back.
+            if (!std.mem.eql(u8, found.text(&again), text[0..length])) return false;
+            out.listen = found;
+            return true;
+        },
+        .problem => return false,
+    }
 }
 
 /// `"none"`, `"result:<64 hex>"` or `"manifest:<64 hex>"`, as `write_binding` writes it.
@@ -1455,7 +1502,7 @@ test "a record is valid ZON in the shape the reader expects, and reads back" {
         try testing.expect(std.mem.endsWith(u8, text, "}\n"));
         var parsed: Parsed = undefined;
         try parse(text, &parsed);
-        try testing.expectEqual(constants.record_version, parsed.version);
+        try testing.expectEqual(constants.record_version_plain, parsed.version);
         try testing.expectEqualStrings("web-1", parsed.name_slice());
         try testing.expectEqualStrings("/srv/alpine", parsed.rootfs_slice());
         try testing.expectEqual(@as(u64, 1_760_000_000), parsed.started);
@@ -1532,7 +1579,7 @@ test "older, newer and damaged records: the reader accepts, skips or refuses exa
     try parse(twice, &parsed);
     try testing.expectEqual(@as(u8, 2), parsed.command_words);
     try testing.expectEqualStrings("c", parsed.command_word(1));
-    const newer = ".{\n    .version = 10,\n    .name = \"x\",\n    .started = 5,\n}\n";
+    const newer = ".{\n    .version = 11,\n    .name = \"x\",\n    .started = 5,\n}\n";
     try testing.expectError(error.Newer, parse(newer, &parsed));
     const bad = [_][]const u8{
         "",
@@ -1637,7 +1684,7 @@ test "pruning keeps the newest runs_max, deletes the oldest first, and counts wh
     }
     const prefix = "/home/alice/.local/state/zbx/runs/";
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(prefix ++ "legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(prefix ++ "damaged.zon", "not a record") == null);
     try testing.expect(sim.world.write_file(prefix ++ "future.zon", future) == null);
@@ -1717,7 +1764,7 @@ test "version 4 keeps the tree and the upper layer, and an older record has neit
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "    .tree = ")) continue;
         if (std.mem.startsWith(u8, line, "    .upper = ")) continue;
-        const now = std.fmt.comptimePrint("    .version = {d},", .{constants.record_version});
+        const now = std.fmt.comptimePrint("    .version = {d},", .{constants.record_version_plain});
         const fixed = if (std.mem.eql(u8, line, now)) "    .version = 3," else line;
         @memcpy(old[length..][0..fixed.len], fixed);
         old[length + fixed.len] = '\n';
@@ -1922,7 +1969,7 @@ test "version 6 keeps the state volumes; versions 4 and 5, as written, read with
     try testing.expect(std.mem.indexOf(u8, text, line) != null);
     var parsed: Parsed = undefined;
     try parse(text, &parsed);
-    try testing.expectEqual(constants.record_version, parsed.version);
+    try testing.expectEqual(constants.record_version_plain, parsed.version);
     try testing.expectEqual(@as(u8, 2), parsed.state_count);
     try testing.expectEqualStrings("pgdata", parsed.state_mount(0).name);
     try testing.expectEqualStrings("/etc/app", parsed.state_mount(1).target);

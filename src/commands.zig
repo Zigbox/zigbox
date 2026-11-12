@@ -11,6 +11,7 @@ const host_mod = @import("host.zig");
 const diagnose = @import("runtime/diagnose.zig");
 const lifecycle = @import("runtime/lifecycle.zig");
 const records = @import("runtime/records.zig");
+const spec_mod = @import("runtime/spec.zig");
 const run = @import("runtime/run.zig");
 const schemas = @import("schemas.zig");
 const Diag = @import("diag/diag.zig").Diag;
@@ -160,6 +161,10 @@ fn ps_row(entry: *const lifecycle.Entry, line: *[constants.output_bytes_max]u8) 
         if (words > 0) writer.writeByte(' ') catch unreachable; // Same bound as above.
         writer.writeAll(record.command_word(words)) catch unreachable; // Same.
     }
+    if (record.listen) |listen| {
+        var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
+        writer.print("  (listens on {s})", .{listen.text(&storage)}) catch unreachable; // Same.
+    }
     writer.writeByte('\n') catch unreachable; // Same.
     return writer.buffered();
 }
@@ -247,6 +252,10 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
     try optional_number(writer, record.limits.cpu_millis);
     try writer.writeAll("}");
     try network_json(writer, record);
+    if (record.listen) |listen| {
+        var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
+        try writer.print(",\"listen\":\"{s}\"", .{listen.text(&storage)});
+    }
     try writer.writeAll("}");
 }
 
@@ -371,13 +380,16 @@ fn report_stop(
     diag: *Diag,
 ) Error!void {
     assert(options.name.len > 0);
-    assert(ref.pid > 0);
+    // A container that failed to start has no pid (0), and it is then never signalled.
+    if (ref.pid == 0) assert(result == .already_stopped);
     var ended: lifecycle.WaitResult = .timeout;
+    var never_started = false;
     var reason_name: []const u8 = "none";
     var code: ?u8 = null;
     lifecycle.wait_adopted(&ref, 0, &ended) catch {};
     switch (ended) {
         .ended => |*record| {
+            never_started = record.exit == .start_failed;
             const found = lifecycle.exit_reason_of(record);
             reason_name = @tagName(record.reason);
             if (record.reason == .none) reason_name = "none";
@@ -399,7 +411,10 @@ fn report_stop(
         writer.writeAll("}\n") catch unreachable; // Same.
     } else {
         const how: []const u8 = switch (result) {
-            .already_stopped => "was not running",
+            .already_stopped => if (never_started)
+                "never started, so there is nothing to stop"
+            else
+                "was not running",
             .graceful => "stopped",
             .killed => "stopped (killed)",
         };

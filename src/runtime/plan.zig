@@ -29,7 +29,7 @@ pub fn is_sys(kind: Kind) bool {
 }
 
 /// The steps that give the container its generated /etc/hosts and /etc/resolv.conf. Each acts
-/// on one of the two files (`Step.index`, a `netfiles.File`).
+/// on one of the three files (`Step.index`, a `netfiles.File`).
 pub fn is_etc(kind: Kind) bool {
     assert(@backingInt(kind) <= @backingInt(Kind.exec));
     return switch (kind) {
@@ -79,7 +79,7 @@ pub fn is_mount(kind: Kind) bool {
 /// a note per step.
 pub fn group_of(step: *const Step) u8 {
     if (!is_etc(step.kind)) return 0;
-    assert(step.index < 2);
+    assert(step.index < 3);
     assert(step.tolerant);
     return step.index + 1;
 }
@@ -110,6 +110,9 @@ pub const Kind = enum {
     await_pasta,
     release_child,
     await_report,
+    /// In a plan with a listener (`--listen`): receives the listener the child made and sent
+    /// (`send_listener`). After `await_report`, so the child's own failure is read first.
+    receive_listener,
     reap,
     // The child.
     die_with_parent,
@@ -142,6 +145,12 @@ pub const Kind = enum {
     /// In a plan with a network namespace of its own: brings `lo` up. Before the capabilities
     /// are restricted, since changing an interface needs CAP_NET_ADMIN.
     bring_up_loopback,
+    /// In a plan with a listener, right after: makes the TCP listener on the loopback
+    /// (`Host.listen_loopback`), then sends it to the parent over the channel and closes the
+    /// child's copies. After this the workload could never hold it: the child never `exec`s
+    /// with it open, and it is close-on-exec besides.
+    make_listener,
+    send_listener,
     /// ... and there a sysfs of the container's own replaces the three /sys steps above but
     /// the first. A sysfs shows the devices of the network namespace it is mounted in.
     mount_sysfs,
@@ -220,7 +229,7 @@ pub fn side_of(kind: Kind) Side {
         .make_pipes, .spawn, .deny_setgroups, .write_gid_map, .write_uid_map => .parent,
         .run_newuidmap, .run_newgidmap, .spawn_keeper, .start_scope => .parent,
         .start_pasta, .await_pasta => .parent,
-        .release_child, .await_report, .reap => .parent,
+        .release_child, .await_report, .receive_listener, .reap => .parent,
         else => .child,
     };
     // The kinds are declared parent first, so the order of the enum says which side a kind is.
@@ -247,13 +256,16 @@ pub const links = [constants.container_links_count]Link{
     .{ .name = "ptmx", .target = "pts/ptmx" },
 };
 
-/// The child's steps: thirty-seven that happen once (four of them the hardening, three the /sys
-/// or the loopback and the sysfs, eleven the /etc files), and two per device and one per link. A
+/// The child's steps: forty-one that happen once (four of them the hardening, three the /sys
+/// or the loopback and the sysfs, fifteen the /etc files), and two per device and one per link. A
 /// read-only plan has `read_only_steps_count` more, one with a working directory, two with a
 /// user (the user and the death signal asked for again). A plan with a network namespace of its
 /// own has one /sys step fewer and the loopback.
-pub const child_steps_count: u32 = 37 + 2 * constants.container_devices_count +
+pub const child_steps_count: u32 = 41 + 2 * constants.container_devices_count +
     constants.container_links_count;
+
+/// The steps a listener adds: making it and sending it in the child, receiving it in the parent.
+pub const listener_steps_count: u32 = 3;
 
 /// The steps a scope adds to the parent's: the keeper and the scope itself.
 pub const scope_steps_count: u32 = 2;
@@ -263,6 +275,10 @@ pub const pasta_steps_count: u32 = 2;
 
 /// The steps a read-only rootfs adds: `/tmp` and `/run` on tmpfs, and the remount.
 pub const read_only_steps_count: u32 = 5;
+
+/// The one step more a read-only plan has: the hostname's bind is not under the rootfs's
+/// non-recursive remount, so it is made read-only of its own (#117).
+pub const read_only_hostname_steps_count: u32 = 1;
 
 /// The steps each state volume adds, and the one more of a `:ro` volume (`is_state`).
 pub const state_steps_count: u32 = 6;
@@ -369,6 +385,9 @@ pub const Input = struct {
     hostname: ?[]const u8 = null,
     /// The file mode creation mask the command starts with; null leaves the caller's.
     umask: ?u16 = null,
+    /// The port of the TCP listener on the container's loopback that is handed to the caller
+    /// (`--listen`, M8b); only with `network` `none`.
+    listen: ?u16 = null,
 
     fn hostname_text(input: *const Input) []const u8 {
         const result = input.hostname orelse input.name;
@@ -466,15 +485,18 @@ pub const Plan = struct {
     scope_description: Text,
     scope_version: u32,
     scope_limits: spec.Limits,
-    /// What the container can reach, and the text of the two generated /etc files.
+    /// What the container can reach, and the text of the three generated /etc files.
     network: spec.Network,
-    etc_texts: [2]Text,
+    etc_texts: [3]Text,
     /// A plan with `--net user` starts pasta: its path, its log (empty: none) and the forwards.
     has_pasta: bool,
     pasta_path: Text,
     pasta_log: Text,
     publish: [constants.publish_count_max]spec.Publish,
     publish_count: u32,
+    /// A plan with a listener: its port (zero: none).
+    has_listener: bool,
+    listen_port: u16,
     /// The state volumes: how many, how many of them read-only, and each one's name and target.
     state_count: u32,
     state_read_only_count: u32,
@@ -510,6 +532,10 @@ pub const Plan = struct {
         plan.read_only = input.read_only;
         plan.overlay = input.overlay != null;
         plan.network = input.network;
+        plan.has_listener = input.listen != null;
+        plan.listen_port = input.listen orelse 0;
+        if (plan.has_listener) assert(input.network == .none);
+        if (plan.has_listener) assert(plan.listen_port > 0);
         plan.has_workdir = input.workdir.len > 0;
         plan.has_umask = input.umask != null;
         plan.umask = input.umask orelse 0;
@@ -535,6 +561,7 @@ pub const Plan = struct {
         assert(plan.count == plan.first_child());
         plan.push_child_steps(input);
         plan.push(.await_report, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.receive_listener, empty_text, empty_text, 0);
         plan.push(.reap, empty_text, empty_text, 0);
         assert(plan.count == plan.steps_expected());
         plan.check();
@@ -547,17 +574,19 @@ pub const Plan = struct {
         assert(plan.steps[0].kind == .make_pipes);
         assert(plan.steps[1].kind == .spawn);
         assert(plan.steps[plan.count - 1].kind == .reap);
-        assert(plan.steps[plan.count - 2].kind == .await_report);
+        const tail = plan.tail_count();
+        assert(plan.steps[plan.count - tail].kind == .await_report);
+        assert((plan.steps[plan.count - 2].kind == .receive_listener) == plan.has_listener);
         // The child's steps are one contiguous run, between `release_child` and `await_report`.
         const child_start = plan.first_child();
         assert(plan.steps[child_start - 1].kind == .release_child);
         assert((plan.steps[child_start - 2].kind == .start_scope) == plan.scoped);
         assert((plan.steps[child_start - 3].kind == .spawn_keeper) == plan.scoped);
         for (plan.steps[0..child_start]) |step| assert(side_of(step.kind) == .parent);
-        for (plan.steps[child_start .. plan.count - 2]) |step| {
+        for (plan.steps[child_start .. plan.count - tail]) |step| {
             assert(side_of(step.kind) == .child);
         }
-        assert(plan.steps[plan.count - 3].kind == .exec);
+        assert(plan.steps[plan.count - tail - 1].kind == .exec);
         // The exec image points into the plan itself: a copy of the plan would break it.
         const first_argument = plan.argv[0].?;
         assert(@intFromPtr(first_argument) >= @intFromPtr(&plan.strings[0]));
@@ -572,17 +601,26 @@ pub const Plan = struct {
         if (!plan.has_pasta) assert(plan.publish_count == 0);
     }
 
+    /// The parent's steps after the child's: `await_report` and `reap`, and the listener's.
+    pub fn tail_count(plan: *const Plan) u32 {
+        return 2 + @as(u32, @intFromBool(plan.has_listener));
+    }
+
     pub fn steps_expected(plan: *const Plan) u32 {
         assert(plan.count <= constants.plan_steps_max);
         const base = if (plan.full) steps_count_full else steps_count_single;
-        const read_only: u32 = if (plan.read_only) read_only_steps_count else 0;
+        const read_only: u32 = if (plan.read_only)
+            read_only_steps_count + read_only_hostname_steps_count
+        else
+            0;
         const extras: u32 = @as(u32, @intFromBool(plan.has_workdir)) +
             2 * @as(u32, @intFromBool(plan.has_user)) + @as(u32, @intFromBool(plan.has_umask));
         const pasta = pasta_steps_count * @as(u32, @intFromBool(plan.has_pasta));
         const state = state_steps_count * plan.state_count +
             state_read_only_steps_count * plan.state_read_only_count;
+        const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
         return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
-            state + plan.mount_steps;
+            state + plan.mount_steps + listener;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -690,8 +728,10 @@ pub const Plan = struct {
         plan.etc_texts[0] = plan.add_text(&.{netfiles.hosts(&buffer, input.hostname_text())});
         const resolv = netfiles.resolv_conf(input.network, input.host_resolv);
         plan.etc_texts[1] = plan.add_text(&.{resolv});
+        plan.etc_texts[2] = plan.add_text(&.{netfiles.hostname(&buffer, input.hostname_text())});
         assert(plan.etc_texts[0].len > 0);
         assert(plan.etc_texts[1].len > 0);
+        assert(plan.etc_texts[2].len > 0);
     }
 
     /// The unit name and description of a scoped plan: "zbx-<name>.scope" and "zbx: <name>".
@@ -841,6 +881,8 @@ pub const Plan = struct {
         if (plan.has_umask) plan.push(.set_umask, empty_text, empty_text, 0);
         plan.push(.make_mounts_private, plan.add_text(&.{"/"}), empty_text, 0);
         if (plan.isolated()) plan.push(.bring_up_loopback, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.make_listener, empty_text, empty_text, 0);
+        if (plan.has_listener) plan.push(.send_listener, empty_text, empty_text, 0);
         if (overlay) |layers| {
             plan.push_etc_mount_points(layers.net);
             plan.push(.mount_overlay, rootfs, plan.overlay_options(layers), 0);
@@ -877,7 +919,8 @@ pub const Plan = struct {
         plan.push(.install_seccomp, empty_text, empty_text, 0);
         plan.push(.exec, empty_text, empty_text, 0);
         assert(plan.steps[plan.count - 1].kind == .exec);
-        assert(plan.count == plan.steps_expected() - 2); // The parent's two last steps remain.
+        // The parent's tail remains.
+        assert(plan.count == plan.steps_expected() - plan.tail_count());
     }
 
     /// Each volume's `data` made, a hidden directory in the container's /dev, the volume bound
@@ -1047,11 +1090,11 @@ pub const Plan = struct {
         plan.push(.mount_pts, pts, empty_text, 0);
     }
 
-    /// The mount points of the two generated files below `base` (the rootfs, or the overlay's
-    /// net layer): `base/etc`, then the two files, each left alone if it is there already.
+    /// The mount points of the three generated files below `base` (the rootfs, or the overlay's
+    /// net layer): `base/etc`, then the three files, each left alone if it is there already.
     fn push_etc_mount_points(plan: *Plan, base: []const u8) void {
         const start = plan.count;
-        defer assert(plan.count == start + 3);
+        defer assert(plan.count == start + 4);
         assert(base.len > 0);
         const directory = plan.add_text(&.{ base, "/etc" });
         plan.push(.make_etc_dir, directory, empty_text, 0);
@@ -1061,20 +1104,29 @@ pub const Plan = struct {
         }
     }
 
-    /// Writes each generated file to the container's /dev, binds it read-only over its mount
-    /// point in the rootfs and removes the staged name. The /dev is a fresh tmpfs by now.
+    /// Writes each generated file to the container's /dev, binds it over its mount point in
+    /// the rootfs (read-only, but for the hostname, unless the plan is read-only) and removes the
+    /// staged name. The /dev is a
+    /// fresh tmpfs by now.
     fn push_etc_files(plan: *Plan, rootfs: []const u8) void {
         const start = plan.count;
-        defer assert(plan.count == start + 8);
+        defer assert(plan.count == start + 11 + read_only_hostname_steps_count *
+            @intFromBool(plan.read_only));
         assert(rootfs.len > 0);
         assert(plan.etc_texts[0].offset != plan.etc_texts[1].offset);
+        assert(plan.etc_texts[1].offset != plan.etc_texts[2].offset);
         for (std.enums.values(netfiles.File)) |file| {
             const index: u8 = @backingInt(file);
             const staged = plan.add_text(&.{ rootfs, "/dev/", file.stage_name() });
             const inside = plan.add_text(&.{ rootfs, "/etc/", file.etc_name() });
             plan.push(.stage_etc_file, staged, plan.etc_texts[index], index);
             plan.push(.bind_etc_file, inside, staged, index);
-            plan.push(.remount_etc_file, inside, empty_text, index);
+            // The hostname stays writable, a program may rewrite it and what it writes is the
+            // container's own copy, but `--read-only` covers it as Docker's does: the rootfs
+            // remount is not recursive and does not reach this bind.
+            if (file != .hostname or plan.read_only) {
+                plan.push(.remount_etc_file, inside, empty_text, index);
+            }
             plan.push(.unstage_etc_file, staged, empty_text, index);
         }
     }
@@ -1208,7 +1260,7 @@ pub const Plan = struct {
 // ---- Naming a step ----
 
 fn etc_name(index: u8) []const u8 {
-    assert(index < 2);
+    assert(index < 3);
     const file: netfiles.File = @fromBackingInt(@intCast(index));
     return file.etc_name();
 }
@@ -1231,6 +1283,7 @@ fn parent_phrase(kind: Kind) []const u8 {
         .start_pasta => "starting pasta for the container's network",
         .await_pasta => "waiting for pasta to configure the container's network",
         .release_child => "letting the container continue",
+        .receive_listener => "receiving the listener the container made",
         .await_report => "waiting for the container to start its command",
         .reap => "waiting for the container to end",
         else => unreachable, // The child's steps; asserted above.
@@ -1291,6 +1344,7 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .write_uid_map, .run_newuidmap, .run_newgidmap => parent_phrase(step.kind),
         .spawn_keeper, .start_scope, .start_pasta => parent_phrase(step.kind),
         .await_pasta, .release_child, .await_report, .reap => parent_phrase(step.kind),
+        .receive_listener => parent_phrase(step.kind),
         .die_with_parent => "asking the kernel to end the container if zbx dies",
         .await_release => "waiting for zbx to write the container's id maps",
         .set_hostname => "setting the container's hostname",
@@ -1309,6 +1363,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .make_sys_dir => "creating /sys in the rootfs",
         .bind_sys => "binding the host's /sys",
         .bring_up_loopback => "bringing up the loopback interface",
+        .make_listener => "making the listener on the container's loopback",
+        .send_listener => "handing the listener to zbx",
         .mount_sysfs => "mounting a sysfs of the container's own",
         .make_etc_dir => "creating the mount point directory for the generated /etc files",
         .create_etc_file => "creating the mount point /etc/",
@@ -1347,9 +1403,10 @@ comptime {
     assert(steps_count_single <= constants.plan_steps_max);
     // The longest plan: the single map, a scope, a read-only root, a working directory, a user
     // (and the death signal asked for again after it) and pasta.
-    const longest = steps_count_single + scope_steps_count + read_only_steps_count + 3 +
-        pasta_steps_count + (state_steps_count + state_read_only_steps_count) *
-        constants.state_volumes_max + mount_steps_staged * constants.mounts_max;
+    const longest = steps_count_single + scope_steps_count + read_only_steps_count +
+        read_only_hostname_steps_count + 3 + pasta_steps_count +
+        (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max +
+        mount_steps_staged * constants.mounts_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
@@ -1392,7 +1449,7 @@ test "with the helpers the parent has one step per map, and the words are the ra
     input.mapping = .{ .full = test_helpers };
     plan.build(&input);
     try testing.expectEqual(steps_count_full, plan.count);
-    try testing.expectEqual(@as(u32, 61), plan.count);
+    try testing.expectEqual(@as(u32, 65), plan.count);
     try testing.expectEqual(Kind.run_newuidmap, plan.steps[2].kind);
     try testing.expectEqual(Kind.run_newgidmap, plan.steps[3].kind);
     try testing.expectEqual(Kind.release_child, plan.steps[4].kind);
@@ -1416,7 +1473,7 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
     const input = test_input(&.{ "/bin/sh", "-c", "true" });
     plan.build(&input);
     try testing.expectEqual(steps_count_single, plan.count);
-    try testing.expectEqual(@as(u32, 62), plan.count);
+    try testing.expectEqual(@as(u32, 66), plan.count);
     var tolerant: u32 = 0;
     var devices_seen: u32 = 0;
     var links_seen: u32 = 0;
@@ -1429,9 +1486,9 @@ test "the plan has the steps in order, parent and child interleaved, and all wit
         if (step.kind == .bind_device) devices_seen += 1;
         if (step.kind == .link_dev) links_seen += 1;
     }
-    // The devpts mount, the two /sys steps of a container with a sysfs of its own, and eleven
-    // for the two generated files.
-    try testing.expectEqual(@as(u32, 14), tolerant);
+    // The devpts mount, the two /sys steps of a container with a sysfs of its own, and fifteen
+    // for the three generated files.
+    try testing.expectEqual(@as(u32, 18), tolerant);
     try testing.expectEqual(constants.container_devices_count, devices_seen);
     try testing.expectEqual(constants.container_links_count, links_seen);
     // The mounts come in the order the kernel needs: private, bind, proc, dev, ... pivot, exec.
@@ -1828,6 +1885,26 @@ test "a container with a network of its own gets a sysfs of its own, and lo up f
     try testing.expectEqual(isolated_count, plan.count);
 }
 
+test "a read-only plan binds the hostname read-only too, and has one step more (#117)" {
+    // Goal: `--read-only` covers /etc/hostname, as it does the other generated files; the rootfs
+    // remount is not recursive and does not reach the bind. Method: build a read-only and a
+    // writable plan of the same run; only the first remounts the hostname, and the count says so.
+    var plan: Plan = undefined;
+    var input = test_input(&.{"sh"});
+    plan.build(&input);
+    const writable_count = plan.count;
+    input.read_only = true;
+    plan.build(&input);
+    const hostname = @backingInt(netfiles.File.hostname);
+    var remounts: u32 = 0;
+    for (plan.steps[0..plan.count]) |step| {
+        if (step.kind == .remount_etc_file and step.index == hostname) remounts += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), remounts);
+    try testing.expectEqual(plan.steps_expected(), plan.count);
+    try testing.expect(plan.count > writable_count);
+}
+
 test "the generated /etc files are bound read-only over the image's, and the staged name goes" {
     // Goal: M5's hosts and resolv.conf. Method: for each file the mount point, the stage, the
     // bind, the read-only remount and the removal come in that order, the text is the file's,
@@ -1840,11 +1917,14 @@ test "the generated /etc files are bound read-only over the image's, and the sta
     for (plan.steps[0..plan.count], 0..) |step, at| {
         if (step.kind != .stage_etc_file) continue;
         stages += 1;
-        const name = if (step.index == 0) "hosts" else "resolv.conf";
+        const name = etc_name(step.index);
         try testing.expectEqual(Kind.bind_etc_file, plan.steps[at + 1].kind);
-        try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
-        try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + 3].kind);
-        for (plan.steps[at .. at + 4]) |part| {
+        // The hostname is not remounted read-only: a program may write it (#113).
+        const writable = step.index == @backingInt(netfiles.File.hostname) and !plan.read_only;
+        const parts: usize = if (writable) 3 else 4;
+        if (!writable) try testing.expectEqual(Kind.remount_etc_file, plan.steps[at + 2].kind);
+        try testing.expectEqual(Kind.unstage_etc_file, plan.steps[at + parts - 1].kind);
+        for (plan.steps[at .. at + parts]) |part| {
             try testing.expect(part.tolerant);
             try testing.expectEqual(step.index + 1, group_of(&part));
         }
@@ -1857,7 +1937,9 @@ test "the generated /etc files are bound read-only over the image's, and the sta
         try testing.expect(at > index_of(&plan, .mount_dev).?);
         try testing.expect(at < index_of(&plan, .pivot_root).?);
     }
-    try testing.expectEqual(@as(u32, 2), stages);
+    try testing.expectEqual(@as(u32, 3), stages);
+    // #113: /etc/hostname holds the container's name, as its sethostname does.
+    try testing.expectEqualStrings("web-1\n", plan.text(plan.etc_texts[2]));
     const hosts_text = plan.text(plan.etc_texts[0]);
     try testing.expect(std.mem.indexOf(u8, hosts_text, "127.0.0.1\tlocalhost web-1\n") != null);
     try testing.expect(std.mem.indexOf(u8, plan.text(plan.etc_texts[1]), "nameserver") == null);
@@ -1882,7 +1964,7 @@ test "a tree's mount points are in the net layer, a directory's in the rootfs" {
         const target = plan.text(step.target);
         try testing.expect(std.mem.startsWith(u8, target, state_containers ++ "/net/etc"));
     }
-    try testing.expectEqual(@as(u32, 3), points);
+    try testing.expectEqual(@as(u32, 4), points);
     plan.build(&test_input(&.{"sh"}));
     const bind_at = index_of(&plan, .bind_rootfs).?;
     try testing.expectEqual(Kind.make_etc_dir, plan.steps[bind_at + 1].kind);

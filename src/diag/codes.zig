@@ -184,6 +184,10 @@ pub const Code = enum(u8) {
     E0603,
     E0604,
     E0605,
+    E0606,
+    E0607,
+    E0608,
+    E0609,
     E0701,
     E0702,
     E0703,
@@ -2892,6 +2896,76 @@ pub const registry = [_]Entry{
         \\Publish a host port at or above that bound (--publish 8080:80), or lower
         \\the bound for every user, as root:
         \\    sysctl net.ipv4.ip_unprivileged_port_start=80
+        ,
+    },
+    .{
+        .code = .E0606,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--listen is refused with these options",
+        .explanation =
+        \\--listen ADDR:PORT makes a TCP listener on the container's own loopback
+        \\and hands it to the program that started zbx, which accepts the
+        \\connections: the container never gets a way out. That only makes sense
+        \\when the container has no network of its own (--net none, the default),
+        \\and it needs --listen-send FD, a Unix socket this process was started
+        \\with, to carry the listener on. Nothing was started.
+        \\
+        \\Drop --net (or give --net none), and add --listen-send with the number of
+        \\the Unix socket the parent passed down. The number is a descriptor
+        \\(0 to 2147483647) that is already open in zbx and is a Unix stream
+        \\socket; zbx checks that before it starts anything.
+        \\
+        \\On macOS --listen is not available at all: the container runs in a
+        \\virtual machine, and a socket cannot be handed across to the process
+        \\that started zbx.
+        ,
+    },
+    .{
+        .code = .E0607,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--listen takes 127.0.0.1 and a port from 1 to 65535",
+        .explanation =
+        \\The listener lives on the container's loopback, so its address is always
+        \\127.0.0.1 (IPv4); any other address, a name or an IPv6 address is
+        \\refused, and so is a port that is not a number from 1 to 65535. Nothing
+        \\was started.
+        \\
+        \\Write it as --listen 127.0.0.1:8080.
+        ,
+    },
+    .{
+        .code = .E0608,
+        .severity = .@"error",
+        .blame = .environment,
+        .summary = "the listener could not be made inside the container",
+        .explanation =
+        \\Inside the container's network namespace zbx makes a TCP socket, binds
+        \\it to 127.0.0.1 and the port from --listen, and listens. One of those
+        \\calls failed or the listener could not be taken from the container; the
+        \\context names the step and the cause names the call and the error. The
+        \\container was not started.
+        \\
+        \\A kernel or security policy that denies sockets, or a descriptor limit,
+        \\is the usual reason; run zbx doctor to see what this host allows.
+        ,
+    },
+    .{
+        .code = .E0609,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "the listener could not be handed on to --listen-send",
+        .explanation =
+        \\zbx hands the listener to the descriptor named by --listen-send with
+        \\SCM_RIGHTS, so that program can accept connections. The send failed: the
+        \\descriptor no longer takes it, usually because the other end was closed
+        \\after zbx started; the container was stopped, so no one is left holding a
+        \\listener nobody serves. A descriptor that is not an open Unix stream
+        \\socket is refused earlier, with E0606, before anything starts.
+        \\
+        \\Pass one end of a socketpair(AF_UNIX, SOCK_STREAM), keep the other end,
+        \\and read the listener from it with recvmsg.
         ,
     },
     .{

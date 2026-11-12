@@ -682,7 +682,7 @@ test "every run leaves a record: running while it runs is not seen, the end is" 
     try testing.expectEqual(@as(u8, 42), run(&sim, &args));
     var parsed: records.Parsed = undefined;
     try records.parse(record_text(&sim, "rec-1").?, &parsed);
-    try testing.expectEqual(constants.record_version, parsed.version);
+    try testing.expectEqual(constants.record_version_plain, parsed.version);
     try testing.expectEqual(@as(u64, 1_760_000_100), parsed.started);
     try testing.expectEqual(@as(?u64, 1_760_000_100), parsed.ended);
     try testing.expectEqual(records.Exit{ .exited = 42 }, parsed.exit);
@@ -749,7 +749,7 @@ test "upgrade: a missing, empty, older, newer or damaged records directory never
     sim_run.init(&sim, 18);
     sim.world.add_node(sim_run.runs_path, .dir);
     const legacy = ".{\n    .name = \"legacy\",\n    .started = 500,\n}\n";
-    const future = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 600,\n}\n";
+    const future = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 600,\n}\n";
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/legacy.zon", legacy) == null);
     try testing.expect(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future) == null);
     try testing.expect(
@@ -965,6 +965,10 @@ test "a generated file that cannot be made is a note, and the run goes on" {
     const table = &sim.world.tables[sim.world.processes[1].table];
     try testing.expect(!table.has(.bind_file, rootfs ++ "/etc/hosts"));
     try testing.expect(table.has(.bind_file, rootfs ++ "/etc/resolv.conf"));
+    // #113: it is bound too, and writable, which /bin/sh scripts in the demos rely on.
+    try testing.expect(table.has(.bind_file, rootfs ++ "/etc/hostname"));
+    const hostname_mount = table.find(rootfs ++ "/etc/hostname").?;
+    try testing.expect(!table.mounts[hostname_mount].read_only);
 }
 
 const value_marker = "value-marker-ZETA-42";

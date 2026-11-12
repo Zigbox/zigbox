@@ -798,7 +798,7 @@ fn skipped_notes(scenario: *const Scenario) u32 {
         .make_sys_dir => if (plan.isolated()) @as(u32, 2) else 3,
         .bind_sys => 2,
         .remount_sys, .mount_sysfs => 1,
-        .make_etc_dir => 2, // The second file's mount point has no directory to be made in.
+        .make_etc_dir => 3, // The three files' mount points have no directory to be made in.
         .create_etc_file, .stage_etc_file, .bind_etc_file, .remount_etc_file => 1,
         // Removing a staged copy that is not there is no failure: only the others count.
         .unstage_etc_file => @intFromBool(!removal_finds_nothing(scenario)),
@@ -845,7 +845,7 @@ fn preload(sim: *HostSim, scenario: *const Scenario) void {
     sim.world.add_node(sim_run.runs_path, .dir);
     const damaged = sim.world.write_file(sim_run.runs_path ++ "/damaged.zon", "garbage");
     assert(damaged == null);
-    const future_text = ".{\n    .version = 10,\n    .name = \"future\",\n    .started = 5,\n}\n";
+    const future_text = ".{\n    .version = 11,\n    .name = \"future\",\n    .started = 5,\n}\n";
     assert(sim.world.write_file(sim_run.runs_path ++ "/future.zon", future_text) == null);
     if (scenario.preloaded == .few_unreadable) return;
     for (0..constants.runs_max - 1) |number| {
@@ -915,7 +915,11 @@ fn prepare_image(sim: *HostSim, scenario: *const Scenario) void {
             unreachable, .dir); // Short.
     }
     // The overlay shows the mount points of the generated files, which are in the net layer.
-    for ([_][]const u8{ "/bin/sh", "/bin/sleep", "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
+    const files = [_][]const u8{
+        "/bin/sh",          "/bin/sleep",    "/etc/hosts",
+        "/etc/resolv.conf", "/etc/hostname",
+    };
+    for (files) |suffix| {
         sim.world.add_node(std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch
             unreachable, .file); // Short.
     }
@@ -1462,7 +1466,7 @@ fn check_record_v2(
     verdict: *const Verdict,
     parsed: *const records.Parsed,
 ) void {
-    assert(parsed.version == constants.record_version);
+    assert(parsed.version == constants.record_version_plain);
     const reason: records.EndReason = switch (verdict.*) {
         .refused => .none,
         .started => |status| if (scenario.counts_as_oom())

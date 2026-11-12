@@ -300,6 +300,7 @@ fn orphan(entry: *Entry, stem: []const u8, scope: []const u8) void {
     record.labels_count = 0;
     record.network = null;
     record.publish_count = 0;
+    record.listen = null;
     record.env_names_len = 0;
     record.env_names_count = 0;
     record.state_len = 0;
@@ -323,7 +324,8 @@ pub const Ref = struct {
     reaped: ?*const std.atomic.Value(bool),
 
     fn is_gone(ref: *const Ref) bool {
-        assert(ref.pid > 0);
+        // A container that failed to start has no pid (0): it never ran, so it is gone.
+        if (ref.pid == 0) return true;
         assert(ref.scope.slice().len <= constants.scope_name_bytes_max);
         if (ref.reaped) |flag| return flag.load(.acquire);
         return !alive(ref.host, ref.pid, ref.scope.slice());

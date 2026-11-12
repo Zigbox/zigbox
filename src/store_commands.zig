@@ -350,7 +350,9 @@ fn do_ls(job: *Job, diag: *Diag) Error!void {
         "DIGEST", "KIND", "FILES", "SIZE", "TIME", "SOURCE",
     }) catch unreachable; // A short fixed line.
     try put(job, head, diag);
-    for (found) |*root| try put(job, ls_row(root, &buffer), diag);
+    for (found) |*root| {
+        try put(job, ls_row(root, unique_bytes(job, &store, root), &buffer), diag);
+    }
     if (exists) try ls_images(job, &store, false, diag);
 }
 
@@ -476,7 +478,23 @@ fn ls_images(job: *Job, store: *const Store, json: bool, diag: *Diag) Error!void
     if (visitor.failed) return error.Failed;
 }
 
-fn ls_row(root: *const roots.Root, buffer: *[constants.output_bytes_max]u8) []const u8 {
+/// The bytes of the distinct objects of a root's tree, each file counted once however many names
+/// it has (`size_unique`); null where the tree cannot be read, which `ls` shows rather than
+/// refuses on.
+fn unique_bytes(job: *Job, store: *const Store, root: *const roots.Root) ?u64 {
+    assert(job.workspace.tree_buffer.len >= constants.store_tree_bytes_max);
+    var memory = usage_memory(job);
+    var failure: usage.Failure = undefined;
+    const stored = usage.tree_stored(store, &memory, root.digest, &failure) catch return null;
+    // `root.bytes` is read from disk and may be 0 or stale; it is not compared (#117).
+    return stored;
+}
+
+fn ls_row(
+    root: *const roots.Root,
+    unique: ?u64,
+    buffer: *[constants.output_bytes_max]u8,
+) []const u8 {
     assert(root.source_len <= constants.store_source_bytes_max);
     assert(buffer.len == constants.output_bytes_max);
     var size: [32]u8 = undefined;
@@ -490,7 +508,7 @@ fn ls_row(root: *const roots.Root, buffer: *[constants.output_bytes_max]u8) []co
         root.digest.text(),
         root.kind.word(),
         root.files,
-        size_words(&size, root.bytes),
+        if (unique) |bytes| size_words(&size, bytes) else "?",
         commands.clock_text(root.time, &when),
         source,
     }) catch unreachable; // Same bound.
@@ -512,9 +530,15 @@ fn ls_json(
         // Cannot fail: one root's object is under 5 KiB (the source escaped is the bulk).
         if (index > 0) writer.writeByte(',') catch unreachable; // Same bound.
         writer.print("{{\"digest\":\"{s}\",\"kind\":\"{s}\",\"time\":{d},\"files\":{d}," ++
-            "\"bytes\":{d},\"source\":", .{
+            "\"bytes\":{d},\"size_unique\":", .{
             root.digest.text(), root.kind.word(), root.time, root.files, root.bytes,
         }) catch unreachable; // Same bound.
+        if (unique_bytes(job, store, root)) |bytes| {
+            writer.print("{d}", .{bytes}) catch unreachable; // Same bound.
+        } else {
+            writer.writeAll("null") catch unreachable; // Same bound.
+        }
+        writer.writeAll(",\"source\":") catch unreachable; // Same bound.
         json_string(&writer, root.source_text()) catch unreachable; // Same bound.
         if (root.parent) |parent| {
             writer.print(",\"parent\":\"{s}\"}}", .{parent.text()}) catch unreachable; // Same.
