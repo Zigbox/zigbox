@@ -4,8 +4,9 @@
 //!
 //! The language is the part of Docker's (moby's `patternmatcher`) that zbx and Docker agree on:
 //! `*` is any run of bytes but `/`, `?` is one byte but `/`, `[a-z]` is a class that never takes
-//! `/`, `\x` is the byte `x` (for a `x` that is not a letter or digit), `**/` is any number of leading directories (including none), and
-//! a `**` that ends the pattern is any run of bytes, `/` too. A path is relative, written with
+//! `/`, `\x` is the byte `x` (for a `x` that is not a letter or digit), `**/` is any number of
+//! leading directories (including none), and a `**` that ends the pattern is any run of bytes,
+//! `/` too. A path is relative, written with
 //! `/`, with no `.` or `..` part and no trailing `/`.
 //!
 //! Some forms mean something else in Docker than they would here, so they are refused
