@@ -256,7 +256,30 @@ fn entry_json(writer: *std.Io.Writer, entry: *const lifecycle.Entry) std.Io.Writ
         var storage: [spec_mod.listen_text_bytes_max]u8 = undefined;
         try writer.print(",\"listen\":\"{s}\"", .{listen.text(&storage)});
     }
+    try devices_json(writer, record);
     try writer.writeAll("}");
+}
+
+/// `"devices":[{"asked":"/dev/dri/renderD128","path":"/dev/dri/renderD128"}]` for a run with
+/// `--device`s; nothing for one without. `asked` is what was typed and `path` where it is in the
+/// container; they are the same until a later slice resolves a name to a node.
+fn devices_json(writer: *std.Io.Writer, record: *const records.Parsed) std.Io.Writer.Error!void {
+    assert(record.devices_len <= record.devices.len);
+    assert(record.devices_len <= constants.record_bytes_max);
+    if (record.devices_len == 0) return;
+    try writer.writeAll(",\"devices\":[");
+    var parts = std.mem.splitScalar(u8, record.devices_text(), ' ');
+    var first = true;
+    while (parts.next()) |path| {
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writer.writeAll("{\"asked\":");
+        try json_string(writer, path);
+        try writer.writeAll(",\"path\":");
+        try json_string(writer, path);
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("]");
 }
 
 /// The members M6 added to a container: `network` (null for a record of a zbx that did not keep

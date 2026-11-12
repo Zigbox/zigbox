@@ -267,6 +267,9 @@ fn step_context(diag: *Diag, plan: *const Plan, index: u8) void {
     assert(diag.code != null);
     const step = &plan.steps[index];
     diag.context("step", "{s} ({d} of {d})", .{ @tagName(step.kind), index + 1, plan.count });
+    if (step.kind == .create_user_device or step.kind == .bind_user_device) {
+        diag.context("device", "{s}", .{plan.device_of(step)});
+    }
 }
 
 /// ZBX-E0425: the kernel refused the container's overlay mount.
@@ -504,13 +507,14 @@ fn setup_reason(kind: plan_mod.Kind, err: host_mod.Error) ?[]const u8 {
         .make_shm_dir,
         .make_pts_dir,
         .create_device_file,
+        .create_user_device,
         => switch (err) {
             error.NotFound => "a directory of the rootfs is missing, so the mount point cannot " ++
                 "be made",
             error.AccessDenied => "the rootfs is not writable by this user",
             else => null,
         },
-        .bind_device => if (err == error.NotFound)
+        .bind_device, .bind_user_device => if (err == error.NotFound)
             "the host has no such device to bind into the container"
         else
             null,

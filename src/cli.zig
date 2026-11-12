@@ -45,6 +45,8 @@ const trust_statement = @import("trust/statement.zig");
 const volume = @import("state/volume.zig");
 const mounts = @import("runtime/mounts.zig");
 const mounts_diagnose = @import("runtime/mounts_diagnose.zig");
+const devices = @import("runtime/devices.zig");
+const devices_diagnose = @import("runtime/devices_diagnose.zig");
 const state_diagnose = @import("state/diagnose.zig");
 const digest_prefix = @import("store/digest.zig");
 const inspect_commands = @import("inspect_commands.zig");
@@ -131,6 +133,8 @@ const help_text =
     \\                  size; k, m or g). Its pages count against --memory
     \\  --bind <host>:<path>   the host's directory or file at <path>, always read-only; a
     \\                  <host> that does not exist is an error, never made (repeatable)
+    \\  --device /dev/<path>   bind a host device node into /dev, at the same path (repeatable,
+    \\                  up to 16). Your groups carry over, so a node your group can open works
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with every symbolic link followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
@@ -410,6 +414,9 @@ pub const RunArgs = struct {
     /// The `--tmpfs`, `--bind` and `--secret` values, parsed as each was read (`take_mount`).
     mounts: [constants.mounts_max]mounts.Mount = undefined,
     mounts_count: u32 = 0,
+    /// The `--device` values, checked as each was read (`take_device`; E0225).
+    devices: [constants.run_devices_max]devices.Device = undefined,
+    devices_count: u32 = 0,
     /// `--user` as typed, `USER[:GROUP]`; checked as it was read (`E0015`).
     user: ?[]const u8 = null,
     /// `exec`: `--workdir` as typed (checked when the exec starts, E0005).
@@ -418,6 +425,11 @@ pub const RunArgs = struct {
     follow: bool = false,
     tail: ?[]const u8 = null,
     stream: ?[]const u8 = null,
+
+    pub fn devices_slice(run_args: *const RunArgs) []const devices.Device {
+        assert(run_args.devices_count <= constants.run_devices_max);
+        return run_args.devices[0..run_args.devices_count];
+    }
 
     pub fn mounts_slice(run_args: *const RunArgs) []const mounts.Mount {
         assert(run_args.mounts_count <= constants.mounts_max);
@@ -458,13 +470,14 @@ const RunOption = enum {
     bind,
     secret,
     mount,
+    device,
     user,
     tail,
     stream,
     workdir,
 
     fn flag(option: RunOption) []const u8 {
-        assert(@backingInt(option) <= 19);
+        assert(@backingInt(option) <= 20);
         assert(@tagName(option).len > 0);
         return switch (option) {
             .rootfs => "--rootfs",
@@ -483,6 +496,7 @@ const RunOption = enum {
             .bind => "--bind",
             .secret => "--secret",
             .mount => "--mount",
+            .device => "--device",
             .user => "--user",
             .tail => "--tail",
             .stream => "--stream",
@@ -677,7 +691,7 @@ const Token = union(enum) {
 /// `--rootfs`, `--rootfs=x` and the other value options of `run`, or null.
 fn run_option_of(argument: []const u8) ?Token {
     assert(argument.len <= constants.arg_bytes_max);
-    assert(std.enums.values(RunOption).len == 20);
+    assert(std.enums.values(RunOption).len == 21);
     inline for (comptime std.enums.values(RunOption)) |option| {
         const flag = comptime option.flag();
         if (std.mem.eql(u8, argument, flag)) return .{ .run_option_next = option };
@@ -1634,6 +1648,7 @@ fn take_run_option(
     if (option == .bind) return take_mount(diag, run_args, .bind, value);
     if (option == .secret) return take_mount(diag, run_args, .secret, value);
     if (option == .mount) return take_mount(diag, run_args, .mount, value);
+    if (option == .device) return take_device(diag, run_args, value);
     const slot = switch (option) {
         .rootfs => &run_args.rootfs,
         .name => &run_args.name,
@@ -1648,6 +1663,7 @@ fn take_run_option(
         .listen_send => &run_args.listen_send,
         .state => unreachable, // Repeatable: `take_state` above.
         .tmpfs, .bind, .secret, .mount => unreachable, // Repeatable: `take_mount` above.
+        .device => unreachable, // Repeatable: `take_device` above.
         .user => &run_args.user,
         .tail => &run_args.tail,
         .stream => &run_args.stream,
@@ -1957,6 +1973,25 @@ fn take_mount(
     }
     run_args.mounts[run_args.mounts_count] = mount;
     run_args.mounts_count += 1;
+}
+
+/// One `--device`: its path is checked now (E0225), with the ones before it for a repeat.
+fn take_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    assert(run_args.devices_count <= constants.run_devices_max);
+    const count = run_args.devices_count;
+    if (count == constants.run_devices_max) {
+        devices_diagnose.bad_path(diag, value, .too_many);
+        return error.BadOptionValue;
+    }
+    run_args.devices[count] = .{ .path = value };
+    if (devices.list_problem(run_args.devices[0 .. count + 1])) |problem| {
+        devices_diagnose.bad_path(diag, value, problem);
+        return error.BadOptionValue;
+    }
+    run_args.devices_count = count + 1;
+    assert(run_args.devices_count <= constants.run_devices_max);
+    assert(diag.code == null);
 }
 
 /// Why `value` is not `USER[:GROUP]`, or null: each part is a name or a number, not empty, and
@@ -3473,6 +3508,37 @@ fn prepare_image(
     };
 }
 
+/// What the operand of `run` names, resolved into `prepared`: an image, or a tree; true when
+/// the tree is a build result and runs with its config.
+fn prepare_operand(
+    host: Host,
+    invocation: *const Invocation,
+    storage: *Storage,
+    prepared: *run_image.Prepared,
+    diag: *Diag,
+) RunError!bool {
+    assert(invocation.command == .run);
+    assert(diag.code == null);
+    const operand = invocation.operand orelse return false;
+    if (operand.len == 0) return false;
+    if (!is_tree_operand(operand)) {
+        try prepare_image(host, invocation, storage, operand, prepared, diag);
+        return false;
+    }
+    // A full digest may name a build result: its tree runs with its config.
+    const command = invocation.run.command;
+    const ws = &storage.run_image;
+    const found = run_image.prepare_result(host, ws, operand, command, prepared, diag);
+    const from_result = found catch return error.StartFailed;
+    if (!from_result and command.len == 0) {
+        // A tree that is not a build result has no command of its own.
+        const raised = missing_argument(diag, .run, .command);
+        assert(raised == error.MissingArgument);
+        return error.StartFailed;
+    }
+    return from_result;
+}
+
 fn run_container(
     host: Host,
     invocation: *const Invocation,
@@ -3495,24 +3561,7 @@ fn run_container(
         .workdir = "",
         .user = null,
     };
-    var from_result = false;
-    if (invocation.operand) |operand| {
-        if (operand.len > 0 and !is_tree_operand(operand)) {
-            try prepare_image(host, invocation, storage, operand, &prepared, diag);
-        } else if (operand.len > 0) {
-            // A full digest may name a build result: its tree runs with its config.
-            const ws = &storage.run_image;
-            const command = given.command;
-            const found = run_image.prepare_result(host, ws, operand, command, &prepared, diag);
-            from_result = found catch return error.StartFailed;
-            if (!from_result and command.len == 0) {
-                // A tree that is not a build result has no command of its own.
-                const raised = missing_argument(diag, .run, .command);
-                assert(raised == error.MissingArgument);
-                return error.StartFailed;
-            }
-        }
-    }
+    const from_result = try prepare_operand(host, invocation, storage, &prepared, diag);
     var digest_text: [constants.store_digest_text_bytes]u8 = undefined;
     try resolve_tree_prefix(host, storage, &prepared, &digest_text, diag);
     var name_buffer: reference_mod.Formatted = undefined;
@@ -3536,6 +3585,7 @@ fn run_container(
         .listen = given.listen,
         .state = given.state_slice(),
         .mounts = spec_mounts,
+        .devices = given.devices_slice(),
         .user_text = prepared.user_text,
         .binding = binding_of(subject.binding),
     };

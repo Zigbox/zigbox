@@ -94,6 +94,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try extra_host_invisible(&session, out, &timer);
     try extra_missing_rootfs(&session, out, &timer);
     try extra_bundle(&session, out, &timer);
+    try extra_devices(&session, out, &timer);
     try session.shutdown();
     return 0;
 }
@@ -307,6 +308,37 @@ fn extra_bundle(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
             "planted secrets and at least one [redacted:...] marker", err);
     };
     try timer.lap(out, "bundle");
+}
+
+/// M10 slice 1 (docs/briefs/M10-gpu.md): a 0660 root:render node made by root is opened inside
+/// by a member of `render`, and refused to a user who is not in the node's group.
+fn extra_devices(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m1: EXTRA: --device, a 0660 root:render node, a member and not\n", .{});
+    const setup = "groupadd -f render && usermod -aG render demo && " ++
+        "mknod /dev/zbx-render c 1 3 && chgrp render /dev/zbx-render && " ++
+        "chmod 0660 /dev/zbx-render && mknod /dev/zbx-locked c 1 3 && " ++
+        "chgrp daemon /dev/zbx-locked && chmod 0660 /dev/zbx-locked";
+    const prepared = try session.run(setup, limits.command_timeout_kvm_s);
+    try H.show(out, "make the nodes, put demo in render", prepared);
+    if (prepared.status != 0) return error.DeviceSetupFailed;
+    const inside = "'id -G; : </dev/zbx-render && echo OPENED-READ; " ++
+        "echo x >/dev/zbx-render && echo OPENED-WRITE'";
+    const member = run_prefix ++ " --name dev1 --device /dev/zbx-render -- sh -c " ++ inside;
+    const opened = try H.run_split(session, member);
+    try H.show_split(out, member, opened);
+    checks_m1.check_device_opened(opened.streams, opened.status) catch |err| {
+        return fail_step(out, "EXTRA devices", "a member of render opens the node, and the " ++
+            "groups note is on stderr", err);
+    };
+    const other = run_prefix ++ " --name dev2 --device /dev/zbx-locked -- sh -c 'echo ran'";
+    const refused = try H.run_split(session, other);
+    try H.show_split(out, other, refused);
+    checks_m1.check_device_refused(refused.streams, refused.status) catch |err| {
+        return fail_step(out, "EXTRA devices", "a non-member is refused with E0225, exit 125", err);
+    };
+    const cleanup = "rm -f /dev/zbx-render /dev/zbx-locked; gpasswd -d demo render; true";
+    _ = try session.run(cleanup, limits.command_timeout_kvm_s);
+    try timer.lap(out, "devices");
 }
 
 test {

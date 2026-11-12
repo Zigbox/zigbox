@@ -130,6 +130,10 @@ pub const Kind = enum {
     mount_dev,
     create_device_file,
     bind_device,
+    /// The devices of `--device` (M10), after M1's six: each is made a mount point (with the
+    /// directories above it that are missing) and bound at its own path, as M1's six are.
+    create_user_device,
+    bind_user_device,
     make_shm_dir,
     mount_shm,
     make_pts_dir,
@@ -284,6 +288,10 @@ pub const read_only_hostname_steps_count: u32 = 1;
 pub const state_steps_count: u32 = 6;
 pub const state_read_only_steps_count: u32 = 1;
 
+/// The steps each `--device` adds: its mount point and its bind (`create_user_device`,
+/// `bind_user_device`).
+pub const user_device_steps_count: u32 = 2;
+
 /// The hidden name in the container's /dev a volume is bound at before it is moved to its target,
 /// followed by the volume's index.
 pub const state_stage_prefix = "/dev/.zbx-state-";
@@ -381,6 +389,9 @@ pub const Input = struct {
     state: []const StateInput = &.{},
     /// The other mounts, in the order given, each already looked at (`mounts.resolve`).
     mounts: []const MountInput = &.{},
+    /// The paths of the host devices bound at the same path in the container (`--device`),
+    /// each already looked at (`devices.resolve`); at most `constants.run_devices_max`.
+    devices: []const []const u8 = &.{},
     /// The hostname, when it is not the name (a build step's, M7).
     hostname: ?[]const u8 = null,
     /// The file mode creation mask the command starts with; null leaves the caller's.
@@ -508,6 +519,9 @@ pub const Plan = struct {
     mount_shapes: [constants.mounts_max]MountShape,
     mount_sources: [constants.mounts_max]Text,
     mount_targets: [constants.mounts_max]Text,
+    /// The host devices of the run: how many, and each one's path.
+    device_count: u32,
+    device_paths: [constants.run_devices_max]Text,
     paths: [constants.plan_paths_bytes_max]u8,
     paths_len: u32,
     name: Text,
@@ -556,6 +570,7 @@ pub const Plan = struct {
         plan.build_pasta(input);
         plan.build_state(input);
         plan.build_mounts(input);
+        plan.build_devices(input);
         plan.build_exec_image(input);
         plan.push_parent_start(input);
         assert(plan.count == plan.first_child());
@@ -620,7 +635,7 @@ pub const Plan = struct {
             state_read_only_steps_count * plan.state_read_only_count;
         const listener = listener_steps_count * @as(u32, @intFromBool(plan.has_listener));
         return base + scope_steps_count * @intFromBool(plan.scoped) + read_only + extras + pasta +
-            state + plan.mount_steps + listener;
+            state + plan.mount_steps + listener + user_device_steps_count * plan.device_count;
     }
 
     /// The index of the first of the child's steps: after the parent's start, which ends with
@@ -710,6 +725,24 @@ pub const Plan = struct {
             plan.mount_steps += steps;
         }
         assert(plan.mount_steps <= constants.mounts_max * mount_steps_staged);
+    }
+
+    fn build_devices(plan: *Plan, input: *const Input) void {
+        assert(input.devices.len <= constants.run_devices_max);
+        plan.device_count = @intCast(input.devices.len);
+        for (input.devices, 0..) |path, index| {
+            assert(std.mem.startsWith(u8, path, "/dev/"));
+            assert(path.len <= constants.device_path_bytes_max);
+            plan.device_paths[index] = plan.add_text(&.{path});
+        }
+    }
+
+    /// The host path of the device a device step acts on, for a diagnostic.
+    pub fn device_of(plan: *const Plan, step: *const Step) []const u8 {
+        const is_device_step = step.kind == .create_user_device or step.kind == .bind_user_device;
+        assert(is_device_step);
+        assert(step.index < plan.device_count);
+        return plan.text(plan.device_paths[step.index]);
     }
 
     /// The shape, source and target of the mount an other-mount step acts on, for a diagnostic.
@@ -895,6 +928,7 @@ pub const Plan = struct {
         plan.push(.make_dev_dir, dev, empty_text, 0);
         plan.push(.mount_dev, dev, empty_text, 0);
         plan.push_devices(rootfs_text);
+        plan.push_user_devices(rootfs_text);
         plan.push_dev_mounts(rootfs_text);
         plan.push_links(rootfs_text);
         plan.push_etc_files(rootfs_text);
@@ -1076,6 +1110,19 @@ pub const Plan = struct {
             const outside = plan.add_text(&.{ "/dev/", name });
             plan.push(.create_device_file, inside, empty_text, @intCast(index));
             plan.push(.bind_device, inside, outside, @intCast(index));
+        }
+    }
+
+    /// Each `--device`, after M1's six: below the rootfs's /dev, at the host's own path.
+    fn push_user_devices(plan: *Plan, rootfs: []const u8) void {
+        const start = plan.count;
+        assert(plan.device_count <= constants.run_devices_max);
+        defer assert(plan.count == start + user_device_steps_count * plan.device_count);
+        for (0..plan.device_count) |index| {
+            const outside = plan.device_paths[index];
+            const inside = plan.add_text(&.{ rootfs, plan.text(outside) });
+            plan.push(.create_user_device, inside, empty_text, @intCast(index));
+            plan.push(.bind_user_device, inside, outside, @intCast(index));
         }
     }
 
@@ -1384,6 +1431,8 @@ pub fn describe(step: *const Step, buffer: []u8) []const u8 {
         .exec => "starting the command",
         .create_device_file => "creating the mount point /dev/",
         .bind_device => "bind-mounting /dev/",
+        .create_user_device => "creating the mount point of a --device in /dev",
+        .bind_user_device => "bind-mounting a --device into /dev",
         .link_dev => "creating the link /dev/",
         .make_tmp_dir => "creating /tmp in the rootfs",
         .mount_tmp => "mounting a tmpfs on /tmp",
@@ -1406,7 +1455,8 @@ comptime {
     const longest = steps_count_single + scope_steps_count + read_only_steps_count +
         read_only_hostname_steps_count + 3 + pasta_steps_count +
         (state_steps_count + state_read_only_steps_count) * constants.state_volumes_max +
-        mount_steps_staged * constants.mounts_max;
+        mount_steps_staged * constants.mounts_max +
+        user_device_steps_count * constants.run_devices_max;
     assert(longest <= constants.plan_steps_max);
     assert(steps_count_full + 1 == steps_count_single);
     assert(devices.len == constants.container_devices_count);
