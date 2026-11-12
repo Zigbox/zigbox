@@ -19,7 +19,7 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const dsse = @import("dsse.zig");
 const policy_mod = @import("policy.zig");
-const record_mod = @import("record.zig");
+const record_mod = @import("signature_record.zig");
 const statement = @import("statement.zig");
 
 pub const Subject = struct {
