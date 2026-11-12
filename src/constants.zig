@@ -242,8 +242,10 @@ pub const run_devices_max: u32 = 16;
 /// in all (`/dev/dri/renderD128` is 18).
 pub const device_path_bytes_max: u32 = 48;
 /// CDI specs (M10 slice 2, docs/briefs/M10-gpu.md). A spec file is read whole, up to this many
-/// bytes (`nvidia-ctk cdi generate` writes about 10 KB per GPU); a bigger one is refused.
-pub const cdi_spec_bytes_max: u32 = 256 * 1024;
+/// bytes (`nvidia-ctk cdi generate` writes about 10 KB per GPU); a bigger one is refused. One
+/// byte less than `file_bytes_max`: `Host.read_file` takes a buffer of at most that, and the
+/// reader needs the one more byte to see a file that is too big.
+pub const cdi_spec_bytes_max: u32 = file_bytes_max - 1;
 /// Spec files read from the three directories together, and entries looked at in one directory.
 pub const cdi_spec_files_max: u32 = 16;
 pub const cdi_dir_entries_max: u32 = 64;
@@ -1204,6 +1206,7 @@ comptime {
     assert(path_bytes_max > 0);
     assert(path_bytes_max < std.math.maxInt(u16));
     assert(file_bytes_max > 0);
+    assert(cdi_spec_bytes_max < file_bytes_max); // The reader takes one byte more, to see "too big".
     assert(file_bytes_max <= std.math.maxInt(u32) / 2); // Offsets and lengths fit in u32.
     assert(read_calls_max > file_bytes_max);
     assert(write_calls_max > output_bytes_max);

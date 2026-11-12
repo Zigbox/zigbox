@@ -124,6 +124,52 @@ fn prepare_container(sim: *HostSim) void {
     sim_run.init(sim, 1);
 }
 
+const cdi_args = [_][:0]const u8{
+    "run", "--rootfs", "/srv/alpine", "--device", "vendor.example/gpu=0", "--", "sh",
+};
+
+/// A host with a device node and one CDI spec in /etc/cdi.
+const cdi_files = sim_run.files ++ [_]@import("host_sim.zig").File{
+    .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
+};
+
+/// A spec with a device (one node) and the library-cache hook.
+const cdi_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}}],
+    \\ "containerEdits":{"hooks":[{"hookName":"createContainer",
+    \\ "path":"/usr/bin/nvidia-cdi-hook","args":["nvidia-cdi-hook","update-ldcache",
+    \\ "--folder","/usr/lib"]}]}}
+;
+
+/// The same spec with a hook Zigbox does not run.
+const cdi_hook_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"0","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}}],
+    \\ "containerEdits":{"hooks":[{"hookName":"createContainer",
+    \\ "path":"/usr/bin/setup","args":["setup","--all"]}]}}
+;
+
+fn prepare_cdi_spec(sim: *HostSim, spec: []const u8) void {
+    sim_run.start(sim, 1, &cdi_files);
+    sim.world.add_node("/dev/fake0", .file);
+    sim.world.add_node("/etc/cdi", .dir);
+    assert(sim.world.write_file("/etc/cdi/example.json", spec) == null);
+}
+
+fn prepare_cdi(sim: *HostSim) void {
+    prepare_cdi_spec(sim, cdi_spec);
+}
+
+fn prepare_cdi_hook(sim: *HostSim) void {
+    prepare_cdi_spec(sim, cdi_hook_spec);
+}
+
+/// A spec that is not JSON the parser takes.
+fn prepare_cdi_bad(sim: *HostSim) void {
+    prepare_cdi_spec(sim, "{\"cdiVersion\":");
+}
+
 /// A channel whose read end is closed: `--listen-send 1001` names its write end, a Unix socket
 /// that is open (so the run starts) and has no one to take the listener (EPIPE on the send).
 fn prepare_send_peer_gone(sim: *HostSim) void {
@@ -989,6 +1035,31 @@ const exec_cases = [_]Case{
         .args = &device_args,
         .prepare = prepare_container,
         .exit = 125,
+    },
+    .{
+        .code = .E0226,
+        .args = &cdi_args,
+        .prepare = prepare_cdi_bad,
+        .exit = 125,
+    },
+    .{
+        .code = .E0227,
+        .args = &cdi_args,
+        .prepare = prepare_cdi_hook,
+        .exit = 125,
+    },
+    .{
+        .code = .E0230,
+        .args = &cdi_args,
+        .prepare = prepare_container,
+        .exit = 125,
+    },
+    .{
+        .code = .W0208,
+        .args = &cdi_args,
+        .prepare = prepare_cdi,
+        .warning = true,
+        .exit = 0,
     },
     .{
         .code = .W0209,

@@ -1,0 +1,9 @@
+error[ZBX-E0226]: can't use a CDI spec
+  while  reading the CDI specs in /etc/cdi, /var/run/cdi and
+         $XDG_CONFIG_HOME/cdi
+  cause  example.json: it is not valid JSON (at cdiVersion)
+  file   example.json
+  field  cdiVersion
+  fix    correct the file, or move it out of the CDI directories
+  more   zbx explain E0226
+  docs   https://zigbox.github.io/zigbox/errors/E0226.html
