@@ -464,7 +464,7 @@ fn container_mounts(
     const run = table.has(.run_tmpfs, join(&buffer, root_path, "/run"));
     if (run != read_only) return "/run is wrong";
     if (isolated) |own_network| {
-        if (network_mounts(table, root_path, own_network)) |problem| return problem;
+        if (network_mounts(table, root_path, own_network, read_only)) |problem| return problem;
     }
     const root = table.find(root_path) orelse return "the rootfs is not a mount";
     if (table.mounts[root].read_only != read_only) return "the rootfs is not as read-only as asked";
@@ -481,6 +481,7 @@ fn network_mounts(
     table: *const sim_world.MountTable,
     root_path: []const u8,
     isolated: bool,
+    read_only: bool,
 ) ?[]const u8 {
     assert(root_path.len > 0);
     assert(table.count <= constants.sim_mounts_max);
@@ -493,11 +494,17 @@ fn network_mounts(
         // A bind of the host's /sys is made read-only by the remount.
         return "/sys is writable";
     }
-    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |name| {
+    for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |name| {
         const path = join(&buffer, root_path, name);
         if (!table.has(.bind_file, path)) return "a generated /etc file is not bound";
         const index = table.find(path).?; // `has` found it.
-        if (!table.mounts[index].read_only) return "a generated /etc file is writable";
+        // The hostname is the one generated file a program may write (#113), unless the
+        // rootfs is read-only (#117).
+        const writable = std.mem.eql(u8, name, "/etc/hostname") and !read_only;
+        if (table.mounts[index].read_only == writable) {
+            if (writable) return "/etc/hostname is read-only";
+            return "a generated /etc file is writable";
+        }
     }
     return null;
 }

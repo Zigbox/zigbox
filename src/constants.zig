@@ -236,10 +236,11 @@ pub const container_links_count: u32 = 5;
 /// holds. The host's `resolv.conf`, which a `--net host` container gets, is cut to whole lines
 /// within this.
 pub const etc_file_bytes_max: u32 = 4096;
-/// The hidden names, in the container's `/dev` tmpfs, the two files are written to before they
-/// are bound over the image's `/etc` files and removed again.
+/// The hidden names, in the container's `/dev` tmpfs, the generated files are written to before
+/// they are bound over the image's `/etc` files and removed again.
 pub const etc_stage_hosts = ".zbx-hosts";
 pub const etc_stage_resolv = ".zbx-resolv";
+pub const etc_stage_hostname = ".zbx-hostname";
 /// Steps in a plan. The plan's own comptime check proves the count it builds is below this.
 pub const plan_steps_max: u32 = 224;
 

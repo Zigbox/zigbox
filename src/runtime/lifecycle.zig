@@ -324,7 +324,8 @@ pub const Ref = struct {
     reaped: ?*const std.atomic.Value(bool),
 
     fn is_gone(ref: *const Ref) bool {
-        assert(ref.pid > 0);
+        // A container that failed to start has no pid (0): it never ran, so it is gone.
+        if (ref.pid == 0) return true;
         assert(ref.scope.slice().len <= constants.scope_name_bytes_max);
         if (ref.reaped) |flag| return flag.load(.acquire);
         return !alive(ref.host, ref.pid, ref.scope.slice());

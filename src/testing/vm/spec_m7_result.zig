@@ -61,7 +61,8 @@ const build_file =
 const script_drop =
     prelude ++
     "L=$($Z store ls --output json | grep -o '\"digest\":\"b3:[a-f0-9]*\",\"kind\":" ++
-    "\"[a-z]*\",\"time\":[0-9]*,\"files\":[0-9]*,\"bytes\":[0-9]*,\"source\":" ++
+    "\"[a-z]*\",\"time\":[0-9]*,\"files\":[0-9]*,\"bytes\":[0-9]*,\"size_unique\":[0-9a-z]*," ++
+    "\"source\":" ++
     "\"[^\"]*alpine[^\"]*\"' | sed 's/.*\"digest\":\"\\([^\"]*\\)\".*/\\1/')\n" ++
     "echo base_dropped=$(echo $L | wc -w)\n" ++
     "for D in $L; do $Z store rm $D > /dev/null 2>&1; done\n" ++

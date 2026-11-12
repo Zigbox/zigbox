@@ -17,4 +17,5 @@ warning[ZBX-W0503]: no zbx.lock was found, so one was written
   docs   https://zigbox.github.io/zigbox/errors/W0503.html
 zbx: note: skipped creating the mount point directory for the generated /etc files: refused by the kernel (ENOENT)
 zbx: note: skipped creating the mount point /etc/resolv.conf: refused by the kernel (ENOENT)
+zbx: note: skipped creating the mount point /etc/hostname: refused by the kernel (ENOENT)
 zbx: note: scope zbx-web-1.scope went by itself just after the run ended

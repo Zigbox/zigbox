@@ -124,7 +124,7 @@ fn world_dirs(fixture: *const Fixture) void {
         const text = text_of(&inner, "{s}{s}", .{ merged, suffix });
         sim.world.add_node(text, .dir);
     }
-    for ([_][]const u8{ "/bin/sh", "/etc/hosts", "/etc/resolv.conf" }) |suffix| {
+    for ([_][]const u8{ "/bin/sh", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |suffix| {
         const text = text_of(&inner, "{s}{s}", .{ merged, suffix });
         sim.world.add_node(text, .file);
     }

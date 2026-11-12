@@ -107,3 +107,23 @@ test "a tree that is not in the store is reported as missing" {
     );
     try testing.expect(failure.tree.kind == .missing);
 }
+
+test "a file linked under several names counts once in the stored size (#112)" {
+    // Goal: `store ls` shows `size_unique`, which counts a hard-linked file once. Method: import
+    // the sample plus a file linked under two more names: the tree has three more files and
+    // 3 x 10 more logical bytes, but only 10 more stored bytes (it fails if tree_stored counts
+    // names).
+    start();
+    files.put_file("/src/etc/one", 0o644, "0123456789");
+    try files.interface().link("/src/etc/one", "/src/etc/two");
+    try files.interface().link("/src/etc/one", "/src/etc/three");
+    const digest = try import_source();
+    var mem = memory();
+    var result: usage.TreeUsage = undefined;
+    var failure: usage.Failure = undefined;
+    try usage.tree_usage(&store, &mem, digest, &result, &failure);
+    try testing.expectEqual(@as(u64, 41 + 30), result.logical_bytes);
+    const stored = try usage.tree_stored(&store, &mem, digest, &failure);
+    try testing.expectEqual(@as(u64, 41 + 10), stored);
+    try testing.expectEqual(result.stored_bytes, stored);
+}
