@@ -35,19 +35,26 @@ pub fn bad_path(diag: *Diag, value: []const u8, problem: devices.ListProblem) vo
     assert(diag.code.? == .E0225);
 }
 
-/// ZBX-E0225: the devices asked and the nodes `--gpu dri` found are more than a run takes. The
-/// cause is the host's node count, not a `--device` the user gave, so it says so and names the
-/// way out: ask for the nodes one by one.
-pub fn too_many_gpu_nodes(diag: *Diag, count: u32) void {
+/// ZBX-E0225: the devices asked and the render nodes `--gpu <keyword>` found are more than a run
+/// takes. The cause is the host's node count, not a `--device` the user gave, so it says so and
+/// names the way out: ask for the nodes one by one. `keyword` is the one the user typed (`all`
+/// falls back to the render nodes on a host without an NVIDIA spec), so the line never names a
+/// flag they did not give.
+pub fn too_many_gpu_nodes(diag: *Diag, count: u32, keyword: []const u8) void {
     assert(diag.code == null);
     assert(count <= constants.run_devices_max + 1);
+    assert(std.mem.eql(u8, keyword, "all") or std.mem.eql(u8, keyword, "dri"));
     diag.raise(.E0225);
     diag.while_("giving the GPUs to the container", .{});
-    diag.cause("--gpu dri found render nodes that, with the other devices asked for, are more " ++
-        "than the {d} devices a run takes", .{constants.run_devices_max});
+    diag.cause("--gpu {s} found {d} render nodes or more that, with the other devices asked " ++
+        "for, are more than the {d} devices a run takes", .{
+        keyword,
+        count,
+        constants.run_devices_max,
+    });
     diag.context("limit", "{d}", .{constants.run_devices_max});
     diag.fix(.{
-        .sentence = "name the nodes you want, instead of --gpu dri (zbx doctor lists them):",
+        .sentence = "name the nodes you want, instead of --gpu (zbx doctor lists them):",
         .command = example,
         .template = true,
     });

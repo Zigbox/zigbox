@@ -13,7 +13,7 @@
 //! written (`ready`), and the child tells the parent about a failed or skipped step (`report`).
 //!
 //! Storage belongs to the caller. A `Handle` holds the plan, the doctor's `Facts` and the run's
-//! state, about 750 KiB (`constants.handle_bytes_max`); the caller passes it by pointer to `start`
+//! state, under 768 KiB (`constants.handle_bytes_max`); the caller passes it by pointer to `start`
 //! and may not move it until `wait` returns. The library has no module-level state but the real
 //! host's per-thread errno and the panic handler's settings (`diag/panic.zig`, which only the `zbx`
 //! program sets), so two callers on two threads each use their own (tested). The stack stays small:
@@ -548,7 +548,8 @@ fn expand_gpu(
             return false;
         },
         .too_many => {
-            devices_diagnose.too_many_gpu_nodes(diag, dri.count);
+            const keyword: []const u8 = if (wants_all) "all" else "dri";
+            devices_diagnose.too_many_gpu_nodes(diag, dri.count, keyword);
             return false;
         },
     }

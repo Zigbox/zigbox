@@ -232,8 +232,25 @@ test "--gpu dri with more render nodes than a run takes says so, and does not bl
     try testing.expectEqual(@as(u8, 125), run_gpu(sim, "dri"));
     const text = sim.stderr();
     try testing.expect(std.mem.indexOf(u8, text, "ZBX-E0225") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "--gpu dri found render nodes") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu dri found ") != null);
     try testing.expect(std.mem.indexOf(u8, text, "name the nodes you want") != null);
+}
+
+test "--gpu all that falls back to too many render nodes names --gpu all, not dri" {
+    // Goal: the review of #140. `all` on a host without an NVIDIA spec is the render nodes, and
+    // the refusal must name the flag the user typed. Method: 17 openable nodes, no spec, `all`.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    sim_run.start(sim, 5, &(sim_run.files ++ many_nodes));
+    sim.groups[0] = 44;
+    sim.groups_count = 1;
+    sim.world.add_node("/dev/dri", .dir);
+    for (many_nodes) |file| std.debug.assert(sim.world.write_file(file.path, "") == null);
+    try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
+    const text = sim.stderr();
+    try testing.expect(std.mem.indexOf(u8, text, "ZBX-E0225") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu all found ") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--gpu dri") == null);
 }
 
 test "--gpu all on a host without the NVIDIA driver gives the render node past a YAML spec" {
