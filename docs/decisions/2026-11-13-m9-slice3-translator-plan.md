@@ -119,3 +119,55 @@ Not written yet, in order:
 
 `translate.zig` must be checked against the real APIs on first compile: `file_mod.Problem`
 fields, `glob.line_fault`, `constants.path_bytes_max`, `words.Out` field names and `mark`.
+
+## Status at handoff (second implementer, 2026-11-13)
+
+Done, committed and unit-tested (61 tests under a scratch root that imports
+`dockerfile/translate_tests.zig`, `import_diagnose.zig` and `diag/codes.zig`; `zig build check`
+has **not** been run on this commit):
+
+- Steps 1 to 4 of the list above: `stages.zig`, `config.zig`, `steps.zig`, `render_noted`, and
+  `translate_tests.zig` with 24 fixture cases and their `.golden`/`.refused` goldens in
+  `src/build/dockerfile_fixtures/` (goldens are `.golden`, not `.zon`, so `zig fmt --check`
+  leaves them alone).
+- Codes E0810 to E0816, W0810, W0811 registered in `src/diag/codes.zig`, each `can_end_run`
+  false. **Deviation for review:** E0816 covers both "the output exists" and "the write failed"
+  (no new code was registered for the write failure); its explanation says so.
+- `src/import_diagnose.zig`: `refused` (a translator refusal as a diagnostic), `read_failed`
+  (E0810), `output_exists` and `output_failed` (E0816), `not_hermetic` (W0810), `dropped`
+  (W0811). Compiled, but not yet reached from `main.zig`'s test block.
+
+Not done, in order:
+
+1. `src/main.zig`: import `import_diagnose.zig` in the test block (the translator files are
+   imported already).
+2. `src/diag_golden.zig` cases for the nine codes (`.direct = fn(diag)` as W0802 does, the
+   warnings with `.warning = true, .exit = 0`), the goldens under `src/testdata/diag/`
+   (`<CODE>.txt`, `.verbose.txt`, `.json.txt`; the test prints `GOLDEN name style` on a
+   mismatch), and `zig build errors-site` for the site pages and index.
+3. `src/import_commands.zig`, the CLI flow: workspace in `storage.build`'s memory by pointer
+   cast with comptime size and alignment asserts (as verify and trust do); read the Dockerfile
+   (`fs.read_whole`, bound `import_dockerfile_bytes_max`) and `.dockerignore`
+   (`<Dockerfile>.dockerignore`, else `<context>/.dockerignore`, else empty); a resolver that
+   looks up `zbx.lock` (`lock.find`), pulls a locked image by digest the way `compose.pull_locked`
+   does, or pulls an unlocked one through `pull_lib.pull` and `lock.put`, then reads env and
+   workdir with `images.load`; on success write the output with `fs.write_atomic_stamped` (temp
+   name as `lock_file.write`), E0816 when it exists without `--force`, save the lock, print the
+   report (`report.render_text` to stderr, `render_json` with `--output json`), then W0810 and
+   W0811. A refusal exits 1 and writes nothing, the lock included.
+4. `src/cli.zig`: `Command.import`, `command_named`, an import-only option pre-check in the parse
+   loop (`--context`, `--target`, `--build-arg`, `--network`, `--hermetic`, `--force`, `-o`;
+   zero or one operand), dispatch, help text (keep under 16384 bytes with the 512-byte margin
+   test) and `src/testdata/help.stdout.txt`.
+5. `src/schemas.zig` `import` schema (count 39 to 40 in `of()` and its test); `src/zigbox.zig`
+   `pub const dockerfile` with a second-caller test in `main.zig`; `src/fuzz.zig` row
+   `dockerfile` and `src/fuzz_dockerfile.zig` (random and mutated fixtures; every refusal has a
+   registered code; every accepted output parses and renders back to the same bytes; 10,000
+   iterations).
+6. The cuts in `docs/demos/m9.md`: FROM scratch with steps is E0811; RUN --mount=type=bind
+   from the context or an image is E0811; copy `.chown`/`.chmod` and image sources are still
+   E0802 at build time; COPY exec-form JSON is not substituted.
+
+Traps: explanation lines are at most 76 bytes (comptime assert in `codes.zig`); tidy wants
+lines of at most 100 columns, functions of at most 70 lines, no `usize` struct fields and a
+comment on each `catch unreachable`; Zig 0.17 has no `"x" ** n` for runtime lengths.
