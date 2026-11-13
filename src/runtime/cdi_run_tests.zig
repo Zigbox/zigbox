@@ -119,6 +119,47 @@ test "the CDI directories come before the library path the image or the user has
     try testing.expect(std.mem.indexOf(u8, envp, want) != null);
 }
 
+test "an empty LD_LIBRARY_PATH is replaced by the CDI directories, with no trailing colon" {
+    // Goal: an empty entry in the path means the working directory to the loader, so the join
+    // must not leave one. Method: the library run with -e LD_LIBRARY_PATH= (empty).
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, library_spec);
+    const run = [_][:0]const u8{
+        "zbx",      "run",                  "-e",     "LD_LIBRARY_PATH=",
+        "--rootfs", sim_run.rootfs_path,    "--name", "c-5",
+        "--device", "vendor.example/gpu=0", "--",     "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &run));
+    const envp = sim.world.processes[1].envp();
+    try testing.expect(std.mem.indexOf(u8, envp, "LD_LIBRARY_PATH=/opt/vendor/lib") != null);
+    try testing.expect(std.mem.indexOf(u8, envp, "/opt/vendor/lib:") == null);
+}
+
+const two_device_spec =
+    \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+    \\ {"name":"nic","containerEdits":{"deviceNodes":[{"path":"/dev/fake0"}]}},
+    \\ {"name":"0","containerEdits":{"mounts":[
+    \\  {"hostPath":"/srv/data","containerPath":"/opt/vendor/lib"}]}}]}
+;
+
+test "the read-only refusal names the device that has the mounts" {
+    // Goal (verbose output has the device in its context): with two devices where only the second owns a mount, E0227 names the second, not the
+    // first (which would work under --read-only). Method: ask for nic, then 0.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup_with(sim, two_device_spec);
+    const run = [_][:0]const u8{
+        "zbx",    "-v",      "run",      "--read-only",            "--rootfs", sim_run.rootfs_path,
+        "--name", "c-6",     "--device", "vendor.example/gpu=nic", "--device", "vendor.example/gpu=0",
+        "--",     "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &run));
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0227]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "vendor.example/gpu=0") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "vendor.example/gpu=nic") == null);
+}
+
 test "--read-only with a device that has mounts is refused with one line; nodes alone are fine" {
     // Goal: a read-only root has no place to make the mount targets, so the run says so before
     // anything starts. Method: the library spec, then the node-only spec of `setup`.

@@ -1,6 +1,6 @@
 error[ZBX-E0226]: can't use a CDI spec
-  while  reading the CDI specs in /etc/cdi, /var/run/cdi and
-         $XDG_CONFIG_HOME/cdi
+  while  reading the CDI specs in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi),
+         /var/run/cdi, /etc/cdi
   cause  example.json: it is not valid JSON (at cdiVersion)
   file   example.json
   field  cdiVersion

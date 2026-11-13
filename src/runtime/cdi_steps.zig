@@ -188,10 +188,11 @@ pub fn run_ldconfig(host: Host, plan: *const Plan, override: *u16) Error!void {
             last = err;
             continue;
         };
-        switch (result.status) {
+        // A killed run is a failed one, even when the helper itself had ended with 0.
+        if (!result.timed_out) switch (result.status) {
             .exited => |code| if (code == 0) return,
             .signaled => {},
-        }
+        };
         override.* = constants.errno_io;
         return error.IoFailed;
     }

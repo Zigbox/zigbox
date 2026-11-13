@@ -335,6 +335,9 @@ pub const ExecRequest = struct {
 pub const HelperResult = struct {
     status: ExitStatus,
     output_len: u32,
+    /// The deadline passed and the helper was killed: its status is then no success, whatever
+    /// it says.
+    timed_out: bool = false,
 };
 
 /// What the parent waiting for its container learns next.

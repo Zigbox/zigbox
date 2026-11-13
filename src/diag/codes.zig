@@ -1259,10 +1259,11 @@ pub const registry = [_]Entry{
         .explanation =
         \\A CDI device (an NVIDIA GPU) mounts the host's driver libraries and asks for
         \\the library cache to be updated ("nvidia-cdi-hook update-ldcache"). zbx
-        \\runs the image's own ldconfig for it. An image without ldconfig, or with a
-        \\read-only root, has no cache to update: zbx puts the libraries' directories
-        \\on LD_LIBRARY_PATH instead and says so once per run. A musl image such as
-        \\Alpine cannot load glibc driver libraries either way; use a glibc image.
+        \\runs the image's own ldconfig for it. An image without ldconfig, or one
+        \\whose ldconfig fails or runs past its 10 seconds (and is killed), has no
+        \\cache updated: zbx puts the libraries' directories on LD_LIBRARY_PATH
+        \\instead and says so once per run. A musl image such as Alpine cannot
+        \\load glibc driver libraries either way; use a glibc image.
         ,
     },
     .{

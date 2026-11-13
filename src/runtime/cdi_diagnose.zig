@@ -11,7 +11,8 @@ const Diag = @import("../diag/diag.zig").Diag;
 const cdi = @import("cdi.zig");
 
 const generate = "nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json";
-const directories = "/etc/cdi, /var/run/cdi and $XDG_CONFIG_HOME/cdi";
+const directories =
+    "$XDG_CONFIG_HOME/cdi (or ~/.config/cdi), /var/run/cdi, /etc/cdi";
 
 fn echo_of(storage: *[constants.arg_echo_bytes_max]u8, text: []const u8) []const u8 {
     assert(storage.len == constants.arg_echo_bytes_max);

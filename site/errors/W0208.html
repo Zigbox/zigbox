@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">driver libraries found through LD_LIBRARY_PATH</p>
 <dl class="facts"><div><dt>Kind</dt><dd>warning</dd></div><div><dt>Blame</dt><dd>environment</dd></div><div><dt>Exit code</dt><dd>2</dd></div></dl>
 <h2>What it means</h2>
-<p>A CDI device (an NVIDIA GPU) mounts the host's driver libraries and asks for the library cache to be updated (&quot;nvidia-cdi-hook update-ldcache&quot;). zbx runs the image's own ldconfig for it. An image without ldconfig, or with a read-only root, has no cache to update: zbx puts the libraries' directories on LD_LIBRARY_PATH instead and says so once per run. A musl image such as Alpine cannot load glibc driver libraries either way; use a glibc image.</p>
+<p>A CDI device (an NVIDIA GPU) mounts the host's driver libraries and asks for the library cache to be updated (&quot;nvidia-cdi-hook update-ldcache&quot;). zbx runs the image's own ldconfig for it. An image without ldconfig, or one whose ldconfig fails or runs past its 10 seconds (and is killed), has no cache updated: zbx puts the libraries' directories on LD_LIBRARY_PATH instead and says so once per run. A musl image such as Alpine cannot load glibc driver libraries either way; use a glibc image.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>
 <pre class="term">zbx explain W0208</pre>
