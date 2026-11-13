@@ -28,6 +28,7 @@ const dbus_fuzz = @import("fuzz_dbus.zig");
 const seccomp_fuzz = @import("fuzz_seccomp.zig");
 const tree_fuzz = @import("fuzz_tree.zig");
 const store_fuzz = @import("fuzz_store.zig");
+const build_chain_fuzz = @import("fuzz_build_chain.zig");
 const peer_fuzz = @import("fuzz_peer.zig");
 const commit_fuzz = @import("fuzz_commit.zig");
 const gc_fuzz = @import("fuzz_gc.zig");
@@ -100,6 +101,7 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "trust", .run_iteration = trust_fuzz.fuzz_trust },
     .{ .name = "provenance", .run_iteration = provenance_fuzz.fuzz_provenance },
     .{ .name = "verified", .run_iteration = verified_fuzz.fuzz_verified },
+    .{ .name = "build_chain", .run_iteration = build_chain_fuzz.fuzz_build_chain },
     .{ .name = "build_cache", .run_iteration = build_cache_fuzz.fuzz_build_cache },
     .{ .name = "parse_sysctl", .run_iteration = parse_fuzz.fuzz_parse_sysctl },
     .{ .name = "parse_kernel", .run_iteration = parse_fuzz.fuzz_parse_kernel },
