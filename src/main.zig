@@ -312,6 +312,7 @@ test {
     _ = @import("build/diagnose.zig");
     _ = @import("build/load.zig");
     _ = @import("build/step.zig");
+    _ = @import("build/step_root_tests.zig");
     _ = @import("build/step_tests.zig");
     _ = @import("build/compose.zig");
     _ = @import("build/compose_tests.zig");
