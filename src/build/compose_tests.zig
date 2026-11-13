@@ -1135,7 +1135,11 @@ test "KNOWN GAP: a copy's selection tree has no root between its write and the c
     // this count is one and this test is to be turned round, not deleted.
     try copy_project_loaded();
     var seen: RootsSeen = .{};
-    files.hook = .{ .rename_to_contains = "/build/cache", .context = &seen, .call = RootsSeen.look };
+    files.hook = .{
+        .rename_to_contains = "/build/cache",
+        .context = &seen,
+        .call = RootsSeen.look,
+    };
     try testing.expect(try context.begin(0) == .hit);
     try testing.expect(seen.fired);
     try testing.expectEqual(@as(u32, 0), seen.roots);

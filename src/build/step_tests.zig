@@ -702,3 +702,7 @@ test "a stderr that returns EPIPE stops the streaming and never fails the step" 
     try testing.expect(!sim.sigpipe_would_kill);
     try testing.expect(!sim.world.broken_pipe_ignored); // Back to the default at the end.
 }
+
+test {
+    _ = @import("step_root_tests.zig");
+}

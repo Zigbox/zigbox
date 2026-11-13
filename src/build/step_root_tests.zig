@@ -137,7 +137,8 @@ test "a root step that changes nothing has its base as its output" {
     try testing.expectEqual(@as(?codes.Code, null), tests.diag.code);
     try testing.expect(tests.result.output.eql(ran.fixture.base));
     // The base's and the input's roots, from the fixture.
-    try testing.expectEqual(@as(u32, 2), support.count_files(&tests.files, tests.store_root ++ "/roots"));
+    const roots = support.count_files(&tests.files, tests.store_root ++ "/roots");
+    try testing.expectEqual(@as(u32, 2), roots);
     try testing.expectEqual(@as(?[]const u8, null), sim_run.leak(&tests.sim, &ran.before));
 }
 

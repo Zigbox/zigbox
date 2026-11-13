@@ -110,7 +110,11 @@ fn make_layer(target: *fs_sim.SimFs, at: u32, seed: u64) void {
 }
 
 /// Top-level names of `digest`, up to `names_max`.
-fn top_names(digest: Digest, storage: *[names_max][constants.store_name_bytes_max]u8, lens: *[names_max]u8) u32 {
+fn top_names(
+    digest: Digest,
+    storage: *[names_max][constants.store_name_bytes_max]u8,
+    lens: *[names_max]u8,
+) u32 {
     var buffer: [constants.store_tree_bytes_max]u8 = undefined;
     var errno: u16 = 0;
     const bytes = trees.load(&store, digest, &buffer, &errno) catch return 0;
@@ -152,7 +156,13 @@ fn select(source: Digest, mask: u16, to: []const u8) Error!?Digest {
         taken += 1;
     }
     if (taken == 0) return null;
-    const selected = copy.select(context(false), &copy_ws, source, patterns[0..taken], to) catch |err| {
+    const selected = copy.select(
+        context(false),
+        &copy_ws,
+        source,
+        patterns[0..taken],
+        to,
+    ) catch |err| {
         if (err == error.NoMatch) return null;
         return error.StepFailed;
     };
@@ -185,7 +195,9 @@ fn run_chain(plan: *const Plan, digests: *[steps_max + 2]Digest) Error!u32 {
                 return error.StepFailed;
             current = result.digest;
         } else if (try select(source, step.mask, destinations[step.to])) |selected| {
-            current = assemble.merge(context(true), current, selected) catch return error.StepFailed;
+            current = assemble.merge(context(true), current, selected) catch {
+                return error.StepFailed;
+            };
         }
         digests[2 + at] = current;
     }
