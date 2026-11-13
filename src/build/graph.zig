@@ -141,7 +141,7 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
         if (copy_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
-        if (step.binds.given) return .{ .step = at, .field = ".binds" };
+        if (bind_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
     }
     return null;
 }
@@ -155,6 +155,19 @@ fn copy_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const 
         const from = entry.from orelse continue;
         if (file_mod.step_ref(file.text(from)) == null) return ".copy .from an image";
         if (entry.exclude.given) return ".copy .exclude on a step: source";
+    }
+    return null;
+}
+
+/// The part of a step's `.binds` that is not built, for good: a bind from the project's files
+/// or from a locked image (only a `step:` output is mounted), or on a copy step, which runs no
+/// container to mount it in.
+fn bind_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const u8 {
+    if (!step.binds.given) return null;
+    if (step.copy.given) return ".binds on a copy step";
+    for (file.step_binds(step)) |bind| {
+        const from = bind.from orelse return ".binds from the project's files";
+        if (file_mod.step_ref(file.text(from)) == null) return ".binds from an image";
     }
     return null;
 }
@@ -568,14 +581,30 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
         ".run = .{\"x\"} } } }";
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
-    const fields = [_][]const u8{".binds = .{}"};
+    // A bind from the project, from an image, and one on a copy step; each is refused for good.
+    const fields = [_][]const u8{
+        ".binds = .{ .{ .source = \"s\", .to = \"/t\" } }",
+        ".binds = .{ .{ .from = \"alpine:3.20\", .source = \"/s\", .to = \"/t\" } }",
+    };
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
             ".run = .{\"x\"}, " ++ field ++ " } } }";
         try testing.expectEqual(Result.ordered, try order_text(text, &problem));
         const found = unrunnable(&test_file, &test_graph).?;
         try testing.expectEqual(@as(?u8, 0), found.step);
+        try testing.expect(std.mem.startsWith(u8, found.field, ".binds "));
     }
+    // A bind from an earlier step's output is built.
+    const step_bind = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"} }, .{ .name = \"b\", .base = \"x\", .run = .{\"x\"}, " ++
+        ".binds = .{ .{ .from = \"step:a\", .source = \"/s\", .to = \"/t\" } } } } }";
+    try testing.expectEqual(Result.ordered, try order_text(step_bind, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
+    // An empty list is nothing to refuse.
+    const empty = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
+        ".run = .{\"x\"}, .binds = .{} } } }";
+    try testing.expectEqual(Result.ordered, try order_text(empty, &problem));
+    try testing.expect(unrunnable(&test_file, &test_graph) == null);
     const base = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++
         ".run = .{\"x\"} }, " ++
         ".{ .name = \"b\", .base = \"step:a\", .run = .{\"x\"} } } }";

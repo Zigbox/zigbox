@@ -3324,11 +3324,11 @@ pub const registry = [_]Entry{
         \\need order: a -> b -> a means a needs b and b needs a.
         \\
         \\The same code refuses a file that parses but uses something this zbx
-        \\reads and cannot build yet: a copy, a cache, a bind, an exclude, a
-        \\.user or .workdir on a step, a named .user in .image.config,
-        \\.output = .root, a step: base, or an input
-        \\with a pattern in it. The cause names the field; zbx build --graph still
-        \\shows the whole file.
+        \\reads and does not build: a copy with .chown or .chmod, a copy from
+        \\an image, an .exclude on a copy from a step:, a bind from the
+        \\project's files or from an image (a bind takes a step: output only),
+        \\or a bind on a copy step. The cause names the field; zbx build
+        \\--graph still shows the whole file.
         \\
         \\Nothing runs before the whole graph is valid. zbx build --graph prints
         \\it, in the order a build starts the steps.

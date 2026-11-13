@@ -762,6 +762,86 @@ test "W0801 is printed once on stderr, naming the network steps, and never on st
     try testing.expectEqualStrings("", sim.stdout());
 }
 
+test "a step with cache mounts ends its row with cache, and its JSON line says so" {
+    // Goal: the report marks a step that has `.caches` (the brief's `cache`); additive in JSON.
+    // Method: the same settle as the network marker, with the span's count set.
+    start();
+    loaded.file.steps[0].caches.count = 1;
+    const answer = answer_of(made_output());
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expectEqualStrings("  compile   miss   0.00 s   cache\n", sim.stdout());
+    try testing.expect(composed.timings[0].caches);
+    start();
+    loaded.file.steps[0].caches.count = 1;
+    context.json = true;
+    try testing.expect(settle(worker_ended(0, 7, &answer), .{ .exited = 0 }).ok);
+    try testing.expect(std.mem.indexOf(u8, sim.stdout(), ",\"caches\":true}") != null);
+}
+
+test "W0802 is printed once on stderr, naming the steps with caches, never on stdout" {
+    // Goal: a build with cache mounts warns once; one without says nothing. Method: set the
+    // count on a step of the example and render in both modes.
+    start();
+    context.warn_caches();
+    try testing.expectEqualStrings("", sim.stderr());
+    loaded.file.steps[1].caches.count = 1;
+    context.warn_caches();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "warning[ZBX-W0802]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "notice") != null);
+    try testing.expectEqualStrings("", sim.stdout());
+    sim.stderr_len = 0;
+    context.json = true;
+    context.warn_caches();
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "{\"code\":\"ZBX-W0802\""));
+    try testing.expectEqualStrings("", sim.stdout());
+}
+
+test "a bind from a step's output is selected from that output, and nothing matched is E0803" {
+    // Goal: the bind's key part is the selection of `.source` in the earlier step's output.
+    // Method: step "a"'s output is the sample tree; "b" binds a directory, then another, then
+    // a path that is not there.
+    start();
+    const text =
+        \\.{ .version = 1, .image = .{}, .steps = .{
+        \\  .{ .name = "a", .base = "alpine:3.20", .run = .{"true"} },
+        \\  .{ .name = "b", .base = "alpine:3.20", .run = .{"true"},
+        \\    .binds = .{ .{ .from = "step:a", .source = "/etc", .to = "/t" } } },
+        \\} }
+    ;
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    composed.outputs[0] = made_output();
+    var spec: key_mod.Spec = undefined;
+    try context.resolve_binds(1, &spec);
+    try testing.expectEqual(@as(usize, 1), spec.binds.len);
+    try testing.expectEqualStrings("/t", spec.binds[0].to);
+    const first = spec.binds[0].source;
+    try context.resolve_binds(1, &spec);
+    try testing.expect(first.eql(spec.binds[0].source));
+    const other = ".binds = .{ .{ .from = \"step:a\", .source = \"/bin\", .to = \"/t\" } }";
+    const nothing = ".binds = .{ .{ .from = \"step:a\", .source = \"/nope\", .to = \"/t\" } }";
+    inline for (.{ other, nothing }, 0..) |field, at| {
+        var buffer: [512]u8 = undefined;
+        const edited = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+            ".{ .version = 1, .image = .{}, .steps = .{ " ++
+                ".{ .name = \"a\", .base = \"alpine:3.20\", .run = .{\"true\"} }, " ++
+                ".{ .name = \"b\", .base = \"alpine:3.20\", .run = .{\"true\"}, ",
+            field,
+            " } } }",
+        });
+        const parsed = file_mod.parse(edited, &loaded.file, &problem);
+        try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+        if (at == 0) {
+            try context.resolve_binds(1, &spec);
+            try testing.expect(!first.eql(spec.binds[0].source));
+        } else {
+            try testing.expectError(error.Failed, context.resolve_binds(1, &spec));
+            try testing.expectEqual(.E0803, diag.code.?);
+        }
+    }
+}
+
 var verify_workspace: verify.Workspace = undefined;
 
 /// One step from its import to its cache entry, as the worker and then the parent do them, on the

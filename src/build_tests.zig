@@ -115,6 +115,13 @@ test "build -f must name a file inside the project, and build alone says what it
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0004") != null);
     try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--graph", "-f" }));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0005") != null);
+    // `--clear-caches` is a `build` option: accepted there (the lock is read next), refused on
+    // another command like `--graph`.
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "build", "--clear-caches" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0003") == null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0004") == null);
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "ps", "--clear-caches" }));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0004") != null);
 }
 
 test "build --output json takes the same path as text: the lock is read, nothing is on stdout" {

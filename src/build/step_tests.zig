@@ -590,6 +590,45 @@ test "a sweep clears what a killed step left, and a live step's lock stops it" {
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
 
+test "clear-caches empties this group's caches under the exclusive lock; busy is E0436" {
+    // Goal: `zbx build --clear-caches` removes `build/caches/<group>` and nothing of another
+    // group, and never under a running step. Method: plant two groups' caches; a shared hold
+    // refuses with E0436 and removes nothing; without it the group's directory is gone.
+    const fixture = try setup(43, "fetch");
+    const mine = store_root ++ "/build/caches/" ++ group;
+    const theirs = store_root ++ "/build/caches/fedcba9876543210";
+    files.put_dir(store_root ++ "/build", 0o755);
+    files.put_dir(store_root ++ "/build/caches", 0o755);
+    inline for ([_][]const u8{ mine, theirs }) |path| {
+        files.put_dir(path, 0o755);
+        files.put_dir(path ++ "/go", 0o755);
+        files.put_file(path ++ "/go/entry", 0o644, "cached");
+    }
+    const spec = spec_for(&fixture);
+    const request: step.Request = .{
+        .host = sim.interface(),
+        .facts = &facts,
+        .spec = &spec,
+        .file = "zbx.build.zon",
+        .group = group,
+    };
+    var other: layout.Store = undefined;
+    other.at(sim.interface(), store_root);
+    try lock.hold(&other, .shared, "build");
+    diag.reset();
+    try testing.expectError(error.Failed, step.clear_caches(&request, &workspace, &diag));
+    try testing.expectEqual(@as(?codes.Code, .E0436), diag.code);
+    try testing.expect(files.kind_of(mine ++ "/go/entry") != null);
+    lock.release(&other);
+    diag.reset();
+    try step.clear_caches(&request, &workspace, &diag);
+    try testing.expect(diag.code == null);
+    try testing.expect(files.kind_of(mine) == null);
+    try testing.expect(files.kind_of(theirs ++ "/go/entry") != null);
+    try step.clear_caches(&request, &workspace, &diag); // Nothing left: not an error.
+    try testing.expectEqual(@as(u32, 0), files.open_count());
+}
+
 test "a sweep of a store that does not exist yet is not an error" {
     // Goal: a clean machine's first `zbx build` has no store directory, so no lock file; the
     // sweep finds nothing and says nothing (the VM demo's second machine was refused with E0417).

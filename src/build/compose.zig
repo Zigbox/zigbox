@@ -119,6 +119,8 @@ pub const Timing = struct {
     output: Digest,
     hit: bool,
     network: bool,
+    /// The step mounts a cache (`.caches`): its output can depend on what the cache held.
+    caches: bool,
 };
 
 /// What the caller asks of the build besides the file.
@@ -128,6 +130,8 @@ pub const Options = struct {
     /// `--verbose`: stream each step's output to stderr, a `<step> | ` before each line, and
     /// render a warning with its whole cause chain.
     verbose: bool,
+    /// `--clear-caches`: empty this build file's cache directories before any step runs.
+    clear_caches: bool = false,
 };
 
 /// The most a report line holds: a JSON step record (two digests, a name, numbers) is the
@@ -181,8 +185,10 @@ pub fn run_steps(
     };
     for (&ws.slots) |*slot| slot.active = false;
     try context.sweep();
+    if (options.clear_caches) try context.clear_caches();
     try context.header();
     context.warn_network();
+    context.warn_caches();
     make_plan(loaded, &ws.plan);
     const executor: schedule.Executor = .{
         .context = &context,
@@ -390,6 +396,24 @@ pub const Context = struct {
         return error.Failed;
     }
 
+    /// `--clear-caches`: empties the cache directories of this build file.
+    fn clear_caches(context: *Context) Error!void {
+        const spec: key_mod.Spec = .{
+            .platform = "linux/amd64",
+            .base_tree = Digest.of("clear"),
+            .base_env = &.{},
+            .input_tree = Digest.of("clear"),
+            .needs = &.{},
+            .argv = &.{},
+            .env = &.{},
+            .network = false,
+            .name = "clear",
+        };
+        const clear_request = context.request(&spec);
+        step_mod.clear_caches(&clear_request, &context.ws.step, context.diag) catch
+            return error.Failed;
+    }
+
     /// Clears what a killed build left in `build/work`, before this one starts steps.
     fn sweep(context: *Context) Error!void {
         const spec: key_mod.Spec = .{
@@ -439,6 +463,7 @@ pub const Context = struct {
         ws.step_inputs[index] = spec.input_tree;
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
+        if (!step.copy.given) try context.resolve_binds(index, &spec);
         if (step.copy.given) return context.begin_copy(index, &spec);
         key_mod.compute(&spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
@@ -856,6 +881,59 @@ pub const Context = struct {
         };
     }
 
+    /// Each bind of the step becomes the tree its `.source` selects in the output of the `step:`
+    /// it names, the whole output for `/`; the tree's digest is what the key holds, so a file
+    /// the source does not take never changes it. A bind from the project or an image never
+    /// gets here (`graph.unrunnable`). A selection is a plain tree of its own and mounts
+    /// read-only at `.to`.
+    pub fn resolve_binds(context: *Context, index: u8, spec: *key_mod.Spec) Error!void {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        const binds = file.step_binds(step);
+        assert(binds.len <= ws.bind_keys.len);
+        for (binds, 0..) |found, at| {
+            const from = found.from orelse unreachable; // `unrunnable` refused a project bind.
+            const name = file_mod.step_ref(file.text(from)) orelse unreachable; // Same: an image.
+            const target = graph_mod.step_named(file, name) orelse unreachable; // The graph check.
+            assert(target != index);
+            const source = file.text(found.source);
+            const output = ws.outputs[target];
+            const selected = try context.bind_select(index, output, source, file.text(from));
+            ws.bind_keys[at] = .{ .to = file.text(found.to), .source = selected };
+        }
+        spec.binds = ws.bind_keys[0..binds.len];
+    }
+
+    fn bind_select(
+        context: *Context,
+        index: u8,
+        output: Digest,
+        source: []const u8,
+        from: []const u8,
+    ) Error!Digest {
+        const ws = context.ws;
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "selecting a bind's files");
+        defer lock.release(store);
+        const assembling: assemble.Context = .{
+            .store = store,
+            .ws = &ws.copying.assemble,
+            .failure = &ws.assembly_failure,
+        };
+        ws.copy_patterns[0] = source;
+        const patterns = ws.copy_patterns[0..1];
+        const name = context.loaded.file.text(context.loaded.file.steps[index].name);
+        return copy_mod.select(assembling, &ws.copying, output, patterns, "/") catch |err| {
+            switch (err) {
+                error.PoolFull => diagnose.glob_pool_full(context.diag, source),
+                error.NoMatch => diagnose.bind_nothing(context.diag, name, source, from),
+                error.Failed => context.assembly_failed(name, "/"),
+            }
+            return error.Failed;
+        };
+    }
+
     fn assembly_failed(context: *Context, name: []const u8, to: []const u8) void {
         const ws = context.ws;
         const store = context.store;
@@ -970,6 +1048,25 @@ pub const Context = struct {
         context.write_warning(&warning);
     }
 
+    /// `W0802` once, on stderr, after `W0801`, when the build file has steps with `.caches`.
+    pub fn warn_caches(context: *Context) void {
+        const file = &context.loaded.file;
+        var names: [constants.build_steps_max][]const u8 = undefined;
+        var count: u32 = 0;
+        for (file.steps_slice()) |*step| {
+            if (step.caches.count == 0) continue;
+            names[count] = file.text(step.name);
+            count += 1;
+        }
+        if (count == 0) return;
+        comptime assert(constants.diag_field_bytes_max >= diagnose.cache_label.len + 8);
+        var joined: [constants.diag_field_bytes_max - diagnose.cache_label.len]u8 = undefined;
+        var warning: Diag = undefined;
+        warning.reset();
+        diagnose.cache_steps(&warning, diagnose.network_names(&joined, names[0..count]), count);
+        context.write_warning(&warning);
+    }
+
     /// `warning` on stderr in the build's output mode; a stderr that cannot be written loses it.
     fn write_warning(context: *Context, warning: *const Diag) void {
         const mode: render.Mode = if (context.json)
@@ -1006,13 +1103,14 @@ pub const Context = struct {
         timing.key = ws.key.digest;
         const name = if (index == image_slot) "image" else file.text(file.steps[index].name);
         timing.network = index != image_slot and file.steps[index].network;
+        timing.caches = index != image_slot and file.steps[index].caches.count > 0;
         if (hit) context.hits += 1 else context.misses += 1;
         var writer = std.Io.Writer.fixed(&ws.row);
         const word = if (hit) "hit" else "miss";
         if (context.json) {
             writer.print("{{\"schema\":\"zbx.build/1\",\"step\":\"{s}\",\"cache\":\"{s}\"," ++
                 "\"key\":\"{s}\",\"output\":\"{s}\",\"start_ms\":{d},\"end_ms\":{d}," ++
-                "\"network\":{s}}}\n", .{
+                "\"network\":{s}{s}}}\n", .{
                 name,
                 word,
                 &timing.key.text(),
@@ -1020,6 +1118,8 @@ pub const Context = struct {
                 timing.start_ms,
                 timing.end_ms,
                 if (timing.network) "true" else "false",
+                // Only a step with caches has the member: a line without it is unchanged.
+                if (timing.caches) ",\"caches\":true" else "",
             }) catch unreachable; // `row_bytes` holds the longest record.
         } else {
             const took = timing.end_ms - timing.start_ms;
@@ -1029,6 +1129,7 @@ pub const Context = struct {
                 name_gap, word, name_gap, took / 1000, took % 1000 / 10,
             }) catch unreachable; // Fits.
             if (timing.network) writer.print("{s}net", .{name_gap}) catch unreachable; // Fits.
+            if (timing.caches) writer.print("{s}cache", .{name_gap}) catch unreachable; // Fits.
             writer.writeByte('\n') catch unreachable; // Fits.
         }
         return context.emit(writer.buffered());

@@ -537,7 +537,12 @@ fn keep_last_line(ws: *Workspace, payload: []const u8) void {
 
 // ---- In the store's namespace -------------------------------------------------------------------
 
-const Action = enum { prepare, import, commit, remove, sweep };
+const Action = enum { prepare, import, commit, remove, sweep, clear_caches };
+
+/// The actions that work on a directory of the store and not on one step's work directory.
+fn is_store_wide(action: Action) bool {
+    return action == .sweep or action == .clear_caches;
+}
 
 /// What the child gets. It has its own copy of memory, so what it learns comes back through
 /// `report`: a diagnostic on failure, the import's digest and file count on success.
@@ -555,12 +560,12 @@ const answer_bytes = constants.store_digest_bytes + 8;
 
 comptime {
     assert(answer_bytes < constants.diag_carry_bytes_max);
-    assert(@typeInfo(Action).@"enum".field_names.len == 5);
+    assert(@typeInfo(Action).@"enum".field_names.len == 6);
 }
 
 fn in_store(request: *const Request, ws: *Workspace, action: Action, diag: *Diag) Error!void {
     assert(diag.code == null);
-    if (action != .sweep) assert(ws.paths.work.len > 0);
+    if (!is_store_wide(action)) assert(ws.paths.work.len > 0);
     const host = request.host;
     var job: Job = .{
         .request = request,
@@ -622,7 +627,7 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
     const job: *Job = @ptrCast(@alignCast(context));
     // An import squashes owners to 0:0 either way; a commit keeps the container's ids.
     job.squash_owner = squash_owner;
-    if (job.action != .sweep) assert(job.ws.paths.work.len > 0);
+    if (!is_store_wide(job.action)) assert(job.ws.paths.work.len > 0);
     var diag: Diag = undefined;
     diag.reset();
     var answer: [answer_bytes]u8 = undefined;
@@ -660,7 +665,7 @@ fn job_call(context: *anyopaque, squash_owner: bool) u8 {
 
 fn execute(store: *Store, job: *Job, diag: *Diag) Error!void {
     assert(diag.code == null);
-    if (job.action != .sweep) assert(job.ws.paths.out.len > job.ws.paths.work.len);
+    if (!is_store_wide(job.action)) assert(job.ws.paths.out.len > job.ws.paths.work.len);
     switch (job.action) {
         .prepare => try prepare(store, job, diag),
         .import => try import_output(store, job, diag),
@@ -671,7 +676,27 @@ fn execute(store: *Store, job: *Job, diag: *Diag) Error!void {
             var dir: PathBuf = undefined;
             try remove_work(store, job, store.path(&dir, &.{"/build/work"}), diag);
         },
+        .clear_caches => try remove_caches(store, job, diag),
     }
+}
+
+/// Empties this build file's cache directories (`--clear-caches`): their files belong to
+/// subordinate ids, which only the namespace's root may remove. The next step that mounts a
+/// cache makes its directory again.
+fn remove_caches(store: *Store, job: *Job, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    const group = job.request.group;
+    assert(group.len == log_group_bytes);
+    var dir: PathBuf = undefined;
+    const path = store.path(&dir, &.{ "/build/caches/", group });
+    assert(std.mem.indexOf(u8, path, "/build/caches/") != null);
+    const ws = &job.ws.image.materialize;
+    var failure: remove.Failure = undefined;
+    remove.tree(store.fs, &ws.removal, &ws.arena, path, &failure) catch {
+        const operation = "emptying the build's cache directories";
+        store_diagnose.write_failed(diag, store, operation, failure.err, failure.errno);
+        return error.Failed;
+    };
 }
 
 fn remove_work(store: *Store, job: *Job, path: [:0]const u8, diag: *Diag) Error!void {
@@ -888,6 +913,32 @@ pub fn sweep(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
     };
     defer lock.release(&store);
     try in_store(request, ws, .sweep, diag);
+}
+
+/// Empties the cache directories of `request.group` (`zbx build --clear-caches`), under the
+/// exclusive lock: a build that holds a cache has the lock shared, so this refuses (E0436)
+/// instead of pulling a directory out from under a running step. A store that does not exist
+/// has no caches.
+pub fn clear_caches(request: *const Request, ws: *Workspace, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(request.group.len == log_group_bytes);
+    var store: Store = undefined;
+    if (!store.locate(request.host)) {
+        store_diagnose.no_data_directory(diag);
+        return error.Failed;
+    }
+    lock.hold(&store, .exclusive, "build clear-caches") catch |err| {
+        if (err == error.Busy) {
+            store_diagnose.store_busy(diag, "emptying the build's caches", lock.holder(&store));
+            return error.Failed;
+        }
+        if (store.lock_error == error.NotFound) return;
+        const operation = "taking the store lock";
+        store_diagnose.write_failed(diag, &store, operation, store.lock_error, store.lock_errno);
+        return error.Failed;
+    };
+    defer lock.release(&store);
+    try in_store(request, ws, .clear_caches, diag);
 }
 
 // ---- Tests ----------------------------------------------------------------------------------

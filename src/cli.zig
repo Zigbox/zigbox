@@ -282,11 +282,12 @@ const help_text =
     \\  directory), or <file>, which must be inside it; checks it, its graph and its inputs, and
     \\  prints the steps in the order a build starts them, then the image, without running
     \\  anything (--output json: nodes and edges, see zbx schema build-graph)
-    \\  zbx build [-f <file>]
-    \\  builds the steps, then the image: one row per step (hit or miss, its time, and net for a
-    \\  step with network = true) and the result digest; --output json: one zbx.build/1 line per
-    \\  step (see zbx schema build). With --verbose each step's output also goes to stderr, a line
-    \\  at a time behind "<step> | " (a reader that stops reading stderr pauses the build).
+    \\  zbx build [-f <file>] [--clear-caches]
+    \\  builds the steps, then the image: one row per step (hit or miss, its time, net for
+    \\  network = true, cache for .caches) and the result digest; --output json: one zbx.build/1
+    \\  line per step (see zbx schema build). --clear-caches first empties the cache
+    \\  directories. With --verbose each step's output also goes to stderr, a line at a time
+    \\  behind "<step> | " (a reader that stops reading stderr pauses the build).
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
     \\  prints its tree and config (--output json: see zbx schema inspect); zbx inspect
     \\  --provenance <result digest> prints the build's provenance record (--output json: see
@@ -559,6 +560,8 @@ pub const PullArgs = struct {
 pub const BuildArgs = struct {
     graph: bool = false,
     file: ?[]const u8 = null,
+    /// `--clear-caches`: empty the build file's cache directories first.
+    clear_caches: bool = false,
 };
 
 pub const Invocation = struct {
@@ -666,6 +669,8 @@ const Token = union(enum) {
     /// `--graph`, and `-f` whose value is the next argument: `build`'s.
     graph,
     file_next,
+    /// `--clear-caches`: `build`'s.
+    clear_caches,
     /// `--no-passphrase`, and `--passphrase-file` with its value next or after an `=`: `key new`'s.
     no_passphrase,
     passphrase_file_next,
@@ -756,6 +761,7 @@ fn classify(argument: []const u8) Token {
     if (std.mem.eql(u8, argument, "--resolve-only")) return .resolve_only;
     if (std.mem.eql(u8, argument, "-o")) return .out_next;
     if (std.mem.eql(u8, argument, "--graph")) return .graph;
+    if (std.mem.eql(u8, argument, "--clear-caches")) return .clear_caches;
     if (std.mem.eql(u8, argument, "-f")) return .file_next;
     if (std.mem.eql(u8, argument, "--no-passphrase")) return .no_passphrase;
     if (std.mem.eql(u8, argument, "--passphrase-file")) return .passphrase_file_next;
@@ -879,7 +885,7 @@ pub fn scan_options(args: []const []const u8) Options {
             },
             .username_inline, .password_file_inline, .password_stdin => {},
             .password_refused => {},
-            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .oci => {},
+            .confirm_inline, .trash, .resolve_only, .by_image, .graph, .clear_caches, .oci => {},
             .dry_run => {},
             .no_passphrase, .passphrase_file_inline, .key_inline, .provenance => {},
             .strict, .require_provenance, .public_inline, .apply => {},
@@ -976,7 +982,9 @@ pub fn parse(
             .provenance => try take_provenance(diag, &invocation.provenance, given, argument),
             .resolve_only => try take_pull_option(diag, &p.pull, given, argument),
             .out_next => try take_out_option(diag, &export_file, given, args, &index),
-            .graph, .file_next => try take_build_option(diag, &p.build, given, args, &index),
+            .graph, .clear_caches, .file_next => {
+                try take_build_option(diag, &p.build, given, args, &index);
+            },
             .no_passphrase,
             .passphrase_file_next,
             .passphrase_file_inline,
@@ -1304,7 +1312,7 @@ fn sign_option_twice(diag: *Diag, option: []const u8) ParseError {
     return error.UnexpectedArgument;
 }
 
-/// `--graph` and `-f FILE`, which only `build` takes.
+/// `--graph`, `--clear-caches` and `-f FILE`, which only `build` takes.
 fn take_build_option(
     diag: *Diag,
     build_args: *BuildArgs,
@@ -1316,13 +1324,17 @@ fn take_build_option(
     const argument = args[index.*];
     const token = classify(argument);
     assert(switch (token) {
-        .graph, .file_next => true,
+        .graph, .clear_caches, .file_next => true,
         else => false,
     });
     if (operands.len == 0) return unknown_option(diag, argument);
     if (command_named(operands[0]) != .build) return unknown_option(diag, argument);
     if (token == .graph) {
         build_args.graph = true;
+        return;
+    }
+    if (token == .clear_caches) {
+        build_args.clear_caches = true;
         return;
     }
     if (build_args.file != null) return file_twice(diag);
@@ -3022,7 +3034,11 @@ fn run_build(
         host,
         &storage.build,
         invocation.build,
-        .{ .json = invocation.options.output == .json, .verbose = invocation.options.verbose },
+        .{
+            .json = invocation.options.output == .json,
+            .verbose = invocation.options.verbose,
+            .clear_caches = invocation.build.clear_caches,
+        },
         &storage.handle.facts,
         diag,
     ) catch |err| return build_error(err);

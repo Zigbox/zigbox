@@ -914,6 +914,27 @@ pub fn copy_nothing(diag: *Diag, step: []const u8, pattern: []const u8, from: []
     assert(diag.code.? == .E0803);
 }
 
+/// `E0803` for a bind whose `.source` matches nothing in the `step:` output it names.
+pub fn bind_nothing(diag: *Diag, step: []const u8, source: []const u8, from: []const u8) void {
+    assert(diag.code == null);
+    assert(source.len > 0);
+    var step_echo: Echo = undefined;
+    var source_echo: Echo = undefined;
+    var from_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const source_shown = text_util.sanitise(&source_echo, source);
+    const from_shown = text_util.sanitise(&from_echo, from);
+    diag.raise(.E0803);
+    diag.while_("mounting a bind for step \"{s}\"", .{step_shown});
+    diag.cause("the bind source \"{s}\" matches nothing in \"{s}\"", .{
+        source_shown, from_shown,
+    });
+    diag.fix(.{ .sentence = "name a path the step's output has, or fix the glob" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("source", "{s}", .{source_shown});
+    assert(diag.code.? == .E0803);
+}
+
 fn conflict_refused(
     diag: *Diag,
     conflict: assemble_mod.Conflict,
@@ -1187,8 +1208,10 @@ pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
     assert(diag.code.? == .E0818);
 }
 
+pub const cache_label = "steps with cache mounts: ";
+
 /// `W0802`: the build has steps with `.caches`. `names` is their names in the build's order,
-/// already quoted and joined by `, `; `count` is how many there are.
+/// joined by `, ` (`network_names` makes it); `count` is how many there are.
 pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
     assert(diag.code == null);
     assert(count > 0);
@@ -1196,7 +1219,7 @@ pub fn cache_steps(diag: *Diag, names: []const u8, count: u32) void {
     diag.raise(.W0802);
     diag.while_("planning the build", .{});
     diag.cause("their output can depend on what a cache held, not only on the inputs", .{});
-    diag.cause("steps with cache mounts: {s}", .{names});
+    diag.cause(cache_label ++ "{s}", .{names});
     diag.context("steps", "{d}", .{count});
     diag.fix(.{
         .sentence = "keep each cache to what the command verifies or rebuilds, and do not " ++
