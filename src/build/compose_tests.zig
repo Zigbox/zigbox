@@ -985,3 +985,20 @@ test "a copy step makes its output with no worker, and an unmatched file never m
     try testing.expectEqual(@as(u32, 2), context.misses);
     try testing.expect(!first.eql(composed.outputs[0]));
 }
+
+test "a config user written as a name becomes its numbers, and an unknown name is E0817" {
+    // Goal: the record of a result holds `uid:gid` only. Method: the sample tree's passwd names
+    // root; `root` becomes `0:0`, a numeric user is left as written, `nobody` is refused.
+    start();
+    composed.record.tree = made_output();
+    composed.record.config.clear();
+    _ = composed.record.config.settings.set(.user, "root");
+    try context.numeric_user();
+    try testing.expectEqualStrings("0:0", composed.record.config.settings.get(.user));
+    _ = composed.record.config.settings.set(.user, "5:6");
+    try context.numeric_user();
+    try testing.expectEqualStrings("5:6", composed.record.config.settings.get(.user));
+    _ = composed.record.config.settings.set(.user, "nobody");
+    try testing.expectError(error.Failed, context.numeric_user());
+    try testing.expectEqual(codes.Code.E0817, diag.code.?);
+}

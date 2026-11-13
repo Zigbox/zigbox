@@ -44,6 +44,7 @@ const render = @import("../diag/render.zig");
 const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
 const copy_mod = @import("copy.zig");
+const image_user = @import("../image_user.zig");
 const result_mod = @import("result.zig");
 const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
@@ -101,6 +102,7 @@ pub const Workspace = struct {
     provenance: provenance_job.Workspace,
     /// A copy step: the selection's memory, each entry's key part and its patterns.
     copying: copy_mod.Workspace,
+    user_ws: image_user.Workspace,
     copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
     copy_patterns: [constants.build_copy_sources_max][]const u8,
 };
@@ -589,12 +591,7 @@ pub const Context = struct {
         const ws = context.ws;
         const file = &context.loaded.file;
         const graph = &context.loaded.graph;
-        var start = index;
-        var hops: u32 = 0;
-        while (graph.base_step[start]) |next| : (hops += 1) {
-            assert(hops < constants.build_steps_max); // The graph is acyclic.
-            start = next;
-        }
+        const start = graph_mod.chain_start(graph, index);
         const entry = try context.load_base(file.text(file.steps[start].base), spec.name);
         spec.platform = entry.platform_text();
         spec.base_tree = if (graph.base_step[index]) |target| ws.outputs[target] else ws.image.tree;
@@ -1007,7 +1004,14 @@ pub const Context = struct {
         var base_tree: ?Digest = null;
         var base: *const images.Settings = &ws.empty_settings;
         ws.empty_settings.clear();
-        if (file.image.base) |text| {
+        if (context.loaded.graph.image_base) |target| {
+            // The result starts from a step's output and inherits the config of the image the
+            // chain of `step:` bases began with.
+            const start = graph_mod.chain_start(&context.loaded.graph, target);
+            _ = try context.load_base(file.text(file.steps[start].base), null);
+            base_tree = ws.outputs[target];
+            base = &ws.image.settings;
+        } else if (file.image.base) |text| {
             _ = try context.load_base(file.text(text), null);
             base_tree = ws.image.tree;
             base = &ws.image.settings;
@@ -1047,6 +1051,7 @@ pub const Context = struct {
             },
         };
         ws.record.tree = tree;
+        try context.numeric_user();
         var saved: result_mod.Failure = undefined;
         const digest = result_mod.save(store, &ws.record, &ws.record_bytes, &saved) catch {
             const err = saved.err;
@@ -1056,6 +1061,29 @@ pub const Context = struct {
         try context.write_provenance(tree, digest);
         try context.report(image_slot, hit, tree);
         try context.footer(digest);
+    }
+
+    /// A `config.user` written as a name becomes its `uid:gid`, looked up in the result's tree: the
+    /// record holds numbers only. The key had the name, so a changed passwd in the tree is a new
+    /// result only through the tree.
+    pub fn numeric_user(context: *Context) Error!void {
+        const ws = context.ws;
+        const settings = &ws.record.config.settings;
+        const text = settings.get(.user);
+        if (text.len == 0) return;
+        if (file_mod.is_numeric_user(text)) return;
+        const tree = ws.record.tree;
+        const found = image_user.resolve(context.store, &ws.user_ws, tree, text, context.diag) catch {
+            context.diag.reset();
+            diagnose.user_not_found(context.diag, ".image .config", text);
+            return error.Failed;
+        };
+        var buffer: [24]u8 = undefined;
+        const numbers = std.fmt.bufPrint(&buffer, "{d}:{d}", .{
+            found.user.uid, found.user.gid,
+        }) catch unreachable; // Two 32-bit numbers and a colon.
+        const set = settings.set(.user, numbers);
+        assert(set != null); // Shorter than the name it replaces or the bound allows both.
     }
 
     /// The provenance record of the result just saved (the store lock is held).

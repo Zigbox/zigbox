@@ -25,6 +25,7 @@ const store_diagnose = @import("../store/diagnose.zig");
 const provenance = @import("../trust/provenance.zig");
 const provenance_store = @import("../trust/provenance_store.zig");
 const load_mod = @import("load.zig");
+const graph_mod = @import("graph.zig");
 
 const Digest = digest_mod.Digest;
 const Store = layout.Store;
@@ -124,7 +125,11 @@ pub fn fill(request: *const Request, record: *provenance.Record, diag: *Diag) Er
         }
     }
     if (file.image.base) |text| {
-        const reference = file.text(text);
+        // A `step:` base is the image its chain began with.
+        const reference = if (loaded.graph.image_base) |target|
+            file.text(file.steps[graph_mod.chain_start(&loaded.graph, target)].base)
+        else
+            file.text(text);
         const entry = &lock.entries[lock.find(reference).?]; // The build resolved it.
         record.image_base = record.add_base(reference, entry.manifest.bytes, entry.tree.bytes);
     }

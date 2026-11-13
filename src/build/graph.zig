@@ -137,12 +137,7 @@ pub const Unrunnable = struct {
 /// quietly ignores a field. `--graph` shows every field and does not ask.
 pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     assert(graph.count == file.steps_count);
-    if (graph.image_base != null) return .{ .step = null, .field = ".image .base = \"step:\"" };
-    if (file.image.config.user) |user| {
-        if (!file_mod.is_numeric_user(file.text(user))) {
-            return .{ .step = null, .field = ".image .config .user as a name" };
-        }
-    }
+    assert(file.steps_count <= constants.build_steps_max);
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
         if (copy_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
@@ -163,6 +158,18 @@ fn copy_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const 
         if (entry.exclude.given) return ".copy .exclude on a step: source";
     }
     return null;
+}
+
+/// The step whose `.base` is an image, at the start of the chain of `step:` bases that
+/// `index` is on (itself when its own base is an image).
+pub fn chain_start(graph: *const Graph, index: u8) u8 {
+    var start = index;
+    var hops: u32 = 0;
+    while (graph.base_step[start]) |next| : (hops += 1) {
+        assert(hops < constants.build_steps_max); // The graph is acyclic.
+        start = next;
+    }
+    return start;
 }
 
 pub fn step_named(file: *const BuildFile, name: []const u8) ?u8 {
