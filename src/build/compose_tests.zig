@@ -830,8 +830,8 @@ test "a bind from a step's output is selected from that output, and nothing matc
             field,
             " } } }",
         });
-        const parsed = file_mod.parse(edited, &loaded.file, &problem);
-        try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+        const again = file_mod.parse(edited, &loaded.file, &problem);
+        try testing.expectEqual(file_mod.ParseResult.parsed, again);
         if (at == 0) {
             try context.resolve_binds(1, &spec);
             try testing.expect(!first.eql(spec.binds[0].source));
