@@ -67,6 +67,7 @@ const cdi_diagnose = @import("cdi_diagnose.zig");
 const cdi_discover = @import("cdi_discover.zig");
 const cdi_mod = @import("cdi.zig");
 const devices_mod = @import("devices.zig");
+const gpu_mod = @import("gpu.zig");
 const devices_diagnose = @import("devices_diagnose.zig");
 
 const Host = host_mod.Host;
@@ -273,6 +274,10 @@ pub const Handle = struct {
     resolution: mounts_mod.Resolution,
     /// The `--device`s (they point into the `Spec`), once the host has shown each.
     devices: []const devices_mod.Device,
+    /// What `devices` come to once `--gpu` is expanded (they point into `gpu_expanded`, or into
+    /// the `Spec` when nothing was expanded): what the plan binds. `devices` is what was asked.
+    effective: []const devices_mod.Device,
+    gpu_expanded: gpu_mod.Expanded,
     /// The devices' paths as the plan takes them.
     device_paths: [constants.run_devices_max][]const u8,
     /// What the CDI devices among `devices` resolved to, null: none was asked. Only while
@@ -373,6 +378,7 @@ fn init_handle(host: Host, container: *const Spec, options: StartOptions, handle
     handle.volumes.count = 0;
     handle.mounts = &.{};
     handle.devices = &.{};
+    handle.effective = &.{};
     handle.cdi = null;
     handle.user = container.user;
     handle.binding = container.binding;
@@ -485,13 +491,58 @@ fn resolve_devices(
         devices_diagnose.refused(diag, path, refusal.problem);
         return error.StartFailed;
     }
+    if (!expand_gpu(host, container, handle, diag)) return error.StartFailed;
     if (!resolve_cdi(host, container, handle, storage, diag)) return error.StartFailed;
-    handle.devices = container.devices;
+    handle.devices = container.devices; // What was asked: the record keeps it.
     var note: Diag = undefined;
     note.reset();
     devices_diagnose.groups_note(&note);
     handle.report(&note);
     assert(handle.devices.len <= constants.run_devices_max);
+}
+
+/// Turns `--gpu` keywords into devices (`gpu.expand`), into `handle.effective`. A run without a
+/// keyword looks at nothing more and keeps its devices as they were.
+fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) bool {
+    assert(diag.code == null);
+    assert(handle.effective.len == 0);
+    var wants = false;
+    var wants_all = false;
+    for (container.devices) |device| {
+        const ask = gpu_mod.ask_of(device.path);
+        wants = wants or ask != null;
+        wants_all = wants_all or ask == .all;
+    }
+    if (!wants) {
+        handle.effective = container.devices;
+        return true;
+    }
+    var dri: gpu_mod.Dri = undefined;
+    gpu_mod.look_dri(host, &dri);
+    var nvidia = false;
+    var trouble = false;
+    // Only `all` looks at the specs: `dri` is the render nodes, with no vendor tooling. A
+    // resolution the caller gave replaces the host's specs, so there is nothing to probe.
+    if (wants_all and container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
+        .offered => nvidia = true,
+        .absent => {},
+        .trouble => trouble = true,
+        .refused => return false,
+    };
+    const out = &handle.gpu_expanded;
+    switch (gpu_mod.expand(container.devices, nvidia, &dri, trouble, out)) {
+        .given => {},
+        .nothing => |nothing| {
+            devices_diagnose.no_gpu(diag, nothing);
+            return false;
+        },
+        .too_many => {
+            devices_diagnose.bad_path(diag, container.devices[0].path, .too_many);
+            return false;
+        },
+    }
+    handle.effective = out.slice();
+    return true;
 }
 
 /// The CDI devices among the asked ones: the caller's resolution if it gave one, else the specs
@@ -503,11 +554,11 @@ fn resolve_cdi(
     storage: *cdi_mod.Resolved,
     diag: *Diag,
 ) bool {
-    assert(container.devices.len <= constants.run_devices_max);
+    assert(handle.effective.len <= constants.run_devices_max);
     assert(diag.code == null);
     var asked: [constants.run_devices_max][]const u8 = undefined;
     var count: usize = 0;
-    for (container.devices) |device| {
+    for (handle.effective) |device| {
         if (devices_mod.is_path(device.path)) continue;
         asked[count] = device.path;
         count += 1;
@@ -570,9 +621,9 @@ fn build_plan(
         } else null,
         .state = handle.volumes.input_slice(),
         .mounts = handle.resolution.inputs[0..handle.mounts.len],
-        .devices = devices_mod.plan_input(handle.devices, &handle.device_paths),
+        .devices = devices_mod.plan_input(handle.effective, &handle.device_paths),
         .cdi = handle.cdi,
-        .keep_groups = handle.devices.len > 0,
+        .keep_groups = handle.effective.len > 0,
         .hostname = container.hostname,
         .umask = container.umask,
     };

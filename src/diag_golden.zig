@@ -128,6 +128,10 @@ const cdi_args = [_][:0]const u8{
     "run", "--rootfs", "/srv/alpine", "--device", "vendor.example/gpu=0", "--", "sh",
 };
 
+const gpu_args = [_][:0]const u8{
+    "run", "--rootfs", "/srv/alpine", "--gpu", "all", "--", "sh",
+};
+
 /// A host with a device node and one CDI spec in /etc/cdi.
 const cdi_files = sim_run.files ++ [_]@import("host_sim.zig").File{
     .{ .path = "/dev/fake0", .content = "", .mode = 0o020666 },
@@ -1050,6 +1054,12 @@ const exec_cases = [_]Case{
         .code = .E0227,
         .args = &cdi_args,
         .prepare = prepare_cdi_hook,
+        .exit = 125,
+    },
+    .{
+        .code = .E0228,
+        .args = &gpu_args,
+        .prepare = prepare_container,
         .exit = 125,
     },
     .{

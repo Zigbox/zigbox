@@ -278,6 +278,16 @@ pub const cdi_name_bytes_max: u32 = 128;
 pub const run_devices_text_bytes_max: u32 = 896;
 /// A path in a spec: where a mount lands in the container, or where it comes from.
 pub const cdi_path_bytes_max: u32 = 256;
+/// The doctor's GPU section (M10 slice 3): items shown (specs, devices, nodes, fixes), the bytes
+/// of an item's subject and detail. Items past the bound are counted, not shown.
+pub const doctor_gpu_items_max: u32 = 24;
+pub const doctor_gpu_subject_bytes_max: u32 = 80;
+pub const doctor_gpu_detail_bytes_max: u32 = 160;
+comptime {
+    // JSON escapes a quote or a backslash into two bytes; an item adds about 100 bytes of frame.
+    const item = 2 * (doctor_gpu_subject_bytes_max + doctor_gpu_detail_bytes_max) + 100;
+    assert(doctor_gpu_items_max * item + 64 <= output_bytes_max);
+}
 /// What one run takes from the specs, merged: nodes, mounts, variables, library directories, and
 /// the text they are kept in. Over any of these the run is refused (E0226).
 pub const cdi_run_nodes_max: u32 = 32;

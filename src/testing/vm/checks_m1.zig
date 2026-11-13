@@ -27,6 +27,8 @@ pub const Error = error{
     DeviceAccessWrong,
     /// M10 slice 2: a CDI device did not bring its node or its environment variable.
     CdiEditWrong,
+    /// M10 slice 3: doctor's GPU section or a `--gpu` run is not what the host has.
+    GpuWrong,
 };
 
 fn has_line(text: []const u8, wanted: []const u8) bool {
@@ -263,6 +265,36 @@ pub fn check_cdi_unknown(streams: Streams, status: u8) Error!void {
     if (status != 125) return error.ExitCodeWrong;
 }
 
+/// M10 slice 3: `zbx doctor` on a host with the spec `zigbox.test/gpu` whose one node the user
+/// can open: the section lists the spec and the device, says the node is openable, and no
+/// line of the section is a gap.
+pub fn check_gpu_doctor(streams: Streams) Error!void {
+    const out = streams.stdout;
+    if (!has_line_starting(out, "gpu  ok  spec ")) return error.GpuWrong;
+    if (std.mem.indexOf(u8, out, "zigbox.test/gpu=0") == null) return error.GpuWrong;
+    if (!has_line_starting(out, "gpu  ok  device zigbox.test/gpu=0")) return error.GpuWrong;
+    if (has_line_starting(out, "gpu  gap")) return error.GpuWrong;
+}
+
+/// `--gpu all` on a host with no `nvidia.com` spec and no render node: E0228 in one line that
+/// names `zbx doctor`, exit 125, nothing on stdout.
+pub fn check_gpu_none(streams: Streams, status: u8) Error!void {
+    if (!std.mem.startsWith(u8, streams.stderr, "error[ZBX-E0228]: ")) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "zbx doctor") == null) return error.NoteMissing;
+    if (std.mem.indexOf(u8, streams.stderr, "errno") != null) return error.NoteMissing;
+    if (std.mem.trim(u8, streams.stdout, " \r\n").len != 0) return error.StdoutNotEmpty;
+    if (status != 125) return error.ExitCodeWrong;
+}
+
+/// `--gpu dri` on a host with a render node: the run succeeds and `ls /dev/dri` in it shows
+/// a `renderD` node and no `card` node.
+pub fn check_gpu_dri(streams: Streams, status: u8) Error!void {
+    if (status != 0) return error.ExitCodeWrong;
+    if (std.mem.indexOf(u8, streams.stdout, "renderD") == null) return error.GpuWrong;
+    if (std.mem.indexOf(u8, streams.stdout, "card") != null) return error.GpuWrong;
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
+}
+
 /// The bundle step prints `BUNDLE:<path>`, the `tar -tzf` listing, `LISTED-END`, then
 /// `LEAKS:<n>` (planted secrets found in the extracted bundle) and `REDACTED:<n>` (markers).
 pub fn check_bundle_has_no_secret(output: []const u8) Error!void {
@@ -493,4 +525,29 @@ test "cdi: a device applies its edits, and an unknown name is E0230 listing the 
     try testing.expectError(error.ExitCodeWrong, check_cdi_unknown(quiet, 1));
     const bare = Streams{ .stdout = "", .stderr = "x" };
     try testing.expectError(error.NoteMissing, check_cdi_unknown(bare, 125));
+}
+
+test "gpu: doctor lists the spec, --gpu all with nothing is E0228, --gpu dri shows the node" {
+    // Goal: each check fails on the wrong text, so it proves something.
+    const good = "gpu  ok  spec /etc/cdi/a.json  zigbox.test/gpu, 1 devices\n" ++
+        "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n";
+    try check_gpu_doctor(.{ .stdout = good, .stderr = "" });
+    const absent = Streams{ .stdout = "ok  kernel\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(absent));
+    const gap = Streams{ .stdout = good ++ "gpu  gap node /dev/x  mode 0660\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_doctor(gap));
+    const none = Streams{
+        .stdout = "",
+        .stderr = "error[ZBX-E0228]: --gpu found nothing; run zbx doctor\n",
+    };
+    try check_gpu_none(none, 125);
+    try testing.expectError(error.ExitCodeWrong, check_gpu_none(none, 1));
+    const bare = Streams{ .stdout = "", .stderr = "x" };
+    try testing.expectError(error.NoteMissing, check_gpu_none(bare, 125));
+    const dri = Streams{ .stdout = "renderD128\n", .stderr = "" };
+    try check_gpu_dri(dri, 0);
+    const card = Streams{ .stdout = "card0\nrenderD128\n", .stderr = "" };
+    try testing.expectError(error.GpuWrong, check_gpu_dri(card, 0));
+    try testing.expectError(error.GpuWrong, check_gpu_dri(.{ .stdout = "", .stderr = "" }, 0));
+    try testing.expectError(error.ExitCodeWrong, check_gpu_dri(dri, 125));
 }
