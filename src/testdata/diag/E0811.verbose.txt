@@ -1,0 +1,8 @@
+error[ZBX-E0811]: a Dockerfile instruction or flag is not supported
+  while  importing Dockerfile
+  cause  Dockerfile:3: Dockerfile:3 has FROM --platform=linux/arm64, but zbx
+         builds ...
+  line   3
+  fix    write --platform=$BUILDPLATFORM, or remove the flag
+  more   zbx explain E0811
+  docs   https://zigbox.github.io/zigbox/errors/E0811.html
