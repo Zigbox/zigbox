@@ -254,6 +254,8 @@ pub const HostReal = struct {
         // refused as unsupported, not asserted on, since the kernel's answer is input.
         const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID;
         if (!complete) return error.Unsupported;
+        assert(buffer.mask.MODE); // Past the refusal, every field read below is the kernel's.
+        assert(buffer.mask.UID);
         return .{ .mode = buffer.mode, .uid = buffer.uid };
     }
 
@@ -267,6 +269,8 @@ pub const HostReal = struct {
         const complete = buffer.mask.TYPE and buffer.mask.MODE and buffer.mask.UID and
             buffer.mask.GID;
         if (!complete) return error.Unsupported;
+        assert(buffer.mask.UID); // Past the refusal, every field read below is the kernel's.
+        assert(buffer.mask.GID);
         // The kernel's own answer, for the ids and the groups the process holds (zbx is never
         // setuid, so its real and effective ids are the same).
         const access = linux.access(path.ptr, linux.R_OK | linux.W_OK);
