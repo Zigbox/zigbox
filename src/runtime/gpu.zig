@@ -76,6 +76,16 @@ pub const Dri = struct {
         return dri.text[index][0..dri.lengths[index]];
     }
 
+    /// A render node is among them: `/dev/kfd` alone is no GPU a workload can use, and a run
+    /// given only it would hide that the render nodes were closed to the user.
+    fn has_render(dri: *const Dri) bool {
+        var index: u32 = 0;
+        while (index < dri.count) : (index += 1) {
+            if (!std.mem.eql(u8, dri.path(index), kfd_path)) return true;
+        }
+        return false;
+    }
+
     fn add(dri: *Dri, node: []const u8) void {
         assert(node.len <= constants.device_path_bytes_max);
         assert(devices.path_problem(node) == null);
@@ -221,7 +231,7 @@ pub fn expand(
             if (!out.add(device.path)) return .too_many;
             continue;
         };
-        const given: bool = if (ask == .all and nvidia) true else dri.count > 0;
+        const given: bool = if (ask == .all and nvidia) true else dri.has_render();
         if (!given) return .{ .nothing = .{
             .ask = ask,
             .unopenable = dri.unopenable,
@@ -249,16 +259,15 @@ pub const Probe = enum {
     offered,
     /// No spec has any.
     absent,
-    /// None, and a spec file could not be used (it may have been the NVIDIA one).
-    trouble,
     /// A spec offers them and they cannot be used: `diag` says why (E0225, E0227, ...).
     refused,
 };
 
 /// Resolves `nvidia.com/gpu=all` against the host's specs only to learn whether it works. The
 /// run resolves again with its real list; the cost is reading the specs twice. A refusal that
-/// says "there are none" is not one: the answer is `absent` or `trouble` and `diag` is left
-/// clean. Any other refusal is the answer the user needs and stays raised.
+/// says "there are none" (E0230) is not one: the answer is `absent` and `diag` is left clean.
+/// Any other refusal, E0226 (a YAML or stale spec) included, is the answer the user needs and
+/// stays raised.
 pub fn probe_nvidia(host: Host, diag: *Diag) Probe {
     assert(diag.code == null);
     var scratch: cdi_discover.Scratch = undefined;
@@ -270,10 +279,8 @@ pub fn probe_nvidia(host: Host, diag: *Diag) Probe {
         diag.reset();
         return .absent;
     }
-    if (code == .E0226) {
-        diag.reset();
-        return .trouble;
-    }
+    // E0226 stays raised: a YAML or stale NVIDIA spec on a host whose nvidia-drm made a render
+    // node would otherwise start the run with the node and no driver, and no word why.
     return .refused;
 }
 
@@ -357,4 +364,13 @@ test "ask_of reads only the two keywords" {
     try testing.expectEqual(@as(?Ask, null), ask_of("nvidia.com/gpu=all"));
     try testing.expectEqual(@as(?Ask, null), ask_of("/dev/dri/gpu=all"));
     try testing.expectEqual(@as(?Ask, null), ask_of(""));
+}
+
+test "expand: /dev/kfd alone is not a GPU, and the closed render nodes are reported" {
+    // Goal: the review's SHOULD. Method: kfd openable, one render node closed.
+    const only_kfd = dri_of(&.{"/dev/kfd"}, 1);
+    var out: Expanded = undefined;
+    const asked = [_]Device{.{ .path = "gpu=dri" }};
+    const got = expand(&asked, false, &only_kfd, false, &out);
+    try testing.expectEqual(@as(u32, 1), got.nothing.unopenable);
 }

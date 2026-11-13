@@ -167,3 +167,17 @@ test "look_dri and expand serve a caller that has no command line" {
     try testing.expectEqualStrings("/dev/dri/renderD128", dri.path(0));
     try testing.expectEqualStrings("/dev/kfd", dri.path(2));
 }
+
+test "--gpu all raises E0226 for a YAML spec instead of falling back to the render nodes" {
+    // Goal: the review's MUST. An NVIDIA host has nvidia-drm's render node, so a fallback would
+    // start the run with no driver libraries and no diagnostic. Method: openable node + YAML spec.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    var files: Files = undefined;
+    setup(sim, &files, .{ .open = 1, .locked = 0, .kfd = false, .spec = false });
+    sim.world.add_node("/etc/cdi", .dir);
+    std.debug.assert(sim.world.write_file("/etc/cdi/nvidia.yaml", "cdiVersion: 0.6.0\n") == null);
+    try testing.expectEqual(@as(u8, 125), run_gpu(sim, "all"));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0226") != null);
+    try testing.expect(!bound(sim, "/dev/dri/renderD128"));
+}

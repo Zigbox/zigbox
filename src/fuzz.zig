@@ -1035,15 +1035,15 @@ fn check_doctor_cli(
     if (json) assert(every_line_is_json(sim.stderr()));
 }
 
-/// True if the interrupts the simulator injected could have made a write give up
-/// (`Host.write_all` stops after `eintr_retries_max` in a row) and what reached the streams
-/// is less than the report says. A run with fewer interrupts than that has no such excuse.
 /// The text report without the GPU lines the doctor adds after it (they are not checks).
 fn report_part(stdout: []const u8) []const u8 {
     const at = std.mem.indexOf(u8, stdout, "\ngpu  ") orelse return stdout;
     return stdout[0 .. at + 1];
 }
 
+/// True if the interrupts the simulator injected could have made a write give up
+/// (`Host.write_all` stops after `eintr_retries_max` in a row) and what reached the streams
+/// is less than the report says. A run with fewer interrupts than that has no such excuse.
 fn doctor_output_cut_by_interrupts(
     sim: *const HostSim,
     report: *const doctor.Report,

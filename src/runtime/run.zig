@@ -515,16 +515,14 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
     var dri: gpu_mod.Dri = undefined;
     gpu_mod.look_dri(host, &dri);
     var nvidia = false;
-    var trouble = false;
     // A resolution the caller gave replaces the host's specs, so there is nothing to probe.
     if (container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
         .offered => nvidia = true,
         .absent => {},
-        .trouble => trouble = true,
         .refused => return false,
     };
     const out = &handle.gpu_expanded;
-    switch (gpu_mod.expand(container.devices, nvidia, &dri, trouble, out)) {
+    switch (gpu_mod.expand(container.devices, nvidia, &dri, false, out)) {
         .given => {},
         .nothing => |nothing| {
             devices_diagnose.no_gpu(diag, nothing);
