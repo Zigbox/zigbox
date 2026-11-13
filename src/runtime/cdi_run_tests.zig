@@ -150,9 +150,11 @@ test "the read-only refusal names the device that has the mounts" {
     const sim = sim_get();
     defer testing.allocator.destroy(sim);
     setup_with(sim, two_device_spec);
+    const nic = "vendor.example/gpu=nic";
+    const gpu = "vendor.example/gpu=0";
     const run = [_][:0]const u8{
-        "zbx",    "-v",      "run",      "--read-only",            "--rootfs", sim_run.rootfs_path,
-        "--name", "c-6",     "--device", "vendor.example/gpu=nic", "--device", "vendor.example/gpu=0",
+        "zbx",    "-v",      "run",      "--read-only", "--rootfs", sim_run.rootfs_path,
+        "--name", "c-6",     "--device", nic,           "--device", gpu,
         "--",     "/bin/sh",
     };
     try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &run));
