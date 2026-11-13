@@ -1,6 +1,6 @@
 # Zigbox: A First-Principles Container Runtime in Zig
 
-Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91); Part II's C4 lines resynced 2026-11-13 (doc rev 103), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
+Snapshot of https://claude.ai/artifact/6D9js8mxSLYmfuZe3rQ26w taken 2026-11-04 (doc rev 91); Part II's C4 lines resynced 2026-11-13 (doc rev 103); M9 and M10 ported to the doc, with their status lines brought up to date, 2026-11-13 (doc rev 112), Parts I to III. The live doc is authoritative; update this file when it changes. The three diagrams in the live doc are listed as figure notes, not reproduced.
 
 ## Purpose and design principles
 
@@ -288,7 +288,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 ### M9 · Import: a Dockerfile becomes a build file
 
-*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; not merged on `main` as of this sync. Targets 0.6.0. Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
+*Status: briefs `docs/briefs/M9-dockerfile-import.md` and `M9-dockerfile-flags.md`; slices 1 and 2 merged (#122, #134), slice 3 in progress, slices 4 and 5 not started (2026-11-13). Targets 0.6.0. Started before the 0.5.0 tag (supervisor, 2026-11-12, `docs/decisions/2026-11-12-m9-starts-before-the-0.5.0-tag.md`).*
 
 **Goal:** `zbx import` reads a Dockerfile and writes a `zbx.build.zon` that a person reads, commits and builds with `zbx build`. A Dockerfile is translated, never executed.
 
@@ -296,7 +296,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **CLI:** `zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg K=V]... [--network detect|all|none] [--hermetic] [-o <file>] [--force]`. Output `zbx.build.zon` in the context, refused if it exists (`E0816`) unless `--force`. `--hermetic` refuses (`E0814`) when any step would have the network or a cache, and writes nothing. Report on stderr; `--output json`, schema `zbx.import/1`. Library: `zigbox.dockerfile.translate`, a pure function.
 
-**Limits (supervisor decision):** `build_steps_max` 64 to 256; `build_file_bytes_max` and `build_pool_bytes` 64 KiB to 256 KiB; new `build_step_caches_max` 4, `build_step_binds_max` 4, `build_copy_entries_max` 64, `build_exclude_lines_max` 256. (On `main` the build bounds are still 64 and 64 KiB.)
+**Limits (supervisor decision):** `build_steps_max` 64 to 256; `build_file_bytes_max` and `build_pool_bytes` 64 KiB to 256 KiB; new `build_step_caches_max` 4, `build_step_binds_max` 4, `build_copy_entries_max` 64, `build_exclude_lines_max` 256. (On `main` since slice 1.)
 
 **Diagnostics:** `E0810` cannot read or parse; `E0811` unsupported instruction, flag or form; `E0812` variable without a value; `E0813` stage problem or step-name collision; `E0814` `--hermetic` refusal; `E0815` over a builder bound; `E0816` output exists; `E0817` user or group name not in the tree; `W0802` cache-mount steps; `W0810` non-hermetic steps; `W0811` parts that did not carry over. A refused import exits 1 and writes nothing. The per-option disposition is in `docs/briefs/M9-dockerfile-flags.md`.
 
@@ -304,7 +304,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 ### M10 · Devices: host devices and GPUs for one container
 
-*Status: brief `docs/briefs/M10-gpu.md` (settled by `docs/decisions/2026-11-11-m10-gpu-decisions.md`). Slice 1 (`--device /dev/<path>` and kept supplementary groups) is merged (#125); slices 2 to 4 are not. Started before the 0.5.0 tag (owner, 2026-11-12, `docs/decisions/2026-11-12-m10-starts-before-the-0.5.0-tag.md`).*
+*Status: brief `docs/briefs/M10-gpu.md` (settled by `docs/decisions/2026-11-11-m10-gpu-decisions.md`). All four slices merged (#125, #130, #135, #140); `demo-m10` passed in CI in an Ubuntu 24.04 VM with KVM (2026-11-13; `--gpu dri` not run there, as the guest has no render node). Started before the 0.5.0 tag (owner, 2026-11-12, `docs/decisions/2026-11-12-m10-starts-before-the-0.5.0-tag.md`).*
 
 **Goal:** `zbx run --gpu all <image> -- nvidia-smi` works rootless on a Linux host with an NVIDIA GPU and its driver, given the one admin step the host needs anyway (generating a CDI spec). AMD and Intel work through render nodes. A run without `--gpu` or `--device` changes by no byte.
 
@@ -314,7 +314,7 @@ M0 to M2 make a hardened runtime; M3 and M4 add the store and real images, which
 
 **Limits:** `run_devices_max` 16; `device_path_bytes_max` 48 (`/dev/dri/renderD*`, `/dev/nvidia*`, `/dev/fuse`, `/dev/kvm`, `/dev/net/tun`, `/dev/bus/usb/NNN/NNN` fit; raising it or allowing `:` is a new decision); `plan_paths_bytes_max` 96 to 104 KiB; `sim_mounts_max` 32 to 64; `sim_nodes_max` 160 to 192. A run record is version 10 only for a run with a listener or devices; otherwise version 9, byte for byte.
 
-**Diagnostics:** registered on `main`: `E0225` a host device is refused (missing, not a character device, outside `/dev`, or the user cannot open it, with the node's mode and group); `W0209` groups show as `nogroup` inside (once per run, after the node checks pass). Planned: `E0226` unusable CDI spec; `E0227` CDI edit not applied; `E0228` `--gpu` found nothing; `E0229` devices unavailable on this platform; `E0230` unknown CDI device name; `W0208` image has no `ldconfig`.
+**Diagnostics:** all registered on `main`: `E0225` a host device is refused (missing, not a character device, outside `/dev`, or the user cannot open it, with the node's mode and group); `W0209` groups show as `nogroup` inside (once per run, after the node checks pass); `E0226` unusable CDI spec; `E0227` CDI edit not applied; `E0228` `--gpu` found nothing; `E0229` devices unavailable on this platform; `E0230` unknown CDI device name; `W0208` image has no `ldconfig`.
 
 **Demo:** `zig build demo-m10` proves the plumbing with a fake vendor device, driver directory and CDI spec made in the guest (no GPU on CI). The real-GPU run (an AWS `g4dn.xlarge`, NVIDIA T4) is recorded in `docs/demos/m10.md`, not part of the demo. Details in the brief.
 
