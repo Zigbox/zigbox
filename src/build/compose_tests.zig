@@ -950,3 +950,38 @@ test "a step whose base no policy trusts is refused before it starts, naming the
     const cause = diag.causes.slice()[diag.causes.count - 1].slice();
     try testing.expect(std.mem.indexOf(u8, cause, "the base of step 'compile'") != null);
 }
+
+test "a copy step makes its output with no worker, and an unmatched file never moves the key" {
+    // Goal: `.copy` is built in the parent: a miss is recorded and reported as one, the same
+    // step again is a hit, and a project file that no `.src` takes changes nothing. Method: copy
+    // `a.txt` and begin; edit `other.txt` and begin again; edit `a.txt` and begin again.
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"put\", .base = \"",
+        locked_reference,
+        "\", .copy = .{ .{ .src = .{\"a.txt\"}, .to = \"/opt/\" } } } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    files.put_file("/p/other.txt", 0o644, "o\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expect(diag.code == null);
+    try testing.expectEqual(@as(u32, 1), context.misses);
+    const first = composed.outputs[0];
+    files.remove_path("/p/other.txt");
+    files.put_file("/p/other.txt", 0o644, "changed\n");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 1), context.hits);
+    try testing.expect(first.eql(composed.outputs[0]));
+    files.remove_path("/p/a.txt");
+    files.put_file("/p/a.txt", 0o644, "edited\n");
+    try testing.expect(try context.begin(0) == .hit);
+    try testing.expectEqual(@as(u32, 2), context.misses);
+    try testing.expect(!first.eql(composed.outputs[0]));
+}
