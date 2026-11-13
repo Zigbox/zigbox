@@ -36,11 +36,13 @@ release PR merged to main (supervisor; version in build.zig.zon, notes in docs/r
        ├─ draft       a DRAFT release (--draft --target <sha>), notes from docs/releases/<v>.md
        │              ── nothing above wrote anything public; nothing below does until `publish` ──
        ├─ linux       env release ┐ the owner's ONE approval covers both
-       │    sign apt and rpm, attach zigbox-repos.tar.gz to the draft
+       │    sign apt and rpm, write the release assets and SHA256SUMS, sign it (SHA256SUMS.asc),
+       │    attach all of it to the draft
        ├─ mac         env release ┘ macos-15 (hosted)
        │    build arm64 and x86_64, lipo, sign, notarize, check, attach
-       │    zbx-<v>-macos-universal.zip, its .sha256 and the formula to the draft
-       ├─ prepare     env release-publish: the draft holds exactly four assets, each checked;
+       │    zbx-<v>-macos-universal.zip, its .sha256, SHA256SUMS.macos and the formula to the draft
+       ├─ prepare     env release-publish: the draft holds exactly the expected assets, each checked,
+       │              both sums files match, SHA256SUMS.asc is by a subkey of the pinned key;
        │              the tap's formula differs only in url, version, sha256 (and the one-off lines)
        ├─ publish     the draft becomes the release; THIS creates the tag, at the release commit
        ├─ tap         env release-publish: commit Formula/zigbox.rb to Zigbox/homebrew-tap main
@@ -77,7 +79,7 @@ By hand, the commit is found, not given: it is the commit of `main` that added
 | App token mints for the tap and the site; tap formula readable; site `deploy.yml` found | `preflight` |
 | a draft at another commit; two drafts | `draft`, `find-draft` |
 | signature, notarization, `lipo -archs` (both), `spctl`, `zbx --version` of the signed zip | `mac` |
-| the draft's four assets, their hashes, the formula's url, version and hash, the archive listing | `prepare` |
+| the draft's assets (exactly), `SHA256SUMS` and `SHA256SUMS.macos` against them, the signature on `SHA256SUMS`, the formula's url, version and hash, the archive listing | `prepare` |
 | the tap diff touches only the lines it may | `prepare` (again in `tap` before the write) |
 
 ### Prereleases
