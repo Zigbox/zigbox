@@ -1,0 +1,47 @@
+name: Check the formula against the tap
+description: >
+  Fetches Formula/zigbox.rb from Zigbox/homebrew-tap main and compares it with the generated
+  formula. Refuses unless the difference is only the url, version and sha256 lines (plus the
+  lines listed below, which the move to a universal binary changes once). Writes nothing to the
+  tap. The caller sets GH_TOKEN to a token that can read the tap and runs the pinned gh.
+inputs:
+  formula:
+    description: Path of the generated formula.
+    required: true
+outputs:
+  changed:
+    description: '"true" when the formula differs from the tap''s, else "false".'
+    value: ${{ steps.check.outputs.changed }}
+  blob:
+    description: The blob SHA of the tap's current Formula/zigbox.rb (for the update call).
+    value: ${{ steps.check.outputs.blob }}
+runs:
+  using: composite
+  steps:
+    - name: Compare
+      id: check
+      shell: bash --noprofile --norc -euo pipefail {0}
+      env:
+        FORMULA: ${{ inputs.formula }}
+        TAP: Zigbox/homebrew-tap
+      run: |
+        current="${RUNNER_TEMP}/tap-current.rb"
+        info=$(gh api "repos/$TAP/contents/Formula/zigbox.rb?ref=main" --jq '.sha')
+        gh api -H 'Accept: application/vnd.github.raw' "repos/$TAP/contents/Formula/zigbox.rb?ref=main" > "$current"
+        echo "blob=$info" >> "$GITHUB_OUTPUT"
+        if cmp -s "$current" "$FORMULA"; then
+          echo "tap: Formula/zigbox.rb is already this formula"
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        changed=$(diff -U0 "$current" "$FORMULA" | { grep -E '^[+-]' || true; } | { grep -Ev '^(\+\+\+|---)' || true; })
+        # url, version and sha256 change every release. The two other lines are what the move to
+        # one universal binary changes, once: the header comment and the arm64-only dependency.
+        allowed='^[+-] *(url|version|sha256) "|^[+-]# zbx for macOS|^-  depends_on arch: :arm64$'
+        if [ -n "$(grep -Ev "$allowed" <<< "$changed" || true)" ]; then
+          echo "release: the formula differs from the tap's in more than url, version and sha256:" >&2
+          printf '%s\n' "$changed" >&2
+          exit 1
+        fi
+        echo "tap: the formula differs from the tap's only in allowed lines"
+        echo "changed=true" >> "$GITHUB_OUTPUT"

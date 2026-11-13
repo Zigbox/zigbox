@@ -79,6 +79,10 @@ Every adversarial review of a pull request (a slice review, a re-review, either 
 
 ## Releases (owner, 2026-11-04)
 
+The tag is made by publishing the draft release, in `.github/workflows/release.yml`, once `ci` is
+green on the merged release commit and every check has passed; never by hand unless the owner has
+written a go-ahead for that release in `docs/decisions/` (docs/releases/automation.md).
+
 A release tag is cut only from a commit that is all of:
 
 - **Sim-clean.** `zig build check` passes on it, and an extended seeded run of every fuzzer and
