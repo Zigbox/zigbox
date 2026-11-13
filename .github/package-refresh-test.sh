@@ -27,17 +27,19 @@ gpg_home() { gpg_in "$home" "$@"; }
 listing_fpr() { GNUPGHOME=$home gpg --batch --list-keys --with-colons |
   awk -F: -v want="$1" '$1 == want { s = 1; next } $1 == "fpr" && s { print $10; exit }'; }
 
-# A primary valid for 10 days, a signing subkey valid for 1 day (the lapse tests need both).
-gpg_home --quick-generate-key "Zigbox refresh test <test@invalid>" rsa4096 cert 10d
+# A primary valid for 90 days, a signing subkey for 60: both outlast the 21-day Valid-Until, and
+# the lapse and too-short tests move the signing time past one or the other.
+gpg_home --quick-generate-key "Zigbox refresh test <test@invalid>" rsa4096 cert 90d
 primary=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
-gpg_home --quick-add-key "$primary" rsa4096 sign 1d
+gpg_home --quick-add-key "$primary" rsa4096 sign 60d
 subkey=$(listing_fpr sub)
 
 export ZIGBOX_SIGNING_KEY ZIGBOX_SIGNING_PASSPHRASE=$passphrase ZIGBOX_SIGNING_FPR=$primary
 ZIGBOX_SIGNING_KEY=$(gpg_home --armor --export-secret-subkeys "${subkey}!")
 
 # The archive a release would hold, signed by the subkey with the same script the release runs.
-.github/release-sign.sh "$work/release"
+now=$(date +%s)
+ZIGBOX_SIGNED_AT=$((now - 86400)) .github/release-sign.sh "$work/release"
 base=$work/release/zigbox-repos.tar.gz
 mkdir "$work/base"
 tar -xzf "$base" -C "$work/base"
@@ -67,11 +69,11 @@ refuse() { # refuse pattern command...: the command must fail with a line holdin
   grep -q -- "$pattern" <<< "$refusal" || fail "wrong refusal for '$pattern': $refusal"
   [ "$(wc -l <<< "$refusal")" -le 2 ] || fail "the refusal is more than a line: $refusal"
 }
+at() { local time=$1; shift; ZIGBOX_SIGNED_AT=$time "$@"; } # at TIME command...: the signing time
 repack() { # repack dir name: a copy of the base tree, changed by the caller, as work/name
   tar -czf "$work/$2" -C "$1" apt rpm zigbox-archive-keyring.gpg zigbox-archive-keyring.asc
 }
 
-now=$(date +%s)
 # 1. The happy path: new Date, Valid-Until 21 days later, the packages untouched, the signed sums.
 ZIGBOX_SIGNED_AT=$now refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
 mkdir "$work/new-tree"
@@ -102,7 +104,8 @@ cp -r "$work/base" "$work/tampered"
 packages=$(find "$work/tampered/apt/dists" -name Packages | head -n 1)
 printf 'Description: changed\n' >> "$packages"
 repack "$work/tampered" tampered.tar.gz
-refuse 'does not match the Release' refresh "$work/tampered.tar.gz" "$work/sums/SHA256SUMS" "$published" "$tag"
+make_sums "$work/tampered.tar.gz" "$work/sums-tampered"
+refuse 'does not match the Release' refresh "$work/tampered.tar.gz" "$work/sums-tampered/SHA256SUMS" "$published" "$tag"
 
 # 3. A Release signed by a key outside the pin: the archive's keyring is not what decides.
 gpg_in "$other_home" --quick-generate-key "Someone else <else@invalid>" rsa2048 sign 1d
@@ -132,10 +135,46 @@ ZIGBOX_SIGNED_AT=$now refuse 'not later than the archive' refresh "$work/new/zig
   "$refreshed_inrelease" "$tag"
 
 # 6. A subkey that lapsed before the signing time, and a primary that did.
-ZIGBOX_SIGNED_AT=$((now + 3 * 86400)) refuse 'no usable (unexpired, unrevoked) signing subkey' \
+ZIGBOX_SIGNED_AT=$((now + 61 * 86400)) refuse 'no usable (unexpired, unrevoked) signing subkey' \
   refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
-ZIGBOX_SIGNED_AT=$((now + 11 * 86400)) refuse 'primary key is revoked or expired' \
+ZIGBOX_SIGNED_AT=$((now + 91 * 86400)) refuse 'primary key is revoked or expired' \
   refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
+
+# 6b. A key that is valid at the signing time but expires before Valid-Until would sign metadata
+# apt stops accepting while it is still current: refused with one line.
+ZIGBOX_SIGNED_AT=$((now + 45 * 86400)) refuse 'signing subkey expires within 21 days' \
+  refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
+ZIGBOX_SIGNED_AT=$((now + 75 * 86400)) refuse 'primary key expires within 21 days' \
+  refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
+
+# 6c. The served InRelease's Date is read from the signed text only: a forged Date line in front
+# of the clearsigned block must not hide that the archive is older than what is served.
+{ printf 'Date: Thu, 01 Jan 1970 00:00:00 UTC\n'; cat "$refreshed_inrelease"; } > "$work/prefixed-InRelease"
+ZIGBOX_SIGNED_AT=$((now + 10)) refuse 'older than the one zigbox.org serves' \
+  refresh "$base" "$work/sums/SHA256SUMS" "$work/prefixed-InRelease" "$tag"
+
+# 6d. The archive's hash is checked against the signed sums before it is read as an archive.
+printf 'not an archive\n' > "$work/garbage.tar.gz"
+refuse 'not the zigbox-repos.tar.gz the signed SHA256SUMS lists' \
+  refresh "$work/garbage.tar.gz" "$work/sums/SHA256SUMS" "$published" "$tag"
+
+# 6e. A half-finished upload (the runbook's recovery). `gh release upload --clobber` replaces one
+# file at a time, so the release can hold the new archive with the old sums, or the new archive and
+# sums with the old signature: the refresh refuses both, as it must. Re-uploading the three saved
+# files of the failed run (the workflow's artifact) restores one signed set, and the next refresh
+# accepts it.
+refuse 'not the zigbox-repos.tar.gz the signed SHA256SUMS lists' at $((now + 10)) \
+  refresh "$work/new/zigbox-repos.tar.gz" "$work/sums/SHA256SUMS" "$refreshed_inrelease" "$tag" "$work/mixed-out"
+mkdir "$work/mixed"
+cp "$work/new/SHA256SUMS" "$work/mixed/SHA256SUMS"
+cp "$work/sums/SHA256SUMS.asc" "$work/mixed/SHA256SUMS.asc"
+refuse 'gpg --verify refused' at $((now + 10)) \
+  refresh "$work/new/zigbox-repos.tar.gz" "$work/mixed/SHA256SUMS" "$refreshed_inrelease" "$tag" "$work/mixed-out"
+mkdir "$work/release-assets"
+cp "$work/new/zigbox-repos.tar.gz" "$work/new/SHA256SUMS" "$work/new/SHA256SUMS.asc" "$work/release-assets/"
+ZIGBOX_SIGNED_AT=$((now + 10)) refresh "$work/release-assets/zigbox-repos.tar.gz" \
+  "$work/release-assets/SHA256SUMS" "$refreshed_inrelease" "$tag" "$work/recovered"
+[ -s "$work/recovered/SHA256SUMS.asc" ] || fail "the recovered set was not refreshed"
 
 # 7. The subkey leaks: the owner revokes it and adds another. The archive (and the keyring in it)
 # is the attacker's, still with the old subkey and no revocation; the refresh must not accept it.
@@ -145,7 +184,7 @@ revoke_first_subkey() {
       --command-fd 0 --status-fd 2 --edit-key "$primary" 2> /dev/null > /dev/null
 }
 revoke_first_subkey
-gpg_home --quick-add-key "$primary" rsa4096 sign 1d
+gpg_home --quick-add-key "$primary" rsa4096 sign 60d
 new_subkey=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons |
   awk -F: '$1 == "sub" && $2 != "r" { s = 1; next } $1 == "fpr" && s { print $10; exit }')
 if [ -z "$new_subkey" ] || [ "$new_subkey" = "$subkey" ]; then fail "the replacement subkey was not made"; fi

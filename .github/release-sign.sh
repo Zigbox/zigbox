@@ -79,9 +79,14 @@ echo "release-sign: signing subkey ${subkey: -16} of primary ${primary: -16}"
 
 sign_with() { gpg_sign -u "${subkey}!" "$@"; }
 
+# One signing time for every round: the `Release` Date and its Valid-Until (21 days later) are in
+# the signed bytes, so the three builds must agree. ZIGBOX_SIGNED_AT (Unix seconds) is for tests.
+signed_at=${ZIGBOX_SIGNED_AT:-$(date +%s)}
+case "$signed_at" in *[!0-9]* | "") fail "ZIGBOX_SIGNED_AT is not Unix seconds" ;; esac
+
 # Round 1: each rpm's header, a binary detached signature named <rpm>.header.sig.
 rm -rf "$packages"
-zig build packages
+zig build packages -Dsigned-at="$signed_at"
 headers=("$packages"/to-sign/*.header)
 [ -e "${headers[0]}" ] || fail "zig build packages wrote no rpm header to sign"
 for header in "${headers[@]}"; do
@@ -89,7 +94,7 @@ for header in "${headers[@]}"; do
 done
 
 # Round 2: embed the header signatures, then sign the repository metadata.
-zig build packages -Dsignatures="$signatures"
+zig build packages -Dsigned-at="$signed_at" -Dsignatures="$signatures"
 release=$packages/apt/dists/stable/Release
 sign_with --clearsign -o "$signatures/InRelease" "$release"
 sign_with -abs -o "$signatures/Release.gpg" "$release"
@@ -99,8 +104,8 @@ for architecture in x86_64 aarch64; do
 done
 
 # Final run places the signatures; the check reads the whole tree back.
-zig build packages -Dsignatures="$signatures"
-zig build packages-check -Dsignatures="$signatures"
+zig build packages -Dsigned-at="$signed_at" -Dsignatures="$signatures"
+zig build packages-check -Dsigned-at="$signed_at" -Dsignatures="$signatures"
 
 # The public key, in the two forms zigbox.org serves. Taken from the signing home, so it
 # carries the subkey the signatures are by. The secret key never leaves that home.

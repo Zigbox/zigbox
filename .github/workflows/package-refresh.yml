@@ -74,16 +74,37 @@ jobs:
           set -euo pipefail
           .github/package-refresh.sh "$RUNNER_TEMP/old/zigbox-repos.tar.gz" "$RUNNER_TEMP/new" \
             "$RUNNER_TEMP/old/SHA256SUMS" "$RUNNER_TEMP/old/served-InRelease" "$TAG"
+      # The three files are public and already signed. Kept as an artifact before any upload, so a
+      # half-finished upload is repaired by uploading these again (docs/releases/packaging.md),
+      # not by a re-run, which the script refuses on mixed assets and which would re-date anyway.
+      - name: Keep the signed files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-refresh-${{ steps.release.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/new/zigbox-repos.tar.gz
+            ${{ runner.temp }}/new/SHA256SUMS
+            ${{ runner.temp }}/new/SHA256SUMS.asc
+          if-no-files-found: error
+          retention-days: 30
       - name: Replace the release's assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          # `--clobber` replaces each file in turn: if this step fails half way, run the workflow
-          # again at once (docs/releases/packaging.md), or SHA256SUMS.asc may not match SHA256SUMS.
-          gh release upload "$TAG" "$RUNNER_TEMP/new/zigbox-repos.tar.gz" "$RUNNER_TEMP/new/SHA256SUMS" \
-            "$RUNNER_TEMP/new/SHA256SUMS.asc" --clobber --repo "$GITHUB_REPOSITORY"
+          # `--clobber` replaces each file in turn, so a failure can leave a mix. Upload all three
+          # again, up to three times; if all fail, the runbook re-uploads the saved artifact.
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" "$RUNNER_TEMP/new/zigbox-repos.tar.gz" "$RUNNER_TEMP/new/SHA256SUMS" \
+              "$RUNNER_TEMP/new/SHA256SUMS.asc" --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "package-refresh: upload attempt $attempt failed" >&2
+            sleep $((attempt * 15))
+          done
+          echo "package-refresh: the upload failed; the release may hold mixed assets, re-upload the run's artifact" >&2
+          exit 1
       - name: Mint the App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0

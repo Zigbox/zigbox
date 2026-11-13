@@ -73,22 +73,29 @@ printf '%s\n' "$ZIGBOX_SIGNING_KEY" | gpg_sign --import 2> "$work/import.log" ||
 unset ZIGBOX_SIGNING_KEY ZIGBOX_SIGNING_PASSPHRASE
 # Colon listing: field 2 validity (e expired, r revoked), 3 bits, 4 algorithm, 7 expiry in Unix
 # seconds (empty: never), 12 capabilities, 15 `#` for a stubbed secret. Expiry is judged at the
-# signing time, so a key that lapsed before it is refused even when gpg's own clock disagrees.
+# signing time, so a key that lapsed before it is refused even when gpg's own clock disagrees. A
+# signature by a key that expires before `Valid-Until` stops verifying (apt: EXPKEYSIG) while the
+# metadata is still current, so a key must also outlive the whole validity window.
 listing=$(GNUPGHOME=$signing_home gpg --batch --list-secret-keys --with-colons 2>/dev/null)
-subkey=$(awk -F: -v primary="$primary" -v at="$signed_at" '
+subkey=$(awk -F: -v primary="$primary" -v at="$signed_at" -v window="$valid_seconds" '
   function dead(validity, expiry) { return validity == "e" || validity == "r" || (expiry != "" && expiry + 0 <= at) }
+  function short(expiry) { return expiry != "" && expiry + 0 <= at + window }
   $1 == "sec" { section = "sec"; if ($3 != 4096 || $4 != 1) weak = 1; if ($15 != "#") plain = 1
-                if (dead($2, $7)) lapsed = 1; next }
-  $1 == "ssb" { section = dead($2, $7) ? "bad" : (index($12, "s") ? "sign" : "other")
+                if (dead($2, $7)) lapsed = 1; else if (short($7)) brief = 1; next }
+  $1 == "ssb" { section = dead($2, $7) ? "bad" : (index($12, "s") ? (short($7) ? "brief" : "sign") : "other")
+                if (section == "brief") briefsub = 1
                 if (section == "sign" && ($3 != 4096 || $4 != 1)) weak = 1; next }
   $1 == "fpr" && section == "sec" { top = $10; section = ""; next }
-  $1 == "fpr" && section == "sign" { print $10; section = "" }
+  $1 == "fpr" && section == "sign" { print $10; signs++; section = "" }
   END { if (top != primary) print "WRONG-PRIMARY"; if (weak) print "WEAK"; if (plain) print "PRIMARY-SECRET"
-        if (lapsed) print "LAPSED-PRIMARY" }
+        if (lapsed) print "LAPSED-PRIMARY"; if (brief) print "SHORT-PRIMARY"
+        if (briefsub && !signs) print "SHORT-SUBKEY" }
 ' <<< "$listing")
 case "$subkey" in
   *WRONG-PRIMARY*) fail "the imported key is not by the primary key ZIGBOX_SIGNING_FPR" ;;
   *LAPSED-PRIMARY*) fail "the primary key is revoked or expired; the owner must renew or replace it" ;;
+  *SHORT-PRIMARY*) fail "the primary key expires within 21 days of the signing time; the owner must renew it" ;;
+  *SHORT-SUBKEY*) fail "the signing subkey expires within 21 days of the signing time; the owner must renew it" ;;
   *PRIMARY-SECRET*) fail "the imported key holds the secret primary key" ;;
   *WEAK*) fail "the primary and the signing subkey must be RSA 4096" ;;
   "") fail "the imported key has no usable (unexpired, unrevoked) signing subkey" ;;
@@ -117,6 +124,13 @@ GNUPGHOME=$signing_home gpg --batch --export "$primary" > "$work/owner-keyring.g
 GNUPGHOME=$verify_home gpg --batch --import "$work/owner-keyring.gpg" 2> /dev/null ||
   fail "the owner's public key cannot be imported"
 
+# The archive is the release's before a byte of it is read: the signed SHA256SUMS (by the current
+# subkey) lists its hash. Only then is it listed or extracted, so every byte is the owner's.
+check_signature "$subkey" "$old_sums.asc" "$old_sums"
+archive_hash=$(sha256sum < "$archive" | cut -d' ' -f1)
+grep -q "^$archive_hash  zigbox-repos.tar.gz\$" "$old_sums" ||
+  fail "$archive is not the zigbox-repos.tar.gz the signed SHA256SUMS lists"
+
 # The archive holds apt/, rpm/ and the keyring files, and nothing else (the same rule the release
 # workflow checks): a listing with anything more is refused before it is extracted.
 tar -tzf "$archive" > "$work/list" || fail "$archive is not a gzip tar archive"
@@ -134,8 +148,9 @@ done
 # be by the current subkey. An asset someone replaced is never given a fresh signature.
 check_signature "$subkey" "$dists/Release.gpg" "$dists/Release"
 check_signature "$subkey" "$dists/InRelease"
-check_signature "$subkey" "$old_sums.asc" "$old_sums"
 check_signature "$subkey" "$published"
+# The served file's Date comes only from the text gpg authenticated, never from bytes around it.
+verify_gpg --output "$work/served.txt" --verify "$published" > /dev/null || fail "gpg --verify refused $published"
 
 # Every package file and index the Release lists is what it names: the sums are kept, so a stale
 # or swapped file would be re-signed otherwise.
@@ -151,11 +166,7 @@ sums_ok() {
 }
 sums_ok
 
-# The archive is the release's: its hash is the line the signed SHA256SUMS gives, and its packages
-# are this tag's version.
-archive_hash=$(sha256sum < "$archive" | cut -d' ' -f1)
-grep -q "^$archive_hash  zigbox-repos.tar.gz\$" "$old_sums" ||
-  fail "$archive is not the zigbox-repos.tar.gz the signed SHA256SUMS lists"
+# Its packages are this tag's version.
 versions=$(find "$dists" -name Packages -exec sed -n 's/^Version: //p' {} + | sort -u)
 [ -n "$versions" ] || fail "the archive's Packages files list no version"
 [ "$versions" = "$version" ] || fail "the archive's packages are not version $version of $tag"
@@ -169,7 +180,7 @@ date_of() { # date_of file: the first Date line, as Unix seconds
   date -u -d "$line" +%s || fail "$1 has an unreadable Date"
 }
 old_date=$(date_of "$dists/Release")
-published_date=$(date_of "$published")
+published_date=$(date_of "$work/served.txt")
 [ "$old_date" -ge "$published_date" ] || fail "the archive's Release is older than the one zigbox.org serves"
 [ "$signed_at" -gt "$old_date" ] || fail "the signing time is not later than the archive's Date"
 

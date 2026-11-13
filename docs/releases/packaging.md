@@ -189,25 +189,46 @@ owner's key already signed and published. It takes the newest release's `zigbox-
 line, nothing signed) unless all of these hold:
 
 - The key is the pinned primary's one signing subkey, not revoked and not expired at the signing
-  time, and the primary is not revoked or expired.
+  time, and the primary is not revoked or expired. Both must also stay valid past `Valid-Until`
+  (21 days after the signing time): a signature by a key that has expired fails in apt however
+  much of `Valid-Until` is left, so a key that expires sooner is refused with a line asking the
+  owner to renew it.
 - Every old signature (`Release.gpg`, `InRelease`, `SHA256SUMS.asc`, the served `InRelease`) is by
   that subkey, checked against the public part of `ZIGBOX_SIGNING_KEY`. The keyring inside the
   archive is never trusted, so a revoked subkey's signature is refused even when the archive ships a
   keyring without the revocation. After the subkey is replaced, the old archive no longer verifies:
   cut a release (or re-run `release-sign.sh` for the tag) before the next refresh.
-- Every file the `Release` lists matches its sum, the archive's hash is the line in the signed
-  `SHA256SUMS`, and the packages in it are the tag's version.
-- The archive's `Release` is not older than the served `InRelease`, and the new `Date` is later than
+- The archive's hash is the line in the signed `SHA256SUMS`, checked before the archive is listed
+  or extracted. Every file the `Release` lists matches its sum, and the packages in it are the
+  tag's version.
+- The archive's `Release` is not older than the served `InRelease` (its `Date` is read from the
+  text gpg verified, never from bytes outside the signed block), and the new `Date` is later than
   the archive's own. A release without a signed `SHA256SUMS` is refused: it has nothing to bind the
   archive to.
 
 It then re-dates, signs `InRelease` and `Release.gpg`, verifies them, signs the new `SHA256SUMS`, and
-uploads the archive and both sums files with `--clobber`, one file at a time: if the upload step
-fails, dispatch the workflow again at once, or `SHA256SUMS.asc` may not match `SHA256SUMS`. It then
+saves the archive and both sums files as the workflow artifact `package-refresh-<tag>` (30 days),
+then uploads them with `--clobber`, one file at a time, trying up to three times. It then
 dispatches the zigbox.org deploy, waits for it, and fails unless the served `InRelease` is valid for
 at least ten more days. Any failure fails the run; GitHub's notification of a failed scheduled run is
 the alarm, and a failed week leaves 14 days before expiry. `.github/package-refresh-test.sh` runs the
 refresh and each refusal with a throwaway key in the release workflow's `test` job.
+
+**Recovery from a half-finished upload.** `--clobber` can leave the release with a mix (the new
+archive and the old sums, or the new archive and sums and the old `SHA256SUMS.asc`); the refresh
+refuses a mix, so dispatching the workflow again does not repair it, and "Re-run failed jobs" would
+build a different tarball. Download the artifact `package-refresh-<tag>` of the failed run and
+upload its three files again:
+
+```sh
+gh run download RUN_ID --repo Zigbox/zigbox -n package-refresh-vX.Y.Z --dir saved
+gh release upload vX.Y.Z saved/zigbox-repos.tar.gz saved/SHA256SUMS saved/SHA256SUMS.asc \
+  --clobber --repo Zigbox/zigbox
+```
+
+Then dispatch the workflow: the next refresh accepts the restored set (`package-refresh-test.sh`
+reproduces both mixes and this recovery). If the artifact has expired, sign by hand in the
+`release` environment (re-run `release-sign.sh` for the tag).
 
 GitHub disables a scheduled workflow after 60 days without repository activity, silently. A quiet
 project must check the Actions tab at least every 50 days and re-enable `package-refresh`; no run
