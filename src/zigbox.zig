@@ -170,6 +170,29 @@ pub const push = struct {
     pub const ecr = @import("push/ecr.zig");
 };
 
+/// The package writer (M8): `.deb` and `.rpm` packages and the apt and dnf trees around them,
+/// reproducibly, for a second product's own packages (Zigcube's C3). Pure: the caller passes its
+/// bytes (`File.bytes`) and an allocator, and owns every returned slice; nothing touches a host,
+/// a clock or the build system. It signs nothing: an rpm takes a detached header signature the
+/// caller made (`rpm.Options`), and the trees are unsigned until the caller signs `Release` and
+/// each `repomd.xml`. `zig build packages` writes zbx's own packages with the same files. The
+/// same files are the `zigbox_package` module; a compilation imports one module or the other.
+pub const package = struct {
+    pub const model = @import("package/model.zig");
+    pub const deb = @import("package/deb.zig");
+    pub const rpm = @import("package/rpm.zig");
+    pub const apt = @import("package/apt.zig");
+    pub const dnf = @import("package/dnf.zig");
+    pub const Package = model.Package;
+    pub const File = model.File;
+    pub const Architecture = model.Architecture;
+    pub const Built = model.Built;
+    pub const TreeFile = model.TreeFile;
+    pub const Error = model.Error;
+    pub const validate = model.validate;
+    pub const describe = model.describe;
+};
+
 /// The pure trust surface (M8): policy, verdict, DSSE, statements, keys' public text and the
 /// signature record's type, with caller-supplied storage and no host or store. It compiles for
 /// `wasm32-freestanding` (`zig build trust-wasm`). `trust_export.zig` has the rest.
@@ -219,6 +242,10 @@ test "the module's surface is what the contract names" {
     _ = push.export_layout;
     _ = push.send;
     _ = push.UploadWorkspace;
+    _ = package.deb.write;
+    _ = package.rpm.write;
+    _ = package.apt.write;
+    _ = package.dnf.write;
     _ = exec_signal;
     _ = ExecHandle;
     _ = trust.verdict.judge;
