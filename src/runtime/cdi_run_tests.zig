@@ -90,10 +90,10 @@ test "mounts are staged and moved to their paths, and a missing ldconfig puts th
     try testing.expectEqual(@as(u8, 0), code);
     const child = &sim.world.processes[1];
     const table = &sim.world.tables[child.table];
-    const directory = table.find("/opt/vendor/lib").?;
+    const directory = table.find(sim_run.rootfs_path ++ "/opt/vendor/lib").?;
     try testing.expectEqual(@as(?host_mod.MountKind, .bind_tree), table.mounts[directory].kind);
     try testing.expect(table.mounts[directory].read_only);
-    const file = table.find("/opt/vendor/note.conf").?;
+    const file = table.find(sim_run.rootfs_path ++ "/opt/vendor/note.conf").?;
     try testing.expectEqual(@as(?host_mod.MountKind, .bind_file), table.mounts[file].kind);
     try testing.expect(table.find("/dev/.zbx-cdi-0") == null);
     try testing.expect(table.find("/dev/.zbx-cdi-1") == null);
@@ -164,7 +164,7 @@ test "a resolved set given to the library gets the host check: kinds noted, abse
     try run_lib.start(sim.interface(), &run, .{}, handle, &diag);
     handle.session.release_output();
     const table = &sim.world.tables[sim.world.processes[1].table];
-    const at = table.find("/opt/v").?;
+    const at = table.find(sim_run.rootfs_path ++ "/opt/v").?;
     try testing.expectEqual(@as(?host_mod.MountKind, .bind_tree), table.mounts[at].kind);
     // A node the host lacks.
     const sim_two = sim_get();
