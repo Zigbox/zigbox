@@ -706,7 +706,7 @@ fn holds(directory: []const u8, path: []const u8) bool {
 /// Whether a directory at `path` can hold a path `pattern` matches: the pattern's leading parts
 /// up to its first `**` must match the directory's, and one without a `**` is only as deep as
 /// it has parts.
-fn could_match_below(pattern: []const u8, path: []const u8) bool {
+pub fn could_match_below(pattern: []const u8, path: []const u8) bool {
     assert(pattern.len > 0);
     assert(path.len > 0);
     var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
