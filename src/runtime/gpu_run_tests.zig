@@ -147,6 +147,13 @@ test "--gpu takes all or dri only, and a repeat is refused" {
     setup(sim, &files, .{ .open = 1, .locked = 0, .kfd = false, .spec = false });
     try testing.expectEqual(@as(u8, 125), run_gpu(sim, "nvidia"));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
+    // The keyword is `--gpu`'s: as a `--device` value it is a name that is none, not an alias.
+    const alias = [_][:0]const u8{
+        "zbx", "run", "--rootfs", rootfs, "--device", "gpu=all", "--", "/bin/sh",
+    };
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &alias));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "ZBX-E0225") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "--device 'gpu=all'") != null);
     const twice = [_][:0]const u8{
         "zbx", "run", "--rootfs", rootfs, "--gpu", "dri", "--gpu", "dri", "--", "/bin/sh",
     };

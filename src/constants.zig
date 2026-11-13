@@ -576,7 +576,7 @@ pub const bundle_files_max: u32 = 12;
 pub const facts_bytes_max: u32 = 256 * 1024;
 pub const bundle_workspace_bytes_max: u32 = 1024 * 1024;
 /// The run `Handle` of a foreground run, kept off the stack too.
-pub const handle_bytes_max: u32 = 480 * 1024;
+pub const handle_bytes_max: u32 = 768 * 1024;
 /// An exec's handle (`runtime/exec.zig`): the plan, the container's environment, its passwd and
 /// group files, and the room the history is rewritten in.
 pub const exec_handle_bytes_max: u32 = 640 * 1024;

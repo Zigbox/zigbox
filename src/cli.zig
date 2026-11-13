@@ -1994,11 +1994,23 @@ fn take_gpu(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void 
         devices_diagnose.bad_gpu(diag, value);
         return error.BadOptionValue;
     };
-    return take_device(diag, run_args, ask.text());
+    return add_device(diag, run_args, ask.text());
 }
 
-/// One `--device`: its path is checked now (E0225), with the ones before it for a repeat.
+/// One `--device`: its path is checked now (E0225), with the ones before it for a repeat. The
+/// keywords `--gpu` keeps in the list are not a `--device` value: `--device gpu=all` is refused
+/// as the name it is not, rather than taken as a second spelling of `--gpu all`.
 fn take_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
+    assert(diag.code == null);
+    if (gpu.ask_of(value) != null) {
+        const problem: devices.ListProblem = .{ .path = .{ .index = 0, .problem = .bad_name } };
+        devices_diagnose.bad_path(diag, value, problem);
+        return error.BadOptionValue;
+    }
+    return add_device(diag, run_args, value);
+}
+
+fn add_device(diag: *Diag, run_args: *RunArgs, value: []const u8) ParseError!void {
     assert(diag.code == null);
     assert(run_args.devices_count <= constants.run_devices_max);
     const count = run_args.devices_count;

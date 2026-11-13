@@ -264,16 +264,21 @@ pub const Probe = enum {
 };
 
 /// Resolves `nvidia.com/gpu=all` against the host's specs only to learn whether it works. The
-/// run resolves again with its real list; the cost is reading the specs twice. A refusal that
+/// caller gives the scratch and the place for the answer (both are too big for a stack; the run
+/// has them in its handle and its start frame). The run resolves again with its real list; the
+/// cost is reading the specs twice. A refusal that
 /// says "there are none" (E0230) is not one: the answer is `absent` and `diag` is left clean.
 /// Any other refusal, E0226 (a YAML or stale spec) included, is the answer the user needs and
 /// stays raised.
-pub fn probe_nvidia(host: Host, diag: *Diag) Probe {
+pub fn probe_nvidia(
+    host: Host,
+    scratch: *cdi_discover.Scratch,
+    found: *cdi.Resolved,
+    diag: *Diag,
+) Probe {
     assert(diag.code == null);
-    var scratch: cdi_discover.Scratch = undefined;
-    var found: cdi.Resolved = undefined;
     const asked = [_][]const u8{nvidia_all};
-    if (cdi_discover.resolve(host, &asked, &scratch, &found, diag)) return .offered;
+    if (cdi_discover.resolve(host, &asked, scratch, found, diag)) return .offered;
     const code = diag.code.?;
     if (code == .E0230) {
         diag.reset();
