@@ -92,6 +92,7 @@ const help_text =
     \\  push <source> <ref>   pack a build result, an image or a tree and put it in a registry
     \\                  (see below)
     \\  build --graph   check the project's zbx.build.zon and print its steps in order (see below)
+    \\  import          write a zbx.build.zon from a Dockerfile, running nothing (see below)
     \\  inspect <id>    print a build result: its tree and the config it runs with
     \\  schema <cmd>    print the JSON schema of a command's output
     \\  explain <code>  explain a diagnostic code offline, for example E0001 (--output json: a
@@ -116,7 +117,7 @@ const help_text =
     \\  --cpus <n>      CPU limit, in CPUs: 0.5 is half of one
     \\  --read-only     mount the root read-only, with a tmpfs at /tmp and /run
     \\  --net <mode>    none (the default: a network of its own, only lo), host (share the host's)
-    \\                  or user (the network through pasta, as the user: apt install passt)
+    \\                  or user (through pasta: apt install passt)
     \\  --publish <h:c> forward TCP port h of this machine to port c of the container (repeatable;
     \\                  implies --net user)
     \\  --listen <addr:port>  make a TCP listener on the container's loopback (only 127.0.0.1;
@@ -139,7 +140,6 @@ const help_text =
     \\                  /etc/cdi, /var/run/cdi or $XDG_CONFIG_HOME/cdi (repeatable, up to
     \\                  16); groups carry over
     \\  --gpu all|dri   the render nodes and /dev/kfd you can open; all: NVIDIA CDI devices if any
-    \\                  (zbx doctor lists them)
     \\  --mount <host>:<path>  the project's directory or file at <path>, writable (repeatable).
     \\                  <host> may be relative; with symbolic links followed it must be the
     \\                  project directory (the one with zbx.lock, else the working directory) or
@@ -159,13 +159,12 @@ const help_text =
     \\
     \\logs:
     \\  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
-    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs
-    \\  (~/.local/state/zbx/logs): at most 5 MiB per container, oldest dropped first;
+    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs: at most 5 MiB per container, oldest dropped first;
     \\  removed with the run record
     \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
     \\  --tail <n>      only the last n lines
     \\  --stream <s>    only stdout, or only stderr
-    \\  a foreground run's stream that is a terminal is left to the container, not logged
+    \\  a terminal stream of a foreground run is the container's, not logged
     \\  --output json   one zbx.logs/1 object per record, per line; a refusal is a
     \\                  diagnostic on stderr (zbx schema logs)
     \\
@@ -175,9 +174,9 @@ const help_text =
     \\  the command joins the container's namespaces and cgroup, with no more than its
     \\  capabilities, no_new_privs and seccomp filter. It has the container's
     \\  environment, directory and user; -e, --user and --workdir change them for it only.
-    \\  With a terminal on zbx's input and output it gets a
-    \\  terminal of its own. It ends with the container. zbx ps does not list it; zbx bundle
-    \\  of the container notes the recent execs (command and exit, never a value of -e)
+    \\  With a terminal on zbx's input and output it gets its own
+    \\  terminal. It ends with the container; zbx ps does not list it; zbx bundle notes it
+    \\  (command and exit, never a value of -e)
     \\  --output json   ends with an exec_exit line on stderr (zbx schema exec)
     \\
     \\store:
@@ -202,22 +201,21 @@ const help_text =
     \\  zbx state rm <name>      move a volume that no run holds to the trash, kept for 7 days
     \\  zbx state restore <name> bring the newest trash of <name> back
     \\  zbx state export <name> [-o <file>]   write the volume as a gzip tar, owners as the
-    \\                           container sees them (999, not the host's ids), to <file>
+    \\                           container sees them, to <file>
     \\                           or standard output (never a terminal); refused while a run
     \\                           writes the volume
-    \\  volumes live in $XDG_DATA_HOME/zbx/state (~/.local/share/zbx/state); only state rm
-    \\  removes one
+    \\  volumes live in $XDG_DATA_HOME/zbx/state; only state rm removes one
     \\
     \\key:
     \\  zbx key new <name>       make an Ed25519 signing key, its secret sealed under a passphrase
-    \\                           (argon2id); asked twice on a terminal, or the first line of
+    \\                          ; asked twice on a terminal, or the first line of
     \\                           --passphrase-file <file>, which only you can read
     \\  zbx key new <name> --no-passphrase   keep the secret in the clear, mode 0600
     \\  zbx key list             each key: name, encryption, id and public key
     \\  zbx key show <name>      one key: name, id, public key and encryption
-    \\  names are up to 32 of a-z, 0-9 and '-'; keys live in $XDG_CONFIG_HOME/zbx/keys, mode
-    \\  0700, never overwritten; a forgotten passphrase is a lost key; list and show never
-    \\  ask for one and never print a secret
+    \\  names: up to 32 of a-z, 0-9, '-'; keys live in $XDG_CONFIG_HOME/zbx/keys, mode 0700,
+    \\  never overwritten; a forgotten passphrase is a lost key; list and show never ask for
+    \\  one or print a secret
     \\
     \\sign:
     \\  zbx sign <what> [--key <name>] [--passphrase-file <file>]
@@ -243,14 +241,14 @@ const help_text =
     \\  zbx trust export <tree>     print the tree's signatures as a bundle
     \\  zbx trust import <file>     verify every line of a bundle, then add what is new
     \\  zbx trust prune [--apply]   list the signature and provenance records whose trees are
-    \\                              gone; --apply removes them (a damaged one is kept, ZBX-W0902)
+    \\                              gone; --apply removes them
     \\
     \\policy:
     \\  zbx policy check [<what>]
     \\  <what>          a build result or a tree (b3:<64 hex>), or an image name, as `zbx run`
     \\                  takes it; omitted: only describe the policy files
-    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon (~/.config/zbx);
-    \\                  a run must pass each one that exists
+    \\  files           /etc/zbx/policy.zon and $XDG_CONFIG_HOME/zbx/policy.zon; a run
+    \\                  must pass each one that exists
     \\  prints each file, its rules, each signature of the tree and why it counts or not, and
     \\  whether the run would start; runs nothing. Exits 0 if it would start, 1 if a policy
     \\  would refuse it (ZBX-E0905); an unreadable file is ZBX-E0904
@@ -274,11 +272,11 @@ const help_text =
     \\                  or ghcr.io/owner/image:v1 (Docker Hub when no registry is named)
     \\  --resolve-only  print the digest of the image manifest for this machine's platform,
     \\                  as the registry names it (anonymous; HTTPS_PROXY and NO_PROXY apply)
-    \\  without it, the layers are downloaded into the store (a cut download resumes), unpacked
+    \\  without it, the layers are downloaded into the store, unpacked
     \\  into one tree and recorded, and zbx.lock (the nearest up from here, else here) gets
     \\  the entry; prints the manifest digest, or with --output json the object of
-    \\  "zbx schema pull" (with the tree's digest)
-    \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first (mirror.gcr.io)
+    \\  "zbx schema pull"
+    \\  ZBX_REGISTRY_MIRRORS=host[,host]   mirrors of Docker Hub to ask first
     \\
     \\build:
     \\  zbx build --graph [-f <file>]
@@ -291,10 +289,16 @@ const help_text =
     \\  and the result digest; --output json: one zbx.build/1
     \\  line per step (see zbx schema build). --clear-caches first empties the cache
     \\  directories. With --verbose each step's output also goes to stderr, a line at a time
-    \\  behind "<step> | " (a reader that stops reading stderr pauses the build).
+    \\  behind "<step> | ".
     \\  zbx run <result digest> runs the result as its config says; zbx inspect <result digest>
     \\  prints its tree and config (zbx schema inspect); zbx inspect --provenance <result
     \\  digest> prints the build's provenance record (zbx schema inspect-provenance)
+    \\
+    \\import:
+    \\  zbx import [<Dockerfile>] [--context <dir>] [--target <stage>] [--build-arg NAME=VALUE]
+    \\             [--network detect|all|none] [--hermetic] [--force] [-o <file>]
+    \\  pins each base image in zbx.lock, refuses what zbx cannot honour and writes nothing then;
+    \\  --output json: zbx.import/1
     \\
     \\bundle:
     \\  zbx bundle (--last | <name>) [--no-redact]
