@@ -581,7 +581,9 @@ test "the code directory of each slice is read with --architecture, the path las
 }
 
 test "only notarytool's missing-profile text counts as a missing profile" {
-    try std.testing.expect(profile_is_missing("Error: No Keychain password item found for profile: p\n"));
-    try std.testing.expect(!profile_is_missing("Error: The Internet connection appears to be offline.\n"));
+    const missing = "Error: No Keychain password item found for profile: p\n";
+    const offline = "Error: The Internet connection appears to be offline.\n";
+    try std.testing.expect(profile_is_missing(missing));
+    try std.testing.expect(!profile_is_missing(offline));
     try std.testing.expect(!profile_is_missing(""));
 }
