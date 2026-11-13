@@ -28,7 +28,9 @@ const digest_mod = @import("../store/digest.zig");
 const cache = @import("cache.zig");
 const schedule = @import("schedule.zig");
 const verify = @import("../store/verify.zig");
+const gc = @import("../store/gc.zig");
 
+const assert = std.debug.assert;
 const testing = std.testing;
 const Digest = digest_mod.Digest;
 
@@ -1120,14 +1122,15 @@ fn import_entry(entry: ?u32) !Digest {
 test "a copy's project source is a root between the import and the selection" {
     // Goal: a concurrent `store gc` cannot remove the source tree a copy selects from. Method:
     // import entry 0 as `begin_copy` does and read the root record (named for the step, as a
-    // step's output root is); an import that is no copy entry's makes none; a root the user
-    // made first is kept as it was; a build that selects drops only the root it made.
+    // step's output root is; a command step's whole-project import is rooted the same way); a
+    // root the user made first is kept as it was; a build that selects drops only the root it
+    // made.
     try copy_project_loaded();
     var text: [constants.store_source_bytes_max]u8 = undefined;
-    const rootless = try import_entry(null);
-    try testing.expect(root_source(rootless, &text) == null);
+    const whole = try import_entry(null);
+    try testing.expectEqualStrings("build:put", root_source(whole, &text).?);
     const source = try import_entry(0);
-    try testing.expect(!source.eql(rootless)); // The entry selects part of the project.
+    try testing.expect(!source.eql(whole)); // The entry selects part of the project.
     try testing.expectEqualStrings("build:put", root_source(source, &text).?);
     var kept: roots.Root = undefined;
     var errno: u16 = 0;
@@ -1142,12 +1145,12 @@ test "a copy's project source is a root between the import and the selection" {
 
 test "a copy step leaves no root of its project source behind" {
     // Goal: the root is for the window only. Method: build the copy step as the test above's
-    // file has it, then look for the source's root.
+    // file has it, then count the roots: the source's, the selection's and the output's are
+    // all dropped once the entry is written.
     try copy_project_loaded();
     try testing.expect(try context.begin(0) == .hit);
     try testing.expect(diag.code == null);
-    var text: [constants.store_source_bytes_max]u8 = undefined;
-    try testing.expect(root_source(try import_entry(null), &text) == null);
+    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
 }
 
 test "a copy source's root that cannot be written is one diagnostic, not a crash" {
@@ -1193,26 +1196,53 @@ test "steps that share a cache id come one after another, each after the nearest
     try testing.expect(plan.valid());
 }
 
+var gc_workspace: gc.Workspace = undefined;
+var gc_tables: [16 * 1024 * 1024]u8 align(8) = @splat(0);
+
+/// How many trees a `store gc` would remove now, with no tree kept alive but by a root or an
+/// entry.
+fn removable_trees() u64 {
+    gc_workspace.tables = &gc_tables;
+    var result: gc.Plan = undefined;
+    var failure: gc.Failure = undefined;
+    const arena = &import_workspace.arena;
+    gc.plan(&store, &gc_workspace, arena, &.{}, &result, &failure) catch unreachable; // Plans.
+    return result.counts.trees;
+}
+
+/// What the store looks like in the middle of a build: the roots there are, and how many more
+/// trees a `store gc` would take if those roots were gone.
 const RootsSeen = struct {
     roots: u32 = 0,
     fired: bool = false,
+    removable_with: u64 = 0,
+    removable_without: u64 = 0,
 
     fn look(raw: *anyopaque) void {
         const seen: *RootsSeen = @ptrCast(@alignCast(raw));
+        seen.measure();
+    }
+
+    fn measure(seen: *RootsSeen) void {
         seen.roots = support.count_files(&files, root_path ++ "/roots");
+        seen.removable_with = removable_trees();
+        var found: [4]roots.Root = undefined;
+        const arena = &import_workspace.arena;
+        const listed = roots.list(&store, arena, &found) catch unreachable; // Lists.
+        assert(listed.count == seen.roots);
+        for (found[0..listed.count]) |root| roots.remove(&store, root.digest) catch unreachable;
+        seen.removable_without = removable_trees();
         seen.fired = true;
     }
 };
 
-test "KNOWN GAP: a copy's selection tree has no root between its write and the cache entry" {
-    // Goal: pin down the window the M9 slice-2 handoffs name. The selection tree is written by
-    // `copy_select`, laid over the base by `copy_assemble`, and only the output is recorded; a
-    // `store gc` between the write and the entry (it takes the lock exclusively, and the build
-    // holds it shared only per call) may remove the selection. Method: stop the build at the
-    // cache entry's write (the first rename into the build cache) and count the roots: the
-    // source's root is already dropped, and the selection has none, so there are none. When the
-    // gap is closed (root the selection under `build:<step>`, drop it after `copy_assemble`),
-    // this count is one and this test is to be turned round, not deleted.
+test "a copy's selection tree is a root between its write and the cache entry" {
+    // Goal: a `store gc` between the selection's write and the cache entry (it takes the lock
+    // exclusively, and the build holds it shared only per call) cannot remove the selection.
+    // Method: stop the build at the cache entry's write (the first rename into the build
+    // cache) and count the roots: the source's is dropped and the selection's is there, one;
+    // a gc plan with it keeps a tree that a plan without it would remove; after the build none
+    // is left.
     try copy_project_loaded();
     var seen: RootsSeen = .{};
     files.hook = .{
@@ -1222,5 +1252,62 @@ test "KNOWN GAP: a copy's selection tree has no root between its write and the c
     };
     try testing.expect(try context.begin(0) == .hit);
     try testing.expect(seen.fired);
-    try testing.expectEqual(@as(u32, 0), seen.roots);
+    try testing.expectEqual(@as(u32, 1), seen.roots);
+    try testing.expect(seen.removable_without > seen.removable_with);
+}
+
+test "a copy that selects nothing leaves no root behind" {
+    // Goal: the failure path of the selection's root. Method: the pattern matches no file; the
+    // build is refused (E0803-class diagnostic) and the store holds no root of this build.
+    try copy_project_loaded();
+    files.remove_path("/p/a.txt");
+    files.put_file("/p/b.txt", 0o644, "b\n");
+    try testing.expectError(error.Failed, context.begin(0));
+    try testing.expect(diag.code != null);
+    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+}
+
+test "a command step's input tree is a root while its worker runs, and gone after" {
+    // Goal: the tree the worker reads cannot be removed by a `store gc` between the import and
+    // the worker's use, and no root of the build outlives the step. Method: begin a command
+    // step with an input (it starts a worker); one root, and a plan with it keeps a tree a plan
+    // without it would remove. Then abort the worker, as a failed build does: no root is left.
+    try command_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    var seen: RootsSeen = .{};
+    seen.measure();
+    try testing.expectEqual(@as(u32, 1), seen.roots);
+    try testing.expect(seen.removable_without > seen.removable_with);
+    try testing.expect(diag.code == null);
+}
+
+test "a command step's input root is dropped when its worker is aborted or settled" {
+    // Goal: the exit paths of that root. Method: begin, abort: no root; begin, settle with a
+    // failure status: no root.
+    try command_project_loaded();
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), support.count_files(&files, root_path ++ "/roots"));
+    compose.Context.abort_step(@ptrCast(&context));
+    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+    try testing.expect(try context.begin(0) == .running);
+    try testing.expectEqual(@as(u32, 1), support.count_files(&files, root_path ++ "/roots"));
+    _ = settle(&composed.slots[0], .{ .exited = 1 });
+    try testing.expectEqual(@as(u32, 0), support.count_files(&files, root_path ++ "/roots"));
+}
+
+fn command_project_loaded() !void {
+    registry_started(&registry.fixture.oci.amd64.digest);
+    var buffer: [512]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{
+        ".{ .version = 1, .image = .{}, .steps = .{ .{ .name = \"compile\", .base = \"",
+        locked_reference,
+        "\", .inputs = .{\"a.txt\"}, .run = .{\"true\"} } } }\n",
+    });
+    var problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &loaded.file, &problem);
+    try testing.expectEqual(file_mod.ParseResult.parsed, parsed);
+    files.put_dir("/p", 0o755);
+    files.put_file("/p/a.txt", 0o644, "a\n");
+    set_path(&loaded.project, "/p");
+    set_path(&loaded.path, "/p/zbx.build.zon");
 }

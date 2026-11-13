@@ -461,6 +461,9 @@ pub const Context = struct {
         else
             try context.import_inputs(index, null);
         ws.step_inputs[index] = spec.input_tree;
+        // The import rooted the input tree for the worker; it is dropped on a hit, on an error,
+        // and when the worker's step settles or is aborted.
+        errdefer if (!step.copy.given) context.unroot(spec.input_tree);
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
         if (!step.copy.given) try context.resolve_binds(index, &spec);
@@ -475,6 +478,7 @@ pub const Context = struct {
         };
         switch (found) {
             .hit => |output| {
+                context.unroot(spec.input_tree);
                 ws.outputs[index] = output;
                 try context.report(index, true, output);
                 return .hit;
@@ -603,6 +607,7 @@ pub const Context = struct {
             host.signal(slot.pid, constants.signal_kill) catch {};
             _ = host.wait_for(slot.pid) catch {};
             host.close(slot.report.read);
+            context.unroot(context.ws.step_inputs[slot.index]);
             slot.active = false;
             ended += 1;
         }
@@ -617,6 +622,7 @@ pub const Context = struct {
         assert(slot.active);
         slot.active = false;
         defer host.close(slot.report.read);
+        defer context.unroot(ws.step_inputs[slot.index]);
         var bytes: [failure_bytes_max]u8 = undefined;
         var length: usize = 0;
         while (length < bytes.len) {
@@ -789,13 +795,20 @@ pub const Context = struct {
         const entries = file.copy_entries(step);
         assert(entries.len > 0);
         assert(entries.len <= ws.copy_keys.len);
+        // Each selection is rooted by `copy_select` and dropped when this step is done with it.
+        var rooted: usize = 0;
+        defer for (ws.copy_keys[0..rooted]) |part| context.unroot(part.source);
         for (entries, 0..) |entry, at| {
             const source = try context.copy_source(index, @intCast(at), &entry);
             if (at == 0) ws.step_inputs[index] = source;
             // A project source was rooted by its import; the selection is what the key keeps.
-            defer if (entry.from == null) context.unroot(source);
+            // A source that is also a selection made here keeps its root until the end.
+            defer if (entry.from == null and !context.is_selection(rooted, source)) {
+                context.unroot(source);
+            };
             const selected = try context.copy_select(index, &entry, source);
             ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
+            rooted += 1;
         }
         spec.copies = ws.copy_keys[0..entries.len];
         spec.root_output = true; // The output is the whole tree, as a root step's is.
@@ -844,6 +857,14 @@ pub const Context = struct {
         return context.ws.outputs[target];
     }
 
+    /// Whether `digest` is one of the first `count` selections of the copy step being begun.
+    fn is_selection(context: *const Context, count: usize, digest: Digest) bool {
+        for (context.ws.copy_keys[0..count]) |part| {
+            if (part.source.eql(digest)) return true;
+        }
+        return false;
+    }
+
     fn copy_select(
         context: *Context,
         index: u8,
@@ -864,8 +885,8 @@ pub const Context = struct {
         };
         const patterns = ws.copy_patterns[0..texts.len];
         const to = file.text(entry.to);
-        return copy_mod.select(assembling, &ws.copying, source, patterns, to) catch |err| {
-            const name = file.text(file.steps[index].name);
+        const name = file.text(file.steps[index].name);
+        const selected = copy_mod.select(assembling, &ws.copying, source, patterns, to) catch |err| {
             switch (err) {
                 error.PoolFull => {
                     const failed = ws.copying.failed_pattern;
@@ -879,6 +900,10 @@ pub const Context = struct {
             }
             return error.Failed;
         };
+        // Between this write and the cache entry the selection is nothing's output: a root keeps
+        // a `store gc` from taking it.
+        if (!input_job.root_tree(store, selected, name, context.diag)) return error.Failed;
+        return selected;
     }
 
     /// Each bind of the step becomes the tree its `.source` selects in the output of the `step:`

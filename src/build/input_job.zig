@@ -147,20 +147,20 @@ fn imported(request: *const Request, diag: *Diag) ?Digest {
         }
         return null;
     };
-    // A copy's source tree is read again after this child has gone, by the parent's selection:
-    // a root keeps a concurrent `store gc` from removing it in between.
-    if (request.entry != null) {
-        if (!root_input(request, digest, diag)) return null;
-    }
+    // The tree is read again after this child has gone (a copy's selection, a command step's
+    // worker): a root keeps a concurrent `store gc` from removing it in between.
+    const name = request.loaded.file.text(request.loaded.file.steps[request.step].name);
+    if (!root_tree(request.store, digest, name, diag)) return null;
     return digest;
 }
 
-/// Roots the imported tree as a build's output is rooted (`step.output_root_prefix`), so the
-/// parent's `unroot` drops it once the selection is made. A root that was already there (the
-/// user's, or an earlier build's) is left as it was. False with `diag` raised on a write error.
-fn root_input(request: *const Request, digest: Digest, diag: *Diag) bool {
+/// Roots a tree a step reads later as a build's output is rooted (`step.output_root_prefix`
+/// plus the step's name), so the build's `unroot` drops it once it is used. A root that was
+/// already there (the user's, or an earlier build's) is left as it was. False with `diag` raised
+/// on a write error.
+pub fn root_tree(store: *Store, digest: Digest, name: []const u8, diag: *Diag) bool {
     assert(diag.code == null);
-    const store = request.store;
+    assert(name.len <= constants.build_step_name_bytes_max);
     var root: roots.Root = undefined;
     var errno: u16 = 0;
     if (roots.load(store, digest, &root, &errno)) |_| {
@@ -171,7 +171,6 @@ fn root_input(request: *const Request, digest: Digest, diag: *Diag) bool {
     }
     const label_max = step_mod.output_root_prefix.len + constants.build_step_name_bytes_max;
     var label: [label_max]u8 = undefined;
-    const name = request.loaded.file.text(request.loaded.file.steps[request.step].name);
     const labelled = std.fmt.bufPrint(&label, step_mod.output_root_prefix ++ "{s}", .{
         name,
     }) catch unreachable; // The buffer holds the prefix and the longest step name.
@@ -184,7 +183,7 @@ fn root_input(request: *const Request, digest: Digest, diag: *Diag) bool {
     root.parent = null;
     var failure: fs_mod.Failure = undefined;
     roots.save(store, &root, &failure) catch {
-        const operation = "writing the root record of a copy's source";
+        const operation = "writing the root record of a step's tree";
         store_diagnose.write_failed(diag, store, operation, failure.err, failure.errno);
         return false;
     };
