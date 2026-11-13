@@ -117,23 +117,27 @@ fn verdict_of_cli(operand: [:0]const u8) ?codes.Code {
     return std.meta.stringToEnum(codes.Code, stderr[at + 4 .. at + 9]);
 }
 
+/// `head` then `tail` in `buffer`.
+fn join(buffer: []u8, head: []const u8, tail: []const u8) []const u8 {
+    assert(head.len + tail.len <= buffer.len);
+    return std.fmt.bufPrint(buffer, "{s}{s}", .{ head, tail }) catch unreachable; // Fits.
+}
+
 /// The merged directory in the container model, as the overlay would show the tree.
 fn world_dirs(name: []const u8) void {
     var path: [200]u8 = undefined;
+    var container: [200]u8 = undefined;
     var inner: [220]u8 = undefined;
-    const merged = std.fmt.bufPrint(&path, state ++ "/{s}/merged", .{name}) catch unreachable;
+    const base = join(&container, state ++ "/", name);
+    const merged = join(&path, base, "/merged");
     sim.world.add_node(merged, .dir);
-    const net = std.fmt.bufPrint(&inner, state ++ "/{s}/net", .{name}) catch unreachable;
-    sim.world.add_node(net, .dir);
+    sim.world.add_node(join(&inner, base, "/net"), .dir);
     for ([_][]const u8{ "/bin", "/proc", "/dev", "/usr/bin" }) |suffix| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
-        sim.world.add_node(text, .dir);
+        sim.world.add_node(join(&inner, merged, suffix), .dir);
     }
-    const shell = std.fmt.bufPrint(&inner, "{s}/bin/sh", .{merged}) catch unreachable;
-    sim.world.add_node(shell, .file);
+    sim.world.add_node(join(&inner, merged, "/bin/sh"), .file);
     for ([_][]const u8{ "/etc/hosts", "/etc/resolv.conf", "/etc/hostname" }) |suffix| {
-        const text = std.fmt.bufPrint(&inner, "{s}{s}", .{ merged, suffix }) catch unreachable;
-        sim.world.add_node(text, .file);
+        sim.world.add_node(join(&inner, merged, suffix), .file);
     }
 }
 
