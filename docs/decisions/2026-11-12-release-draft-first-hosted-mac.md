@@ -32,11 +32,14 @@ the runner-label guard and the `macos-arm64` zip name. Everything else in them s
    re-wrapped with a throwaway password through `openssl -passin env:`, a temporary keychain with
    random passwords, removed in an `always()` step. The workflow waits for nothing from `mac.yml`:
    `mac-check` runs `zig build check` on `macos-15` at the release commit inside the run.
-4. **The keychain stays off the search list.** `codesign` and `notarytool` get it by path, and
-   the identity is chosen by hash after `find-identity` finds exactly one. `mac-test` asserts the
-   search list is unchanged, so its hosted run shows whether `codesign` needs it. If it does, the
-   fix is to add the temporary keychain to the list for the signing step and restore the list in
-   the `always()` step; record that here when it happens.
+4. **The keychain joins the user search list for the signing step only.** `mac-test` showed that
+   `codesign` does not find the identity through `--keychain` alone (its man page says the file is
+   not searched to resolve the chain unless it is also on the search list). So `mac` saves
+   `security list-keychains -d user`, sets the list to the temporary keychain plus the saved
+   entries before `Sign and notarize`, and the `always()` cleanup restores the saved list; `mac-test`
+   does the same. The identity is still chosen by hash after `find-identity` finds exactly one, and
+   `--keychain` is still passed. The exposure the old rule guarded against does not exist on a
+   one-job virtual machine that no pull request shares.
 5. **Pinned tools.** Zig by SHA-256 (as before, plus `setup-zig-macos`), `gh` 2.74.0 by SHA-256
    (`.github/actions/setup-gh`, for ubuntu and both macOS architectures), every action by full
    commit SHA. Every checkout has `persist-credentials: false`.
@@ -67,9 +70,9 @@ the runner-label guard and the `macos-arm64` zip name. Everything else in them s
 ## Open, for the owner and the dry run
 
 - **Intel.** The VM kernel is arm64-only, so on an Intel Mac `zbx` runs `--version`, `doctor` and
-  `brew test`, but no VM. The formula's `depends_on arch: :arm64` is gone with this change; the
-  owner should confirm that Intel users may install it, or put the line back (and the universal
-  zip stays harmless).
+  `brew test`, but no VM. The owner dropped Intel on Mac, so the formula keeps
+  `depends_on arch: :arm64` and the Intel `verify` leg checks the zip only; the universal zip
+  stays.
 - Not verified before a real run: `spctl` on a bare Mach-O, `codesign --architecture` for the
   per-slice CDHash, the x86_64 cross-build with frameworks on the arm64 runner, and
   `macos-15-intel` as a label. Each fails loudly in `mac`, `mac-test` or `verify`.

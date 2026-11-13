@@ -334,28 +334,44 @@ fn make_universal(
 }
 
 /// Whether the keychain has a notary profile of this name: `notarytool history` exits 0 with one.
-fn profile_exists(io: Io, profile: []const u8, keychain: []const u8) bool {
+const ProfileState = enum { present, missing, unknown };
+
+/// `notarytool history` succeeds when the profile exists. A missing profile is told apart from
+/// any other failure (Apple down, a revoked key, no network) by the text notarytool prints.
+fn profile_state(
+    io: Io,
+    arena: std.mem.Allocator,
+    profile: []const u8,
+    keychain: []const u8,
+) ProfileState {
     var words: [8][]const u8 = undefined;
     const tail = notary_arguments("history", "", profile, keychain, &words);
     var argv: [10][]const u8 = undefined;
     argv[0] = "/usr/bin/xcrun";
     argv[1] = "--no-cache"; // no per-user lookup cache that another process could have edited
     @memcpy(argv[2 .. 2 + tail.len], tail);
-    var child = std.process.spawn(io, .{
-        .argv = argv[0 .. 2 + tail.len],
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    const result = child.wait(io) catch return false;
-    return switch (result) {
-        .exited => |code| code == 0,
-        else => false,
-    };
+    const run_argv = argv[0 .. 2 + tail.len];
+    const result = std.process.run(arena, io, .{ .argv = run_argv }) catch return .unknown;
+    switch (result.term) {
+        .exited => |code| if (code == 0) return .present,
+        else => {},
+    }
+    const missing = profile_is_missing(result.stderr) or profile_is_missing(result.stdout);
+    return if (missing) .missing else .unknown;
+}
+
+fn profile_is_missing(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "No Keychain password item found") != null;
 }
 
 /// Refused before anything is built or signed: a release that cannot be notarized is not worth
 /// signing for.
-fn check_notarization(io: Io, arguments: *const Arguments, log: *Io.Writer) !void {
+fn check_notarization(
+    io: Io,
+    arena: std.mem.Allocator,
+    arguments: *const Arguments,
+    log: *Io.Writer,
+) !void {
     assert(arguments.notarize);
     // Refused before anything is built or signed: a release that cannot be notarized is not
     // worth signing for.
@@ -365,20 +381,30 @@ fn check_notarization(io: Io, arguments: *const Arguments, log: *Io.Writer) !voi
             "an ad-hoc signature cannot be notarized\n", .{default_profile});
         return error.NotarizationRefused;
     }
-    if (!profile_exists(io, arguments.profile, arguments.keychain)) {
-        try log.print("mac_release: the keychain has no notary profile '{s}'. Store one " ++
-            "with: xcrun notarytool store-credentials {s} (it asks for the Apple ID and " ++
-            "an app-specific password, or an API key, and keeps them in the keychain)\n", .{
-            arguments.profile, arguments.profile,
-        });
-        return error.NotarizationRefused;
+    switch (profile_state(io, arena, arguments.profile, arguments.keychain)) {
+        .present => {},
+        .missing => {
+            try log.print("mac_release: the keychain has no notary profile '{s}'. Store one " ++
+                "with: xcrun notarytool store-credentials {s} (it asks for the Apple ID and " ++
+                "an app-specific password, or an API key, and keeps them in the keychain)\n", .{
+                arguments.profile, arguments.profile,
+            });
+            return error.NotarizationRefused;
+        },
+        .unknown => {
+            try log.print("mac_release: could not query notary profile '{s}' (Apple or the " ++
+                "network may be down, or the key revoked); it is not known to be missing\n", .{
+                arguments.profile,
+            });
+            return error.NotarizationRefused;
+        },
     }
 }
 
 fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !void {
     const io = init.io;
     const arena = init.arena.allocator();
-    if (arguments.notarize) try check_notarization(io, arguments, log);
+    if (arguments.notarize) try check_notarization(io, arena, arguments, log);
     const dir = Io.Dir.cwd();
     // One run, one set of files: nothing of an earlier run stays beside this one's.
     dir.deleteTree(io, arguments.out) catch {};
@@ -419,7 +445,7 @@ fn run(init: std.process.Init, arguments: *const Arguments, log: *Io.Writer) !vo
         );
         var notary_argv: [10][]const u8 = undefined;
         notary_argv[0] = "/usr/bin/xcrun";
-        notary_argv[1] = "--no-cache"; // see profile_exists
+        notary_argv[1] = "--no-cache"; // see profile_state
         @memcpy(notary_argv[2 .. 2 + notary.len], notary);
         try exec(io, log, notary_argv[0 .. 2 + notary.len]);
         // A Mach-O on its own cannot be stapled, and the archive is not a bundle either: the
@@ -552,4 +578,10 @@ test "the code directory of each slice is read with --architecture, the path las
         try std.testing.expectEqualStrings(architecture, built[2]);
         try std.testing.expectEqualStrings("stage/zbx", built[3]);
     }
+}
+
+test "only notarytool's missing-profile text counts as a missing profile" {
+    try std.testing.expect(profile_is_missing("Error: No Keychain password item found for profile: p\n"));
+    try std.testing.expect(!profile_is_missing("Error: The Internet connection appears to be offline.\n"));
+    try std.testing.expect(!profile_is_missing(""));
 }

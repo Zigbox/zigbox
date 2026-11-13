@@ -56,10 +56,12 @@ on:
 permissions:
   contents: read
 
-# One release run per commit (or version): a run for a later commit of main must never replace a
-# waiting run for the release commit, and two runs for one release must take turns.
+# One release run per commit: a run for a later commit of main must never replace a waiting run
+# for the release commit, and the automatic run and a manual dispatch from the same commit
+# (`github.sha`) take turns. A dispatch that finishes an older release from a later main commit
+# is in another group; `plan` and `find-draft` fail closed if two drafts of one tag exist.
 concurrency:
-  group: release-${{ github.event.workflow_run.head_sha || inputs.version || github.ref }}
+  group: release-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -381,7 +383,8 @@ jobs:
       # in this step. `security import` takes the .p12 password only on argv, so the .p12 is
       # first re-wrapped under a random password made here; MAC_CERT_PASSWORD reaches only
       # openssl, through its environment. The keychain is passed to codesign and notarytool by
-      # path and is never put on the search list or made the default.
+      # path; the next step also puts it on the user search list (mac-test showed codesign needs
+      # that), and the cleanup restores the list this step found.
       - name: Temporary keychain with the Developer ID certificate and the notary key
         env:
           MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
@@ -429,17 +432,20 @@ jobs:
           /usr/bin/xcrun --no-cache notarytool store-credentials zbx-notary --key "$SECRETS_DIR/notary.p8" \
             --key-id "$MAC_NOTARY_KEY_ID" --issuer "$MAC_NOTARY_ISSUER_ID" --keychain "$KEYCHAIN" > /dev/null
           /bin/rm -f "$SECRETS_DIR/notary.p8"
-          listed=$(/usr/bin/security list-keychains -d user)
-          if grep -q zbx-release <<< "$listed"; then
-            echo "release: the temporary keychain is on the search list" >&2
-            exit 1
-          fi
       # Builds both slices, joins them with lipo, signs, notarizes, zips; checks the signature
       # and that the archive's code is the signed code.
       - name: Sign and notarize
         # An explicit -target gets no SDK by itself: --sysroot names it, -Dsdk searches it for the
         # frameworks and libobjc.
         run: |
+          # codesign resolves the identity's certificate chain through the user search list, so
+          # the temporary keychain joins it for this step. The list found is saved (the paths are
+          # not secrets) and the cleanup step restores it, whatever happens. This job is a
+          # one-job virtual machine that no pull request shares.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          existing=()
+          while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
           zig build mac-release --sysroot "$SDK" -Dsdk \
             -Dnotarize -Dsign-identity="$SIGN_IDENTITY" -Dkeychain="$KEYCHAIN"
@@ -464,8 +470,14 @@ jobs:
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |
+          # Puts back the search list the build step found (nothing to do if it never got that far).
+          if [ -f "$RUNNER_TEMP/keychain-list" ]; then
+            saved=()
+            while IFS= read -r line; do saved+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+            /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
+          fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # The last stop before the release is public: the draft holds exactly the four assets, each
   # checked, and the tap's formula differs from the new one only where it may. Writes nothing.
@@ -579,6 +591,17 @@ jobs:
           set -euo pipefail
           latest=true
           if [ "$PRERELEASE" = true ]; then latest=false; fi
+          # The approval can wait for hours: the tag must still be absent now, because publishing
+          # under a tag that someone made meanwhile would pair it with assets built from $SHA.
+          # A 404 is the one answer that lets this go on; any other failure also refuses.
+          if err=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>&1 > /dev/null); then
+            echo "release: the tag $TAG exists now; refusing to publish under it" >&2
+            exit 1
+          fi
+          case "$err" in
+            *"HTTP 404"*) ;;
+            *) echo "release: could not check that $TAG is absent: ${err%%$'\n'*}" >&2; exit 1 ;;
+          esac
           # tag_name is passed again: without it the draft publishes under its placeholder
           # "untagged-..." name and no tag is made (found by draft-test).
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$ID" -F draft=false \
@@ -712,8 +735,8 @@ jobs:
           echo "release: the site deploy did not finish within 30 minutes" >&2
           exit 1
 
-  # What a user does, on an Apple silicon and an Intel Mac: take the public zip and check it,
-  # then install from the tap and run it. No secret, no environment.
+  # What a user does: take the public zip and check it (Apple silicon and Intel), then, on Apple
+  # silicon, install from the tap and run it. No secret, no environment.
   verify:
     name: install and run (${{ matrix.os }})
     needs: [plan, site]
@@ -748,7 +771,10 @@ jobs:
           zip: ${{ runner.temp }}/public/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
           version: ${{ needs.plan.outputs.version }}
           gatekeeper: 'true'
+      # The formula needs Apple silicon (depends_on arch: :arm64), so an Intel Mac checks the zip
+      # above and nothing more.
       - name: brew install, zbx --version and brew test
+        if: ${{ runner.arch == 'ARM64' }}
         run: |
           set -euo pipefail
           brew update
@@ -863,17 +889,14 @@ jobs:
           fingerprint=$(/usr/bin/openssl x509 -in "$SECRETS_DIR/cert.pem" -noout -fingerprint -sha1)
           echo "TEST_IDENTITY=$(echo "${fingerprint#*=}" | /usr/bin/tr -d ':')" >> "$GITHUB_ENV"
           /bin/rm -rf "$SECRETS_DIR"
-          listed=$(/usr/bin/security list-keychains -d user)
-          if grep -q zbx-release <<< "$listed"; then
-            echo "release: the temporary keychain is on the search list" >&2
-            exit 1
-          fi
       - name: Build the universal zip and sign it with it (no notarization, no upload)
         run: |
-          # codesign finds a self-signed identity only when its keychain is on the search list (a
-          # real Developer ID identity is found through --keychain alone). This job is a one-job
-          # virtual machine, and the cleanup step puts the login keychain back.
-          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+          # codesign finds the identity only when its keychain is on the search list; this is the
+          # same step as in `mac`. The cleanup step restores the list found here.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          existing=()
+          while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+          /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
           SDK="$(/usr/bin/xcrun --show-sdk-path)"
           zig build mac-release --sysroot "$SDK" -Dsdk \
             -Dsign-identity="$TEST_IDENTITY" -Dkeychain="$KEYCHAIN"
@@ -892,9 +915,14 @@ jobs:
       - name: Delete the keychain and everything this job wrote under the runner's temp
         if: ${{ always() }}
         run: |
-          /usr/bin/security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" || true
+          # Puts back the search list the build step found (nothing to do if it never got that far).
+          if [ -f "$RUNNER_TEMP/keychain-list" ]; then
+            saved=()
+            while IFS= read -r line; do saved+=("$line"); done < "$RUNNER_TEMP/keychain-list"
+            /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
+          fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # Tries, on a scratch branch only, what the release depends on and the docs do not promise:
   # that gh uploads to, downloads from, edits and publishes a DRAFT by its tag, that a draft makes

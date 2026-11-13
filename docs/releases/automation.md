@@ -92,18 +92,19 @@ latest). It still commits the formula to the tap, so a dry run is reverted by ha
 notarizes it, and writes `zbx-<v>-macos-universal.zip`, its `.sha256` and the formula. After signing
 it checks `codesign --verify --strict`, that the archive's code is the signed code (CDHash of each
 slice), `lipo -archs` (exactly arm64 and x86_64), and, in the workflow, `spctl --assess` and the
-version string. The zip holds `zbx` alone. The formula no longer says `depends_on arch: :arm64`.
+version string. The zip holds `zbx` alone. The formula keeps `depends_on arch: :arm64` (the owner dropped Intel on Mac; the universal zip stays).
 
-The x86_64 slice runs `zbx --version`, `zbx doctor` and `brew test`; it cannot boot the VM, whose
-kernel is arm64-only (the `macos-15-intel` check shows this and nothing more).
+The x86_64 slice is checked on `macos-15-intel` as a zip only (`mac-check-zip`: signature,
+Gatekeeper, architectures, version); `brew install` is skipped there because the formula needs
+Apple silicon, whose kernel the VM requires.
 
 ### The tap
 
 `tap` takes the formula from the published release (not from an artifact), checks its hash
 against the zip's, fetches the tap's current `Formula/zigbox.rb` through the API, and refuses unless
 the difference is only `url`, `version` and `sha256` lines. The first universal release also
-changes the header comment and removes the `depends_on arch: :arm64` line, so those two are
-allowed (`.github/actions/tap-formula`). The write is one contents-API call with the blob SHA it
+changes the header comment (and the formula may still drop the `depends_on arch: :arm64` line
+if the owner later allows Intel), so those two are allowed (`.github/actions/tap-formula`). The write is one contents-API call with the blob SHA it
 read, so a concurrent change to the formula makes it fail, never overwrite.
 
 ## Security notes
@@ -113,8 +114,9 @@ read, so a concurrent change to the formula makes it fail, never overwrite.
   the signing step, in mode-600 files that are deleted in the step, and in a temporary keychain
   under `$RUNNER_TEMP`, deleted in an `always()` step. The `release` environment's approval and its
   `main`-only policy are what stop a pull request from reaching them.
-- The keychain is never put on the search list: `codesign` and `notarytool` get it by path. (If a
-  hosted runner ever needs it on the list, the decision says what to do.)
+- The temporary keychain is put on the user search list for the signing step, because `codesign`
+  needs it there to resolve the chain; the `always()` step restores the list the job found. Both
+  steps are the same in `mac-test`.
 - The App can write the contents of two repositories, `homebrew-tap` and `zigbox.github.io`, and
   read Actions on the site; it is not installed on `Zigbox/zigbox`. Its key is a secret of
   `release-publish` alone (no reviewers, `main` only): `preflight`, `prepare`, `tap` and `site`
@@ -158,6 +160,12 @@ self-hosted release runner and its separate macOS user, the runner group. (`MAC_
 runners cannot run.) A ruleset that protects `v*` tags needs nothing: the tag is made by the
 `github-actions` bot through `GITHUB_TOKEN`; if the ruleset blocks it, say so (the first publish
 shows it).
+
+**Owner, recommended: a tag ruleset.** `publish` checks just before publishing that the tag is
+still absent and refuses if it exists, which leaves a window of seconds, not hours. Closing it needs
+a repository ruleset that targets tags `v*` and restricts creation so that only the release
+workflow's identity (`github-actions`) can create them. Sessions cannot set rulesets: Settings →
+Rules → Rulesets → New tag ruleset.
 
 ## Setup guide (owner, once)
 
