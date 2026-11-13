@@ -67,7 +67,8 @@ test "a refusal exits 1 with its code and writes nothing" {
     try testing.expectEqual(@as(u8, 1), run(&base));
     try expect_stderr("E0811");
     try testing.expect(files.content_of(output_path) == null);
-    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "import", project ++ "/Missing.Dockerfile" }));
+    const missing = project ++ "/Missing.Dockerfile";
+    try testing.expectEqual(@as(u8, 1), run(&.{ "zbx", "import", missing }));
     try expect_stderr("E0810");
     try testing.expectEqual(@as(u8, 1), run(&(base ++ .{ "--network", "bogus" })));
     try expect_stderr("E0005");
