@@ -1214,8 +1214,11 @@ pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
 /// scheduler has been told; the running steps are then aborted and their roots removed.
 pub fn build_interrupted(diag: *Diag, signal: u8) void {
     assert(diag.code == null);
-    assert(signal == constants.signal_interrupt or signal == constants.signal_term);
-    const name = if (signal == constants.signal_interrupt) "SIGINT" else "SIGTERM";
+    const name = switch (signal) {
+        constants.signal_interrupt => "SIGINT",
+        constants.signal_term => "SIGTERM",
+        else => unreachable, // The host catches only these two.
+    };
     diag.raise(.E0808);
     diag.cause("stopped by {s}; the unfinished steps' work was released", .{
         name,

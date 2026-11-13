@@ -1817,10 +1817,10 @@ test "a caught SIGINT and SIGTERM set the flag instead of ending the process" {
         try std.testing.expect(!subject.interrupt_pending());
         const sent = linux.tgkill(linux.getpid(), linux.gettid(), which);
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(sent));
-        try std.testing.expectEqual(@as(u8, @intCast(@backingInt(which))), subject.interrupt_signal());
+        try std.testing.expectEqual(number_of(which), subject.interrupt_signal());
         const other: linux.SIG = if (which == .INT) .TERM else .INT;
         _ = linux.tgkill(linux.getpid(), linux.gettid(), other);
-        try std.testing.expectEqual(@as(u8, @intCast(@backingInt(which))), subject.interrupt_signal());
+        try std.testing.expectEqual(number_of(which), subject.interrupt_signal());
         subject.catch_interrupts(false);
     }
 }
@@ -1867,7 +1867,8 @@ test "an inherited ignored SIGTERM stays ignored while caught, and is ignored af
         .mask = linux.sigemptyset(),
         .flags = 0,
     };
-    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.sigaction(.TERM, &ignore, null)));
+    const ignored = linux.sigaction(.TERM, &ignore, null);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(ignored));
     subject.catch_interrupts(true);
     _ = linux.tgkill(linux.getpid(), linux.gettid(), .TERM);
     try std.testing.expect(!subject.interrupt_pending());
@@ -2698,4 +2699,9 @@ test "real keeper holds one descriptor, lives until its pipe's writers are gone,
     const status = try subject.wait_for(pid);
     try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, status);
     try std.testing.expectEqual(@as(u32, 0), real.open_count);
+}
+
+/// The signal's number, as `interrupt_signal` returns it.
+fn number_of(signal: linux.SIG) u8 {
+    return @intCast(@backingInt(signal));
 }

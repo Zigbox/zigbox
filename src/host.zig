@@ -1436,8 +1436,7 @@ pub const Host = struct {
         assert(@intFromPtr(host.vtable) != 0);
         assert(@intFromPtr(host.context) != 0);
         const number = host.vtable.interrupt_signal(host.context);
-        assert(number == 0 or number == constants.signal_interrupt or
-            number == constants.signal_term);
+        assert(interrupt_known(number));
         return number;
     }
 
@@ -1632,4 +1631,12 @@ test "PathZ refuses empty, over-long and NUL-containing paths" {
     try std.testing.expectEqual(@as(usize, constants.path_bytes_max), accepted.len);
     const too_long = repeat('/', constants.path_bytes_max + 1);
     try std.testing.expectError(error.PathTooLong, path_z.init(too_long));
+}
+
+/// Whether `number` is what `interrupt_signal` may return: none, SIGINT or SIGTERM.
+fn interrupt_known(number: u8) bool {
+    return switch (number) {
+        0, constants.signal_interrupt, constants.signal_term => true,
+        else => false,
+    };
 }
