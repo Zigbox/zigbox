@@ -1,0 +1,6 @@
+error[ZBX-E0815]: the Dockerfile is larger than a build file holds
+  cause  Dockerfile:12: Dockerfile:12 makes a string of 70000 bytes, more than
+         the bu...
+  fix    move the text into a script in the context and COPY it
+  more   zbx explain E0815 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0815.html

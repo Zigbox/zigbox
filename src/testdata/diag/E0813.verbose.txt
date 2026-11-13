@@ -1,0 +1,7 @@
+error[ZBX-E0813]: a Dockerfile stage can't be used
+  while  importing Dockerfile
+  cause  Dockerfile:9: Dockerfile:9 names a second stage `build`
+  line   9
+  fix    give each stage its own name
+  more   zbx explain E0813
+  docs   https://zigbox.github.io/zigbox/errors/E0813.html

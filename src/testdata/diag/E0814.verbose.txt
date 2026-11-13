@@ -1,0 +1,7 @@
+error[ZBX-E0814]: --hermetic refused a step
+  while  importing Dockerfile
+  cause  Dockerfile:7: --hermetic: step fetch (Dockerfile:7) has the network
+  line   7
+  fix    drop --hermetic, or change Dockerfile:7 so it needs neither t...
+  more   zbx explain E0814
+  docs   https://zigbox.github.io/zigbox/errors/E0814.html
