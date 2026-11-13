@@ -149,6 +149,7 @@ signed      demo  3b6a…(key id)  this record
 - **`zbx exec`** (owner): the policy verdict on the container's tree and binding from its run record. There is no re-hash, because the container is running and its lower layer was checked when it started. A container started before the policy existed and not satisfying it is refused with the same code. Pausing or stopping it is not exec's business.
 - **`zbx build`** (owner): each step's base is checked like a run's tree before the step's container starts, and a refusal names the step. A step is a container running the base image's code. Users who turn on `require_signature` sign their bases (`zbx sign alpine@sha256:…`). Cache hits run nothing and are not checked.
 - **`zbx pull`** is not gated (owner).
+- **`zigbox.start`** (owner, 2026-11-13, [decision](../decisions/2026-11-13-library-trust-gate.md)): the library's start runs the same gate as `zbx run` (`src/trust/start_gate.zig`), with no way to skip it, so a node's policy binds Zigcube's agent too.
 
 ### The tamper check (verify-on-run)
 
@@ -251,7 +252,8 @@ New commands: `key new|list|show`, `sign`, `verify`, `trust export|import|prune`
 - the policy parser and the verdict function;
 - `zigbox.trust`, the export of the pure parts for a caller that judges a signed tree (policy, verdict, DSSE, statements, key text, the signature record's type): caller-supplied storage (`dsse.Work` 873,894 bytes, `signature_record.Record` 2,800,336, `verdict.Report` 284), compiled for `wasm32-freestanding` by `zig build trust-wasm`, part of `check` ([decision](../decisions/2026-11-12-zigbox-trust-export.md));
 - the signature record (an in-toto bundle) and the provenance statement;
-- the tamper check over a store.
+- the tamper check over a store;
+- `zigbox.start`, the start behind the gate `zbx run` runs, with a caller-owned `zigbox.GateWorkspace` ([decision](../decisions/2026-11-13-library-trust-gate.md)).
 
 Zigcube's C6 admission (server) and node check (agent) call the same verdict function. A test drives the verdict and `import_trust` from a caller other than the CLI, as M7's `build_library_tests.zig` does. `zigbox_package` is a separate module. `zigbox.push` (lane U) exports `pack`, `export_layout` and `push`; Zigcube's builders call it.
 

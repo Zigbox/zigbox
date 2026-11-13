@@ -354,6 +354,7 @@ test {
     _ = @import("trust/policy_commands_tests.zig");
     _ = @import("trust/exec_gate.zig");
     _ = @import("trust/gate_run_tests.zig");
+    _ = @import("trust/start_gate_tests.zig");
     _ = @import("trust/record_tests.zig");
     _ = @import("fuzz_json.zig");
     _ = @import("fuzz_trust.zig");
