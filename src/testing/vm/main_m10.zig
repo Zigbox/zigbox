@@ -142,7 +142,7 @@ fn step_doctor(session: *Session, out: *Io.Writer) !void {
 }
 
 fn step_device(session: *Session, out: *Io.Writer) !void {
-    try out.print("\ndemo-m10: STEP 2: --device zigbox.test/gpu=0 brings node, variable, library\n", .{});
+    try out.print("\ndemo-m10: STEP 2: --device zigbox.test/gpu=0: node, variable, library\n", .{});
     const inside = "'echo ZBXGPU=$ZBXGPU; : </dev/zbx-gpu && echo NODE-OPEN; " ++
         "ls /opt/zbx-gpu-lib'";
     const command = run_prefix ++ " --name gpu-dev --device zigbox.test/gpu=0 -- sh -c " ++ inside;
@@ -194,7 +194,8 @@ fn step_not_in_group(session: *Session, out: *Io.Writer) !void {
 fn step_yaml(session: *Session, out: *Io.Writer) !void {
     try out.print("\ndemo-m10: STEP 5: a YAML spec beside the JSON one\n", .{});
     const put = "printf 'cdiVersion: 0.6.0\\n' > /etc/cdi/zbx-yaml.yaml";
-    if ((try session.run(put, limits.command_timeout_kvm_s)).status != 0) return error.DeviceSetupFailed;
+    const wrote = try session.run(put, limits.command_timeout_kvm_s);
+    if (wrote.status != 0) return error.DeviceSetupFailed;
     defer _ = session.run("rm -f /etc/cdi/zbx-yaml.yaml", limits.command_timeout_kvm_s) catch {};
     const doctor = zbx ++ " doctor";
     const listed = try H.run_split(session, doctor);

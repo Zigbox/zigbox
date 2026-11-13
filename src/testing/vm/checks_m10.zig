@@ -103,54 +103,79 @@ pub fn check_baseline(streams: Streams, status: u8) Error!void {
 
 const testing = std.testing;
 
+fn quiet(stdout: []const u8) Streams {
+    return .{ .stdout = stdout, .stderr = "" };
+}
+
+fn loud(stderr: []const u8) Streams {
+    return .{ .stdout = "", .stderr = stderr };
+}
+
+fn both(stdout: []const u8, stderr: []const u8) Streams {
+    return .{ .stdout = stdout, .stderr = stderr };
+}
+
 test "check_doctor wants the spec, device and node, and no gap" {
-    const good = "ok   kernel  x\ngpu  ok  spec /etc/cdi/zbx-gpu.json  zigbox.test/gpu, 1 devices\n" ++
+    const good = "ok   kernel  x\n" ++
+        "gpu  ok  spec /etc/cdi/zbx-gpu.json  zigbox.test/gpu, 1 devices\n" ++
         "gpu  ok  device zigbox.test/gpu=0  every node can be opened by you\n" ++
         "gpu  ok  node /dev/zbx-gpu  mode 0660, group 44, you are in that group\n";
-    try check_doctor(.{ .stdout = good, .stderr = "" });
-    try testing.expectError(error.OutputWrong, check_doctor(.{ .stdout = "ok  kernel  x\n", .stderr = "" }));
+    try check_doctor(quiet(good));
+    try testing.expectError(error.OutputWrong, check_doctor(quiet("ok  kernel  x\n")));
     const gap = good ++ "gpu  gap node /dev/x  closed\n";
-    try testing.expectError(error.OutputWrong, check_doctor(.{ .stdout = gap, .stderr = "" }));
+    try testing.expectError(error.OutputWrong, check_doctor(quiet(gap)));
 }
 
 test "check_device_run wants the node open, the variable and the library" {
     const out = "ZBXGPU=on\nNODE-OPEN\nlibzbxgpu\n";
-    try check_device_run(.{ .stdout = out, .stderr = "warning[ZBX-W0209]: x\n" }, 0);
-    try testing.expectError(error.ExitCodeWrong, check_device_run(.{ .stdout = out, .stderr = "" }, 1));
-    try testing.expectError(error.OutputWrong, check_device_run(.{ .stdout = "ZBXGPU=on\nlibzbxgpu\n", .stderr = "" }, 0));
-    try testing.expectError(error.OutputWrong, check_device_run(.{ .stdout = out, .stderr = "error[ZBX-E0225]: x\n" }, 0));
+    try check_device_run(both(out, "warning[ZBX-W0209]: x\n"), 0);
+    try testing.expectError(error.ExitCodeWrong, check_device_run(quiet(out), 1));
+    const unopened = quiet("ZBXGPU=on\nlibzbxgpu\n");
+    try testing.expectError(error.OutputWrong, check_device_run(unopened, 0));
+    const refused = both(out, "error[ZBX-E0225]: x\n");
+    try testing.expectError(error.OutputWrong, check_device_run(refused, 0));
 }
 
 test "check_not_in_group wants one coded line naming the node and the group" {
-    const text = "error[ZBX-E0225]: can't bind that device\n  cause  you cannot open /dev/zbx-gpu: group 44\n";
-    try check_not_in_group(.{ .stdout = "", .stderr = text }, 125);
-    try testing.expectError(error.ExitCodeWrong, check_not_in_group(.{ .stdout = "", .stderr = text }, 1));
-    try testing.expectError(error.RefusalWrong, check_not_in_group(.{ .stdout = "", .stderr = "error[ZBX-E0226]: x /dev/zbx-gpu group\n" }, 125));
-    try testing.expectError(error.RefusalWrong, check_not_in_group(.{ .stdout = "", .stderr = "error[ZBX-E0225]: x\n" }, 125));
+    const text = "error[ZBX-E0225]: can't bind that device\n" ++
+        "  cause  you cannot open /dev/zbx-gpu: group 44\n";
+    try check_not_in_group(loud(text), 125);
+    try testing.expectError(error.ExitCodeWrong, check_not_in_group(loud(text), 1));
+    const other_code = loud("error[ZBX-E0226]: x /dev/zbx-gpu group\n");
+    try testing.expectError(error.RefusalWrong, check_not_in_group(other_code, 125));
+    const no_names = loud("error[ZBX-E0225]: x\n");
+    try testing.expectError(error.RefusalWrong, check_not_in_group(no_names, 125));
 }
 
 test "the YAML checks want the fix and the file named" {
     const doctor = "gpu  gap spec /etc/cdi/zbx-yaml.yaml  refused: a YAML spec\n" ++
-        "gpu  ok  device zigbox.test/gpu=0  x\ngpu  gap fix a YAML spec  nvidia-ctk cdi generate --format=json\n";
-    try check_yaml_doctor(.{ .stdout = doctor, .stderr = "" });
-    try testing.expectError(error.OutputWrong, check_yaml_doctor(.{ .stdout = "gpu  ok  device zigbox.test/gpu=0\n", .stderr = "" }));
-    const run = "error[ZBX-E0226]: can't use a CDI spec\n  cause  /etc/cdi/zbx-yaml.yaml is refused\n";
-    try check_yaml_run(.{ .stdout = "", .stderr = run }, 125);
-    try testing.expectError(error.RefusalWrong, check_yaml_run(.{ .stdout = "", .stderr = "error[ZBX-E0226]: x\n" }, 125));
-    try testing.expectError(error.ExitCodeWrong, check_yaml_run(.{ .stdout = "", .stderr = run }, 0));
+        "gpu  ok  device zigbox.test/gpu=0  x\n" ++
+        "gpu  gap fix a YAML spec  nvidia-ctk cdi generate --format=json\n";
+    try check_yaml_doctor(quiet(doctor));
+    const bare = quiet("gpu  ok  device zigbox.test/gpu=0\n");
+    try testing.expectError(error.OutputWrong, check_yaml_doctor(bare));
+    const run = "error[ZBX-E0226]: can't use a CDI spec\n" ++
+        "  cause  /etc/cdi/zbx-yaml.yaml is refused\n";
+    try check_yaml_run(loud(run), 125);
+    const unnamed = loud("error[ZBX-E0226]: x\n");
+    try testing.expectError(error.RefusalWrong, check_yaml_run(unnamed, 125));
+    try testing.expectError(error.ExitCodeWrong, check_yaml_run(loud(run), 0));
 }
 
 test "check_no_ldconfig wants W0208 and the path" {
     const out = "LDP=/opt/zbx-gpu-lib:\n";
-    try check_no_ldconfig(.{ .stdout = out, .stderr = "warning[ZBX-W0208]: x\n" }, 0);
-    try testing.expectError(error.OutputWrong, check_no_ldconfig(.{ .stdout = out, .stderr = "" }, 0));
-    try testing.expectError(error.OutputWrong, check_no_ldconfig(.{ .stdout = "LDP=\n", .stderr = "warning[ZBX-W0208]: x\n" }, 0));
-    try testing.expectError(error.ExitCodeWrong, check_no_ldconfig(.{ .stdout = out, .stderr = "warning[ZBX-W0208]: x\n" }, 3));
+    const note = "warning[ZBX-W0208]: x\n";
+    try check_no_ldconfig(both(out, note), 0);
+    try testing.expectError(error.OutputWrong, check_no_ldconfig(quiet(out), 0));
+    try testing.expectError(error.OutputWrong, check_no_ldconfig(both("LDP=\n", note), 0));
+    try testing.expectError(error.ExitCodeWrong, check_no_ldconfig(both(out, note), 3));
 }
 
 test "check_baseline wants a quiet run with no demo node" {
-    try check_baseline(.{ .stdout = "null\nUID=0\n", .stderr = "" }, 0);
-    try testing.expectError(error.OutputWrong, check_baseline(.{ .stdout = "zbx-gpu\nUID=0\n", .stderr = "" }, 0));
-    try testing.expectError(error.OutputWrong, check_baseline(.{ .stdout = "UID=0\n", .stderr = "warning[ZBX-W0209]: x\n" }, 0));
-    try testing.expectError(error.OutputWrong, check_baseline(.{ .stdout = "null\n", .stderr = "" }, 0));
+    try check_baseline(quiet("null\nUID=0\n"), 0);
+    const node = quiet("zbx-gpu\nUID=0\n");
+    try testing.expectError(error.OutputWrong, check_baseline(node, 0));
+    const noted = both("UID=0\n", "warning[ZBX-W0209]: x\n");
+    try testing.expectError(error.OutputWrong, check_baseline(noted, 0));
+    try testing.expectError(error.OutputWrong, check_baseline(quiet("null\n"), 0));
 }
