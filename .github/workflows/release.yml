@@ -850,9 +850,13 @@ jobs:
           /usr/bin/security import "$SECRETS_DIR/wrapped.p12" -k "$KEYCHAIN" -P "$WRAP_PASSWORD" -x -T /usr/bin/codesign
           /usr/bin/security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           # codesign refuses an identity whose certificate is not trusted for code signing
-          # (CSSMERR_TP_NOT_TRUSTED), so the throwaway certificate is trusted, in the user
-          # domain and for this temporary keychain only.
-          /usr/bin/security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$SECRETS_DIR/cert.pem"
+          # (CSSMERR_TP_NOT_TRUSTED), so the throwaway certificate is trusted for code signing.
+          # The user domain would wait for a password prompt nobody can answer, so this is the
+          # admin domain, which the GitHub-hosted runner's passwordless sudo allows; the runner
+          # is a one-job virtual machine and the certificate lives one day. A prompt fails the
+          # step after a minute instead of hanging it.
+          /usr/bin/perl -e 'alarm 60; exec @ARGV' /usr/bin/sudo -n /usr/bin/security \
+            add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$SECRETS_DIR/cert.pem"
           /usr/bin/security find-identity -p codesigning "$KEYCHAIN"
           # codesign finds an untrusted self-signed identity by its certificate hash, not by name.
           # The hash is public certificate data, not a secret.
