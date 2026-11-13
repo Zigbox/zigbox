@@ -130,6 +130,22 @@ pub fn start(
     assert(diag.code == null);
     if (container.image != null) assert(options.image_workspace != null);
     run.init_handle(host, container, options, handle);
+    var judged = container.*;
+    const gated = try admit(host, &judged, options, workspace, diag);
+    return run.start(host, &judged, gated, handle, diag);
+}
+
+/// The gate alone: loads the policy files, judges `container` when one asks anything, and
+/// returns the options the start runs with (the tamper check added when any file exists).
+/// `container.image` is set to the full digest of the tree judged.
+pub fn admit(
+    host: Host,
+    container: *spec_mod.Spec,
+    options: run.StartOptions,
+    workspace: *Workspace,
+    diag: *Diag,
+) run.Error!run.StartOptions {
+    assert(diag.code == null);
     const state = &workspace.state;
     state.* = .{
         .memory = &workspace.gate,
@@ -144,9 +160,8 @@ pub fn start(
         .then = options.tree_check,
     };
     state.load(host, diag) catch return error.StartFailed;
-    var judged = container.*;
     if (gate.any_checks(&workspace.gate)) {
-        const subject = try subject_of(host, workspace, &judged, options, diag);
+        const subject = try subject_of(host, workspace, container, options, diag);
         state.judge(host, subject, diag) catch return error.StartFailed;
     }
     var gated = options;
@@ -154,7 +169,8 @@ pub fn start(
     if (options.tree_check == null) {
         if (!state.tamper_on) assert(gated.tree_check == null);
     }
-    return run.start(host, &judged, gated, handle, diag);
+    assert(diag.code == null);
+    return gated;
 }
 
 /// What the policy judges of `container`. A tree given by a prefix or an image name is resolved
