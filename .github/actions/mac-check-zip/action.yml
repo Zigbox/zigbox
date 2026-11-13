@@ -37,7 +37,11 @@ runs:
         archs=$(/usr/bin/lipo -archs "$binary")
         echo "archs: $archs"
         case " $archs " in
-          *" arm64 "*" x86_64 "* | *" x86_64 "*" arm64 "*) ;;
+          *" arm64 "*) ;;
+          *) echo "release: zbx holds '$archs', not both arm64 and x86_64" >&2; exit 1 ;;
+        esac
+        case " $archs " in
+          *" x86_64 "*) ;;
           *) echo "release: zbx holds '$archs', not both arm64 and x86_64" >&2; exit 1 ;;
         esac
         if [ "$(printf '%s\n' "$archs" | /usr/bin/wc -w | /usr/bin/tr -d ' ')" != "2" ]; then
