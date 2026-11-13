@@ -259,6 +259,9 @@ pub const Probe = enum {
     offered,
     /// No spec has any.
     absent,
+    /// None, a spec file could not be used, and the host has no NVIDIA driver: the spec is
+    /// some other vendor's, so `--gpu all` falls back to the render nodes.
+    trouble,
     /// A spec offers them and they cannot be used: `diag` says why (E0225, E0227, ...).
     refused,
 };
@@ -266,8 +269,10 @@ pub const Probe = enum {
 /// Resolves `nvidia.com/gpu=all` against the host's specs only to learn whether it works. The
 /// run resolves again with its real list; the cost is reading the specs twice. A refusal that
 /// says "there are none" (E0230) is not one: the answer is `absent` and `diag` is left clean.
-/// Any other refusal, E0226 (a YAML or stale spec) included, is the answer the user needs and
-/// stays raised.
+/// E0226 (a spec file could not be used) stays raised only on a host with the NVIDIA driver,
+/// where the file is likely NVIDIA's own (YAML, or stale after a driver upgrade) and its
+/// nvidia-drm render node would start the run with no driver and no word why. Elsewhere the
+/// file is another vendor's: the answer is `trouble`. Any other refusal stays raised.
 pub fn probe_nvidia(host: Host, diag: *Diag) Probe {
     assert(diag.code == null);
     var scratch: cdi_discover.Scratch = undefined;
@@ -279,10 +284,28 @@ pub fn probe_nvidia(host: Host, diag: *Diag) Probe {
         diag.reset();
         return .absent;
     }
-    // E0226 stays raised: a YAML or stale NVIDIA spec on a host whose nvidia-drm made a render
-    // node would otherwise start the run with the node and no driver, and no word why.
+    if (code == .E0226 and !nvidia_driver(host)) {
+        diag.reset();
+        return .trouble;
+    }
     return .refused;
 }
+
+/// The NVIDIA kernel driver is loaded: it makes `/proc/driver/nvidia/version` and
+/// `/dev/nvidiactl`. Either one is enough; an error other than "not there" counts as there, so
+/// a host whose driver cannot be seen still hears about its spec.
+fn nvidia_driver(host: Host) bool {
+    for (nvidia_driver_paths) |path| {
+        _ = host.stat(path) catch |err| switch (err) {
+            error.NotFound => continue,
+            else => return true,
+        };
+        return true;
+    }
+    return false;
+}
+
+const nvidia_driver_paths = [_][]const u8{ "/proc/driver/nvidia/version", "/dev/nvidiactl" };
 
 const testing = std.testing;
 

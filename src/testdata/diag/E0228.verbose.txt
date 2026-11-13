@@ -1,8 +1,8 @@
 error[ZBX-E0228]: --gpu found no GPU device to give
   while  looking for a GPU for --gpu all
   cause  no nvidia.com/gpu device in the CDI specs ($XDG_CONFIG_HOME/cdi,
-         /var/run/cdi, /etc/cdi), and no render node (/dev/dri/renderD*) or
-         /dev/kfd that you can open
+         /var/run/cdi, /etc/cdi), and no render node (/dev/dri/renderD*) that
+         you can open (/dev/kfd alone is not enough)
   gpu    all
   fix    see what this host has, and the fix for each gap:   zbx doctor
   more   zbx explain E0228

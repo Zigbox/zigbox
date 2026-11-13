@@ -507,7 +507,12 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
     assert(diag.code == null);
     assert(handle.effective.len == 0);
     var wants = false;
-    for (container.devices) |device| wants = wants or gpu_mod.ask_of(device.path) != null;
+    var wants_all = false;
+    for (container.devices) |device| {
+        const ask = gpu_mod.ask_of(device.path);
+        wants = wants or ask != null;
+        wants_all = wants_all or ask == .all;
+    }
     if (!wants) {
         handle.effective = container.devices;
         return true;
@@ -515,14 +520,17 @@ fn expand_gpu(host: Host, container: *const Spec, handle: *Handle, diag: *Diag) 
     var dri: gpu_mod.Dri = undefined;
     gpu_mod.look_dri(host, &dri);
     var nvidia = false;
-    // A resolution the caller gave replaces the host's specs, so there is nothing to probe.
-    if (container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
+    var trouble = false;
+    // Only `all` looks at the specs: `dri` is the render nodes, with no vendor tooling. A
+    // resolution the caller gave replaces the host's specs, so there is nothing to probe.
+    if (wants_all and container.cdi == null) switch (gpu_mod.probe_nvidia(host, diag)) {
         .offered => nvidia = true,
         .absent => {},
+        .trouble => trouble = true,
         .refused => return false,
     };
     const out = &handle.gpu_expanded;
-    switch (gpu_mod.expand(container.devices, nvidia, &dri, false, out)) {
+    switch (gpu_mod.expand(container.devices, nvidia, &dri, trouble, out)) {
         .given => {},
         .nothing => |nothing| {
             devices_diagnose.no_gpu(diag, nothing);
