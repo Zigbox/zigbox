@@ -1223,6 +1223,7 @@ pub fn build_interrupted(diag: *Diag, signal: u8) void {
     diag.cause("stopped by {s}; the unfinished steps' work was released", .{
         name,
     });
+    diag.fix(.{ .sentence = "run zbx build again; the steps that finished are cache hits" });
     assert(diag.code.? == .E0808);
 }
 

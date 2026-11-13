@@ -9,7 +9,8 @@ with a `zbx doctor` hint: wrong, since nothing is broken and the user asked for 
   It is the next free build code: E0810 to E0819 are reserved for the Dockerfile import
   (`docs/briefs/M9-dockerfile-import.md`), E0808 and E0809 were unused.
 - The message is one line naming the signal (SIGINT or SIGTERM) and saying the work of the
-  unfinished steps was released. No `doctor` hint: there is nothing to diagnose.
+  unfinished steps was released, and one fix: run `zbx build` again (finished steps are cache
+  hits). No `doctor` hint: there is nothing to diagnose.
 - It is raised wherever the build checks for a stop: the start of a step, its input import,
   each copy entry's selection, an interrupted or pre-empted wait, the start of the image step
   and before the image's record is saved. A signal during the image's assembly is never exit 0.
