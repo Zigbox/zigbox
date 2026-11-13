@@ -20,11 +20,16 @@ gates quoted). When `ci` is green on that commit, `.github/workflows/release.yml
 everything that can refuse, makes a **draft** release (no tag yet), and waits for the owner's one
 approval of the `release` environment. Nobody tags by hand. After the approval:
 
-- `linux` signs the apt and dnf trees and attaches `zigbox-repos.tar.gz` (the rest of this file);
+- `linux` signs the apt and dnf trees, writes the release assets, signs their `SHA256SUMS`, and
+  attaches the tarballs, the SBOM, the debs and rpms, `zigbox-repos.tar.gz`, `SHA256SUMS` and
+  `SHA256SUMS.asc` (the rest of this file);
 - `mac`, on a GitHub-hosted macOS runner, builds `zbx` for arm64 and x86_64, joins them with
   `lipo`, signs the result with the Developer ID certificate in a temporary keychain, notarizes
-  it, and attaches `zbx-<v>-macos-universal.zip`, its `.sha256` and the formula to the draft;
-- `prepare` checks the draft's four assets and the tap diff; `publish` publishes the draft, which
+  it, and attaches `zbx-<v>-macos-universal.zip`, its `.sha256`, `SHA256SUMS.macos` (the sum of
+  that zip alone; the zip is notarized, so it carries no gpg signature) and the formula to the
+  draft;
+- `prepare` checks that the draft holds exactly those assets, that both sums files match, that
+  `SHA256SUMS.asc` is by a subkey of the pinned release key, and the tap diff; `publish` publishes the draft, which
   creates the tag at the release commit;
 - `tap` and `site` (environment `release-publish`, `main` only, no reviewers) commit the formula
   to `Zigbox/homebrew-tap` and run the zigbox.org deploy, waiting for it;
@@ -159,8 +164,14 @@ If the subkey leaks, revoke it with the primary key and set a new one the same w
 7. Writes `zigbox-repos.tar.gz`: `apt`, `rpm` and the two keyring files, and nothing else (not
    `to-sign/`, not the test key files).
 
-The `linux` job then attaches the archive to the release. The release has no other assets from the
-workflow: the release binaries are not attached by it.
+8. Writes the release assets (`zig build release-assets`, see below) with the same `N` as
+   `-Dsource-date-epoch`, so the whole release has one time: the workflow takes it once, after the
+   owner's approval, as `ZIGBOX_SIGNED_AT`. Then signs `SHA256SUMS` into `SHA256SUMS.asc` (armored,
+   detached) with the same subkey and verifies it against the public key alone. Everything goes to
+   `OUTPUT_DIR/assets/`.
+
+The `linux` job checks the sums and attaches everything in `OUTPUT_DIR/assets/` to the draft.
+`SHA256SUMS` covers the Linux assets only; the Mac job adds `SHA256SUMS.macos` for its zip.
 
 Each `zig build packages` run deletes `apt/`, `rpm/` and `to-sign/` under the output directory
 first, so the files of an earlier run never stay beside this one's.

@@ -9,7 +9,11 @@
 #   ZIGBOX_SIGNING_PASSPHRASE  the subkey's passphrase
 #   ZIGBOX_SIGNING_FPR         fingerprint of the primary key; every signature must be by one of
 #                              its subkeys, or the script fails
-# Output: OUTPUT_DIR/zigbox-repos.tar.gz, and OUTPUT_DIR/zigbox-archive-keyring.{gpg,asc}.
+#   ZIGBOX_SIGNED_AT           optional: the one signing time (Unix seconds) of the release; the
+#                              workflow sets it once. Default: now.
+# Output: OUTPUT_DIR/zigbox-repos.tar.gz, OUTPUT_DIR/zigbox-archive-keyring.{gpg,asc}, and
+#   OUTPUT_DIR/assets/: every release asset but the Mac zip (tarballs, SBOM, debs, rpms, the
+#   archive), SHA256SUMS over them and SHA256SUMS.asc, its detached signature by the subkey.
 # Run from the repository root. Needs zig, gpg, rpm. See docs/releases/packaging.md.
 set -euo pipefail
 # No `set -x`: this script handles the key.
@@ -169,4 +173,16 @@ mkdir -p "$output"
 tar -czf "$output/zigbox-repos.tar.gz" -C "$packages" \
   apt rpm zigbox-archive-keyring.gpg zigbox-archive-keyring.asc
 cp "$packages/zigbox-archive-keyring.gpg" "$packages/zigbox-archive-keyring.asc" "$output/"
-echo "release-sign: every signature verified; wrote $output/zigbox-repos.tar.gz"
+
+# The other release assets and SHA256SUMS over them, then SHA256SUMS signed by the same subkey
+# (the key is still loaded) and verified against the public key alone. The signed time is also
+# the timestamp of the tar entries and the SBOM, so the whole release has one time.
+zig build release-assets -Dpackages-dir="$packages" -Drepos-archive="$output/zigbox-repos.tar.gz" \
+  -Dsource-date-epoch="$signed_at"
+assets=zig-out/release-assets
+[ -s "$assets/SHA256SUMS" ] || fail "release-assets wrote no SHA256SUMS"
+sign_with --detach-sign --armor -o "$assets/SHA256SUMS.asc" "$assets/SHA256SUMS"
+check_gpg "$assets/SHA256SUMS.asc" "$assets/SHA256SUMS"
+rm -rf "$output/assets"
+cp -R "$assets" "$output/assets"
+echo "release-sign: every signature verified; wrote $output/zigbox-repos.tar.gz and $output/assets"

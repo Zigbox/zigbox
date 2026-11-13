@@ -58,6 +58,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned here, in reviewed code, not read from a secret: users trust this fingerprint
+  # (docs/releases/packaging.md, "The release key"). `linux` signs with a subkey of it and
+  # `prepare` checks the signature on SHA256SUMS is by one.
+  ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
+
 # One release run per commit: a run for a later commit of main must never replace a waiting run
 # for the release commit, and the automatic run and a manual dispatch from the same commit
 # (`github.sha`) take turns. A dispatch that finishes an older release from a later main commit
@@ -312,15 +318,19 @@ jobs:
           tag: ${{ needs.plan.outputs.tag }}
           sha: ${{ needs.plan.outputs.sha }}
           require: 'true'
+      # One signing time for the whole release: the apt `Release` Date and Valid-Until, every
+      # rebuild of the packages, and the timestamp of the tarballs and the SBOM. Taken after the
+      # owner's approval, so that Valid-Until counts from the signing.
+      - name: The signing time
+        run: echo "ZIGBOX_SIGNED_AT=$(date +%s)" >> "$GITHUB_ENV"
       # The key and passphrase reach this one step through the environment and the script
-      # reads them from there; nothing here prints them or takes them as an argument.
+      # reads them from there; nothing here prints them or takes them as an argument. The script
+      # signs the packages and the repository metadata, writes the release assets, and signs
+      # their SHA256SUMS, all by the one subkey, then verifies every signature.
       - name: Sign
         env:
           ZIGBOX_SIGNING_KEY: ${{ secrets.ZIGBOX_SIGNING_KEY }}
           ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
-          # Pinned here, in reviewed code, not read from the environment: users trust this
-          # fingerprint (docs/releases/packaging.md, "The release key").
-          ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
         run: .github/release-sign.sh "$RUNNER_TEMP/out"
       - name: The archive holds what packaging.md says and nothing secret
         run: |
@@ -330,11 +340,21 @@ jobs:
           ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list" || exit 1
           ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list" || exit 1
           ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list" || exit 1
-      - name: Attach the archive to the draft
+      - name: The sums match the assets
+        run: |
+          cd "$RUNNER_TEMP/out/assets"
+          sha256sum -c SHA256SUMS
+          test -s SHA256SUMS.asc
+      - name: Attach the assets, the sums and the signature to the draft
         env:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          "$GH" release upload "$TAG" "$RUNNER_TEMP/out/zigbox-repos.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+          set -euo pipefail
+          cd "$RUNNER_TEMP/out/assets"
+          # Every file of the directory: the tarballs, the SBOM, the debs and rpms, the archive,
+          # SHA256SUMS and SHA256SUMS.asc.
+          files=(*)
+          "$GH" release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
 
   # The Developer ID signature and the notarization, on a GitHub-hosted Mac (a fresh virtual
   # machine for this job alone), in the same `release` environment as `linux`. The certificate
@@ -444,7 +464,10 @@ jobs:
           # the temporary keychain joins it for this step. The list found is saved (the paths are
           # not secrets) and the cleanup step restores it, whatever happens. This job is a
           # one-job virtual machine that no pull request shares.
-          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          # Written to a temp file and moved into place, so a failed or cancelled `security
+          # list-keychains` never leaves an empty saved list for the cleanup to restore.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list.tmp"
+          /bin/mv "$RUNNER_TEMP/keychain-list.tmp" "$RUNNER_TEMP/keychain-list"
           existing=()
           while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
           /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
@@ -460,13 +483,26 @@ jobs:
           zip: zig-out/mac-release/zbx-${{ needs.plan.outputs.version }}-macos-universal.zip
           version: ${{ needs.plan.outputs.version }}
           gatekeeper: 'true'
-      - name: Attach the zip and the formula to the draft
+      # SHA256SUMS.macos: the sums of the signed zip alone, in the format of the Linux SHA256SUMS
+      # (which this job cannot sign: it holds no gpg key). The directory holds the zip and
+      # nothing else, so the file names exactly one asset.
+      - name: The sums of the signed zip
+        run: |
+          zip="zbx-$VERSION-macos-universal.zip"
+          mkdir "$RUNNER_TEMP/macos-assets"
+          cp "zig-out/mac-release/$zip" "$RUNNER_TEMP/macos-assets/$zip"
+          zig build release-sums -Dassets-dir="$RUNNER_TEMP/macos-assets" -Dsums-name=SHA256SUMS.macos
+          cd "$RUNNER_TEMP/macos-assets"
+          /usr/bin/shasum -a 256 -c SHA256SUMS.macos
+          [ "$(/usr/bin/wc -l < SHA256SUMS.macos | /usr/bin/tr -d ' ')" = 1 ]
+      - name: Attach the zip, its sums and the formula to the draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           out=zig-out/mac-release
           "$GH" release upload "$TAG" "$out/zbx-$VERSION-macos-universal.zip" \
             "$out/zbx-$VERSION-macos-universal.zip.sha256" "$out/zigbox.rb" \
+            "$RUNNER_TEMP/macos-assets/SHA256SUMS.macos" \
             --clobber --repo "$GITHUB_REPOSITORY"
       # Whatever happened: nothing of ours is left on the runner.
       - name: Delete the keychain and everything this job wrote under the runner's temp
@@ -479,10 +515,11 @@ jobs:
             /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
           fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP/gh-pinned" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
-  # The last stop before the release is public: the draft holds exactly the four assets, each
-  # checked, and the tap's formula differs from the new one only where it may. Writes nothing.
+  # The last stop before the release is public: the draft holds exactly the assets (the Linux
+  # ones, the sums, the signature, the Mac zip and the formula), each checked, and
+  # the tap's formula differs from the new one only where it may. Writes nothing.
   prepare:
     name: check the draft before publishing
     needs: [plan, linux, mac]
@@ -514,7 +551,22 @@ jobs:
           cd "$RUNNER_TEMP/assets"
           "$GH" release download "$TAG" --repo "$GITHUB_REPOSITORY"
           zip="zbx-$VERSION-macos-universal.zip"
-          want=$(printf '%s\n' "$zip" "$zip.sha256" zigbox.rb zigbox-repos.tar.gz | sort)
+          fail() { echo "release: $*" >&2; exit 1; }
+          # SHA256SUMS names the Linux assets: the two tarballs, the SBOM, the archive, and one
+          # deb and one rpm per architecture. Its names, in sha256sum -c format, say the rest.
+          [ -s SHA256SUMS ] || fail "the draft has no SHA256SUMS"
+          awk 'NF != 2 || length($1) != 64 { bad = 1 } END { exit bad }' SHA256SUMS ||
+            fail "SHA256SUMS is not in sha256sum format"
+          linux=$(awk '{ print $2 }' SHA256SUMS | sort)
+          fixed=$(printf '%s\n' "zbx-$VERSION-linux-x86_64.tar.gz" "zbx-$VERSION-linux-aarch64.tar.gz" \
+            "zbx-$VERSION.cdx.json" zigbox-repos.tar.gz | sort)
+          [ "$(comm -23 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))" = "" ] ||
+            fail "SHA256SUMS lacks one of: $(printf '%s ' $fixed)"
+          rest=$(comm -13 <(printf '%s\n' "$fixed") <(printf '%s\n' "$linux"))
+          [ "$(grep -c '\.deb$' <<< "$rest" || true)" = 2 ] && [ "$(grep -c '\.rpm$' <<< "$rest" || true)" = 2 ] &&
+            [ "$(grep -c . <<< "$rest")" = 4 ] || fail "SHA256SUMS does not name exactly two debs and two rpms besides the fixed assets: $rest"
+          want=$(printf '%s\n' "$linux" SHA256SUMS SHA256SUMS.asc SHA256SUMS.macos \
+            "$zip" "$zip.sha256" zigbox.rb | sort)
           have=$(/bin/ls -A | sort)
           if [ "$want" != "$have" ]; then
             echo "release: the draft's assets are not exactly:" >&2
@@ -523,6 +575,22 @@ jobs:
             printf '%s\n' "$have" >&2
             exit 1
           fi
+          # The Linux sums match every file, and the Mac sums name the zip and nothing else.
+          sha256sum -c SHA256SUMS
+          sha256sum -c SHA256SUMS.macos
+          [ "$(awk '{ print $2 }' SHA256SUMS.macos)" = "$zip" ] || fail "SHA256SUMS.macos does not name exactly $zip"
+          # SHA256SUMS.asc: good, by a subkey (not the primary) of the pinned primary key. The
+          # public key is the one the archive carries; the pinned fingerprint is what vouches for it.
+          mkdir -m 0700 verify-home
+          tar -xzf zigbox-repos.tar.gz -C verify-home zigbox-archive-keyring.gpg
+          GNUPGHOME=$PWD/verify-home gpg --batch --no-tty --import verify-home/zigbox-archive-keyring.gpg 2> /dev/null
+          status=$(GNUPGHOME=$PWD/verify-home gpg --batch --no-tty --status-fd 1 --verify SHA256SUMS.asc SHA256SUMS 2> /dev/null) ||
+            fail "gpg refused SHA256SUMS.asc"
+          grep -q '^\[GNUPG:\] GOODSIG ' <<< "$status" || fail "no good signature on SHA256SUMS"
+          fields=$(awk '$2 == "VALIDSIG" { print $3, $NF }' <<< "$status")
+          [ "${fields#* }" = "$ZIGBOX_SIGNING_FPR" ] || fail "SHA256SUMS.asc is not by a subkey of the pinned release key"
+          [ "${fields% *}" != "$ZIGBOX_SIGNING_FPR" ] || fail "SHA256SUMS.asc is signed by the primary key, not a subkey"
+          rm -rf verify-home
           sha256sum -c "$zip.sha256"
           zip_sha=$(cut -d ' ' -f 1 "$zip.sha256")
           formula_sha=$(sed -n 's/^ *sha256 "\([0-9a-f]\{64\}\)"$/\1/p' zigbox.rb)
@@ -538,7 +606,7 @@ jobs:
           ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' list || exit 1
           ! grep -Eq '(^|/)\.' list || exit 1
           ! grep -Eq 'to-sign|test-key|passphrase|secret' list || exit 1
-          echo "prepare: the draft's four assets are as they should be"
+          echo "prepare: the draft's assets, sums and signature are as they should be"
       - name: Mint the App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -823,6 +891,16 @@ jobs:
           ! grep -Evq '^(apt/|rpm/|zigbox-archive-keyring\.(asc|gpg)$)' "$RUNNER_TEMP/list" || exit 1
           ! grep -Eq '(^|/)\.' "$RUNNER_TEMP/list" || exit 1
           ! grep -Eq 'to-sign|test-key|passphrase|secret' "$RUNNER_TEMP/list" || exit 1
+      - name: The assets, the sums and the signature
+        run: |
+          cd "$RUNNER_TEMP/out/assets"
+          ls -l
+          sha256sum -c SHA256SUMS
+          test -s SHA256SUMS.asc
+          [ "$(wc -l < SHA256SUMS)" = 8 ]
+          grep -q 'linux-x86_64\.tar\.gz$' SHA256SUMS
+          grep -q 'cdx\.json$' SHA256SUMS
+          grep -q ' zigbox-repos\.tar\.gz$' SHA256SUMS
 
   # The `mac` job's keychain steps with a throwaway self-signed identity made here: builds the
   # universal zip, signs it with that, notarizes nothing, uploads nothing; no secret is available.
@@ -897,7 +975,10 @@ jobs:
         run: |
           # codesign finds the identity only when its keychain is on the search list; this is the
           # same step as in `mac`. The cleanup step restores the list found here.
-          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list"
+          # Written to a temp file and moved into place, so a failed or cancelled `security
+          # list-keychains` never leaves an empty saved list for the cleanup to restore.
+          /usr/bin/security list-keychains -d user | /usr/bin/sed 's/^ *"\(.*\)"$/\1/' > "$RUNNER_TEMP/keychain-list.tmp"
+          /bin/mv "$RUNNER_TEMP/keychain-list.tmp" "$RUNNER_TEMP/keychain-list"
           existing=()
           while IFS= read -r line; do existing+=("$line"); done < "$RUNNER_TEMP/keychain-list"
           /usr/bin/security list-keychains -d user -s "$KEYCHAIN" ${existing[@]+"${existing[@]}"}
@@ -926,7 +1007,7 @@ jobs:
             /usr/bin/security list-keychains -d user -s ${saved[@]+"${saved[@]}"} || true
           fi
           /usr/bin/security delete-keychain "$KEYCHAIN" || true
-          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
+          /bin/rm -rf "$KEYCHAIN" "$RUNNER_TEMP/keychain-list" "$RUNNER_TEMP/keychain-list.tmp" "$SECRETS_DIR" "$RUNNER_TEMP"/zig-aarch64-macos-* "$RUNNER_TEMP/zig-global"
 
   # Tries, on a scratch branch only, what the release depends on and the docs do not promise:
   # that gh uploads to, downloads from, edits and publishes a DRAFT by its tag, that a draft makes
