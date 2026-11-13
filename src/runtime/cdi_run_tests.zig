@@ -226,7 +226,9 @@ test "a directory with more than 64 spec files is refused with one line" {
 fn write_specs(sim: *HostSim, directory: []const u8, count: usize, first: usize) void {
     var name: [48]u8 = undefined;
     for (first..first + count) |at| {
-        const path = std.fmt.bufPrint(&name, "{s}/s{d:0>3}.json", .{ directory, at }) catch unreachable;
+        const format = "{s}/s{d:0>3}.json";
+        // 48 bytes hold the longest directory and name.
+        const path = std.fmt.bufPrint(&name, format, .{ directory, at }) catch unreachable;
         std.debug.assert(sim.world.write_file(path, spec) == null);
     }
 }

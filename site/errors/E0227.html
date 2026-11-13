@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0227 · Zigbox</title>
-<meta name="description" content="a CDI device needs an edit zbx does not apply">
+<meta name="description" content="a CDI device needs an edit or a combination zbx does not apply">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0227.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,10 +73,11 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0227</h1>
-<p class="summary">a CDI device needs an edit zbx does not apply</p>
+<p class="summary">a CDI device needs an edit or a combination zbx does not apply</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
 <p>zbx applies the parts of a CDI device it can honour without a privileged helper: character device nodes, bind mounts, environment variables, and the hook &quot;nvidia-cdi-hook update-ldcache&quot;, which it does itself. A device whose spec has anything else is refused by name rather than started without it: another hook, intelRdt, additionalGids, a mount that is not a bind, a node that is not a character device at its own path, or two mounts at one path from different host paths. zbx never runs a hook from a spec.</p>
+<p>With --read-only, a device whose spec has mounts is refused too: the mount targets cannot be made in a read-only root. The spec is fine; drop --read-only, or ask for the nodes alone.</p>
 <p>The cause names the device and the edit. Ask for the nodes as paths (--device /dev/nvidia0) if the workload needs only those.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

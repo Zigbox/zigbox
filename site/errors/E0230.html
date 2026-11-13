@@ -76,7 +76,7 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <p class="summary">no CDI spec has that device</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>The name given to --device (vendor.com/class=name) is in none of the specs in /etc/cdi, /var/run/cdi and $XDG_CONFIG_HOME/cdi. The cause lists the names the specs do have (the first 16). &quot;vendor.com/class=all&quot; means every device of that vendor's spec, or a device the spec calls &quot;all&quot;.</p>
+<p>The name given to --device (vendor.com/class=name) is in none of the specs in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi), /var/run/cdi and /etc/cdi. The cause lists the names the specs do have (the first 16). &quot;vendor.com/class=all&quot; means every device of that vendor's spec, or a device the spec calls &quot;all&quot;.</p>
 <p>Without any spec, generate one: nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json. A spec that could not be read is E0226.</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

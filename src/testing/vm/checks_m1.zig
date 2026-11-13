@@ -239,8 +239,8 @@ pub fn check_device_refused(streams: Streams, status: u8) Error!void {
 
 /// M10 slice 2: a CDI device (`vendor.example/gpu=0`) from a spec in /etc/cdi brings its node and
 /// its variable into a run of a member of the node's group: the step prints `OPENED-READ` and
-/// `FAKE=all`, and nothing on stderr is an error. W0208 must not appear: Alpine ships an `ldconfig`
-/// stub that succeeds, so the library cache step passes under the filter (CI run of the first VM check).
+/// `FAKE=all`, and nothing on stderr is an error. W0208 must not appear: Alpine ships an
+/// `ldconfig` stub that succeeds, so the library cache step passes under the filter.
 pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (!has_line(streams.stdout, "OPENED-READ")) return error.CdiEditWrong;
