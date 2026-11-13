@@ -24,6 +24,8 @@ on:
       - '.github/workflows/release.yml'
       - '.github/release-sign.sh'
       - '.github/release-sign-test.sh'
+      - '.github/package-refresh.sh'
+      - '.github/package-refresh-test.sh'
       - 'src/package.zig'
       - 'src/package_*.zig'
       - 'src/package/**'
@@ -41,7 +43,7 @@ jobs:
     name: test the signing script (throwaway key)
     if: ${{ github.ref_type != 'tag' && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,9 +57,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q rpm shellcheck
       - name: ShellCheck
-        run: shellcheck .github/release-sign.sh .github/release-sign-test.sh
+        run: shellcheck .github/release-sign.sh .github/release-sign-test.sh .github/package-refresh.sh .github/package-refresh-test.sh
       - name: Sign with a throwaway key
         run: .github/release-sign-test.sh "$RUNNER_TEMP/out"
+      - name: Refresh and refuse with a throwaway key
+        run: .github/package-refresh-test.sh "$RUNNER_TEMP/refresh"
       - name: The archive holds what packaging.md says and nothing secret
         run: |
           tar -tzf "$RUNNER_TEMP/out/zigbox-repos.tar.gz" | tee /dev/stderr > "$RUNNER_TEMP/list"

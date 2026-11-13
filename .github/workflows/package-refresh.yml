@@ -57,14 +57,11 @@ jobs:
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package-refresh: '$tag' is not a release tag" >&2; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/old"
+          # The archive, its signed SHA256SUMS (both files, or the script refuses) and the
+          # InRelease the site serves now, which the archive must not be older than.
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/old" \
-            --pattern zigbox-repos.tar.gz
-          # SHA256SUMS exists from the release that ships it; its line for the archive changes.
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' | grep -qx 'SHA256SUMS'; then
-            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/old" \
-              --pattern SHA256SUMS
-          fi
+            --pattern zigbox-repos.tar.gz --pattern SHA256SUMS --pattern SHA256SUMS.asc
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/old/served-InRelease" https://zigbox.org/apt/dists/stable/InRelease
           echo "package-refresh: refreshing $tag"
       - name: Re-sign
         env:
@@ -72,22 +69,21 @@ jobs:
           ZIGBOX_SIGNING_PASSPHRASE: ${{ secrets.ZIGBOX_SIGNING_PASSPHRASE }}
           # The same pinned primary fingerprint as release.yml (docs/releases/packaging.md).
           ZIGBOX_SIGNING_FPR: 09991DC39816D3C914E2A22C5AB00BC328B7DBB7
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          sums=""
-          [ -f "$RUNNER_TEMP/old/SHA256SUMS" ] && sums="$RUNNER_TEMP/old/SHA256SUMS"
-          .github/package-refresh.sh "$RUNNER_TEMP/old/zigbox-repos.tar.gz" "$RUNNER_TEMP/new" $sums
+          .github/package-refresh.sh "$RUNNER_TEMP/old/zigbox-repos.tar.gz" "$RUNNER_TEMP/new" \
+            "$RUNNER_TEMP/old/SHA256SUMS" "$RUNNER_TEMP/old/served-InRelease" "$TAG"
       - name: Replace the release's assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          files=("$RUNNER_TEMP/new/zigbox-repos.tar.gz")
-          for extra in SHA256SUMS SHA256SUMS.asc; do
-            [ -f "$RUNNER_TEMP/new/$extra" ] && files+=("$RUNNER_TEMP/new/$extra")
-          done
-          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          # `--clobber` replaces each file in turn: if this step fails half way, run the workflow
+          # again at once (docs/releases/packaging.md), or SHA256SUMS.asc may not match SHA256SUMS.
+          gh release upload "$TAG" "$RUNNER_TEMP/new/zigbox-repos.tar.gz" "$RUNNER_TEMP/new/SHA256SUMS" \
+            "$RUNNER_TEMP/new/SHA256SUMS.asc" --clobber --repo "$GITHUB_REPOSITORY"
       - name: Mint the App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0

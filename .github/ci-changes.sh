@@ -56,7 +56,8 @@ classify() {
     # The release workflow and its signing script run only on a tag (and its own test job on a
     # throwaway key); no demo runs them, so they select none.
     .github/workflows/release.yml | .github/release-sign.sh | .github/release-sign-test.sh | \
-      .github/workflows/package-refresh.yml | .github/package-refresh.sh) return ;;
+      .github/workflows/package-refresh.yml | .github/package-refresh.sh | \
+      .github/package-refresh-test.sh) return ;;
   esac
   case "$p" in
     # What the harness, the build or CI itself is made of: every demo.

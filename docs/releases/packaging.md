@@ -151,7 +151,7 @@ the signed packages. All of it is reproducible (fixed mtime, owner and order; gz
 
 - `zbx-<v>-linux-x86_64.tar.gz` and `zbx-<v>-linux-aarch64.tar.gz`: the static ReleaseSafe `zbx`,
   `LICENSE` and a short `README.txt`.
-- `zbx-<v>.cdx.json`: a CycloneDX 1.5 SBOM (version, licence, purl `pkg:github/Zigbox/zigbox@v<v>`,
+- `zbx-<v>.cdx.json`: a CycloneDX 1.5 SBOM (version, licence, purl `pkg:github/zigbox/zigbox@v<v>`,
   the SHA-256 of each binary, the Zig toolchain version, and the statement that there are no
   third-party components).
 - With `-Dpackages-dir=zig-out/packages` (the tree `release-sign.sh` signed), the debs and rpms,
@@ -167,7 +167,7 @@ to write a separate file and leave the signed one alone. Sign `SHA256SUMS` after
 `SHA256SUMS` is meant to be signed: a detached `SHA256SUMS.asc` by the release subkey, made after
 every asset is in the directory. In `release-sign.sh` that is one line beside the others:
 `sign_with -ab -o "$output/SHA256SUMS.asc" "$output/SHA256SUMS"`, checked with `check_gpg`.
-`package-refresh.sh` re-signs `SHA256SUMS` itself because the archive's line changes.
+`package-refresh.sh` re-signs `SHA256SUMS` itself because the archive's line changes, and only after checking the old signature.
 
 ## Keeping apt fresh
 
@@ -183,13 +183,35 @@ an existing tree and deletes the `InRelease` and `Release.gpg` that no longer ma
 
 `.github/workflows/package-refresh.yml` runs `.github/package-refresh.sh` weekly (Monday 05:17 UTC)
 and on dispatch, in the environment `package-refresh`
-([decision](../decisions/2026-11-12-apt-valid-until-and-refresh.md)): it takes the newest release's
-`zigbox-repos.tar.gz`, checks its old signature is by a subkey of the pinned primary and its file
-sums are right, re-dates, signs `InRelease` and `Release.gpg`, verifies them, and uploads the new
-archive (and `SHA256SUMS` and its signature when the release has them) with `--clobber`. It then
-dispatches the zigbox.org deploy, waits for it, and fails unless the served `InRelease` is valid
-for at least ten more days. Any failure fails the run; GitHub's notification of a failed
-scheduled run is the alarm, and a failed week leaves 14 days before expiry.
+([decision](../decisions/2026-11-12-apt-valid-until-and-refresh.md)). It signs again only what the
+owner's key already signed and published. It takes the newest release's `zigbox-repos.tar.gz`,
+`SHA256SUMS` and `SHA256SUMS.asc`, and the `InRelease` zigbox.org serves now, and refuses (one
+line, nothing signed) unless all of these hold:
+
+- The key is the pinned primary's one signing subkey, not revoked and not expired at the signing
+  time, and the primary is not revoked or expired.
+- Every old signature (`Release.gpg`, `InRelease`, `SHA256SUMS.asc`, the served `InRelease`) is by
+  that subkey, checked against the public part of `ZIGBOX_SIGNING_KEY`. The keyring inside the
+  archive is never trusted, so a revoked subkey's signature is refused even when the archive ships a
+  keyring without the revocation. After the subkey is replaced, the old archive no longer verifies:
+  cut a release (or re-run `release-sign.sh` for the tag) before the next refresh.
+- Every file the `Release` lists matches its sum, the archive's hash is the line in the signed
+  `SHA256SUMS`, and the packages in it are the tag's version.
+- The archive's `Release` is not older than the served `InRelease`, and the new `Date` is later than
+  the archive's own. A release without a signed `SHA256SUMS` is refused: it has nothing to bind the
+  archive to.
+
+It then re-dates, signs `InRelease` and `Release.gpg`, verifies them, signs the new `SHA256SUMS`, and
+uploads the archive and both sums files with `--clobber`, one file at a time: if the upload step
+fails, dispatch the workflow again at once, or `SHA256SUMS.asc` may not match `SHA256SUMS`. It then
+dispatches the zigbox.org deploy, waits for it, and fails unless the served `InRelease` is valid for
+at least ten more days. Any failure fails the run; GitHub's notification of a failed scheduled run is
+the alarm, and a failed week leaves 14 days before expiry. `.github/package-refresh-test.sh` runs the
+refresh and each refusal with a throwaway key in the release workflow's `test` job.
+
+GitHub disables a scheduled workflow after 60 days without repository activity, silently. A quiet
+project must check the Actions tab at least every 50 days and re-enable `package-refresh`; no run
+means no alarm, and apt fails with "Release file is expired" 21 days after the last signing.
 
 Owner setup, once: create the environment `package-refresh` on `Zigbox/zigbox` with no required
 reviewer, a deployment branch policy of `main` only, and the secrets `ZIGBOX_SIGNING_KEY`,

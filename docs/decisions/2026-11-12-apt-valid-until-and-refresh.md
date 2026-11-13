@@ -53,8 +53,14 @@ reversed by deleting the workflow and the environment.
 
 ## Consequences
 
-- `zigbox-repos.tar.gz` and (when the release has one) `SHA256SUMS` and `SHA256SUMS.asc` are
-  replaced weekly; the archive's hash changes each time, so a user who pinned the first hash
+- The refresh signs again only what the owner's current key already signed (review of #129): old
+  signatures are checked against the public part of `ZIGBOX_SIGNING_KEY`, never the archive's
+  keyring; the signed `SHA256SUMS` must list the archive; the packages must be the tag's version;
+  the archive must not be older than the served `InRelease`; a revoked or expired key is refused.
+  A release without a signed `SHA256SUMS`, and an archive signed by a subkey the owner has since
+  replaced, are refused until a new release is cut (packaging.md, "Keeping apt fresh").
+
+- `zigbox-repos.tar.gz`, `SHA256SUMS` and `SHA256SUMS.asc` are replaced weekly; the archive's hash changes each time, so a user who pinned the first hash
   must use `SHA256SUMS` from the current release.
 - The first refresh of a release is the first time its `Release` has a `Valid-Until`; releases
   signed before this change keep the old `Release` until then.

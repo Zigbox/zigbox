@@ -249,7 +249,7 @@ fn sbom_head(writer: *std.Io.Writer, inputs: *const Inputs) std.Io.Writer.Error!
         \\      "version": "{s}",
         \\      "description": "Rootless, daemonless Linux container runtime and image builder",
         \\      "licenses": [ {{ "license": {{ "id": "{s}" }} }} ],
-        \\      "purl": "pkg:github/Zigbox/zigbox@v{s}",
+        \\      "purl": "pkg:github/zigbox/zigbox@v{s}",
         \\      "externalReferences": [
         \\        {{ "type": "website", "url": "https://zigbox.org" }},
         \\        {{ "type": "vcs", "url": "https://github.com/Zigbox/zigbox" }}
@@ -361,7 +361,7 @@ test "the sbom is valid JSON that says what is in the build and that nothing els
     try std.testing.expectEqualStrings("1.5", root.get("specVersion").?.string);
     const main = root.get("metadata").?.object.get("component").?.object;
     const purl = main.get("purl").?.string;
-    try std.testing.expectEqualStrings("pkg:github/Zigbox/zigbox@v1.2.3", purl);
+    try std.testing.expectEqualStrings("pkg:github/zigbox/zigbox@v1.2.3", purl);
     try std.testing.expectEqualStrings("1.2.3", main.get("version").?.string);
     const id = main.get("licenses").?.array.items[0].object.get("license").?.object.get("id");
     try std.testing.expectEqualStrings("MIT", id.?.string);

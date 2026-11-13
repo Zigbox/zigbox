@@ -37,6 +37,7 @@ const shell_allowlist = [_][]const u8{
     ".github/release-sign-test.sh",
     // The weekly re-sign: the same `gpg` glue as release-sign.sh, around its own checks.
     ".github/package-refresh.sh",
+    ".github/package-refresh-test.sh",
 };
 
 /// The files that make up the shipped `zbx` binary. Their functions must average at least
