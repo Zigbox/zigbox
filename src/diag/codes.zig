@@ -75,6 +75,8 @@ pub const Code = enum(u8) {
     E0225,
     E0226,
     E0227,
+    E0228,
+    E0229,
     E0230,
     W0201,
     W0202,
@@ -1126,6 +1128,38 @@ pub const registry = [_]Entry{
         \\
         \\The cause names the device and the edit. Ask for the nodes as paths
         \\(--device /dev/nvidia0) if the workload needs only those.
+        ,
+    },
+    .{
+        .code = .E0228,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "--gpu found no GPU device to give",
+        .explanation =
+        \\--gpu all gives every nvidia.com/gpu device of a CDI spec when a spec has
+        \\them, and otherwise every /dev/dri/renderD* node you can open, plus
+        \\/dev/kfd when it is there. --gpu dri gives the render nodes and /dev/kfd
+        \\only. When there is none of these, the run is refused rather than started
+        \\without a GPU.
+        \\
+        \\The cause names what was looked for and what was there but not usable: a
+        \\render node whose group you are not in, or a CDI spec that could not be
+        \\read. zbx doctor lists the specs, the nodes, their modes and groups, and
+        \\the one-line fix for each gap. zbx never changes a mode or a group.
+        ,
+    },
+    .{
+        .code = .E0229,
+        .severity = .@"error",
+        .blame = .user,
+        .summary = "devices are not available on this platform",
+        .explanation =
+        \\--device and --gpu give a container the device nodes of the machine zbx
+        \\runs on. On macOS the container runs in a Linux guest, and Apple's
+        \\virtualization gives a Linux guest no GPU compute, so there is nothing to
+        \\give. The run is refused before the guest is started.
+        \\
+        \\Run on a Linux host with a GPU, or leave the option out.
         ,
     },
     .{
@@ -4367,7 +4401,7 @@ pub fn can_end_run(code: Code) bool {
         .E0817, .W0802 => false,
         .E0901, .E0902, .E0908, .E0909, .E0910, .E0911, .W0901, .W0902, .W0903 => false,
         .E1006, .E1007 => false,
-        .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227, .E0230 => false,
+        .E0220, .E0221, .E0222, .E0223, .E0224, .E0225, .E0226, .E0227, .E0228, .E0229, .E0230 => false,
         .W0207, .W0208, .W0209 => false,
         else => true,
     };

@@ -19,6 +19,7 @@ const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const plan_mod = @import("plan.zig");
 const cdi = @import("cdi.zig");
+const gpu_mod = @import("gpu.zig");
 
 const Host = host_mod.Host;
 
@@ -127,6 +128,7 @@ pub fn is_path(asked: []const u8) bool {
 
 /// What is wrong with one device as asked, by its text alone.
 pub fn asked_problem(asked: []const u8) ?Problem {
+    if (gpu_mod.ask_of(asked) != null) return null; // `--gpu`: a keyword, expanded at the start.
     if (is_path(asked)) return path_problem(asked);
     if (std.mem.indexOfScalar(u8, asked, '=') == null) return path_problem(asked);
     return if (cdi.split_qualified(asked) == null) .bad_name else null;
