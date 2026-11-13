@@ -1,0 +1,5 @@
+error[ZBX-E0818]: a glob matched more paths than a build can hold
+  cause  "src/**/*.go" matched more than 65536 paths in this build
+  fix    match a directory instead of the files in it, narrow the glob, or .exclude what you do not need
+  more   zbx explain E0818 · rerun with --verbose for the full cause chain
+  docs   https://zigbox.github.io/zigbox/errors/E0818.html
