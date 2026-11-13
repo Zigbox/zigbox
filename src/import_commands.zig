@@ -164,6 +164,8 @@ pub fn run(
 
 /// `<context>/zbx.build.zon`, or the bare name for the working directory.
 fn default_output(buffer: *Path, context: ?[]const u8) []const u8 {
+    assert(buffer.len == constants.path_bytes_max + 1);
+    assert(output_default.len > 0);
     const given = context orelse return output_default;
     const directory = std.mem.trimEnd(u8, given, "/");
     if (directory.len == 0) return "/" ++ output_default;
@@ -244,6 +246,7 @@ fn split_build_args(args: *const Args, storage: []translate.BuildArg) []const tr
 
 /// The host's platform: `ZBX_PLATFORM` as a pull reads it, else the machine's.
 fn platform_of(host: Host, diag: *Diag) Error!translate.Platform {
+    assert(diag.code == null);
     const set = pull_commands.platform_of(host);
     const architecture = set.architecture orelse found: {
         const uname = host.uname() catch {
@@ -256,6 +259,8 @@ fn platform_of(host: Host, diag: *Diag) Error!translate.Platform {
 }
 
 fn save_lock(host: Host, fs: fs_mod.Fs, locking: *lock_file.Workspace, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(locking.lock.count <= constants.lock_entries_max);
     var failure: lock_file.Failure = undefined;
     lock_file.save(host, fs, locking, &failure) catch {
         image_diagnose.lock_failure(diag, locking.located.text(), failure);
@@ -342,6 +347,8 @@ fn too_large(diag: *Diag) Error {
 }
 
 fn emit(host: Host, comptime stream: host_mod.Stream, bytes: []const u8, diag: *Diag) Error!void {
+    assert(diag.code == null);
+    assert(bytes.len <= constants.import_report_bytes_max);
     host.write_all(stream, bytes) catch |err| {
         errors.output_failed(diag, stream, err, host.last_errno());
         return error.OutputFailed;
@@ -357,7 +364,7 @@ fn warn(host: Host, warning: *const Diag, output: Output, buffer: []u8, diag: *D
 /// Words joined by `, ` into `buffer`, with `...` where the room ends.
 const Joined = struct {
     buffer: []u8,
-    len: usize = 0,
+    len: u32 = 0,
     full: bool = false,
 
     fn add(joined: *Joined, parts: []const []const u8) void {
@@ -376,7 +383,7 @@ const Joined = struct {
         }
         for (parts) |part| {
             @memcpy(joined.buffer[joined.len..][0..part.len], part);
-            joined.len += part.len;
+            joined.len += @intCast(part.len);
         }
     }
 
@@ -391,7 +398,8 @@ fn flagged_names(buffer: []u8, report_of: *const report_mod.Report) []const u8 {
     for (report_of.steps_slice()) |*step| {
         if (!step.flagged()) continue;
         const net = step.network orelse "";
-        const why = if (step.network != null) (if (step.matched) "net, matched " else "net, ") else "";
+        const net_why = if (step.matched) "net, matched " else "net, ";
+        const why = if (step.network != null) net_why else "";
         const cache = if (step.cache) (if (step.network != null) ", cache" else "cache") else "";
         const bind = if (step.bind) ", bind" else "";
         joined.add(&.{ step.name_text(), " (", why, net, cache, bind, ")" });

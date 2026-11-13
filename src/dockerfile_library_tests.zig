@@ -25,7 +25,10 @@ const source =
 const Resolver = struct {
     asked: u32 = 0,
 
-    fn resolve(context: *anyopaque, reference: []const u8) error{Unresolved}!dockerfile.ImageFacts {
+    fn resolve(
+        context: *anyopaque,
+        reference: []const u8,
+    ) error{Unresolved}!dockerfile.ImageFacts {
         const resolver: *Resolver = @ptrCast(@alignCast(context));
         assert(reference.len > 0);
         resolver.asked += 1;
@@ -51,7 +54,7 @@ fn options_of(text: []const u8, resolver: *Resolver) dockerfile.Options {
 /// What one caller got: its own copy of the bytes (the workspace is freed with the caller).
 const Result = struct {
     bytes: [8192]u8 = undefined,
-    len: usize = 0,
+    len: u32 = 0,
     references: u32 = 0,
     failed: bool = false,
 };
@@ -73,7 +76,7 @@ fn work(result: *Result) void {
         return;
     }
     @memcpy(result.bytes[0..built.len], built);
-    result.len = built.len;
+    result.len = @intCast(built.len);
     result.references = @intCast(ws.references_slice().len);
 }
 
@@ -90,9 +93,10 @@ test "two callers on two threads translate one Dockerfile to the same bytes" {
     try testing.expect(!results[0].failed);
     try testing.expect(!results[1].failed);
     try testing.expect(results[0].len > 0);
-    try testing.expectEqualStrings(results[0].bytes[0..results[0].len], results[1].bytes[0..results[1].len]);
+    const first = results[0].bytes[0..results[0].len];
+    try testing.expectEqualStrings(first, results[1].bytes[0..results[1].len]);
     try testing.expectEqual(@as(u32, 1), results[0].references);
-    try testing.expect(std.mem.indexOf(u8, results[0].bytes[0..results[0].len], "alpine:3.20") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "alpine:3.20") != null);
 }
 
 test "a refusal is a code and a line, and the workspace is reusable after it" {
@@ -113,7 +117,10 @@ test "a refusal is a code and a line, and the workspace is reusable after it" {
 test "a reference the resolver cannot find is Unresolved, not a refusal" {
     // Goal: the two errors are told apart. Method: a resolver that refuses every reference.
     const Missing = struct {
-        fn resolve(context: *anyopaque, reference: []const u8) error{Unresolved}!dockerfile.ImageFacts {
+        fn resolve(
+            context: *anyopaque,
+            reference: []const u8,
+        ) error{Unresolved}!dockerfile.ImageFacts {
             _ = context;
             assert(reference.len > 0);
             return error.Unresolved;

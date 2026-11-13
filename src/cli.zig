@@ -159,8 +159,8 @@ const help_text =
     \\
     \\logs:
     \\  zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
-    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs: at most 5 MiB per container, oldest dropped first;
-    \\  removed with the run record
+    \\  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs:
+    \\  at most 5 MiB per container, oldest dropped first; removed with the run record
     \\  --follow        go on showing what the container writes; ends, exit 0, when it ends
     \\  --tail <n>      only the last n lines
     \\  --stream <s>    only stdout, or only stderr
@@ -720,6 +720,8 @@ const ImportOption = enum {
     force,
 
     fn flag(option: ImportOption) []const u8 {
+        assert(@intFromEnum(option) < std.enums.values(ImportOption).len);
+        assert(@tagName(option).len > 0);
         return switch (option) {
             .context => "--context",
             .target => "--target",
@@ -1071,6 +1073,11 @@ pub fn parse(
     p.store(invocation);
     try resolve(args, operands[0..count], invocation, diag);
     try check_options(&gc_args, invocation, diag);
+    put_export_file(invocation, export_file);
+}
+
+/// `-o <file>` is `import`'s output, or else `state export`'s.
+fn put_export_file(invocation: *Invocation, export_file: ?[]const u8) void {
     if (invocation.command == .import) {
         invocation.import.output = export_file;
         invocation.import.dockerfile = invocation.operand;
@@ -1454,7 +1461,8 @@ fn set_import_value(
     option: ImportOption,
     value: []const u8,
 ) ParseError!void {
-    assert(option != .hermetic and option != .force);
+    assert(option != .hermetic);
+    assert(option != .force);
     if (value.len == 0) return missing_option_value(diag, option.flag());
     switch (option) {
         .context => import_args.context = value,
@@ -2978,6 +2986,8 @@ fn missing_argument(diag: *Diag, command: Command, missing: Missing) ParseError 
 
 /// `--rootfs` or `--name` with no value after it.
 fn import_flag_named(option: []const u8) bool {
+    assert(option.len <= constants.arg_bytes_max);
+    assert(std.enums.values(ImportOption).len > 0);
     inline for (comptime std.enums.values(ImportOption)) |known| {
         if (std.mem.eql(u8, option, comptime known.flag())) return true;
     }
@@ -3237,6 +3247,7 @@ fn run_build(
 fn import_workspace(storage: *Storage) *import_commands.Workspace {
     comptime assert(@sizeOf(import_commands.Workspace) <= @sizeOf(build_commands.Workspace));
     comptime assert(@alignOf(import_commands.Workspace) <= @alignOf(build_commands.Workspace));
+    assert(@intFromPtr(&storage.build) % @alignOf(import_commands.Workspace) == 0);
     return @ptrCast(@alignCast(&storage.build));
 }
 

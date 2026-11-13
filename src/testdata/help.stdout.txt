@@ -93,8 +93,8 @@ stop:
 
 logs:
   zbx logs <name> [--follow] [--tail <n>] [--stream stdout|stderr]
-  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs: at most 5 MiB per container, oldest dropped first;
-  removed with the run record
+  every run keeps its stdout and stderr, in order, in $XDG_STATE_HOME/zbx/logs:
+  at most 5 MiB per container, oldest dropped first; removed with the run record
   --follow        go on showing what the container writes; ends, exit 0, when it ends
   --tail <n>      only the last n lines
   --stream <s>    only stdout, or only stderr
