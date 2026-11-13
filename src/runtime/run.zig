@@ -525,7 +525,8 @@ fn resolve_cdi(
         }
     }
     if (container.read_only and storage.mounts_count > 0) {
-        cdi_diagnose.read_only_mounts(diag, asked[0]);
+        const owner = storage.mount_owner[0];
+        cdi_diagnose.read_only_mounts(diag, asked[if (owner < count) owner else 0]);
         return false;
     }
     handle.cdi = storage;

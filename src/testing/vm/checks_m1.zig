@@ -239,8 +239,8 @@ pub fn check_device_refused(streams: Streams, status: u8) Error!void {
 
 /// M10 slice 2: a CDI device (`vendor.example/gpu=0`) from a spec in /etc/cdi brings its node and
 /// its variable into a run of a member of the node's group: the step prints `OPENED-READ` and
-/// `FAKE=all`, and nothing on stderr is an error. W0208 is not required: Alpine ships an `ldconfig`
-/// stub that succeeds, so the library cache step passes (CI run of the first VM check).
+/// `FAKE=all`, and nothing on stderr is an error. W0208 must not appear: Alpine ships an `ldconfig`
+/// stub that succeeds, so the library cache step passes under the filter (CI run of the first VM check).
 pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
     if (status != 0) return error.ExitCodeWrong;
     if (!has_line(streams.stdout, "OPENED-READ")) return error.CdiEditWrong;
@@ -248,6 +248,8 @@ pub fn check_cdi_applied(streams: Streams, status: u8) Error!void {
     if (!has_line(streams.stdout, "vendor")) return error.CdiEditWrong; // The bound directory.
     if (!has_line(streams.stdout, "BIND-RO")) return error.CdiEditWrong; // Read-only, as a volume.
     if (std.mem.indexOf(u8, streams.stderr, "ZBX-E") != null) return error.NoteMissing;
+    // The guest's ldconfig is known to work: W0208 means the late step failed under the filter.
+    if (std.mem.indexOf(u8, streams.stderr, "ZBX-W0208") != null) return error.CdiEditWrong;
 }
 
 /// A name no spec has: E0230 in one line that lists the names the specs do have, exit 125.
@@ -483,6 +485,8 @@ test "cdi: a device applies its edits, and an unknown name is E0230 listing the 
     try testing.expectError(error.CdiEditWrong, check_cdi_applied(no_bind, 0));
     const failed = Streams{ .stdout = applied.stdout, .stderr = "error[ZBX-E0226]: x\n" };
     try testing.expectError(error.NoteMissing, check_cdi_applied(failed, 0));
+    const late = Streams{ .stdout = applied.stdout, .stderr = "warning[ZBX-W0208]: x\n" };
+    try testing.expectError(error.CdiEditWrong, check_cdi_applied(late, 0));
     const unknown = "error[ZBX-E0230]: no such device\n  known  vendor.example/gpu=0\n";
     try check_cdi_unknown(.{ .stdout = "", .stderr = unknown }, 125);
     const quiet = Streams{ .stdout = "", .stderr = unknown };

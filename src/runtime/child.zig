@@ -390,7 +390,13 @@ fn library_path_env(plan: *const Plan, line: *[library_line_bytes]u8) @TypeOf(pl
         const text = std.mem.span(variable);
         if (!std.mem.startsWith(u8, text, key)) continue;
         const present = text[key.len..];
-        if (own.len + 1 + present.len >= line.len) return envp; // Too long to join: theirs.
+        // An empty value joins as nothing: a trailing ':' would search the working directory.
+        if (present.len == 0) {
+            envp[count] = plan.text(plan.ld_library_path).ptr;
+            return envp;
+        }
+        // Each environment value is held to `env_value_bytes_max`, which `line` has room for.
+        assert(own.len + 1 + present.len < line.len);
         @memcpy(line[0..own.len], own);
         line[own.len] = ':';
         @memcpy(line[own.len + 1 ..][0..present.len], present);

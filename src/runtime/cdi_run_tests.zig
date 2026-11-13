@@ -222,3 +222,38 @@ test "a directory with more than 64 spec files is refused with one line" {
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0226]: "));
     try testing.expect(std.mem.indexOf(u8, sim.stderr(), "64") != null);
 }
+
+fn write_specs(sim: *HostSim, directory: []const u8, count: usize, first: usize) void {
+    var name: [48]u8 = undefined;
+    for (first..first + count) |at| {
+        const path = std.fmt.bufPrint(&name, "{s}/s{d:0>3}.json", .{ directory, at }) catch unreachable;
+        std.debug.assert(sim.world.write_file(path, spec) == null);
+    }
+}
+
+test "exactly 64 spec files in a directory resolve the device" {
+    // Goal: the bound is at 64, not below. Method: example.json from setup plus 63 more is 64.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup(sim);
+    write_specs(sim, "/etc/cdi", 63, 0);
+    const code = sim_run.run_cli(sim, &library_run_plain);
+    if (code != 0) std.debug.print("{s}\n", .{sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+}
+
+test "the spec file count sums across directories" {
+    // Goal: 64 is the count over all directories. Method: 40 in /var/run/cdi, then /etc/cdi has
+    // example.json plus 23 more (64 in all) and works; one more file there is E0226 on /etc/cdi.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup(sim);
+    sim.world.add_node("/var/run/cdi", .dir);
+    write_specs(sim, "/var/run/cdi", 40, 0);
+    write_specs(sim, "/etc/cdi", 23, 0);
+    try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &library_run_plain));
+    write_specs(sim, "/etc/cdi", 1, 500);
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &library_run_plain));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "error[ZBX-E0226]: ") != null);
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "/etc/cdi") != null);
+}

@@ -1091,12 +1091,14 @@ pub const registry = [_]Entry{
         .summary = "can't use a CDI spec",
         .explanation =
         \\--device vendor.com/class=name asks for a device that a CDI spec describes.
-        \\zbx reads the JSON specs in /etc/cdi, /var/run/cdi and $XDG_CONFIG_HOME/cdi
-        \\(cdiVersion 0.3.0 to 0.9.x), each at most 256 KiB, at most 16 files, and
-        \\refuses one it cannot use: unreadable, not valid JSON, over a bound of the
-        \\parser, with a field of the wrong type or a missing one, or in YAML, which
-        \\zbx does not read. It also refuses a spec that names a mount source or a
-        \\device node this host does not have, or one you cannot open.
+        \\zbx reads the JSON specs in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi),
+        \\/var/run/cdi and /etc/cdi, in that order; the first directory that has a
+        \\device wins. The specs are cdiVersion 0.3.0 to 0.9.x, each at most 64 KiB,
+        \\at most 64 files in all. zbx refuses one it cannot use: unreadable, not
+        \\valid JSON, over a bound of the parser, with a field of the wrong type or
+        \\a missing one, or in YAML, which zbx does not read. It also refuses a spec
+        \\that names a mount source or a device node this host does not have, or one
+        \\you cannot open.
         \\
         \\The cause names the file and the field. Write the spec again for this host:
         \\nvidia-ctk cdi generate --format=json --output=/etc/cdi/nvidia.json
@@ -1108,7 +1110,7 @@ pub const registry = [_]Entry{
         .code = .E0227,
         .severity = .@"error",
         .blame = .user,
-        .summary = "a CDI device needs an edit zbx does not apply",
+        .summary = "a CDI device needs an edit or a combination zbx does not apply",
         .explanation =
         \\zbx applies the parts of a CDI device it can honour without a privileged
         \\helper: character device nodes, bind mounts, environment variables, and the
@@ -1117,6 +1119,10 @@ pub const registry = [_]Entry{
         \\another hook, intelRdt, additionalGids, a mount that is not a bind, a node
         \\that is not a character device at its own path, or two mounts at one path
         \\from different host paths. zbx never runs a hook from a spec.
+        \\
+        \\With --read-only, a device whose spec has mounts is refused too: the mount
+        \\targets cannot be made in a read-only root. The spec is fine; drop
+        \\--read-only, or ask for the nodes alone.
         \\
         \\The cause names the device and the edit. Ask for the nodes as paths
         \\(--device /dev/nvidia0) if the workload needs only those.
@@ -1129,9 +1135,10 @@ pub const registry = [_]Entry{
         .summary = "no CDI spec has that device",
         .explanation =
         \\The name given to --device (vendor.com/class=name) is in none of the specs
-        \\in /etc/cdi, /var/run/cdi and $XDG_CONFIG_HOME/cdi. The cause lists the
-        \\names the specs do have (the first 16). "vendor.com/class=all" means every
-        \\device of that vendor's spec, or a device the spec calls "all".
+        \\in $XDG_CONFIG_HOME/cdi (or ~/.config/cdi), /var/run/cdi and /etc/cdi. The
+        \\cause lists the names the specs do have (the first 16).
+        \\"vendor.com/class=all" means every device of that vendor's spec, or a
+        \\device the spec calls "all".
         \\
         \\Without any spec, generate one: nvidia-ctk cdi generate --format=json
         \\--output=/etc/cdi/nvidia.json. A spec that could not be read is E0226.

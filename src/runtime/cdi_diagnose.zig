@@ -144,8 +144,8 @@ pub fn no_ldconfig(diag: *Diag) void {
     assert(diag.code == null);
     diag.raise(.W0208);
     diag.while_("starting the container", .{});
-    diag.cause("the image has no usable ldconfig (or its root is read-only), so the driver " ++
-        "libraries are found through LD_LIBRARY_PATH instead of the library cache", .{});
+    diag.cause("the image's ldconfig is missing, failed, or ran past its 10 seconds (and was killed), " ++
+        "so the driver libraries are found through LD_LIBRARY_PATH instead of the library cache", .{});
     diag.fix(.{ .sentence = "nothing to do for an image that finds them; a musl image such " ++
         "as Alpine cannot load glibc driver libraries, use a glibc image" });
     assert(diag.code.? == .W0208);

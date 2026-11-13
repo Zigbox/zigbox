@@ -969,9 +969,17 @@ pub const HostReal = struct {
         };
         if (forked == 0) helper_child(request, ends[1]);
         _ = linux.close(ends[1]);
-        const length = drain_helper(ends[0], output);
+        const pid: i32 = @intCast(forked);
+        const drained = drain_helper(ends[0], output, request.timeout_seconds);
         _ = linux.close(ends[0]);
-        const status = try wait_child(@intCast(forked));
+        // Past the deadline the helper and its process group are killed: the alarm inside the
+        // helper is its own program's to ignore, this is not.
+        if (drained.timed_out) {
+            _ = linux.kill(-pid, linux.SIG.KILL);
+            _ = linux.kill(pid, linux.SIG.KILL);
+        }
+        const length = drained.length;
+        const status = try wait_child(pid);
         assert(length <= output.len);
         return .{ .status = status, .output_len = length };
     }
@@ -1803,6 +1811,8 @@ fn program_child(
 
 fn helper_child(request: host.ExecRequest, output: i32) noreturn {
     if (request.timeout_seconds > 0) {
+        // Its own process group, so the waiter's kill reaches what the program started too.
+        _ = linux.setpgid(0, 0);
         // The timer survives the exec; SIGALRM's default action ends the helper.
         const limit: linux.itimerspec = .{
             .it_interval = .{ .sec = 0, .nsec = 0 },
@@ -1817,11 +1827,26 @@ fn helper_child(request: host.ExecRequest, output: i32) noreturn {
     linux.exit_group(127);
 }
 
-/// Reads the helper's output to the end: the first bytes are kept, the rest dropped.
-fn drain_helper(descriptor: i32, output: []u8) u32 {
+const Drained = struct { length: u32, timed_out: bool };
+
+/// Reads the helper's output to the end: the first bytes are kept, the rest dropped. With
+/// `limit_seconds` > 0 the whole read has that deadline (a program that never closes the pipe,
+/// or leaves a process holding it, ends as `timed_out`).
+fn drain_helper(descriptor: i32, output: []u8, limit_seconds: u32) Drained {
     var kept: usize = 0;
     var scratch: [64]u8 = undefined;
+    const deadline = monotonic_now_ms() + @as(u64, limit_seconds) * 1000;
     for (0..constants.helper_read_calls_max) |_| {
+        if (limit_seconds > 0) {
+            const now = monotonic_now_ms();
+            if (now >= deadline) return .{ .length = @intCast(kept), .timed_out = true };
+            var poll_set = [1]linux.pollfd{.{ .fd = descriptor, .events = linux.POLL.IN }};
+            const left: i32 = @intCast(@min(deadline - now, 1000));
+            const waited = linux.poll(&poll_set, 1, left);
+            if (linux.errno(waited) == .INTR) continue;
+            if (linux.errno(waited) != .SUCCESS) break;
+            if (waited == 0) continue; // The deadline check at the top decides.
+        }
         const room: []u8 = if (kept < output.len) output[kept..] else &scratch;
         const count = linux.read(descriptor, room.ptr, room.len);
         if (linux.errno(count) == .INTR) continue;
@@ -1829,7 +1854,7 @@ fn drain_helper(descriptor: i32, output: []u8) u32 {
         if (count == 0) break;
         if (kept < output.len) kept += count;
     }
-    return @intCast(kept);
+    return .{ .length = @intCast(kept), .timed_out = false };
 }
 
 /// The `SigIgn:` and `SigCgt:` lines of /proc/<pid>/status, as masks.
@@ -1885,6 +1910,27 @@ test "signal masks are read from the status lines, and only when both are there"
     try std.testing.expect(parse_signal_masks("SigCgt:\t0\n") == null);
     try std.testing.expect(parse_signal_masks("SigIgn:\t0\nSigCgt:\tzz\n") == null);
     try std.testing.expect(parse_signal_masks("") == null);
+}
+
+test "a helper that ignores the alarm, or leaves a holder of the pipe, ends at the deadline" {
+    // Goal: both hang shapes return within the deadline (one second here) with the helper killed.
+    var real: HostReal = .{};
+    const envp = [_:null]?[*:0]const u8{null};
+    const scripts = [_][:0]const u8{
+        "trap '' ALRM; sleep 1000", // Ignores the alarm.
+        "(sleep 1000 &) ; exit 0", // A background holder of the pipe, the helper itself gone.
+    };
+    for (scripts) |script| {
+        const argv = [_:null]?[*:0]const u8{ "sh", "-c", script, null };
+        var output: [8]u8 = undefined;
+        const begun = monotonic_now_ms();
+        const result = try real.interface().run_helper(
+            .{ .path = "/bin/sh", .argv = &argv, .envp = &envp, .timeout_seconds = 1 },
+            &output,
+        );
+        try std.testing.expect(monotonic_now_ms() - begun < 5000);
+        _ = result;
+    }
 }
 
 test "a real helper's status and output are captured, and the rest dropped" {
