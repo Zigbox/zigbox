@@ -96,6 +96,7 @@ fn demo(init: std.process.Init, out: *Io.Writer, options: H.Options) !u8 {
     try extra_bundle(&session, out, &timer);
     try extra_devices(&session, out, &timer);
     try extra_cdi(&session, out, &timer);
+    try extra_gpu(&session, out, &timer);
     try session.shutdown();
     return 0;
 }
@@ -381,6 +382,52 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         " gpasswd -d demo render; true";
     _ = try session.run(cleanup, limits.command_timeout_kvm_s);
     try timer.lap(out, "cdi");
+}
+
+/// M10 slice 3: doctor lists a `zigbox.test/gpu=0` spec with its node openable; `--gpu all` with
+/// no `nvidia.com` spec is E0228 when the guest has no render node, and `--gpu dri` shows the
+/// guest's render node in `ls /dev/dri` when it has one (the runner's QEMU may not give one:
+/// that half is then recorded as not run in docs/demos/m10.md, and the output says so).
+fn extra_gpu(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
+    try out.print("\ndemo-m1: EXTRA: doctor's GPU section, --gpu all and --gpu dri\n", .{});
+    const spec = "{\"cdiVersion\":\"0.6.0\",\"kind\":\"zigbox.test/gpu\",\"devices\":[" ++
+        "{\"name\":\"0\",\"containerEdits\":{\"deviceNodes\":" ++
+        "[{\"path\":\"/dev/zbx-render\"}]}}]}";
+    const setup = "groupadd -f render && usermod -aG render demo && " ++
+        "mknod /dev/zbx-render c 1 3 && chgrp render /dev/zbx-render && " ++
+        "chmod 0660 /dev/zbx-render && mkdir -p /etc/cdi && " ++
+        "printf '%s' '" ++ spec ++ "' > /etc/cdi/zbx-gpu.json";
+    const prepared = try session.run(setup, limits.command_timeout_kvm_s);
+    try H.show(out, "write the spec, make the node", prepared);
+    if (prepared.status != 0) return error.DeviceSetupFailed;
+    const doctor = H.as_demo ++ "/home/demo/zbx doctor";
+    const listed = try H.run_split(session, doctor);
+    try H.show_split(out, doctor, listed);
+    checks_m1.check_gpu_doctor(listed.streams) catch |err| {
+        return fail_step(out, "EXTRA gpu", "doctor lists the spec and the node", err);
+    };
+    const probe = try session.run("ls /dev/dri 2>/dev/null | grep -c renderD; true", limits.command_timeout_kvm_s);
+    const has_render = !std.mem.eql(u8, std.mem.trim(u8, probe.output, " \r\n"), "0");
+    try out.print("demo-m1: the guest has a render node: {}\n", .{has_render});
+    if (has_render) {
+        const dri = run_prefix ++ " --name gpu2 --gpu dri -- ls /dev/dri";
+        const shown = try H.run_split(session, dri);
+        try H.show_split(out, dri, shown);
+        checks_m1.check_gpu_dri(shown.streams, shown.status) catch |err| {
+            return fail_step(out, "EXTRA gpu", "--gpu dri shows the render node", err);
+        };
+    } else {
+        const all = run_prefix ++ " --name gpu1 --gpu all -- sh -c 'echo ran'";
+        const refused = try H.run_split(session, all);
+        try H.show_split(out, all, refused);
+        checks_m1.check_gpu_none(refused.streams, refused.status) catch |err| {
+            return fail_step(out, "EXTRA gpu", "--gpu all with nothing is E0228", err);
+        };
+        try out.print("demo-m1: NOT RUN: --gpu dri (the guest has no render node)\n", .{});
+    }
+    const cleanup = "rm -rf /dev/zbx-render /etc/cdi/zbx-gpu.json; gpasswd -d demo render; true";
+    _ = try session.run(cleanup, limits.command_timeout_kvm_s);
+    try timer.lap(out, "gpu");
 }
 
 test {
