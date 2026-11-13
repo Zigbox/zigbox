@@ -3843,7 +3843,7 @@ fn resolve_writable(
     var any = false;
     for (typed) |*mount| any = any or mount.kind == .mount;
     if (!any) return typed;
-    mounts.resolve_sources(host, "", typed, &storage.run_mounts, diag) catch {
+    mounts.resolve_sources(host, .{}, typed, &storage.run_mounts, diag) catch {
         return error.StartFailed;
     };
     for (typed, 0..) |*mount, at| {
