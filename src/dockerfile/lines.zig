@@ -280,7 +280,7 @@ fn takes_heredocs(keyword: Keyword, rest: []const u8) bool {
         else => return false,
     }
     if (rest.len > 0 and rest[0] == '[') return false;
-    return std.mem.indexOf(u8, rest, "<<") != null;
+    return marker_after(rest, 0) != null;
 }
 
 /// Appends `first` and every line it continues onto, the escape characters dropped.
@@ -497,4 +497,16 @@ test "the instruction bound is E0815, one past it" {
     try testing.expectEqual(count, parsed.instructions_count);
     try testing.expectEqual(error.Refused, parse(&text, parsed, &refusal));
     try testing.expectEqual(refusal_mod.Code.E0815, refusal.code);
+}
+
+test "a << that names no heredoc is plain text" {
+    // Goal: `<<` without a marker name (a shift, a malformed marker) opens no heredoc. Found by
+    // the dockerfile fuzzer. Method: RUN lines with `<<{OF` and `1 << 2`, then the next line.
+    const parsed = try parse_test("FROM a\nRUN <<{OF\nRUN echo $((1 << 2))\nCMD x\n");
+    defer testing.allocator.destroy(parsed);
+    const all = parsed.instructions_slice();
+    try testing.expectEqual(@as(usize, 4), all.len);
+    try testing.expectEqual(@as(u8, 0), all[1].heredocs_count);
+    try testing.expectEqual(@as(u8, 0), all[2].heredocs_count);
+    try testing.expectEqual(Keyword.cmd, all[3].keyword);
 }

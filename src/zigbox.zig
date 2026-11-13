@@ -194,6 +194,15 @@ pub const build = struct {
     pub const schedule = @import("build/schedule.zig");
 };
 
+/// The Dockerfile translator (M9): `dockerfile.translate(ws, options)` turns a Dockerfile, its
+/// `.dockerignore` and the build arguments into the bytes of a `zbx.build.zon`, and fills
+/// `ws.report` and the references it reached. Pure: the caller's `Resolver` says what a base
+/// image's env and workdir are, and nothing is read, pulled or written here. A refusal is
+/// `error.Refused` with `ws.refusal` (a code, a line, what and a fix); an image the resolver
+/// cannot find is `error.Unresolved`. `dockerfile.report` renders the report (text and
+/// `zbx.import/1`). The workspace is large: give it static or heap memory.
+pub const dockerfile = @import("dockerfile/translate.zig");
+
 test "the module's surface is what the contract names" {
     // Goal: a rename or a removal in the runtime that Zigcube relies on fails here, loudly.
     _ = Spec;

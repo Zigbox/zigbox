@@ -201,6 +201,7 @@ test {
     _ = @import("pull_library_tests.zig");
     _ = @import("push_library_tests.zig");
     _ = @import("build_library_tests.zig");
+    _ = @import("dockerfile_library_tests.zig");
     _ = @import("host_real_net.zig");
     _ = @import("testing/vm/registry_server.zig");
     _ = @import("testing/vm/registry_fixture.zig");
@@ -373,6 +374,7 @@ test {
     _ = @import("dockerfile/config.zig");
     _ = @import("dockerfile/steps.zig");
     _ = @import("dockerfile/translate_tests.zig");
+    _ = @import("import_diagnose.zig");
 }
 
 test {
@@ -388,4 +390,5 @@ test {
     // Globs and `.dockerignore` matching (M9), and the fuzzer that checks them.
     _ = @import("build/glob.zig");
     _ = @import("fuzz_dockerignore.zig");
+    _ = @import("fuzz_dockerfile.zig");
 }

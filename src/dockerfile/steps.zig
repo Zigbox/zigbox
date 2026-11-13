@@ -429,6 +429,10 @@ fn copy_flags(
         const value = try words.word_of(flag.value orelse "", context, &t.out, t.refusal());
         const name = flag.name;
         if (std.mem.eql(u8, name, "from")) {
+            if (value.len == 0) {
+                return refuse(t.refusal(), .E0810, line, "Dockerfile:{d} has --from= with no " ++
+                    "stage or image", .{line}, "name a stage or an image after --from=", .{});
+            }
             result.from = value;
         } else if (std.mem.eql(u8, name, "chown")) {
             result.chown = value;

@@ -24,6 +24,9 @@ const report_mod = @import("report.zig");
 const refusal_mod = @import("refusal.zig");
 const stages = @import("stages.zig");
 
+pub const report = report_mod;
+pub const refusal = refusal_mod;
+
 const Refusal = refusal_mod.Refusal;
 const Refused = refusal_mod.Refused;
 const refuse = refusal_mod.refuse;
