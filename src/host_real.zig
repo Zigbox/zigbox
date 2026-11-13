@@ -1848,8 +1848,11 @@ const Drained = struct { length: u32, timed_out: bool };
 /// pipe, leaves a process holding it, or writes past the read bound ends as `timed_out`.
 fn drain_helper(descriptor: i32, output: []u8, deadline: u64) Drained {
     var kept: usize = 0;
-    var scratch: [64]u8 = undefined;
-    for (0..constants.helper_read_calls_max) |_| {
+    var scratch: [512]u8 = undefined;
+    // With a deadline, the deadline is the bound (checked at the top of every pass); without
+    // one the read count is.
+    var passes: u32 = 0;
+    while (deadline > 0 or passes < constants.helper_read_calls_max) : (passes +%= 1) {
         if (deadline > 0) {
             const now = monotonic_now_ms();
             if (now >= deadline) return .{ .length = @intCast(kept), .timed_out = true };
@@ -1867,9 +1870,8 @@ fn drain_helper(descriptor: i32, output: []u8, deadline: u64) Drained {
         if (count == 0) return .{ .length = @intCast(kept), .timed_out = false };
         if (kept < output.len) kept += count;
     }
-    // Running out of reads is no end: with a deadline it is the deadline (the helper is still
-    // writing), without one the output is simply cut.
-    return .{ .length = @intCast(kept), .timed_out = deadline > 0 };
+    // Only reachable without a deadline (or on a poll/read error): the output is simply cut.
+    return .{ .length = @intCast(kept), .timed_out = false };
 }
 
 /// Waits for the helper to end. Without a deadline it blocks; with one it looks every few
@@ -1985,6 +1987,23 @@ test "a helper that hangs in any of four ways is killed at the deadline, and say
     );
     try std.testing.expect(monotonic_now_ms() - begun < 5000);
     try std.testing.expect(result.timed_out);
+}
+
+test "a helper that prints many lines slowly and exits 0 is not timed out" {
+    // Goal: a chatty ldconfig is no hang. 150 lines with short pauses, far more than the read
+    // bound, finish well inside the deadline: not killed, exit 0, first bytes kept.
+    var real: HostReal = .{};
+    const envp = [_:null]?[*:0]const u8{null};
+    const script = "i=0; while [ $i -lt 150 ]; do echo \"warning $i\"; i=$((i+1)); sleep 0.005; done";
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", script, null };
+    var output: [16]u8 = undefined;
+    const result = try real.interface().run_helper(
+        .{ .path = "/bin/sh", .argv = &argv, .envp = &envp, .timeout_seconds = 20 },
+        &output,
+    );
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(host.ExitStatus{ .exited = 0 }, result.status);
+    try std.testing.expectEqualStrings("warning 0\nwarning", output[0..result.output_len]);
 }
 
 test "a helper that ends in time is not timed out, and reads /dev/null for input" {

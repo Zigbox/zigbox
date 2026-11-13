@@ -1138,6 +1138,9 @@ pub const HostSim = struct {
             .status = .{ .exited = 127 },
             .output_len = 0,
         };
+        if (sim.world.ldconfig_times_out and std.mem.eql(u8, std.fs.path.basename(request.path), "ldconfig")) {
+            return .{ .status = .{ .exited = 0 }, .output_len = 0, .timed_out = true };
+        }
         const ids: sim_world.Ids = .{ .uid = sim.uid_value, .gid = sim.gid_value };
         const result = sim.world.run_helper(request, ids, output);
         return .{ .status = result.status, .output_len = result.len };

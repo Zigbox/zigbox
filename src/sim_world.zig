@@ -398,6 +398,8 @@ pub const World = struct {
     helper_runs: u32,
     /// Makes the helpers fail with this exit code (null: they behave).
     helper_fails_with: ?u8,
+    /// Makes an `ldconfig` that is installed end 0 but report that the deadline killed it.
+    ldconfig_times_out: bool,
     /// When the manager started a scope, the container's process had not run yet: it was waiting
     /// for the go-ahead, so nothing it does happens outside the scope.
     scope_started_before_child_ran: bool,
@@ -520,6 +522,7 @@ pub const World = struct {
         world.subid_count = 65536;
         world.helper_runs = 0;
         world.helper_fails_with = null;
+        world.ldconfig_times_out = false;
         world.scope_started_before_child_ran = false;
         world.bus.init();
         world.now_ms = 1_000_000;
