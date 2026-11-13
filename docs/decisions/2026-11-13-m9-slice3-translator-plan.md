@@ -171,3 +171,10 @@ Not done, in order:
 Traps: explanation lines are at most 76 bytes (comptime assert in `codes.zig`); tidy wants
 lines of at most 100 columns, functions of at most 70 lines, no `usize` struct fields and a
 comment on each `catch unreachable`; Zig 0.17 has no `"x" ** n` for runtime lengths.
+
+## Status at handoff (third implementer, 2026-11-13)
+
+Steps 1 to 6 are done (see the PR). Supervisor ruling: E0816 covers both "the output exists" and
+"the write failed"; no new code was registered. Lasting traps: the fuzzer's resolver asserts a
+non-empty reference, so an empty `--from=` is refused (E0810) before it reaches one; `<<` is a
+heredoc only where `marker_after` finds a name, so `takes_heredocs` asks the same function.
