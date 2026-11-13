@@ -882,6 +882,16 @@ jobs:
               done
             done
           done
+          echo "== search list before:"; security list-keychains -d user
+          security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db" || true
+          echo "== search list after:"; security list-keychains -d user
+          security find-identity -v -p codesigning || true
+          for id in "$TEST_IDENTITY" zbx-release-test; do
+            echo "== on the search list: id=$id"
+            codesign --force --options runtime --timestamp=none --sign "$id" "$t" 2>&1 || true
+            codesign --force --options runtime --timestamp=none --sign "$id" --keychain "$KEYCHAIN" "$t" 2>&1 || true
+          done
+          security list-keychains -d user -s "$HOME/Library/Keychains/login.keychain-db" || true
           /bin/rm -f "$t"
       - name: Build the universal zip and sign it with it (no notarization, no upload)
         run: |
