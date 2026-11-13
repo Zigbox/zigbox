@@ -2,7 +2,8 @@
 //! Directories, the first that has a device deciding it (as in the reference implementation,
 //! where a later directory in `/etc/cdi`, `/var/run/cdi` order overrides an earlier one):
 //! `$XDG_CONFIG_HOME/cdi` (`$HOME/.config/cdi` when it is unset), `/var/run/cdi`, `/etc/cdi`,
-//! each read in name order, at most `cdi_dir_entries_max` spec files in all (more is refused). What the specs name is then looked at on the host:
+//! each read in name order, at most `cdi_dir_entries_max` spec files in all (more is refused).
+//! What the specs name is then looked at on the host:
 //! a mount's source must be there (E0226) and a node must be one the caller can open (E0225).
 
 const std = @import("std");
@@ -168,7 +169,9 @@ fn refuse(asked: []const []const u8, scratch: *Scratch, refusal: cdi.Refusal, di
             cdi_diagnose.unsupported(diag, asked[found.index], found.edit, name);
         },
         .too_big => |index| cdi_diagnose.too_big(diag, asked[index]),
-        .too_many_files => cdi_diagnose.too_many_files(diag, scratch.overflow[0..scratch.overflow_len]),
+        .too_many_files => {
+            cdi_diagnose.too_many_files(diag, scratch.overflow[0..scratch.overflow_len]);
+        },
     }
     return false;
 }

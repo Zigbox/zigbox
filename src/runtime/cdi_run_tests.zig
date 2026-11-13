@@ -77,7 +77,7 @@ const library_run = [_][:0]const u8{
     "--device", "vendor.example/gpu=0", "--",       "/bin/sh",
 };
 
-test "mounts are staged and moved to their paths, and a missing ldconfig puts the directory on the path" {
+test "mounts are staged and moved, and a missing ldconfig puts the directory on the path" {
     // Goal: the library half of a CDI device. Method: a directory and a file mount, and the
     // update-ldcache hook; the simulator has no ldconfig, so the fallback is taken. The mounts
     // are in the new root at their paths and the hidden stage names are gone; the command
@@ -97,7 +97,8 @@ test "mounts are staged and moved to their paths, and a missing ldconfig puts th
     try testing.expectEqual(@as(?host_mod.MountKind, .bind_file), table.mounts[file].kind);
     try testing.expect(table.find("/dev/.zbx-cdi-0") == null);
     try testing.expect(table.find("/dev/.zbx-cdi-1") == null);
-    try testing.expect(std.mem.indexOf(u8, child.envp(), "LD_LIBRARY_PATH=/opt/vendor/lib") != null);
+    const want = "LD_LIBRARY_PATH=/opt/vendor/lib";
+    try testing.expect(std.mem.indexOf(u8, child.envp(), want) != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sim.stderr(), "ZBX-W0208"));
 }
 
@@ -108,9 +109,9 @@ test "the CDI directories come before the library path the image or the user has
     defer testing.allocator.destroy(sim);
     setup_with(sim, library_spec);
     const run = [_][:0]const u8{
-        "zbx",      "run",                    "-e",                 "LD_LIBRARY_PATH=/opt/app/lib",
-        "--rootfs", sim_run.rootfs_path,      "--name",             "c-3",
-        "--device", "vendor.example/gpu=0",   "--",                 "/bin/sh",
+        "zbx",      "run",                  "-e",     "LD_LIBRARY_PATH=/opt/app/lib",
+        "--rootfs", sim_run.rootfs_path,    "--name", "c-3",
+        "--device", "vendor.example/gpu=0", "--",     "/bin/sh",
     };
     try testing.expectEqual(@as(u8, 0), sim_run.run_cli(sim, &run));
     const envp = sim.world.processes[1].envp();
@@ -125,9 +126,9 @@ test "--read-only with a device that has mounts is refused with one line; nodes 
     defer testing.allocator.destroy(sim);
     setup_with(sim, library_spec);
     const run = [_][:0]const u8{
-        "zbx",      "run",                  "--read-only", "--rootfs", sim_run.rootfs_path,
-        "--name",   "c-4",                  "--device",    "vendor.example/gpu=0",
-        "--",       "/bin/sh",
+        "zbx",     "run", "--read-only", "--rootfs",             sim_run.rootfs_path,
+        "--name",  "c-4", "--device",    "vendor.example/gpu=0", "--",
+        "/bin/sh",
     };
     try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &run));
     try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0227]: "));
@@ -178,4 +179,43 @@ test "a resolved set given to the library gets the host check: kinds noted, abse
     try testing.expectError(error.StartFailed, result);
     try testing.expectEqual(@as(?@TypeOf(diag.code.?), .E0225), diag.code);
     try testing.expect(!sim_two.world.processes[1].execd);
+}
+
+test "/var/run/cdi wins over /etc/cdi for the same device" {
+    // Goal: the reference order, the later directory overrides. Method: the same name in both
+    // directories, with a variable only the /var/run one sets.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup(sim);
+    sim.world.add_node("/var/run/cdi", .dir);
+    const other =
+        \\{"cdiVersion":"0.6.0","kind":"vendor.example/gpu","devices":[
+        \\ {"name":"0","containerEdits":{"env":["WON=var-run"],"deviceNodes":[{"path":"/dev/fake0"}]}}]}
+    ;
+    std.debug.assert(sim.world.write_file("/var/run/cdi/example.json", other) == null);
+    const code = sim_run.run_cli(sim, &library_run_plain);
+    if (code != 0) std.debug.print("{s}\n", .{sim.stderr()});
+    try testing.expectEqual(@as(u8, 0), code);
+    const envp = sim.world.processes[1].envp();
+    try testing.expect(std.mem.indexOf(u8, envp, "WON=var-run") != null);
+}
+
+const library_run_plain = [_][:0]const u8{
+    "zbx",      "run",                  "--rootfs", sim_run.rootfs_path, "--name", "c-5",
+    "--device", "vendor.example/gpu=0", "--",       "/bin/sh",
+};
+
+test "a directory with more than 64 spec files is refused with one line" {
+    // Goal: discovery is bounded and says so. Method: 65 files in /etc/cdi.
+    const sim = sim_get();
+    defer testing.allocator.destroy(sim);
+    setup(sim);
+    var name: [32]u8 = undefined;
+    for (0..65) |at| {
+        const path = std.fmt.bufPrint(&name, "/etc/cdi/s{d:0>3}.json", .{at}) catch unreachable;
+        std.debug.assert(sim.world.write_file(path, spec) == null);
+    }
+    try testing.expectEqual(@as(u8, 125), sim_run.run_cli(sim, &library_run_plain));
+    try testing.expect(std.mem.startsWith(u8, sim.stderr(), "error[ZBX-E0226]: "));
+    try testing.expect(std.mem.indexOf(u8, sim.stderr(), "64") != null);
 }

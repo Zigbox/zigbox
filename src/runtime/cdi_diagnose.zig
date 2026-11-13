@@ -89,7 +89,11 @@ pub fn unsupported(diag: *Diag, device: []const u8, edit: cdi.Unsupported, name:
     diag.context("device", "{s}", .{named});
     diag.context("edit", "{s}", .{edit.sentence()});
     if (edit == .read_only_mounts) {
-        diag.fix(.{ .sentence = "run without --read-only, or pass the node as a path:", .command = "zbx run --device /dev/nvidia0 <image>", .template = true });
+        diag.fix(.{
+            .sentence = "run without --read-only, or pass the node as a path:",
+            .command = "zbx run --device /dev/nvidia0 <image>",
+            .template = true,
+        });
         assert(diag.code.? == .E0227);
         return;
     }

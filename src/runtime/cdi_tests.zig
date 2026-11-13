@@ -300,3 +300,16 @@ test "resolve: the per-run bounds, at and one past" {
         try testing.expectEqual(@as(u32, 0), over.too_big);
     }
 }
+
+test "parse: hostPath before path in a mount is read the same as the other order" {
+    // Goal: key order inside an object is not meaning. Method: a node with `hostPath` first.
+    const parsed = try make();
+    defer testing.allocator.destroy(parsed);
+    const spec =
+        \\{"cdiVersion":"0.5.0","kind":"a.b/c","devices":[
+        \\ {"name":"x","containerEdits":{"deviceNodes":[
+        \\  {"hostPath":"/dev/real0","path":"/dev/real0"}]}}]}
+    ;
+    try testing.expectEqual(@as(?cdi.Problem, null), cdi.parse(parsed, spec));
+    try testing.expect(parsed.devices[0].edits.unsupported == .none);
+}

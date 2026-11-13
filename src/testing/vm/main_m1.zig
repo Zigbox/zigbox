@@ -338,7 +338,8 @@ fn extra_devices(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
         return fail_step(out, "EXTRA devices", "a non-member is refused with E0225, exit 125", err);
     };
     const cleanup = "rm -f /dev/zbx-render /dev/zbx-locked; gpasswd -d demo render; true";
-    _ = try session.run(cleanup, limits.command_timeout_kvm_s);
+    const timeout = limits.command_timeout_kvm_s;
+    _ = try session.run(cleanup, timeout);
     try timer.lap(out, "devices");
 }
 
@@ -349,8 +350,7 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     const spec = "{\"cdiVersion\":\"0.6.0\",\"kind\":\"vendor.example/gpu\",\"devices\":[" ++
         "{\"name\":\"0\",\"containerEdits\":{\"deviceNodes\":" ++
         "[{\"path\":\"/dev/zbx-render\"}],\"mounts\":[{\"hostPath\":\"/opt/zbx-fake-lib\"," ++
-        "\"containerPath\":\"/opt/zbx-fake-lib\",\"options\":[\"ro\",\"bind\"]}]}}],"
-        ++
+        "\"containerPath\":\"/opt/zbx-fake-lib\",\"options\":[\"ro\",\"bind\"]}]}}]," ++
         "\"containerEdits\":{\"env\":[\"FAKE=all\"]," ++
         "\"hooks\":[{\"hookName\":\"createContainer\"," ++
         "\"path\":\"/usr/bin/nvidia-cdi-hook\",\"args\":[\"nvidia-cdi-hook\",\"update-ldcache\"," ++
@@ -377,7 +377,8 @@ fn extra_cdi(session: *Session, out: *Io.Writer, timer: *H.Timer) !void {
     checks_m1.check_cdi_unknown(refused.streams, refused.status) catch |err| {
         return fail_step(out, "EXTRA cdi", "an unknown name is E0230 with the known names", err);
     };
-    const cleanup = "rm -rf /dev/zbx-render /etc/cdi/zbx-fake.json /opt/zbx-fake-lib; gpasswd -d demo render; true";
+    const cleanup = "rm -rf /dev/zbx-render /etc/cdi/zbx-fake.json /opt/zbx-fake-lib;" ++
+        " gpasswd -d demo render; true";
     _ = try session.run(cleanup, limits.command_timeout_kvm_s);
     try timer.lap(out, "cdi");
 }
