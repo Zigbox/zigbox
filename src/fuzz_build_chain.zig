@@ -268,6 +268,7 @@ fn check_purity(plan: *const Plan, expected: *const [steps_max + 2]Digest) void 
         assert(before.eql(twice));
         // Names the patterns do not take are not changed by a file with a name of their own.
         reference_files.put_file("/dst/zz-unrelated", 0o644, "not named by any pattern");
+        defer reference_files.remove_path("/dst/zz-unrelated"); // Every copy step is checked.
         const grown = import_tree("/dst") catch unreachable; // A clean import.
         assert(!grown.eql(source));
         var storage: [names_max][constants.store_name_bytes_max]u8 = undefined;
@@ -280,8 +281,6 @@ fn check_purity(plan: *const Plan, expected: *const [steps_max + 2]Digest) void 
         const kept = (select(source, masked, to) catch unreachable) orelse continue; // Clean.
         const after = (select(grown, masked, to) catch unreachable).?; // Clean.
         assert(kept.eql(after));
-        reference_files.remove_path("/dst/zz-unrelated");
-        return;
     }
 }
 

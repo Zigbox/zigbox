@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ZBX-E0818 · Zigbox</title>
-<meta name="description" content="a glob matched more paths than a build can hold">
+<meta name="description" content="a glob matched more paths than one import can hold">
 <link rel="canonical" href="https://zigbox.github.io/zigbox/errors/E0818.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
@@ -73,10 +73,10 @@ footer{border-top:1px solid var(--line);padding-block:24px;color:var(--muted);
 <main class="wrap">
 <p class="eyebrow">Diagnostic code</p>
 <h1>ZBX-E0818</h1>
-<p class="summary">a glob matched more paths than a build can hold</p>
+<p class="summary">a glob matched more paths than one import can hold</p>
 <dl class="facts"><div><dt>Kind</dt><dd>error</dd></div><div><dt>Blame</dt><dd>user</dd></div><div><dt>Exit code</dt><dd>1</dd></div></dl>
 <h2>What it means</h2>
-<p>An input or a copy source written as a glob is matched against the project when the build runs, and every path it matches is kept so that the step's inputs enter its tree in order. One build holds at most 65536 matched paths (and their names, at most 4 MiB of them) across all its steps. A directory that a glob matches counts once, however many files it holds.</p>
+<p>An input or a copy source written as a glob is matched against the project when the build runs, and every path it matches is kept so that the step's inputs enter its tree in order. One import (a step's inputs, or one copy entry's source, from the project or from a step's output) holds at most 65536 matched paths and 4 MiB of their names; each import starts afresh. A directory that a glob matches counts once, however many files it holds.</p>
 <p>The cause names the input and the bound. To fix it, match a directory instead of the files in it, narrow the glob, or add the paths you do not need to .exclude (an excluded path is never walked into when no line re-includes anything).</p>
 <h2>Offline</h2>
 <p>The same text, without a network:</p>

@@ -3458,13 +3458,14 @@ pub const registry = [_]Entry{
         .code = .E0818,
         .severity = .@"error",
         .blame = .user,
-        .summary = "a glob matched more paths than a build can hold",
+        .summary = "a glob matched more paths than one import can hold",
         .explanation =
         \\An input or a copy source written as a glob is matched against the project
         \\when the build runs, and every path it matches is kept so that the step's
-        \\inputs enter its tree in order. One build holds at most 65536 matched
-        \\paths (and their names, at most 4 MiB of them) across all its steps. A
-        \\directory that a glob matches counts once, however many files it holds.
+        \\inputs enter its tree in order. One import (a step's inputs, or one copy
+        \\entry's source, from the project or from a step's output) holds at most
+        \\65536 matched paths and 4 MiB of their names; each import starts afresh.
+        \\A directory that a glob matches counts once, however many files it holds.
         \\
         \\The cause names the input and the bound. To fix it, match a directory
         \\instead of the files in it, narrow the glob, or add the paths you do not

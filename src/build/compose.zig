@@ -600,6 +600,7 @@ pub const Context = struct {
     /// Fails the build with one line when a SIGINT or SIGTERM arrived: the scheduler then aborts
     /// the running steps, and every root this build made is removed on the way out.
     fn check_interrupt(context: *Context) Error!void {
+        assert(context.diag.code == null);
         if (!context.host.interrupt_pending()) return;
         store_diagnose.worker_ended(context.diag, .{
             .report = "the build was stopped by SIGINT or SIGTERM",
@@ -965,7 +966,8 @@ pub const Context = struct {
             assert(target != index);
             const source = file.text(found.source);
             const output = ws.outputs[target];
-            const selected = context.bind_select(index, output, source, file.text(from)) catch |err| {
+            const text = file.text(from);
+            const selected = context.bind_select(index, output, source, text) catch |err| {
                 for (ws.bind_keys[0..at]) |done| context.unroot(done.source);
                 return err;
             };
@@ -993,7 +995,8 @@ pub const Context = struct {
         ws.copy_patterns[0] = source;
         const patterns = ws.copy_patterns[0..1];
         const name = context.loaded.file.text(context.loaded.file.steps[index].name);
-        const selected = copy_mod.select(assembling, &ws.copying, output, patterns, "/") catch |err| {
+        const picked = copy_mod.select(assembling, &ws.copying, output, patterns, "/");
+        const selected = picked catch |err| {
             switch (err) {
                 error.PoolFull => diagnose.glob_pool_full(context.diag, source),
                 error.NoMatch => diagnose.bind_nothing(context.diag, name, source, from),
@@ -1074,8 +1077,10 @@ pub const Context = struct {
     /// Counts one more user of a tree this build has rooted (or found rooted).
     fn hold(context: *Context, digest: Digest) void {
         const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
         for (ws.holds[0..ws.holds_count]) |*entry| {
             if (!entry.digest.eql(digest)) continue;
+            assert(entry.users > 0);
             entry.users += 1;
             return;
         }
@@ -1089,6 +1094,7 @@ pub const Context = struct {
     /// nobody counted (an output, a project source a copy step imported) is dropped as before.
     fn release(context: *Context, digest: Digest) bool {
         const ws = context.ws;
+        assert(ws.holds_count <= ws.holds.len);
         for (ws.holds[0..ws.holds_count], 0..) |*entry, at| {
             if (!entry.digest.eql(digest)) continue;
             assert(entry.users > 0);
@@ -1102,6 +1108,7 @@ pub const Context = struct {
     }
 
     fn unroot_binds(context: *Context, slot: *const Slot) void {
+        assert(slot.binds_count <= slot.binds.len);
         for (slot.binds[0..slot.binds_count]) |digest| context.unroot(digest);
     }
 
@@ -1327,7 +1334,10 @@ pub const Context = struct {
         const store = context.store;
         const found = image_user.resolve(store, &ws.user_ws, tree, text, context.diag) catch {
             context.diag.reset();
-            diagnose.user_not_found(context.diag, ".image .config", text);
+            // The name may come from the base image's config, which the file never wrote.
+            const set_here = context.loaded.file.image.config.user != null;
+            const where = if (set_here) ".image .config" else "the base image's config";
+            diagnose.user_not_found(context.diag, where, text);
             return error.Failed;
         };
         var buffer: [24]u8 = undefined;

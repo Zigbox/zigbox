@@ -1,6 +1,6 @@
-error[ZBX-E0818]: a glob matched more paths than a build can hold
-  while  matching a glob against the project
-  cause  "src/**/*.go" matched more than 65536 paths in this build
+error[ZBX-E0818]: a glob matched more paths than one import can hold
+  while  matching a glob
+  cause  "src/**/*.go" matched more paths than one import holds (65536 paths, 4194304 bytes)
   input  src/**/*.go
   limit  65536 paths
   fix    match a directory instead of the files in it, narrow the glob, or .exclude what you do not need

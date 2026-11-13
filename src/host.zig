@@ -1418,9 +1418,14 @@ pub const Host = struct {
     pub fn catch_interrupts(host: Host, catch_it: bool) void {
         assert(@intFromPtr(host.vtable) != 0);
         host.vtable.catch_interrupts(host.context, catch_it);
+        // Catching starts a fresh window: nothing has arrived in it yet.
+        if (catch_it) assert(!host.vtable.interrupt_pending(host.context));
+        assert(host.vtable.last_errno(host.context) < 4096);
     }
 
     pub fn interrupt_pending(host: Host) bool {
+        assert(@intFromPtr(host.vtable) != 0);
+        assert(@intFromPtr(host.context) != 0);
         return host.vtable.interrupt_pending(host.context);
     }
 

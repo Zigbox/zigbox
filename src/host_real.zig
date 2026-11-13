@@ -1293,8 +1293,9 @@ pub const HostReal = struct {
     var interrupt_flag: std.atomic.Value(bool) = .init(false);
 
     fn on_interrupt(which: linux.SIG) callconv(.c) void {
-        _ = which;
+        assert(@backingInt(which) != 0); // A real signal number, as the kernel delivers.
         interrupt_flag.store(true, .release);
+        assert(interrupt_flag.load(.acquire));
     }
 
     fn catch_interrupts(context: *anyopaque, catch_it: bool) void {
@@ -1309,10 +1310,12 @@ pub const HostReal = struct {
             const result = linux.sigaction(which, &action, null);
             assert(linux.errno(result) == .SUCCESS); // Valid signals and a valid handler.
         }
+        if (catch_it) assert(!interrupt_flag.load(.acquire)); // A fresh window starts clear.
     }
 
     fn interrupt_pending(context: *anyopaque) bool {
         _ = from_context(context);
+        assert(@intFromPtr(context) != 0);
         return interrupt_flag.load(.acquire);
     }
 

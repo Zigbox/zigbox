@@ -761,7 +761,7 @@ pub fn step_name_hint(diag: *Diag, name: []const u8) void {
     assert(name.len > 0);
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, name);
-    const sentence = "to use the output of the step of that name, write .from like this";
+    const sentence = "to use the output of the step of that name, write .base like this";
     diag.fix_with(sentence, ".from = \"step:{s}\"", .{shown});
     assert(diag.code.? == .E0804);
 }
@@ -1186,18 +1186,20 @@ pub fn user_not_found(diag: *Diag, where: []const u8, name: []const u8) void {
     assert(diag.code.? == .E0817);
 }
 
-/// `E0818`: the paths the globs of a build matched are more than `build_glob_matches_max`, or
-/// their names more than `build_glob_pool_bytes_max`. `input` is the glob being matched.
+/// `E0818`: the paths the globs of one import (a step's inputs, or one copy entry's source)
+/// matched are more than `build_glob_matches_max`, or their names more than
+/// `build_glob_pool_bytes_max`. `input` is the glob being matched.
 pub fn glob_pool_full(diag: *Diag, input: []const u8) void {
     assert(diag.code == null);
     assert(input.len > 0);
     var echo: Echo = undefined;
     const shown = text_util.sanitise(&echo, input);
     diag.raise(.E0818);
-    diag.while_("matching a glob against the project", .{});
-    diag.cause("\"{s}\" matched more than {d} paths in this build", .{
+    diag.while_("matching a glob", .{});
+    diag.cause("\"{s}\" matched more paths than one import holds ({d} paths, {d} bytes)", .{
         shown,
         constants.build_glob_matches_max,
+        constants.build_glob_pool_bytes_max,
     });
     diag.context("input", "{s}", .{shown});
     diag.context("limit", "{d} paths", .{constants.build_glob_matches_max});
