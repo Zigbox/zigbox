@@ -21,13 +21,37 @@ const Writer = std.Io.Writer;
 
 /// Writes `file` in its canonical form. The form is at most `build_render_bytes_max` bytes.
 pub fn render(file: *const BuildFile, writer: *Writer) Writer.Error!void {
+    return render_with(file, null, writer);
+}
+
+/// Comments for `render_noted`: a header before the file, and one line before each step.
+pub const Notes = struct {
+    /// Whole `//` lines, each ending in a newline.
+    header: []const u8,
+    /// One per step, without the `// ` or a newline.
+    steps: []const []const u8,
+};
+
+/// `render` with comments: what `zbx import` writes. The comments do not change what the file
+/// parses to.
+pub fn render_noted(file: *const BuildFile, notes: *const Notes, writer: *Writer) Writer.Error!void {
+    assert(notes.steps.len == file.steps_count);
+    for (notes.steps) |note| assert(std.mem.indexOfScalar(u8, note, '\n') == null);
+    return render_with(file, notes, writer);
+}
+
+fn render_with(file: *const BuildFile, notes: ?*const Notes, writer: *Writer) Writer.Error!void {
     assert(file.version == file_mod.version);
     assert(file.pool_len <= constants.build_pool_bytes);
+    if (notes) |n| try writer.writeAll(n.header);
     try writer.print(".{{\n    .version = {d},\n", .{file.version});
     if (file.exclude.given) try render_span(file, 1, "exclude", file.exclude, writer);
     if (file.steps_count > 0) {
         try writer.writeAll("    .steps = .{\n");
-        for (file.steps_slice()) |*step| try render_step(file, step, writer);
+        for (file.steps_slice(), 0..) |*step, index| {
+            if (notes) |n| try writer.print("        // {s}\n", .{n.steps[index]});
+            try render_step(file, step, writer);
+        }
         try writer.writeAll("    },\n");
     }
     try writer.writeAll("    .image = .{\n");

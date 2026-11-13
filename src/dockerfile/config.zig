@@ -319,8 +319,18 @@ fn kept(t: *Translator, instruction: *const Instruction) Error!void {
     const substitute = instruction.keyword != .healthcheck and instruction.keyword != .maintainer;
     var value = text;
     if (substitute) {
-        const context = t.stage_context(line);
-        value = try words.word_of(text, &context, &t.out, t.refusal());
+        // `VOLUME ["/a", "/b"]` and `VOLUME /a /b` are the same list: kept space-separated.
+        var list: words.WordList = undefined;
+        if (!try words.exec_form(text, line, &t.out, &list, t.refusal())) {
+            const context = t.stage_context(line);
+            try words.words_of(text, &context, &t.out, &list, t.refusal());
+        }
+        const start = t.out.mark();
+        for (list.slice(), 0..) |word, index| {
+            if (index > 0) try t.out.push(t.refusal(), line, " ");
+            try t.out.push(t.refusal(), line, word);
+        }
+        value = t.out.since(start);
     }
     const state = t.state();
     // A second EXPOSE or VOLUME adds to the first, as Docker's lists do.

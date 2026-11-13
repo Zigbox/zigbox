@@ -423,6 +423,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     var unpack = true;
     var excludes: [words.flags_max][]const u8 = undefined;
     var excludes_count: u32 = 0;
+    var remote_flag: ?[]const u8 = null;
     for (flags.slice()) |flag| {
         const value = try words.word_of(flag.value orelse "", &context, &t.out, t.refusal());
         if (std.mem.eql(u8, flag.name, "from")) {
@@ -440,6 +441,11 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
             std.mem.eql(u8, value, "false"))
         {
             unpack = false;
+        } else if (instruction.keyword == .add and remote_flag == null and
+            (std.mem.eql(u8, flag.name, "checksum") or std.mem.eql(u8, flag.name, "keep-git-dir")))
+        {
+            // Refused after the sources, so `ADD --checksum=... <url>` names the URL.
+            remote_flag = flag.name;
         } else {
             return unsupported(t, line, "--", flag.name, "remove the flag");
         }
@@ -457,6 +463,7 @@ pub fn copy(t: *Translator, instruction: *const Instruction) Error!void {
     }
     const sources = items[0 .. items.len - 1];
     if (instruction.keyword == .add) try add_sources(t, line, sources, unpack);
+    if (remote_flag) |flag| return unsupported(t, line, "ADD --", flag, "remove the flag");
     const state = t.state();
     const to = try translate.absolute(t, line, state.directory(), items[items.len - 1], true);
     var from_text: ?[]const u8 = null;

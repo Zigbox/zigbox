@@ -115,7 +115,7 @@ fn from(t: *Translator, instruction: *const lines.Instruction) Error!void {
         .steps_count = 0,
         .state = undefined,
     };
-    if (base == .stage) stage.uses |= @as(u64, 1) << base.stage;
+    if (base == .stage) stage.uses |= @as(u64, 1) << @intCast(base.stage);
     ws.stages_count += 1;
 }
 

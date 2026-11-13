@@ -194,6 +194,8 @@ pub const Translator = struct {
     out: words.Out,
     draft: Writer,
     stage: u32,
+    /// The Dockerfile line being translated, for refusals deep in a helper.
+    line: u32,
 
     pub fn refusal(t: *Translator) *Refusal {
         return &t.ws.refusal;
@@ -239,7 +241,22 @@ pub const Translator = struct {
     }
 
     pub fn put_string(t: *Translator, value: []const u8) Refused!void {
+        if (value.len > constants.build_string_bytes_max) {
+            return refuse(t.refusal(), .E0815, t.line, "Dockerfile:{d} makes a string of {d} " ++
+                "bytes, more than the build file's {d}", .{
+                t.line, value.len, constants.build_string_bytes_max,
+            }, "move the text into a script in the context and COPY it", .{});
+        }
         render.render_string(value, &t.draft) catch return t.draft_full();
+    }
+
+    /// `key=value` in the translation's own memory.
+    pub fn join(t: *Translator, key: []const u8, value: []const u8) Refused![]const u8 {
+        const start = t.out.mark();
+        try t.out.push(t.refusal(), t.line, key);
+        try t.out.push(t.refusal(), t.line, "=");
+        try t.out.push(t.refusal(), t.line, value);
+        return t.out.since(start);
     }
 
     /// `name = "value",` on a line of its own, at the step's depth.
@@ -380,6 +397,7 @@ pub fn translate(ws: *Workspace, options: *const Options) Error![]const u8 {
         .out = .{ .bytes = &ws.words },
         .draft = .fixed(&ws.draft),
         .stage = 0,
+        .line = 0,
     };
     try platform_args(&t);
     try directives(&t);

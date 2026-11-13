@@ -364,6 +364,15 @@ test {
 test {
     // The Dockerfile translator (M9 slice 3).
     _ = @import("dockerfile/refusal.zig");
+    _ = @import("dockerfile/lines.zig");
+    _ = @import("dockerfile/words.zig");
+    _ = @import("dockerfile/network.zig");
+    _ = @import("dockerfile/report.zig");
+    _ = @import("dockerfile/translate.zig");
+    _ = @import("dockerfile/stages.zig");
+    _ = @import("dockerfile/config.zig");
+    _ = @import("dockerfile/steps.zig");
+    _ = @import("dockerfile/translate_tests.zig");
 }
 
 test {
