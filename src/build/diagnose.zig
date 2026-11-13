@@ -865,6 +865,55 @@ pub fn assembly_refused(
     assert(diag.code.? == .E0807);
 }
 
+/// `E0807` for a copy step whose selection or merge could not be made (not an I/O failure).
+pub fn copy_refused(
+    diag: *Diag,
+    failure: *const assemble_mod.Failure,
+    step: []const u8,
+    to: []const u8,
+) void {
+    assert(diag.code == null);
+    assert(failure.* != .io);
+    assert(failure.* != .damaged);
+    var step_echo: Echo = undefined;
+    var to_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const to_shown = text_util.sanitise(&to_echo, to);
+    diag.raise(.E0807);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    switch (failure.*) {
+        .too_deep => diag.cause("the copy to {s} would be deeper than {d} directories", .{
+            to_shown, constants.store_depth_max,
+        }),
+        .too_large, .too_common, .conflict => {
+            diag.cause("the tree the copy to {s} makes is too large to assemble", .{to_shown});
+        },
+        .io, .damaged => unreachable,
+    }
+    diag.fix(.{ .sentence = "copy fewer or smaller directories, or a shorter destination" });
+    diag.context("step", "{s}", .{step_shown});
+    assert(diag.code.? == .E0807);
+}
+
+/// `E0803` for a copy whose `.src` matches nothing in a `step:` source.
+pub fn copy_nothing(diag: *Diag, step: []const u8, pattern: []const u8, from: []const u8) void {
+    assert(diag.code == null);
+    assert(pattern.len > 0);
+    var step_echo: Echo = undefined;
+    var pattern_echo: Echo = undefined;
+    var from_echo: Echo = undefined;
+    const step_shown = text_util.sanitise(&step_echo, step);
+    const pattern_shown = text_util.sanitise(&pattern_echo, pattern);
+    const from_shown = text_util.sanitise(&from_echo, from);
+    diag.raise(.E0803);
+    diag.while_("copying files in step \"{s}\"", .{step_shown});
+    diag.cause("\"{s}\" matches nothing in \"{s}\"", .{ pattern_shown, from_shown });
+    diag.fix(.{ .sentence = "name a path the source has, or fix the glob" });
+    diag.context("step", "{s}", .{step_shown});
+    diag.context("src", "{s}", .{pattern_shown});
+    assert(diag.code.? == .E0803);
+}
+
 fn conflict_refused(
     diag: *Diag,
     conflict: assemble_mod.Conflict,

@@ -43,6 +43,7 @@ const graph_mod = @import("graph.zig");
 const render = @import("../diag/render.zig");
 const schedule = @import("schedule.zig");
 const assemble = @import("assemble.zig");
+const copy_mod = @import("copy.zig");
 const result_mod = @import("result.zig");
 const roots = @import("../store/roots.zig");
 const pull_lib = @import("../pull.zig");
@@ -98,6 +99,10 @@ pub const Workspace = struct {
     step_inputs: [constants.build_steps_max]Digest,
     step_keys: [constants.build_steps_max]Digest,
     provenance: provenance_job.Workspace,
+    /// A copy step: the selection's memory, each entry's key part and its patterns.
+    copying: copy_mod.Workspace,
+    copy_keys: [constants.build_copy_entries_max]key_mod.Copy,
+    copy_patterns: [constants.build_copy_sources_max][]const u8,
 };
 
 /// The timings slot of the image step.
@@ -388,10 +393,14 @@ pub const Context = struct {
         if (step.user) |user| spec.user = file.text(user);
         if (step.workdir) |workdir| spec.workdir = file.text(workdir);
         try context.resolve_base(index, &spec);
-        spec.input_tree = try context.import_inputs(index);
+        spec.input_tree = if (step.copy.given)
+            std.mem.zeroes(Digest)
+        else
+            try context.import_inputs(index, null);
         ws.step_inputs[index] = spec.input_tree;
         fill_lists(file, step, ws, &spec);
         spec.needs = fill_needs(loaded, index, ws);
+        if (step.copy.given) return context.begin_copy(index, &spec);
         key_mod.compute(&spec, &ws.key) catch {
             diagnose.step_env_refused(context.diag, name, loaded.shown(), step.env.count, "");
             return error.Failed;
@@ -695,7 +704,7 @@ pub const Context = struct {
         };
     }
 
-    fn import_inputs(context: *Context, index: u8) Error!Digest {
+    fn import_inputs(context: *Context, index: u8, entry: ?u32) Error!Digest {
         const ws = context.ws;
         const job: input_job.Request = .{
             .host = context.host,
@@ -703,10 +712,143 @@ pub const Context = struct {
             .store = context.store,
             .loaded = context.loaded,
             .step = index,
+            .entry = entry,
             .ws = &ws.input,
             .problem = &ws.input_problem,
         };
         return input_job.import(&job, context.diag) catch return error.Failed;
+    }
+
+    /// A copy step (`.copy`): the output is the base with each entry's selection laid over it,
+    /// made here, in this process, under one shared lock; no command runs. Each entry's
+    /// selection is in the key, so a file the patterns do not take never changes it.
+    fn begin_copy(context: *Context, index: u8, spec: *key_mod.Spec) Error!schedule.Begin {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const step = &file.steps[index];
+        ws.timings[index].start_ms = context.elapsed();
+        const entries = file.copy_entries(step);
+        assert(entries.len > 0);
+        assert(entries.len <= ws.copy_keys.len);
+        for (entries, 0..) |entry, at| {
+            const source = try context.copy_source(index, @intCast(at), &entry);
+            if (at == 0) ws.step_inputs[index] = source;
+            const selected = try context.copy_select(index, &entry, source);
+            ws.copy_keys[at] = .{ .source = selected, .to = file.text(entry.to) };
+        }
+        spec.copies = ws.copy_keys[0..entries.len];
+        key_mod.compute(spec, &ws.key) catch {
+            diagnose.step_env_refused(context.diag, spec.name, context.loaded.shown(), 0, "");
+            return error.Failed;
+        };
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "copying files");
+        defer lock.release(store);
+        var failure: cache.Failure = undefined;
+        const found = cache.lookup(store, &ws.cache, &ws.key, &failure) catch
+            return context.cache_failed(&failure);
+        var hit = true;
+        const output = switch (found) {
+            .hit => |existing| existing,
+            .miss => blk: {
+                hit = false;
+                if (context.loaded.graph.base_step[index] == null) {
+                    try context.check_base(file.text(step.base), spec);
+                }
+                const made = try context.copy_assemble(spec.base_tree, entries.len);
+                break :blk cache.record(store, &ws.cache, &ws.key, made, &failure) catch
+                    return context.cache_failed(&failure);
+            },
+        };
+        context.unroot(output);
+        ws.outputs[index] = output;
+        try context.report(index, hit, output);
+        return .hit;
+    }
+
+    /// The tree entry `at` of step `index` takes from: the project's matched paths, imported, or
+    /// the output of the `step:` it names.
+    fn copy_source(
+        context: *Context,
+        index: u8,
+        at: u32,
+        entry: *const file_mod.CopyEntry,
+    ) Error!Digest {
+        const file = &context.loaded.file;
+        const from = entry.from orelse return context.import_inputs(index, at);
+        const name = file_mod.step_ref(file.text(from)) orelse unreachable; // Refused earlier.
+        const target = graph_mod.step_named(file, name) orelse unreachable; // The graph check.
+        assert(target < index);
+        return context.ws.outputs[target];
+    }
+
+    fn copy_select(
+        context: *Context,
+        index: u8,
+        entry: *const file_mod.CopyEntry,
+        source: Digest,
+    ) Error!Digest {
+        const ws = context.ws;
+        const file = &context.loaded.file;
+        const texts = file.texts(entry.src);
+        for (texts, 0..) |text, at| ws.copy_patterns[at] = file.text(text);
+        const store = context.store;
+        try store_diagnose.hold(context.diag, store, .shared, "build", "selecting files to copy");
+        defer lock.release(store);
+        const assembling: assemble.Context = .{
+            .store = store,
+            .ws = &ws.copying.assemble,
+            .failure = &ws.assembly_failure,
+        };
+        const patterns = ws.copy_patterns[0..texts.len];
+        const to = file.text(entry.to);
+        return copy_mod.select(assembling, &ws.copying, source, patterns, to) catch |err| {
+            const name = file.text(file.steps[index].name);
+            switch (err) {
+                error.PoolFull => {
+                    const failed = ws.copying.failed_pattern;
+                    diagnose.glob_pool_full(context.diag, patterns[failed]);
+                },
+                error.NoMatch => {
+                    const from = if (entry.from) |text| file.text(text) else "the project";
+                    diagnose.copy_nothing(context.diag, name, patterns[0], from);
+                },
+                error.Failed => context.assembly_failed(name, to),
+            }
+            return error.Failed;
+        };
+    }
+
+    fn assembly_failed(context: *Context, name: []const u8, to: []const u8) void {
+        const ws = context.ws;
+        const store = context.store;
+        switch (ws.assembly_failure) {
+            .io => |io| store_diagnose.write_failed(context.diag, store, io.step, io.err, io.errno),
+            .damaged => {
+                const operation = "reading a tree to copy";
+                store_diagnose.write_failed(context.diag, store, operation, error.IoFailed, 0);
+            },
+            else => diagnose.copy_refused(context.diag, &ws.assembly_failure, name, to),
+        }
+    }
+
+    /// The base with every entry's selection laid over it (a later file replaces an earlier one).
+    fn copy_assemble(context: *Context, base: Digest, count: usize) Error!Digest {
+        const ws = context.ws;
+        const merging: assemble.Context = .{
+            .store = context.store,
+            .ws = &ws.assembly,
+            .failure = &ws.assembly_failure,
+            .replace = true,
+        };
+        var tree = base;
+        for (ws.copy_keys[0..count]) |part| {
+            tree = assemble.merge(merging, tree, part.source) catch {
+                context.assembly_failed("copy", part.to);
+                return error.Failed;
+            };
+        }
+        return tree;
     }
 
     /// Writes the entry under the shared lock, and returns the tree it names.

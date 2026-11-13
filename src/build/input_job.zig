@@ -34,6 +34,8 @@ pub const Request = struct {
     store: *Store,
     loaded: *const load_mod.Workspace,
     step: u8,
+    /// A copy entry of the step (an index into its entries): import its `.src`, not `.inputs`.
+    entry: ?u32 = null,
     ws: *input_tree.Workspace,
     problem: *inputs_mod.Problem,
 };
@@ -122,12 +124,19 @@ fn imported(request: *const Request, diag: *Diag) ?Digest {
         return null;
     };
     defer fs.close(project);
-    const import_request: input_tree.Request = .{
+    var import_request: input_tree.Request = .{
         .store = request.store,
         .project = project,
         .file = &loaded.file,
         .step = request.step,
     };
+    if (request.entry) |at| {
+        const file = &loaded.file;
+        const step = &file.steps[request.step];
+        const entry = file.copy_entries(step)[at];
+        import_request.inputs = file.texts(entry.src);
+        import_request.exclude = .{ file.exclude, step.exclude, entry.exclude };
+    }
     return input_tree.import(import_request, request.ws, request.problem, diag) catch |err| {
         if (err == error.Refused) {
             diagnose.input_problem(diag, loaded.project.text(), &loaded.file, request.problem);

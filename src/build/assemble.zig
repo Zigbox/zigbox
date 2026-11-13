@@ -284,7 +284,7 @@ const Step = union(enum) {
     finished: Digest,
 };
 
-fn merge(context: Context, dst: Digest, src: Digest) Error!Digest {
+pub fn merge(context: Context, dst: Digest, src: Digest) Error!Digest {
     const ws = context.ws;
     ws.frames[0] = .{ .dst = dst, .src = src, .done = 0, .results = undefined, .path_len = 0 };
     var depth: u32 = 0;

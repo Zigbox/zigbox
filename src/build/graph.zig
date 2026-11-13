@@ -145,9 +145,22 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     }
     for (file.steps_slice(), 0..) |*step, index| {
         const at: u8 = @intCast(index);
-        if (step.copy.given) return .{ .step = at, .field = ".copy" };
+        if (copy_unrunnable(file, step)) |field| return .{ .step = at, .field = field };
         if (step.caches.given) return .{ .step = at, .field = ".caches" };
         if (step.binds.given) return .{ .step = at, .field = ".binds" };
+    }
+    return null;
+}
+
+/// The part of a step's `.copy` that is not built yet: a source that is an image, an owner or a
+/// mode to set, or an exclude on a `step:` source (the recorded cuts of M9 slice 2).
+fn copy_unrunnable(file: *const BuildFile, step: *const file_mod.Step) ?[]const u8 {
+    for (file.copy_entries(step)) |entry| {
+        if (entry.chown != null) return ".copy .chown";
+        if (entry.chmod != null) return ".copy .chmod";
+        const from = entry.from orelse continue;
+        if (file_mod.step_ref(file.text(from)) == null) return ".copy .from an image";
+        if (entry.exclude.given) return ".copy .exclude on a step: source";
     }
     return null;
 }
