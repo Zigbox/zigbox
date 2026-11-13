@@ -1278,6 +1278,8 @@ test "a bare step name as a base gets a second fix that writes step:<name>" {
     base_not_locked(&diag, "pack", "build", false);
     step_name_hint(&diag, "build");
     try std.testing.expectEqual(@as(u32, 2), diag.fixes.count);
-    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.items[1].command.slice(), "step:build") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diag.fixes.items[0].command.slice(), "zbx pull") != null);
+    const second = diag.fixes.items[1].command.slice();
+    const first = diag.fixes.items[0].command.slice();
+    try std.testing.expect(std.mem.indexOf(u8, second, "step:build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "zbx pull") != null);
 }

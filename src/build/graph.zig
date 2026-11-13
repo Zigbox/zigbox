@@ -16,7 +16,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const file_mod = @import("file.zig");
-const glob_mod = @import("glob.zig");
 
 const BuildFile = file_mod.BuildFile;
 const Text = file_mod.Text;
@@ -138,7 +137,6 @@ pub const Unrunnable = struct {
 /// quietly ignores a field. `--graph` shows every field and does not ask.
 pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
     assert(graph.count == file.steps_count);
-    if (file.exclude.given) return .{ .step = null, .field = ".exclude" };
     if (graph.image_base != null) return .{ .step = null, .field = ".image .base = \"step:\"" };
     if (file.image.config.user) |user| {
         if (!file_mod.is_numeric_user(file.text(user))) {
@@ -150,12 +148,6 @@ pub fn unrunnable(file: *const BuildFile, graph: *const Graph) ?Unrunnable {
         if (step.copy.given) return .{ .step = at, .field = ".copy" };
         if (step.caches.given) return .{ .step = at, .field = ".caches" };
         if (step.binds.given) return .{ .step = at, .field = ".binds" };
-        if (step.exclude.given) return .{ .step = at, .field = ".exclude" };
-        for (step.inputs.slice()) |input| {
-            if (glob_mod.is_glob(file.text(input))) {
-                return .{ .step = at, .field = "an input glob" };
-            }
-        }
     }
     return null;
 }
@@ -558,7 +550,7 @@ test "a build refuses what it cannot run yet, and a plain M7 file is runnable" {
     try testing.expectEqual(Result.ordered, try order_text(plain, &problem));
     try testing.expect(unrunnable(&test_file, &test_graph) == null);
     const fields = [_][]const u8{
-        ".exclude = .{}", ".inputs = .{ \"*.go\" }", ".caches = .{}", ".binds = .{}",
+        ".caches = .{}", ".binds = .{}",
     };
     inline for (fields) |field| {
         const text = step_head ++ "}, .steps = .{ .{ .name = \"a\", .base = \"x\", " ++

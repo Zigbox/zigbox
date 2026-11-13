@@ -910,6 +910,8 @@ pub const build_copy_entries_max: u32 = 64;
 pub const build_exclude_lines_max: u32 = 256;
 /// The sources of one copy entry.
 pub const build_copy_sources_max: u32 = build_step_inputs_max;
+/// A build's file, step and copy exclude lines, read as one list (later lines win).
+pub const build_exclude_chain_max: u32 = 3 * build_exclude_lines_max;
 /// What one whole file holds of the M9 lists, so that no step carries an array of its own. A
 /// step's own bound above still holds; these are the totals the file's arrays are sized to
 /// (one copy step per instruction needs about one entry a step, and a few lists each).

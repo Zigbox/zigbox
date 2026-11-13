@@ -24,7 +24,9 @@ const assert = std.debug.assert;
 const constants = @import("../constants.zig");
 const host_mod = @import("../host.zig");
 const Diag = @import("../diag/diag.zig").Diag;
+const diagnose = @import("diagnose.zig");
 const file_mod = @import("file.zig");
+const glob = @import("glob.zig");
 const inputs_mod = @import("inputs.zig");
 const digest_mod = @import("../store/digest.zig");
 const store_diagnose = @import("../store/diagnose.zig");
@@ -63,6 +65,55 @@ pub const Request = struct {
     project: Fd,
     file: *const BuildFile,
     step: u8,
+    /// The inputs to import: null is the step's own `.inputs`. A copy imports its `.src`.
+    inputs: ?[]const Text = null,
+    /// The exclude lists, in order, later lines winning: null is the file's then the step's.
+    exclude: ?[3]file_mod.Span = null,
+};
+
+/// One path a build's inputs name or a glob matched, in `Matches.bytes`.
+pub const Match = struct { at: u32, len: u16, input: u16 };
+
+/// The paths of one import, in a pool allocated once (`build_glob_matches_max` of them,
+/// `build_glob_pool_bytes_max` bytes of names): E0818 when either runs out.
+pub const Matches = struct {
+    entries: [constants.build_glob_matches_max]Match,
+    count: u32,
+    bytes: [constants.build_glob_pool_bytes_max]u8,
+    used: u32,
+
+    pub fn add(matches: *Matches, path: []const u8, input: u32) bool {
+        assert(path.len > 0);
+        assert(path.len <= constants.path_bytes_max);
+        assert(matches.used <= matches.bytes.len);
+        if (matches.count == matches.entries.len) return false;
+        if (matches.used + path.len > matches.bytes.len) return false;
+        @memcpy(matches.bytes[matches.used..][0..path.len], path);
+        matches.entries[matches.count] = .{
+            .at = matches.used,
+            .len = @intCast(path.len),
+            .input = @intCast(input),
+        };
+        matches.used += @intCast(path.len);
+        matches.count += 1;
+        return true;
+    }
+
+    fn get(matches: *const Matches, index: u32) []const u8 {
+        assert(index < matches.count);
+        const entry = matches.entries[index];
+        return matches.bytes[entry.at..][0..entry.len];
+    }
+};
+
+/// One directory of the glob walk: its names, sorted, in the arena.
+const Scan = struct {
+    path_len: u32,
+    names: NameList,
+    offsets: []const u32,
+    next: u32,
+    /// Where the arena is free after this frame.
+    end: u32,
 };
 
 const Frame = struct {
@@ -86,7 +137,10 @@ pub const Workspace = struct {
     frames: [constants.store_depth_max + 1]Frame,
     path: [constants.path_bytes_max + 1]u8,
     link_target: [constants.store_symlink_target_bytes_max + 1]u8,
-    order: [constants.build_step_inputs_max]u32,
+    matches: Matches,
+    order: [constants.build_glob_matches_max]u32,
+    scan: [constants.store_depth_max + 1]Scan,
+    lines: [constants.build_exclude_chain_max][]const u8,
 };
 
 /// Imports the inputs of step `request.step` and returns the tree's digest. The tree is in the
@@ -94,6 +148,7 @@ pub const Workspace = struct {
 pub fn import(request: Request, ws: *Workspace, problem: *Problem, diag: *Diag) Error!Digest {
     assert(request.step < request.file.steps_count);
     assert(diag.code == null);
+    const step = &request.file.steps[request.step];
     var run: Run = .{
         .request = request,
         .ws = ws,
@@ -101,7 +156,12 @@ pub fn import(request: Request, ws: *Workspace, problem: *Problem, diag: *Diag) 
         .diag = diag,
         .depth = 0,
         .input = undefined,
+        .inputs = request.inputs orelse step.inputs.slice(),
+        .lines = &.{},
+        .negation = false,
+        .scan_depth = 0,
     };
+    run.read_lines(request.exclude orelse .{ request.file.exclude, step.exclude, .none });
     return run.go();
 }
 
@@ -113,17 +173,42 @@ const Run = struct {
     depth: u32,
     /// The declared input being imported, for a refusal.
     input: Text,
+    inputs: []const Text,
+    /// The exclude lines, in `ws.lines`.
+    lines: []const []const u8,
+    /// Some exclude line starts with `!`: an excluded directory is still entered.
+    negation: bool,
+    scan_depth: u32,
+
+    fn read_lines(run: *Run, spans: [3]file_mod.Span) void {
+        var count: u32 = 0;
+        for (spans) |span| {
+            for (run.request.file.texts(span)) |text| {
+                run.ws.lines[count] = run.request.file.text(text);
+                count += 1;
+            }
+        }
+        assert(count <= constants.build_exclude_chain_max);
+        run.lines = run.ws.lines[0..count];
+        for (run.lines) |line| {
+            if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \t\r"), "!")) run.negation = true;
+        }
+    }
 
     fn go(run: *Run) Error!Digest {
-        const inputs = run.request.file.steps[run.request.step].inputs.slice();
-        assert(inputs.len <= run.ws.order.len);
-        const order = run.ws.order[0..inputs.len];
+        assert(run.inputs.len <= constants.build_step_inputs_max);
+        run.ws.matches.count = 0;
+        run.ws.matches.used = 0;
+        try run.collect();
+        const count = run.ws.matches.count;
+        const order = run.ws.order[0..count];
         for (order, 0..) |*slot, index| slot.* = @intCast(index);
-        std.sort.insertion(u32, order, run, input_less);
+        std.sort.heap(u32, order, run, input_less);
+        const kept = run.drop_covered(order);
         try run.push_made_up(0);
-        for (order) |index| {
-            run.input = inputs[index];
-            const text = run.request.file.text(run.input);
+        for (order[0..kept]) |index| {
+            run.input = run.inputs[run.ws.matches.entries[index].input];
+            const text = run.ws.matches.get(index);
             assert(inputs_mod.is_plain_relative(text));
             try run.close_to(text);
             try run.open_parents(text);
@@ -136,12 +221,27 @@ const Run = struct {
     }
 
     fn input_less(run: *Run, left: u32, right: u32) bool {
-        const inputs = run.request.file.steps[run.request.step].inputs.slice();
-        assert(left < inputs.len);
-        assert(right < inputs.len);
-        return component_less(run.request.file.text(inputs[left]), run.request.file.text(
-            inputs[right],
-        ));
+        return component_less(run.ws.matches.get(left), run.ws.matches.get(right));
+    }
+
+    /// Of the sorted paths, keeps (moving them to the front) those not equal to, or inside, an
+    /// earlier kept one; returns how many.
+    fn drop_covered(run: *Run, order: []u32) u32 {
+        var kept: u32 = 0;
+        for (order) |index| {
+            const path = run.ws.matches.get(index);
+            if (kept > 0) {
+                const last = run.ws.matches.get(order[kept - 1]);
+                if (std.mem.eql(u8, last, path) or holds(last, path)) continue;
+            }
+            order[kept] = index;
+            kept += 1;
+        }
+        return kept;
+    }
+
+    fn is_excluded(run: *const Run, path: []const u8) bool {
+        return glob.excluded(run.lines, path);
     }
 
     // ---- Failures ---------------------------------------------------------------------------
@@ -273,6 +373,119 @@ const Run = struct {
         run.depth += 1;
     }
 
+    // ---- The paths the inputs name: plain ones, and what the globs match ---------------------
+
+    fn collect(run: *Run) Error!void {
+        for (run.inputs, 0..) |input, index| {
+            run.input = input;
+            const text = run.request.file.text(input);
+            if (glob.is_glob(text)) {
+                try run.expand(text, @intCast(index));
+            } else if (!run.is_excluded(text)) {
+                assert(inputs_mod.is_plain_relative(text));
+                try run.keep(text, @intCast(index));
+            }
+        }
+    }
+
+    fn keep(run: *Run, path: []const u8, input: u32) Error!void {
+        if (run.ws.matches.add(path, input)) return;
+        diagnose.glob_pool_full(run.diag, run.request.file.text(run.inputs[input]));
+        return error.Failed;
+    }
+
+    /// Walks the project for the paths `pattern` matches, into the pool. Only directories that
+    /// can hold a match are entered, and a matched directory is not entered.
+    fn expand(run: *Run, pattern: []const u8, input: u32) Error!void {
+        assert(pattern.len > 0);
+        assert(pattern.len <= constants.build_pattern_bytes_max);
+        const before = run.ws.matches.count;
+        run.scan_depth = 0;
+        try run.scan_push(0, 0);
+        for (0..constants.store_walk_entries_max) |_| {
+            if (run.scan_depth == 0) break;
+            const top = &run.ws.scan[run.scan_depth - 1];
+            if (top.next == top.offsets.len) {
+                run.scan_depth -= 1;
+                continue;
+            }
+            const name = top.names.at(top.offsets[top.next]);
+            top.next += 1;
+            const base = top.path_len;
+            const path_len = base + @as(u32, if (base > 0) 1 else 0) + @as(u32, @intCast(name.len));
+            if (path_len > constants.path_bytes_max) return run.limit(.path, base);
+            if (base > 0) run.ws.path[base] = '/';
+            @memcpy(run.ws.path[path_len - name.len .. path_len], name);
+            run.ws.path[path_len] = 0;
+            try run.scan_entry(pattern, input, path_len);
+        } else return run.limit(.entries, 0);
+        if (run.ws.matches.count != before) return;
+        @memcpy(run.ws.path[0..pattern.len], pattern);
+        run.ws.path[pattern.len] = 0;
+        return run.refuse(.missing, @intCast(pattern.len), null);
+    }
+
+    fn scan_entry(run: *Run, pattern: []const u8, input: u32, path_len: u32) Error!void {
+        assert(path_len > 0);
+        const excluded = run.is_excluded(run.ws.path[0..path_len]);
+        if (excluded and !run.negation) return;
+        const fs = run.request.store.fs;
+        const path = run.ws.path[0..path_len :0];
+        const handle = fs.open_beneath(run.request.project, path, .path_entry) catch |err|
+            return run.source_failed(err, path_len);
+        defer fs.close(handle);
+        const stat = fs.fstat(handle) catch |err| return run.source_failed(err, path_len);
+        if (glob.matches(pattern, path)) {
+            if (!excluded) try run.keep(path, input);
+            return;
+        }
+        if (stat.kind != .dir or !could_match_below(pattern, path)) return;
+        try run.scan_push(path_len, stat.inode);
+    }
+
+    /// Pushes the directory at `ws.path[0..path_len]` ("." for the project) on the scan stack.
+    fn scan_push(run: *Run, path_len: u32, inode: u64) Error!void {
+        if (run.scan_depth > constants.store_depth_max) return run.limit(.depth, path_len);
+        const fs = run.request.store.fs;
+        const base: u32 = if (run.scan_depth == 0) 0 else run.ws.scan[run.scan_depth - 1].end;
+        if (base + 4096 > run.ws.arena.len) return run.limit(.arena, path_len);
+        var names = NameList.init(run.ws.arena[base..], constants.store_dir_entries_max);
+        const shown: u32 = if (path_len == 0) 1 else path_len;
+        {
+            if (path_len == 0) run.ws.path[0..2].* = .{ '.', 0 };
+            const dir_path = run.ws.path[0..shown :0];
+            const fd = fs.open_beneath(run.request.project, dir_path, .directory) catch |err|
+                return run.source_failed(err, shown);
+            defer fs.close(fd);
+            const stat = fs.fstat(fd) catch |err| return run.source_failed(err, shown);
+            if (stat.kind != .dir) return run.refuse(.changed, shown, null);
+            if (inode != 0 and stat.inode != inode) return run.refuse(.changed, shown, null);
+            fs.read_dir_fd(fd, names.visitor()) catch |err| return run.source_failed(err, shown);
+        }
+        if (names.too_many) return run.limit(.entries, path_len);
+        if (names.too_long) return run.limit(.name, path_len);
+        if (names.full) return run.limit(.arena, path_len);
+        const offsets_at = align_up(base + names.used, 4);
+        const offsets_end = offsets_at + names.count * 4;
+        if (offsets_end + 256 > run.ws.arena.len) return run.limit(.arena, path_len);
+        const region: []align(4) u8 = @alignCast(run.ws.arena[offsets_at..offsets_end]);
+        run.ws.scan[run.scan_depth] = .{
+            .path_len = path_len,
+            .names = names,
+            .offsets = names.sorted(std.mem.bytesAsSlice(u32, region)),
+            .next = 0,
+            .end = align_up(offsets_end, 8),
+        };
+        run.scan_depth += 1;
+    }
+
+    /// Whether `path` (a directory) is left out by the exclude lines, when it is inside a
+    /// directory input; a file or link that is, and a directory with no `!` line to
+    /// re-include something below it, is not imported.
+    fn leave_out(run: *const Run, path_len: u32) bool {
+        return run.is_excluded(run.ws.path[0..path_len]);
+    }
+
     // ---- One entry --------------------------------------------------------------------------
 
     /// Imports the entry at `ws.path[0..path_len]` into the top frame. `declared`: it is a
@@ -289,6 +502,8 @@ const Run = struct {
         const stat = fs.fstat(handle) catch |err| return run.source_failed(err, path_len);
         const name = base_name(path);
         const writer = &run.ws.frames[run.depth - 1].writer;
+        const left_out = !declared and run.leave_out(path_len);
+        if (left_out and (stat.kind != .dir or !run.negation)) return;
         switch (stat.kind) {
             .file => try run.entry_file(path_len, &stat),
             .dir => {
@@ -486,6 +701,23 @@ fn holds(directory: []const u8, path: []const u8) bool {
     if (path.len <= directory.len) return false;
     if (!std.mem.startsWith(u8, path, directory)) return false;
     return path[directory.len] == '/';
+}
+
+/// Whether a directory at `path` can hold a path `pattern` matches: the pattern's leading parts
+/// up to its first `**` must match the directory's, and one without a `**` is only as deep as
+/// it has parts.
+fn could_match_below(pattern: []const u8, path: []const u8) bool {
+    assert(pattern.len > 0);
+    assert(path.len > 0);
+    var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
+    var path_parts = std.mem.splitScalar(u8, path, '/');
+    for (0..constants.path_bytes_max) |_| {
+        const part = path_parts.next() orelse return true;
+        const wanted = pattern_parts.next() orelse return false;
+        if (std.mem.eql(u8, wanted, "**")) return true;
+        if (!glob.matches(wanted, part)) return false;
+    }
+    unreachable;
 }
 
 /// Orders paths part by part: a slash sorts before every byte, so `a/b` comes before `a-b`,

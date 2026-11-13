@@ -262,3 +262,103 @@ test "a declared file below 64 made-up directories imports, and below 65 is E041
     try expect_limit("nested more than 64 levels deep");
     try testing.expectEqual(@as(u32, 0), files.open_count());
 }
+
+fn parse_excluding(
+    comptime inputs: []const u8,
+    comptime file_ex: []const u8,
+    comptime step_ex: []const u8,
+) void {
+    const text = ".{ .version = 1, .image = .{}, .exclude = .{" ++ file_ex ++ "}, .steps = .{ " ++
+        ".{ .name = \"s\", .base = \"b\", .run = .{\"x\"}, .exclude = .{" ++ step_ex ++
+        "}, .inputs = .{" ++ inputs ++ "} } } }";
+    var parse_problem: file_mod.Problem = undefined;
+    const parsed = file_mod.parse(text, &build_file, &parse_problem);
+    assert(parsed == .parsed);
+}
+
+/// Whether the tree `root` holds the path `path` (names joined by `/`).
+fn has(root: Digest, path: []const u8) !bool {
+    var current = root;
+    var names = std.mem.splitScalar(u8, path, '/');
+    var entry: tree.Entry = undefined;
+    while (names.next()) |name| {
+        if (!try entry_of(current, name, &entry)) return false;
+        current = entry.subtree;
+        if (names.peek() != null and entry.kind != .dir) return false;
+    }
+    return true;
+}
+
+test "a glob input brings in the paths it matches and a matched directory whole" {
+    // Goal: `*.c` under src is main.c only, `**/*.c` reaches lib/a.c too, a directory a glob
+    // matches is imported whole, and nothing else is in the tree. Method: three imports.
+    start(3);
+    parse("\"src/*.c\"");
+    const shallow = try import_inputs();
+    try testing.expect(try has(shallow, "src/main.c"));
+    try testing.expect(!try has(shallow, "src/run.sh"));
+    try testing.expect(!try has(shallow, "src/lib"));
+    try testing.expect(!try has(shallow, "docs"));
+    parse("\"**/*.c\"");
+    const deep = try import_inputs();
+    try testing.expect(!deep.eql(shallow));
+    try testing.expect(try has(deep, "src/main.c"));
+    try testing.expect(try has(deep, "src/lib/a.c"));
+    parse("\"s?c\", \"d*\"");
+    const dirs = try import_inputs();
+    try testing.expect(try has(dirs, "src/lib/a.c"));
+    try testing.expect(try has(dirs, "docs/a.txt"));
+    try testing.expect(!try has(dirs, "README"));
+}
+
+test "a glob that matches nothing is refused, and an input a glob and a path both name is once" {
+    // Goal: an empty glob is an error naming the input; overlap between globs and plain inputs
+    // is merged, not refused. Method: `*.zig` matches nothing; `src` plus `src/*.c` equals `src`.
+    start(4);
+    parse("\"*.zig\"");
+    try testing.expectError(error.Refused, import_inputs());
+    try testing.expectEqual(inputs_mod.ProblemKind.missing, problem.kind);
+    parse("\"src\"");
+    const plain = try import_inputs();
+    parse("\"src\", \"src/*.c\", \"s*\"");
+    try testing.expect(plain.eql(try import_inputs()));
+}
+
+test "excludes leave out paths from directory inputs, globs and plain inputs" {
+    // Goal: the file's and the step's exclude lines both apply, a `!` line re-includes, and an
+    // excluded plain input is dropped. Method: import with lines, look at the tree.
+    start(5);
+    parse_excluding("\"src\"", "\"src/lib\"", "\"src/*.sh\"");
+    const cut = try import_inputs();
+    try testing.expect(try has(cut, "src/main.c"));
+    try testing.expect(!try has(cut, "src/run.sh"));
+    try testing.expect(!try has(cut, "src/lib"));
+    parse_excluding("\"src\"", "\"src/lib\"", "\"!src/lib/a.c\"");
+    const back = try import_inputs();
+    try testing.expect(try has(back, "src/lib/a.c"));
+    try testing.expect(try has(back, "src/main.c"));
+    parse_excluding("\"src/main.c\", \"README\"", "\"README\"", "");
+    const dropped = try import_inputs();
+    try testing.expect(!try has(dropped, "README"));
+    try testing.expect(try has(dropped, "src/main.c"));
+    parse_excluding("\"**/*.c\"", "\"src/lib\"", "");
+    const globbed = try import_inputs();
+    try testing.expect(try has(globbed, "src/main.c"));
+    try testing.expect(!try has(globbed, "src/lib"));
+}
+
+test "the matched-path pool holds its bound and no more" {
+    // Goal: E0818's bound. Method: add paths to a pool until it is full: the last that fits
+    // is number `build_glob_matches_max`, the next is refused.
+    const matches = &workspace.matches;
+    matches.count = 0;
+    matches.used = 0;
+    for (0..constants.build_glob_matches_max) |index| {
+        var buffer: [16]u8 = undefined;
+        // Sixteen bytes hold "p/" and a number below 65,536.
+        const path = std.fmt.bufPrint(&buffer, "p/{d}", .{index}) catch unreachable;
+        try testing.expect(matches.add(path, 0));
+    }
+    try testing.expect(!matches.add("one/more", 0));
+    try testing.expectEqual(constants.build_glob_matches_max, matches.count);
+}

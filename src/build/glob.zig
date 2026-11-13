@@ -325,7 +325,7 @@ pub fn line_fault(text: []const u8) ?Fault {
 /// Whether the exclude `lines` leave `path` out: the last line that matches `path` or one of
 /// its parent directories decides, and a path no line matches is in.
 pub fn excluded(lines: []const []const u8, path: []const u8) bool {
-    assert(lines.len <= constants.build_exclude_lines_max);
+    assert(lines.len <= constants.build_exclude_chain_max);
     assert(path.len > 0);
     var result = false;
     for (lines) |text| {
