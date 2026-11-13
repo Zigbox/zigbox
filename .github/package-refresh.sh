@@ -42,6 +42,8 @@ case "$signed_at" in *[!0-9]* | "") fail "ZIGBOX_SIGNED_AT is not Unix seconds" 
 version=${tag#v}
 # Must equal apt_valid_seconds in src/constants.zig (21 days).
 valid_seconds=1814400
+# A key must stay valid this long after the signing time: Valid-Until plus 7 days to renew it.
+renew_seconds=2419200
 [ -f "$old_sums" ] || fail "$old_sums is missing: a release without SHA256SUMS is not refreshed"
 [ -f "$old_sums.asc" ] || fail "$old_sums.asc is missing: unsigned SHA256SUMS is not refreshed"
 [ -f "$published" ] || fail "$published is missing: the served InRelease is needed to refuse a rollback"
@@ -75,9 +77,10 @@ unset ZIGBOX_SIGNING_KEY ZIGBOX_SIGNING_PASSPHRASE
 # seconds (empty: never), 12 capabilities, 15 `#` for a stubbed secret. Expiry is judged at the
 # signing time, so a key that lapsed before it is refused even when gpg's own clock disagrees. A
 # signature by a key that expires before `Valid-Until` stops verifying (apt: EXPKEYSIG) while the
-# metadata is still current, so a key must also outlive the whole validity window.
+# metadata is still current, so a key must also outlive the whole validity window, and the 7 days
+# after it in which the owner renews it (`renew_seconds`, the awk window below).
 listing=$(GNUPGHOME=$signing_home gpg --batch --list-secret-keys --with-colons 2>/dev/null)
-subkey=$(awk -F: -v primary="$primary" -v at="$signed_at" -v window="$valid_seconds" '
+subkey=$(awk -F: -v primary="$primary" -v at="$signed_at" -v window="$renew_seconds" '
   function dead(validity, expiry) { return validity == "e" || validity == "r" || (expiry != "" && expiry + 0 <= at) }
   function short(expiry) { return expiry != "" && expiry + 0 <= at + window }
   $1 == "sec" { section = "sec"; if ($3 != 4096 || $4 != 1) weak = 1; if ($15 != "#") plain = 1
@@ -94,8 +97,8 @@ subkey=$(awk -F: -v primary="$primary" -v at="$signed_at" -v window="$valid_seco
 case "$subkey" in
   *WRONG-PRIMARY*) fail "the imported key is not by the primary key ZIGBOX_SIGNING_FPR" ;;
   *LAPSED-PRIMARY*) fail "the primary key is revoked or expired; the owner must renew or replace it" ;;
-  *SHORT-PRIMARY*) fail "the primary key expires within 21 days of the signing time; the owner must renew it" ;;
-  *SHORT-SUBKEY*) fail "the signing subkey expires within 21 days of the signing time; the owner must renew it" ;;
+  *SHORT-PRIMARY*) fail "the primary key expires within 28 days of the signing time (21 days of Valid-Until plus 7 to renew); the owner must renew it" ;;
+  *SHORT-SUBKEY*) fail "the signing subkey expires within 28 days of the signing time (21 days of Valid-Until plus 7 to renew); the owner must renew it" ;;
   *PRIMARY-SECRET*) fail "the imported key holds the secret primary key" ;;
   *WEAK*) fail "the primary and the signing subkey must be RSA 4096" ;;
   "") fail "the imported key has no usable (unexpired, unrevoked) signing subkey" ;;

@@ -27,8 +27,9 @@ gpg_home() { gpg_in "$home" "$@"; }
 listing_fpr() { GNUPGHOME=$home gpg --batch --list-keys --with-colons |
   awk -F: -v want="$1" '$1 == want { s = 1; next } $1 == "fpr" && s { print $10; exit }'; }
 
-# A primary valid for 90 days, a signing subkey for 60: both outlast the 21-day Valid-Until, and
-# the lapse and too-short tests move the signing time past one or the other.
+# A primary valid for 90 days, a signing subkey for 60: both outlast the 28-day margin (21 days of
+# Valid-Until and 7 to renew), and the lapse and too-short tests move the signing time past one or
+# the other.
 gpg_home --quick-generate-key "Zigbox refresh test <test@invalid>" rsa4096 cert 90d
 primary=$(GNUPGHOME=$home gpg --batch --list-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
 gpg_home --quick-add-key "$primary" rsa4096 sign 60d
@@ -140,11 +141,15 @@ ZIGBOX_SIGNED_AT=$((now + 61 * 86400)) refuse 'no usable (unexpired, unrevoked) 
 ZIGBOX_SIGNED_AT=$((now + 91 * 86400)) refuse 'primary key is revoked or expired' \
   refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
 
-# 6b. A key that is valid at the signing time but expires before Valid-Until would sign metadata
-# apt stops accepting while it is still current: refused with one line.
-ZIGBOX_SIGNED_AT=$((now + 45 * 86400)) refuse 'signing subkey expires within 21 days' \
+# 6b. A key that is valid at the signing time but expires before Valid-Until plus the 7-day renewal
+# margin (28 days) would sign metadata the owner cannot renew in time: refused with one line. The
+# subkey here expires 60 days after setup, so signing at day 35 leaves 25 days: between 21 and 28,
+# refused now, though apt would still accept it for 21 more days.
+ZIGBOX_SIGNED_AT=$((now + 35 * 86400)) refuse 'signing subkey expires within 28 days' \
   refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
-ZIGBOX_SIGNED_AT=$((now + 75 * 86400)) refuse 'primary key expires within 21 days' \
+ZIGBOX_SIGNED_AT=$((now + 45 * 86400)) refuse 'signing subkey expires within 28 days' \
+  refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
+ZIGBOX_SIGNED_AT=$((now + 75 * 86400)) refuse 'primary key expires within 28 days' \
   refresh "$base" "$work/sums/SHA256SUMS" "$published" "$tag"
 
 # 6c. The served InRelease's Date is read from the signed text only: a forged Date line in front

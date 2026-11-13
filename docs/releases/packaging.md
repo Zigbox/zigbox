@@ -189,10 +189,11 @@ owner's key already signed and published. It takes the newest release's `zigbox-
 line, nothing signed) unless all of these hold:
 
 - The key is the pinned primary's one signing subkey, not revoked and not expired at the signing
-  time, and the primary is not revoked or expired. Both must also stay valid past `Valid-Until`
-  (21 days after the signing time): a signature by a key that has expired fails in apt however
-  much of `Valid-Until` is left, so a key that expires sooner is refused with a line asking the
-  owner to renew it.
+  time, and the primary is not revoked or expired. Both must also stay valid for 28 days after the
+  signing time: `Valid-Until` is 21 days after it, and the 7 days after that are the owner's
+  margin to renew. A signature by a key that has expired fails in apt however much of
+  `Valid-Until` is left, so a key that expires within 28 days is refused with a line asking the
+  owner to renew it. A weekly run therefore always leaves time to renew before the key lapses.
 - Every old signature (`Release.gpg`, `InRelease`, `SHA256SUMS.asc`, the served `InRelease`) is by
   that subkey, checked against the public part of `ZIGBOX_SIGNING_KEY`. The keyring inside the
   archive is never trusted, so a revoked subkey's signature is refused even when the archive ships a
